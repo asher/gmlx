@@ -1,10 +1,10 @@
 # A local RAG stack
 
-This guide is for building retrieval-augmented generation on the server. RAG
-needs two services beside the chat model. An embedder indexes documents and
-queries as vectors, and an optional reranker re-scores the vector search's
-shortlist. The server provides both as OpenAI- and Cohere-compatible
-endpoints, from GGUF models, on the same port as chat.
+This guide is for building retrieval-augmented generation on the server.
+RAG needs two services beside the chat model: an embedder that indexes
+documents and queries as vectors, and an optional reranker that re-scores
+the vector search's shortlist. The server provides both as OpenAI- and
+Cohere-compatible endpoints, from GGUF models, on the same port as chat.
 
 ## Enable the endpoints
 
@@ -22,32 +22,32 @@ server:
 ```
 
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
-cache only. Fetch them first with `gmlx pull`. A server that starts without
-them disables the endpoint until the file is present. Both services load in
-the background at startup. They sit outside the chat residency pool, where a
-re-index and chat never evict each other. Both run in a worker thread that
-interleaves with batched chat decode.
+cache only, so fetch them first with `gmlx pull`. A server that starts
+without them disables the endpoint until the file is present. Both services
+load in the background at startup and sit outside the chat residency pool,
+so a re-index and chat never evict each other, and both run in a worker
+thread that interleaves with batched chat decode.
 
 ## Choosing the models
 
-The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder with
-last-token pooling. It loads like any other GGUF and carries the model's full
-32k context. Long documents embed without truncation. Use `qwen3-embed-4b` or
-`-8b` for better retrieval at a bigger index, or point the key at any local or
-`hf:` GGUF. Encoder options exist too, including EmbeddingGemma from a GGUF
-and several safetensors encoders that download once on a cache miss. The alias
-tables with dimensions and context windows are under [Text
-embeddings](services.md#text-embeddings-embeddings).
+The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder
+with last-token pooling. It loads like any other GGUF and carries the
+model's full 32k context, so long documents embed without truncation. Use
+`qwen3-embed-4b` or `-8b` for better retrieval at a bigger index, or point
+the key at any local or `hf:` GGUF. Encoder options exist too, including
+EmbeddingGemma from a GGUF and several safetensors encoders that download
+once on a cache miss. The alias tables with dimensions and context windows
+are under [Text embeddings](services.md#text-embeddings-embeddings).
 
 The reranker is a Qwen3-Reranker GGUF, a causal model fine-tuned to answer
-yes or no to "does this document satisfy this query". Its score is the
+yes or no to "does this document satisfy this query", and its score is the
 probability of yes. Aliases are `qwen3-rerank-0.6b`, `-4b` and `-8b`, or
 any GGUF ref. [Reranking](services.md#reranking-rerank) has the details.
 
 ## The embeddings endpoint
 
-The endpoint has the OpenAI shape. `input` is a string or a list of strings.
-Vectors come back L2-normalized:
+The endpoint has the OpenAI shape, where `input` is a string or a list of
+strings, and vectors come back L2-normalized:
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
@@ -66,10 +66,10 @@ curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
 }
 ```
 
-The conventional OpenAI model names all map to the configured model. It can
-also be omitted. Any other requested model is refused, never silently
-substituted. The response echoes the name you requested. An optional
-`encoding_format` selects `float`, the default, or `base64`.
+The conventional OpenAI model names all map to the configured model, and
+the field can also be omitted. Any other requested model is refused rather
+than silently substituted, and the response echoes the name you requested.
+An optional `encoding_format` selects `float`, the default, or `base64`.
 
 ## The rerank endpoint
 
@@ -98,19 +98,20 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
 ```
 
 `documents` entries may also be `{"text": ...}` objects. Because
-`return_documents` defaults to true, each result echoes its document. Set
-it false for indices and scores only. An optional `instruction` overrides
-the default query instruction. Scoring runs a model forward for each
-document. Keep the candidate list to a vector search's shortlist of tens,
-not thousands.
+`return_documents` defaults to true, each result echoes its document, so
+set it false for indices and scores only. An optional `instruction`
+overrides the default query instruction. Scoring runs a model forward for
+each document, so keep the candidate list to a vector search's shortlist of
+tens, not thousands.
 
 ## Configure Open WebUI
 
-`gmlx launch open-webui` points Open WebUI's document embedder at this server,
-points its external reranker here when the server advertises one and enables
-the hybrid search mode that reranking requires. Upload documents in Open WebUI
-and query them. Indexing and retrieval happen against your server. The
-variables it sets are listed under [open-webui](launch.md#open-webui).
+`gmlx launch open-webui` points Open WebUI's document embedder at this
+server, points its external reranker here when the server advertises one
+and enables the hybrid search mode that reranking requires. Upload
+documents in Open WebUI and query them, and indexing and retrieval happen
+against your server. The variables it sets are listed under
+[open-webui](launch.md#open-webui).
 
 ## Other consumers
 

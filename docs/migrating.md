@@ -1,7 +1,7 @@
 # Migrating from llama.cpp, Ollama or LM Studio
 
-gmlx runs the same GGUF files those tools use. The models themselves are
-reused with no conversion. This page maps the rest. It lists what transfers
+gmlx runs the same GGUF files those tools use, so the models themselves are
+reused with no conversion. This page maps the rest: what transfers
 directly, what has a different name and what is different by design.
 
 ## Coming from llama.cpp
@@ -25,13 +25,15 @@ directly, what has a different name and what is different by design.
 | `--parallel N` | none | continuous batching admits requests automatically, and `--budget-gb` bounds residency |
 | `--lora adapter` | `--adapter adapter.gguf` | [lora.md](lora.md) covers adapter interoperation in both directions |
 
-`/v1/completions` accepts a single string prompt and returns a single choice.
-The primary route is `/v1/chat/completions`. Anthropic Messages and OpenAI
-Responses run on the same port, as [api.md](api.md) describes.
+`/v1/completions` accepts a single string prompt and returns a single
+choice, although the primary route is `/v1/chat/completions`. Anthropic
+Messages and OpenAI Responses run on the same port, as [api.md](api.md)
+describes.
 
 ## Coming from Ollama
 
-Any GGUF file on disk can be reused. Ollama's model store and API do not.
+Any GGUF file on disk can be reused, but Ollama's model store and API do
+not carry over.
 
 - Ollama's library is stored as sha-named blobs, not `.gguf` files, which
   cannot be used directly. Re-download the models you use with `gmlx pull`.
@@ -57,6 +59,6 @@ gmlx init --models-dir ~/.lmstudio/models -r
 ```
 
 The init wizard also offers the LM Studio directory unprompted when it
-exists. Ids, sampling profiles and a default model can then be adjusted in
-the YAML file. The local server API matches LM Studio's, plus Anthropic
+exists, and ids, sampling profiles and a default model can then be adjusted
+in the YAML file. The local server API matches LM Studio's, plus Anthropic
 Messages on the same port.

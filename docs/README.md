@@ -1,8 +1,9 @@
 # gmlx documentation
 
-gmlx runs GGUF models on Apple Silicon. A single command chats, serves,
-connects an agent or talks by voice. This index groups the pages by what
-you want to do. The [project README](../README.md) is the overview.
+gmlx runs GGUF models on Apple Silicon, and a single command chats,
+serves, connects an agent or talks by voice. This index groups the pages by
+what you want to do, while the [project README](../README.md) is the
+overview.
 
 Start with [getting-started.md](getting-started.md), which takes you from
 install to a served model with a client connected. Look up flags in

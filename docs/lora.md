@@ -21,16 +21,16 @@ on the unmodified quantized weights.
 
 Two properties make this worth using over the usual convert, fine-tune and
 requantize cycle. The frozen base stays in its K-quant codec during
-training, with the adapter's gradient flowing through the quantized matmul.
-There is no float copy of the base and no optimizer state for it, which
+training, with the adapter's gradient flowing through the quantized matmul,
+so there is no float copy of the base and no optimizer state for it, which
 lets you fine-tune a model you could not hold in fp16. At inference the base
-bytes are never modified. The output is the base with its existing
-quantization error plus the exact adapter delta in full precision. Merging
-would force a requantization of the adapted weights.
+bytes are never modified, and the output is the base with its existing
+quantization error plus the exact adapter delta in full precision, whereas
+merging would force a requantization of the adapted weights.
 
-If you have the full-precision model and enough memory, fine-tune that
-and quantize afterward. Training on the quant is for when the quant is all
-you can fit.
+If you have the full-precision model and enough memory, fine-tune that and
+quantize afterward, because training on the quant is for when the quant is
+all you can fit.
 
 ## Train an adapter
 
@@ -79,11 +79,12 @@ gmlx train Qwen3-0.6B-Q8_0.gguf --data ./pirate-data \
 ```
 
 Train loss should fall steadily. With only 90 examples, stop around 150
-iterations. Training longer overfits, validation loss rises and greedy
-decoding can repeat. `--num-layers` and `--rank` trade capacity for memory.
-The defaults of 8 layers at rank 8 are a reasonable starting point. This
-walkthrough targets a dense base. On a MoE base the default adaptation keys
-are untested. The flag table is under [gmlx train](cli.md#gmlx-train).
+iterations, because training longer overfits, validation loss rises and
+greedy decoding can repeat. `--num-layers` and `--rank` trade capacity for
+memory, and the defaults of 8 layers at rank 8 are a reasonable starting
+point. This walkthrough targets a dense base, and on a MoE base the default
+adaptation keys are untested. The flag table is under
+[gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
 
@@ -98,17 +99,18 @@ Because the pirate data has no thinking, the adapted model thinks briefly and
 then answers in pirate speech.
 
 The single-model `serve` form registers the adapted model under the
-file-derived id and the bare base as `<id>-base` on the same loaded model.
-Both are addressable without a config.
+file-derived id and the bare base as `<id>-base` on the same loaded model,
+so both are addressable without a config.
 
 ## Serving one base with many adapters
 
-A quantized base can serve any number of adapted variants at once. The base
-weights load a single time. Each adapter loads into a slot of its own on that
-resident model. A request applies only the adapter of the model id it
-addressed. Requests to the base and to any adapted id batch together into a
-single decode step. An adapter adds about 1% to 2% to decode and prefill cost.
-Switching between ids costs nothing, because nothing is swapped.
+A quantized base can serve any number of adapted variants at once. The
+base weights load a single time and each adapter loads into a slot of its
+own on that resident model, so a request applies only the adapter of the
+model id it addressed. Requests to the base and to any adapted id batch
+together into a single decode step. An adapter adds about 1% to 2% to
+decode and prefill cost, and switching between ids costs nothing, because
+nothing is swapped.
 
 Model ids whose entries name the same `path` and differ only in `adapter:`
 share a resident model:
@@ -135,11 +137,11 @@ models:
 | `qwen3-0.6b-formal` | the same base | `formal-lora.gguf` at scale 1.0 for its rows |
 
 Everything that changes how the model is loaded must agree across the
-group, including `path`, `context_length` and `speculative`. An id that
-differs in more than `adapter:` becomes a separate entry with a separate
-copy of the weights. Keep the group's other keys identical or inherit them
-from a profile. The memory use shows as a single entry under
-`resident_models` on `GET /v1/metrics`. `curl localhost:8080/v1/models`
+group, including `path`, `context_length` and `speculative`, because an id
+that differs in more than `adapter:` becomes a separate entry with a
+separate copy of the weights. Keep the group's other keys identical or
+inherit them from a profile. The memory use shows as a single entry under
+`resident_models` on `GET /v1/metrics`, while `curl localhost:8080/v1/models`
 lists all three ids.
 
 There is nothing adapter-specific in the API. Each request names an id. The
@@ -154,15 +156,16 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -d '{
 ```
 
 Concurrent requests to different ids of the group do not queue behind each
-other. An adapted request's output equals what it would produce running
+other, and an adapted request's output equals what it would produce running
 alone, whatever else is in the batch.
 
 In the chat client, `gmlx chat --server qwen3-0.6b-pirate` connects to a
-served id. `/model <id>` inside the session switches the id the next turn goes
-to while keeping the transcript. Because the ids share a resident model the
-switch is instant. You can ask on the base, switch and have the adapted model
-answer the follow-up with the full context. `/model` alone lists the served
-ids. Tab completes them. [chat.md](chat.md) describes the client.
+served id, and `/model <id>` inside the session switches the id the next
+turn goes to while keeping the transcript. Because the ids share a resident
+model the switch is instant, so you can ask on the base, switch and have
+the adapted model answer the follow-up with the full context. `/model`
+alone lists the served ids, and Tab completes them. [chat.md](chat.md)
+describes the client.
 
 Adapters interact with two other features:
 
@@ -174,13 +177,14 @@ Adapters interact with two other features:
   concurrent requests exceed the width cap the batch decodes plain until it
   drains. Adapters behave identically on both sides of that switch.
 
-The sorted adapter set is part of what identifies the loaded model. Adding an
-id with a new adapter and reloading the config builds a new entry. The old one
-is evicted after its idle time. Plan for both copies being briefly resident,
-or restart instead of reloading when the base is large.
+The sorted adapter set is part of what identifies the loaded model, so
+adding an id with a new adapter and reloading the config builds a new
+entry, and the old one is evicted after its idle time. Plan for both copies
+being briefly resident, or restart instead of reloading when the base is
+large.
 
 Serving base and adapters together at that low cost needs an mlx-kquant
-build with the in-op LoRA epilogue. Older builds fall back to plain-op
+build with the in-op LoRA epilogue, while older builds fall back to plain-op
 deltas, with the same results at a somewhat higher cost.
 
 ## Adapter format and interop

@@ -12,7 +12,7 @@ gmlx launch opencode                          # uses the server's default model
 gmlx launch open-webui                        # browser chat app on :3000
 ```
 
-launch never installs the tool itself. If the binary is not on PATH, it
+launch never installs the tool itself, so if the binary is not on PATH it
 prints an install hint and exits. The flag table and exit codes are under
 [gmlx launch](cli.md#gmlx-launch).
 
@@ -62,9 +62,10 @@ binding its port. The spinner names the model while it loads. When nothing is
 preloaded, the server answers in about a second and the model loads on the
 first request, which makes that first turn slower.
 
-There is no fixed timeout. Only the server process exiting counts as a
-failure. Ctrl-C stops waiting while the server keeps starting. With no config
-anywhere, launch prints `gmlx init` guidance and starts nothing.
+There is no fixed timeout, because only the server process exiting counts
+as a failure, and Ctrl-C stops waiting while the server keeps starting.
+With no config anywhere, launch prints `gmlx init` guidance and starts
+nothing.
 
 - `--no-start` never auto-starts. launch errors if the server is not running.
 - `--start-timeout SECONDS` caps the wait, for non-interactive use.
@@ -74,16 +75,16 @@ anywhere, launch prints `gmlx init` guidance and starts nothing.
 
 ## Choosing the model
 
-`--model ID` picks which served model the tool uses. Without it, the tool
-gets the server's default. An `id@profile` form such as
+`--model ID` picks which served model the tool uses, and without it the
+tool gets the server's default. An `id@profile` form such as
 `--model qwen3.6-27b@coding` runs all requests from the tool at that
 profile's sampling. The id is validated against the served list.
 
 When you pass `--model`, launch also asks the server to keep that model
-resident through the idle timeout. A long session's model is not unloaded
-during the session. This is not a pin. Under memory pressure the pool can
-still evict it. `gmlx ps` shows the model as kept. `POST /unload` releases it.
-`--no-keep` opts out.
+resident through the idle timeout, so a long session's model is not
+unloaded during the session. This is not a pin, and under memory pressure
+the pool can still evict it. `gmlx ps` shows the model as kept,
+`POST /unload` releases it, and `--no-keep` opts out.
 
 To give a coding agent the coding intent and keep it resident:
 
@@ -112,18 +113,18 @@ tool's native setting:
 
 ### claude-code
 
-Claude Code uses the server's Anthropic API. launch exports
+Claude Code uses the server's Anthropic API, so launch exports
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
-`ANTHROPIC_AUTH_TOKEN`. The token is a placeholder when the server has no
-auth. A model is required. Pass `--model` or set
-`server.defaults.model`. An inherited `ANTHROPIC_API_KEY` is dropped so the
-injected token takes effect. `~/.claude` is never modified.
+`ANTHROPIC_AUTH_TOKEN`, where the token is a placeholder when the server
+has no auth. A model is required, so pass `--model` or set
+`server.defaults.model`. An inherited `ANTHROPIC_API_KEY` is dropped so
+that the injected token takes effect, and `~/.claude` is never modified.
 
-Claude Code is prefill-heavy. It sends a very long system prompt and often
-rewrites its request prefix through compaction and tool results. Prompt
-processing dominates turn latency. Serve with the [prompt
-cache](performance.md#the-prompt-cache) on. Prefer a model and machine with
-strong prefill throughput.
+Claude Code is prefill-heavy: it sends a very long system prompt and often
+rewrites its request prefix through compaction and tool results, so prompt
+processing dominates turn latency. Serve with the
+[prompt cache](performance.md#the-prompt-cache) on, and prefer a model and
+machine with strong prefill throughput.
 
 ### opencode
 
@@ -136,21 +137,21 @@ launch sets `defaultProvider` and `defaultModel` in the merged files.
 ### omp
 
 launch sets `modelRoles.default`. omp's provider registry has no API-key
-slot.
+slot, so a keyed server is not usable from it.
 
 ### hermes
 
 The injected file is your `~/.hermes/config.yaml` merged with the gmlx
 provider block, passed through `HERMES_CONFIG` plus `CUSTOM_BASE_URL`. A
-model is required. hermes refuses models with less than 64k context at
-startup. The window comes from the GGUF metadata. Give it a model whose
-trained context is at least 64k tokens.
+model is required, and because hermes refuses models with less than 64k
+context at startup and the window comes from the GGUF metadata, give it a
+model whose trained context is at least 64k tokens.
 
 ### goose
 
 launch merges the non-secret pointer keys into goose's file and also
-exports them as environment variables. The variables take precedence in
-goose. A model is required.
+exports them as environment variables, which take precedence in goose. A
+model is required.
 
 ### aichat
 
@@ -161,20 +162,21 @@ still needs aichat's `llm-functions` installed.
 ### elia
 
 Each served id becomes an OpenAI-compatible litellm model. elia 1.x or
-newer is required. Upgrade with `pipx upgrade elia-chat`.
+newer is required, so upgrade with `pipx upgrade elia-chat` if yours is
+older.
 
 ### open-webui
 
-Open WebUI is a browser chat app and a web server of its own. This launch
-therefore starts a second service instead of a terminal client. Install
-it separately with `pipx install open-webui --python python3.12`. It needs
-Python 3.11 or 3.12.
+Open WebUI is a browser chat app and a web server of its own, so this
+launch starts a second service instead of a terminal client. Install it
+separately with `pipx install open-webui --python python3.12`, since it
+needs Python 3.11 or 3.12.
 
-launch exports the base URL and key, disables the Ollama API, sets `DATA_DIR`,
-runs the app on port 3000 and prints the URL. It uses port 3001 when the gmlx
-server holds 3000. Chat history is stored in `~/.open-webui` on the host, or
-at `--config-path`. Add `WEBUI_AUTH=false` to its environment for a no-login
-single-user setup on a fresh data directory.
+launch exports the base URL and key, disables the Ollama API, sets
+`DATA_DIR`, runs the app on port 3000, or 3001 when the gmlx server holds
+3000, and prints the URL. Chat history is stored in `~/.open-webui` on the
+host, or at `--config-path`. Add `WEBUI_AUTH=false` to its environment for
+a no-login single-user setup on a fresh data directory.
 
 The configuration depends on which services the server reports:
 

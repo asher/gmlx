@@ -6,9 +6,9 @@ design context, the docs under [docs/](docs/) are authoritative.
 ## Dev setup
 
 `mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
-macOS 26.2+. Older macOS builds it from source, which needs full Xcode with
-its Metal toolchain. It pins `mlx==0.32.1`. Nothing else needs pinning. Dev
-setup is a venv, a clone and an editable install:
+macOS 26.2+, while older macOS builds it from source, which needs full
+Xcode with its Metal toolchain. It pins `mlx==0.32.1`, and nothing else
+needs pinning. Dev setup is a venv, a clone and an editable install:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -30,12 +30,13 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # adds numerical parity against real GG
 python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the GPU
 ```
 
-A PR should keep the default `pytest` tier passing. If your change touches
-loading or numerics, say which integration tests you ran and on which
-model. New architectures need a greedy token-parity check against llama.cpp
-at long context. They must keep `scripts/check-coverage.py --check --strict`
-passing with `docs/arch-coverage.md` regenerated. Short-prompt parity is
-not sufficient, because attention bugs only appear at depth.
+A PR should keep the default `pytest` tier passing, and if your change
+touches loading or numerics, say which integration tests you ran and on
+which model. New architectures need a greedy token-parity check against
+llama.cpp at long context, because short-prompt parity is not sufficient
+when attention bugs only appear at depth, and they must keep
+`scripts/check-coverage.py --check --strict` passing with
+`docs/arch-coverage.md` regenerated.
 [docs/internals/adding-architectures.md](docs/internals/adding-architectures.md)
 describes what adding an architecture involves and the full acceptance
 gate.

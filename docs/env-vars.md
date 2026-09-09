@@ -1,11 +1,11 @@
 # Environment variables
 
 The environment variables a user can set, in one place. Most settings are
-also reachable as a flag or a config key. When a setting is set more than
-one way, the precedence is flag, then config key, then environment
+also reachable as a flag or a config key, and when a setting is set more
+than one way the precedence is flag, then config key, then environment
 variable. The exception is `GMLX_CACHE_LIMIT_GB`, which overrides
-`server.cache_limit_gb` so a benchmark run can pin the MLX buffer-cache limit
-without editing the config.
+`server.cache_limit_gb` so that a benchmark run can pin the MLX
+buffer-cache limit without editing the config.
 
 Anything not listed here or in
 [internals/debug-switches.md](internals/debug-switches.md) is internal and may
@@ -13,11 +13,11 @@ change meaning or disappear between releases.
 
 ## Load and cache keys
 
-These are upstream mlx-vlm variables. gmlx sets them for each model from the
-`load:` and `cache:` blocks of the config, described in
-[server-config.md](server-config.md#param-key-reference). A config key is the
-normal way to set them. Exporting one applies it to all models the process
-loads.
+These are upstream mlx-vlm variables, which gmlx sets for each model from
+the `load:` and `cache:` blocks of the config, described in
+[server-config.md](server-config.md#param-key-reference). A config key is
+the normal way to set them, because exporting one applies it to all models
+the process loads.
 
 | Variable | Config key |
 |----------|------------|
@@ -39,9 +39,10 @@ loads.
 | `APC_DISK_NAMESPACE` | `cache.disk.namespace` |
 
 `KV_KEY_BITS` and `KV_VALUE_BITS` set split key and value widths for kvarn
-KV server-wide. They have no config key and override `GMLX_KVARN_BITS`.
+KV server-wide, and they have no config key and override `GMLX_KVARN_BITS`.
 `PREFILL_STEP_SIZE` is likewise mlx-vlm's variable for the prefill chunk
-size. Prefer `--prefill-step-size` or `server.prefill_step_size`.
+size, although `--prefill-step-size` or `server.prefill_step_size` is the
+better way to set it.
 `TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for, as
 [api.md](api.md#logprobs) describes.
 
@@ -59,8 +60,9 @@ size. Prefer `--prefill-step-size` or `server.prefill_step_size`.
 ## Server
 
 These change how `gmlx serve` schedules and admits requests. Each has a
-config key or flag that is the normal way to set it. The variable exists
-so a live server can be reconfigured for an A/B without a restart.
+config key or flag that is the normal way to set it, and the variable
+exists so that a live server can be reconfigured for an A/B without a
+restart.
 
 | Variable | Meaning |
 |----------|---------|
