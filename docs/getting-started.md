@@ -26,10 +26,8 @@ step ends in something usable, so you can stop wherever your needs are met.
 - Python 3.11 or newer. Installing with uv or pipx fetches one for you.
 - Disk space for models, plus [Homebrew](https://brew.sh) if you want voice.
 
-A running model needs memory for its weights, roughly the GGUF file size, and
-for the KV cache, which grows with the length of the conversation. [Pick a
-model for your Mac](#pick-a-model-for-your-mac) has suggestions for each
-machine size.
+[Pick a model for your Mac](#pick-a-model-for-your-mac) has suggestions
+for each machine size.
 
 ## Install
 
@@ -58,18 +56,12 @@ vision models, embeds and runs the menu bar, which leaves few extras:
 | `assistant` | MCP tools for the built-in [assistant](assistant.md) |
 | `all` | everything above |
 
-`gmlx[chat]` is the common smaller choice, omitting only voice and the
-assistant. To add an extra later, run the install command again with the new
-extra, in the same form you used the first time:
-
-```sh
-uv tool install "gmlx[all]"      # or: pip install "gmlx[all]"
-```
-
-`gmlx init` offers to do this for the services you turn on, and any "not
-installed" message names the command as well. ffmpeg is the only dependency
-that no Python installer supplies. It decodes audio uploads and encodes mp3,
-flac and opus.
+`gmlx[chat]` is the smaller choice, omitting only voice and the assistant.
+To add an extra later, run the install command again with the new extra, in
+the same form you used the first time. `gmlx init` offers to install the
+extra for each service you turn on, and any "not installed" message names
+the command as well. ffmpeg is the only dependency that no Python installer
+supplies. It decodes audio uploads and encodes mp3, flac and opus.
 
 Tab completion needs this line in `~/.zshrc`, with bash and fish variants
 available:
@@ -111,9 +103,9 @@ the whole table.
 
 ## Pick a model for your Mac
 
-The suffix on a GGUF name gives the number of bits per weight, so Q4 files
-are smaller and slightly lossier while Q6 and Q8 are bigger and closer to the
-original. The suggestions below are instruct models that leave memory for
+The suffix on a GGUF name is its [quant](glossary.md), roughly the bits per
+weight, so a Q4 file is smaller than the Q6 of the same model and slightly
+lossier. The suggestions below are instruct models that leave memory for
 the KV cache at everyday context lengths.
 
 | Mac RAM | Suggestion | Notes |
@@ -123,9 +115,11 @@ the KV cache at everyday context lengths.
 | 64 GB | Qwen3.6-27B, Q6_K, 23 GB | strong general model and the recommended tool-calling model |
 | 96 GB and up | Qwen3.6-35B-A3B, Q6_K, or gpt-oss-120b, 63 GB | MoE models: big-model quality at small-model decode speed |
 
-In a long session the cache can grow as large as the weights. The per-token
-arithmetic, the families that use less memory than it suggests, and the
-`--kv-bits` and `--kv-quant-scheme` flags are all in
+A running model needs memory for its weights, roughly the file size, and
+for the KV cache, which grows with the conversation and in a long session
+can reach the size of the weights. The per-token arithmetic, the families
+that use less memory than it suggests, and the `--kv-bits` and
+`--kv-quant-scheme` flags are all in
 [performance.md](performance.md#memory-and-the-kv-cache). A MoE model larger
 than RAM can still run by streaming its experts from disk, and
 [streaming.md](streaming.md) has the fit calculation for that case.

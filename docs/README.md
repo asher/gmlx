@@ -33,7 +33,7 @@ terms the rest of the docs use.
 | fine-tune with LoRA and serve several adapters on one base | [lora.md](lora.md) |
 | run a 200B MoE on a 64 GB Mac and pick a lossy setting | [streaming.md](streaming.md) |
 | make it faster and know what each setting costs | [performance.md](performance.md) |
-| fix something that broke | `gmlx doctor`, then [troubleshooting.md](troubleshooting.md) |
+| fix something that broke | [troubleshooting.md](troubleshooting.md) |
 
 ## Reference
 

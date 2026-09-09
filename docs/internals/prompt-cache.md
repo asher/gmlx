@@ -9,9 +9,9 @@ cache APC, and the switches use that name.
 ## Which tier serves which architecture
 
 The cache routes each model by its cache shape once, at load, and logs the
-routing as `APC tier:` so that a silent mis-route is visible. Reuse works
-on all families, because the tiers differ in storage layout rather than in
-whether hits happen.
+routing as `APC tier:` so that a silent mis-route is visible. The tiers
+differ in storage layout, not in whether hits happen, so every shape in the
+table gets reuse except the armed MSA indexer, which gets none.
 
 | Cache shape | Example archs | Tier |
 |-------------|---------------|------|
@@ -20,6 +20,32 @@ whether hits happen.
 | sliding-window attention | gemma3, gemma-4 including E4B and 3n, gpt-oss, SWA llama | ckpt |
 | CacheList or pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | exact |
 | MSA indexer armed | minimax-m3 indexer GGUFs | none, with a logged warning. The indexless GGUF serves through the block tier. |
+
+## The cache layers
+
+A request passes through the layers below in order, and all of them are on
+by default. The first three serve every model, and the last two exist for
+speculative and checkpoint-tier models.
+
+- Prefix layer. An in-memory LRU of post-prefill KV and hidden state. A
+  request sharing a prefix with an earlier one skips that prefill even with
+  `cache:` off.
+- Shared pools. With `cache.enabled`, the lookup order of exact, block and
+  disk fills the prompt cache before prefill, including warm restarts from the
+  SSD tier.
+- Retirement. At request finish the whole sequence, prompt plus reply, is
+  stored back, so the next turn of a conversation warm-starts past the whole
+  of this one.
+- Drafter sidecar. A native MTP head keeps a separate KV, and a warm target
+  paired with an empty drafter KV decodes at degraded acceptance until that
+  KV is rebuilt. A small sidecar entry therefore saves the drafter's KV
+  beside the target's, so a warm hit restores both.
+- Checkpoints. Hybrid models save restore points piecewise along a prefill
+  and while generating, plus targeted ones at the end of the system prompt,
+  one token before the prompt end and at the predicted next-turn boundary.
+  The system-prompt one is what lets parallel agents sharing a prompt
+  restore from it. A checkpoint's disk copy is its skeleton. Prompt prefill
+  on these models runs one request at a time.
 
 ## Checkpoint-tier counters
 
@@ -43,7 +69,7 @@ each block of a block shard.
 | `ckpt_pool_evictions` | Saved prefixes discarded to make room. Normal on long sessions, fastest on sliding-window models. Raise `num_blocks` to keep more history cached. |
 | `ckpt_skeleton_writes` | Saves mirrored to the disk tier for warm restarts. Zero with `disk` on means a restart will start cold. |
 | `sidecar_writes` | Draft-model cache entries saved next to their target entries. Speculative decoding only. |
-| `retire_fallback_full` | Finished requests whose generated tokens were saved in the slower whole-sequence form because no smaller snapshot was available. Occasional entries are normal. |
+| `retire_fallback_suppressed` | Whole-sequence retirement stores skipped because the predicted next-turn render had diverged, so the entry could never match. The turn checkpoint covers them. |
 
 The server also checks for a tier that is not storing or hitting and warns
 once per model, after `GMLX_APC_CKPT_TRIPWIRE` completed requests with zero
@@ -76,7 +102,7 @@ the fp16 tail roll back exactly.
 | `GMLX_SPEC_APC_SIDECAR` | `0` turns off just the drafter-KV sidecar. |
 | `GMLX_SPEC_APC_CKPT` | `0` turns off just the hybrid checkpoint tier. The exact full-clone path is used instead. |
 | `GMLX_SPEC_APC_ENTRIES` | Prefix-layer LRU entries. Default `4`. |
-| `GMLX_SPEC_APC_SIDECAR_ENTRIES` | Drafter-sidecar LRU entries. Default `8`. |
+| `GMLX_SPEC_APC_SIDECAR_ENTRIES` | Drafter-sidecar LRU entries. Default `12`. |
 | `GMLX_SPEC_APC_BUDGET_MB` | Byte budget for the in-memory prefix layer, in MB. Default `8192`. |
 | `GMLX_SPEC_APC_SIDECAR_BUDGET_MB` | Byte budget for the drafter-sidecar LRU, in MB. Default `512`. |
 | `GMLX_APC_STORE_EVAL_CHUNK` | Blocks evaluated in each step of the post-prefill store. Default `32`. Bounds the prefill-thread stall on long prompts. |

@@ -53,11 +53,10 @@ models:
 ```
 
 The load maps the file instead of reading it, so generation starts within
-seconds whatever the size. Decode starts at the disk's demand rate and
-improves over the first few dozen tokens, which is the time the expert
-arena, the wired region that holds the most used experts, takes to fill. The
-decode feeder's exit line, printed by `run` and `chat` under `-v` and always
-in server logs, shows the hit rate a session reached.
+seconds whatever the size. The first few dozen tokens are slower while the
+expert arena, the wired region that holds the most used experts, fills from
+disk. The decode feeder's exit line, printed by `run` and `chat` under `-v`
+and always in server logs, shows the hit rate a session reached.
 
 `gmlx validate <file>` says whether this Mac can stream a given file and how
 big its arena would be. A quantized KV cache, `--kv-bits 8`, is the usual
@@ -69,9 +68,9 @@ What composes with streaming:
 |-------------|--------|
 | `--stream-experts` with `--mmproj` | the text tower streams, the vision tower stays on the GPU |
 | `--stream-cpu` with `--mmproj` | refused, because the CPU placement would move the vision tower too |
-| `--stream-experts` with speculative decoding | works on the CLI with an explicit `--speculative`. Auto-MTP stays off |
-| `stream:` on a `speculative:` server entry | refused |
-| any `--moe-*` lossy setting with speculative decoding | the setting takes precedence and decode runs without speculation |
+| `--stream-experts` with speculative decoding | composes on the CLI with an explicit `--speculative`. Auto-MTP stays off under streaming |
+| `stream:` on a `speculative:` server entry | refused at load. The server loads the drafter after the placement and would leave it unplaced |
+| a `--moe-*` lossy setting with speculative decoding | under auto-MTP the setting applies and decode stays plain. With an explicit `--speculative` the command errors |
 
 ## Choosing a placement
 
@@ -80,10 +79,10 @@ What composes with streaming:
 | `--stream-experts`, or `stream: experts` | attention, routers, shared experts, the KV cache | the routed experts, served from the arena and the disk | the default choice, for long context, chat and serving beside other models |
 | `--stream-cpu`, or `stream: cpu` | nothing, because the whole model runs on the CPU device from the page cache | everything past the wired budget | a single-model setup where a single device for everything is simpler |
 
-With the decode feeder on, `--stream-experts` matches `--stream-cpu` on short
-generations, becomes faster once the arena has filled and keeps the large KV
-cache on the GPU at depth. In a server config, `stream: cpu` moves the whole
-process to the CPU device, so it does not mix with GPU-resident models.
+With the decode feeder on, `--stream-experts` matches `--stream-cpu` on
+short generations and pulls ahead once the arena has filled. On a server,
+`stream: cpu` moves the whole process to the CPU device, so it does not mix
+with GPU-resident models.
 
 ## How big a model can this machine stream
 
@@ -231,8 +230,8 @@ cancelled before they reach the disk.
 GPU keep-warm matters because streamed decode alternates sub-millisecond
 GPU bursts with host and disk gaps, and the GPU drops to idle clocks in each
 gap. The heartbeat costs power only while decoding and stops after a second
-of inactivity. Turn it off on battery, and note that it gains nothing on a
-model that fits in RAM.
+of inactivity. Turn it off on battery. It gains nothing on a model that
+fits in RAM.
 
 Weight pinning is skipped, with a printed reason, when the every-token set
 would exceed 60% of RAM. A tensor the loader converts at load is left out

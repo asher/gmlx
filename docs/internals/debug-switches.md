@@ -1,7 +1,10 @@
 # Debug switches
 
 Environment variables that change how gmlx builds or routes a model so a
-defect can be isolated. None is a tuning setting. Each is read at load or on each call, reduces performance or disables a fix and exists for A/B runs while debugging. User-facing variables are in [../env-vars.md](../env-vars.md).
+defect can be isolated. None is a tuning setting: each one slows the model
+or disables a fix, and exists so that an A/B run can rule a component in or
+out. They are read at load or on each call. The user-facing variables are in
+[env-vars.md](../env-vars.md).
 
 | Variable | Meaning |
 |----------|---------|

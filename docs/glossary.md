@@ -11,14 +11,14 @@ See [streaming.md](streaming.md).
 Barge-in. Speaking over the assistant while it is talking. In voice chat
 the reply stops and the new utterance is taken.
 
-Context and depth. Everything currently in the model's input, measured in
-tokens, which includes the conversation so far, pasted files and the reply
-in progress. Depth is how many tokens are already there, and it is the x
-axis of the benchmark charts because attention cost grows with it.
-
 Codec. The GGUF quantization type of one tensor, such as `Q4_K` or
 `IQ2_XXS`. A file mixes codecs across tensors, and each codec in a file
 needs a kernel for the file to load.
+
+Context and depth. Everything in the model's input, measured in
+tokens, which includes the conversation so far, pasted files and the reply
+in progress. Depth is how many tokens are already there, and it is the x
+axis of the benchmark charts because attention cost grows with it.
 
 Drafter. The small predictor speculative decoding uses to propose tokens.
 It is either a head inside the model's own GGUF or a separate companion
@@ -65,15 +65,15 @@ unloads under memory pressure, which is what `gmlx launch` and voice
 sessions ask for. An idle model unloads after `ttl_s` seconds without a
 request.
 
-KV cache. The model's stored attention state for the context, kept in RAM
-beside the weights. It grows with context length, which is why a model whose
-file barely fits leaves no memory for long conversations. `--kv-bits 8` or
-`--kv-quant-scheme kvarn` compresses it.
-
 K-quant and IQ. The two families of GGUF quantization. K-quants such as
 `Q4_K_M` group weights with per-block scales. IQ quants such as `IQ2_M` use
 learned codebooks for the smallest files. Both are more accurate per byte
 than a plain affine quantization.
+
+KV cache. The model's stored attention state for the context, kept in RAM
+beside the weights. It grows with context length, which is why a model whose
+file barely fits leaves no memory for long conversations. `--kv-bits 8` or
+`--kv-quant-scheme kvarn` compresses it.
 
 MCP. The Model Context Protocol, a standard way for a model to call tools
 provided by separate programs. gmlx's built-in assistant supports it.
@@ -82,13 +82,13 @@ mmproj. A companion GGUF holding a vision or audio tower. Paired with its
 language model GGUF it makes a model that accepts image or audio input. See
 [vlm.md](vlm.md).
 
-Preflight. The checks the loader runs before reading any tensor bytes,
-covering the architecture gate and the codec of each tensor. A file that
-fails preflight is refused with the reason.
-
 Prefill and decode. The two phases of answering. Prefill reads the prompt
 all at once, while decode generates the reply one token at a time, and the
 two have different speeds and are reported separately.
+
+Preflight. The checks the loader runs before reading any tensor bytes,
+covering the architecture gate and the codec of each tensor. A file that
+fails preflight is refused with the reason.
 
 Prestage. Reading experts the router is predicted to select before the
 router runs, which overlaps the read with compute. It moves bytes only and
@@ -114,10 +114,10 @@ model verifies them in one step, giving the same output with fewer full
 passes. MTP, multi-token prediction, is the form where the draft head is
 included inside the model's own GGUF. gmlx turns it on automatically.
 
-Streaming placements. The two ways to run a model bigger than memory. `stream:
-experts` keeps the every-token layers and the KV cache on the GPU and streams
-the routed experts from disk. With `stream: cpu` the whole model runs on the
-CPU from the page cache.
+Stream (experts, cpu). The two placements for a model bigger than memory.
+`stream: experts` keeps the every-token layers and the KV cache on the GPU
+and streams the routed experts from disk. With `stream: cpu` the whole model
+runs on the CPU from the page cache.
 
 Thinking model. A model trained to reason before answering, streaming that
 text inside markers such as `<think>`. The chat client shows it under a

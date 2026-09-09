@@ -5,19 +5,22 @@ design context, the docs under [docs/](docs/) are authoritative.
 
 ## Dev setup
 
-`mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
-macOS 26.2+, while older macOS builds it from source, which needs full
-Xcode with its Metal toolchain. It pins `mlx==0.32.1`, and nothing else
-needs pinning. Dev setup is a venv, a clone and an editable install:
+gmlx needs Python 3.11 or newer on macOS with Apple Silicon, which is the
+primary target. `mlx-kquant` comes from PyPI as a prebuilt arm64 wheel for
+macOS 26.2 and newer, and older macOS builds it from source, which needs
+full Xcode with its Metal toolchain. It also builds CPU-only on Linux,
+which is enough for the default test tier. The version bounds on mlx-vlm,
+mlx-lm, mlx-kquant and mlx, and why they are what they are, are explained in
+[docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
+
+Dev setup is a venv, a clone and an editable install with the same extras
+CI uses. Without `assistant`, the MCP tool-server tests skip themselves:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
 git clone https://github.com/asher/gmlx
-pip install -e "./gmlx[chat]" pytest ruff
+pip install -e "./gmlx[chat,assistant]" pytest ruff
 ```
-
-macOS on Apple Silicon is the primary target. mlx-kquant also builds CPU-only on
-Linux, which is enough for the default test tier.
 
 ## Tests
 
@@ -32,35 +35,29 @@ python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the 
 
 A PR should keep the default `pytest` tier passing, and if your change
 touches loading or numerics, say which integration tests you ran and on
-which model. New architectures need a greedy token-parity check against
-llama.cpp at long context, because short-prompt parity is not sufficient
-when attention bugs only appear at depth, and they must keep
-`scripts/check-coverage.py --check --strict` passing with
-`docs/arch-coverage.md` regenerated.
-[docs/internals/adding-architectures.md](docs/internals/adding-architectures.md)
-describes what adding an architecture involves and the full acceptance
-gate.
+which model. A new architecture has its own acceptance gate, including
+long-context parity against llama.cpp and a regenerated coverage matrix,
+in [docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
 
 ## Lint
 
 ```sh
 ruff check .
-pre-commit install   # optional, runs the same check on each commit
+python scripts/check-docs.py   # docs style and link check, also a CI step
+pre-commit install             # optional, runs ruff on each commit
 ```
 
 ## Things to know before you patch
 
-- Seam patches are version-fragile by design. The serving stack uses
-  mlx-vlm's FastAPI app and batching engine by patching late-bound seams in
-  `gmlx/serve/bridge_vlm.py`, `gmlx/serve/residency.py` and
-  `gmlx/serve/patches/`. At load time the loader patches a few mlx-lm
-  classes. `gmlx/serve/bridge_lm.py` separately patches the
+- The serving stack is stock mlx-vlm with late-bound patches over its
+  seams, in `gmlx/serve/bridge_vlm.py`, `gmlx/serve/residency.py` and
+  `gmlx/serve/patches/`. The loader patches a few mlx-lm classes at load
+  time, and `gmlx/serve/bridge_lm.py` separately patches the
   `ModelProvider._load` of `mlx_lm.server`, the sequential mlx-lm server.
-  Each patch has a guard or version check that raises an error. Keep that
-  property. A new patch must be idempotent and must raise, never silently
-  no-op, when the upstream surface it expects has changed. The `mlx-vlm`
-  upper bound in `pyproject.toml` is bumped on purpose, after re-running
-  the server tests against the new version.
+  Every patch is registered as a seam, guarded, and raises rather than
+  no-ops when upstream moves. The rules for adding one and for moving the
+  pins are in
+  [docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py` and arch metadata in
   `gmlx/load/arch_table.py`. A new architecture usually touches exactly those
@@ -90,17 +87,12 @@ pre-commit install   # optional, runs the same check on each commit
 
 ## Commit style
 
-A commit message is a single line with no body, in the form
-`type(scope): short lowercase summary`. Examples are
-`feat(arch): add falcon-h1` and
-`fix(server): XTC 400 on bare-int eos_token_ids`. The type is one of
-`feat`, `fix`, `perf`, `docs`, `test` and `chore`. A scope names a
-subsystem and comes from the established set, which keeps history
-greppable:
-
-`arch`, `loader`, `server`, `cli`, `chat`, `mtp`, `adapter`, `train`,
-`stream`, `vlm`, `manage`, `launch`, `config`, `bench`, `tests`, `docs`,
-`release`, `hygiene`.
-
-Keep everything on the subject line, no extended body. A revert is
-`chore(scope): revert <what>`.
+A commit message is a single subject line with no body, in the form
+`type(scope): short lowercase summary`. The type is one of `feat`, `fix`,
+`perf`, `docs`, `test` and `chore`, plus `release` for a version bump. The
+scope in parentheses names the subsystem or model family the change is
+about, such as `stream`, `kv`, `server`, `cli` or `qwen4exp`, and is left
+out when the change has no single home, as in `docs: fix audit findings`.
+Examples from the history are `feat(arch): add falcon-h1`,
+`fix(kv): honor kv_bits under MTP on cache-list models` and
+`release: 0.4.10`. A revert is `chore(scope): revert <what>`.

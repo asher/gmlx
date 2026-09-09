@@ -19,11 +19,11 @@ turning on speculative decoding, or serving more than one client.
 
 Single-stream decode is memory-bandwidth-bound: each token reads the model's
 active weights once, so tokens per second is roughly bandwidth divided by
-active bytes. That has three practical consequences. Smaller quants decode
-faster when nothing else limits them, MoE models read only the routed experts
-for a token and so decode at the speed of small models with the quality of
-large ones, and chips with more memory bandwidth are faster in proportion,
-independent of anything gmlx does.
+active bytes. Three things follow. Smaller quants decode faster when nothing
+else limits them. MoE models read only the routed experts for a token, so
+they decode at the speed of small models with the quality of large ones. And
+a chip with more memory bandwidth is faster in proportion, independent of
+anything gmlx does.
 
 Prefill, the prompt processing, is compute-bound instead, and benefits from
 GPU compute and batching more than from small weights. Long-context work
@@ -37,7 +37,7 @@ next section addresses one of these regimes.
 | a uniform K-quant file | up to 64% faster decode than a mixed file of the same model | none | the file you download, see [Choosing a quant](#choosing-a-quant-for-speed) |
 | speculative decoding | 1.1x to 2x decode, identical output | memory for the drafter, less gain at high concurrency | automatic on models with a head, otherwise `--draft-gguf` or `speculative:` |
 | the prompt cache | skips prefill for any prefix seen before | RAM or SSD for the entries | on by default, and `cache:` keys add the SSD tier |
-| a quantized KV cache | halves to quarters cache memory | fewer accepted drafts with speculation on, a small quality cost at 4 bits | `--kv-bits` or `--kv-quant-scheme kvarn`, or the load keys `kv_bits` and `kv_quant_scheme` |
+| a quantized KV cache | halves to quarters cache memory | a small quality cost at 4 bits, and a cost to speculation described under MTP | `--kv-bits` or `--kv-quant-scheme kvarn`, or the load keys `kv_bits` and `kv_quant_scheme` |
 | admission pacing | keeps live streams decoding while a long prompt is admitted | slower admission of the new request | `server.decode_prefill_ratio`, default `auto` |
 | sparse attention | depth-flat attention cost past 8k tokens | lossy, opt-in, llama-family only | `GMLX_SPARSE_ATTN=1` |
 | streaming | runs a MoE bigger than RAM | single-digit tokens per second | [streaming.md](streaming.md) |
@@ -56,19 +56,16 @@ gmlx run model.gguf --bench "128,512,2048" --bench-runs 3
 gmlx run model.gguf --bench-depths "0,4096,16384"
 ```
 
-`--bench-runs 3` reports the best run at each length, which matters on
-laptops because sustained runs throttle and taking the best run keeps a
-thermally degraded repeat from lowering the number. In back-to-back
-comparisons the second arm still runs on a hotter chip, so let the machine
-cool between arms you intend to compare.
-
-How long a rested machine runs before it throttles depends on the chassis. A
-rested 14-inch M5 Max held full boost clocks for roughly twenty minutes of
-streamed MoE decode before dropping to a sustained rate about 20% lower, and
-the 16-inch chassis holds boost longer. Record sustained numbers for anything
-long-running, and size warmup in minutes of decode rather than tokens. A
-chat-length session on a rested machine runs at the faster rate the whole
-time.
+`--bench-runs 3` reports the best run at each length, which matters on a
+laptop because sustained runs throttle, and the best run is the one a
+thermally degraded repeat cannot lower. How long a rested machine holds its
+boost clocks depends on the chassis: a 14-inch M5 Max ran roughly twenty
+minutes of streamed MoE decode before settling about 20% lower, and the
+16-inch chassis holds boost longer. A chat-length session on a rested
+machine therefore runs at the faster rate the whole time, while anything
+long-running should be measured at the sustained rate, with warmup sized in
+minutes of decode rather than tokens. In back-to-back comparisons the second
+arm runs on a hotter chip, so let the machine cool between arms.
 
 Prefill throughput at a 512-token prompt is the conventional benchmark
 figure, but it is a short-context number. If your real workload is a coding
@@ -91,8 +88,8 @@ prompts, as medians of repeated runs:
 | Qwen3.5-9B (dense) | Q6_K | ~70 tok/s | ~112 tok/s | ~76 tok/s | ~1600 tok/s | ~1140 tok/s |
 
 Against llama.cpp on the same GGUF, prefill is faster on all models at all
-depths measured, and decode is faster in all cells but one at 512 tokens,
-with the decode advantage growing as the KV cache grows. The full tables to
+depths measured. Above 4k tokens decode is faster too, and the gap grows as
+the context deepens. The full tables to
 200k tokens, the charts, the methodology and the weight provenance are in
 [benchmarks.md](benchmarks.md).
 
@@ -105,12 +102,13 @@ Your absolute numbers scale with your chip's memory bandwidth. A Pro-tier
 chip has about half the bandwidth of a Max, and a base M-series chip a
 quarter to a fifth, but the ratios between models and quants stay the same.
 
-All numbers and llama.cpp comparisons in these docs were measured on an M5
-Max with a 40-core GPU. The kernels target the matrix hardware in M3 and
-later GPUs, and MoE prefill and expert-gather batches route through a kernel
-validated on an M3 Max. M1 and M2 run the standard kernel paths, but they have
-not been a tuning focus or benchmarked against llama.cpp, so if you run the
-bench commands on one, an issue with your numbers is welcome.
+Unless a table names another machine, the numbers and llama.cpp comparisons
+in these docs come from an M5 Max with a 40-core GPU. The kernels target
+the matrix hardware in M3 and later GPUs, and MoE prefill and expert-gather
+batches route through a kernel validated on an M3 Max. M1 and M2 run the
+standard kernel paths, but they have not been a tuning focus or benchmarked
+against llama.cpp, so if you run the bench commands on one, an issue with
+your numbers is welcome.
 
 ## Choosing a quant for speed
 
@@ -124,8 +122,8 @@ divergence of MLX's native affine quantization at equal bitrate, as
 
 Mixed files decode measurably slower, because at single-stream decode each
 layer's slowest matmul sets the token time, and the promoted float and Q8_0
-tensors run slower than the K-quant kernels. In our M5 Max measurements,
-switching from the mixed UD build to a uniform Q6_K of the same model sped
+tensors run slower than the K-quant kernels. On an M5 Max, switching from
+the mixed UD build to a uniform Q6_K of the same model sped
 decode up 64% on the dense Qwen3.6-27B and 15% on the MoE Qwen3.6-35B-A3B,
 with output quality equal or better.
 
@@ -140,15 +138,17 @@ The practical rules:
 
 ## MTP speculative decoding
 
-Models that include a native multi-token-prediction head, which Qwen3.5, 3.6
-and 3.8 do, get [speculative decoding](glossary.md) automatically on `run`
-and `chat`. The head drafts tokens ahead and the base model verifies them, so
-the output is exactly what the base model would have produced, only faster
-when drafts are accepted. `--no-mtp` turns it off. gemma-4 and Muse Glimmer
-use the two-file form instead, a small companion drafter GGUF passed with
-`--draft-gguf`, or on the server the `speculative:` config key. A configured
-companion takes precedence over a native head, and `--native-mtp`, or the
-per-model `native_mtp: true`, forces the head.
+Models that include a native multi-token-prediction head, which the dense
+Qwen3.5, 3.6 and 3.8 models do, get [speculative decoding](glossary.md)
+automatically on `run` and `chat`. The head drafts tokens ahead and the base
+model verifies them, so the output is exactly what the base model would have
+produced, only faster when drafts are accepted. `--no-mtp` turns it off.
+gemma-4, Muse Glimmer and Qwen3.8-Flash-Next use the two-file form instead:
+a small companion drafter GGUF, passed with `--draft-gguf` or, for the last
+two, found on its own when it sits beside the target. On the server the
+`speculative:` config key enables either form. A configured companion takes
+precedence over a native head, and `--native-mtp`, or the per-model
+`native_mtp: true`, forces the head.
 
 Gains depend on acceptance rate and context depth. Speculation roughly
 doubles dense-model decode at short context, and still gives 1.4x to 1.8x
@@ -236,9 +236,9 @@ cannot be rolled back:
 
 Sliding-window models under `--speculative` keep no record of generated
 tokens, so their next-turn reuse comes from the prefill boundaries alone and
-the reply is re-prefilled. Under kvarn KV the routing matches this table
-except that dense models use the exact tier, since the block tier cannot
-split kvarn's 128-token records.
+the reply is re-prefilled. Under kvarn KV, dense models move to the exact
+tier, for the reason
+[internals/prompt-cache.md](internals/prompt-cache.md#under-kvarn-kv) gives.
 
 The optional SSD tier persists entries across restarts and holds more
 entries than RAM would. Turn it on with `gmlx init --disk-cache` or the
@@ -253,32 +253,12 @@ entry on the predicted next-turn render instead, and what follows the
 divergence re-prefills, as it does on every server. That is a property of the
 template.
 
-### What a warm hit restores
-
-A speculative request uses the pools the plain path uses, plus two
-speculative-only layers. All are on by default.
-
-- Prefix layer. An in-memory LRU of post-prefill KV and hidden state. A
-  request sharing a prefix with an earlier one skips that prefill even with
-  `cache:` off.
-- Shared pools. With `cache.enabled`, the lookup order of exact, block and
-  disk fills the prompt cache before prefill, including warm restarts from the
-  SSD tier.
-- Retirement. At request finish the whole sequence, prompt plus reply, is
-  stored back. The next turn of a conversation then warm-starts past the
-  whole of this one.
-- Drafter sidecar. A native MTP head keeps a separate KV. When a warm target
-  is paired with a drafter whose KV is empty, it decodes at degraded
-  acceptance until that KV is rebuilt. To avoid that, a small sidecar entry
-  saves the drafter's KV beside the target's so a warm hit restores both.
-- Checkpoints. Hybrid models save restore points piecewise along a prefill and
-  while generating, plus targeted ones at the end of the system prompt, one
-  token before the prompt end and at the predicted next-turn boundary. The
-  system-prompt one is what lets parallel agents sharing a prompt restore from
-  it. Prompt prefill on these models runs one request at a time.
-
-The design and the triage switches are in
-[internals/prompt-cache.md](internals/prompt-cache.md).
+A warm hit restores more than the prompt's KV. A finished request's whole
+sequence, prompt plus reply, is stored back so the next turn of the
+conversation warm-starts past it, and on a speculative model the drafter's
+own KV is saved beside the target's so acceptance is not degraded while it
+rebuilds. The cache layers behind this, their counters and the triage
+switches are in [internals/prompt-cache.md](internals/prompt-cache.md).
 
 ## Serving concurrent requests
 
@@ -304,7 +284,7 @@ the two symptoms:
 
 Paced admission bounds a waiter's time-to-first-token at twice its unpaced
 prefill, and prefill runs at full speed whenever nothing is decoding, which
-leaves single-client serving unaffected under any setting. In our serve
+leaves single-client serving unaffected under any setting. In the serve
 benchmarks a second client arriving at 14k tokens slowed the live stream to
 4% of its decode rate under strict alternation, whereas paced it kept 80%,
 with the second client's time-to-first-token unchanged. Both keys are
@@ -327,8 +307,9 @@ the `GMLX_CASCADE_SDPA` rows in [env-vars.md](env-vars.md#runtime).
 ## Sparse attention at depth
 
 At deep context, decode attention reads the whole KV cache for each token,
-and past roughly 16k tokens it dominates the step. `GMLX_SPARSE_ATTN=1`
-switches deep decode to top-k sparse attention: the runtime keeps a small
+and from about 8k tokens that read is a large share of the step.
+`GMLX_SPARSE_ATTN=1` switches decode past that depth to top-k sparse
+attention: the runtime keeps a small
 index over the cache, and each step attends only the best-scoring pages
 within a fixed token budget, plus the attention sink and the most recent
 pages, so attention cost stops growing with depth.
@@ -375,9 +356,8 @@ Settings, lowest cost first:
   quality cost. `--kv-quant-scheme kvarn` gives that fidelity at 6 bits in
   about half the fp16 cache and stays usable down to 4. [KV cache
   quantization](#kv-cache-quantization) says what each scheme does, which
-  models gain from it and what the fidelity data shows. Server-side these are
-  the [load keys](server-config.md#load-keys). With speculation on, quantized
-  KV also costs draft acceptance.
+  models gain from it and what the fidelity data shows. Server-side these
+  are the [load keys](server-config.md#load-keys).
 - `--max-kv-size` caps the cache as a rolling window, dropping the oldest
   context. On `run` and `chat` the window quantizes under kvarn once the cap
   is at least the kvarn minimum, as [cli.md](cli.md#gmlx-run) describes.
@@ -409,8 +389,8 @@ plus an fp16 scale and bias. Widths are 2, 3, 4, 6 and 8, and
 
 KVarN, `--kv-quant-scheme kvarn` or `kv_quant_scheme: kvarn`, is
 variance-normalized quantization. `--kv-bits` picks the width, 6 by default
-from 2, 3, 4, 5, 6 and 8. Split key and value widths are set through the
-environment, as [env-vars.md](env-vars.md#load-and-cache-keys) lists. Each
+from 2, 3, 4, 5, 6 and 8, and the `GMLX_KVARN_BITS` row in
+[env-vars.md](env-vars.md#runtime) splits the key and value widths. Each
 128-value slice of a head is rotated by a Hadamard transform, which spreads
 outlier channels over the whole slice. K and V are stored in 128-token
 records. Before rounding, each record is scaled along both axes by 16
@@ -421,8 +401,7 @@ attention sink, stay fp16, as do the newest `--kv-tail-tokens` tokens, 1024 by
 default. A record is sealed once the tail has moved past it. Decode and MTP
 verify read the records in the mlx-kquant kernels and merge the fp16 tail
 through a single softmax. The prompt cache stores records on its exact and
-checkpoint tiers. mlx-kquant 0.4.6 or later is required. On an older build the
-scheme is dropped with a printed reason and the model runs fp16 KV.
+checkpoint tiers.
 
 Which layers quantize is decided by cache shape, not model name. Growing
 attention KV quantizes, except the last layer of a deep stack, which stays
@@ -557,8 +536,7 @@ size 1, where verify rounds attend the records on the matrix-unit verify
 kernels at about a decode step's cost: at head_dim 256 with 8 queries for
 each KV head at 16k, that is 1.0 ms for each layer and round against 0.9 for
 decode. Choose kvarn for memory and fidelity, or affine for peak decode speed
-on a KV-bound dense model. The split-width variable is in
-[env-vars.md](env-vars.md#runtime) and the debug switches in
+on a KV-bound dense model. The debug switches are in
 [internals/debug-switches.md](internals/debug-switches.md).
 
 KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli at

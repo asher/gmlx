@@ -5,12 +5,13 @@ server, for contributors. This page covers the implementation, while the
 config surface is documented in [server-config.md](../server-config.md) and
 the endpoints in [api.md](../api.md).
 
-gmlx is a thin patch layer over stock mlx-vlm: it installs late-bound
-patches over a small set of mlx-vlm seams and leaves the stock app,
-batching engine and protocol handlers untouched. Loads route to the gmlx
-loader, which reads GGUF bytes through mlx-kquant's C++ reader and swaps
-model leaves for K-quant kernels, and the stock engine then executes those
-kernels in its own forward pass. There is no engine fork.
+The server is stock mlx-vlm, with its app, batching engine and protocol
+handlers untouched, and gmlx reaches into it through patched seams. Loads
+route to the gmlx loader, which reads GGUF bytes through mlx-kquant's C++
+reader and swaps model leaves for K-quant kernels, and the stock engine then
+executes those kernels in its own forward pass. There is no engine fork.
+The seam inventory, and why each one is fragile, is in
+[upstream-upgrades.md](upstream-upgrades.md).
 
 ## From file to response
 
@@ -33,8 +34,7 @@ flowchart TD
     MM -. VLM .-> PARSE
 
     subgraph ADAPT["Model adapter + residency"]
-        direction TB
-        WRAP["text -> mlx_vlm text_only.Model<br/>(VLM -> mlx_vlm vision/audio model class)"]
+        direction TB        WRAP["text -> gmlx vendored text_only.Model<br/>(VLM -> mlx_vlm vision/audio model class)"]
         STOP["attach StoppingCriteria to tokenizer"]
         REG["multi-model residency pool<br/>pinned + LRU, one process wired_limit"]
         WRAP --> STOP --> REG
@@ -78,38 +78,29 @@ flowchart TD
     RESP --> SDK
 ```
 
-## Components
+## What the diagram leaves out
 
-The loader, `gmlx.load_model`, parses the GGUF bytes and remaps tensor
-names to the Hugging Face layout, synthesizes the config and tokenizer,
-including the chat template, builds the stock model class and swaps the
-quantized leaves for K-quant modules. A VLM adds a second file containing
-the vision or audio tower. The output is a model, config and tokenizer
-triple with no safetensors round-trip.
+The loader's output is a model, config and tokenizer triple with no
+safetensors round-trip. The text-only wrapper it hands to the engine is
+gmlx's own copy of the adapter mlx-vlm removed in 0.6.15, vendored in
+`gmlx/models/vlm_text_only.py` so the embedding and language-model
+interface the engine expects stays stable across upstream releases. The
+residency pool that holds wrapped models owns the single process-wide wired
+limit.
 
-An adapter wraps a text model in mlx-vlm's text-only model class, which
-exposes the embedding and language-model interface the engine expects, and
-attaches stopping criteria to the tokenizer, while VLM models are wrapped in
-their mlx-vlm class instead. Wrapped models are held in a residency pool of
-pinned and LRU entries that owns the single process-wide wired limit.
+Prefix reuse is the prompt cache manager, which picks a tier per
+architecture ([prompt-cache.md](prompt-cache.md)). Speculative decoding runs
+gmlx's own verify round, which keeps the prompt cache available under a
+drafter ([speculative-batching.md](speculative-batching.md)).
 
-The engine is mlx-vlm's batch generator. It runs continuous batching over a
-ragged KV cache, given embeddings that the request path precomputes. Prefix
-reuse is the prompt cache manager, which picks a tier per architecture
-([prompt-cache.md](prompt-cache.md)). Speculative decoding runs gmlx's own
-verify round, which keeps the prompt cache available under a drafter
-([speculative-batching.md](speculative-batching.md)).
-
-Above the engine is mlx-vlm's FastAPI app, which serves OpenAI chat
-completions, OpenAI Responses and Anthropic Messages, each with streaming.
 Tool calls are extracted from the raw token stream by mlx-lm's tool parsers,
 selected from the model's chat template and re-emitted in each protocol's
 format. Each request's sampling parameters resolve through the config
 precedence chain before generation, from the family's model-card defaults up
 to the request's own fields ([Precedence](../server-config.md#precedence)).
-Served assistant ids are handled in front of this layer: a request to one
-runs the tool loop on a worker thread, and each round re-enters the server
-as an ordinary loopback client
+Served assistant ids are handled in front of the HTTP layer: a request to
+one runs the tool loop on a worker thread, and each round re-enters the
+server as an ordinary loopback client
 ([served assistants](../assistant.md#served-assistants)).
 
 Clients are anything that implements either API. Pointing `ANTHROPIC_BASE_URL`
@@ -144,7 +135,5 @@ sequenceDiagram
   E-->>C: stream tokens
 ```
 
-The patched seams are the residency lookup, the load call and the
-generation argument builder, and everything between them is stock. The seam
-inventory and the procedure for moving it to a new upstream release are in
-[upstream-upgrades.md](upstream-upgrades.md).
+On this path the patched seams are the residency lookup, the load call and
+the generation argument builder. Everything between them is stock.

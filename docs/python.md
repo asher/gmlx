@@ -18,12 +18,11 @@ from gmlx import load_model
 model, config, tokenizer = load_model("model.gguf")
 ```
 
-The return value is `(model, config, tokenizer)`. Here the model is a stock
-mlx-lm `Model` with quantized leaves swapped for `KQuant*` modules, while the
-config and tokenizer are both synthesized from the GGUF metadata. Under
-`mlx_lm.generate` and `mlx_lm.stream_generate` the model runs normally, in
-code written for ordinary mlx-lm checkpoints. Sharded files, named
-`-00001-of-000NN.gguf`, are discovered from any shard's path.
+The model is a stock mlx-lm `Model` with its quantized leaves swapped for
+`KQuant*` modules, so `mlx_lm.generate`, `mlx_lm.stream_generate` and any
+other code written for ordinary mlx-lm checkpoints run it unchanged. The
+config and tokenizer are both synthesized from the GGUF metadata. Sharded
+files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -82,6 +81,8 @@ KV cache:
 | `kv_bits` | `None` | Quantize the KV cache to this many bits. |
 | `kv_group_size` | `64` | KV quantization group size. |
 | `quantized_kv_start` | `0` | Position where KV quantization begins. |
+| `kv_quant_scheme` | `None` | `uniform` for the standard affine scheme, or `kvarn` for variance-normalized quantization. |
+| `kv_tail_tokens` | `1024` | Under `kvarn`, the most recent tokens that also stay fp16. A multiple of 128, and `0` disables the tail. |
 
 Long prompts and thinking models:
 
@@ -92,6 +93,7 @@ Long prompts and thinking models:
 | `thinking_budget` | `None` | Cap reasoning tokens. After roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
 | `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
+| `reasoning` | `None` | How a verbose stream shows thinking: `show` styles it, `hide` collapses it to the timing line, `raw` streams it verbatim. The return value is always raw. |
 
 ## Benchmark
 
@@ -114,6 +116,11 @@ loop. Its CLI equivalent is `gmlx run --bench`.
 | `runs` | `2` | Runs at each length. The best is reported. |
 | `warmup` | `True` | One untimed warmup generation first. |
 | `prefill_step_size` | model-aware | As in `generate`. |
+| `kv_bits` | `None` | As in `generate`, with `kv_group_size` and `quantized_kv_start`. |
+| `kv_group_size` | `64` | |
+| `quantized_kv_start` | `0` | |
+| `kv_quant_scheme` | `None` | As in `generate`, with `kv_tail_tokens`. |
+| `kv_tail_tokens` | `1024` | |
 
 ## Preflight and errors
 
@@ -125,12 +132,12 @@ pf = preflight("model.gguf")
 pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 ```
 
-`preflight(gguf_path, arch=None)` validates a GGUF before committing to a
-load: it discovers shards, histograms the tensor codecs, refuses
-unsupported ones by name and gates on the architecture. Because it reads
-only the GGUF header, it stays fast on multi-GB files. `load_model` runs it
-internally, and you can call it yourself to check a file first. Its CLI
-equivalent is `gmlx validate`.
+`preflight(gguf_path, *, arch=None, hf_source=None)` validates a GGUF
+before committing to a load: it discovers shards, histograms the tensor
+codecs, refuses unsupported ones by name and gates on the architecture. It
+reads only the GGUF header, so a multi-GB file is checked in well under a
+second. `load_model` runs it internally, and you can call it yourself to
+check a file first. Its CLI equivalent is `gmlx validate`.
 
 Failures raise one of two exceptions, from `preflight` or `load_model`
 alike:
@@ -161,8 +168,7 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 builds an HF fast tokenizer purely from the GGUF's embedded vocab, merges
 and scores metadata, which is the same synthesis `load_model` runs
 internally, without the model load. `detect_arch(reader)` reads
-`general.architecture` from the header. Both read only GGUF metadata, so
-they stay fast on multi-GB files.
+`general.architecture` from the header. Neither touches tensor bytes.
 
 Use these when a tool needs the tokenizer before deciding whether to load
 weights at all, such as an eval harness doing tokenizer parity checks,
@@ -195,9 +201,9 @@ as a `uint8` `weight` and dispatches through the `mlx_kquant` Metal kernels
 on a stock `mlx` wheel, so dequantization happens inside the kernel, never
 as a separate materialized pass. `install_kquant_modules(model, hf_kquant_meta)`
 is the swap step itself: it iterates over a constructed model's leaf
-modules and replaces each one whose weight carries a codec. Being driven
-entirely by codec strings, it is arch-generic and exported for building
-custom loaders.
+modules and replaces each one whose weight carries a codec. It keys on
+codec strings, not on the architecture, so a custom loader can use it on
+any model.
 
 ## Beyond the stable surface
 

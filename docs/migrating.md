@@ -15,7 +15,7 @@ directly, what has a different name and what is different by design.
 | `-n N` | `--max-tokens N` | default is until end-of-sequence on both |
 | `--temp`, `--top-k`, `--top-p`, `--min-p` | same names | defaults come from each model family's card, so bare `run` and `chat` are already tuned |
 | `-c N` | none | the window comes from the GGUF metadata, and `--max-kv-size N` bounds cache memory with a rotating cache |
-| `--rope-scaling`, `--yarn-*` | none | read from metadata, with an expert override in [debug-switches.md](internals/debug-switches.md) |
+| `--rope-scaling`, `--yarn-*` | none | read from the GGUF metadata, with no override |
 | `-ngl` | none needed | everything runs on the GPU, and `--stream-experts` and `--stream-cpu` are the over-RAM MoE placements in [streaming.md](streaming.md) |
 | `--cache-type-k/-v q8_0` | `--kv-bits 8` | same purpose, with `--kv-group-size` |
 | `--draft-model`, `--spec-draft-n-max` | `--draft-gguf`, `--draft-block-size` | models with a native head need no companion drafter |
@@ -25,10 +25,8 @@ directly, what has a different name and what is different by design.
 | `--parallel N` | none | continuous batching admits requests automatically, and `--budget-gb` bounds residency |
 | `--lora adapter` | `--adapter adapter.gguf` | [lora.md](lora.md) covers adapter interoperation in both directions |
 
-`/v1/completions` accepts a single string prompt and returns a single
-choice, although the primary route is `/v1/chat/completions`. Anthropic
-Messages and OpenAI Responses run on the same port, as [api.md](api.md)
-describes.
+The server speaks the OpenAI, Anthropic Messages and OpenAI Responses APIs
+on one port, and [api.md](api.md) lists what each honors.
 
 ## Coming from Ollama
 
@@ -38,14 +36,13 @@ not carry over.
 - Ollama's library is stored as sha-named blobs, not `.gguf` files, which
   cannot be used directly. Re-download the models you use with `gmlx pull`.
   `gmlx validate hf:<org>/<repo>` lists the available quants first.
-- gmlx implements the OpenAI, Anthropic and OpenAI Responses APIs, not the
-  Ollama API. Clients configured for an OpenAI-compatible endpoint work
-  unchanged. Ollama-native integrations need their OpenAI mode, pointed at
-  port 8080.
+- The Ollama API is not implemented. Clients configured for an
+  OpenAI-compatible endpoint work unchanged, and Ollama-native integrations
+  need their OpenAI mode, pointed at port 8080.
 - Modelfile parameters map onto the config in
-  [server-config.md](server-config.md). `num_predict` is the server's
-  `max_tokens` default, sampling keys are set for each model or in `profiles:`
-  and `SYSTEM` becomes `system:`.
+  [server-config.md](server-config.md). `num_predict` becomes the
+  `max_tokens` sampling key, set for a model or in `profiles:` like the
+  other sampling keys, and `SYSTEM` becomes `system:`.
 - Keep-alive and unload behavior is the [residency
   system](server-config.md#residency), with an idle timeout, LRU eviction
   under a byte budget and `pin` for always-resident models.
@@ -60,5 +57,6 @@ gmlx init --models-dir ~/.lmstudio/models -r
 
 The init wizard also offers the LM Studio directory unprompted when it
 exists, and ids, sampling profiles and a default model can then be adjusted
-in the YAML file. The local server API matches LM Studio's, plus Anthropic
-Messages on the same port.
+in the YAML file. Clients that used LM Studio's OpenAI-compatible endpoint
+work against this server unchanged, which adds Anthropic Messages on the
+same port.

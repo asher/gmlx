@@ -8,8 +8,7 @@ the config block and what sets the latency.
 `talk` is a client of the gmlx server, and the whole loop runs against the
 server's endpoints: transcription goes in, a chat turn streams back and
 speech comes out sentence by sentence. The speech models and the language
-model therefore share a GPU under the server's arbitration. Expect 1.3 to
-2.2 seconds from the end of your speech to the first spoken audio.
+model therefore share a GPU under the server's arbitration.
 
 - [Setup](#setup)
 - [Worked example](#worked-example)
@@ -22,9 +21,12 @@ model therefore share a GPU under the server's arbitration. Expect 1.3 to
 
 ## Setup
 
+Install the `talk` extra in the same form as your gmlx install, as
+[getting-started.md](getting-started.md#install) shows, and add ffmpeg,
+which Whisper uses for audio decoding:
+
 ```sh
-uv tool install "gmlx[talk]"     # or: pip install "gmlx[talk]"
-brew install ffmpeg              # audio decoding for Whisper
+brew install ffmpeg
 ```
 
 The server needs both speech services in its config:
@@ -42,14 +44,11 @@ The services themselves are described in [services.md](services.md).
 
 On first run two small files download into `~/.cache/gmlx/talk/`, the
 keyword-spotting bundle and the voice-activity model, a few MB together.
-macOS then asks for microphone permission once, and you should allow it. The
-prompt names your terminal instead of gmlx, because macOS grants the mic to
-the app you launched from, whereas voice sessions started from the
-[menu bar](menubar.md#voice-sessions) prompt as gmlx. If the prompt was
-denied, re-enable it under System Settings, Privacy and Security,
-Microphone.
+macOS then asks for microphone permission once, and the prompt names your
+terminal rather than gmlx, for the reason [menubar.md](menubar.md#permissions)
+explains. If it was denied,
 [troubleshooting.md](troubleshooting.md#the-mic-never-works-in-talk) has the
-steps.
+steps to re-enable it.
 
 ## Worked example
 
@@ -71,8 +70,8 @@ that the cat might actually learn it.
 listening for "hey assistant"
 ```
 
-Space stops the assistant mid-sentence. Typing at any time sends a text
-message instead of speaking. Try voices live:
+Typing at any time sends a text message instead of speaking, and the slash
+commands work mid-session, so you can try voices live:
 
 ```text
 /voice            # list the server's voices
@@ -83,7 +82,7 @@ message instead of speaking. Try voices live:
 The wake phrase is plain text with no training, because the keyword spotter
 is an open-vocabulary transducer and any phrase is spelled into tokens at
 startup. Continuous listening costs well under one percent of a CPU core. If
-the wake engine is not installed, `talk` falls back to open-mic mode with an
+the wake engine is not installed, `talk` falls back to `vad` mode with an
 install hint.
 
 ## Modes
@@ -97,9 +96,10 @@ install hint.
 
 ## Keys and slash commands
 
-While running, Space stops speech or drives push-to-talk, Esc cancels the
-current turn, `m` mutes the mic and `q` quits. Typing any printable character
-switches to line input.
+Space stops the assistant mid-sentence, and in `ptt` mode it starts and
+ends a capture. Esc cancels the current turn, `m` mutes the mic and `q`
+quits. Either key takes effect within about 150 ms. Typing any printable
+character switches to line input.
 
 | Command | Effect |
 |---------|--------|
@@ -110,7 +110,7 @@ switches to line input.
 | `/mute` | toggle the mic |
 | `/system <prompt>` | set the spoken persona |
 | `/reset` | clear the conversation |
-| `/memory` | list stored memories, with `forget ID` and `clear` to manage them, on the assistant brain only |
+| `/memory` | list stored memories. `/memory forget ID` removes one and `/memory clear yes` removes all. Assistant brain only |
 | `/devices` | list audio devices |
 | `/help`, `/quit` | show the commands, or quit |
 
@@ -120,14 +120,10 @@ switches to line input.
 built-in [assistant](assistant.md), so the model can call tools mid-turn and
 the conversation gains long-term memory. Tools come from MCP servers you
 configure, while memory is a local store built on the server's embeddings.
-This example configures two MCP servers that run locally with no API keys
-and turns memory on. The reference filesystem server needs Node, the
-reference fetch server needs uv and memory needs `embeddings:` on the
-server:
-
-```sh
-uv tool install "gmlx[talk,assistant]"     # or: pip install "gmlx[talk,assistant]"
-```
+The example below configures two MCP servers that run locally with no API
+keys and turns memory on. It needs the `assistant` extra alongside `talk`,
+Node for the reference filesystem server, uv for the reference fetch server
+and `embeddings:` on the server for memory:
 
 ```yaml
 server:
@@ -157,7 +153,7 @@ assistant:
     enabled: true
 ```
 
-Tool calling needs a model that is competent at it. Qwen3.6-27B is the
+Tool calling needs a model that is competent at it, and Qwen3.6-27B is the
 recommended class. A session then looks like this, with tool activity in
 the status line and only the answer spoken:
 
@@ -193,13 +189,17 @@ keys have a matching flag under [gmlx talk](cli.md#gmlx-talk), although
 `vad.pre_roll_ms` and `push_to_talk_modifier` are config-only. Precedence
 is defaults, then YAML, then flags.
 
+The `system` key is the only one with a subtlety. Leave it out and the
+assistant speaks with the default prompt, which asks for speakable output.
+Set it to `null` or `""` and there is no persona at all, which is not the
+same as the default.
+
 ```yaml
 talk:
   model: qwen3.6-27b@instruct   # id[@profile], default the server's default model
   voice: af_heart               # a Kokoro preset or qwen3-tts speaker
   speed: 1.0
-  system: null                  # spoken persona. Omit the key for the default speakable-output
-                                #   prompt. A literal null or "" sets no persona, not the default.
+  system: null                  # spoken persona, see above
   language: null                # whisper language hint
   max_tokens: null              # reply cap, unset means until the model stops
   mode: wake                    # wake | vad | ptt | text
@@ -232,11 +232,12 @@ gate, which suits scripting and smoke-testing a setup.
 
 ## Latency and interruption
 
-End of speech to first audio is typically 1.3 to 2.2 seconds, which is the
-sum of the endpointer's 550 ms silence hangover, 300 to 500 ms of Whisper
-turbo, the model's first sentence and 150 to 300 ms of Kokoro synthesis.
-Replies are chunked at sentence boundaries and synthesized a sentence ahead
-of playback, which keeps long answers speaking continuously.
+Expect 1.3 to 2.2 seconds from the end of your speech to the first spoken
+audio. That is the sum of the endpointer's 550 ms silence hangover, 300 to
+500 ms of Whisper turbo, the model's first sentence and 150 to 300 ms of
+Kokoro synthesis. Replies are chunked at sentence boundaries and synthesized
+a sentence ahead of playback, which keeps long answers speaking
+continuously.
 
 | Tuning | Trade |
 |--------|-------|
@@ -247,19 +248,16 @@ of playback, which keeps long answers speaking continuously.
 In wake mode the wake phrase itself interrupts a reply, because the keyword
 spotter stays live while the assistant transcribes, thinks and speaks.
 Saying the phrase mid-reply stops playback, cancels the turn and opens the
-mic, and a stop phrase after it, such as "stop", "cancel" or "never mind",
-acknowledges and returns to waiting for the wake phrase instead of starting
-a turn. Space and Esc do the same from the keyboard within about 150 ms.
+mic. A stop phrase after it, such as "stop", "cancel" or "never mind", is
+acknowledged and returns to waiting for the wake phrase instead of starting
+a turn.
 
 Only wake-phrase scoring runs during a reply, and full transcription of the
 open mic stays gated, since playback would otherwise be re-transcribed.
-`vad` and `ptt` modes are therefore half-duplex and keyboard-interrupt only.
-There is no protection against the assistant speaking the wake phrase: if a
-reply quotes it aloud, the spotter detects it through the speakers, so pick
-a phrase the model is unlikely to say. Whisper's known hallucinations on
-silence and noise are filtered by a minimum-speech and energy floor before
-transcription and a known-phrase check after, so noise does not become a
-turn.
-
-The manual smoke checklist for this loop, for contributors, is in
-[internals/testing.md](internals/testing.md#voice-loop-manual-pass).
+`vad` and `ptt` modes are therefore half-duplex and interruptible from the
+keyboard only. There is no protection against the assistant speaking the
+wake phrase: if a reply quotes it aloud, the spotter detects it through the
+speakers, so pick a phrase the model is unlikely to say. Whisper's known
+hallucinations on silence and noise are filtered by a minimum-speech and
+energy floor before transcription and a known-phrase check after, so noise
+does not become a turn.

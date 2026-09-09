@@ -8,10 +8,6 @@ guide.
 
 ## What the over-budget case produces
 
-The case studies that follow are the evidence behind the lossy settings table
-in [streaming.md](../streaming.md#the-lossy-settings). Each measured point
-changes one variable.
-
 Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on an M5
 Max MacBook Pro with 128 GB. Both used `--stream-experts` at streaming
 defaults, on the lossless path. The prompt is the one-shot canvas-animation
@@ -48,10 +44,10 @@ asserts, multi-step arithmetic and length control, plus a repetition check.
 
 Those are sustained-regime medians. A 14-inch machine started at idle
 temperature ran the same arms 15-25% faster for its first twenty minutes,
-with the baseline at 5.0 tok/s and the pair at 5.6 or better, for the
-reason the note on rested machines under
-[Measuring](../performance.md#measuring) explains. Moving the pair to less
-aggressive values keeps its quality margin but not its speed.
+with the baseline at 5.0 tok/s and the pair at 5.6 or better, until the
+chassis throttled, as [Measuring](../performance.md#measuring) describes.
+Moving the pair to less aggressive values keeps its quality margin but not
+its speed.
 Miss-shed's speedup falls steeply as P rises: at 0.93 it sheds only a
 third of the experts it sheds at 0.90, and the less aggressive pair gained
 a few percent where the full pair gained +13. Near these values the quality
@@ -131,7 +127,7 @@ width or gating changes.
 
 The most over-budget point runs the scale sample from the top of this page
 with the settings on. Kimi-K3 UD-Q2_K_XL is 861 GB on the same 128 GB
-machine, with 896 experts routed 16 to a token across 91 streamed expert
+machine, with 896 experts routed 16 to a token across 92 streamed expert
 layers. This far over budget, the arena holds a small fraction of the
 expert set, the lossless hit rate is about 50% and demand stalls take about
 two thirds of decode wall time, so the miss-targeted setting gains by far
@@ -148,8 +144,8 @@ alternated A/Bs.
 | `moe_miss_shed: 0.70` | 26.1% | 71.9% | 1.33 tok/s (+16%) |
 | `moe_miss_shed: 0.65` | 30.4% | 74.2% | 1.39 tok/s (+21%) |
 
-The runs span several days of sessions, and ambient memory pressure sized
-the wired arena differently across them, from 29 to 33 GB, so read the
+The runs span several days, and ambient memory pressure sized the wired
+arena differently across them, from 29 to 33 GB, so read the
 mechanism columns as a trend and not as a controlled sweep. Two results are
 still clear. Shedding raised the hit rate of the remaining experts, because
 the arena stops loading and evicting experts that would be dropped anyway,
@@ -181,13 +177,18 @@ inside code.
 The procedure is repeatable on any model:
 
 1. Run the lossless run and the candidate setting on the same prompt at the
-   same seed, at the temperature and top-p you deploy with. A check at a lower temperature does not cover a higher one. Untruncated sampling exposes the whole perturbed tail that nucleus truncation hides.
+   same seed, at the temperature and top-p you deploy with. A check at a
+   lower temperature does not cover a higher one, and untruncated sampling
+   exposes the whole perturbed tail that nucleus truncation hides.
 2. Score a short goal battery: JSON extraction, constrained format, code with
    asserts, multi-step arithmetic, length control and a repetition check.
    Put chained arithmetic in first if the workload depends on it.
-3. Generate something long, 10k tokens or more. Scan it for stray tokens.
-   A per-token error rate too small to appear in a short check still accumulates.
-4. Render the artifact and compare it with the lossless run. Dropped gate mass degrades content before form. A page can be valid and complete with its subject missing.
+3. Generate something long, 10k tokens or more, and scan it for stray
+   tokens. A per-token error rate too small to appear in a short check still
+   accumulates.
+4. Render the artifact and compare it with the lossless run. Dropped gate
+   mass degrades content before form, so a page can be valid and complete
+   with its subject missing.
 5. Leave margin on each stacked setting, since their effects add up against
    a single quality threshold. Re-gate whenever routing width or gating
    changes.
@@ -299,19 +300,17 @@ medians unless noted.
 
 Lookahead prestage recall of the next layer's actual top-k is about 78% on
 GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the
-previous token's routing. `GMLX_DECODE_LOOKAHEAD_PROBE=1` prints the
-per-layer recall table at exit without issuing reads. Run this check on a
-new model family.
+previous token's routing, measured with the recall probe in
+[debug-switches.md](debug-switches.md).
 
 Keep-warm does not change stall time or arena hit rate, because the disk
 does the same work, and the gain is clock residency. With the heartbeat alone
 on an idle M5 Max, GPU power went from 199 mW to 287 mW while active
 residency went from 58% to 99.8% at the 338 MHz floor, and the real cost is
 holding the decode-level clock through the gaps, which scales with the
-workload. When a streamed model's per-token time is dominated by the eval
-and sync bucket and not by stalls, a clock frequency drop is the likely
-cause and keep-warm is the quick test. `GMLX_DECODE_PHASE_STATS=1` prints
-that breakdown.
+workload. A streamed model whose per-token time sits in the eval and sync
+bucket rather than in stalls, in the phase breakdown the same page lists,
+is the case keep-warm helps.
 
 Weight pinning matters because without it the every-token weights are
 plain file-backed pages, which the kernel evicts between uses on a machine

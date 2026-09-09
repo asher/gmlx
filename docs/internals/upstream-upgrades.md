@@ -1,18 +1,27 @@
 # Upgrading mlx-vlm, mlx-lm and mlx
 
-gmlx patches about thirty private symbols across mlx-vlm and mlx-lm and
-deep-imports model internals, with the inventory in
-`gmlx/upstream/seams.py`. That surface is safe only under the exact mlx-vlm
-pin in `pyproject.toml`, because upstream point releases change it. This
-page is the maintainer's procedure for changing the pin.
+gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs late-bound
+patches over private upstream symbols, deep-imports model internals, and
+leaves everything between those seams stock. The inventory is the `SEAMS`
+table in `gmlx/upstream/seams.py`, well over a hundred entries, and
+`python -m gmlx.upstream.seams` prints the current count with its drift
+report. Every seam is fragile by design: upstream point releases move the
+symbols, so the surface is safe only under the versions this page
+qualifies. It is the maintainer's procedure for changing them.
 
-Three checks enforce the pin:
+The versions are declared in `pyproject.toml` in three different ways.
+mlx-vlm is an exact pin, `mlx-vlm==X.Y.Z`, because it owns the seams.
+mlx-lm and mlx-kquant carry floors, `mlx-lm>=0.31` and
+`mlx-kquant>=0.4.7,<0.5`. mlx itself is unconstrained there and arrives
+through mlx-kquant, which pins the exact mlx release its kernels were built
+against, and CI installs that same mlx explicitly. Three checks keep an
+environment inside those bounds:
 
 | Layer | Where | What it does |
 |-------|-------|--------------|
-| exact pin | `pyproject.toml` | `mlx-vlm==X.Y.Z`. mlx and mlx-lm are pinned together, with a minimum version so source installs resolve |
+| declared versions | `pyproject.toml` | the exact mlx-vlm pin and the mlx-lm and mlx-kquant floors described above |
 | seam contract | `tests/upstream/test_upstream_seams.py` | every patched symbol is pinned to a source fingerprint. Drift fails CI naming the seam |
-| runtime gate | `check_upstream_versions`, at CLI entry | versions below the minimum refuse to run with an upgrade message, newer than the qualified set warns. `gmlx doctor` is exempt |
+| runtime gate | `check_upstream_versions`, at CLI entry | mlx, mlx-lm or mlx-vlm below its floor refuses to run with an upgrade message, and newer than the qualified set warns once. `gmlx doctor` is exempt |
 
 ## Watching upstream releases
 
@@ -73,7 +82,8 @@ Any new patch or deep import of upstream internals gets a row in `SEAMS`
 in the same change, then a regen. A seam that correctness or a hard feature
 dependency relies on sets `critical=True`, and its installer must raise
 when the seam is missing, whereas optional accelerations warn once and fall
-back.
+back. Either way a patch is idempotent and never silently no-ops when the
+upstream surface it expects has changed.
 
 KV-cache classes have two origins since mlx-vlm 0.6.4 vendored its own. The
 rules for isinstance checks and construction are in the docstring of

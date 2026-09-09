@@ -22,11 +22,10 @@ server:
 ```
 
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
-cache only, so fetch them first with `gmlx pull`. A server that starts
-without them disables the endpoint until the file is present. Both services
-load in the background at startup and sit outside the chat residency pool,
-so a re-index and chat never evict each other, and both run in a worker
-thread that interleaves with batched chat decode.
+cache only, so fetch them first with `gmlx pull`. Both services load in the
+background at startup and sit outside the chat residency pool, which
+[services.md](services.md) describes along with the other behaviour the
+four services share.
 
 ## Choosing the models
 
@@ -66,10 +65,9 @@ curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
 }
 ```
 
-The conventional OpenAI model names all map to the configured model, and
-the field can also be omitted. Any other requested model is refused rather
-than silently substituted, and the response echoes the name you requested.
-An optional `encoding_format` selects `float`, the default, or `base64`.
+The response echoes the `model` name you sent, which can be any of the
+conventional OpenAI embedding names or omitted. An optional
+`encoding_format` selects `float`, the default, or `base64`.
 
 ## The rerank endpoint
 
@@ -97,12 +95,17 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
 }
 ```
 
-`documents` entries may also be `{"text": ...}` objects. Because
-`return_documents` defaults to true, each result echoes its document, so
-set it false for indices and scores only. An optional `instruction`
-overrides the default query instruction. Scoring runs a model forward for
-each document, so keep the candidate list to a vector search's shortlist of
-tens, not thousands.
+The optional fields:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `documents[]` | | strings, or `{"text": ...}` objects |
+| `top_n` | all | how many results to return |
+| `return_documents` | `true` | echo each result's document. Set it false for indices and scores only |
+| `instruction` | the model's | replaces the query instruction the reranker is prompted with |
+
+Scoring runs a model forward for each document, so keep the candidate list
+to a vector search's shortlist of tens, not thousands.
 
 ## Configure Open WebUI
 

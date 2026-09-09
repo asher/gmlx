@@ -301,8 +301,8 @@ older depth series one by one.
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is ds4-server (antirez's
-dwarfstar DeepSeek-V4 server, ignore-eos patched), not llama.cpp --
+This model's comparison engine is ds4-server, antirez's
+dwarfstar DeepSeek-V4 server with the ignore-eos patch, because
 llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
 gmlx / ds4-server.
 

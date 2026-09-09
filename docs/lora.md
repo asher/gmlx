@@ -20,13 +20,13 @@ a small GGUF file. `run`, `chat` and `serve` attach it live at load with
 on the unmodified quantized weights.
 
 Two properties make this worth using over the usual convert, fine-tune and
-requantize cycle. The frozen base stays in its K-quant codec during
-training, with the adapter's gradient flowing through the quantized matmul,
-so there is no float copy of the base and no optimizer state for it, which
-lets you fine-tune a model you could not hold in fp16. At inference the base
-bytes are never modified, and the output is the base with its existing
-quantization error plus the exact adapter delta in full precision, whereas
-merging would force a requantization of the adapted weights.
+requantize cycle. During training the frozen base stays in its K-quant
+codec and the adapter's gradient flows through the quantized matmul. There
+is no float copy of the base and no optimizer state for it, so you can
+fine-tune a model you could not hold in fp16. At inference the base bytes
+are never modified: the output is the base, with its existing quantization
+error, plus the exact adapter delta in full precision, whereas merging would
+force a requantization of the adapted weights.
 
 If you have the full-precision model and enough memory, fine-tune that and
 quantize afterward, because training on the quant is for when the quant is
@@ -173,19 +173,16 @@ Adapters interact with two other features:
   key includes the adapter set. The cost is a cached copy for each id that
   shares a prefix.
 - Speculative decoding. `speculative: true` combines with adapters. Set it
-  on each id of the group, since a mismatch would split the entry. When
-  concurrent requests exceed the width cap the batch decodes plain until it
-  drains. Adapters behave identically on both sides of that switch.
+  on each id of the group, since a mismatch would split the entry. Adapters
+  behave identically whether the batch is speculating or has fallen back to
+  plain decode past the
+  [width cap](performance.md#mtp-speculative-decoding).
 
 The sorted adapter set is part of what identifies the loaded model, so
 adding an id with a new adapter and reloading the config builds a new
 entry, and the old one is evicted after its idle time. Plan for both copies
 being briefly resident, or restart instead of reloading when the base is
 large.
-
-Serving base and adapters together at that low cost needs an mlx-kquant
-build with the in-op LoRA epilogue, while older builds fall back to plain-op
-deltas, with the same results at a somewhat higher cost.
 
 ## Adapter format and interop
 

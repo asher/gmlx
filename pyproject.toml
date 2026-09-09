@@ -37,7 +37,7 @@ dependencies = [
     # rather than inherited through mlx-lm.
     "mlx",
     "numpy",
-    # Exact pin: gmlx patches ~30 private mlx-vlm symbols (see
+    # Exact pin: gmlx patches well over a hundred private mlx-vlm symbols (see
     # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache/compat.py for the dual-origin cache-class rules).

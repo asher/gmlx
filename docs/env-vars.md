@@ -1,11 +1,14 @@
 # Environment variables
 
-The environment variables a user can set, in one place. Most settings are
-also reachable as a flag or a config key, and when a setting is set more
-than one way the precedence is flag, then config key, then environment
-variable. The exception is `GMLX_CACHE_LIMIT_GB`, which overrides
-`server.cache_limit_gb` so that a benchmark run can pin the MLX
-buffer-cache limit without editing the config.
+The environment variables a user can set, in one place. Most of them are
+also reachable as a flag or a config key, and that is the normal way to set
+one, because an exported variable applies to every model the process loads
+and to every server started from that shell. The variables exist so that a
+benchmark or an A/B can change one setting without editing the config. When
+a setting is set more than one way, the flag wins, then the config key, then
+the variable. Two variables invert that order and override the config:
+`GMLX_CACHE_LIMIT_GB` over `server.cache_limit_gb`, and `GMLX_MTP_WIDTH_CAP`
+over each model's `speculative_width_cap`.
 
 Anything not listed here or in
 [internals/debug-switches.md](internals/debug-switches.md) is internal and may
@@ -15,9 +18,7 @@ change meaning or disappear between releases.
 
 These are upstream mlx-vlm variables, which gmlx sets for each model from
 the `load:` and `cache:` blocks of the config, described in
-[server-config.md](server-config.md#param-key-reference). A config key is
-the normal way to set them, because exporting one applies it to all models
-the process loads.
+[server-config.md](server-config.md#param-key-reference).
 
 | Variable | Config key |
 |----------|------------|
@@ -39,10 +40,9 @@ the process loads.
 | `APC_DISK_NAMESPACE` | `cache.disk.namespace` |
 
 `KV_KEY_BITS` and `KV_VALUE_BITS` set split key and value widths for kvarn
-KV server-wide, and they have no config key and override `GMLX_KVARN_BITS`.
-`PREFILL_STEP_SIZE` is likewise mlx-vlm's variable for the prefill chunk
-size, although `--prefill-step-size` or `server.prefill_step_size` is the
-better way to set it.
+KV server-wide. They have no config key and override `GMLX_KVARN_BITS`.
+`PREFILL_STEP_SIZE` is mlx-vlm's variable for the prefill chunk size, which
+`--prefill-step-size` and `server.prefill_step_size` set per server.
 `TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for, as
 [api.md](api.md#logprobs) describes.
 
@@ -55,21 +55,19 @@ better way to set it.
 | `MLX_VLM_PINNED_MODELS` | Comma-separated model paths to pin. Combined with `--pin` and `pin: true` entries, so it only adds pins. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper entirely. LRU eviction under pressure still applies. |
 | `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds, default `30`. |
-| `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a queued request waits for a decode slot before the server returns 503. `server.token_queue_timeout_s` sets the same limit from the config. |
+| `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a queued request waits for a decode slot before a 503. `server.token_queue_timeout_s` sets the same limit, and `1800` applies when neither is set. |
 
 ## Server
 
-These change how `gmlx serve` schedules and admits requests. Each has a
-config key or flag that is the normal way to set it, and the variable
-exists so that a live server can be reconfigured for an A/B without a
-restart.
+These change how `gmlx serve` schedules and admits requests. The ones
+marked as read per tick or per chunk take effect on a running server.
 
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_DECODE_PREFILL_RATIO` | The `server.decode_prefill_ratio` value, read per scheduler tick. |
 | `GMLX_DECODE_PREFILL_FLOOR` | The decode-rate floor `auto` pacing protects, as a share of a stream's batched rate, default `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | The `server.prefill_tick_ms` value, read per chunk. |
-| `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. |
+| `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. Default `256`. |
 | `GMLX_DECODE_BATCH` | Requests that decode together in a step. Default `8`. `0` restores the upstream 32. |
 | `GMLX_QUEUE_DEPTH_CAP` | Waiting requests admitted before the server answers 503. Default 2x the decode batch. `0` disables the cap. |
 | `GMLX_SSE_KEEPALIVE_S` | Seconds between SSE keepalive comments while a stream is silent. Default `15`. `0` disables them. |
@@ -105,7 +103,7 @@ changes.
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve added to the host floor, default `2.5`. Buffered read throughput drops sharply when the page cache has too little memory. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Default on, skipped with a printed reason above 60% of RAM. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights into the Metal residency set on streamed models. |
-| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the table onto the CPU stream on a model that fits, for measurement. |
+| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the table to stream even when the model fits, for measurement. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. Default `1`. `0` runs continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |
@@ -131,4 +129,4 @@ changes.
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`. Same as `--ignore-eos`, for forced-length benchmarking. |
 | `GMLX_API_KEY` | Client-side default key for `ps` when `--api-key` is not passed. The server reads its key only from `server.api_key`. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for `validate` and `pull` on gated or private repos. |
-| `XDG_CACHE_HOME` | Where `chat` keeps its prompt history and backgrounded servers keep their runfiles and logs, under a `gmlx/` subdirectory. |
+| `XDG_CACHE_HOME` | The root of the `gmlx/` cache directory, which holds `chat`'s prompt history, backgrounded servers' runfiles and logs, and the models `talk` downloads. |
