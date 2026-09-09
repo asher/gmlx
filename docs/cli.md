@@ -83,9 +83,9 @@ and the file it writes is described in [server-config.md](server-config.md).
 ## gmlx serve
 
 Runs the server. It detaches by default and returns at once, so the same
-shell can run `gmlx launch` next, or pass `--foreground` to stay attached. A
-background server keeps a runfile and a log under `~/.cache/gmlx/` and, on a
-macOS desktop session, raises the [menu bar app](menubar.md).
+shell can run `gmlx launch` next. `--foreground` keeps it attached instead.
+A background server keeps a runfile and a log under `~/.cache/gmlx/` and, on
+a macOS desktop session, raises the [menu bar app](menubar.md).
 
 ```sh
 gmlx serve                                  # the config in the default location
@@ -124,7 +124,7 @@ config, where the same settings apply to a config-mode server:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--budget-gb F` | 0.8x the GPU working set | resident weight budget across all models |
+| `--budget-gb F` | 0.8x the GPU working set | [resident](glossary.md) weight budget across all models |
 | `--max-models N` | none | cap on resident models |
 | `--pin ID_OR_PATH` | none | never evict this model, repeatable |
 | `--max-tokens N` | none | default completion cap |
@@ -150,8 +150,8 @@ These flags control speculative decoding:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--speculative` | auto | speculate with the model's own MTP head or `--draft-gguf` |
-| `--draft-gguf PATH` | none | a separate drafter GGUF, which implies `--speculative` |
+| `--speculative` | off | speculate with the model's own MTP head or `--draft-gguf`. A config `discover` scan enables it on its own |
+| `--draft-gguf PATH` | none | a separate [drafter](glossary.md) GGUF, which implies `--speculative` |
 | `--native-mtp` | off | prefer the model's own head when `--draft-gguf` is also set |
 | `--draft-block-size N` | drafter default | draft tokens in each round |
 | `--speculative-width-cap N` | drafter default | speculate only while at most N requests decode together. `0` uncapped |
@@ -165,13 +165,13 @@ These flags stream a model bigger than memory, as
 | `--stream-experts` | off | stream the routed experts from disk. Attention and the KV cache stay on GPU |
 | `--stream-cpu` | off | run the whole model on the CPU device from the page cache |
 | `--prefill-feeder`, `--no-prefill-feeder` | on | stage expert prefill directly from the GGUF |
-| `--decode-feeder`, `--no-decode-feeder` | on under `--stream-experts` | decode from a wired, popularity-managed expert arena |
+| `--decode-feeder`, `--no-decode-feeder` | on under `--stream-experts` | decode from a wired, popularity-managed expert [arena](glossary.md) |
 | `--gpu-keepwarm` | on for streamed loads | keep GPU clocks high while a streamed model decodes |
 | `--moe-experts K` | trained | cap the router at K experts for each token, lossy |
 | `--moe-expert-mass P` | off | keep the smallest expert set covering share P of gate mass, lossy |
 | `--moe-miss-shed P` | off | drop experts that would miss the arena down to share P, lossy |
 | `--moe-layer-shed P` | off | skip a streamed layer's experts with probability P, lossy |
-| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy |
+| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy, so it needs `--moe-miss-shed` |
 
 These flags enable services. Each is also a `server` key and is described
 in [services.md](services.md):
@@ -183,9 +183,8 @@ in [services.md](services.md):
 | `--embeddings [MODEL]` | off | embeddings at `POST /v1/embeddings`. Bare is `qwen3-embed-0.6b`. No extra is needed |
 | `--rerank [MODEL]` | off | reranking at `POST /v1/rerank`. Bare is `qwen3-rerank-0.6b`. No extra is needed |
 
-There is no `--api-key` flag on `serve`. The key lives in the config, as
-[bind and auth](server-config.md#bind-and-auth) explains, so that the
-lifecycle tools and the menu bar can read the same file.
+There is no `--api-key` flag on `serve`. The key lives in the config, for
+the reasons [bind and auth](server-config.md#bind-and-auth) gives.
 
 Each completed request logs a line with the endpoint, model, token counts
 and timing:
@@ -218,6 +217,8 @@ with the reason and their age.
 | `--host H` | the managed server | which server |
 | `--port P` | the managed server | which server |
 | `--json` | off | emit JSON |
+
+Exit codes: 0 a server is running, 3 none is.
 
 ## gmlx restart
 
@@ -351,7 +352,7 @@ These flags control memory:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--max-kv-size N` | none | cap the KV cache with a rotating window. Combines with kvarn but not with affine `--kv-bits` |
+| `--max-kv-size N` | none | cap the KV cache with a rotating window. Combines with [kvarn](glossary.md) but not with affine `--kv-bits` |
 | `--kv-bits N` | off | quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, default 6 |
 | `--kv-group-size N` | `64` | affine quantization group size |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | `kvarn` is variance-normalized quantization, [performance.md](performance.md#kv-cache-quantization) |
@@ -360,13 +361,11 @@ These flags control memory:
 | `--prefill-step-size N` | `2048`, `8192` when streaming | prefill chunk size |
 | `--dtype {auto,bfloat16,float16}` | `auto` | activation width. `auto` is float16 on M1 and M2 |
 
-Under kvarn the first 128 tokens of the cache and the newest
-`--kv-tail-tokens` tokens stay fp16, and the quantized part between them is
-stored in 128-token blocks. A `--max-kv-size` window therefore has to hold
-at least 384 tokens with a zero tail, or 1280 at the default tail, and a
-smaller window exits 2, as does a width outside the scheme's list. When
-kvarn declines a model, `run` prints the reason and runs fp16 KV. The VLM
-media path always keeps fp16.
+A width outside the scheme's list exits 2, and so does a `--max-kv-size`
+window too small for kvarn's block layout, which
+[performance.md](performance.md#kv-cache-quantization) describes along with
+the models kvarn declines. A declined model prints the reason and runs fp16
+KV, and the VLM media path always keeps fp16.
 
 These flags control loading:
 
@@ -429,7 +428,7 @@ These flags stream a model bigger than memory, which
 | `--moe-expert-probe` | off | run lossless and print how many experts each token needed at candidate P values |
 | `--moe-miss-shed P` | off | drop experts that would miss the arena down to share P, lossy |
 | `--moe-layer-shed P` | off | skip a streamed layer's experts with probability P, lossy |
-| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy |
+| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy, so it needs `--moe-miss-shed` |
 
 These flags inspect and benchmark:
 
@@ -500,7 +499,7 @@ These flags control display and sessions:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--render {auto,plain,lite,rich}` | `auto` | markdown rendering of replies |
-| `--theme NAME` | `dark` | color theme |
+| `--theme NAME` | the config's `theme:`, else `dark` | color theme |
 | `--colorblind` | off | colorblind-friendly accents on any theme |
 | `--no-history` | off | do not read or write the prompt history file |
 | `--no-autosave` | off | do not save the session after each turn |
@@ -544,7 +543,7 @@ gmlx launch omp --config-only
 | `--model ID[@profile]` | the server's default | the served model the tool uses, kept resident while it runs |
 | `--base-url URL` | none | an explicit server, never auto-started |
 | `--host H`, `--port P` | the managed server | the server to target |
-| `--api-key KEY` | none | the key, written to the tool's native config field |
+| `--api-key KEY` | a placeholder | the key, written to the tool's native config field. Without one, tools that require a key get the provider id |
 | `--provider-id NAME` | `gmlx` | the provider id written into the tool's config |
 | `--config-path PATH` | under `~/.config/gmlx` | where the tool config is written |
 | `--config-only` | off | write the config and print the run command without running it |
@@ -596,10 +595,11 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 | `--json` | off | emit each verdict as JSON before downloading |
 
 Inside a `model_dirs` root, downloads nest under `<org>__<repo>/` so that a
-model's siblings stay together. An interrupted download resumes from its
-`.part` file, and before starting, `pull` checks that the volume has space
-for all the shards. Set `HF_TOKEN` for gated repositories. A model that
-will not fit this Mac's RAM still downloads, with a note.
+model's siblings stay together. Before the first byte, `pull` checks that
+the volume has space for every shard, and it notes, without refusing, a
+model that will not fit this Mac's RAM. An interrupted download resumes
+from its `.part` file. Gated repositories need `HF_TOKEN` in the
+environment.
 
 ## gmlx validate
 
@@ -696,17 +696,16 @@ cache is unreadable, is kept and reported instead of dropped.
 
 Shows the models resident in a running server from its `/v1/metrics`
 snapshot, with the id, size, idle time, TTL, pinned state and path of each.
-A keyed server needs the key, from `--api-key` or the `GMLX_API_KEY`
-variable.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--url URL` | the managed server | the server's base URL |
 | `--host H`, `--port P` | the managed server | the server to target |
-| `--api-key KEY` | `GMLX_API_KEY` | the key for a keyed server |
+| `--api-key KEY` | the `GMLX_API_KEY` variable | the key for a keyed server |
 | `--json` | off | emit JSON |
 
-Exit code 1 means no server was reachable.
+Exit codes: 0 listed, 1 the server answered with an error or is not gmlx,
+3 no server was reachable.
 
 ## gmlx profiles
 
@@ -836,6 +835,6 @@ gmlx completion fish | source      # ~/.config/fish/config.fish
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `shell`, positional | required | `zsh`, `bash` or `fish` |
+| `shell`, positional | none | `zsh`, `bash` or `fish`. Bare prints the help with the install lines |
 
 No regeneration is needed after an upgrade.

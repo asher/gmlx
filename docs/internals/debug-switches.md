@@ -1,10 +1,11 @@
 # Debug switches
 
-Environment variables that change how gmlx builds or routes a model so a
-defect can be isolated. None is a tuning setting: each one slows the model
-or disables a fix, and exists so that an A/B run can rule a component in or
-out. They are read at load or on each call. The user-facing variables are in
-[env-vars.md](../env-vars.md).
+Environment variables that change how gmlx builds or routes a model, or
+make it report what it did, so that a defect can be isolated. None is a
+tuning setting. The disabling switches slow the model or turn a fix off,
+the logging switches cost nothing but output, and all of them exist so that
+an A/B run can rule a component in or out. They are read at load or on each
+call. The user-facing variables are in [env-vars.md](../env-vars.md).
 
 | Variable | Meaning |
 |----------|---------|
@@ -20,7 +21,7 @@ out. They are read at load or on each call. The user-facing variables are in
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round. |
-| `GMLX_ROUND_PROFILE=1` | Profile each speculative round. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. Works in the server process. |
+| `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too, so a serve claim can be certified there. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print a streamed decode's per-token split between disk stalls and the eval and sync bucket at exit. A clock frequency drop shows as a large sync bucket. |
 | `GMLX_PIN_CAST_EXCLUDE=0` | Pin the file bytes of every every-token tensor on a streamed model, including tensors the loader converts at load. By default converted tensors are left out. |
 | `GMLX_STREAM_PLE_COMPOSE=0` | Keep a streamable lookup table resident when the experts also stream, instead of streaming both. |

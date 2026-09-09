@@ -33,8 +33,9 @@ on one port, and [api.md](api.md) lists what each honors.
 Any GGUF file on disk can be reused, but Ollama's model store and API do
 not carry over.
 
-- Ollama's library is stored as sha-named blobs, not `.gguf` files, which
-  cannot be used directly. Re-download the models you use with `gmlx pull`.
+- Ollama's library is stored as sha-named blobs rather than `.gguf` files,
+  and the blobs cannot be served directly. Re-download the models you use
+  with `gmlx pull`.
   `gmlx validate hf:<org>/<repo>` lists the available quants first.
 - The Ollama API is not implemented. Clients configured for an
   OpenAI-compatible endpoint work unchanged, and Ollama-native integrations
@@ -58,5 +59,5 @@ gmlx init --models-dir ~/.lmstudio/models -r
 The init wizard also offers the LM Studio directory unprompted when it
 exists, and ids, sampling profiles and a default model can then be adjusted
 in the YAML file. Clients that used LM Studio's OpenAI-compatible endpoint
-work against this server unchanged, which adds Anthropic Messages on the
-same port.
+work against this server unchanged, and Anthropic Messages is available on
+the same port.

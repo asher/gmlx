@@ -12,19 +12,22 @@ in [server-config.md](../server-config.md#speculative_width_cap).
 A speculative generation runs in one of two loops, chosen by live batch
 width.
 
-The scalar loop serves one decoding request. Draft and target sampler RNG
-streams stay coupled, which lets sampled drafts be accepted against sampled
-targets and gives the highest acceptance rate, so it is the fastest path
-and the common case.
+The scalar loop serves one decoding request. Its draft and target samplers
+share coupled RNG streams, so a sampled draft can be accepted against a
+sampled target, which gives the highest acceptance rate. That makes it the
+fastest path, and it is the common case.
 
 The batch loop serves two or more. For each row it tracks the KV offset,
 the budget, a finished flag and the bonus token, which is the first token a
 verify round accepts beyond the drafted run and the point the next round
 starts from. Drafting is greedy, since coupled RNG does not extend across
-rows. The loop also checks the per-model width cap, and a batch wider than
-the cap decodes plain, because verification widens each row's weight reads
-and past the measured width the batch is faster without drafting. New
-requests join between verify rounds, when the loop drains an injection
+rows.
+
+The loop also checks the per-model width cap. A batch wider than the cap
+decodes plain, because verification widens each row's weight reads and past
+the measured width the batch is faster without drafting.
+
+New requests join between verify rounds, when the loop drains an injection
 queue, extends the target KV cache and the drafter with the new rows and
 re-checks the cap. A batch that comes back under the cap re-arms itself
 with a capture round, a single plain-cost forward that collects the hidden
@@ -45,9 +48,9 @@ stateDiagram-v2
 
 The scalar loop has no injection boundary, because its speed comes from
 not being a batch. Making a prefilled request wait for the running request
-to finish is worse on both measures: the waiter's time to first token grows
+to finish is worse on both measures. The waiter's time to first token grows
 to the running request's remaining generation, and aggregate throughput
-drops as well, because a single speculating stream is slower than the same
+drops too, because a single speculating stream is slower than the same
 hardware decoding several streams plain. When waiters queue behind a live
 scalar generation the server therefore preempts it:
 

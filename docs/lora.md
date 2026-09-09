@@ -35,7 +35,8 @@ all you can fit.
 ## Train an adapter
 
 The walkthrough teaches Qwen3-0.6B to talk like a pirate. Any pure K-quant or
-legacy-codec GGUF works as a base:
+legacy-codec GGUF works as a base. The walkthrough uses a dense one, and on
+a MoE base the default adaptation keys are untested:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --to .
@@ -82,9 +83,7 @@ Train loss should fall steadily. With only 90 examples, stop around 150
 iterations, because training longer overfits, validation loss rises and
 greedy decoding can repeat. `--num-layers` and `--rank` trade capacity for
 memory, and the defaults of 8 layers at rank 8 are a reasonable starting
-point. This walkthrough targets a dense base, and on a MoE base the default
-adaptation keys are untested. The flag table is under
-[gmlx train](cli.md#gmlx-train).
+point. The flag table is under [gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
 
@@ -144,9 +143,9 @@ inherit them from a profile. The memory use shows as a single entry under
 `resident_models` on `GET /v1/metrics`, while `curl localhost:8080/v1/models`
 lists all three ids.
 
-There is nothing adapter-specific in the API. Each request names an id. The
-server turns that id's adapter on and all other slots off for the rows of that
-request:
+Nothing in the API is adapter-specific: a request names an id, and the
+server turns that id's adapter on and all other slots off for the rows of
+that request:
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/chat/completions -d '{
@@ -159,13 +158,12 @@ Concurrent requests to different ids of the group do not queue behind each
 other, and an adapted request's output equals what it would produce running
 alone, whatever else is in the batch.
 
-In the chat client, `gmlx chat --server qwen3-0.6b-pirate` connects to a
-served id, and `/model <id>` inside the session switches the id the next
-turn goes to while keeping the transcript. Because the ids share a resident
-model the switch is instant, so you can ask on the base, switch and have
-the adapted model answer the follow-up with the full context. `/model`
-alone lists the served ids, and Tab completes them. [chat.md](chat.md)
-describes the client.
+The chat client compares them in one conversation: `gmlx chat --server
+qwen3-0.6b-pirate` connects to a served id and
+[`/model <id>`](chat.md#undo-retry-and-sessions) switches to another with
+the transcript kept, instantly, since the ids share a resident model. On a
+local load, `/adapter off` and `/adapter SCALE` toggle or scale the
+`--adapter` file live.
 
 Adapters interact with two other features:
 
@@ -197,10 +195,11 @@ GGUF adapters built for llama.cpp.
 ## Limitations
 
 - LoRA only. DoRA on a K-quant base is not supported.
-- Targets are the dense linears q, k, v, o, gate, up and down, plus MoE expert
-  down-projection stacks. Gate and up expert stacks, embeddings and expert
-  targets on bases the runtime runs under a fused MoE block, such as gemma and
-  gpt-oss, error at load instead of being skipped.
+- Targets are the dense linears q, k, v, o, gate, up and down, plus MoE
+  expert down-projection stacks. Three target kinds are refused at load
+  rather than skipped: expert gate and up stacks, embeddings, and any
+  expert target on a base the runtime runs under a fused MoE block, such as
+  gemma and gpt-oss.
 - Text path only. `--adapter` does not combine with `--mmproj`.
 - Each model id's adapter is fixed at load. Switching adapters means
   addressing a different id, not a request parameter.

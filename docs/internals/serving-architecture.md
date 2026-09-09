@@ -34,7 +34,8 @@ flowchart TD
     MM -. VLM .-> PARSE
 
     subgraph ADAPT["Model adapter + residency"]
-        direction TB        WRAP["text -> gmlx vendored text_only.Model<br/>(VLM -> mlx_vlm vision/audio model class)"]
+        direction TB
+        WRAP["text -> gmlx vendored text_only.Model<br/>(VLM -> mlx_vlm vision/audio model class)"]
         STOP["attach StoppingCriteria to tokenizer"]
         REG["multi-model residency pool<br/>pinned + LRU, one process wired_limit"]
         WRAP --> STOP --> REG
@@ -81,31 +82,24 @@ flowchart TD
 ## What the diagram leaves out
 
 The loader's output is a model, config and tokenizer triple with no
-safetensors round-trip. The text-only wrapper it hands to the engine is
-gmlx's own copy of the adapter mlx-vlm removed in 0.6.15, vendored in
-`gmlx/models/vlm_text_only.py` so the embedding and language-model
-interface the engine expects stays stable across upstream releases. The
-residency pool that holds wrapped models owns the single process-wide wired
-limit.
+safetensors round-trip. The text-only wrapper in the adapter stage is
+gmlx's own copy of the class mlx-vlm removed in 0.6.15, vendored in
+`gmlx/models/vlm_text_only.py`. Keeping it in-tree holds the embedding and
+language-model interface the engine expects steady across upstream
+releases.
 
-Prefix reuse is the prompt cache manager, which picks a tier per
-architecture ([prompt-cache.md](prompt-cache.md)). Speculative decoding runs
-gmlx's own verify round, which keeps the prompt cache available under a
-drafter ([speculative-batching.md](speculative-batching.md)).
+The prompt cache picks its tier per architecture, as
+[prompt-cache.md](prompt-cache.md) describes, and the verify round that
+speculative decoding runs is gmlx's own, which is what keeps the prompt
+cache usable under a drafter ([speculative-batching.md](speculative-batching.md)).
 
-Tool calls are extracted from the raw token stream by mlx-lm's tool parsers,
-selected from the model's chat template and re-emitted in each protocol's
-format. Each request's sampling parameters resolve through the config
-precedence chain before generation, from the family's model-card defaults up
-to the request's own fields ([Precedence](../server-config.md#precedence)).
-Served assistant ids are handled in front of the HTTP layer: a request to
-one runs the tool loop on a worker thread, and each round re-enters the
-server as an ordinary loopback client
-([served assistants](../assistant.md#served-assistants)).
-
-Clients are anything that implements either API. Pointing `ANTHROPIC_BASE_URL`
-at the server lets Anthropic-API tools such as Claude Code use a local
-model.
+Two things happen before a request reaches the engine. Its sampling
+parameters resolve through the config precedence chain, from the family's
+model-card defaults up to the request's own fields
+([Precedence](../server-config.md#precedence)). And a request to a served
+assistant id never reaches the HTTP layer as itself: the tool loop runs on a
+worker thread and each round re-enters the server as an ordinary loopback
+client ([served assistants](../assistant.md#served-assistants)).
 
 ## The request path through the seams
 

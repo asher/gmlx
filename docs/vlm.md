@@ -8,7 +8,8 @@ A multimodal model in GGUF is two files. The language model is quantized as
 usual, and a companion `mmproj` GGUF holds the encoder and the projector.
 Hugging Face repos ship the companion as an `mmproj-*.gguf` sibling of the
 language model, and `gmlx validate` recognizes one and names the file it
-pairs with. Vision and audio support is in the base install.
+pairs with. Vision and audio support is in the base install, and the
+language model GGUF alone still loads and runs as a plain text model.
 
 `--mmproj` pairs the two. The text tower runs on the K-quant kernels exactly
 as in text-only mode, and so do the matmuls of a quantized encoder, while
@@ -66,13 +67,13 @@ supported yet. That load fails immediately and the error names the family.
 On LLaVA the loader reports two unfilled `post_layernorm` parameters, which
 is expected: the conversion omits them and LLaVA never uses them.
 
-DeepSeek-V4-Flash-Vision-Exp differs from the other families in three ways.
-Image turns need an unquantized KV cache, so `--kv-bits` applies to text
-turns only, and the server runs image turns one at a time. Each image
-expands to a block of up to 384 tokens that prefills as one chunk, and the
-prompt cache keys on those blocks, which means a conversation that repeats
-its earlier image turns verbatim hits the cache. Its text output is also not
-token-for-token comparable with the text-only release.
+DeepSeek-V4-Flash-Vision-Exp differs from the other families in three
+ways. First, image turns need an unquantized KV cache and run one at a time
+on the server, so `--kv-bits` applies to text turns only. Second, each
+image expands to a block of up to 384 tokens that prefills as one chunk,
+and the prompt cache keys on those blocks, so a conversation that repeats
+its earlier image turns verbatim hits the cache. Third, its text output is
+not token-for-token comparable with the text-only release.
 
 ## Combining with other features
 
@@ -82,9 +83,6 @@ token-for-token comparable with the text-only release.
 | `--stream-cpu` | refused, because that placement would move the vision tower to the CPU too |
 | `--speculative` | works with any drafter: a native head, a `--draft-gguf` companion or an autodetected one. Text turns speculate and media turns decode plain |
 | `--adapter` | refused, because live LoRA is text-path only |
-
-The bare language model GGUF still loads and runs as a plain text model
-without its companion.
 
 The two front ends place media differently. `chat` keeps each image on the
 turn that sent it, so a later question about an earlier image is answered
@@ -97,9 +95,9 @@ image turn misses the prompt cache from the point where the images moved.
 ## Known GGUF defects
 
 Some community companion files are mis-converted upstream, independent of
-this loader. You can recognize one because llama.cpp's multimodal CLI produces the same
-degraded output from the same file, while the native weights of the same
-checkpoint render correctly.
+this loader. You can recognize one because llama.cpp's multimodal CLI
+produces the same degraded output from the same file, while the native
+weights of the same checkpoint render correctly.
 
 Pixtral companions carry corrupted vision attention q and k projections
 from a RoPE layout mismatch in the conversion. There is no exact

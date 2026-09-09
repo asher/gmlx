@@ -1,9 +1,10 @@
 # HTTP API
 
-The endpoints `gmlx serve` exposes, how a request names a model and which
-request fields each protocol honors. It is for anyone writing a client or
-putting the server behind a load balancer. The YAML that configures the server
-is in [server-config.md](server-config.md).
+This page is for anyone writing a client against `gmlx serve` or putting it
+behind a load balancer. It covers the endpoints, how a request names a
+model, the metrics a dispatcher reads, which request fields each protocol
+honors, and what the server refuses. The YAML that configures the server is
+in [server-config.md](server-config.md).
 
 - [Addressing a model in a request](#addressing-a-model-in-a-request)
 - [Endpoints](#endpoints)
@@ -12,10 +13,8 @@ is in [server-config.md](server-config.md).
 - [Limits and back-pressure](#limits-and-back-pressure)
 - [Hugging Face policy](#hugging-face-policy)
 
-A client that wants tools and structured output sends `tools` and
-`response_format` on `/v1/chat/completions` to a model that supports tool
-calling, as [Tool calling](#tool-calling) and
-[Structured output](#structured-output) show.
+Tool calling, structured output, logprobs and vision messages each have a
+subsection under API capabilities.
 
 ## Addressing a model in a request
 
@@ -30,11 +29,11 @@ calling, as [Tool calling](#tool-calling) and
 
 The `@profile` suffix is split on the last `@` and only treated as a profile
 when it names a known one, so an id that itself contains an `@` stays
-intact.
-An unknown id returns 404 listing the available ids, while an unknown profile
-returns 400 listing the valid ones. With `model` empty, the server uses its
-default model, else the sole model, else returns 400. The same addressing
-works on the CLI, as `gmlx run <id-or-path>@coding` or `--profile coding`.
+intact. An unknown id returns 404 listing the available ids, and an unknown
+profile returns 400 listing the valid ones. With `model` empty, the server
+uses its default model, else the sole model, else returns 400. The same
+addressing works on the CLI, as `gmlx run <id-or-path>@coding` or
+`--profile coding`.
 
 ## Endpoints
 
@@ -64,32 +63,34 @@ All routes except `/health` require the API key when one is set.
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
-`default` markers, the GGUF's trained `context_length` and
-`max_context_at_width_1`, how much of that context fits at decode width 1,
-which is what a harness sizes its context window from. A resident model with KV quantization configured adds a
-`kv_quant` object: `scheme`, `bits`, `group_size`, `layers_quantized`,
-`layers_fp16`, a `verdict` of `full`, `partial`, `dropped` or `error`, and
-`verdict_batched` for a speculative model, which runs fp16 KV while batched.
-Under kvarn it also carries `value_bits` and `tail_tokens`. The Hugging Face
-cache is never listed.
+`default` markers and two context figures: `context_length`, the GGUF's
+trained window, and `max_context_at_width_1`, how much of it fits in memory
+for a single stream. A harness sizes its context window from the second. A
+resident model with KV quantization configured adds a `kv_quant` object:
+`scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`, a
+`verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`
+for a speculative model, which runs fp16 KV while batched. Under
+[kvarn](glossary.md) it also carries `value_bits` and `tail_tokens`. The
+Hugging Face cache is never listed.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
-or 503 with a one-word `reason` and a `Retry-After` header, where the reason
-is `pressure` when the governor is orange or red, `queue` when requests are
-waiting and `busy` when all engines are at their decode width.
+or 503 with a one-word `reason` and a `Retry-After` header. The reason is
+`pressure` when the [governor](glossary.md) is orange or red, `queue` when
+requests are waiting and `busy` when all engines are at their decode width.
 
 `POST /v1/completions` supports `max_tokens`, `temperature`, `top_p`, `seed`,
 `stop`, `stream` and `profile`. List or token-array prompts, `n > 1`, `echo`,
-`suffix` and `best_of > 1` are rejected with a 400. The stock image
-generation routes are not usable with GGUF models.
+`suffix` and `best_of > 1` are rejected with a 400. mlx-vlm's image
+generation routes are present but cannot serve a GGUF model.
 
-An explicit `/unload` overrides the preload's lifetime hold, so a preloaded
-model unloads too, and if it is reloaded by request afterward it is managed
-like any other until a reload with `preload` re-pins it. `/v1/keep` is what
-`gmlx launch --model` and voice sessions call, and the kept model stays
-LRU-evictable under memory pressure. `/v1/reload` returns
-`{"status": "unsupported"}` outside config mode, as
+The residency routes act on what
+[Memory and residency](server-config.md#memory-and-residency) configures.
+`/unload` outranks the hold a preloaded model has for the process lifetime,
+so it unloads too, and until the next reload it is then managed like any
+other model. `/v1/keep` is what `gmlx launch --model` and voice sessions
+call, and a kept model stays LRU-evictable under memory pressure.
+`/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Reloading the config](server-config.md#reloading-the-config) explains.
 
 ## Capacity and live-request metrics
@@ -106,18 +107,18 @@ instead of failing the snapshot.
 | `requests[]` | one row for each request | queued rows first. `state` is `queued`, `prefill` or `decode`, and the other fields are listed below the table |
 | `resident_models[]` | for each model, `in_flight`, `pinned`, `kept` and bytes | the number for each model to compare against `decode_batch`, since each model decodes on a separate engine |
 | `governor` | `band`, counters | the memory governor's band and shed history |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the arena's bytes, capacity and hit rate |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the [arena's](glossary.md) bytes, capacity and hit rate |
 | `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | the boot capacity table, absent for a Hugging Face fall-through load |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean |
 
 A request row carries `id`, `model`, `state`, `position`, `prompt_tokens`,
 `generated`, `max_tokens`, `elapsed_s`, `ttft_s` and `decode_tok_s`, and
 two structured fields. `cache` holds the tier its prefix hit, one of
-`exact`, `block`, `ckpt`, `anchor` and `miss`, plus the `warm_tokens` it
-reused. `speculative` holds the drafter's rounds, drafted and accepted
-counts and accept rate, exact at batch width 1 and shared across a wider
-batch, or `null` without a drafter. Rows refresh at most four times a
-second on each engine.
+`exact`, `block`, `ckpt`, `anchor` and `miss`, or `hit` when only the reused
+token count is known, plus the `warm_tokens` it reused. `speculative` holds
+the [drafter's](glossary.md) rounds, drafted and accepted counts and accept
+rate, exact at batch width 1 and shared across a wider batch, or `null`
+without a drafter. Rows refresh at most four times a second on each engine.
 
 Two routes use the same numbers to tell a dispatcher whether to proceed before
 sending a request.
@@ -129,23 +130,24 @@ the routing signal across machines. `need_bytes` is the prompt's KV plus the
 prefill transient, plus `max_tokens` when the body pins one. `fits_now` and
 `fits_drained` judge that against the current free memory and the drained
 working set, while `context_ok` judges it against `context_limit`.
-`est_ttft_s` estimates the time to first token. A model that is not
-resident answers `resident: false`, because the dry run never loads a model,
-and media requests render but are not estimated. `"dry_run": true` on
+`est_ttft_s` estimates the time to first token. The dry run never loads a
+model, so a model that is not resident answers `resident: false`. A media
+request is rendered but not estimated. `"dry_run": true` on
 `/v1/chat/completions` returns the same estimate through the queue cap.
 
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
 at the smallest tabulated width at or above `W`. It answers `admit_now` when
 in addition the governor is not orange or red, nothing is waiting and at
-least `W` decode slots are free, and `reason` names the first condition that
-fails.
+least `W` decode slots are free. Under a yellow band only one free slot is
+counted, so a wider fan-out waits for the band to clear. `reason` names the
+first condition that fails.
 
 The Prometheus rendering flattens these to gauges such as
 `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`, `gmlx_governor_band` with a
 `band` label, `gmlx_capacity_max_ctx` with a `width` label and per-model
-series with `model` and `profile` labels. `requests[]` is high-cardinality and
-contributes only its count.
+series with a `model` label, plus a `profile` label on entries that carry a
+profile. `requests[]` is high-cardinality and contributes only its count.
 
 ## API capabilities
 
@@ -156,11 +158,12 @@ override or request-level context setting.
 
 ### Tool calling
 
-OpenAI `tools` and `tool_calls` on `/v1/chat/completions`, Anthropic `tools`
-and `tool_use` blocks on `/v1/messages`. The parser is inferred from the
-model's chat template, so a model whose template defines a tool-call syntax
-gets parsing with nothing to configure. Streaming works too, and a parsed
-call ends the stream with `finish_reason: "tool_calls"`.
+`/v1/chat/completions` takes OpenAI `tools` and answers with `tool_calls`,
+and `/v1/messages` takes Anthropic `tools` and answers with `tool_use`
+blocks. The parser is inferred from the model's chat template, so a model
+whose template defines a tool-call syntax gets parsing with nothing to
+configure. Streaming works too, and a parsed call ends the stream with
+`finish_reason: "tool_calls"`.
 
 `tool_choice` is enforced where it can be:
 
@@ -190,10 +193,9 @@ curl localhost:8080/v1/chat/completions -d '{
 ### Parameter support
 
 The request schemas accept unknown fields, so nothing is rejected for being
-present. A honored parameter changes the response, while an ignored one is
-accepted and skipped, and each ignored parameter a request sets produces a
-warning line in the server log naming it. A test cross-checks the table
-against the allowlists the warning uses.
+present. An honored parameter changes the response. An ignored one is
+accepted and skipped, and a request that sets any produces one warning line
+in the server log naming them all.
 
 The standard sampling parameters are honored on all three generation dialects.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
@@ -230,16 +232,16 @@ They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 `response_format: {"type": "json_schema", ...}` gives grammar-constrained
 decoding, where the model cannot emit tokens that violate the schema.
 Enforcement comes from [llguidance](https://github.com/guidance-ai/llguidance),
-installed with the base package. On the Anthropic endpoint an `output_config`
+which the pinned mlx-vlm release depends on, so it is present in every
+install. On the Anthropic endpoint an `output_config`
 of type `json_schema` maps to the same engine. `"json_object"` is accepted
 and constrained to a permissive object grammar, and unknown types are
 rejected.
 
 A malformed schema is rejected with a 400 before generation. The first
 structured request on a model runs a one-time tokenizer build of about
-1.5 s, cached for the process lifetime. Structured output is not available
-on speculative models, because the engine rejects request-level logits
-processors there, so such a request errors.
+1.5 s, cached for the process lifetime. A speculative model cannot take
+request-level logits processors, so a structured request to one errors.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -289,9 +291,9 @@ curl localhost:8080/v1/chat/completions -d '{
 | a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |
 | a streaming request is silent, as during a long prefill | an SSE comment line every 15 seconds so read timeouts do not drop the connection | `GMLX_SSE_KEEPALIVE_S` |
 
-The preflight estimates the prompt's KV cache from the model's size for
-each token, plus the prefill transient, against the working set with the
-batch drained. `max_tokens` counts only when the request pins it
+The preflight estimates the prompt's KV cache from the model's per-token KV
+size, plus the prefill transient, against the working set with the batch
+drained. `max_tokens` counts only when the request pins it
 explicitly, and media requests are not estimated. The load gate judges a
 model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
@@ -301,9 +303,15 @@ the decode batch width the queue cap is derived from, are documented under
 
 ## Hugging Face policy
 
-By default the server makes no Hugging Face access, so a request `model`
-that is neither a local GGUF nor a configured id is refused with a 403 of
-type `hf_access_disabled` instead of triggering a download. With
-`server.hf_cache: true` a named repo id resolves from the local cache only,
-still never the network, and cached models are addressable only when named
-in `models:`.
+The server never downloads on a request. A generation request whose
+`model` is not a configured id gets the 404 described under Addressing a
+model, whatever the id looks like. Below that resolver, the stock model
+loader is gated as well: anything that reaches it with a repo id rather
+than a GGUF or local path is refused with a 403 of type
+`hf_access_disabled`, so no route can trigger a fetch.
+
+`server.hf_cache: true` changes what the config may reference, not what a
+request may name. With it on, `hf:` refs in `models:` and the `gmlx init
+--from-hf-cache` scan resolve from the local Hugging Face cache, still never
+the network, so a repo that was downloaded by another tool can be served
+without copying the file.

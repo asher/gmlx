@@ -39,7 +39,7 @@ the same sampler and the same chat prompts on both engines.
 | mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
 | llama.cpp | `b9967` |
 | Build overrides | models rebenched on newer releases list their own builds under Model provenance |
-| DeepSeek-V4-Flash reference | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
+| DeepSeek-V4-Flash reference | the dwarfstar ds4-server by antirez @ `b030961`, ignore-eos patched |
 | Dates | 2026-07-05 .. 2026-08-29 |
 | Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
@@ -57,11 +57,12 @@ it off.
 
 Chart labels are sanitized, so abliterated community builds render as
 the base model. This table is the weight mapping for reproduction.
-Builds is what each model's rows were measured on. Models are
-rebenched independently, so a newer build on one row does not apply
-to the others. Measured is the date of the newest run still
-contributing cells to the row, since partial reruns replace cells of
-older depth series one by one.
+The Builds column names the gmlx and mlx-kquant builds each model's
+rows were measured on. Models are rebenched independently, so a newer
+build on one row does not apply to the others. The Measured column
+gives the date of the newest run still contributing cells to the row,
+because a partial rerun replaces the cells of an older depth series
+one by one.
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|
@@ -301,8 +302,8 @@ older depth series one by one.
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is ds4-server, antirez's
-dwarfstar DeepSeek-V4 server with the ignore-eos patch, because
+This model's comparison engine is the dwarfstar ds4-server by
+antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
 llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
 gmlx / ds4-server.
 

@@ -33,25 +33,28 @@ three things:
 A family that diverges from the canonical layouts also adds the parts that
 make it diverge: per-tensor remap overrides, wire-byte transforms for fused
 or permuted weight layouts and occasionally a new module class or a
-tokenizer-classifier branch. That is where the effort goes, and it varies
-widely. A clean Llama-layout family can be supported with almost no per-arch
-code in a few hours, while hybrids and exotic layouts, such as SSM mixes,
-MLA attention, MoE variants with biased projections, fused expert tensors
-and new float formats, take significant engineering and debugging time, so
-do not estimate the work from the simplest case. Vision and audio towers are
-a separate track with the same gate rules, and [vlm.md](../vlm.md) lists
-what is supported.
+tokenizer-classifier branch. That is where the effort goes. A clean
+Llama-layout family can be supported with almost no per-arch code in a few
+hours. Hybrids and exotic layouts take significant engineering and
+debugging time: state-space (SSM) layers mixed with attention, multi-head
+latent attention (MLA, the compressed-KV attention of the DeepSeek
+lineage), MoE variants with biased projections, fused expert tensors and
+new float formats. Do not estimate the work from the simplest case. The
+[glossary](../glossary.md) defines the attention terms used here.
+
+Vision and audio towers are a separate track with the same gate rules, and
+[vlm.md](../vlm.md) lists what is supported.
 
 ## Why the gate is strict
 
 The characteristic failure modes of a mis-ported architecture are silent.
 A wrong rope layout or a bias assigned to a quantized weight slot still
-produces fluent, plausible text on short prompts, and the error only
-appears far into a long context, which is why fluent generation does not
-count as done and why the parity requirement is 16k tokens. The standard
-also applies in reverse: when every public GGUF of a family is broken
-upstream, as with `gemma3n`, the loader gates the family off by name with
-the reason instead of loading cleanly into wrong weights.
+produces fluent, plausible text on short prompts. The error appears only
+far into a long context, which is why fluent generation does not count as
+done and why parity is required at 16k tokens. The standard also applies in
+reverse: when every public GGUF of a family is broken upstream, as with
+`gemma3n`, the loader gates the family off by name with the reason instead
+of loading cleanly into wrong weights.
 
 ## The acceptance gate
 
@@ -66,13 +69,8 @@ An architecture is done when all of the following pass.
 - Long-context parity against llama.cpp at 16k, from
   `tests/gen/test_long_context.py::test_long_prefill_parity`. A prompt of
   16k tokens or more, greedy-decoded, agrees as text with llama.cpp on the
-  same file. Short-prompt parity is necessary but not sufficient, because
-  rope, KV-cache, GQA-layout and permute bugs only surface at depth. Prepend
-  BOS for archs with `add_bos_token=True` and match llama.cpp's prompt token
-  count. Otherwise a tokenization delta is misread as a model bug. If the
-  installed mlx-lm has a known context limitation for the family, such as a
-  missing sliding-window implementation, cap the comparison window and
-  document it in the arch notes.
+  same file. Short-prompt parity is not enough, because rope, KV-cache,
+  grouped-query (GQA) head-layout and permute bugs surface only at depth.
 - Degeneration check, from `test_long_decode_integrity`. A long
   EOS-suppressed greedy decode keeps each token id in range and each step's
   logprob finite, with no single-token repetition. Semantic looping on a tiny
@@ -90,9 +88,13 @@ An architecture is done when all of the following pass.
   warning fires if a verify-shaped causal call at depth falls back to stock.
   For MTP families, `GMLX_MTP_DEBUG=1` logs a line starting
   `[mtp] verify branch:` per round.
-- Repo gates green. The CPU tier of `pytest` passes, and
+- Repo gates green. The CPU tier of `pytest` passes with a new fixture
+  case for the family in `tests/load/test_config_synth.py`, and
   `scripts/check-coverage.py --check --strict` passes with
   `docs/arch-coverage.md` regenerated from the new table row.
+
+Those two tests, the config-synth fixture and the parity run, are the
+required deliverables of a new-architecture PR alongside the code.
 
 ## Smoke commands
 
@@ -112,14 +114,18 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LLAMACPP_BIN=/path/to/llama-completion \
 python scripts/check-coverage.py --check --strict
 ```
 
-The tiers these tests run in, how to select a GGUF-gated tier, and how to
-certify a serve performance claim in the real server process are in
-[testing.md](testing.md).
+Two details keep the parity run honest. Prepend BOS for archs with
+`add_bos_token=True` and match llama.cpp's prompt token count, or a
+tokenization delta is misread as a model bug. If the installed mlx-lm has a
+known context limitation for the family, such as a missing sliding-window
+implementation, cap the comparison window and record that in the arch
+notes. The tiers these tests run in and how to select a GGUF-gated tier are
+in [testing.md](testing.md).
 
 ## Requesting or contributing a family
 
 To request a family, open an issue with a link to the GGUF or its Hugging
 Face repo and the model's `general.architecture` string, which
 `gmlx validate <ref>` prints without downloading the file. Contributions
-are welcome. A new-architecture PR is expected to pass the acceptance gate
-above and to add a config-synth fixture test.
+are welcome, and a new-architecture PR is reviewed against the acceptance
+gate above.

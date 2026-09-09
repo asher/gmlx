@@ -165,16 +165,17 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 ```
 
 `load_tokenizer_from_gguf(meta, arch, *, chat_template_override=None)`
-builds an HF fast tokenizer purely from the GGUF's embedded vocab, merges
-and scores metadata, which is the same synthesis `load_model` runs
-internally, without the model load. `detect_arch(reader)` reads
-`general.architecture` from the header. Neither touches tensor bytes.
+builds an HF fast tokenizer from the GGUF's embedded vocab, merges and
+scores metadata. It is the same synthesis `load_model` runs, taken on its
+own. `detect_arch(reader)` reads `general.architecture` from the header.
+Neither touches tensor bytes.
 
 Use these when a tool needs the tokenizer before deciding whether to load
 weights at all, such as an eval harness doing tokenizer parity checks,
 corpus pre-tokenization, or template inspection. `chat_template_override`,
-an inline Jinja string, replaces the GGUF's chat template and is applied
-before multi-EOS inference, so EOS detection runs against the override.
+an inline Jinja string, replaces the GGUF's chat template. The loader
+infers the model's turn-ending tokens from the template it ends up with, so
+an override changes which tokens stop generation as well.
 
 ## mlx-lm server bridge
 
@@ -188,9 +189,10 @@ Idempotently patches `mlx_lm.server.ModelProvider` so that any `*.gguf`
 model path loads through `load_model`. Non-GGUF paths pass through
 unchanged, which lets a single `mlx_lm.server` process mix GGUF and
 ordinary MLX checkpoints. GGUF requests are pinned to mlx-lm's validated
-sequential path, with no batching, and adapters and draft models are not
-supported on this route. Use it to add GGUF support to an existing
-`mlx_lm.server` deployment, while `gmlx serve` is the full-featured server.
+sequential path, with no batching. A `--draft-model` is ignored for GGUF
+models with a warning, and `--adapter` on one raises, since adapters are
+wired only in `gmlx serve`. Use the bridge to add GGUF support to an
+existing `mlx_lm.server` deployment, and `gmlx serve` for everything else.
 
 ## Quantized modules
 

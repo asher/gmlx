@@ -12,10 +12,10 @@ interpreter that has gmlx and mlx-kquant installed for all of them.
 ## CPU logic tests
 
 The CPU tier runs on synthetic inputs, with no model loaded and no GPU
-kernel dispatched, so it runs anywhere, including CI. It covers everything
-from the loader's remap tables and config synthesis through the config
-loader, discovery, residency and the server patches to the chat client,
-where `tests/tui/test_chat_e2e.py` runs the real multi-turn loop with the
+kernel dispatched, so it runs anywhere, including CI. It reaches every
+subsystem: the loader's remap tables and config synthesis, the config
+loader and discovery, residency, the server patches and the chat client,
+where `tests/tui/test_chat_e2e.py` drives the real multi-turn loop with the
 model layer faked. The doc tests under `tests/test_docs_*.py` belong to it
 as well.
 
@@ -25,9 +25,11 @@ pytest tests/test_config.py  # one module
 ```
 
 Set `KQUANT_FORCE_CPU=1` on a machine with no usable Metal GPU to keep the
-few tests that use array ops off the GPU path. `scripts/check-docs.py`, the
-docs style and link check, is not collected by pytest. CI runs it as a
-separate step, so run it yourself after editing a doc.
+few tests that use array ops off the GPU path.
+
+The docs style and link check, `scripts/check-docs.py`, is not collected
+by pytest. CI runs it as a separate step, so run it yourself after editing
+a doc.
 
 ## GGUF-gated integration tests
 
@@ -71,11 +73,9 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
   pytest tests/serve/test_serve_apc_engagement.py -v
 ```
 
-A serve performance claim is certified the same way, in the real server
-process rather than an in-process harness. The speculative round profile
-works there: start the server with `GMLX_ROUND_PROFILE=1` and
-`GMLX_ROUND_LOG` set to a TSV path, then read the rounds from that file.
-The full list of such switches is in [debug-switches.md](debug-switches.md).
+A serve performance claim is likewise measured in the real server process,
+with the round profile switches listed in
+[debug-switches.md](debug-switches.md).
 
 ## Server end-to-end harnesses
 
@@ -106,8 +106,8 @@ python tests/e2e/run_server_e2e.py                # full run, writes report.md a
 
 ## Voice loop manual pass
 
-A manual checklist after changing the `gmlx talk` loop. The unit tests fake
-audio and HTTP and cover none of this.
+Run this checklist by hand before merging a change to the `gmlx talk`
+loop. The unit tests fake audio and HTTP and cover none of it.
 
 1. With the server down, `gmlx talk` autostarts it, the capability check
    passes and the prompt appears.
@@ -118,5 +118,6 @@ audio and HTTP and cover none of this.
    speaker.
 5. A long multi-sentence answer plays without gaps or underruns.
 6. 60 s of silence and 60 s of background noise produce no ghost turns.
-7. `--once` exits after one exchange. `--mode text` speaks the replies to typed input.
+7. `--once` exits after one exchange. `--mode text` speaks the replies to
+   typed input.
 8. The menu bar "Talk to model" item opens a working session.

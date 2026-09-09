@@ -6,15 +6,18 @@ design context, the docs under [docs/](docs/) are authoritative.
 ## Dev setup
 
 gmlx needs Python 3.11 or newer on macOS with Apple Silicon, which is the
-primary target. `mlx-kquant` comes from PyPI as a prebuilt arm64 wheel for
-macOS 26.2 and newer, and older macOS builds it from source, which needs
-full Xcode with its Metal toolchain. It also builds CPU-only on Linux,
-which is enough for the default test tier. The version bounds on mlx-vlm,
-mlx-lm, mlx-kquant and mlx, and why they are what they are, are explained in
+primary target. Its kernel dependency, `mlx-kquant`, comes from PyPI as a
+prebuilt arm64 wheel for macOS 26.2 and newer. On older macOS the wheel is
+built from source, which needs full Xcode with its Metal toolchain, and on
+Linux it builds CPU-only, which is enough for the default test tier. The
+version bounds on mlx-vlm, mlx-lm, mlx-kquant and mlx, and why they are what
+they are, are explained in
 [docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
 
-Dev setup is a venv, a clone and an editable install with the same extras
-CI uses. Without `assistant`, the MCP tool-server tests skip themselves:
+Dev setup is a venv, a clone and an editable install with the `chat` and
+`assistant` extras. CI adds `vlm` as well, an empty extra kept for older
+install commands. Without `assistant`, the MCP tool-server tests skip
+themselves:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -35,9 +38,9 @@ python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the 
 
 A PR should keep the default `pytest` tier passing, and if your change
 touches loading or numerics, say which integration tests you ran and on
-which model. A new architecture has its own acceptance gate, including
-long-context parity against llama.cpp and a regenerated coverage matrix,
-in [docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
+which model. A new architecture has its own acceptance gate and required
+tests, in
+[docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
 
 ## Lint
 
@@ -60,8 +63,7 @@ pre-commit install             # optional, runs ruff on each commit
   [docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py` and arch metadata in
-  `gmlx/load/arch_table.py`. A new architecture usually touches exactly those
-  three plus a parity test.
+  `gmlx/load/arch_table.py`. Those three are where a new architecture lands.
 - The package tree follows subsystems. Tests mirror it under `tests/`:
 
   | Package | Concern |
@@ -82,8 +84,8 @@ pre-commit install             # optional, runs ruff on each commit
   Cross-cutting modules such as `config.py`, `envflags.py`,
   `eval_guard.py`, `textfmt.py` and `spinner.py` stay at the `gmlx/` top
   level.
-- Error messages name the fix. Follow the existing style. Say what was
-  expected, what was found and what the user or upgrader should do.
+- Error messages follow the existing style: they say what was expected,
+  what was found and what the user or upgrader should do next.
 
 ## Commit style
 
@@ -93,6 +95,6 @@ A commit message is a single subject line with no body, in the form
 scope in parentheses names the subsystem or model family the change is
 about, such as `stream`, `kv`, `server`, `cli` or `qwen4exp`, and is left
 out when the change has no single home, as in `docs: fix audit findings`.
-Examples from the history are `feat(arch): add falcon-h1`,
-`fix(kv): honor kv_bits under MTP on cache-list models` and
-`release: 0.4.10`. A revert is `chore(scope): revert <what>`.
+Subjects from the history include `feat(kvarn): KVarN variance-normalized
+KV cache`, `fix(tokenizer): drop <|end|> from the harmony stop set for
+gpt-oss` and `release: 0.4.10`. A revert is `chore(scope): revert <what>`.

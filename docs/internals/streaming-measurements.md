@@ -12,8 +12,8 @@ Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on an M5
 Max MacBook Pro with 128 GB. Both used `--stream-experts` at streaming
 defaults, on the lossless path. The prompt is the one-shot canvas-animation
 prompt that the lossy-setting comparisons also use. Each screenshot links to
-the generated page, committed beside it in `docs/assets/perf/`. GitHub shows
-the page source. Download one to watch the animation.
+the generated page, committed beside it in `docs/assets/perf/`. GitHub
+shows a page's source, so download one to watch the animation.
 
 | | |
 |---|---|
@@ -42,21 +42,22 @@ asserts, multi-step arithmetic and length control, plus a repetition check.
 | the pair softened to 0.07 / 0.93 | +2-4% | clean |
 | `moe_expert_mass: 0.90` | ~0%, alone or stacked | clean |
 
-Those are sustained-regime medians. A 14-inch machine started at idle
-temperature ran the same arms 15-25% faster for its first twenty minutes,
-with the baseline at 5.0 tok/s and the pair at 5.6 or better, until the
-chassis throttled, as [Measuring](../performance.md#measuring) describes.
-Moving the pair to less aggressive values keeps its quality margin but not
-its speed.
-Miss-shed's speedup falls steeply as P rises: at 0.93 it sheds only a
-third of the experts it sheds at 0.90, and the less aggressive pair gained
-a few percent where the full pair gained +13. Near these values the quality
-boundary is real. In single long-generation checks at this model card's
-temperature of 0.9, the pair at 0.09/0.91 emitted a stray token into code
-even under top-p 0.97, while 0.07/0.93 ran clean, so the safe
-high-temperature setting on this model is the less aggressive pair and its
-few percent. Workloads that can run lower-temperature sampling, or accept
-an occasional stray token, get the larger speedups.
+Those are sustained-regime medians. A rested 14-inch machine ran the same
+arms faster for its first twenty minutes, with the baseline at 5.0 tok/s
+and the pair at 5.6 or better, until the chassis throttled, as
+[Measuring](../performance.md#measuring) describes.
+
+Softening the pair keeps its quality margin but loses most of its speed.
+Miss-shed's speedup falls steeply as P rises: at 0.93 it sheds only a third
+of the experts it sheds at 0.90, and the softened pair gained a few percent
+where the full pair gained +13.
+
+Near these values the quality boundary is real. In single long-generation
+checks at the model card's temperature of 0.9, the pair at 0.09/0.91
+emitted a stray token into code even under top-p 0.97, while 0.07/0.93 ran
+clean. At that temperature the safe setting on this model is the softened
+pair and its few percent, and workloads that can run lower-temperature
+sampling, or accept an occasional stray token, get the larger speedups.
 
 That ordering is specific to this model. With a flat router, expert-mass
 had no low-mass experts to drop, and at a 92% hit rate misses were rare
@@ -87,28 +88,30 @@ The probe put this router in the middle of the concentration range, where
 P=0.85 keeps 3.7 of 4 experts on decode for 4% dropped mass. Expert-mass
 did remove reads, but most of the reads it removed were arena hits that
 cost nothing, so its router-side filtering cost more than the stalls it
-saved. Miss-shed drops mass only where a stall is otherwise certain, which
-also means its realized cost sits far below the probe's unconditional
-number: at P=0.80 the probe predicts 12% dropped mass, while the
-residency-aware shed dropped 2.9%, shedding 8% of routed experts across a
-third of token-layer calls. Two 10k-token generations at temperature 0.6
+saved. Miss-shed drops mass only where a stall is otherwise certain, so
+its realized cost sits far below the probe's unconditional number: at
+P=0.80 the probe predicts 12% dropped mass, while the residency-aware shed
+dropped 2.9%, shedding 8% of routed experts across a third of token-layer
+calls. Two 10k-token generations at temperature 0.6
 and top-p 0.95 ran clean, producing complete working artifacts with no
 stray tokens. The probe sizes expert-mass but does not account for
 residency, so when the exit stats show a low hit rate, try miss-shed first.
 
 ## GLM-5.2: wider routing
 
-This point changes routing width. GLM-5.2 is a 282 GB UD-IQ3_XXS file
-with 256 experts routed top-8 under sigmoid gating, and it streams on the
-same machine at a per-expert hit rate near 88%, higher than M3's, yet
-stalls more, because a layer stalls when any of eight routed experts miss
-rather than four. At hit rate h the stall odds are `1 - h^k`, and k = 8
-roughly doubles them at the same h. That amplification works in both
-directions, since each point of hit rate miss-shed recovers is worth about
-twice as much, so the same setting measured stronger here, +16.5% decode
-at P=0.80 with stalls halved and +10.7% at P=0.85, both as even-round
-alternated 512-token medians. Arena size, flat on M3, mattered too, with
-each arena GB adding about 0.2 points of hit rate.
+GLM-5.2 changes the routing width. It is a 282 GB UD-IQ3_XXS file with 256
+experts routed top-8 under sigmoid gating, and it streams on the same
+machine at a per-expert hit rate near 88%, higher than M3's, yet stalls
+more, because a layer stalls when any of eight routed experts misses rather
+than four. At hit rate h the stall odds are `1 - h^k`, and k = 8 roughly
+doubles them at the same h.
+
+That amplification works in both directions. Each point of hit rate that
+miss-shed recovers is worth about twice as much, so the same setting
+measured stronger here: +16.5% decode at P=0.80 with stalls halved, and
++10.7% at P=0.85, both as even-round alternated 512-token medians. Arena
+size, flat on M3, mattered too, with each arena GB adding about 0.2 points
+of hit rate.
 
 Wider routing also concentrates more meaning in each expert, which moved
 the quality threshold. P=0.80, clean on M3, broke GLM-5.2 in a way
@@ -116,12 +119,10 @@ character scans cannot detect: a 12k-token one-page-app generation
 completed with no stray tokens, valid markup and working code, but the page
 it drew was missing its subject, showing a sky with no road and no car on a
 prompt asking for a car on a road. The lossless run at the same seed drew
-the full scene, and so did P=0.85. Dropped gate mass degrades content
-before it degrades form, so a shed level cannot be certified by scanning
-the output for corruption. Instead, render the artifact and look at it, at
-deploy sampling settings, against a lossless run at the same seed. Miss-shed's
-safe range depends on the architecture, so re-gate it whenever routing
-width or gating changes.
+the full scene, and so did P=0.85. Dropped gate mass degraded the content
+before the form, and a different routing width moved the threshold, which
+is why the procedure below renders the artifact and re-gates after a
+routing change.
 
 ## Kimi-K3: far over budget
 
@@ -247,11 +248,10 @@ sampling, at temperature 0.6 and top-p 0.95 instead of the model card's
 <a href="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
 
 It ran clean and produced one of the strongest scenes of the whole set,
-from the full pair that needed less aggressive values to run clean at
-temperature 0.9. This is a single sample like the others, but it suggests
-the practical setting on this model. Keep the full pair and its whole +13%
-and lower the temperature slightly. Making the settings less aggressive at
-the card's temperature loses most of the speedup instead.
+from the full pair that needed softening to run clean at temperature 0.9.
+This is a single sample like the others, but it suggests the practical
+setting on this model: keep the full pair and its whole +13% and lower the
+temperature slightly.
 
 ## One prompt, four shed levels: Kimi-K3
 
@@ -273,11 +273,10 @@ the tone mapping overshot, so that page renders far darker than its palette
 intends and the foreground trees reduce to blurred dark masses. At 0.65 the
 sky and landscape are the richest of the four while the car is the most
 damaged subject, with oversized featureless wheels and a stray light streak
-across the body. Between 0.65 and 0.80 the flaws differ in kind, not in
-degree, so a single sample for each setting cannot rank adjacent levels,
-although it can show that all three are above the quality threshold, which
-is one step further down at 0.60, where a code generation broke outright.
-As on GLM-5.2, dropped mass degraded what the pages drew long before it
+across the body. Between 0.65 and 0.80 the flaws differ in kind rather
+than degree, so a single sample for each setting cannot rank adjacent
+levels. It can show that all three sit above the threshold that 0.60 fell
+through. As on GLM-5.2, dropped mass degraded what the pages drew long before it
 corrupted what they wrote. Certifying a level means rendering the artifact,
 and ranking neighboring levels takes more samples than one.
 
@@ -303,14 +302,14 @@ GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the
 previous token's routing, measured with the recall probe in
 [debug-switches.md](debug-switches.md).
 
-Keep-warm does not change stall time or arena hit rate, because the disk
-does the same work, and the gain is clock residency. With the heartbeat alone
-on an idle M5 Max, GPU power went from 199 mW to 287 mW while active
-residency went from 58% to 99.8% at the 338 MHz floor, and the real cost is
-holding the decode-level clock through the gaps, which scales with the
-workload. A streamed model whose per-token time sits in the eval and sync
-bucket rather than in stalls, in the phase breakdown the same page lists,
-is the case keep-warm helps.
+Keep-warm changes neither stall time nor arena hit rate, since the disk
+does the same work. The gain is clock residency. With the heartbeat alone on
+an idle M5 Max, GPU power rose from 199 mW to 287 mW while active residency
+rose from 58% to 99.8% at the 338 MHz floor. The real cost is holding the
+decode-level clock through the gaps, and it scales with the workload.
+Keep-warm helps a streamed model whose per-token time sits in the eval and
+sync bucket rather than in stalls, in the phase breakdown that
+`GMLX_DECODE_PHASE_STATS` in [debug-switches.md](debug-switches.md) prints.
 
 Weight pinning matters because without it the every-token weights are
 plain file-backed pages, which the kernel evicts between uses on a machine

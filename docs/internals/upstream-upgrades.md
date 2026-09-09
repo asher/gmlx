@@ -6,8 +6,9 @@ leaves everything between those seams stock. The inventory is the `SEAMS`
 table in `gmlx/upstream/seams.py`, well over a hundred entries, and
 `python -m gmlx.upstream.seams` prints the current count with its drift
 report. Every seam is fragile by design: upstream point releases move the
-symbols, so the surface is safe only under the versions this page
-qualifies. It is the maintainer's procedure for changing them.
+symbols, so the surface is safe only under a qualified set of versions.
+This page records that set and is the maintainer's procedure for changing
+it.
 
 The versions are declared in `pyproject.toml` in three different ways.
 mlx-vlm is an exact pin, `mlx-vlm==X.Y.Z`, because it owns the seams.
@@ -25,16 +26,18 @@ environment inside those bounds:
 
 ## Watching upstream releases
 
-When mlx-vlm or mlx-lm publishes a release:
+When mlx-vlm publishes a release:
 
 ```sh
 scripts/upstream_canary.sh
 ```
 
-This builds a disposable venv with this checkout plus the latest mlx-vlm
-and runs the seam check. A pass means the release is likely a safe bump,
-still to be qualified by the procedure below, while a failure lists each
-changed symbol and the gmlx site that uses it.
+This builds a disposable venv with this checkout, lifts only the mlx-vlm
+pin to whatever PyPI serves and runs the seam check. mlx-lm is exercised
+only if that upgrade happens to pull a newer one in. A pass means the
+release is likely a safe bump, still to be qualified by the procedure
+below, while a failure lists each changed symbol and the gmlx site that
+uses it.
 
 ## Bump procedure
 
@@ -66,11 +69,13 @@ changed symbol and the gmlx site that uses it.
    prefill and decode, serve gemma-4-12B dense with a warm prompt-cache hit,
    run gpt-oss-20b MXFP4, serve deepseek-v4 and take one `gmlx talk` turn.
 
-6. The env-gated integration tests:
+6. The gated integration tests. The first needs a native-MTP GGUF on disk,
+   the second runs whenever the installed mlx-vlm has the qwen3.5 language
+   module:
 
    ```sh
-   KQUANT_TEST_MTP_GGUF=<path> pytest tests/spec/test_full_prompt_prefill.py \
-       tests/models/test_qwen35_verify_fold.py
+   KQUANT_TEST_MTP_GGUF=<path> pytest tests/spec/test_full_prompt_prefill.py
+   pytest tests/models/test_qwen35_verify_fold.py
    ```
 
 7. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`

@@ -1,11 +1,12 @@
 # Glossary
 
-The terms these docs use, in plain words, alphabetically. Each guide links
-here on the first use of a term.
+The terms these docs use, in plain words, alphabetically. The guides link
+here where a term first matters, and the reference pages use the terms as
+defined here.
 
 Arena. The wired region of GPU memory a streamed MoE model keeps its most
 used experts in. Decode reads from the arena and fetches only the misses
-from disk. The server log prints its size as `[stream] memory budget:`.
+from disk. The server log prints its budget as `[stream] memory budget:`.
 See [streaming.md](streaming.md).
 
 Barge-in. Speaking over the assistant while it is talking. In voice chat
@@ -27,7 +28,7 @@ GGUF.
 Endpointing. Deciding that an utterance has ended, from trailing silence.
 The voice chat settings for it are in [talk.md](talk.md).
 
-Every-token layers. The parts of a MoE model that run on every token, which
+Every-token weights. The parts of a MoE model that run on every token, which
 are attention, norms, routers and shared experts. Streaming keeps them on
 the GPU and streams only the routed experts.
 
@@ -41,6 +42,11 @@ Feeder. The two paths that move expert weights for a streamed model. One, the
 prefill feeder, stages each layer's experts directly from the GGUF into
 GPU-visible slots. The other, the decode feeder, serves decode from the arena.
 
+GDN. Gated delta net, a recurrent layer kind that some newer families such
+as Qwen3.5 and 3.6 mix with ordinary attention. A recurrent layer keeps a
+fixed-size state instead of a KV cache that grows with context, which is why
+these hybrids use less memory at depth than their size suggests.
+
 GGUF. The single-file model format the open-model ecosystem publishes on
 Hugging Face, where a file is a ready-to-run model. Very large models are
 split into numbered shards, which gmlx treats as a single file. gmlx runs
@@ -50,33 +56,56 @@ Governor. The runtime memory watchdog in the server. It watches the
 kernel's free pages and shrinks its registered caches, the arena first,
 before the machine swaps. Its state shows at `/v1/metrics`.
 
+GQA. Grouped-query attention, the common layout where several query heads
+share one key and value head. Fewer KV heads mean a smaller KV cache per
+token, so a GQA model of a given size holds a longer context than one with
+a KV head for every query head.
+
 Hugging Face. The site the open-model ecosystem publishes on. References of
 the form `hf:org/repo/file.gguf` in these docs point there. `gmlx pull`
 downloads them.
+
+Hybrid cache. The per-layer cache list a model uses when its layers are not
+all the same kind, for example attention layers beside recurrent or
+sliding-window ones. Each layer keeps the cache type it needs, and the
+prompt cache and KV quantization treat such a model layer by layer. mlx-lm
+calls the container `CacheList`.
 
 Intent and profile. An intent is a built-in named sampling preset from a
 model family's card, such as `@coding`, addressable on any model with no
 config. A profile is a named bundle of settings you write in the server
 config. Both are selected the same way, `model@NAME` or `--profile NAME`.
 
-Keep, pin and idle. The three states of a resident model. A pinned model
-is never unloaded, while a kept model is exempt from the idle timeout but
-unloads under memory pressure, which is what `gmlx launch` and voice
-sessions ask for. An idle model unloads after `ttl_s` seconds without a
-request.
-
 K-quant and IQ. The two families of GGUF quantization. K-quants such as
 `Q4_K_M` group weights with per-block scales. IQ quants such as `IQ2_M` use
 learned codebooks for the smallest files. Both are more accurate per byte
 than a plain affine quantization.
+
+Keep, pin and idle. The three states of a resident model. A pinned model
+is never unloaded. A kept model is exempt from the idle timeout but can
+still be unloaded under memory pressure, and kept is what `gmlx launch` and
+voice sessions ask for. An idle model unloads after `ttl_s` seconds without
+a request.
 
 KV cache. The model's stored attention state for the context, kept in RAM
 beside the weights. It grows with context length, which is why a model whose
 file barely fits leaves no memory for long conversations. `--kv-bits 8` or
 `--kv-quant-scheme kvarn` compresses it.
 
+kvarn. The KV cache quantization scheme that keeps the most accuracy per
+bit. It rotates and normalizes the cache in 128-token records before
+rounding, so no single token or channel dominates, and it leaves the first
+tokens and the newest ones at full precision. `--kv-quant-scheme kvarn`
+selects it, and [performance.md](performance.md#kv-cache-quantization)
+compares it with plain affine quantization.
+
 MCP. The Model Context Protocol, a standard way for a model to call tools
 provided by separate programs. gmlx's built-in assistant supports it.
+
+MLA. Multi-head latent attention, the attention layout of the DeepSeek
+family and models derived from it. Keys and values are stored as one
+compressed latent vector per token rather than as separate K and V rows, so
+the KV cache is already small and only affine KV quantization applies.
 
 mmproj. A companion GGUF holding a vision or audio tower. Paired with its
 language model GGUF it makes a model that accepts image or audio input. See
@@ -112,10 +141,11 @@ on a streamed model, one layer at a time.
 Speculative decoding and MTP. A drafter proposes several tokens and the full
 model verifies them in one step, giving the same output with fewer full
 passes. MTP, multi-token prediction, is the form where the draft head is
-included inside the model's own GGUF. gmlx turns it on automatically.
+included inside the model's own GGUF. `run`, `chat` and discovered server
+entries turn it on by themselves.
 
 Stream (experts, cpu). The two placements for a model bigger than memory.
-`stream: experts` keeps the every-token layers and the KV cache on the GPU
+`stream: experts` keeps the every-token weights and the KV cache on the GPU
 and streams the routed experts from disk. With `stream: cpu` the whole model
 runs on the CPU from the page cache.
 

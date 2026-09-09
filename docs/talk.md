@@ -2,8 +2,6 @@
 
 This guide is for talking to a served model by voice with `gmlx talk`. You
 say the wake phrase and speak, and the reply is spoken back as it streams.
-It covers setup, a worked example, the listening modes, the in-session keys,
-the config block and what sets the latency.
 
 `talk` is a client of the gmlx server, and the whole loop runs against the
 server's endpoints: transcription goes in, a chat turn streams back and
@@ -37,9 +35,10 @@ server:
   tts: kokoro
 ```
 
-`gmlx init` offers both and adds a voice-chat step, for the voice, wake
-phrase and listen mode, whenever you configure the two together. If
-something is missing at startup, `gmlx talk` prints the exact lines to add.
+`gmlx init` offers both, and whenever you configure the two together it
+adds a voice-chat step that asks for the voice, the wake phrase and the
+listen mode. If something is missing at startup, `gmlx talk` prints the
+exact lines to add.
 The services themselves are described in [services.md](services.md).
 
 On first run two small files download into `~/.cache/gmlx/talk/`, the
@@ -81,9 +80,11 @@ commands work mid-session, so you can try voices live:
 
 The wake phrase is plain text with no training, because the keyword spotter
 is an open-vocabulary transducer and any phrase is spelled into tokens at
-startup. Continuous listening costs well under one percent of a CPU core. If
-the wake engine is not installed, `talk` falls back to `vad` mode with an
-install hint.
+startup. Listening for it continuously costs well under one percent of a
+CPU core.
+
+The spotter comes from the `talk` extra. Without it, `talk` prints an
+install hint and falls back to `vad` mode.
 
 ## Modes
 
@@ -96,10 +97,10 @@ install hint.
 
 ## Keys and slash commands
 
-Space stops the assistant mid-sentence, and in `ptt` mode it starts and
-ends a capture. Esc cancels the current turn, `m` mutes the mic and `q`
-quits. Either key takes effect within about 150 ms. Typing any printable
-character switches to line input.
+While the assistant is transcribing, thinking or speaking, Space or Esc
+stops the playback and cancels the turn, within about 150 ms. At other
+times Space starts and ends a capture in `ptt` mode, `m` mutes the mic and
+`q` quits. Typing any printable character switches to line input.
 
 | Command | Effect |
 |---------|--------|
@@ -112,7 +113,7 @@ character switches to line input.
 | `/reset` | clear the conversation |
 | `/memory` | list stored memories. `/memory forget ID` removes one and `/memory clear yes` removes all. Assistant brain only |
 | `/devices` | list audio devices |
-| `/help`, `/quit` | show the commands, or quit |
+| `/help`, `/quit` | show the commands, or quit. `/exit` and `/q` also quit |
 
 ## The assistant by voice
 
@@ -153,9 +154,10 @@ assistant:
     enabled: true
 ```
 
-Tool calling needs a model that is competent at it, and Qwen3.6-27B is the
-recommended class. A session then looks like this, with tool activity in
-the status line and only the answer spoken:
+Pick a model that is competent at tool calling, which
+[assistant.md](assistant.md#the-tool-loop) says more about. A session then
+looks like this, with tool activity in the status line and only the answer
+spoken:
 
 ```text
 listening for "hey assistant"
@@ -170,16 +172,13 @@ assistant: Noted. Ana's birthday is March 12th.
 ```
 
 Quit, relaunch later and ask when your sister's birthday is, and the
-assistant answers from memory. What it stored is an extracted fact rather
-than a transcript, and extraction runs in the background after the turn, so
-it adds no latency. The store is shared with `gmlx chat --assistant`, and
-`/memory` inspects it from inside a session. For the rules, the on-disk
-location and the security model, read [assistant.md](assistant.md#memory).
+assistant answers from memory. Extraction runs after the turn, so it adds
+no latency to the spoken reply. What is stored, where, and how to inspect
+it with `/memory` is in [assistant.md](assistant.md#memory).
 
-Tool rounds cost time, a model turn plus the call for each round, so
-multi-tool answers are slower than plain chat. A barge-in during a tool
-round is still handled correctly: the loop commits what you heard and never
-leaves a half-finished tool round in the history.
+Answers that need several tool rounds take longer than plain chat. A
+barge-in during a tool round is still handled correctly: the loop commits
+what you heard and never leaves a half-finished tool round in the history.
 
 ## Configuration reference
 
@@ -252,12 +251,15 @@ mic. A stop phrase after it, such as "stop", "cancel" or "never mind", is
 acknowledged and returns to waiting for the wake phrase instead of starting
 a turn.
 
-Only wake-phrase scoring runs during a reply, and full transcription of the
-open mic stays gated, since playback would otherwise be re-transcribed.
-`vad` and `ptt` modes are therefore half-duplex and interruptible from the
-keyboard only. There is no protection against the assistant speaking the
-wake phrase: if a reply quotes it aloud, the spotter detects it through the
-speakers, so pick a phrase the model is unlikely to say. Whisper's known
-hallucinations on silence and noise are filtered by a minimum-speech and
-energy floor before transcription and a known-phrase check after, so noise
-does not become a turn.
+Only wake-phrase scoring runs during a reply. Full transcription of the
+open mic stays gated, since playback would otherwise be re-transcribed, so
+`vad` and `ptt` modes are half-duplex and interruptible from the keyboard
+only.
+
+Pick a wake phrase the model is unlikely to say. If a reply quotes it
+aloud, the spotter hears it through the speakers and treats it as a
+barge-in.
+
+Whisper's known hallucinations on silence and noise are filtered by a
+minimum-speech and energy floor before transcription and a known-phrase
+check after, so noise does not become a turn.

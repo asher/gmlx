@@ -25,20 +25,21 @@ installing. The flag table and exit codes are under
 
 ## How a launch works
 
-1. Probe. `/health` and `/v1/models` are checked. The served ids, aliases and
-   the default-model marker come from `/v1/models`, which makes them
-   selectable inside menu-driven tools.
-2. Configure. Each client is configured in one of three styles, listed in the
-   table that follows. Injection writes a config under `~/.config/gmlx/` and
-   points the tool at it through an environment variable the tool honours,
-   so the tool's own config is never read or written. Merge adds a provider
-   block to the tool's file, preserves existing providers and refuses to
-   overwrite a file it cannot parse. Environment passes everything in the
-   exec environment with no file at all.
-3. Exec. The tool replaces the launch process, connected to your server.
+A launch has three steps. It probes `/health` and `/v1/models`, and the
+served ids, aliases and default-model marker it reads there become the
+choices a menu-driven tool offers. It then writes the tool's configuration
+in the style the table below gives for that client. Finally it execs the
+tool, which replaces the launch process already connected to your server.
+`--config-only` stops after the second step and prints the run command
+instead, for inspection or scripting.
 
-`--config-only` writes the configuration and prints the run command instead
-of running the tool, for inspection or scripting.
+The three configuration styles differ in what they touch. Injection writes
+a config under `~/.config/gmlx/` and points the tool at it through an
+environment variable the tool honors, so the tool's own config is never
+read or written. Merge adds a provider block to the tool's file, preserves
+the providers already there and refuses to overwrite a file it cannot
+parse. Environment passes everything in the exec environment with no file
+at all.
 
 | Client | What it is | Style | Where the config goes |
 |--------|------------|-------|-----------------------|
@@ -58,17 +59,19 @@ If no server answers, a background server is started from the first config
 in a [default location](server-config.md#default-config-locations) and polled
 until it responds. With no config anywhere, the command prints `gmlx init`
 guidance and exits with code 2. Nothing is started when you pass
-`--base-url`: an explicit address is used as given and reads no config, so a
-project-local config cannot redirect the session or supply an unexpected key.
+`--base-url`: the launch uses that address as given and reads no config, so
+a project-local config cannot redirect the session or supply an unexpected
+key.
 
-The server binds its port as soon as it starts. When the config names a
-model to preload, because it pins one, sets `server.defaults.model` or holds
-exactly one, that model begins loading at once and stays resident, and a
+The server binds its port as soon as it starts, and a model the config
+marks for preloading begins loading in the background at the same moment.
+Which model that is, and the `defaults.preload` key that warms more, is
+under [Memory and residency](server-config.md#memory-and-residency). A
 first turn that arrives before the load finishes waits for the rest of it.
 With nothing to preload, the first request carries the whole load, and the
 launch prints a note saying so. Passing `--model` avoids that wait, because
-the keep request it sends starts loading the model in the background before
-the tool has asked for anything.
+the keep request it sends starts loading the model before the tool has asked
+for anything.
 
 There is no fixed timeout. Only the server process exiting counts as a
 failure, and Ctrl-C stops waiting while the server keeps starting in the
@@ -136,8 +139,7 @@ machine with strong prefill throughput.
 These three coding harnesses differ only in where the default model lands:
 opencode takes it in the injected file's top-level `model` key, pi as
 `defaultProvider` and `defaultModel` in the merged files, and omp as
-`modelRoles.default`. omp is also the one client that cannot carry an API
-key, as the authentication table shows.
+`modelRoles.default`.
 
 ### hermes
 
@@ -150,8 +152,10 @@ model of at least 64k tokens.
 
 ### goose
 
-The non-secret pointer keys are merged into goose's file and also exported
-as environment variables, which take precedence in goose.
+The provider, model and server address are merged into goose's file as
+`GOOSE_PROVIDER`, `GOOSE_MODEL`, `OPENAI_HOST` and `OPENAI_BASE_PATH`, and
+the same four are exported as environment variables, which take precedence
+in goose. A later bare `goose` therefore still finds the server.
 
 ### aichat
 
@@ -173,9 +177,9 @@ separately with `pipx install open-webui --python python3.12`. It needs
 Python 3.11 or 3.12, and a failure to install or start is usually pipx
 holding the wrong Python.
 
-The launch exports the base URL and key, disables the Ollama API, sets
-`DATA_DIR` and runs the app on port 3000, moving to 3001 when the gmlx
-server itself holds 3000, then prints the URL. Chat history is stored in
+The launch exports the base URL and key, disables the Ollama API and sets
+`DATA_DIR`. It runs the app on port 3000, or on 3001 when the gmlx server
+itself holds 3000, and prints the URL. Chat history is stored in
 `~/.open-webui` on the host, or at `--config-path`. Add `WEBUI_AUTH=false`
 to its environment for a no-login single-user setup on a fresh data
 directory.
@@ -187,4 +191,4 @@ The configuration depends on which services the server reports:
 | chat only | chat, with its document embedder pointed at this server so it starts without downloading one |
 | `embeddings` | document RAG ([rag.md](rag.md)) |
 | `rerank` as well | hybrid search with the external reranker at `/v1/rerank` |
-| `stt` and `tts` | audio engines at the server's `/v1/audio/*` endpoints, with a Kokoro voice as the default |
+| `stt` and `tts` | audio engines at the server's `/v1/audio/*` endpoints. The voice rule is in [services.md](services.md#text-to-speech-tts) |

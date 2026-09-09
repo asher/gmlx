@@ -82,15 +82,16 @@ model to call tools provided by separate programs. Each `mcp:` entry is
 either a stdio server, where `command` is the argv to spawn plus an optional
 `env` map, or a streamable-HTTP endpoint given as `url`. When two servers
 offer a tool of the same name, the tool gets the server's name as a prefix.
-An MCP server that fails to start produces a warning instead of blocking
-the loop, and so does a missing `assistant` extra, with an install hint.
-Each stdio server's stderr goes to its own log at
+An MCP server that fails to start produces a warning, and the loop runs
+without it. A missing `assistant` extra is reported the same way, with an
+install hint. Each stdio server's stderr goes to its own log at
 `~/.cache/gmlx/mcp-<name>.log`.
 
-A stdio tool server runs with a minimal environment of `HOME`, `PATH`,
-`SHELL`, `TERM`, `USER` and `LOGNAME`, plus whatever `env:` adds. Nothing
-else from your shell is inherited, so a token set in your environment never
-reaches third-party tool code unless you pass it.
+A stdio tool server starts with the MCP SDK's default environment, which
+on macOS is `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and `LOGNAME`, plus
+whatever `env:` adds. Nothing else from your shell is inherited, so a token
+set in your environment never reaches third-party tool code unless you pass
+it.
 
 ## Tool examples
 
@@ -114,7 +115,7 @@ assistant:
 
 If you already run [SearXNG](https://docs.searxng.org), point the assistant
 at it for aggregated results that stay local. The instance must allow the
-JSON format, which means adding `json` to `search.formats` in its settings.
+JSON format, so add `json` to `search.formats` in its settings.
 
 ```yaml
 assistant:
@@ -200,11 +201,11 @@ The terminal experience is the one [chat.md](chat.md) describes. Rendering,
 themes, history, sessions and `/system` all work, `/retry` and `/undo`
 rewind whole tool rounds, and `/memory` is added. Sampling flags you set
 are forwarded to the server on each round. Flags that only apply to a local
-load are handled in two ways: `--adapter`, `--mmproj` and the
-`--chat-template` flags are refused, because the server would silently run
-a different conversation, and the loading, memory, speculation and
-streaming flags are ignored with a note. `/image`, `/audio` and the thinking
-budget are not available in this mode.
+load fall into two groups. `--adapter`, `--mmproj` and the `--chat-template`
+flags are refused, because honoring them would need a different model than
+the one the server holds. The loading, memory, speculation and streaming
+flags are ignored with a note, since the server already decided them.
+`/image`, `/audio` and the thinking budget are not available in this mode.
 
 ## Served assistants
 
@@ -282,5 +283,4 @@ execution on the host. The protections are:
   each one's tool scope.
 
 Memory on a served assistant is one store shared by every client of that
-id. That suits a personal server and not a multi-user one, which is why it
-defaults off.
+id, which suits a personal server and not a multi-user one.

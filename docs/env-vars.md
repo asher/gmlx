@@ -1,12 +1,13 @@
 # Environment variables
 
-The environment variables a user can set, in one place. Most of them are
-also reachable as a flag or a config key, and that is the normal way to set
-one, because an exported variable applies to every model the process loads
-and to every server started from that shell. The variables exist so that a
-benchmark or an A/B can change one setting without editing the config. When
-a setting is set more than one way, the flag wins, then the config key, then
-the variable. Two variables invert that order and override the config:
+This page lists every environment variable a user can set, in one place.
+Most of them are also reachable as a flag or a config key, and that is the
+normal way to set one, because an exported variable applies to every model
+the process loads and to every server started from that shell. The
+variables exist so that a benchmark or an A/B can change one setting
+without editing the config. When a setting is set more than one way, the
+flag wins, then the config key, then the variable. Two variables invert
+that order and override the config:
 `GMLX_CACHE_LIMIT_GB` over `server.cache_limit_gb`, and `GMLX_MTP_WIDTH_CAP`
 over each model's `speculative_width_cap`.
 
@@ -39,10 +40,14 @@ the `load:` and `cache:` blocks of the config, described in
 | `APC_DISK_READ_MODE` | `cache.disk.read_mode` |
 | `APC_DISK_NAMESPACE` | `cache.disk.namespace` |
 
-`KV_KEY_BITS` and `KV_VALUE_BITS` set split key and value widths for kvarn
-KV server-wide. They have no config key and override `GMLX_KVARN_BITS`.
-`PREFILL_STEP_SIZE` is mlx-vlm's variable for the prefill chunk size, which
+Three more upstream variables have no row in the table because they are
+not set per model. `KV_KEY_BITS` and `KV_VALUE_BITS` give
+[kvarn](glossary.md) KV split key and value widths server-wide and override
+`GMLX_KVARN_BITS`.
+
+`PREFILL_STEP_SIZE` is mlx-vlm's name for the prefill chunk size, which
 `--prefill-step-size` and `server.prefill_step_size` set per server.
+
 `TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for, as
 [api.md](api.md#logprobs) describes.
 
@@ -68,7 +73,7 @@ marked as read per tick or per chunk take effect on a running server.
 | `GMLX_DECODE_PREFILL_FLOOR` | The decode-rate floor `auto` pacing protects, as a share of a stream's batched rate, default `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | The `server.prefill_tick_ms` value, read per chunk. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. Default `256`. |
-| `GMLX_DECODE_BATCH` | Requests that decode together in a step. Default `8`. `0` restores the upstream 32. |
+| `GMLX_DECODE_BATCH` | Requests that decode together in a step. Default `8`, or the capacity table's widest fit when that is smaller. `0` restores the upstream 32. |
 | `GMLX_QUEUE_DEPTH_CAP` | Waiting requests admitted before the server answers 503. Default 2x the decode batch. `0` disables the cap. |
 | `GMLX_SSE_KEEPALIVE_S` | Seconds between SSE keepalive comments while a stream is silent. Default `15`. `0` disables them. |
 | `GMLX_PREFLIGHT_MEM=0` | Disable the memory preflight that answers 400 when a prompt cannot fit. |
@@ -81,8 +86,7 @@ marked as read per tick or per chunk take effect on a running server.
 
 Streaming, memory-governor and kernel-route switches. The mechanisms are
 explained in [streaming.md](streaming.md) and
-[performance.md](performance.md). Each row says what its variable
-changes.
+[performance.md](performance.md).
 
 | Variable | Meaning |
 |----------|---------|
@@ -112,7 +116,7 @@ changes.
 | `GMLX_DECODE_LOOKAHEAD_NORM` | Prediction input, `ratio` by default, or `raw`, which skips the norm-gain rescale. |
 | `GMLX_DECODE_LOOKAHEAD_MIN_P` | Per-rank reliability floor below which a prediction rank stops being submitted, default `0.5`. |
 | `GMLX_DECODE_LOOKAHEAD_CANCEL=0` | Let unrouted predictions read to completion instead of cancelling the unstarted ones. |
-| `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage read pool at default disk priority instead of the utility tier. |
+| `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage read pool at default disk priority. The utility tier is the default only on a disk the fast-disk policy did not classify as fast. |
 | `GMLX_GOVERNOR=0` | Disable the runtime memory governor. Its band, shed counters and floor show at `/v1/metrics`. |
 | `GMLX_GOV_KERNEL_FLOOR_GB` | Reclaimable-pages floor in GB below which the governor goes red and reclaims caches. Default the lower of `4` and 10% of RAM. `0` disables it. |
 | `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server's memory limit is computed. Default the larger of `8` and 10% of RAM. |

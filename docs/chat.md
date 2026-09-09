@@ -42,6 +42,7 @@ uv tool install "gmlx[chat]"     # or: pip install "gmlx[chat]"
 | `/render rich|lite|plain` | the markdown renderer |
 | `/theme NAME [cb]` | the color theme, with an optional colorblind modifier |
 | `/model`, `/stats` | the loaded model's card, and the session totals. In server mode `/model <id>` switches the served id |
+| `/adapter [on|off|SCALE]` | switch the `--adapter` LoRA off and on, or scale it, for the next turns |
 | `/history [on|off|clear]` | prompt history persistence |
 | `/save [name]`, `/sessions`, `/load-session <name|N>`, `/export [file.md]` | session persistence |
 | `/load <file>` | prefill the next prompt from a text file |
@@ -58,19 +59,24 @@ partial reply stays in the KV cache, where `/retry` regenerates it and
 
 Arrow keys, Ctrl-A and Ctrl-E edit the line, and up-arrow history persists
 across sessions under `$XDG_CACHE_HOME/gmlx/` unless `--no-history` keeps a
-session ephemeral. With the `chat` extra installed, a completion menu opens
-as you type a command, a matching earlier line is suggested in grey ahead of
-the cursor and accepted with the right-arrow key, and a bottom toolbar shows
-the live sampling settings, staged blocks, context fill and the last reply's
-speed. Multi-line paste is handled correctly, and Alt-Enter inserts a newline
-without submitting. Without the extra, readline provides line editing and
-Tab completion.
+session ephemeral. The `chat` extra improves the prompt in three ways. A
+completion menu opens as you type a command. A matching earlier line is
+suggested in grey ahead of the cursor, and the right-arrow key accepts it.
+A bottom toolbar shows the live sampling settings, staged blocks, context
+fill and the last reply's speed. Multi-line paste is handled correctly, and
+Alt-Enter inserts a newline without submitting. Without the extra, readline
+provides line editing and Tab completion.
 
-Tab completes the command names and, after a command, its arguments: the
-values of `/history`, `/reasoning`, `/render`, `/thinking` and
-`/thinking-budget`, saved session names after `/load-session`, theme names
-and the `cb` modifier after `/theme`, file paths after `/load`, `/image`,
-`/audio`, `/export` and `/!`, and served ids after `/model`.
+Tab completes command names, and after a command it completes the argument:
+
+| After | Tab offers |
+|-------|------------|
+| `/history`, `/reasoning`, `/render`, `/thinking` | that command's values |
+| `/thinking-budget` | `off` |
+| `/load-session` | saved session names |
+| `/theme` | theme names, then the `cb` modifier |
+| `/load`, `/image`, `/audio`, `/export`, `/!` | file paths |
+| `/model` | served ids, in server mode |
 
 ## Sampling at runtime
 
@@ -84,6 +90,12 @@ stops. A bare `chat` starts from the model family's card defaults, and an
 `@profile` suffix on the model, such as `model.gguf@creative`, starts from
 another [profile](server-config.md#profiles) instead.
 
+[Speculative decoding](performance.md#mtp-speculative-decoding) is on
+automatically for models with a native head, and `--draft-gguf` pairs a
+companion drafter. The only visible difference is in sampling: while a
+drafter is active only temperature, top-p, top-k and min-p apply, because
+the verification step cannot apply penalties or biases.
+
 ## Undo, retry and sessions
 
 `/retry` and `/undo` rewind the persistent KV cache to the turn's
@@ -95,26 +107,28 @@ starts over.
 
 A chat autosaves after each turn as JSON under `$XDG_DATA_HOME/gmlx/chats`,
 and `/reset` rotates to a fresh file so old conversations survive.
-`--no-autosave` turns this off. `--resume` at startup restores the model's
-latest session, or a named one, and `/load-session` does the same from
-inside a chat, restoring settings and transcript together and replaying the
-KV cache on your next message. `/export` writes a markdown transcript with
-thinking in collapsed blocks.
+`--no-autosave` turns this off. A saved session restores its settings and
+transcript together: `--resume` at startup brings back the model's latest
+one, or a named one, and `/load-session` does the same from inside a chat.
+Either way the KV cache is replayed on your next message rather than at
+load time. `/export` writes a markdown transcript with thinking in
+collapsed blocks.
 
 In server mode, `/model` lists the served ids and `/model <id>` switches
-the id the next turn is sent to. The transcript is kept and the server
-re-reads it under the new id, so you can compare a base and its adapters
-mid-conversation, since they share a loaded model, as
-[lora.md](lora.md#serving-one-base-with-many-adapters) describes.
+the id the next turn is sent to. The transcript is kept, and the server
+re-reads it under the new id. A base and its adapters share one loaded
+model, so switching between them is instant, which is how
+[lora.md](lora.md#serving-one-base-with-many-adapters) compares adapters
+mid-conversation.
 
 ## Shell output and media
 
 `/! <command>` runs a shell command and stages its output as a fenced
 block, with the command as header and the exit status as footer. The block
 is attached to your next message, so your question and the output arrive
-in one turn. Several blocks can be staged, the prompt shows `(+n) >> `
-while any are waiting, Enter on an empty prompt sends them alone and
-`/drop` discards them. Output longer than about 16 KB is truncated in the
+in one turn. Several blocks can be staged at once, and the prompt shows
+`(+n) >> ` while any are waiting. Enter on an empty prompt sends them alone,
+and `/drop` discards them. Output longer than about 16 KB is truncated in the
 middle. The command's stdin is closed so an interactive program cannot
 block the client, and Ctrl-C interrupts the command rather than the
 session.
@@ -148,12 +162,6 @@ overrides it:
 | `rich` | the default on a color terminal with the `chat` extra installed | tables and syntax-highlighted code fences |
 | `lite` | a color terminal without the extra | ANSI styling with no dependencies |
 | `plain` | a non-TTY, or `NO_COLOR` set | raw text |
-
-[Speculative decoding](performance.md#mtp-speculative-decoding) is on
-automatically for models with a native head, and `--draft-gguf` pairs a
-companion drafter. Nothing changes in the client except the sampling
-commands: while a drafter is active only temperature, top-p, top-k and min-p
-apply, because the verification step cannot apply penalties or biases.
 
 ## Themes
 
@@ -189,8 +197,7 @@ A theme is a set of slots, one per kind of text, each holding a style.
 
 `rgb` is used on a 256-color or better terminal, reduced to the nearest of
 256 colors when truecolor is unavailable, and `fg16` is the fallback on a
-16-color terminal. `code_theme_cb` is the
-pygments style used under the colorblind modifier, and `ptk_toolbar` is the
-prompt_toolkit style string for the bottom toolbar. A malformed theme
-definition prints a warning at chat startup and is skipped, and the rest
-still register.
+16-color terminal. `code_theme_cb` is the pygments style used under the
+colorblind modifier, and `ptk_toolbar` is the prompt_toolkit style string
+for the bottom toolbar. A malformed theme definition prints a warning at
+chat startup and is skipped, and the rest still register.

@@ -13,11 +13,11 @@ attach to it.
 ## What it does
 
 The item shows the server's state, with the dot filled while requests are
-generating or queued. Below it are the resident models with their size,
-their default, pinned or kept markers and an eviction countdown on idle
-ones, and clicking a model unloads it. The menu's server actions are Start
-server, Stop server, Restart server, Reload config, Copy server URL, Open
-logs and Quit, all through the server's endpoints. If a tracked server exits
+generating or queued. Below it are the resident models, each with its size,
+a default, pinned or kept marker and, when idle, a countdown to eviction.
+Clicking a model unloads it. The menu's server actions are Start server,
+Stop server, Restart server, Reload config, Copy server URL, Open logs and
+Quit, all through the server's endpoints. If a tracked server exits
 unexpectedly the item posts a macOS notification, while an intentional stop
 or restart does not.
 
@@ -29,12 +29,13 @@ login item with [gmlx service install](cli.md#gmlx-service).
 Like `serve`, the item detaches by default. `--foreground` runs the event
 loop in place and `--stop` quits a detached item. Only one item runs per
 machine: a second `serve` finds the running one and leaves it alone, and a
-manual `--foreground` launch while one is running exits with an error. With
-no explicit target the item tracks the primary server, following it as
-servers start and stop, while `--url`, `--host` or `--port` restricts it to
-one server. It reads the API key from the managed server's config, or takes
-`--api-key` for a server whose config it cannot see, and a key-protected
-server it has no key for shows as up with a key-required note. The flags
+manual `--foreground` launch while one is running exits with an error.
+
+With no explicit target the item tracks the primary server, following it
+as servers start and stop. `--url`, `--host` or `--port` restricts it to
+one server. The API key comes from the managed server's config, or from
+`--api-key` for a server whose config the item cannot see. A key-protected
+server it has no key for shows as up, with a key-required note. The flags
 are listed under [launch menubar](cli.md#launch-menubar).
 
 ## Editing the config
@@ -45,8 +46,8 @@ runs the draft through the server's config parser, so the verdict is what
 atomically and refuses once if the file changed on disk while you were
 editing, and "Save & Reload" validates, saves and triggers the running
 server's reload in a single step. Open in Editor opens the file in your
-default text editor instead. The item appears whenever the menu bar has a
-config.
+default text editor instead. The Edit config entry appears whenever the
+menu bar has a config.
 
 ## Voice sessions
 
@@ -59,14 +60,14 @@ talks. The session's menu offers Stop speaking, Mute mic, a Volume slider,
 Show transcript, which opens a floating panel with the running
 conversation, and End voice chat. With the assistant brain and memory on it
 also offers Show memory and Clear memory. The volume setting persists
-across sessions. Mic input has no gain control, so use the input level in
-macOS Sound settings.
+across sessions. There is no mic gain control, because software gain would
+shift the endpointing thresholds. Set the input level in macOS Sound
+settings instead.
 
-All settings come from the `talk:` block described in [talk.md](talk.md),
-although push-to-talk and text modes fall back to wake mode since there is
-no keyboard. A "Talk in a terminal" item opens `gmlx talk` in iTerm2 when it
-is running and otherwise in the default terminal handler, with no
-AppleScript involved.
+All settings come from the `talk:` block described in [talk.md](talk.md).
+Push-to-talk and text modes fall back to wake mode, since there is no
+keyboard. A "Talk in a terminal" item opens `gmlx talk` in iTerm2 when it
+is running and otherwise in the default terminal handler.
 
 A voice session started from either surface asks the server to
 [keep](glossary.md) its model resident until the session
@@ -75,12 +76,16 @@ ends, and the model is loaded and warmed before the mic opens.
 ### Tap-to-talk hotkey
 
 The menu bar can bind a global tap-to-talk combo that works from any app,
-Space pressed while the Globe key is held. Pressing it always leads to an
-open mic, whatever the session state: with no session running it starts
-one, when the session is idle it opens the mic, tapping again while
-listening dismisses, mid-capture it ends the utterance, and while the
-assistant is transcribing, thinking or speaking it barges in and listens. A
-tap while muted unmutes first.
+Space pressed while the Globe key is held. A tap unmutes the mic if it was
+muted, and then what it does depends on the session state:
+
+| Session state | A tap |
+|---------------|-------|
+| none running | starts one |
+| idle | opens the mic |
+| listening | closes the mic again |
+| capturing an utterance | ends the utterance |
+| transcribing, thinking or speaking | barges in and opens the mic |
 
 On keyboards without a Globe key, choose a different modifier. `gmlx init`
 asks for it in the voice-chat step, or set it in the config:

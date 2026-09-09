@@ -9,11 +9,13 @@ Cohere-compatible endpoints, from GGUF models, on the same port as chat.
 ## Enable the endpoints
 
 ```sh
-gmlx init --with-embeddings --with-rerank    # or take both steps in the wizard
+gmlx init --models-dir ~/models --with-embeddings --with-rerank
 gmlx serve
 ```
 
-That writes the two keys into the config with the default models:
+The two `--with-*` flags add the services to a scaffolded config, which
+needs a models directory, or the interactive `gmlx init` offers both as
+steps. Either way the config gains the two keys with the default models:
 
 ```yaml
 server:
@@ -24,24 +26,20 @@ server:
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
 cache only, so fetch them first with `gmlx pull`. Both services load in the
 background at startup and sit outside the chat residency pool, which
-[services.md](services.md) describes along with the other behaviour the
+[services.md](services.md) describes along with the other behavior the
 four services share.
 
 ## Choosing the models
 
-The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder
-with last-token pooling. It loads like any other GGUF and carries the
-model's full 32k context, so long documents embed without truncation. Use
-`qwen3-embed-4b` or `-8b` for better retrieval at a bigger index, or point
-the key at any local or `hf:` GGUF. Encoder options exist too, including
-EmbeddingGemma from a GGUF and several safetensors encoders that download
-once on a cache miss. The alias tables with dimensions and context windows
-are under [Text embeddings](services.md#text-embeddings-embeddings).
-
-The reranker is a Qwen3-Reranker GGUF, a causal model fine-tuned to answer
-yes or no to "does this document satisfy this query", and its score is the
-probability of yes. Aliases are `qwen3-rerank-0.6b`, `-4b` and `-8b`, or
-any GGUF ref. [Reranking](services.md#reranking-rerank) has the details.
+The default embedder, `qwen3-embed-0.6b`, embeds a document in one pass
+over the default model's 32k context, so long documents are not truncated.
+`qwen3-embed-4b` and `-8b` retrieve better at the cost of a bigger index,
+any local or `hf:` GGUF can be named instead, and there are encoder options
+for particular languages or sizes. The reranker is `qwen3-rerank-0.6b` by
+default, with `-4b` and `-8b` above it. The alias tables, dimensions,
+context windows and how each model scores are under
+[Text embeddings](services.md#text-embeddings-embeddings) and
+[Reranking](services.md#reranking-rerank).
 
 ## The embeddings endpoint
 

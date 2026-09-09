@@ -6,7 +6,7 @@ service's config value, aliases and endpoint. [rag.md](rag.md) and
 [talk.md](talk.md) show them in use, and `gmlx launch open-webui` wires all
 four into Open WebUI, as [launch.md](launch.md#open-webui) describes.
 
-The four services share their runtime behaviour. Each configured model is
+The four services share their runtime behavior. Each configured model is
 warmed in the background at startup and then cached in-process, and if the
 warm-up fails the first request loads it. None of them counts against
 `budget_gb` or lives in the chat residency pool, so a RAG re-index and chat
@@ -47,9 +47,9 @@ server:
 ```
 
 The value is an alias, an HF repo in MLX-whisper format, or a local
-converted model directory, and `true` means the default alias. To pick a
-precision the alias does not offer, name the exact repo.
-`stt: mlx-community/whisper-large-v3-turbo` is the fp16 turbo.
+converted model directory, and `true` means the default alias. Any other
+mlx-community Whisper conversion, such as a quantized `large-v3`, is
+reached by naming its repo.
 
 | Alias | Repo | Notes |
 |-------|------|-------|
@@ -110,21 +110,22 @@ converted model directory, and `true` means the default alias.
 | `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | larger, multilingual, named voices |
 | `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | smaller Qwen3-TTS |
 
-Requests follow the OpenAI shape, a JSON body with `input` plus the
-optional fields `model`, `voice`, `speed` from 0.25 to 4.0 and
-`response_format`, where `response_format` takes `mp3`, the default, `wav`,
-`flac`, `opus` or `pcm`. `voice` defaults to Kokoro's `af_heart`:
+A request is a JSON body with `input` plus the optional fields `model`,
+`voice`, `speed` from 0.25 to 4.0 and `response_format`, where
+`response_format` takes `mp3`, the default, `wav`, `flac`, `opus` or `pcm`.
+Without `voice`, Kokoro speaks as `af_heart` and any other model uses its
+own default:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \
   -d '{"model":"tts-1","input":"Hello from MLX.","voice":"af_heart"}' -o out.mp3
 ```
 
-When TTS is configured the server also answers `GET /v1/audio/voices` with
-the configured model's voice names, which is where a client such as
-`gmlx talk` fills its `/voice` list. Kokoro-style repos enumerate their
-`voices/` directory once the model is local, qwen3-tts models return their
-named-speaker set and unknown models return an empty list:
+The server also answers `GET /v1/audio/voices` with the configured
+model's voice names, which is what `gmlx talk` shows under `/voice`.
+Kokoro-style repos enumerate their `voices/` directory once the model is
+local, qwen3-tts models return their named-speaker set and unknown models
+return an empty list:
 
 ```sh
 curl localhost:8080/v1/audio/voices
@@ -132,10 +133,11 @@ curl localhost:8080/v1/audio/voices
 ```
 
 A client that gets a 404 here, from an older server or one without TTS,
-passes voice names through unchecked. Open WebUI's default voice is an
-OpenAI name that Kokoro rejects, so the launch pins `af_heart`. A TTS model
-other than Kokoro needs one of its own voices set instead, as
-[launch.md](launch.md#open-webui) explains.
+has to pass voice names through unchecked. Open WebUI always sends a voice,
+and its default is an OpenAI name that Kokoro rejects, so
+`gmlx launch open-webui` sets `AUDIO_TTS_VOICE` to `af_heart`. When the
+server's TTS model is not Kokoro, override that variable in Open WebUI's
+environment with one of the model's own voices.
 
 ## Text embeddings (`embeddings:`)
 
@@ -149,11 +151,11 @@ The form of the value picks one of three backends.
 - A GGUF decoder embedder. The value is a `*.gguf` path, an
   `hf:<org>/<repo>/<file>.gguf` ref, or a `qwen3-embed-*` alias for
   Qwen3-Embedding `0.6b`, `4b` or `8b`. These are the Qwen3 dense decoder
-  trunk plus last-token pooling and an L2 norm. The runtime loads them like
-  any other GGUF. They carry the model's full 32k to 40k context, so long
-  documents embed without truncation.
+  trunk with last-token pooling, loaded like any other GGUF. They carry the
+  model's full 32k to 40k context, so long documents embed without
+  truncation.
 - A GGUF encoder. `embeddinggemma-gguf` runs an EmbeddingGemma GGUF as a
-  bidirectional sentence encoder, with mean pooling and a dense head, on
+  bidirectional sentence encoder with mean pooling and a dense head, on
   this runtime's loader.
 - A safetensors encoder through
   [mlx-embeddings](https://pypi.org/project/mlx-embeddings/), a core
@@ -203,17 +205,15 @@ Safetensors encoders, default quant `8bit`:
 Pick from the GGUF tier unless you want one of the encoders in
 particular, for its size or its language coverage.
 
-Requests follow the OpenAI shape, a JSON body with `input` as a string or a
-list of strings, plus the optional fields `model` and `encoding_format`,
-where `encoding_format` takes `float`, the default, or `base64`:
+A request is a JSON body with `input` as a string or a list of strings,
+plus the optional fields `model` and `encoding_format`, where
+`encoding_format` takes `float`, the default, or `base64`. Every backend
+returns L2-normalized vectors:
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
   -d '{"model":"text-embedding-3-small","input":["hello","world"]}'
 ```
-
-Vectors are L2-normalized, mean-pooled by the encoder backends and
-last-token pooled by the GGUF decoder backend.
 
 ## Reranking (`rerank:`)
 
@@ -243,11 +243,10 @@ it resolves from the local cache only, like a GGUF embedder. Although the
 reranker is independent of the embedder, `gmlx init` defaults its quant to
 the quant chosen for the embedder.
 
-Requests have the Cohere and Jina shape. They take `query`, `documents` as
-strings or `{"text": ...}` objects and the optional fields `top_n`,
-`instruction` and `return_documents`. The response holds `results` sorted
-best-first, each with `index` and `relevance_score`, plus `model` and
-`usage`:
+A request takes `query`, `documents` as strings or `{"text": ...}` objects
+and the optional fields `top_n`, which `top_k` also spells, `instruction`
+and `return_documents`. The response holds `results` sorted best-first,
+each with `index` and `relevance_score`, plus `model` and `usage`:
 
 ```sh
 curl localhost:8080/v1/rerank -H 'content-type: application/json' \

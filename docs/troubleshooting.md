@@ -73,13 +73,14 @@ such as a network drop or a Hugging Face error, is also safe to re-run.
 
 `validate`, `pull`, or a load fails and names a tensor codec.
 
-The file uses a tensor type with no kernel. That is rare, because the
-K-quant, legacy and IQ families all have kernels, as does the
-structured-ternary `STQ1_0`, and the usual culprits are the plain ternary
-`TQ1_0` and `TQ2_0` types. The refusal names the unsupported codec and what
-is supported. Pick a different quant from the same repo.
-`gmlx validate hf:<org>/<repo>` lists the variants so you can choose
-without downloading, and a uniform K-quant file also
+The file uses a tensor type with no kernel. The K-quant, legacy and IQ
+families all have kernels, as does the structured-ternary `STQ1_0`, so this
+is rare, and the usual culprits are the plain ternary `TQ1_0` and `TQ2_0`
+types. The refusal names the unsupported codec and what is supported.
+
+Pick a different quant from the same repo. `gmlx validate hf:<org>/<repo>`
+lists the variants so you can choose without downloading. A uniform K-quant
+file is the best choice when you have one, since it also
 [decodes fastest](performance.md#choosing-a-quant-for-speed).
 
 ## A configured model is missing from /v1/models
@@ -135,14 +136,13 @@ The server answered immediately, but the first chat completion took many
 seconds.
 
 Nothing was preloaded, so the first request carried the whole model load.
-The server begins loading a model the moment it starts when the config pins
-one, names one in `server.defaults.model` or holds exactly one, and
-`server.defaults.preload` warms further ids after it. The port answers while
-that load runs, so an early request waits only for what is left of it. The
-keys are under [Memory and residency](server-config.md#memory-and-residency).
-A slow first turn on a very long prompt is a different case: that is prefill
-rather than loading, and the [prompt cache](performance.md#the-prompt-cache)
-covers it.
+Mark a model for loading at startup with a pin, `server.defaults.model` or
+`server.defaults.preload`, which
+[Memory and residency](server-config.md#memory-and-residency) describes.
+The port answers while that load runs, so an early request waits only for
+what is left of it. A slow first turn on a very long prompt is a
+different case: that is prefill rather than loading, and the
+[prompt cache](performance.md#the-prompt-cache) covers it.
 
 ## Requests fail with 403 hf_access_disabled
 
@@ -181,9 +181,9 @@ that residency stays under the limit.
 `gmlx logs -n 100` prints the managed server's log and `-f` follows it,
 with the files under `~/.cache/gmlx/`. Each completed request logs a line
 with the model, token counts and timing, which is usually enough to see
-what was slow. `gmlx status` reports the process, `gmlx ps` the resident
-models and `gmlx serve
---print-config` the fully resolved config the server would run with.
+what was slow. `gmlx status` reports the process and `gmlx ps` the
+resident models. `gmlx serve --print-config` prints the fully resolved
+config the server would run with.
 
 ## Where files are on disk
 
