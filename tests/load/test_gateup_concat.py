@@ -147,3 +147,27 @@ def test_concat_headroom_check_off_when_zero(monkeypatch):
     x, inds = _prefill_rows(rng, 64)
     mx.eval(model.experts(x, inds))
     assert getattr(model.experts, "_kq_gate_up", None) is not None
+
+
+@pytest.mark.parametrize("tokens", [16, 150])
+def test_prefill_mix_matches_eager(tokens, monkeypatch):
+    """With routing scores, the sorted-prefill path returns the mixed
+    [B, T, N] through kq.gather_mix; it matches the eager unsort, score
+    multiply and sum over slots."""
+    import mlx_kquant as kq
+    if not hasattr(kq, "gather_mix"):
+        pytest.skip("mlx_kquant without gather_mix")
+    rng = np.random.default_rng(11)
+    model = _build(rng)
+    x, inds = _prefill_inputs(rng, tokens)
+    scores = mx.array(rng.random((1, tokens, 4)).astype(np.float16))
+    y_fused = model.experts(x, inds, scores)
+    mx.eval(y_fused)
+    assert y_fused.shape == (1, tokens, DIM)
+    monkeypatch.setattr(modules, "_MIX_PREFILL_ENABLED", False)
+    y_eager = model.experts(x, inds, scores)
+    mx.eval(y_eager)
+    assert y_eager.shape == y_fused.shape and y_eager.dtype == y_fused.dtype
+    a = np.array(y_fused, np.float32)
+    b = np.array(y_eager, np.float32)
+    assert np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-9) < 5e-3

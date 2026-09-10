@@ -142,6 +142,11 @@ _FUSED_MOE_GLUE_ENABLED = True
 # models would double most of their weight bytes and blow the wired limit).
 # GMLX_MOE_GATEUP_CONCAT=0 disables (skips the install-time concat too).
 _GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
+# Sorted-prefill MoE: the gather back to token order, the score multiply
+# and the sum over the routed slots as one mlx-kquant dispatch
+# (gather_mix) after the down gather. GMLX_MOE_MIX_PREFILL=0 keeps the
+# eager unsort and mix.
+_MIX_PREFILL_ENABLED = env_bool("GMLX_MOE_MIX_PREFILL", True)
 _GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
 # The copy is built at the first sorted-prefill call, when the weights are
 # resident and the live memory is known. It must leave this much room under
@@ -668,7 +673,7 @@ def _make_fused_kquant(base_cls, caps):
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
                 y = y.reshape(*indices.shape, y.shape[-1])
             else:
-                y = self._kq_prefill_gate_up(x, indices)
+                y = self._kq_prefill_gate_up(x, indices, scores)
                 if y is None:
                     y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
@@ -677,14 +682,17 @@ def _make_fused_kquant(base_cls, caps):
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
             return y
 
-        def _kq_prefill_gate_up(self, x, indices):
+        def _kq_prefill_gate_up(self, x, indices, scores=None):
             """Sorted-prefill widths: one gather over the concatenated
             gate+up wire bytes (built here on the first eligible call,
             from the pending stamp _install_gateup_concat left), then the
             stock activation + down gather. Mirrors mlx-lm
             SwitchGLU.__call__ exactly apart from the single fused
             projection; returns None when ineligible so the caller falls
-            back to the stock two-gather path."""
+            back to the stock two-gather path. With `scores` and
+            GMLX_MOE_MIX_PREFILL the unsort and the score-weighted sum
+            run as one dispatch (kq.gather_mix) and the result comes back
+            mixed, [..., N]; the shexp-fold stamp keeps it unmixed."""
             if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
                     or self.training):
                 return None
@@ -707,6 +715,14 @@ def _make_fused_kquant(base_cls, caps):
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
+            if (scores is not None and _MIX_PREFILL_ENABLED
+                    and hasattr(kq, "gather_mix")
+                    and getattr(self, "_kq_shexp_mod", None) is None):
+                k = indices.shape[-1]
+                rows = y.shape[0]
+                y = kq.gather_mix(
+                    y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
+                return y.reshape(*indices.shape[:-1], -1)
             y = _scatter_unsort(y, inv_order, indices.shape)
             return y.squeeze(-2)
 

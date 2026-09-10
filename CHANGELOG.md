@@ -18,6 +18,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decay inside the chunked kernel (`kda_chunk_gated`) and fuse the output
   norm and gate (`rmsnorm_gate`). `GMLX_GLM5_KDA_CONV=0` keeps the eager
   chain on all three.
+- Sorted-prefill MoE layers on mlx-kquant builds run the unsort and the
+  score-weighted sum over the routed slots as one dispatch (`gather_mix`);
+  `GMLX_MOE_MIX_PREFILL=0` keeps the eager pair.
 - Hyper-connected models (DeepSeek-V4, GLM-5.3-Flash) run each
   hyper-connection cycle after the first of a decode or verify step as
   one mlx-kquant dispatch (`hc_front_expand_collapse`) instead of two,
