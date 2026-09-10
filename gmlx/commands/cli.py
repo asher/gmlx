@@ -2254,6 +2254,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if rc is not None:
         return rc
     _ensure_stream_cb_caps(args)
+    from gmlx.serve.cb_phase import install_cb_phase_steps
+
+    # In-RAM placements: fine caps through each prefill, coarse from the
+    # first token (what serve does per phase). Streaming keeps its lift.
+    install_cb_phase_steps(
+        streaming=bool(getattr(args, "stream_experts", False)
+                       or getattr(args, "stream_cpu", False)))
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp:

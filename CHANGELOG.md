@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `run`, `chat` and `bench` flip the MLX command-buffer caps per phase the
+  way `serve` does (fine through a prefill, coarse from the first token),
+  so in-RAM decode on the CLI path no longer splits every step into
+  dozens of buffers. Streaming placements keep their lifetime lift;
+  `GMLX_CB_PHASE=0` disables the flips.
 - GLM-5.3-Flash sparse decode and MTP verify steps read each query's
   selected latent rows through mlx-kquant's index-gathered attention
   (`sdpa_fa_indexed`, one call per step) instead of gathering a copy per
