@@ -965,39 +965,42 @@ class Glm5NextDeltaAttention(nn.Module):
         if (self._can_kernel
                 and kda_fused.fused_ok(x, mask, cache, max_t=_KDA_FUSED_MAX_T)):
             # Decode step, or an MTP verify block of T tokens: the
-            # projections run once at M = T, then one fused dispatch per
-            # token (conv, norms, decay, delta rule, out-norm) chained
-            # through the recurrent state. The state after every token is
-            # kept on the sink, so a rollback restores the accepted
+            # projections run once at M = T, then one fused dispatch for
+            # the block (conv, norms, decay, delta rule, out-norm per token,
+            # the state carried in registers). The state after every token
+            # is kept on the sink, so a rollback restores the accepted
             # prefix's state directly instead of replaying the layer.
             xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
             a_raw = self.f_b_proj(self.f_a_proj(x))
             b_logit = self.b_proj(x)
             gate = self.g_b_proj(self.g_a_proj(x))
-            states = [(q_state, k_state, v_state, ssm_state)]
-            ys = []
-            for t in range(T):
-                sl = slice(t, t + 1)
-                q_state, k_state, v_state, ssm_state = states[-1]
-                y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
-                    xq[:, sl], xk[:, sl], xv[:, sl],
-                    q_state, k_state, v_state,
-                    self.q_conv.conv.weight, self.k_conv.conv.weight,
-                    self.v_conv.conv.weight,
-                    a_raw[:, sl], self.dt_bias, self.a_folded,
-                    b_logit[:, sl], gate[:, sl],
-                    ssm_state, self.o_norm.weight,
-                    lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
-                    norm_eps=self.o_norm.eps, num_heads=self.num_heads,
-                    head_dim=self.head_dim, conv_kernel=self.conv_kernel)
-                ys.append(y)
-                states.append((q_state, k_state, v_state, ssm_state))
+            y, q_new, k_new, v_new, ssm_new, ssm_mid = kda_fused.kda_decode_fused_block(
+                xq, xk, xv, q_state, k_state, v_state,
+                self.q_conv.conv.weight, self.k_conv.conv.weight,
+                self.v_conv.conv.weight,
+                a_raw, self.dt_bias, self.a_folded, b_logit, gate,
+                ssm_state, self.o_norm.weight,
+                lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
+                norm_eps=self.o_norm.eps, num_heads=self.num_heads,
+                head_dim=self.head_dim, conv_kernel=self.conv_kernel)
             if gdn_sink is not None:
+                # Conv tails after t tokens are the last KW-1 rows of the
+                # carried tails followed by the block's first t inputs.
+                ns = self.conv_kernel - 1
+
+                def tails(prev, cur, t):
+                    if prev is None:
+                        prev = mx.zeros((B, ns, cur.shape[-1]), dtype=dtype)
+                    return mx.concatenate([prev, cur[:, :t]], axis=1)[:, t:]
+
+                states = [(q_state, k_state, v_state, ssm_state)]
+                for t in range(1, T):
+                    states.append((tails(q_state, xq, t), tails(k_state, xk, t),
+                                   tails(v_state, xv, t), ssm_mid[t - 1]))
+                states.append((q_new, k_new, v_new, ssm_new))
                 gdn_sink[-1]["states"] = states
-            for i, v in enumerate(states[-1]):
-                cache[i] = v
+            cache[0], cache[1], cache[2], cache[3] = q_new, k_new, v_new, ssm_new
             cache.advance(T)
-            y = ys[0] if T == 1 else mx.concatenate(ys, axis=1)
             return self.o_proj(y.astype(dtype))
 
         q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)

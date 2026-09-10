@@ -40,10 +40,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   layers in the absorbed form like a decode step; the naive route expanded
   the latent into per-head K and V over every visible key and cost 19 ms
   per verify at 512 keys. `GMLX_GLM5_ABSORBED_MAX_L` sets the band.
-- GLM-5.3-Flash MTP verify forwards run the KDA layers as chained fused
-  decode kernels (one per verify token) instead of the op chain, and a
-  rollback restores the kept per-token state instead of replaying the
-  layer. `GMLX_GLM5_KDA_FUSED_MAX_T` sets the band.
+- GLM-5.3-Flash MTP verify forwards run the KDA layers as one fused
+  decode dispatch per layer for the whole verify block instead of the op
+  chain, the recurrent state carried in registers across the block's
+  tokens, and a rollback restores the kept per-token state instead of
+  replaying the layer. `GMLX_GLM5_KDA_FUSED_MAX_T` sets the band.
+- The fused KDA decode kernel loads its state rows up front: the
+  single-token dispatch drops from about 50 to 38 us per layer and a
+  two-token verify block from about 90 to 49 us on an M5 Max (34 layers
+  on GLM-5.3-Flash).
 - GLM-5.3-Flash decode steps (1 to 4 query tokens) score the DSA indexer
   through mlx-kquant's fused decode scorer and radix top-k instead of the
   inline fp32 matmul chain and argpartition, about 1 ms a step off the

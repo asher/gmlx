@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""Fused single-token KDA decode kernel: kernel-level parity against the
-eager op chain it replaces (conv, l2 norms, decay, delta rule, out-norm,
-gate) and glm5_next decode parity with the route on vs off.
+"""Fused KDA decode kernel: kernel-level parity against the eager op chain
+it replaces (conv, l2 norms, decay, delta rule, out-norm, gate), the block
+form against the single-token kernel chained per token, and glm5_next
+decode parity with the route on vs off.
 
 Tiny dims, random weights, no GGUF. Metal only (the kernel has no CPU
 implementation; the eager path stays the CPU route)."""
@@ -19,7 +20,7 @@ from mlx_lm.models.gated_delta import gated_delta_kernel
 
 from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
-from gmlx.models.kda_fused import kda_decode_fused
+from gmlx.models.kda_fused import kda_decode_fused, kda_decode_fused_block
 
 from test_glm5_next import _random_model, _tiny_args
 
@@ -84,6 +85,53 @@ def test_kernel_matches_eager_chain(B, dtype):
     for a, b in zip(ref[1:4], got[1:4]):
         assert mx.array_equal(a, b)
     assert got[0].dtype == dtype and got[4].dtype == mx.float32
+
+
+@pytest.mark.parametrize("B", [1, 2])
+@pytest.mark.parametrize("hd", [32, 128])
+def test_block_matches_chained_single_token(B, hd):
+    """One NT-token dispatch (state carried in registers, per-token states
+    on the side output) equals NT chained single-token dispatches: the
+    same f32 evaluation order, so bit-exact. Head dim 128 takes the float4
+    register path, other head dims the scalar one."""
+    NT, h = 3, 2
+    c = h * hd
+    mx.random.seed(11)
+    dtype = mx.bfloat16
+    ws = [(mx.random.normal((c, KW, 1)) * 0.5).astype(dtype) for _ in range(3)]
+    xq, xk, xv, a_raw, gate = (
+        mx.random.normal((B, NT, c)).astype(dtype) for _ in range(5))
+    sq, sk, sv = (mx.random.normal((B, KW - 1, c)).astype(dtype) for _ in range(3))
+    dt_bias = mx.random.normal((c,)) * 0.5
+    a_folded = -mx.random.uniform(low=1.0, high=4.0, shape=(h,))
+    b_logit = mx.random.normal((B, NT, h)).astype(dtype)
+    state = mx.random.normal((B, h, hd, hd)) * 0.1
+    w = (1 + 0.1 * mx.random.normal((hd,))).astype(dtype)
+    kw = dict(lb=LB, scale=hd ** -0.5, l2_eps=1e-6, norm_eps=1e-5,
+              num_heads=h, head_dim=hd, conv_kernel=KW)
+
+    st = (sq, sk, sv, state)
+    ys, mids = [], []
+    for t in range(NT):
+        sl = slice(t, t + 1)
+        y, *st = kda_decode_fused(
+            xq[:, sl], xk[:, sl], xv[:, sl], st[0], st[1], st[2], *ws,
+            a_raw[:, sl], dt_bias, a_folded, b_logit[:, sl], gate[:, sl],
+            st[3], w, **kw)
+        ys.append(y)
+        mids.append(st[3])
+    got = kda_decode_fused_block(
+        xq, xk, xv, sq, sk, sv, *ws, a_raw, dt_bias, a_folded, b_logit, gate,
+        state, w, **kw)
+    mx.eval(ys, st, got)
+
+    assert got[0].shape == (B, NT, c) and got[5].shape == (NT - 1, B, h, hd, hd)
+    assert mx.array_equal(got[0], mx.concatenate(ys, axis=1))
+    for a, b in zip(st[:3], got[1:4]):
+        assert mx.array_equal(a, b)
+    assert mx.array_equal(got[4], st[3])
+    for t in range(NT - 1):
+        assert mx.array_equal(got[5][t], mids[t])
 
 
 def test_glm5_decode_route_matches_eager(monkeypatch):
