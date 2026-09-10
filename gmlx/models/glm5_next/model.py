@@ -91,6 +91,25 @@ _ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
 # blocks are 2 tokens; wider steps take the op chain and the sink replay.
 _KDA_FUSED_MAX_T = int(os.environ.get("GMLX_GLM5_KDA_FUSED_MAX_T", "8"))
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
+# Sparse decode (L <= _ABSORBED_MAX_L) through mlx-kquant's index-gathered
+# attention: one call per step reads every query's selected latent rows
+# straight from the cache, with no gathered copy and no materialized
+# score matrix. Needs a build with sdpa_fa_indexed, B == 1 and a 512-wide
+# f16/bf16 latent; otherwise the per-query gather + sdpa loop runs.
+_SPARSE_INDEXED = os.environ.get("GMLX_GLM5_SPARSE_INDEXED", "1") != "0"
+_INDEXED_SDPA = None
+
+
+def _indexed_sdpa():
+    """mlx_kquant.sdpa_fa_indexed, or None when the installed build lacks it."""
+    global _INDEXED_SDPA
+    if _INDEXED_SDPA is None:
+        try:
+            import mlx_kquant as kq
+            _INDEXED_SDPA = getattr(kq, "sdpa_fa_indexed", False)
+        except ImportError:
+            _INDEXED_SDPA = False
+    return _INDEXED_SDPA or None
 # Decode-width indexer scoring through mlx-kquant's fused scorer and
 # radix top-k (one dispatch each) instead of the inline per-head f32
 # matmul, head reduction, mask and argpartition. Steps of 1 to 4 queries.
@@ -650,6 +669,30 @@ class Glm5NextMLAAttention(nn.Module):
             latent_d[:, 0], tok[..., None], axis=1)[:, None]
         return kv_g, gmask
 
+    def _sparse_decode_index(self, latent_d, sel_pools, offset: int,
+                             L: int, spill: bool) -> mx.array:
+        """int32 [L, M] key lists for sdpa_fa_indexed at B == 1: query j's
+        selected pools expanded ``kpool`` wide plus its tail rows, spilled
+        pools and the shorter lists' slack written as -1 (a padded slot)."""
+        r = self._kpool
+        rows = []
+        for j in range(L):
+            q_abs = offset + j
+            tail_start = (q_abs + 1) // r * r
+            sel = sel_pools[0, j]
+            tok = sel[:, None] * r + mx.arange(r)
+            if spill:
+                tok = mx.where(sel[:, None] < tail_start // r, tok, -1)
+            tok = tok.reshape(-1)
+            if q_abs >= tail_start:
+                tok = mx.concatenate([tok, mx.arange(tail_start, q_abs + 1)])
+            rows.append(tok.astype(mx.int32))
+        m = max(t.shape[0] for t in rows)
+        rows = [t if t.shape[0] == m else
+                mx.concatenate([t, mx.full((m - t.shape[0],), -1, mx.int32)])
+                for t in rows]
+        return rows[0][None] if L == 1 else mx.stack(rows)
+
     def _gathered_sparse_prefill(
         self, q_n, latent_d, sel_pools, offset: int, L: int, S: int
     ) -> mx.array:
@@ -831,14 +874,23 @@ class Glm5NextMLAAttention(nn.Module):
             # sends it to the materialized fallback).
             spill = (L > 1 and (offset + 1) // self._kpool
                      < self.indexer.select_k)
-            outs = []
-            for j in range(L):
-                kv_g, gmask = self._sparse_decode_keys(
-                    latent_d, sel_pools[:, j], offset + j, B, spill=spill)
-                outs.append(scaled_dot_product_attention(
-                    q_n[:, :, j:j + 1], kv_g, kv_g, cache=None,
-                    scale=self.scale, mask=gmask))
-            out = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
+            indexed = (_indexed_sdpa() if _SPARSE_INDEXED and B == 1
+                       and q_n.shape[-1] == 512
+                       and q_n.dtype == latent_d.dtype
+                       and q_n.dtype in (mx.float16, mx.bfloat16) else None)
+            if indexed is not None:
+                idx = self._sparse_decode_index(
+                    latent_d, sel_pools, offset, L, spill)
+                out = indexed(q_n, latent_d, idx, self.scale)
+            else:
+                outs = []
+                for j in range(L):
+                    kv_g, gmask = self._sparse_decode_keys(
+                        latent_d, sel_pools[:, j], offset + j, B, spill=spill)
+                    outs.append(scaled_dot_product_attention(
+                        q_n[:, :, j:j + 1], kv_g, kv_g, cache=None,
+                        scale=self.scale, mask=gmask))
+                out = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
             out = self.unembed_out(out)
         elif sel_pools is not None:
             # Sparse prefill/chunk: gathered keys past the streaming

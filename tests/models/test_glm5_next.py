@@ -487,6 +487,51 @@ def test_sparse_verify_gather_matches_masked_path(width):
             rtol=2e-3, atol=2e-3, err_msg=f"verify block at {start}")
 
 
+@pytest.mark.parametrize("L,offset,topk", [(1, 63, 32), (2, 17, 32), (3, 70, 32)])
+def test_sparse_decode_indexed_matches_gather_loop(L, offset, topk):
+    # The index-list route (one sdpa_fa_indexed call over every query's
+    # selected latent rows) must match the per-query gather + sdpa loop
+    # it replaces, including a spilled block (L=2 at offset 17: fewer
+    # visible pools than select_k) and lists of unequal tail length.
+    from mlx_lm.models.base import scaled_dot_product_attention
+
+    if glm5_model._indexed_sdpa() is None:
+        pytest.skip("mlx-kquant sdpa_fa_indexed unavailable here")
+    args = _tiny_args(kv_lora_rank=512, index_topk=topk)
+    attn = Glm5NextMLAAttention(args)
+    r, S = args.index_kpool, offset + L
+    select_k = attn.indexer.select_k
+    spill = L > 1 and (offset + 1) // r < select_k
+    mx.random.seed(offset)
+    q = (mx.random.normal((1, args.num_attention_heads, L, 512)) * 0.3
+         ).astype(mx.bfloat16)
+    latent = (mx.random.normal((1, 1, S, 512)) * 0.5).astype(mx.bfloat16)
+    n_vis = max(1, (offset + L) // r)
+    sel = mx.stack([mx.sort(mx.random.permutation(n_vis)[:select_k])
+                    if n_vis >= select_k else
+                    mx.concatenate([mx.arange(n_vis), mx.zeros(
+                        (select_k - n_vis,), dtype=mx.int32)])
+                    for _ in range(L)])[None].astype(mx.int32)
+    mx.eval(q, latent, sel)
+    scale = 512 ** -0.5
+    outs = []
+    for j in range(L):
+        kv_g, gmask = attn._sparse_decode_keys(
+            latent, sel[:, j], offset + j, 1, spill=spill)
+        outs.append(scaled_dot_product_attention(
+            q[:, :, j:j + 1], kv_g, kv_g, cache=None, scale=scale, mask=gmask))
+    ref = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
+    idx = attn._sparse_decode_index(latent, sel, offset, L, spill)
+    got = glm5_model._indexed_sdpa()(q, latent, idx, scale)
+    mx.eval(ref, got, idx)
+    assert idx.shape[0] == L and idx.dtype == mx.int32
+    if spill:
+        assert int((idx < 0).sum()) > 0
+    rf, gf = ref.astype(mx.float32), got.astype(mx.float32)
+    rel = float(mx.linalg.norm(gf - rf) / mx.linalg.norm(rf))
+    assert rel < 5e-3, f"indexed vs gather loop rel {rel:.3e}"
+
+
 def test_streamed_absorbed_attention_matches_sdpa(monkeypatch):
     # The online-softmax key-block accumulation must reproduce plain
     # masked SDPA, including rows whose first blocks are fully masked.

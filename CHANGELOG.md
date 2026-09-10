@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- GLM-5.3-Flash sparse decode and MTP verify steps read each query's
+  selected latent rows through mlx-kquant's index-gathered attention
+  (`sdpa_fa_indexed`, one call per step) instead of gathering a copy per
+  query and running a materialized softmax over it.
+  `GMLX_GLM5_SPARSE_INDEXED=0` restores the gather loop.
 - DeepSeek-V4-Flash-Vision-Exp loads with its `deepseek4v` mmproj: image
   turns on `run`, `chat` and `serve`; text turns unchanged.
 - `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`): a second

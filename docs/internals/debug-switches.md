@@ -23,6 +23,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Room left under the memory ceiling after a concat copy, default `8`. A copy that would not fit is skipped and logged. `0` turns the check off. |
 | `GMLX_GLM5_ABSORBED_MAX_L` | Widest query count GLM-5.3-Flash MLA layers run in the absorbed MQA form instead of expanding the latent per head, default `16`. `0` restores the expansion. |
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash DSA indexer inline instead of through the mlx-kquant fused scorer and radix top-k. The fused route rounds scores before the select. |
+| `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify, restoring the per-query gather and sdpa loop. The route needs `sdpa_fa_indexed`. |
 | `GMLX_GLM5_KDA_FUSED_MAX_T` | Widest step GLM-5.3-Flash KDA layers run as one fused decode dispatch per layer, default `8`. Wider steps take the op chain, and `0` restores it everywhere. |
 | `GMLX_HC_M1_MAX_ROWS` | Widest step in rows that hyper-connected models run the fused per-row hyper-connection kernels on, default `8`. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels on DeepSeek-V4 and GLM-5.3-Flash, leaving every step on the GEMM route. |
