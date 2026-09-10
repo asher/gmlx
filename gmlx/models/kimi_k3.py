@@ -365,6 +365,13 @@ def _kda_decay_lb(a_folded, a_raw, dt_bias, lb):
     return mx.exp(lb * mx.sigmoid((-a_folded)[..., None] * a))
 
 
+def _kda_decay_lb_log(a_folded, a_raw, dt_bias, lb):
+    # log of _kda_decay_lb: lb * sigmoid(exp(A_log) * (a + dt_bias)), fp32,
+    # for the chunked recurrence that takes the log decay directly.
+    a = a_raw.astype(mx.float32) + dt_bias
+    return lb * mx.sigmoid((-a_folded)[..., None] * a)
+
+
 @partial(mx.compile, shapeless=True)
 def _kda_decay_softplus(a_folded, a_raw, dt_bias):
     # kimi-linear form: decay = exp(-exp(A_log) * softplus(a + dt_bias)).

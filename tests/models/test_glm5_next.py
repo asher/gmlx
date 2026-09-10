@@ -211,6 +211,44 @@ def test_kda_chained_fused_step_matches_op_chain(monkeypatch, width):
         assert float(mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max()) < 2e-2
 
 
+@pytest.mark.skipif(
+    not glm5_model._kda_chunk_op(),
+    reason="mlx-kquant kda_chunk needs tensor-op (NAX) hardware")
+@pytest.mark.parametrize("length", [32, 40])
+def test_kda_chunk_prefill_matches_sequential_kernel(monkeypatch, length):
+    """A prefill of `length` tokens through mlx-kquant's chunked delta-rule
+    kernel (GMLX_GLM5_KDA_CHUNK) matches the token-sequential kernel: the
+    layer output, the conv tails and the recurrent state, for a
+    chunk-aligned and a ragged length."""
+    args = _tiny_args(kda_head_dim=128)
+    model = _random_model(args, seed=7)
+    model.set_dtype(mx.bfloat16)
+    model.eval()
+    attn = model.layers[0].self_attn
+    mx.random.seed(21 + length)
+    x = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(
+        mx.bfloat16)
+
+    def run(on):
+        monkeypatch.setattr(glm5_model, "_KDA_CHUNK", on)
+        cache = glm5_model.ArraysCache(size=4)
+        y = attn(x, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y.astype(mx.float32), [cache[i].astype(mx.float32)
+                                      for i in range(4)]
+
+    y_ref, st_ref = run(False)
+    y_chunk, st_chunk = run(True)
+
+    def rel(a, b):
+        return float(mx.linalg.norm(a - b) / (mx.linalg.norm(b) + 1e-9))
+
+    assert rel(y_chunk, y_ref) < 1e-2
+    for a, b in zip(st_chunk, st_ref):
+        assert a.shape == b.shape
+        assert rel(a, b) < 1e-2
+
+
 def test_kda_layer_matches_naive_reference():
     # End-to-end KDA layer vs a step-loop reference implementing the
     # llama.cpp semantics: causal depthwise conv then silu, l2-normalized

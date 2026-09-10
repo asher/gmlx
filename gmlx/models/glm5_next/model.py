@@ -75,7 +75,7 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models import kda_fused
-from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
+from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb, _kda_decay_lb_log
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
@@ -90,6 +90,31 @@ _ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
 # per token, the intermediate states kept for rollback). MTP verify
 # blocks are 2 tokens; wider steps take the op chain and the sink replay.
 _KDA_FUSED_MAX_T = int(os.environ.get("GMLX_GLM5_KDA_FUSED_MAX_T", "8"))
+# Multi-token KDA steps of at least _KDA_CHUNK_MIN_T tokens (prefill
+# chunks, wide verify blocks) run the delta-rule recurrence through
+# mlx-kquant's chunked kernel, which keeps the recurrent state on the
+# matrix units across 32-token chunks instead of stepping token by token.
+# Needs tensor-op hardware, head dim 128 and fp16/bf16 activations; the
+# sequential kernel serves everything else. GMLX_GLM5_KDA_CHUNK=0 keeps
+# the sequential kernel everywhere.
+_KDA_CHUNK = os.environ.get("GMLX_GLM5_KDA_CHUNK", "1") != "0"
+_KDA_CHUNK_MIN_T = 16
+_KDA_CHUNK_OP = None
+
+
+def _kda_chunk_op():
+    """mlx_kquant.kda_chunk on tensor-op hardware, else None."""
+    global _KDA_CHUNK_OP
+    if _KDA_CHUNK_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            if getattr(kq, "kda_chunk", None) is not None and kq.nax_available():
+                op = kq.kda_chunk
+        except ImportError:
+            pass
+        _KDA_CHUNK_OP = op
+    return _KDA_CHUNK_OP or None
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
 # Sparse decode (L <= _ABSORBED_MAX_L) through mlx-kquant's index-gathered
 # attention: one call per step reads every query's selected latent rows
@@ -1086,7 +1111,6 @@ class Glm5NextDeltaAttention(nn.Module):
         a_raw = self.f_b_proj(self.f_a_proj(x)).reshape(
             B, T, self.num_heads, self.head_dim)
         dt = self.dt_bias.reshape(self.num_heads, self.head_dim)
-        g = _kda_decay_lb(self.a_folded, a_raw, dt, self.gate_lower_bound)
         beta = mx.sigmoid(self.b_proj(x).reshape(B, T, self.num_heads))
 
         if ssm_state is None:
@@ -1094,10 +1118,33 @@ class Glm5NextDeltaAttention(nn.Module):
                 (B, self.num_heads, self.head_dim, self.head_dim),
                 dtype=mx.float32)
 
-        if self._can_kernel and mx.default_device() == mx.gpu and not self.training:
-            out, ssm_state = gated_delta_kernel(q, k, v, g, beta, ssm_state, mask)
+        on_gpu = (self._can_kernel and mx.default_device() == mx.gpu
+                  and not self.training)
+        chunk_op = None
+        if (on_gpu and _KDA_CHUNK and T >= _KDA_CHUNK_MIN_T
+                and self.head_dim == 128
+                and q.dtype in (mx.float16, mx.bfloat16)):
+            chunk_op = _kda_chunk_op()
+        if chunk_op is not None:
+            # Chunked recurrence on the log decay; a masked row carries the
+            # state through unchanged (zero log decay and beta) and reads
+            # zero, as in the sequential kernel.
+            log_g = _kda_decay_lb_log(
+                self.a_folded, a_raw, dt, self.gate_lower_bound)
+            if mask is not None:
+                log_g = mx.where(mask[..., None, None], log_g, 0.0)
+                beta = mx.where(mask[..., None], beta, 0.0)
+            out, ssm_state = chunk_op(q, k, v, log_g, beta, ssm_state)
+            if mask is not None:
+                out = mx.where(mask[..., None, None], out, mx.array(0, out.dtype))
         else:
-            out, ssm_state = gated_delta_ops(q, k, v, g, beta, ssm_state, mask)
+            g = _kda_decay_lb(self.a_folded, a_raw, dt, self.gate_lower_bound)
+            if on_gpu:
+                out, ssm_state = gated_delta_kernel(
+                    q, k, v, g, beta, ssm_state, mask)
+            else:
+                out, ssm_state = gated_delta_ops(
+                    q, k, v, g, beta, ssm_state, mask)
 
         if cache is not None:
             cache[3] = ssm_state

@@ -25,6 +25,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash DSA indexer inline instead of through the mlx-kquant fused scorer and radix top-k. The fused route rounds scores before the select. |
 | `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify, restoring the per-query gather and sdpa loop. The route needs `sdpa_fa_indexed`. |
 | `GMLX_GLM5_KDA_FUSED_MAX_T` | Widest step GLM-5.3-Flash KDA layers run as one fused decode dispatch per layer, default `8`. Wider steps take the op chain, and `0` restores it everywhere. |
+| `GMLX_GLM5_KDA_CHUNK=0` | Keep GLM-5.3-Flash KDA prefill on the token-sequential kernel instead of the mlx-kquant chunked recurrence, which needs tensor-op hardware and head dim 128. |
 | `GMLX_HC_M1_MAX_ROWS` | Widest step in rows that hyper-connected models run the fused per-row hyper-connection kernels on, default `8`. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels on DeepSeek-V4 and GLM-5.3-Flash, leaving every step on the GEMM route. |
 | `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Bit-identical either way. |

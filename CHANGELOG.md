@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- GLM-5.3-Flash KDA layers run prefill chunks through mlx-kquant's chunked
+  delta-rule kernel (`kda_chunk`), which keeps the recurrent state on the
+  matrix units across 32-token chunks instead of stepping token by token.
+  Tensor-op hardware only; `GMLX_GLM5_KDA_CHUNK=0` keeps the sequential
+  kernel.
 - Hyper-connected models (DeepSeek-V4, GLM-5.3-Flash) run each
   hyper-connection cycle after the first of a decode or verify step as
   one mlx-kquant dispatch (`hc_front_expand_collapse`) instead of two,
