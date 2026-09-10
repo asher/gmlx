@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Hyper-connected models (DeepSeek-V4, GLM-5.3-Flash) run each
+  hyper-connection cycle after the first of a decode or verify step as
+  one mlx-kquant dispatch (`hc_front_expand_collapse`) instead of two,
+  which takes a dependent kernel launch off every sublayer of the step.
+  Bit-identical; `GMLX_HC_FUSED_CYCLE=0` restores the two-kernel pair.
 - `run`, `chat` and `bench` flip the MLX command-buffer caps per phase the
   way `serve` does (fine through a prefill, coarse from the first token),
   so in-RAM decode on the CLI path no longer splits every step into

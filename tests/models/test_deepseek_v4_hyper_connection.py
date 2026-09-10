@@ -180,3 +180,45 @@ def test_fused_front_matches_reference_over_short_block(length):
                   - ref_normed2.astype(mx.float32)).max().item() < 1e-1
     assert mx.abs(post2 - ref_post2).max().item() < 3e-3
     assert mx.abs(comb2 - ref_comb2).max().item() < 3e-3
+
+
+@pytest.mark.parametrize("length", [1, 2, 5])
+def test_fused_cycle_matches_pair(length, monkeypatch):
+    """The one-dispatch cycle (mlx-kquant hc_front_expand_collapse) and
+    the two-kernel pair give bit-identical h, normed output, post and
+    comb; GMLX_HC_FUSED_CYCLE=0 selects the pair."""
+    import gmlx.models.deepseek_v4.hyper_connection as hcm
+
+    if not hcm._KQ_HC_CYCLE:
+        pytest.skip("mlx-kquant hc_front_expand_collapse unavailable here")
+    cfg = _Cfg()
+    cfg.hidden_size = 1024
+    mx.random.seed(37)
+    hc = HyperConnection(cfg)
+    hc.eval()
+    mix_rows = (2 + cfg.hc_mult) * cfg.hc_mult
+    hc.fn = (
+        mx.random.normal((mix_rows, cfg.hc_mult * cfg.hidden_size)) * 0.02
+    ).astype(mx.float32)
+    hc.base = (mx.random.normal((mix_rows,)) * 0.5).astype(mx.float32)
+    hc.scale = mx.array([1.1, 0.9, 1.3], dtype=mx.float32)
+    w = (mx.random.normal((cfg.hidden_size,)) * 0.1 + 1.0).astype(mx.bfloat16)
+    x = (
+        mx.random.normal((1, length, cfg.hc_mult, cfg.hidden_size)) * 1.7
+    ).astype(mx.bfloat16)
+    if not hc.m1_fused_ok(x):
+        pytest.skip("fused hyper-connection front unavailable here")
+    _, post, comb = hc.fused_m1(x, w)
+    x_sub = (mx.random.normal((1, length, cfg.hidden_size)) * 1.7).astype(
+        mx.bfloat16)
+    mx.eval(post, comb, x_sub)
+
+    monkeypatch.setenv("GMLX_HC_FUSED_CYCLE", "0")
+    h_p, (n_p, post_p, comb_p) = hc.fused_m1_expand((x_sub, x, post, comb), w)
+    monkeypatch.setenv("GMLX_HC_FUSED_CYCLE", "1")
+    h_f, (n_f, post_f, comb_f) = hc.fused_m1_expand((x_sub, x, post, comb), w)
+    mx.eval(h_p, n_p, post_p, comb_p, h_f, n_f, post_f, comb_f)
+    assert mx.array_equal(h_f, h_p)
+    assert mx.array_equal(n_f, n_p)
+    assert mx.array_equal(post_f, post_p)
+    assert mx.array_equal(comb_f, comb_p)
