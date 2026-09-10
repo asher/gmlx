@@ -423,8 +423,17 @@ class Glm5NextIndexer(nn.Module):
 
         # fp32 head weights: the weights are sign-free (no softmax, no relu
         # on them) and a bf16 head gate moves logits enough to flip
-        # near-tied pools; the weight tensor itself is kept fp32.
-        w = (x.astype(mx.float32) @ self.weights_proj.weight.T) * self._w_scale
+        # near-tied pools; the weight tensor itself is kept fp32. A verify
+        # block (2 to 4 queries) projects one row at a time: the single-row
+        # form is an exact f32 GEMV like the decode step, where the M-row
+        # GEMM runs TF32 and costs three times as much at M = 2.
+        xf = x.astype(mx.float32)
+        wt = self.weights_proj.weight.T
+        if 1 < L <= 4:
+            w = mx.concatenate([xf[:, j:j + 1] @ wt for j in range(L)], axis=1)
+        else:
+            w = xf @ wt
+        w = w * self._w_scale
 
         if (L <= 4 and isinstance(offset, int) and self.select_k in (512, 2048)
                 and self.head_dim == 128 and self.n_heads in (32, 64)
