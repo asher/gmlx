@@ -5,7 +5,7 @@
 # checkout plus the newest mlx-vlm, and runs the seam contract check
 # (gmlx.upstream.seams) and an import smoke. Nonzero exit = drift; the
 # report names each moved or rewritten symbol. Run this when upstream cuts a
-# release, before users hit it - see docs/upstream-upgrades.md.
+# release, before users hit it - see docs/internals/upstream-upgrades.md.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"

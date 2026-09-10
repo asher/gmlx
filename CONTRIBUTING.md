@@ -1,67 +1,70 @@
 # Contributing
 
-Thanks for considering a contribution. This page covers the mechanics; for design
-context, the docs under [`docs/`](docs/) are the source of truth.
+Thanks for considering a contribution. This page covers the mechanics. For
+design context, the docs under [docs/](docs/) are authoritative.
 
 ## Dev setup
 
-`mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
-macOS 26+. Older macOS builds it from source, which needs the Xcode Command
-Line Tools. It pins `mlx==0.31.2` itself, so nothing else needs pinning. Dev
-setup is a venv, a clone, and an editable install:
+gmlx needs Python 3.11 or newer on macOS with Apple Silicon, which is the
+primary target. Its kernel dependency, `mlx-kquant`, comes from PyPI as a
+prebuilt arm64 wheel for macOS 26.2 and newer. On older macOS the wheel is
+built from source, which needs full Xcode with its Metal toolchain, and on
+Linux it builds CPU-only, which is enough for the default test tier. The
+version bounds on mlx-vlm, mlx-lm, mlx-kquant and mlx, and why they are what
+they are, are explained in
+[docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
+
+Dev setup is a venv, a clone and an editable install with the `chat` and
+`assistant` extras. CI adds `vlm` as well, an empty extra kept for older
+install commands. Without `assistant`, the MCP tool-server tests skip
+themselves:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
 git clone https://github.com/asher/gmlx
-pip install -e "./gmlx[chat]" pytest ruff
+pip install -e "./gmlx[chat,assistant]" pytest ruff
 ```
-
-macOS on Apple Silicon is the primary target. mlx-kquant also builds CPU-only on
-Linux, which is enough for the default test tier.
 
 ## Tests
 
-Three tiers (full guide: [docs/testing.md](docs/testing.md)):
+There are three tiers, described in full in
+[docs/internals/testing.md](docs/internals/testing.md):
 
 ```sh
-pytest                                   # CPU logic tests: no models, runs anywhere
-KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # + numerical parity vs real GGUFs (add -m integration to run only those)
-python tests/e2e/run_server_e2e.py       # server end-to-end harness (GPU)
+pytest                                   # CPU logic tests, no models, runs anywhere
+KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # adds numerical parity against real GGUFs, and -m integration runs only those
+python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the GPU
 ```
 
-A PR should keep `pytest` (the default tier) green. If your change touches
-loading/numerics, say which integration tests you ran and on which model. New
-architectures need a greedy token-parity check against llama.cpp at long context,
-and must keep `scripts/check-coverage.py --check --strict` green with
-`docs/arch-coverage.md` regenerated. Short-prompt parity is not sufficient:
-attention bugs only surface at depth.
-What adding an architecture involves, and the full acceptance gate:
-[docs/adding-architectures.md](docs/adding-architectures.md).
+A PR should keep the default `pytest` tier passing, and if your change
+touches loading or numerics, say which integration tests you ran and on
+which model. A new architecture has its own acceptance gate and required
+tests, in
+[docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
 
 ## Lint
 
 ```sh
 ruff check .
-pre-commit install   # optional: runs the same check on each commit
+python scripts/check-docs.py   # docs style and link check, also a CI step
+pre-commit install             # optional, runs ruff on each commit
 ```
 
 ## Things to know before you patch
 
-- Seam patches are version-fragile by design. The serving stack adopts mlx-vlm's
-  FastAPI app + batching engine by patching late-bound seams (`gmlx/serve/bridge_vlm.py`,
-  `gmlx/serve/residency.py`, `gmlx/serve/patches/`), and the loader patches a few
-  mlx-lm classes at load time. `gmlx/serve/bridge_lm.py` separately patches `mlx_lm.server`'s
-  `ModelProvider._load` (the sequential mlx-lm server, not mlx-vlm). Every patch
-  carries a guard or version tripwire that fails loudly.
-  Keep that property: a new patch must be idempotent and must raise (not silently
-  no-op) when the upstream surface it expects has changed. The `mlx-vlm` upper
-  bound in `pyproject.toml` is bumped deliberately, after re-running the server
-  tests against the new version.
-- One module per concern: tensor-name remap lives in `gmlx/load/remap.py`,
-  config synthesis in `gmlx/load/config_synth.py`, arch metadata in
-  `gmlx/load/arch_table.py`. A new architecture usually touches exactly those
-  three plus a parity test.
-- The package tree maps subsystems; tests mirror it under `tests/`:
+- The serving stack is stock mlx-vlm with late-bound patches over its
+  seams, in `gmlx/serve/bridge_vlm.py`, `gmlx/serve/residency.py` and
+  `gmlx/serve/patches/`. The loader patches a few mlx-lm classes at load
+  time, and `gmlx/serve/bridge_lm.py` separately patches the
+  `ModelProvider._load` of `mlx_lm.server`, the sequential mlx-lm server.
+  Every patch is registered as a seam, guarded, and raises rather than
+  no-ops when upstream moves. The rules for adding one and for moving the
+  pins are in
+  [docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
+- Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
+  config synthesis in `gmlx/load/config_synth.py` and arch metadata in
+  `gmlx/load/arch_table.py`. Those three are where a new architecture lands.
+- The package tree follows subsystems. Tests mirror it under `tests/`:
 
   | Package | Concern |
   |---------|---------|
@@ -69,30 +72,29 @@ pre-commit install   # optional: runs the same check on each commit
   | `gmlx/models/` | owned model backbones, one subpackage or module per family |
   | `gmlx/upstream/` | patches installed over upstream mlx-lm/mlx-vlm seams |
   | `gmlx/cache/` | automatic prompt cache and KV-cache persistence |
-  | `gmlx/spec/` | speculative decoding: MTP, drafters, acceptance |
+  | `gmlx/spec/` | speculative decoding, MTP, drafters, acceptance |
   | `gmlx/stream/` | weight streaming and residency for over-RAM models |
-  | `gmlx/serve/` | server, admission, batched decode; HTTP patches in `serve/patches/` |
+  | `gmlx/serve/` | server, admission, batched decode, with HTTP patches in `serve/patches/` |
   | `gmlx/gen/` | generation loop, sampling profiles, benchmarks |
   | `gmlx/commands/` | CLI verbs behind the `gmlx` umbrella |
   | `gmlx/tui/` | interactive chat terminal UI |
-  | `gmlx/talk/` | voice client: audio I/O and hotkey |
+  | `gmlx/talk/` | voice client, audio I/O and hotkey |
   | `gmlx/assistant/` | tool-loop assistant brain and its MCP surface |
 
-  Cross-cutting leaves (`config.py`, `envflags.py`, `eval_guard.py`,
-  `textfmt.py`, `spinner.py`) stay at the `gmlx/` top level.
-- Error messages name the fix. Follow the existing style: say what was
-  expected, what was found, and what the user (or upgrader) should do.
+  Cross-cutting modules such as `config.py`, `envflags.py`,
+  `eval_guard.py`, `textfmt.py` and `spinner.py` stay at the `gmlx/` top
+  level.
+- Error messages follow the existing style: they say what was expected,
+  what was found and what the user or upgrader should do next.
 
 ## Commit style
 
-A single line, no body: `(topic): short imperative summary`, e.g.
-`(arch): add falcon-h1`, `(server): fix XTC 400 on bare-int eos_token_ids`.
-The topic is parenthesized and names one top-level feature; pick from the
-established set so history stays greppable:
-
-`arch`, `loader`, `server`, `cli`, `chat`, `mtp`, `adapter`, `train`,
-`stream` (formerly `cpu-moe`), `vlm`, `manage`, `launch`, `config`, `bench`,
-`tests`, `docs`, `release`, `hygiene`.
-
-Keep everything on the subject line, no extended body. A revert is
-`(topic): revert <what>`.
+A commit message is a single subject line with no body, in the form
+`type(scope): short lowercase summary`. The type is one of `feat`, `fix`,
+`perf`, `docs`, `test` and `chore`, plus `release` for a version bump. The
+scope in parentheses names the subsystem or model family the change is
+about, such as `stream`, `kv`, `server`, `cli` or `qwen4exp`, and is left
+out when the change has no single home, as in `docs: fix audit findings`.
+Subjects from the history include `feat(kvarn): KVarN variance-normalized
+KV cache`, `fix(tokenizer): drop <|end|> from the harmony stop set for
+gpt-oss` and `release: 0.4.10`. A revert is `chore(scope): revert <what>`.

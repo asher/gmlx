@@ -24,7 +24,7 @@ from gmlx.serve.patches import api_contract as sp_api  # noqa: E402
 _APP = importlib.import_module("mlx_vlm.server.app")
 _SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
 
-_DOCS = Path(__file__).resolve().parents[2] / "docs" / "server-config.md"
+_DOCS = Path(__file__).resolve().parents[2] / "docs" / "api.md"
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,7 @@ def _restore_routes():
 # know about (which would make the warning fire on a field that actually
 # works, or stay silent on one that doesn't). To update: re-read what the
 # handler / _build_gen_args / gmlx patches read off the request, adjust the
-# sets in gmlx/serve/patches/api_contract.py, the docs/server-config.md
+# sets in gmlx/serve/patches/api_contract.py, the docs/api.md
 # "Parameter support" table, and the hand lists below - together.
 
 def _scrape_request_reads(*funcs) -> set:
@@ -129,13 +129,13 @@ def test_known_ignored_params_do_warn():
 
 
 def test_doc_table_rows_match_allowlists():
-    """Cross-check the docs/server-config.md "Parameter support" table
+    """Cross-check the docs/api.md "Parameter support" table
     against the consumed sets: an `ignored` cell must be off the allowlist,
     a `honored` cell on it. Cells reading template/rejected/n-a are prose."""
     text = _DOCS.read_text()
     m = re.search(r"### Parameter support\n(.*?)\n\n(?:###|##) ", text,
                   re.DOTALL)
-    assert m, "server-config.md lost its '### Parameter support' table"
+    assert m, "api.md lost its '### Parameter support' table"
     consumed_by_col = [sp_api.CHAT_CONSUMED, sp_api.RESPONSES_CONSUMED,
                        sp_api.ANTHROPIC_CONSUMED]
     rows = 0

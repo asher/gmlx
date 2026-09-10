@@ -1,25 +1,25 @@
 # gmlx fleet serve-bench
 
-Single-stream (concurrency 1) server throughput of gmlx against
-llama.cpp on the same GGUF across the fleet, at KV depths from 512 to
-200k+ tokens. Prefill is faster on every model at every measured
-depth; above 4k depth decode is too, and the gap widens as context
-deepens. Speculative decode (MTP) is measured where a
-native/preserved MTP head exists.
+Single-stream server throughput of gmlx against llama.cpp on the
+same GGUF across the fleet, at concurrency 1 and at KV depths from
+512 to 200k+ tokens. Prefill is faster on all models at all measured
+depths. Above 4k depth decode is faster too, and the gap grows as
+context deepens. Speculative decode, MTP, is measured where a native
+or preserved MTP head exists.
 
-Machine-readable data: [benchmarks.json](benchmarks.json). Any cell
-is reproducible with the bundled harness in [bench/](../bench/).
+The machine-readable data is in [benchmarks.json](benchmarks.json).
+Any cell is reproducible with the bundled harness in [bench/](../bench/).
 
-## Fleet at a glance
+## Fleet summary
 
-**Throughput speedup vs KV depth** (gmlx / reference engine, every model):
+Throughput speedup vs KV depth, gmlx over the reference engine, for all models:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
   <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
 </picture>
 
-**Speculative (MTP) decode lift vs KV depth** (own-baseline, per model):
+Speculative decode lift vs KV depth, each model against its own baseline:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
@@ -28,36 +28,41 @@ is reproducible with the bundled harness in [bench/](../bench/).
 
 ## Methodology
 
-All numbers are single-stream (concurrency 1) server throughput,
-gmlx vs the reference engine, measured with the same GGUF weights,
-same sampler, and the same chat prompts on both engines.
+All numbers are single-stream server throughput at concurrency 1,
+gmlx against the reference engine, measured with the same GGUF weights,
+the same sampler and the same chat prompts on both engines.
 
 | | |
 |---|---|
-| **Hardware** | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
-| **gmlx** | `0.1.0` (fleet default) |
-| **mlx-kquant** | `0.3.5` (K-quant + perf kernels; fleet default) |
-| **llama.cpp** | `b9967` |
-| **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
-| **DeepSeek-V4-Flash reference** | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
-| **Dates** | 2026-07-05 .. 2026-08-29 |
-| **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
-| **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
-| **Speculative draft** | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
-| **Aggregation** | 4 requests/cell x 2 thermal-alternated rounds, median reported |
-| **Thermal protocol** | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
-| **Decode metric** | median decode tok/s over full-length samples (>=150 output tokens) |
-| **Prefill metric** | median prefill tok/s over all successful samples |
+| Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
+| gmlx | `0.1.0` (fleet default) |
+| mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
+| llama.cpp | `b9967` |
+| Build overrides | models rebenched on newer releases list their own builds under Model provenance |
+| DeepSeek-V4-Flash reference | the dwarfstar ds4-server by antirez @ `b030961`, ignore-eos patched |
+| Dates | 2026-07-05 .. 2026-08-29 |
+| Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
+| Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
+| Speculative draft | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
+| Aggregation | 4 requests/cell x 2 thermal-alternated rounds, median reported |
+| Thermal protocol | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
+| Decode metric | median decode tok/s over full-length samples (>=150 output tokens) |
+| Prefill metric | median prefill tok/s over all successful samples |
+
+MTP@N in the tables means speculative decoding with N draft tokens in
+each round on both engines. The baseline column is the same server with
+it off.
 
 ## Model provenance
 
-Chart labels are sanitized (abliterated community builds render as the
-base model); this table is the honest weight mapping for reproduction.
-Builds is what each model's rows were measured on: models are
-rebenched independently, so a newer build on one row says nothing
-about the others. Measured is the date of the newest run still
-contributing cells to the row (partial reruns fold onto older
-ladders cell by cell).
+Chart labels are sanitized, so abliterated community builds render as
+the base model. This table is the weight mapping for reproduction.
+The Builds column names the gmlx and mlx-kquant builds each model's
+rows were measured on. Models are rebenched independently, so a newer
+build on one row does not apply to the others. The Measured column
+gives the date of the newest run still contributing cells to the row,
+because a partial rerun replaces the cells of an older depth series
+one by one.
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|
@@ -297,8 +302,8 @@ ladders cell by cell).
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is **ds4-server** (antirez's
-dwarfstar DeepSeek-V4 server, ignore-eos patched), not llama.cpp --
+This model's comparison engine is the dwarfstar ds4-server by
+antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
 llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
 gmlx / ds4-server.
 

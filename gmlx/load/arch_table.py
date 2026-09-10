@@ -39,6 +39,7 @@ class ArchEntry:
     remap_alias: str     # remap.ARCH_ALIAS target, e.g. "QWEN35MOE" ("" if none)
     notes: str = ""
     backend: str = "mlx-lm"   # which package ships `class Model` (mlx-lm | mlx-vlm)
+    caveat: str = ""          # one user-facing limit, rendered in docs/arch-coverage.md
 
 
 # Archs whose model class lives in mlx-vlm rather than mlx-lm. Almost every text
@@ -100,6 +101,24 @@ _FAMILY_NOTES = {
 }
 
 
+# gguf_arch -> the one limit a user hits with this arch, in one sentence. Rendered
+# as the caveat column of docs/arch-coverage.md; `notes` above is the
+# implementation record and is not rendered.
+_CAVEATS = {
+    "deepseek2": "DeepSeek-V2, with softmax gating, is not supported.",
+    "deepseek4": "Not a llama.cpp conversion. The parity reference is the ds4 engine.",
+    "gemma2": "Pass hf_source for 27B. Output matches the reference only within the 4096 window.",
+    "gemma3": "Pass hf_source for 27B.",
+    "phi3": "Pass hf_source for the 128K long-context variants.",
+    "hy_v3": "Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them.",
+    "hyv4": "No MTP head in the GGUF, so no speculative decoding. --kv-bits is refused.",
+    "qwen4exp": "The MTP head needs the companion GGUF next to the target or --draft-gguf.",
+    "kimi-k3": "The hybrid cache cannot trim, so chat re-prefills on trim.",
+    "glm5next": "The hybrid cache cannot trim, so chat re-prefills on trim.",
+    "minimax-m3": "Indexless GGUFs run dense, exact to 2048 tokens and degrading beyond.",
+}
+
+
 def _build_table() -> dict[str, ArchEntry]:
     table: dict[str, ArchEntry] = {}
     for arch, model_type in config_synth.GGUF_ARCH_TO_MODEL_TYPE.items():
@@ -110,6 +129,7 @@ def _build_table() -> dict[str, ArchEntry]:
             family=family,
             remap_alias=ARCH_ALIAS.get(arch, ""),
             notes=notes,
+            caveat=_CAVEATS.get(arch, ""),
             backend=("mlx-vlm" if arch in _MLX_VLM_BACKED
                      else "mlx-embeddings" if arch in _MLX_EMBEDDINGS_BACKED
                      else "mlx-lm"),

@@ -1,147 +1,105 @@
-# Multimodal (vision-language) GGUF support
+# Vision and audio input
 
-A multimodal model in GGUF is two files:
+This guide is for running a multimodal GGUF, a language model paired with a
+vision or audio tower. It covers the file pairing, usage from the CLI and the
+server, the supported families and the known defects in community files.
 
-1. the LLM GGUF, a normal text architecture, K-quantized as usual; and
-2. a separate `mmproj` GGUF (`general.architecture = "clip"`) holding the
-   vision (and/or audio) encoder plus the cross-modal projector. It ships float
-   or Q8_0. A quantized mmproj's encoder matmuls run on the K-quant kernels like
-   the text tower, while float weights stay native.
+A multimodal model in GGUF is two files. The language model is quantized as
+usual, and a companion `mmproj` GGUF holds the encoder and the projector.
+Hugging Face repos ship the companion as an `mmproj-*.gguf` sibling of the
+language model, and `gmlx validate` recognizes one and names the file it
+pairs with. Vision and audio support is in the base install, and the
+language model GGUF alone still loads and runs as a plain text model.
 
-`gmlx` pairs them with `--mmproj` and loads an [mlx-vlm](https://github.com/Blaizzy/mlx-vlm)
-`Model`: the text tower runs on the K-quant kernels exactly as in text-only mode, the
-encoders run in float, and the image processor + chat template (including the
-per-family image/audio marker tokens) are synthesized from the two GGUFs' metadata.
-`--hf-source` overrides only when a file omits something.
-
-Vision and audio support is included in the base install, no extra needed.
-
-Where mmproj files come from: llama.cpp-style multimodal GGUF repos ship them
-as `mmproj-*.gguf` siblings of the LLM GGUF in the same Hugging Face repo.
-`gmlx validate` recognizes one as a companion and tells you to pair it with
-its LLM GGUF via `--mmproj`.
+`--mmproj` pairs the two. The text tower runs on the K-quant kernels exactly
+as in text-only mode, and so do the matmuls of a quantized encoder, while
+float encoder weights stay native. The image processor and chat template are
+built from the metadata of the two files, and `--hf-source` fills in only
+what a file omits.
 
 ## Usage
 
 ```sh
-# one-shot generation with an image (or a URL)
+# one-shot generation with an image file or URL
 gmlx run model.gguf --mmproj mmproj.gguf --image photo.jpg --prompt "What is this?"
 
-# interactive multimodal chat: /image, /audio, or just drag a file into the prompt
+# interactive chat with /image, /audio, or a file dragged into the prompt
 gmlx chat model.gguf --mmproj mmproj.gguf
 
-# serve it (single model, or `mmproj:` per model in the YAML config)
+# serve one model with its companion. A config pairs them with mmproj: per model
 gmlx serve model.gguf --mmproj mmproj.gguf --port 8080
 ```
 
-`--resize-shape N|WxH` resizes images before encoding, setting the soft-token count
-that dominates prefill cost. Unset, images encode at native resolution. A
-square cap like `448` (or an explicit `672x448`) is a typical choice when prefill
-cost matters. Audio input (`--audio`, `/audio`) works where the
-mmproj carries an audio encoder (gemma-4 omni, Qwen3-Omni). Vision-only mmprojs
-reject it. Full flag reference: [docs/cli.md](cli.md); server config:
-[docs/server-config.md](server-config.md).
+The flags are under [gmlx run](cli.md#gmlx-run), the request shape under
+[Vision messages](api.md#vision-messages) and the per-model key under
+[models](server-config.md#models).
+
+Images encode at native resolution unless `--resize-shape` shrinks them
+first. The size after resizing decides how many soft tokens an image expands
+to, and those tokens dominate prefill cost, so a square cap such as `448` is
+the usual choice when prefill time matters more than fine detail.
+
+Audio works the same way on a companion that carries an audio encoder, as
+with gemma-4 omni and Qwen3-Omni. `--audio` on `run` and `/audio` in chat
+attach a clip to the next turn.
 
 ## Supported families
 
-The mmproj's `clip.*` metadata names the projector; the LLM arch disambiguates
-families that share one. An unsupported pairing fails loudly at load with both names.
+The companion's `clip.*` metadata names the projector. Where several
+families share a projector, the language model's architecture tells them
+apart, and an unsupported pairing fails at load with the projector and
+architecture it found in the error.
 
-| Family | Projector / arch | Examples |
-|--------|------------------|----------|
-| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B (processor needs `--hf-source`, see below) |
-| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B (see defect note below) |
-| Qwen3.5 / 3.6 | `qwen3vl_merger` + `qwen35`/`qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL (dense + MoE) |
-| Qwen3-Omni | `qwen3vl_merger` + `qwen3vlmoe` | Qwen3-Omni (vision + audio) |
-| gemma-4 omni | `gemma4v`/`gemma4a` | gemma-4-E2B / E4B (vision + audio) |
-| gemma-4 unified | `gemma4uv` | gemma-4-12B (encoder-free unified embedder) |
-| Muse Glimmer | `muse-glimmer` + `muse-glimmer` | Muse-Glimmer-30B |
-| Kimi K2.5 / K2.7 | `kimik25` + `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code |
-| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` + `deepseek4` | DeepSeek-V4-Flash-Vision-Exp (unsloth UD) |
+| Family | Projector and arch | Examples | Notes |
+|--------|--------------------|----------|-------|
+| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | pass `--hf-source llava-hf/llava-1.5-7b-hf`, because the image processor is not in the GGUF |
+| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | vision quality limited by a conversion defect, described under Known GGUF defects |
+| Qwen3.5 and 3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
+| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | vision and audio, experimental. Text on the thinker tower is reliable |
+| gemma-4 omni | `gemma4v`, `gemma4a` | gemma-4-E2B, E4B | vision and audio |
+| gemma-4 unified | `gemma4uv` | gemma-4-12B | encoder-free unified embedder |
+| Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | vision tower and processor implemented in gmlx, so no `--hf-source` is needed |
+| Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | over-RAM MoE, needs `--stream-experts` |
+| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | the unsloth UD builds | differs in a few ways, described below |
 
-Muse Glimmer's vision tower and image processor are implemented in gmlx. Neither
-mlx-vlm nor the installed transformers ships the family, so the preprocessing
-ports llama.cpp's `mtmd_image_preprocessor_muse_glimmer`. `--hf-source` is not
-needed.
+Qwen2-VL and Qwen2.5-VL companions, projector `qwen2vl_merger`, are not
+supported yet. That load fails immediately and the error names the family.
+On LLaVA the loader reports two unfilled `post_layernorm` parameters, which
+is expected: the conversion omits them and LLaVA never uses them.
 
-Kimi K2.x pairs its MoonViT mmproj with the `deepseek2` text tower. The
-converter rewrites the vision Q/K into the split 2-D RoPE layout that
-llama.cpp's `build_rope_2d` reads. The remap puts them back into the
-interleaved layout of MoonViT. A mis-decoded mmproj thus gives confidently
-wrong image descriptions, and not a load error. GLM-5.2-V has the same vision
-encoder on a different text arch, and gmlx refuses it by name. K2.x is an
-over-RAM MoE, so it needs the streaming placement in the caveats below.
+DeepSeek-V4-Flash-Vision-Exp differs from the other families in three
+ways. First, image turns need an unquantized KV cache and run one at a time
+on the server, so `--kv-bits` applies to text turns only. Second, each
+image expands to a block of up to 384 tokens that prefills as one chunk,
+and the prompt cache keys on those blocks, so a conversation that repeats
+its earlier image turns verbatim hits the cache. Third, its text output is
+not token-for-token comparable with the text-only release.
 
-Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
-load fails up front with the family named. LLaVA's image processor isn't
-synthesized from the GGUF. Pass the checkpoint's HF id (e.g.
-`--hf-source llava-hf/llava-1.5-7b-hf`) so the processor loads from there. On
-LLaVA the loader reports two unfilled parameters
-(`vision_tower.[...].post_layernorm.{weight,bias}`). This is expected: llama.cpp's
-mmproj conversion omits CLIP's `post_ln`, and LLaVA never uses it. Features
-come from the raw penultimate layer (`vision_feature_layer = -2`), while
-`post_layernorm` only touches the final pooled output.
+## Combining with other features
 
-## Known upstream conversion defects
+| Combination | Result |
+|-------------|--------|
+| `--stream-experts` | works with one request in flight. The text tower streams and the vision tower stays on the GPU |
+| `--stream-cpu` | refused, because that placement would move the vision tower to the CPU too |
+| `--speculative` | works with any drafter: a native head, a `--draft-gguf` companion or an autodetected one. Text turns speculate and media turns decode plain |
+| `--adapter` | refused, because live LoRA is text-path only |
 
-Some community mmproj GGUFs are mis-converted upstream (in llama.cpp's
-`convert_hf_to_gguf.py --mmproj`), independent of this loader. The tell is that
-both this loader and llama.cpp's own `llama-mtmd-cli` produce degraded vision
-output from the same file, while the native (HF- or MLX-converted) weights of
-the same checkpoint render correctly, so the defect lives in the GGUF, not the
-consumer.
+The two front ends place media differently. `chat` keeps each image on the
+turn that sent it, so a later question about an earlier image is answered
+against the right history, but once media enters a conversation every turn
+re-prefills the whole transcript and re-encodes the media, because the
+KV-cached fast path is text-only. The serve chat endpoint instead renders all
+of a conversation's images on its last user message, so a follow-up after an
+image turn misses the prompt cache from the point where the images moved.
 
-- Pixtral (`projector_type = pixtral`): the vision attention `q`/`k`
-  projection weights are mangled by a RoPE-permutation mismatch in the mmproj
-  conversion. Pixtral's ViT uses 2-D RoPE, and the conversion's q/k layout doesn't
-  match it. The corruption is isolated to `v.blk.N.attn_q` / `attn_k` across
-  every block. `attn_v` / `attn_out`, the FFN, every norm, the patch conv, and
-  the projector are faithful at cosine >= 0.99 vs the native weights, which is
-  how the defect was localized. The standard 1-D RoPE un-permute only partially
-  realigns q/k, so there is no clean loader-side inverse, and llama.cpp's `mtmd`
-  shows the same degradation on the same file. This is separate from the
-  already-merged `image_std` mean/std fix (llama.cpp #13208). Current community
-  mmproj files carry that fix. GGUF Pixtral vision quality is capped until a
-  re-converted mmproj appears. The text tower is unaffected.
+## Known GGUF defects
 
-## Caveats
+Some community companion files are mis-converted upstream, independent of
+this loader. You can recognize one because llama.cpp's multimodal CLI
+produces the same degraded output from the same file, while the native
+weights of the same checkpoint render correctly.
 
-- A multimodal request needs the mmproj at load. The bare LLM GGUF still loads and
-  runs as a plain text model (the vision side is simply absent).
-- Adapters (`--adapter`) don't combine with `--mmproj` yet -- live GGUF LoRA is
-  text-path-only and errors loudly.
-- You can use `--stream-experts` (server key `stream: experts`) with
-  `--mmproj`. Use this combination for an over-RAM multimodal MoE. gmlx puts
-  the placement on the text tower after it loads the model, and the vision
-  tower stays on the GPU. You cannot use `--stream-cpu` (server key
-  `stream: cpu`) with `--mmproj`. That mode moves the process to the CPU
-  device, and it moves the vision tower with it. Send only one request at a
-  time to a server that streams a VLM (see [streaming.md](streaming.md)).
-- Speculative decoding (`--speculative`) *does* combine with `--mmproj` when a drafter
-  is available -- a native MTP head (e.g. Qwen3.5/3.6), a `--draft-gguf` companion
-  (gemma4 assistant, DFlash/DFlash2, qwen4exp-mtp), or an autodetected companion
-  for a companion-only family (Qwen3.8-Flash-Next, Muse Glimmer). Text-only turns
-  speculate; media turns fall back to plain decode. Every drafter shape the text
-  path supports works on the VLM path. With `--mmproj` but no drafter source,
-  `--speculative` still errors loudly (it suggests `--draft-gguf`).
-- Qwen3-Omni multimodal generation rides mlx-vlm's `qwen3_omni_moe` path, which we
-  have found unreliable in stock mlx-vlm. Treat vision/audio input on Omni as
-  experimental. Text generation on the Omni thinker tower is solid.
-- DeepSeek-V4-Flash-Vision-Exp:
-  - Image turns run one request at a time and need unquantized KV;
-    `--kv-bits` applies to text turns only.
-  - Each image expands to a block of up to 384 tokens that prefills in one
-    chunk. A chunk boundary that would cut a block moves to the block edge.
-  - Prefix caching keys on the expanded blocks. A conversation that repeats
-    its earlier image turns verbatim hits the cache; one that re-renders
-    them re-prefills from the first changed block.
-  - Text output is not token-for-token comparable with the 0731 text
-    release (rms eps 1e-20 vs 1e-6).
-  - The 0731 DSpark sidecar pairs as a text-turn drafter via `--draft-gguf`.
-    Measure its acceptance; it was trained on the 0731 trunk.
-  - llama.cpp attends a block's lead pads bidirectionally; gmlx follows the
-    reference and keeps them causal.
-- The serve chat endpoint renders every image of a conversation on its last
-  user message (stock mlx-vlm rendering, every VLM), so a follow-up turn
-  after an image turn re-prefills from the moved block. `chat` pins each
-  image to its own turn and keeps the prefix.
+Pixtral companions carry corrupted vision attention q and k projections
+from a RoPE layout mismatch in the conversion. There is no exact
+loader-side inverse, so GGUF Pixtral vision quality is limited until a
+re-converted companion appears. The text tower is unaffected.

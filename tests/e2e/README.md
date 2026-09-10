@@ -154,7 +154,7 @@ phase: load/unload/reload cycles (wired memory and the priced footprint return, 
 budget line matches the planner), arena warmth and a wired-memory transient from another
 process (`memhog.py`), a box that is already occupied at load, co-residency beside a
 dense model with a capped arena, and a load beside a model that is decoding. See
-`docs/testing.md`.
+`docs/internals/testing.md`.
 
 A scenario whose models aren't present is **skipped**, so the harness runs on a partial
 library — the structural + small-model tiers light up as soon as the public models are on

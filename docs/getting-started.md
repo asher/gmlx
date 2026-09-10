@@ -1,107 +1,83 @@
 # Getting started
 
-This guide takes you from nothing to a running model: install, download a GGUF (the
-single-file model format the open-model ecosystem publishes on Hugging Face), chat
-with it, stand up the server, and connect a client. Each step ends in something you
-can use, so stop wherever your needs are met.
+This guide takes you from a fresh Mac to a served model with a client
+connected: install gmlx, generate once, pick a model that suits your
+machine, set up the server, call it over HTTP and connect a tool to it. Each
+section ends in something usable, so you can stop wherever your needs are
+met. The last two sections point onward to the browser app, voice and the
+login item.
+
+- [What you need](#what-you-need)
+- [Install](#install)
+- [First generation](#first-generation)
+- [Pick a model for your Mac](#pick-a-model-for-your-mac)
+- [Set up the server](#set-up-the-server)
+- [Talk to it over HTTP](#talk-to-it-over-http)
+- [Connect a client](#connect-a-client)
+- [Chat in your browser](#chat-in-your-browser)
+- [Voice and the login item](#voice-and-the-login-item)
+- [When something fails](#when-something-fails)
 
 ## What you need
 
-- An Apple Silicon Mac (any M-series chip).
-- Python 3.11 or newer. Installing with `uv` or `pipx` fetches one for you.
-- Disk space for models.
-- macOS 26 or newer, recommended: the Metal kernels then install as a
-  prebuilt wheel. On older macOS versions the install compiles them from
-  source, which needs full Xcode with its Metal toolchain; the Command Line
-  Tools alone do not include the `metal` compiler. Recent Xcode versions
-  fetch that toolchain as a separate download
-  (`xcodebuild -downloadComponent MetalToolchain`).
-- For voice and the browser chat app: [Homebrew](https://brew.sh), used below
-  to install `ffmpeg`.
-
-gmlx installs like a Python developer tool - a terminal is assumed
-throughout.
-
-A running model costs memory in two parts: the weights, roughly the GGUF file size,
-and the KV cache, which grows with context length.
-[Pick a model for your Mac](#pick-a-model-for-your-mac) has per-machine suggestions
-and the arithmetic for estimating the cache.
+- Any Apple Silicon Mac. [Pick a model for your Mac](#pick-a-model-for-your-mac)
+  has suggestions for each memory size.
+- macOS 26.2 or newer is recommended, because the Metal kernels then install
+  as a prebuilt wheel. On older versions the install compiles them, which
+  needs full Xcode with its Metal toolchain, not the Command Line Tools
+  alone. Recent Xcode fetches the toolchain with
+  `xcodebuild -downloadComponent MetalToolchain`.
+- Python 3.11 or newer, which uv or pipx fetches for you.
+- Disk space for models, plus [Homebrew](https://brew.sh) if you want voice.
 
 ## Install
 
 ```sh
-uv tool install "gmlx[all]"
+uv tool install "gmlx[all]"      # or: pip install "gmlx[all]"
 brew install ffmpeg              # voice and non-wav audio only
 ```
 
-That is the whole install. `gmlx` lands on your PATH in every terminal, in an
-isolated environment, with a suitable Python fetched for it, and `[all]` turns
-on every optional feature.
-[uv](https://docs.astral.sh/uv/) itself is one command
-(`brew install uv`, or `curl -LsSf https://astral.sh/uv/install.sh | sh`);
-`pipx install "gmlx[all]"` behaves the same way. Upgrade later with
-`uv tool upgrade gmlx` (or `pipx upgrade gmlx`).
+uv puts the `gmlx` command on your PATH in an isolated environment and fetches
+a suitable Python for it, and pipx behaves the same way. Install
+[uv](https://docs.astral.sh/uv/) with `brew install uv`, and upgrade later
+with `uv tool upgrade gmlx`. The pip form installs into a venv you manage
+yourself, so the command exists only while that venv is active. If a new
+terminal cannot find `gmlx`,
+[troubleshooting.md](troubleshooting.md#gmlx-command-not-found-in-a-new-terminal)
+explains.
 
-`ffmpeg` is the one dependency no Python installer can supply. It is needed
-only to decode audio uploads and to encode mp3/flac/opus. Skip it if you are
-not using voice.
+`[all]` turns on all optional features. The core install already serves, loads
+vision models, embeds and runs the menu bar, which leaves few extras:
 
-To install less, name the extras you want instead of `all` - `gmlx[chat]` is
-the common choice, giving up only voice and the assistant. `gmlx init` offers
-to add the rest later ([adding an extra](#the-extras) below).
+| Extra | Adds |
+|-------|------|
+| `chat` | line editing, history and rich rendering in `gmlx chat` |
+| `stt` | server speech-to-text with mlx-whisper |
+| `tts` | server text-to-speech with the Kokoro phoneme front end |
+| `talk` | voice chat, including `stt` and `tts` |
+| `assistant` | MCP tools for the built-in [assistant](assistant.md) |
+| `all` | everything above |
 
-A plain venv you manage yourself works as well:
+`gmlx[chat]` is the smaller choice, omitting only voice and the assistant.
+To add an extra later, run the install command again with the new extra, in
+the same form you used the first time. You rarely have to remember that:
+`gmlx init` offers to install the extra for each service you turn on, and
+any "not installed" message names the command.
+
+ffmpeg is the one dependency that no Python installer supplies. It decodes
+audio uploads and encodes mp3, flac and opus, so it is needed for voice and
+for any audio that is not wav.
+
+Tab completion needs this line in `~/.zshrc`, with bash and fish variants
+available:
 
 ```sh
-mkdir ~/gmlx && cd ~/gmlx
-python3 -m venv .venv && source .venv/bin/activate
-pip install "gmlx[all]"
+eval "$(gmlx completion zsh)"
 ```
 
-Installed this way, the `gmlx` command exists only while the venv is active:
-run `source ~/gmlx/.venv/bin/activate` in each new terminal. A
-`command not found: gmlx` means only that. The `uv tool` and pipx routes have
-no such step.
+It completes verbs, flags, your model ids and the ports of running servers.
 
-The `mlx-kquant` dependency (the Metal kernels) arrives
-as a prebuilt wheel from PyPI on macOS 26 and newer. On older macOS versions
-the install builds it from source: the full-Xcode requirement from
-[What you need](#what-you-need), and a few minutes of compile time.
-
-Tab completion is worth the one line: add `eval "$(gmlx completion zsh)"` to
-`~/.zshrc` (there are `bash` and `fish` variants). It completes verbs, flags, your
-config's model ids, and the host and port of any running server.
-
-### The extras
-
-All optional:
-
-| Extra | Adds | Needed for |
-|-------|------|------------|
-| `chat` | prompt_toolkit line editor, rich | nicer `gmlx chat` |
-| `stt` | mlx-whisper (plus ffmpeg on PATH) | server speech-to-text |
-| `tts` | spaCy-backed phoneme front-end (plus ffmpeg for non-wav) | server text-to-speech |
-| `talk` | client audio + wake word, includes stt and tts | `gmlx talk` voice chat |
-| `assistant` | the MCP SDK | tools for the built-in [assistant](assistant.md) (talk, `chat --assistant`, served assistants) |
-| `all` | chat + talk + assistant in one | every optional feature |
-
-Every extra runs on any supported Python, 3.11 through 3.14.
-
-Adding one later depends on how gmlx was installed: `pip install 'gmlx[X]'`
-in a venv, but a `uv tool` or pipx environment is owned by its installer and
-takes a different command. These docs write the pip form for brevity. To get
-the right one for your machine, run `gmlx init`, which offers to install what
-it needs, or read it off any "not installed" message - both name the command
-that works where you are.
-
-`vlm` and `embeddings` exist as empty back-compat extras: multimodal loading and the
-embeddings endpoint are part of the core install. mlx-audio itself already arrives
-with the core install. The `tts` extra pins it and adds the
-grapheme-to-phoneme front-end the default Kokoro voice needs. That front-end
-also wants a spaCy English pipeline, which gmlx fetches from Hugging Face on
-first use - no separate install step.
-
-## First generation in two minutes
+## First generation
 
 Download a small model into the current directory and run it:
 
@@ -110,151 +86,99 @@ gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
 gmlx run Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
 ```
 
-You should see a one-line load summary (model family, file size, quant, load
-time), the model's
-reply, and a closing line with prompt and generation speeds in tokens per second.
-This model is only 0.4 GB; it exists to prove the pipeline, not to impress.
+You get a one-line load summary, the reply, and a closing line with prompt
+and generation speed in tokens per second. At 0.4 GB this model is here to
+verify the install, not for its quality.
 
-Chat is the same file, interactive:
+The same file also runs as an interactive chat:
 
 ```sh
 gmlx chat Qwen3-0.6B-Q4_K_M.gguf
 ```
 
-Multi-turn, with the KV cache kept between turns. Type `/help` inside the REPL for
-the runtime commands (sampling changes, `/undo`, `/retry`, sessions, staging a file
-or shell output into the next message). Esc cancels a reply mid-stream;
-`/exit` (or Ctrl-D) quits.
+The conversation keeps its KV cache between turns, so each turn reads only
+the new message. Type `/help` inside for the commands, Esc to cancel a reply
+and `/exit` to quit. [chat.md](chat.md) describes the rest.
 
-Sampling defaults come from the model family's card, so a bare `run` or `chat` is
-already using the settings the model's authors recommend. `gmlx profiles` prints
-the table. Two words you will meet for adjusting them: built-in *intents*
-(`@coding`, `@creative`, ...) work on any model with no config, while *profiles*
-are your own named setting bundles, defined later in a server config's
-`profiles:` block. Both are addressed the same way, `model@NAME` or
-`--profile NAME`.
+Sampling defaults come from the model family's card, so a bare `run` or
+`chat` already uses the settings the model's authors recommend. Intents such
+as `@coding` and `@creative` switch to the card's other operating points on
+any model, as in `gmlx run model.gguf@creative`, and `gmlx profiles` prints
+the whole table.
 
 ## Pick a model for your Mac
 
-Suggestions by machine memory, all instruct models that load end to end here.
-A quick key to the quant names you will see everywhere: the Q-number is roughly
-bits per weight, so Q4 files are smaller and slightly lossier, Q6/Q8 bigger and
-closer to the original. When and why it matters is in
-[performance.md](performance.md#choosing-a-quant-for-speed).
+The suffix on a GGUF name is its [quant](glossary.md), a trade of file size
+against fidelity. The suggestions below are instruct models that leave
+memory for the KV cache at everyday context lengths.
 
 | Mac RAM | Suggestion | Notes |
-|---------|-----------|-------|
-| 16 GB | Qwen3-4B (Q4_K_M, ~2.5 GB) | fast, capable small model |
-| 32 GB | Qwen3.5-9B (Q6_K, ~8 GB) | native MTP head: speculative decoding is automatic |
-| 64 GB | Qwen3.6-27B (Q6_K, ~23 GB) | strong general model; also the tool-calling pick |
-| 96+ GB | Qwen3.6-35B-A3B (Q6_K) or gpt-oss-120b (MXFP4, ~63 GB) | MoE models: big-model quality, small-model decode cost |
+|---------|------------|-------|
+| 16 GB | Qwen3-4B, Q4_K_M, 2.5 GB | fast, capable small model |
+| 32 GB | Qwen3.5-9B, Q6_K, 8 GB | has a draft head, so speculative decoding is automatic |
+| 64 GB | Qwen3.6-27B, Q6_K, 23 GB | strong general model and the recommended tool-calling model |
+| 96 GB and up | Qwen3.6-35B-A3B, Q6_K, 29 GB, or gpt-oss-120b, MXFP4, 63 GB | MoE models: big-model quality at small-model decode speed |
 
-These sizes leave room for the KV cache at everyday context lengths.
-[Will it fit?](#will-it-fit) below has the per-token arithmetic and the
-`--kv-bits` lever for long sessions.
+A running model needs memory for its weights, roughly the file size, and
+for the KV cache, which grows with the conversation and in a long session
+can reach the size of the weights. The per-token arithmetic, the families
+that use less memory than it suggests, and the `--kv-bits` and
+`--kv-quant-scheme` flags are all in
+[performance.md](performance.md#memory-and-the-kv-cache). A MoE model larger
+than RAM can still run by streaming its experts from disk, and
+[streaming.md](streaming.md) has the fit calculation for that case.
 
-Two habits save time and disk:
+Two commands save time and disk.
 
 ```sh
-# check a file will load BEFORE downloading gigabytes (reads only the header)
-gmlx validate hf:unsloth/Qwen3.6-27B-GGUF
-
-# then pull the variant you picked (sharded downloads resume if interrupted)
+gmlx validate hf:unsloth/Qwen3.6-27B-GGUF          # lists every quant with a fits verdict
 gmlx pull hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q6_K.gguf --to ~/models
 ```
 
-`--to` says where the file lands, and it is required only until a config exists
-(next section). After that, bare `pull` lands files in your model directory,
-registers them in the config, and a running server serves them immediately.
-`gmlx sync-models` reconciles in bulk after hand-moving or deleting files. These
-are multi-gigabyte downloads - minutes to an hour depending on your connection -
-with progress, rate, and resume built in.
+`validate` downloads only the header, a few megabytes, and names the codec
+when a file cannot load. `pull` resumes an interrupted download and, once a
+config exists, writes to your model directory and registers the file, so
+`--to` is only for this pre-config stage. Gated repositories need
+`HF_TOKEN`, as
+[troubleshooting.md](troubleshooting.md#a-gated-or-private-repo-will-not-download)
+describes.
 
-`validate` accepts a repo, a folder, a pasted browser link, or an exact file. Given
-a repo it lists every quant variant as a ready-to-paste ref. K-quant, legacy,
-IQ, and structured-ternary (STQ1_0) files all load. In the rare case a file uses
-a codec with no kernel (the plain ternary TQ types, for instance), the verdict
-names it so you can pick another variant. Uniform K-quant files also decode faster than heavily mixed ones.
-
-Set `HF_TOKEN` for gated or private repos. If you already have a model library
-from LM Studio, it serves as-is (the files are plain GGUFs):
-`gmlx init --models-dir ~/.lmstudio/models` in the next section picks it up, and
-the wizard offers the directory on its own. Coming from llama.cpp or Ollama?
-[migrating.md](migrating.md) maps what carries over.
-
-### Will it fit?
-
-Weights cost about the file size. For a standard dense model, the KV cache costs:
-
-```text
-bytes per token = 2 (K and V) x layers x kv_heads x head_dim x 2 (bf16)
-```
-
-An 8B-class model (32 layers, 8 KV heads, head dim 128) uses 128 KB per token of
-context, so a 32k-token session adds 4 GB on top of the weights. The layer and
-head counts are in the GGUF metadata, and the model card lists them too.
-
-If weights plus cache crowd your RAM, quantize the cache: `--kv-bits 8` roughly
-halves it at nearly no quality cost. Several families (sliding-window,
-hybrid linear-attention, MLA) are much cheaper than the formula suggests.
-More worked numbers, the cheaper families, and the rest of the levers:
-[performance.md](performance.md#memory-and-the-kv-cache).
-
-A MoE model larger than RAM can still run. `--stream-experts` keeps the
-every-token weights resident and streams the routed experts from disk.
-The fit rule for that mode is different: the every-token weights and the
-KV room must fit under the memory ceiling, and the file size does not
-matter. See
-[streaming.md](streaming.md#how-big-a-model-can-this-box-stream).
-`gmlx validate <file>` prints the verdict for this Mac.
+If you already have models from LM Studio, Ollama or llama.cpp,
+[migrating.md](migrating.md) says which of them serve as they are and what
+else transfers.
 
 ## Set up the server
 
-`gmlx init` scaffolds the config. Run bare in a terminal, it opens a guided wizard
-that walks through:
-
-1. Model directories to scan (recursive optional), plus your local Hugging Face
-   cache if it holds GGUFs.
-2. The discovered models: rename ids, drop entries, mark a default, add aliases.
-3. A per-family sampling summary, with an optional default intent per family.
-4. The on-disk prompt cache (recommended for coding agents) and its size cap.
-5. Optional services: speech-to-text, text-to-speech, embeddings, reranking. If you
-   configure both STT and TTS, a voice-chat step follows.
-6. Idle unload (how long an unused model stays resident) and a request timeout.
-7. Where to write the file, with a preview before anything is saved.
-
-Prefer flags? `gmlx init --models-dir ~/models` scaffolds non-interactively, and
-every wizard choice has a flag equivalent (`--with-stt`, `--disk-cache`,
-`--default-model`, and so on).
-
-The config lands at `~/.config/gmlx/gmlx.yaml`. It is one YAML file with a
-`server:` block (port, model directories, services), a `models:` block (one entry
-per model: path, optional per-model settings), and optional `profiles:`, `rules:`,
-`aliases:`, and `talk:` blocks. Every optional key appears as a commented hint with
-its default, so the file documents itself. The full reference is
-[server-config.md](server-config.md).
-
-Then:
+`gmlx init` writes the config that all the other commands read. Run with no
+arguments it opens a wizard, which scans your model folders, lets you rename
+ids and set a default, offers the on-disk prompt cache and the speech,
+embedding and rerank services, and asks about idle unload. It previews the
+file before writing it to `~/.config/gmlx/gmlx.yaml`. Each choice has a flag,
+so `gmlx init --models-dir ~/models` writes the config with no questions.
 
 ```sh
-gmlx serve            # finds the config, detaches, returns immediately
+gmlx init
+gmlx serve            # finds the config, detaches, returns
 gmlx status           # pid, uptime, url
-gmlx ps               # which models are resident right now
-gmlx logs -n 20 -f    # follow the server log
-gmlx stop             # shut it down
+gmlx ps               # which models are resident
+gmlx logs -n 20 -f    # follow the log
+gmlx stop
 ```
 
-`serve` runs in the background by default so you keep your shell (pass `-f` to stay
-attached). On a macOS GUI session it also raises a small menu-bar monitor showing
-the resident models, with unload, restart, log, and config-editing controls.
+The file has a `server` block, a `models` block with an entry for each model,
+and optional `profiles`, `rules` and `aliases`. Optional keys appear as
+commented hints with their defaults, and [server-config.md](server-config.md)
+is the reference for all of them.
+
+`serve` runs in the background so you keep your shell. On a macOS desktop it
+also starts a small [menu bar app](menubar.md) showing what is resident.
 
 ## Talk to it over HTTP
 
-The server speaks the OpenAI API (plus Anthropic and OpenAI Responses on the same
-port). The `model` field is whatever id `init` printed for your file - auto-named
-ids carry the quant tag (`qwen3-0.6b-q4`, `qwen3.6-27b-q6`). `gmlx list` shows
-them, and an unknown id gets a 404 listing the valid ones. With the small model
-from the walkthrough above:
+The server implements the OpenAI, Anthropic and OpenAI Responses APIs on a
+single port. Set the `model` field to the id that `init` printed, quant tag
+included, such as `qwen3-0.6b-q4`. If you have forgotten them, `gmlx list`
+shows the ids.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -263,13 +187,9 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Add `"stream": true` for server-sent events. The `model` field takes any id from
-your config, an alias, or `id@intent` to switch the sampling operating point per
-request (`qwen3.6-27b@coding`, `@instruct`, `@creative`, and friends; `gmlx
-profiles` lists them).
-
-From Python, the standard OpenAI client works unchanged
-(`pip install openai` - it is not a gmlx dependency):
+Add `"stream": true` for server-sent events, or append `@coding` or another
+intent to the id to switch sampling for that request. From Python the
+standard OpenAI client works unchanged:
 
 ```python
 from openai import OpenAI
@@ -282,150 +202,44 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
-Tool calling, structured output (`response_format: json_schema`), logprobs, and
-vision messages all work over this API; see
-[server-config.md](server-config.md#api-capabilities).
+Tool calling, structured output, logprobs and vision messages all work over
+this API. [api.md](api.md) has the endpoints and request formats.
 
 ## Connect a client
 
-`gmlx launch` points an external tool at your server and starts the server first if
-it is down. For example, Claude Code on a local model:
+`gmlx launch` configures an external tool to use your server and starts the
+server first if it is not running:
 
 ```sh
-gmlx launch claude-code --model qwen3.6-27b
+gmlx launch pi --model qwen3.6-27b
 ```
 
-launch exports the environment Claude Code needs (its Anthropic-API base URL and
-model), starts your server if necessary with a spinner while the model loads, and
-execs `claude`. Your `~/.claude` configuration is never touched. The same one-liner
-works for opencode, pi, omp, hermes, goose, the aichat and elia chat clients, and
-the Open WebUI browser app. Per-client details: [launch.md](launch.md).
+This adds a provider block for your server to pi's own settings and keeps
+the providers already there. It then waits for the model to load and runs
+`pi`. The same one-liner works for the other coding agents and chat clients
+that [launch.md](launch.md) covers.
 
 ## Chat in your browser
 
-If you would rather click than type in a terminal, Open WebUI gives you a
-ChatGPT-style browser app on top of your server. It is a separate program with
-its own install (it needs Python 3.11 or 3.12):
+Open WebUI is a ChatGPT-style browser app that can use your server. It is a
+separate program with its own install, but once it is there `gmlx launch
+open-webui` starts your server if needed, configures the app to use it and
+prints the URL. Chat works at once, and document upload and voice become
+available when the server also runs embeddings and speech.
+[launch.md](launch.md#open-webui) has the install and the single-user setup.
 
-```sh
-brew install pipx           # once, if you don't have pipx
-pipx install open-webui --python python3.12
-gmlx launch open-webui
-```
+## Voice and the login item
 
-`launch` starts your gmlx server if needed, wires Open WebUI to it, runs it on
-port 3000, and prints the URL to open. Chat works immediately. If your server
-also runs embeddings, speech-to-text, or text-to-speech, document upload and
-voice light up too. Details, including a no-login single-user setup:
-[launch.md](launch.md#open-webui).
+With the `talk` extra and speech services configured, `gmlx talk` is a
+hands-free voice loop: you say the wake phrase and ask, and the reply is
+spoken as it streams. [talk.md](talk.md) covers it. To keep the server and
+the menu bar running from login, install them as a login item with
+`gmlx service install`, as [menubar.md](menubar.md) describes.
 
-## Optional: voice
+## When something fails
 
-With the `[talk]` extra installed and STT + TTS configured (the init wizard offers
-both), `gmlx talk` runs a hands-free voice loop against your server: say the wake
-phrase, ask, and the reply is spoken back as it streams. The built-in
-[assistant](assistant.md) (`talk.brain: assistant`) adds MCP tools and long-term
-memory. Setup and worked examples: [talk.md](talk.md).
-
-## Run it at login
-
-```sh
-gmlx service install    # menu bar at login; it starts the server when needed
-gmlx service status
-gmlx service uninstall  # remove the login item
-```
-
-macOS only. `service install` accepts the same options as `serve`. The menu
-bar runs as the launchd agent (so its permission prompts attribute to gmlx)
-and starts the recorded server once per login. `--no-autostart` leaves the
-server to its Start menu item, and `--headless` installs a server-only agent
-for GUI-less machines (that one restarts on crash and is stopped with
-`service uninstall`).
-
-## Where things live on disk
-
-| Path | Contents |
-|------|----------|
-| `~/.config/gmlx/gmlx.yaml` | your config |
-| `~/.config/gmlx/` | client configs written by `gmlx launch` |
-| `~/.cache/gmlx/` | server runfiles and logs, chat line-editor history, GGUF header cache |
-| `~/.cache/gmlx/apc/` | the on-disk prompt cache, when enabled |
-| `~/.cache/gmlx/talk/` | wake-word and voice-activity models (a few MB, first `talk` run) |
-| `~/.local/share/gmlx/chats/` | saved chat sessions (`--resume`, `/save`) |
-| `~/.local/share/gmlx/assistant-memory.db` | the assistant's long-term memory (served assistants get their own `assistant-<id>.db` beside it) |
-| `~/Library/Application Support/gmlx/` | the menu-bar app bundle (created on first `serve`/`service install` on macOS) |
-| `~/Library/LaunchAgents/com.gmlx.*.plist` | the login items written by `gmlx service install` |
-| `~/.open-webui/` | Open WebUI's chat history, if you use `gmlx launch open-webui` |
-| your model directories | the GGUFs themselves; `pull` writes here |
-
-To remove gmlx completely: `gmlx service uninstall` if installed (that removes
-the LaunchAgents), delete the directories above, delete the models you pulled,
-and `pip uninstall gmlx mlx-kquant`.
-
-## When something goes wrong
-
-The common first-run problems, each with a fix in
-[troubleshooting.md](troubleshooting.md): the install fails building the Metal
-kernels on an older macOS, `gmlx` is "command not found" in a new terminal (the
-venv is not active), a download was interrupted or the disk filled, a file
-refuses to load because of IQ codecs, Whisper complains about ffmpeg, the mic
-permission prompt never appeared, port 8080 is already in use, or the first
-request after a cold start is slow because the model was loading. For anything
-else, `gmlx doctor` checks the runtime, config, model paths, and services in one
-pass, and `gmlx logs` shows what the server was doing.
-
-## Glossary
-
-Terms used throughout these docs and on Hugging Face model pages, ordered
-roughly as you will meet them.
-
-- **Open-weight model**: a language model whose weights are published for
-  anyone to download and run - Llama, Qwen, Gemma, DeepSeek, GLM, gpt-oss,
-  and many more. Running one locally keeps the conversation on your Mac.
-- **GGUF**: the single-file format the open-model ecosystem publishes models
-  in. One `.gguf` file is one ready-to-run model (very large ones are split
-  into numbered shards; gmlx treats the set as one file). gmlx runs GGUFs
-  exactly as published, with no conversion step.
-- **Quant (quantization)**: a compressed build of a model. The suffix on a
-  GGUF name - `Q4_K_M`, `Q6_K`, `Q8_0`, `IQ2_M` - says how many bits each
-  weight keeps: the number is roughly bits per weight, so Q4 files are
-  smaller and slightly lossier, Q6/Q8 bigger and closer to the original.
-  Most repos publish one file per quant; you pick the size that fits your
-  RAM ([pick a model](#pick-a-model-for-your-mac)).
-- **Token**: the unit models read and write - a word fragment, on average
-  about three-quarters of an English word. Speeds are quoted in tokens per
-  second (tok/s).
-- **Context**: everything the model is currently considering - your
-  conversation so far, pasted files, its own reply in progress - measured in
-  tokens.
-- **KV cache**: the model's working memory for the context, kept alongside
-  the weights in RAM. It grows with context length, which is why a model
-  whose file barely fits leaves no room for long conversations
-  ([will it fit?](#will-it-fit)); `--kv-bits 8` compresses it.
-- **Prefill and decode**: the two phases of answering. Prefill is reading
-  your prompt (fast, reported separately); decode is generating the reply
-  token by token. `gmlx run`'s closing stats line reports both speeds.
-- **Thinking (reasoning) model**: a model trained to reason step by step
-  before answering, streaming that scratch work inside `<think>` markers.
-  `run` and `chat` style it under a `thinking` label by default
-  (`--reasoning` controls this).
-- **MoE (mixture of experts)**: a model built from many small "expert"
-  sub-networks, of which each token activates only a few, so decode costs
-  what the active fraction costs rather than the full parameter count (the
-  `-A3B` in a name like `35B-A3B` = 3B active parameters). Because most
-  experts are idle on any given token, a MoE bigger than RAM can still run by
-  [streaming experts from disk](streaming.md).
-- **Speculative decoding / MTP**: a small draft predictor proposes several
-  tokens and the full model verifies them in one step - identical output,
-  fewer full-model passes. Some models (qwen3.5/3.6)
-  ship the draft head inside the GGUF ("MTP", multi-token prediction), and
-  gmlx turns it on automatically.
-- **mmproj**: a companion GGUF holding a vision (or audio) tower. Pair it
-  with its LLM GGUF via `--mmproj` and the model can see images
-  ([vlm.md](vlm.md)).
-- **Hugging Face**: the site the open-model ecosystem publishes on.
-  `hf:org/repo/file.gguf` refs throughout these docs point there; `gmlx
-  pull` downloads them.
-- **OpenAI-compatible API**: the de-facto standard HTTP interface for
-  chatting with a model. `gmlx serve` speaks it, and Anthropic's, so clients
-  written for those APIs address a local server unchanged.
+`gmlx doctor` checks the runtime, config, model paths and services in one
+pass and names the fix for anything it flags.
+[troubleshooting.md](troubleshooting.md) lists the failures common in new
+setups, where each file is on disk and how to remove gmlx completely.
+[README.md](README.md) indexes the rest of the docs.

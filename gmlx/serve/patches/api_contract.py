@@ -26,7 +26,7 @@ _MESSAGES_PATHS = ("/messages", "/v1/messages")
 # actually reads the field off the request: the stock handler, the
 # shape-agnostic ``_build_gen_args`` (getattr-based, so it reads these off any
 # request object), or a gmlx server patch. A set-but-unlisted field draws the
-# one-line warning below. The docs/server-config.md "Parameter support" table
+# one-line warning below. The docs/api.md "Parameter support" table
 # is derived from these sets, and tests/serve/test_api_contract.py cross-checks
 # both (and fails when an upstream schema grows a field not classified here),
 # so update table, test, and set together.
@@ -107,7 +107,7 @@ def warn_ignored_fields(path: str, ignored) -> None:
         return
     _log.warning(
         "%s: ignoring unsupported parameter(s): %s "
-        "(see the parameter support table in docs/server-config.md)",
+        "(see the parameter support table in docs/api.md)",
         path, ", ".join(ignored))
 
 
@@ -163,7 +163,7 @@ def _warn_unfulfilled(path: str) -> None:
         "%s: tool_choice requested a forced tool call but none was "
         "parsed from the output; required/named tool_choice is only "
         "honored when the model's chat template implements it "
-        "(see docs/server-config.md)", path)
+        "(see docs/api.md)", path)
 
 
 # Tool-call presence markers in the three dialects' stream chunks: chat SSE
@@ -225,7 +225,7 @@ def _maybe_warn_top_logprobs(path: str, request) -> None:
         _log.warning(
             "%s: top_logprobs=%d exceeds the server cap %d (TOP_LOGPROBS_K, "
             "hard-capped at 20 by the engine), so alternatives beyond the "
-            "cap are omitted (see docs/server-config.md)",
+            "cap are omitted (see docs/api.md)",
             path, want, cap)
 
 

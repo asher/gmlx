@@ -1,77 +1,63 @@
-# Migrating from llama.cpp, Ollama, or LM Studio
+# Migrating from llama.cpp, Ollama or LM Studio
 
-gmlx runs the same GGUF files those tools use, so the models themselves move
-with no conversion. This page maps the rest: what carries over directly, what
-has a different name, and what works differently on purpose.
+gmlx runs the same GGUF files those tools use, so the models themselves are
+reused with no conversion. This page maps the rest: what transfers
+directly, what has a different name and what is different by design.
 
-## Coming from llama.cpp / llama-server
+## Coming from llama.cpp
 
-Your GGUFs work as-is: `gmlx run model.gguf` is the moral equivalent of
-`llama-cli -m model.gguf`, and `gmlx serve model.gguf` of `llama-server`.
-The default port is the same 8080.
-
-Common flag equivalents:
+`gmlx run model.gguf` is the equivalent of `llama-cli -m model.gguf`, and
+`gmlx serve model.gguf` of `llama-server`, on the same default port 8080.
 
 | llama.cpp | gmlx | Notes |
 |-----------|------|-------|
-| `-m model.gguf` | positional `model.gguf` | sharded files: point at the first shard |
-| `-n N` | `--max-tokens N` | default is until-EOS on both |
-| `--temp`, `--top-k`, `--top-p`, `--min-p` | same names | defaults come from each model family's card, so bare `run`/`chat` is already tuned |
-| `-c N` (context size) | none | the window comes from the GGUF's own metadata; `--max-kv-size N` bounds cache memory with a rotating cache instead |
-| `--rope-scaling` / `--yarn-*` | none | metadata-driven; `GMLX_ROPE_FACTORS` exists as an expert escape hatch ([cli.md](cli.md#environment-variables)) |
-| `-ngl` (GPU layers) | none needed | everything runs on the GPU; `--stream-experts` / `--stream-cpu` are the deliberate over-RAM MoE placements ([streaming.md](streaming.md)) |
-| `--cache-type-k/-v q8_0` | `--kv-bits 8` (+ `--kv-group-size`) | same purpose, mlx-lm quantized KV cache |
-| `--draft-model`, `--spec-draft-n-max` | `--draft-gguf`, `--draft-block-size` | native-MTP models (Qwen3.5/3.6, Hy3, DS-V4) need no companion drafter at all |
-| `--chat-template` | `--chat-template STR\|PATH` | per-model in server configs (`overrides: {chat_template: ...}`) |
+| `-m model.gguf` | positional `model.gguf` | for sharded files, point at the first shard |
+| `-n N` | `--max-tokens N` | default is until end-of-sequence on both |
+| `--temp`, `--top-k`, `--top-p`, `--min-p` | same names | defaults come from each model family's card, so bare `run` and `chat` are already tuned |
+| `-c N` | none | the window comes from the GGUF metadata, and `--max-kv-size N` bounds cache memory with a rotating cache |
+| `--rope-scaling`, `--yarn-*` | none | read from the GGUF metadata, with no override |
+| `-ngl` | none needed | everything runs on the GPU, and `--stream-experts` and `--stream-cpu` are the over-RAM MoE placements in [streaming.md](streaming.md) |
+| `--cache-type-k/-v q8_0` | `--kv-bits 8` | same purpose, with `--kv-group-size` |
+| `--draft-model`, `--spec-draft-n-max` | `--draft-gguf`, `--draft-block-size` | models with a native head need no companion drafter |
+| `--chat-template` | `--chat-template STR_OR_PATH` | per model in server configs under `overrides` |
 | `--ignore-eos` | `--ignore-eos` | same benchmarking semantics |
-| `--api-key K` | `server.api_key` in the YAML config | config-only by design, so the key never lands in `ps` output or shell history |
-| `--parallel N` | none | continuous batching admits requests automatically; residency is bounded by `--budget-gb` instead |
-| `--lora adapter` | `--adapter adapter.gguf` | llama.cpp-format adapter GGUFs interop in both directions ([lora.md](lora.md)) |
+| `--api-key K` | `server.api_key` in the config | config-only, so the key never appears in process listings or shell history |
+| `--parallel N` | none | continuous batching admits requests automatically, and `--budget-gb` bounds residency |
+| `--lora adapter` | `--adapter adapter.gguf` | [lora.md](lora.md) covers adapter interoperation in both directions |
 
-`/v1/completions` is served with a minimal surface (single string prompt,
-one choice). `/v1/chat/completions` is the primary route, and Anthropic
-Messages and OpenAI Responses run on the same port. Per-request details:
-[server-config.md](server-config.md#api-capabilities).
+The server speaks the OpenAI, Anthropic Messages and OpenAI Responses APIs
+on one port, and [api.md](api.md) lists what each honors.
 
 ## Coming from Ollama
 
-What carries over: any GGUF you can point at. What does not: Ollama's model
-store and API.
+Any GGUF file on disk can be reused, but Ollama's model store and API do
+not carry over.
 
-- Ollama's library lives as sha-named blobs, not `.gguf` files, so it cannot
-  be pointed at directly. Re-download the models you use with `gmlx pull`
-  (`gmlx validate hf:<org>/<repo>` lists every variant first).
-- gmlx speaks the OpenAI, Anthropic, and OpenAI Responses APIs, not the
-  Ollama API (`/api/generate`, `/api/chat`). Clients configured for an
-  OpenAI-compatible endpoint work unchanged. Ollama-native integrations need
-  their OpenAI mode, pointed at port 8080 (not 11434).
-- Modelfile parameters map onto the YAML config: `num_predict` is the server
-  `--max-tokens` default, sampling knobs live per model or in `profiles:`
-  blocks, and `SYSTEM` becomes `system:` ([server-config.md](server-config.md)).
-- Keep-alive/unload behavior is the residency system: idle TTL, LRU under a
-  byte budget, `--pin` for always-resident models.
+- Ollama's library is stored as sha-named blobs rather than `.gguf` files,
+  and the blobs cannot be served directly. Re-download the models you use
+  with `gmlx pull`.
+  `gmlx validate hf:<org>/<repo>` lists the available quants first.
+- The Ollama API is not implemented. Clients configured for an
+  OpenAI-compatible endpoint work unchanged, and Ollama-native integrations
+  need their OpenAI mode, pointed at port 8080.
+- Modelfile parameters map onto the config in
+  [server-config.md](server-config.md). `num_predict` becomes the
+  `max_tokens` sampling key, set for a model or in `profiles:` like the
+  other sampling keys, and `SYSTEM` becomes `system:`.
+- Keep-alive and unload behavior is the [residency
+  system](server-config.md#residency), with an idle timeout, LRU eviction
+  under a byte budget and `pin` for always-resident models.
 
 ## Coming from LM Studio
 
-Your existing library serves as-is - the files are plain GGUFs:
+Your existing library serves as it is, since the files are plain GGUFs:
 
 ```sh
 gmlx init --models-dir ~/.lmstudio/models -r
 ```
 
-The init wizard also offers the LM Studio directory on its own when it
-exists. Ids, sampling profiles, and a default model are then yours to adjust
-in one YAML file. The local server surface (OpenAI API, `/v1/models`) is the
-same shape LM Studio's is, plus Anthropic Messages on the same port.
-
-## Why serve from gmlx
-
-Beyond the kernel-level speed on K-quants ([performance.md](performance.md)):
-
-- warm config reload (SIGHUP / `POST /v1/reload`) without dropping residents
-- residency controls: byte budget, pinning, idle unload, keep tiers
-- loopback-by-default binding that refuses a wide bind without a key
-- cross-request prompt caching with an optional SSD tier
-- MTP speculative decoding on served models
-- one-command client hookups (`gmlx launch claude-code`, `open-webui`, ...)
-  that never touch your dotfiles ([launch.md](launch.md))
+The init wizard also offers the LM Studio directory unprompted when it
+exists, and ids, sampling profiles and a default model can then be adjusted
+in the YAML file. Clients that used LM Studio's OpenAI-compatible endpoint
+work against this server unchanged, and Anthropic Messages is available on
+the same port.
