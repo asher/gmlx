@@ -43,6 +43,7 @@ import importlib
 import os
 import sys
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
@@ -115,6 +116,68 @@ def _kda_chunk_op():
             pass
         _KDA_CHUNK_OP = op
     return _KDA_CHUNK_OP or None
+
+
+_KDA_CHUNK_GATED_OP = None
+
+
+def _kda_chunk_gated_op():
+    """mlx_kquant.kda_chunk_gated (the decay formed in the kernel) when
+    the chunk route is available and the build carries it, else None."""
+    global _KDA_CHUNK_GATED_OP
+    if _KDA_CHUNK_GATED_OP is None:
+        op = False
+        if _kda_chunk_op() is not None:
+            import mlx_kquant as kq
+            op = getattr(kq, "kda_chunk_gated", None) or False
+        _KDA_CHUNK_GATED_OP = op
+    return _KDA_CHUNK_GATED_OP or None
+
+
+_RMSNORM_GATE_OP = None
+
+
+def _rmsnorm_gate_op():
+    """mlx_kquant.rmsnorm_gate when the build carries it, else None."""
+    global _RMSNORM_GATE_OP
+    if _RMSNORM_GATE_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            op = getattr(kq, "rmsnorm_gate", None) or False
+        except ImportError:
+            pass
+        _RMSNORM_GATE_OP = op
+    return _RMSNORM_GATE_OP or None
+# The three short convs, silu, the l2 norms with their folded scales and
+# the conv tails of a KDA prefill step as one mlx-kquant dispatch each
+# (kda_conv, any GPU and the CPU) instead of the concat, conv1d, silu,
+# rms_norm and multiply chain. GMLX_GLM5_KDA_CONV=0 keeps the eager chain.
+_KDA_CONV = os.environ.get("GMLX_GLM5_KDA_CONV", "1") != "0"
+_KDA_CONV_OP = None
+
+
+def _kda_conv_op():
+    """mlx_kquant.kda_conv when the build carries it, else None."""
+    global _KDA_CONV_OP
+    if _KDA_CONV_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            op = getattr(kq, "kda_conv", None) or False
+        except ImportError:
+            pass
+        _KDA_CONV_OP = op
+    return _KDA_CONV_OP or None
+
+
+@partial(mx.compile, shapeless=True)
+def _kda_out_gate(out, gate, w, eps):
+    # rms_norm over head_dim with the shared weight, then the sigmoid gate;
+    # the sigmoid and the product fuse into one pass.
+    return mx.fast.rms_norm(out, w, eps) * mx.sigmoid(gate)
+
+
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
 # Sparse decode (L <= _ABSORBED_MAX_L) through mlx-kquant's index-gathered
 # attention: one call per step reads every query's selected latent rows
@@ -1089,9 +1152,35 @@ class Glm5NextDeltaAttention(nn.Module):
             cache.advance(T)
             return self.o_proj(y.astype(dtype))
 
-        q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
-        k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
-        v_conv, v_state = self.v_conv(self.v_proj(x), v_state, mask, lengths)
+        conv_op = None
+        if (_KDA_CONV and self._can_kernel and not self.training
+                and lengths is None and self.head_dim in (64, 128, 256)
+                and dtype in (mx.float16, mx.bfloat16)):
+            conv_op = _kda_conv_op()
+        if conv_op is not None:
+            # conv, silu, l2 norm with the folded scale (kimi_linear
+            # convention: l2norm(x) = rms_norm(x)/sqrt(d), q additionally
+            # carries 1/sqrt(d)) and the conv tails in one dispatch each.
+            xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            if mask is not None:
+                xq = mx.where(mask[..., None], xq, 0)
+                xk = mx.where(mask[..., None], xk, 0)
+                xv = mx.where(mask[..., None], xv, 0)
+            if q_state is None:
+                q_state = k_state = v_state = mx.zeros(
+                    (B, self.conv_kernel - 1, self.projection_dim), dtype=dtype)
+            q_conv, q_state = conv_op(
+                xq, q_state, self.q_conv.conv.weight, self.head_dim,
+                self.scale**2, 1e-6)
+            k_conv, k_state = conv_op(
+                xk, k_state, self.k_conv.conv.weight, self.head_dim,
+                self.scale, 1e-6)
+            v_conv, v_state = conv_op(
+                xv, v_state, self.v_conv.conv.weight, self.head_dim, 0.0, 1e-6)
+        else:
+            q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
+            k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
+            v_conv, v_state = self.v_conv(self.v_proj(x), v_state, mask, lengths)
         if cache is not None:
             cache[0] = q_state
             cache[1] = k_state
@@ -1101,10 +1190,10 @@ class Glm5NextDeltaAttention(nn.Module):
         k = k_conv.reshape(B, T, self.num_heads, self.head_dim)
         v = v_conv.reshape(B, T, self.num_heads, self.head_dim)
 
-        # l2-norm with the attention scale folded in (kimi_linear convention:
-        # l2norm(x) = rms_norm(x)/sqrt(d), q additionally carries 1/sqrt(d)).
-        q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-        k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
+        if conv_op is None:
+            # l2-norm with the attention scale folded in.
+            q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+            k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
 
         # Decay: exp(lb * sigmoid(exp(A_log) * (f_b(f_a(x)) + dt_bias))),
         # per key channel. f/g/beta read the layer input, not the conv out.
@@ -1125,7 +1214,16 @@ class Glm5NextDeltaAttention(nn.Module):
                 and self.head_dim == 128
                 and q.dtype in (mx.float16, mx.bfloat16)):
             chunk_op = _kda_chunk_op()
-        if chunk_op is not None:
+        gated_op = None
+        if chunk_op is not None and mask is None and conv_op is not None:
+            gated_op = _kda_chunk_gated_op()
+        if gated_op is not None:
+            # The kernel forms the decay from the gate pre-activation
+            # (exp(A_log) = -a_folded, dt_bias, the lower bound) itself.
+            out, ssm_state = gated_op(
+                q, k, v, a_raw, -self.a_folded, self.dt_bias, beta,
+                ssm_state, self.gate_lower_bound)
+        elif chunk_op is not None:
             # Chunked recurrence on the log decay; a masked row carries the
             # state through unchanged (zero log decay and beta) and reads
             # zero, as in the sequential kernel.
@@ -1154,9 +1252,13 @@ class Glm5NextDeltaAttention(nn.Module):
             B, T, self.num_heads, self.head_dim)
         # RMS over head_dim with one shared weight, then a plain sigmoid
         # gate (not a silu-gated norm).
-        out = (self.o_norm(out.reshape(B, T, self.num_heads, self.head_dim))
-               * mx.sigmoid(gate)).reshape(B, T, -1)
-        return self.o_proj(out.astype(dtype))
+        out = out.reshape(B, T, self.num_heads, self.head_dim)
+        ng_op = _rmsnorm_gate_op() if conv_op is not None else None
+        if ng_op is not None:
+            out = ng_op(out, self.o_norm.weight, gate, self.o_norm.eps)
+        else:
+            out = _kda_out_gate(out, gate, self.o_norm.weight, self.o_norm.eps)
+        return self.o_proj(out.reshape(B, T, -1).astype(dtype))
 
 
 def rollback_verify_sink(sink: list, n: int) -> None:

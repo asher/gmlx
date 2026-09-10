@@ -249,6 +249,55 @@ def test_kda_chunk_prefill_matches_sequential_kernel(monkeypatch, length):
         assert rel(a, b) < 1e-2
 
 
+@pytest.mark.skipif(
+    not glm5_model._kda_conv_op(),
+    reason="mlx-kquant build without kda_conv")
+@pytest.mark.parametrize("length", [1, 2, 40])
+@pytest.mark.parametrize("chunk", [False, True])
+def test_kda_conv_prefill_matches_eager_chain(monkeypatch, length, chunk):
+    """A step of `length` tokens through mlx-kquant's fused short conv
+    (GMLX_GLM5_KDA_CONV), and with the chunk route the in-kernel decay and
+    fused output gate, matches the eager chain: the layer output, the conv
+    tails and the recurrent state, for a step shorter than the carried
+    rows, one equal to them and a long one, each continued from a warm
+    cache."""
+    args = _tiny_args(kda_head_dim=128)
+    model = _random_model(args, seed=7)
+    model.set_dtype(mx.bfloat16)
+    model.eval()
+    attn = model.layers[0].self_attn
+    mx.random.seed(31 + length)
+    x0 = (mx.random.normal((1, 5, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    x = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(
+        mx.bfloat16)
+
+    if chunk and not glm5_model._kda_chunk_op():
+        pytest.skip("mlx-kquant kda_chunk needs tensor-op (NAX) hardware")
+
+    def run(on):
+        # With the chunk route on, the fused arm also takes the in-kernel
+        # decay (kda_chunk_gated) and the fused output gate.
+        monkeypatch.setattr(glm5_model, "_KDA_CONV", on)
+        monkeypatch.setattr(glm5_model, "_KDA_CHUNK", chunk)
+        cache = glm5_model.ArraysCache(size=4)
+        attn(x0, cache=cache)
+        y = attn(x, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y.astype(mx.float32), [cache[i].astype(mx.float32)
+                                      for i in range(4)]
+
+    y_ref, st_ref = run(False)
+    y_fused, st_fused = run(True)
+
+    def rel(a, b):
+        return float(mx.linalg.norm(a - b) / (mx.linalg.norm(b) + 1e-9))
+
+    assert rel(y_fused, y_ref) < 1e-2
+    for a, b in zip(st_fused, st_ref):
+        assert a.shape == b.shape
+        assert rel(a, b) < 1e-2
+
+
 def test_kda_layer_matches_naive_reference():
     # End-to-end KDA layer vs a step-loop reference implementing the
     # llama.cpp semantics: causal depthwise conv then silu, l2-normalized

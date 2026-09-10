@@ -13,6 +13,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matrix units across 32-token chunks instead of stepping token by token.
   Tensor-op hardware only; `GMLX_GLM5_KDA_CHUNK=0` keeps the sequential
   kernel.
+- GLM-5.3-Flash KDA layers run each prefill short conv with its silu, l2
+  norm and conv tails as one mlx-kquant dispatch (`kda_conv`), form the
+  decay inside the chunked kernel (`kda_chunk_gated`) and fuse the output
+  norm and gate (`rmsnorm_gate`). `GMLX_GLM5_KDA_CONV=0` keeps the eager
+  chain on all three.
 - Hyper-connected models (DeepSeek-V4, GLM-5.3-Flash) run each
   hyper-connection cycle after the first of a decode or verify step as
   one mlx-kquant dispatch (`hc_front_expand_collapse`) instead of two,
