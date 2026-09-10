@@ -149,14 +149,17 @@ def test_concat_headroom_check_off_when_zero(monkeypatch):
     assert getattr(model.experts, "_kq_gate_up", None) is not None
 
 
+@pytest.mark.parametrize("concat", [True, False])
 @pytest.mark.parametrize("tokens", [16, 150])
-def test_prefill_mix_matches_eager(tokens, monkeypatch):
+def test_prefill_mix_matches_eager(tokens, concat, monkeypatch):
     """With routing scores, the sorted-prefill path returns the mixed
-    [B, T, N] through kq.gather_mix; it matches the eager unsort, score
+    [B, T, N] through kq.gather_mix on both the gate+up concat path and
+    the stock two-gather path; it matches the eager unsort, score
     multiply and sum over slots."""
     import mlx_kquant as kq
     if not hasattr(kq, "gather_mix"):
         pytest.skip("mlx_kquant without gather_mix")
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", concat)
     rng = np.random.default_rng(11)
     model = _build(rng)
     x, inds = _prefill_inputs(rng, tokens)

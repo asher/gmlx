@@ -675,6 +675,8 @@ def _make_fused_kquant(base_cls, caps):
             else:
                 y = self._kq_prefill_gate_up(x, indices, scores)
                 if y is None:
+                    y = self._kq_prefill_sorted(x, indices, scores)
+                if y is None:
                     y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
                 if getattr(self, "_kq_shexp_mod", None) is not None:
@@ -715,16 +717,47 @@ def _make_fused_kquant(base_cls, caps):
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
-            if (scores is not None and _MIX_PREFILL_ENABLED
-                    and hasattr(kq, "gather_mix")
-                    and getattr(self, "_kq_shexp_mod", None) is None):
-                k = indices.shape[-1]
-                rows = y.shape[0]
-                y = kq.gather_mix(
-                    y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
-                return y.reshape(*indices.shape[:-1], -1)
+            if self._kq_mix_prefill_ok(indices, scores):
+                return self._kq_mix_sorted(y, inv_order, indices, scores)
             y = _scatter_unsort(y, inv_order, indices.shape)
             return y.squeeze(-2)
+
+        def _kq_mix_prefill_ok(self, indices, scores) -> bool:
+            """Whether a sorted-prefill call returns mixed through
+            kq.gather_mix: scores given, the route on, the op present,
+            sorting widths, no shexp-fold stamp (that caller mixes)."""
+            return (
+                scores is not None and _MIX_PREFILL_ENABLED
+                and hasattr(kq, "gather_mix") and indices.size >= 64
+                and not self.training
+                and getattr(self, "_kq_shexp_mod", None) is None)
+
+        def _kq_mix_sorted(self, y, inv_order, indices, scores):
+            """The unsort and the score-weighted sum over the routed
+            slots as one dispatch: y is the sorted down output
+            [rows, 1, N], inv_order the sorted row of each (token, slot)
+            pair; returns [..., N] in the batched layout."""
+            k = indices.shape[-1]
+            rows = y.shape[0]
+            y = kq.gather_mix(
+                y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
+            return y.reshape(*indices.shape[:-1], -1)
+
+        def _kq_prefill_sorted(self, x, indices, scores):
+            """The stock two-gather sorted prefill (mlx-lm
+            SwitchGLU.__call__ at sorting widths) with the unsort and mix
+            as one dispatch; the path taken when the gate+up concat is
+            off or does not fit. None when ineligible."""
+            if not self._kq_mix_prefill_ok(indices, scores):
+                return None
+            from mlx_lm.models.switch_layers import _gather_sort
+            x = mx.expand_dims(x, (-2, -3))
+            x, idx, inv_order = _gather_sort(x, indices)
+            x_up = self.up_proj(x, idx, sorted_indices=True)
+            x_gate = self.gate_proj(x, idx, sorted_indices=True)
+            y = self.down_proj(
+                self.activation(x_up, x_gate), idx, sorted_indices=True)
+            return self._kq_mix_sorted(y, inv_order, indices, scores)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
