@@ -21,8 +21,14 @@ This is the per-row delivered-token ledger any retire-and-requeue
 action needs, kept engine-side because response objects are consumed
 by the HTTP layer and gone.
 
-Only the memory-error class is contained; every other exception
-propagates unchanged. GMLX_TICK_GUARD=0 disables.
+A command buffer that failed for a reason other than memory is a
+different animal: a timeout or a page fault says the submitted work
+was wrong, not that the box is full. Those get one contained retry
+so a driver hiccup cannot take the server down, and then propagate
+with the Metal error in the log, because no amount of reclaim fixes
+them and shedding a row would file a kernel bug under capacity.
+Every other exception propagates unchanged. GMLX_TICK_GUARD=0
+disables.
 """
 
 from __future__ import annotations
@@ -36,16 +42,32 @@ _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_tick_guard"
 
+# Running out of memory is what the ladder below can actually fix, so the
+# memory class holds only the allocator's own words. Every other command
+# buffer failure is a fault in the work that was submitted: a timeout means
+# a kernel hung or the launch was oversized, a page fault means it read out
+# of bounds. Reclaiming buffers cannot fix either one, and answering them
+# with a re-prefill throws away a request and files the bug under capacity.
 _MEM_MARKS = ("metal::malloc", "Insufficient Memory",
-              "Command buffer execution failed", "kIOGPUCommand",
-              "Attempting to allocate")
+              "Attempting to allocate",
+              "kIOGPUCommandBufferCallbackErrorOutOfMemory")
+
+_GPU_MARKS = ("Command buffer execution failed", "kIOGPUCommand")
 
 _row_failed_callbacks: list = []
 
 
 def is_memory_error(e: BaseException) -> bool:
+    """The allocator refused, or Metal reported it ran out of memory."""
     return isinstance(e, RuntimeError) and any(
         m in str(e) for m in _MEM_MARKS)
+
+
+def is_gpu_fault(e: BaseException) -> bool:
+    """A command buffer failed for a reason other than memory."""
+    return (isinstance(e, RuntimeError)
+            and not is_memory_error(e)
+            and any(m in str(e) for m in _GPU_MARKS))
 
 
 def on_row_failed(fn) -> None:
@@ -72,6 +94,7 @@ class _TickState:
     def __init__(self):
         self.ledger: dict = {}
         self.fail_streak = 0
+        self.fault_streak = 0
         self.rebuilt: set = set()
         self.last_victim = None
         self.ticks = 0
@@ -198,6 +221,27 @@ def _rebuild_row(gen, st: _TickState, uid) -> None:
                  len(row.prompt_ids), len(row.committed))
 
 
+def _contain_fault(st: _TickState, e: RuntimeError) -> bool:
+    """A non-memory command buffer failure. Contain the first one, since a
+    driver hiccup should not take the server down, and let a second one
+    through: reclaiming buffers cannot fix a fault in the work itself, so
+    retrying past that only hides the kernel bug behind a wedged loop.
+    Returns True when the tick was contained."""
+    from gmlx.eval_guard import drain_for
+
+    st.fault_streak += 1
+    if st.fault_streak < 2:
+        _log.error("[tick-guard] GPU fault, not a memory error, containing "
+                   "one retry: %s", str(e).splitlines()[0][:200])
+        drain_for("engine-tick")
+        mx.clear_cache()
+        return True
+    _log.error("[tick-guard] GPU fault repeated; not containing it, because "
+               "reclaiming memory cannot fix a fault in the submitted work: "
+               "%s", str(e).splitlines()[0][:200])
+    return False
+
+
 def _contain(gen, st: _TickState, e: RuntimeError) -> None:
     from gmlx.eval_guard import drain_for
 
@@ -250,11 +294,16 @@ def install_tick_guard() -> bool:
             _maybe_inject(st)
             out = _orig(self, **kwargs)
         except RuntimeError as e:
+            if is_gpu_fault(e):
+                if not _contain_fault(st, e):
+                    raise
+                return [], []
             if not is_memory_error(e):
                 raise
             _contain(self, st, e)
             return [], []
         st.fail_streak = 0
+        st.fault_streak = 0
         _harvest_responses(st, out[1])
         return out
 

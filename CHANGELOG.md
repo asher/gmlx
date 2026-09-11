@@ -41,6 +41,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A command buffer that timed out or page faulted was read as memory
+  pressure, so serve reclaimed buffers and retired a decoding row that had
+  done nothing wrong. A GPU fault now gets one retry and then surfaces with
+  the error Metal reported, and only real allocation failures take the
+  memory ladder.
 - Every speculative request was shed on a 109 GB model with a native MTP
   head, the prefill gate+up expert concat having left the governor 1-2 GB.
   The concat is built only when the copy leaves

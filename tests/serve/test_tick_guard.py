@@ -42,6 +42,18 @@ def resp(uid, token, finish=None):
 MEM_ERR = RuntimeError(
     "[metal::malloc] Attempting to allocate 103918075904 bytes")
 
+OOM_ERR = RuntimeError(
+    "[METAL] Command buffer execution failed: Insufficient Memory "
+    "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory).")
+
+TIMEOUT_ERR = RuntimeError(
+    "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+    "(00000002:kIOGPUCommandBufferCallbackErrorTimeout).")
+
+PAGE_FAULT_ERR = RuntimeError(
+    "[METAL] Command buffer execution failed: Caused GPU Page Fault Error "
+    "(00000003:kIOGPUCommandBufferCallbackErrorPageFault).")
+
 
 @pytest.fixture
 def wrapped(monkeypatch):
@@ -163,3 +175,60 @@ def test_kill_switch(monkeypatch):
     orig = ar.BatchGenerator._next
     assert tg.install_tick_guard() is False
     assert ar.BatchGenerator._next is orig
+
+
+def test_classifier_separates_memory_from_gpu_faults():
+    """Only the allocator's own words are a memory error. A timeout or a
+    page fault says the submitted work was wrong, not that the box is
+    full, so the ladder that sheds a row must not see them."""
+    for e in (MEM_ERR, OOM_ERR):
+        assert tg.is_memory_error(e) and not tg.is_gpu_fault(e), e
+    for e in (TIMEOUT_ERR, PAGE_FAULT_ERR):
+        assert tg.is_gpu_fault(e) and not tg.is_memory_error(e), e
+    other = RuntimeError("shapes do not match")
+    assert not tg.is_memory_error(other) and not tg.is_gpu_fault(other)
+
+
+def test_gpu_fault_is_contained_once_then_propagates(wrapped, monkeypatch):
+    """One retry covers a driver hiccup. A second fault propagates with
+    the Metal error rather than shedding a row, because reclaiming
+    buffers cannot fix a fault in the work itself."""
+    gen, script, drains = wrapped
+    cleared = []
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: cleared.append(1))
+    script.append(TIMEOUT_ERR)
+    assert tick(gen) == ([], [])
+    assert drains == ["engine-tick"] and cleared == [1]
+    assert gen.removed == []
+
+    script.append(TIMEOUT_ERR)
+    with pytest.raises(RuntimeError, match="Timeout"):
+        tick(gen)
+    assert gen.removed == []          # never sheds a row on a fault
+    assert drains == ["engine-tick"]  # no second reclaim
+
+
+def test_gpu_fault_streak_resets_on_a_good_tick(wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    script.append(PAGE_FAULT_ERR)
+    tick(gen)
+    script.append(([], [resp(7, 11)]))
+    tick(gen)
+    assert gen._kq_tick_guard.fault_streak == 0
+    script.append(PAGE_FAULT_ERR)
+    assert tick(gen) == ([], [])      # contained again after recovery
+
+
+def test_metal_oom_still_takes_the_memory_ladder(wrapped, monkeypatch):
+    """The OOM that arrives as a command buffer failure keeps the old
+    behaviour: contained, then a row retired and requeued."""
+    gen, script, drains = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7, 8], [4, 40])
+    script.append(OOM_ERR)
+    tick(gen)
+    assert gen.removed == []
+    script.append(OOM_ERR)
+    tick(gen)
+    assert gen.removed == [8]         # largest row retired, as before
