@@ -347,6 +347,13 @@ class ShortConv1d(nn.Module):
             new_state = mx.take_along_axis(conv_input, positions, axis=1)
         else:
             new_state = mx.contiguous(conv_input[:, -n_keep:, :])
+        # mx.eval builds its tape breadth-first from the roots, so an array
+        # only the cache reads (this state) evaluates after the whole chunk
+        # graph, and conv_input stays allocated until then: 34 layers x 3
+        # convs x 33 MB at the 2048-token chunk. Tying the output to the
+        # state evaluates both where the conv runs and frees conv_input
+        # there. The Depends primitive launches nothing.
+        (out,) = mx.depends([out], [new_state])
         return out, new_state
 
 
@@ -356,6 +363,14 @@ def _kda_decay_lb(a_folded, a_raw, dt_bias, lb):
     # a_folded stores -exp(A_log), so exp(A_log) = -a_folded. All fp32.
     a = a_raw.astype(mx.float32) + dt_bias
     return mx.exp(lb * mx.sigmoid((-a_folded)[..., None] * a))
+
+
+@partial(mx.compile, shapeless=True)
+def _kda_decay_lb_log(a_folded, a_raw, dt_bias, lb):
+    # log of _kda_decay_lb: lb * sigmoid(exp(A_log) * (a + dt_bias)), fp32,
+    # for the chunked recurrence that takes the log decay directly.
+    a = a_raw.astype(mx.float32) + dt_bias
+    return lb * mx.sigmoid((-a_folded)[..., None] * a)
 
 
 @partial(mx.compile, shapeless=True)

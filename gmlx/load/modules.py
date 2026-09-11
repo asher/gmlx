@@ -43,7 +43,7 @@ from mlx_kquant.nn import (
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 import gmlx.lora_rows as lora_rows
 from .dtypes import activation_dtype
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_float, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -142,7 +142,20 @@ _FUSED_MOE_GLUE_ENABLED = True
 # models would double most of their weight bytes and blow the wired limit).
 # GMLX_MOE_GATEUP_CONCAT=0 disables (skips the install-time concat too).
 _GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
+# Sorted-prefill MoE: the gather back to token order, the score multiply
+# and the sum over the routed slots as one mlx-kquant dispatch
+# (gather_mix) after the down gather. GMLX_MOE_MIX_PREFILL=0 keeps the
+# eager unsort and mix.
+_MIX_PREFILL_ENABLED = env_bool("GMLX_MOE_MIX_PREFILL", True)
 _GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
+# The copy is built at the first sorted-prefill call, when the weights are
+# resident and the live memory is known. It must leave this much room under
+# the memory ceiling (the serve governor's ceiling, see gmlx.serve.capacity)
+# for prefill transients; a model that already sits near the ceiling keeps
+# that room instead of a second copy of one layer's experts. 0 disables the
+# check (the install budget alone decides).
+_GATEUP_CONCAT_HEADROOM_GB = env_float("GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB", 8.0)
+_GATEUP_SKIP_LOGGED = False
 
 
 def _kq_fused_device_ok(*mods) -> bool:
@@ -660,7 +673,9 @@ def _make_fused_kquant(base_cls, caps):
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
                 y = y.reshape(*indices.shape, y.shape[-1])
             else:
-                y = self._kq_prefill_gate_up(x, indices)
+                y = self._kq_prefill_gate_up(x, indices, scores)
+                if y is None:
+                    y = self._kq_prefill_sorted(x, indices, scores)
                 if y is None:
                     y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
@@ -669,20 +684,26 @@ def _make_fused_kquant(base_cls, caps):
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
             return y
 
-        def _kq_prefill_gate_up(self, x, indices):
+        def _kq_prefill_gate_up(self, x, indices, scores=None):
             """Sorted-prefill widths: one gather over the concatenated
             gate+up wire bytes (built here on the first eligible call,
             from the pending stamp _install_gateup_concat left), then the
             stock activation + down gather. Mirrors mlx-lm
             SwitchGLU.__call__ exactly apart from the single fused
             projection; returns None when ineligible so the caller falls
-            back to the stock two-gather path."""
+            back to the stock two-gather path. With `scores` and
+            GMLX_MOE_MIX_PREFILL the unsort and the score-weighted sum
+            run as one dispatch (kq.gather_mix) and the result comes back
+            mixed, [..., N]; the shexp-fold stamp keeps it unmixed."""
             if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
                     or self.training):
                 return None
             gu = getattr(self, "_kq_gate_up", None)
             if gu is None:
                 if not getattr(self, "_kq_gate_up_pending", False):
+                    return None
+                if not _gateup_concat_fits(self):
+                    object.__setattr__(self, "_kq_gate_up_pending", False)
                     return None
                 gu = _build_gateup_concat(self)
                 object.__setattr__(self, "_kq_gate_up", gu)
@@ -696,8 +717,47 @@ def _make_fused_kquant(base_cls, caps):
             x_gate, x_up = h[..., :half], h[..., half:]
             y = self.down_proj(
                 self.activation(x_up, x_gate), idx, sorted_indices=True)
+            if self._kq_mix_prefill_ok(indices, scores):
+                return self._kq_mix_sorted(y, inv_order, indices, scores)
             y = _scatter_unsort(y, inv_order, indices.shape)
             return y.squeeze(-2)
+
+        def _kq_mix_prefill_ok(self, indices, scores) -> bool:
+            """Whether a sorted-prefill call returns mixed through
+            kq.gather_mix: scores given, the route on, the op present,
+            sorting widths, no shexp-fold stamp (that caller mixes)."""
+            return (
+                scores is not None and _MIX_PREFILL_ENABLED
+                and hasattr(kq, "gather_mix") and indices.size >= 64
+                and not self.training
+                and getattr(self, "_kq_shexp_mod", None) is None)
+
+        def _kq_mix_sorted(self, y, inv_order, indices, scores):
+            """The unsort and the score-weighted sum over the routed
+            slots as one dispatch: y is the sorted down output
+            [rows, 1, N], inv_order the sorted row of each (token, slot)
+            pair; returns [..., N] in the batched layout."""
+            k = indices.shape[-1]
+            rows = y.shape[0]
+            y = kq.gather_mix(
+                y.reshape(rows, -1), inv_order, scores.reshape(rows // k, k))
+            return y.reshape(*indices.shape[:-1], -1)
+
+        def _kq_prefill_sorted(self, x, indices, scores):
+            """The stock two-gather sorted prefill (mlx-lm
+            SwitchGLU.__call__ at sorting widths) with the unsort and mix
+            as one dispatch; the path taken when the gate+up concat is
+            off or does not fit. None when ineligible."""
+            if not self._kq_mix_prefill_ok(indices, scores):
+                return None
+            from mlx_lm.models.switch_layers import _gather_sort
+            x = mx.expand_dims(x, (-2, -3))
+            x, idx, inv_order = _gather_sort(x, indices)
+            x_up = self.up_proj(x, idx, sorted_indices=True)
+            x_gate = self.gate_proj(x, idx, sorted_indices=True)
+            y = self.down_proj(
+                self.activation(x_up, x_gate), idx, sorted_indices=True)
+            return self._kq_mix_sorted(y, inv_order, indices, scores)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
@@ -755,6 +815,43 @@ def _install_gateup_concat(m, budget_bytes) -> int:
         return budget_bytes
     object.__setattr__(m, "_kq_gate_up_pending", True)
     return budget_bytes - cost
+
+
+def _memory_ceiling_bytes():
+    """The memory ceiling the concat copy is judged against: the serve
+    governor's (Metal's recommended working set less the margin, never
+    closer to physical RAM than the kernel reserve). None when unreadable."""
+    try:
+        from gmlx.serve.capacity import working_budget_bytes
+        return working_budget_bytes()
+    except Exception:
+        return None
+
+
+def _gateup_concat_fits(m) -> bool:
+    """Build-time check for the concat copy: live memory plus the copy must
+    leave _GATEUP_CONCAT_HEADROOM_GB under the ceiling. Logged once per
+    process when it refuses, with the numbers."""
+    global _GATEUP_SKIP_LOGGED
+    if _GATEUP_CONCAT_HEADROOM_GB <= 0:
+        return True
+    ceiling = _memory_ceiling_bytes()
+    if ceiling is None:
+        return True
+    cost = m.gate_proj.weight.nbytes + m.up_proj.weight.nbytes
+    active = mx.get_active_memory()
+    room = _GATEUP_CONCAT_HEADROOM_GB * 1e9
+    if active + cost + room <= ceiling:
+        return True
+    if not _GATEUP_SKIP_LOGGED:
+        _GATEUP_SKIP_LOGGED = True
+        import logging
+        logging.getLogger(__name__).info(
+            "[moe] gate+up concat skipped: %.1f GB live + %.2f GB copy leaves "
+            "less than %.1f GB under the %.1f GB ceiling "
+            "(GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB)",
+            active / 1e9, cost / 1e9, _GATEUP_CONCAT_HEADROOM_GB, ceiling / 1e9)
+    return False
 
 
 def _build_gateup_concat(m):

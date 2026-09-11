@@ -21,6 +21,7 @@ import gmlx.models.kimi_k3 as kimi_k3_model
 from gmlx.models.kimi_k3 import (
     Model,
     ModelArgs,
+    ShortConv1d,
     _ResidualMixer,
     _situ,
 )
@@ -378,3 +379,32 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
         dec = parse_gguf_name("kimi-k3", name)
         assert dec.kind == RemapDecision.KIND_MAP, (name, dec.reason)
         assert dec.hf_name in params, (name, dec.hf_name)
+
+
+def test_short_conv_state_frees_conv_input():
+    # 16 chained convs over one prefill chunk, evaluated through the chain
+    # output only. Without the output-to-state tie the cache-only state
+    # slices stay lazy and each pins its 33 MB conv_input (16 x 33 MB
+    # live after the eval); with it the states evaluate with the convs
+    # and the inputs are released. Peak memory is not the signal here:
+    # in-flight command buffers hold their buffers until completion.
+    mx.random.seed(0)
+    C, T, n = 8192, 2048, 16
+    convs = [ShortConv1d(C, 4) for _ in range(n)]
+    for c in convs:
+        c.conv.weight = c.conv.weight.astype(mx.bfloat16)
+    x = mx.random.normal((1, T, C)).astype(mx.bfloat16)
+    mx.eval(x, [c.parameters() for c in convs])
+    mx.synchronize()
+    base = mx.get_active_memory()
+    h, states = x, []
+    for c in convs:
+        h, st = c(h, None, None, None)
+        states.append(st)
+    mx.eval(h)
+    mx.synchronize()
+    per_input = T * C * 2
+    live = mx.get_active_memory() - base
+    assert live < 2 * per_input, f"{live / 1e6:.0f} MB live after eval(h)"
+    ref = mx.concatenate([mx.zeros((1, 3, C), dtype=x.dtype), x], axis=1)
+    assert mx.array_equal(states[0], ref[:, -3:, :])

@@ -43,6 +43,7 @@ import importlib
 import os
 import sys
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
@@ -75,12 +76,156 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models import kda_fused
-from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
+from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb, _kda_decay_lb_log
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
 _ABSORBED_PREFILL = os.environ.get("GMLX_GLM5_ABSORBED_PREFILL", "0") == "1"
+# Query counts up to this take the absorbed MQA form like a decode step.
+# The naive route below expands the latent into per-head K and V over
+# every visible key (64 x S x 256 x 2), which pays for itself only at
+# chunk-sized L; an MTP verify (L = 2..8) through it cost 19 ms per
+# forward at 512 keys.
+_ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
+# Widest step the KDA layers run as chained fused decode kernels (one
+# per token, the intermediate states kept for rollback). MTP verify
+# blocks are 2 tokens; wider steps take the op chain and the sink replay.
+_KDA_FUSED_MAX_T = int(os.environ.get("GMLX_GLM5_KDA_FUSED_MAX_T", "8"))
+# Multi-token KDA steps of at least _KDA_CHUNK_MIN_T tokens (prefill
+# chunks, wide verify blocks) run the delta-rule recurrence through
+# mlx-kquant's chunked kernel, which keeps the recurrent state on the
+# matrix units across 32-token chunks instead of stepping token by token.
+# Needs tensor-op hardware, head dim 128 and fp16/bf16 activations; the
+# sequential kernel serves everything else. GMLX_GLM5_KDA_CHUNK=0 keeps
+# the sequential kernel everywhere.
+_KDA_CHUNK = os.environ.get("GMLX_GLM5_KDA_CHUNK", "1") != "0"
+_KDA_CHUNK_MIN_T = 16
+_KDA_CHUNK_OP = None
+
+
+def _kda_chunk_op():
+    """mlx_kquant.kda_chunk on tensor-op hardware, else None."""
+    global _KDA_CHUNK_OP
+    if _KDA_CHUNK_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            if getattr(kq, "kda_chunk", None) is not None and kq.nax_available():
+                op = kq.kda_chunk
+        except ImportError:
+            pass
+        _KDA_CHUNK_OP = op
+    return _KDA_CHUNK_OP or None
+
+
+_KDA_CHUNK_GATED_OP = None
+
+
+def _kda_chunk_gated_op():
+    """mlx_kquant.kda_chunk_gated (the decay formed in the kernel) when
+    the chunk route is available and the build carries it, else None."""
+    global _KDA_CHUNK_GATED_OP
+    if _KDA_CHUNK_GATED_OP is None:
+        op = False
+        if _kda_chunk_op() is not None:
+            import mlx_kquant as kq
+            op = getattr(kq, "kda_chunk_gated", None) or False
+        _KDA_CHUNK_GATED_OP = op
+    return _KDA_CHUNK_GATED_OP or None
+
+
+_RMSNORM_GATE_OP = None
+
+
+def _rmsnorm_gate_op():
+    """mlx_kquant.rmsnorm_gate when the build carries it, else None."""
+    global _RMSNORM_GATE_OP
+    if _RMSNORM_GATE_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            op = getattr(kq, "rmsnorm_gate", None) or False
+        except ImportError:
+            pass
+        _RMSNORM_GATE_OP = op
+    return _RMSNORM_GATE_OP or None
+# The three short convs, silu, the l2 norms with their folded scales and
+# the conv tails of a KDA prefill step as one mlx-kquant dispatch each
+# (kda_conv, any GPU and the CPU) instead of the concat, conv1d, silu,
+# rms_norm and multiply chain. GMLX_GLM5_KDA_CONV=0 keeps the eager chain.
+_KDA_CONV = os.environ.get("GMLX_GLM5_KDA_CONV", "1") != "0"
+_KDA_CONV_OP = None
+
+
+def _kda_conv_op():
+    """mlx_kquant.kda_conv when the build carries it, else None."""
+    global _KDA_CONV_OP
+    if _KDA_CONV_OP is None:
+        op = False
+        try:
+            import mlx_kquant as kq
+            op = getattr(kq, "kda_conv", None) or False
+        except ImportError:
+            pass
+        _KDA_CONV_OP = op
+    return _KDA_CONV_OP or None
+
+
+@partial(mx.compile, shapeless=True)
+def _kda_out_gate(out, gate, w, eps):
+    # rms_norm over head_dim with the shared weight, then the sigmoid gate;
+    # the sigmoid and the product fuse into one pass.
+    return mx.fast.rms_norm(out, w, eps) * mx.sigmoid(gate)
+
+
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
+# Sparse decode (L <= _ABSORBED_MAX_L) through mlx-kquant's index-gathered
+# attention: one call per step reads every query's selected latent rows
+# straight from the cache, with no gathered copy and no materialized
+# score matrix. Needs a build with sdpa_fa_indexed, B == 1 and a 512-wide
+# f16/bf16 latent; otherwise the per-query gather + sdpa loop runs.
+_SPARSE_INDEXED = os.environ.get("GMLX_GLM5_SPARSE_INDEXED", "1") != "0"
+_INDEXED_SDPA = None
+
+
+def _indexed_sdpa():
+    """mlx_kquant.sdpa_fa_indexed, or None when the installed build lacks it
+    or the device cannot run it (the kernel is Metal only, and on a CPU
+    device the op has no implementation to dispatch)."""
+    global _INDEXED_SDPA
+    if _INDEXED_SDPA is None:
+        try:
+            import mlx_kquant as kq
+            _INDEXED_SDPA = getattr(kq, "sdpa_fa_indexed", False)
+        except ImportError:
+            _INDEXED_SDPA = False
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
+    return _INDEXED_SDPA or None
+# Decode-width indexer scoring through mlx-kquant's fused scorer and
+# radix top-k (one dispatch each) instead of the inline per-head f32
+# matmul, head reduction, mask and argpartition. Steps of 1 to 4 queries.
+_INDEXER_DECODE = os.environ.get("GMLX_GLM5_INDEXER_DECODE", "1") != "0"
+_INDEXER_DECODE_STATE = {"ok": None}
+
+
+def _indexer_decode_available() -> bool:
+    """One-time probe for mlx-kquant's decode indexer pair; Metal only,
+    permanently off for the process after a kernel error."""
+    ok = _INDEXER_DECODE_STATE["ok"]
+    if ok is None:
+        ok = _INDEXER_DECODE and mx.default_device() == mx.gpu
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = (mx.metal.is_available()
+                      and hasattr(kq, "dsa_indexer_score_decode")
+                      and hasattr(kq, "dsa_topk_indices"))
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _INDEXER_DECODE_STATE["ok"] = ok
+    return ok and _INDEXER_DECODE and mx.default_device() == mx.gpu
 
 
 def ensure_registered() -> None:
@@ -389,8 +534,40 @@ class Glm5NextIndexer(nn.Module):
 
         # fp32 head weights: the weights are sign-free (no softmax, no relu
         # on them) and a bf16 head gate moves logits enough to flip
-        # near-tied pools; the weight tensor itself is kept fp32.
-        w = (x.astype(mx.float32) @ self.weights_proj.weight.T) * self._w_scale
+        # near-tied pools; the weight tensor itself is kept fp32. A verify
+        # block (2 to 4 queries) projects one row at a time: the single-row
+        # form is an exact f32 GEMV like the decode step, where the M-row
+        # GEMM runs TF32 and costs three times as much at M = 2.
+        xf = x.astype(mx.float32)
+        wt = self.weights_proj.weight.T
+        if 1 < L <= 4:
+            w = mx.concatenate([xf[:, j:j + 1] @ wt for j in range(L)], axis=1)
+        else:
+            w = xf @ wt
+        w = w * self._w_scale
+
+        if (L <= 4 and isinstance(offset, int) and self.select_k in (512, 2048)
+                and self.head_dim == 128 and self.n_heads in (32, 64)
+                and q.dtype in (mx.float16, mx.bfloat16)
+                and _indexer_decode_available()):
+            # Fused scorer: relu per head, the f32 head weights, pooled
+            # visibility p < (offset + j + 1) // kpool baked in (every pool
+            # visible to a lone query), then a radix top-k with
+            # deterministic ties. The scores round to the query dtype
+            # before the select, so pools within that rounding of the
+            # threshold can swap against the inline f32 argpartition.
+            try:
+                import mlx_kquant as kq
+
+                scores = kq.dsa_indexer_score_decode(
+                    q, pooled.astype(q.dtype), w, offset, self.kpool)
+                return kq.dsa_topk_indices(
+                    scores, self.select_k, bucketed=True)[:, 0]
+            except Exception as exc:  # noqa: BLE001 - inline fallback
+                _INDEXER_DECODE_STATE["ok"] = False
+                print(f"[glm5_next] kquant indexer decode disabled for this "
+                      f"process after error (inline scoring active): {exc!r}",
+                      file=sys.stderr)
 
         if pool_cache is not None:
             pmask = pool_cache.make_mask(L, offset)
@@ -551,6 +728,62 @@ class Glm5NextMLAAttention(nn.Module):
         # Debug/test seam: False routes sparse decode through the masked
         # path instead of the latent gather (same function).
         self._decode_gather = True
+
+    def _sparse_decode_keys(self, latent_d, sel, q_abs: int, B: int,
+                            spill: bool = False):
+        """Latent rows one query attends: its selected pools expanded
+        ``kpool`` wide plus the partial tail up to ``q_abs``, and a bool
+        mask over those columns when ``spill`` is set. A lone decode
+        query sees every pool in the cache; a query inside a verify block
+        can be handed pools its later block-mates completed (a spill:
+        fewer visible pools than select_k), which the mask hides the way
+        the masked path's causal term does."""
+        r = self._kpool
+        tail_start = (q_abs + 1) // r * r
+        tok = (sel[..., None] * r + mx.arange(r)).reshape(B, -1)
+        gmask = None
+        if spill:
+            keep = mx.broadcast_to(
+                (sel < tail_start // r)[..., None], sel.shape + (r,)
+            ).reshape(B, -1)
+            tok = mx.minimum(tok, latent_d.shape[2] - 1)
+        if q_abs >= tail_start:
+            tail = mx.broadcast_to(
+                mx.arange(tail_start, q_abs + 1)[None],
+                (B, q_abs + 1 - tail_start))
+            tok = mx.concatenate([tok, tail], axis=1)
+            if spill:
+                keep = mx.concatenate(
+                    [keep, mx.ones(tail.shape, dtype=mx.bool_)], axis=1)
+        if spill:
+            gmask = keep[:, None, None, :]
+        kv_g = mx.take_along_axis(
+            latent_d[:, 0], tok[..., None], axis=1)[:, None]
+        return kv_g, gmask
+
+    def _sparse_decode_index(self, latent_d, sel_pools, offset: int,
+                             L: int, spill: bool) -> mx.array:
+        """int32 [L, M] key lists for sdpa_fa_indexed at B == 1: query j's
+        selected pools expanded ``kpool`` wide plus its tail rows, spilled
+        pools and the shorter lists' slack written as -1 (a padded slot)."""
+        r = self._kpool
+        rows = []
+        for j in range(L):
+            q_abs = offset + j
+            tail_start = (q_abs + 1) // r * r
+            sel = sel_pools[0, j]
+            tok = sel[:, None] * r + mx.arange(r)
+            if spill:
+                tok = mx.where(sel[:, None] < tail_start // r, tok, -1)
+            tok = tok.reshape(-1)
+            if q_abs >= tail_start:
+                tok = mx.concatenate([tok, mx.arange(tail_start, q_abs + 1)])
+            rows.append(tok.astype(mx.int32))
+        m = max(t.shape[0] for t in rows)
+        rows = [t if t.shape[0] == m else
+                mx.concatenate([t, mx.full((m - t.shape[0],), -1, mx.int32)])
+                for t in rows]
+        return rows[0][None] if L == 1 else mx.stack(rows)
 
     def _gathered_sparse_prefill(
         self, q_n, latent_d, sel_pools, offset: int, L: int, S: int
@@ -717,26 +950,39 @@ class Glm5NextMLAAttention(nn.Module):
         q = q.reshape(B, L, self.num_heads, self.q_head_dim).transpose(
             0, 2, 1, 3)
 
-        if (sel_pools is not None and L == 1 and isinstance(offset, int)
-                and self._decode_gather):
+        if (sel_pools is not None and L <= _ABSORBED_MAX_L
+                and isinstance(offset, int) and self._decode_gather):
             # Sparse decode: gather the selected latents + the tail rows and
             # run absorbed MQA over them. Every gathered row is a complete
-            # visible pool member or the tail, so no mask is needed.
+            # visible pool member or the tail, so no mask is needed. An MTP
+            # verify (L = 2..8) is L such steps, one gather per query with
+            # its own tail: no host sync, unlike the block route below.
             latent_d = _dequantized(latent_all, kv_cache)
-            r = self._kpool
-            tok = (sel_pools[..., None] * r + mx.arange(r)).reshape(B, -1)
-            q_abs = offset  # this token's absolute position
-            tail_start = (q_abs + 1) // r * r
-            if q_abs >= tail_start:
-                tail = mx.broadcast_to(
-                    mx.arange(tail_start, q_abs + 1)[None],
-                    (B, q_abs + 1 - tail_start))
-                tok = mx.concatenate([tok, tail], axis=1)
-            kv_g = mx.take_along_axis(
-                latent_d[:, 0], tok[..., None], axis=1)[:, None]
             q_n = self.embed_q(q)
-            out = scaled_dot_product_attention(
-                q_n, kv_g, kv_g, cache=None, scale=self.scale, mask=None)
+            # A spill (a query handed pools its block-mates completed) needs
+            # fewer than select_k visible pools for the block's first query;
+            # past that depth no mask is needed, and a maskless single-query
+            # call keeps the fused hd512 attention route (an array mask
+            # sends it to the materialized fallback).
+            spill = (L > 1 and (offset + 1) // self._kpool
+                     < self.indexer.select_k)
+            indexed = (_indexed_sdpa() if _SPARSE_INDEXED and B == 1
+                       and q_n.shape[-1] == 512
+                       and q_n.dtype == latent_d.dtype
+                       and q_n.dtype in (mx.float16, mx.bfloat16) else None)
+            if indexed is not None:
+                idx = self._sparse_decode_index(
+                    latent_d, sel_pools, offset, L, spill)
+                out = indexed(q_n, latent_d, idx, self.scale)
+            else:
+                outs = []
+                for j in range(L):
+                    kv_g, gmask = self._sparse_decode_keys(
+                        latent_d, sel_pools[:, j], offset + j, B, spill=spill)
+                    outs.append(scaled_dot_product_attention(
+                        q_n[:, :, j:j + 1], kv_g, kv_g, cache=None,
+                        scale=self.scale, mask=gmask))
+                out = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
             out = self.unembed_out(out)
         elif sel_pools is not None:
             # Sparse prefill/chunk: gathered keys past the streaming
@@ -755,7 +1001,7 @@ class Glm5NextMLAAttention(nn.Module):
                 out = _streamed_absorbed_attention(
                     q_n, latent_d, smask, self.scale)
                 out = self.unembed_out(out)
-            elif _ABSORBED_PREFILL:
+            elif _ABSORBED_PREFILL or L <= _ABSORBED_MAX_L:
                 smask = self._sparse_mask(sel_pools, offset, L, S)[:, None]
                 q_n = self.embed_q(q)
                 out = scaled_dot_product_attention(
@@ -785,7 +1031,7 @@ class Glm5NextMLAAttention(nn.Module):
                     mask is not None and mask.ndim == 3) else mask,
                 self.scale)
             out = self.unembed_out(out)
-        elif _ABSORBED_PREFILL:
+        elif _ABSORBED_PREFILL or L <= _ABSORBED_MAX_L:
             q_n = self.embed_q(q)
             out = scaled_dot_product_attention(
                 q_n, latent_all, latent_all, cache=kv_cache, scale=self.scale,
@@ -869,31 +1115,79 @@ class Glm5NextDeltaAttention(nn.Module):
                 "inputs": x, "mask": mask,
             })
 
-        if (self._can_kernel and gdn_sink is None
-                and kda_fused.fused_ok(x, mask, cache)):
-            # Plain decode step: one dispatch from the projections to the
-            # gated output (conv, norms, decay, delta rule, out-norm).
-            y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
-                self.q_proj(x), self.k_proj(x), self.v_proj(x),
-                q_state, k_state, v_state,
+        if (self._can_kernel
+                and kda_fused.fused_ok(
+                    x, mask, cache, max_t=_KDA_FUSED_MAX_T,
+                    num_heads=self.num_heads, head_dim=self.head_dim,
+                    conv_kernel=self.conv_kernel)):
+            # Decode step, or an MTP verify block of T tokens: the
+            # projections run once at M = T, then one fused dispatch for
+            # the block (conv, norms, decay, delta rule, out-norm per token,
+            # the state carried in registers). The state after every token
+            # is kept on the sink, so a rollback restores the accepted
+            # prefix's state directly instead of replaying the layer.
+            xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            a_raw = self.f_b_proj(self.f_a_proj(x))
+            b_logit = self.b_proj(x)
+            gate = self.g_b_proj(self.g_a_proj(x))
+            y, q_new, k_new, v_new, ssm_new, ssm_mid = kda_fused.kda_decode_fused_block(
+                xq, xk, xv, q_state, k_state, v_state,
                 self.q_conv.conv.weight, self.k_conv.conv.weight,
                 self.v_conv.conv.weight,
-                self.f_b_proj(self.f_a_proj(x)), self.dt_bias, self.a_folded,
-                self.b_proj(x), self.g_b_proj(self.g_a_proj(x)),
+                a_raw, self.dt_bias, self.a_folded, b_logit, gate,
                 ssm_state, self.o_norm.weight,
                 lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
                 norm_eps=self.o_norm.eps, num_heads=self.num_heads,
                 head_dim=self.head_dim, conv_kernel=self.conv_kernel)
-            cache[0] = q_state
-            cache[1] = k_state
-            cache[2] = v_state
-            cache[3] = ssm_state
+            if gdn_sink is not None:
+                # Conv tails after t tokens are the last KW-1 rows of the
+                # carried tails followed by the block's first t inputs.
+                ns = self.conv_kernel - 1
+
+                def tails(prev, cur, t):
+                    if prev is None:
+                        prev = mx.zeros((B, ns, cur.shape[-1]), dtype=dtype)
+                    return mx.concatenate([prev, cur[:, :t]], axis=1)[:, t:]
+
+                states = [(q_state, k_state, v_state, ssm_state)]
+                for t in range(1, T):
+                    states.append((tails(q_state, xq, t), tails(k_state, xk, t),
+                                   tails(v_state, xv, t), ssm_mid[t - 1]))
+                states.append((q_new, k_new, v_new, ssm_new))
+                gdn_sink[-1]["states"] = states
+            cache[0], cache[1], cache[2], cache[3] = q_new, k_new, v_new, ssm_new
             cache.advance(T)
             return self.o_proj(y.astype(dtype))
 
-        q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
-        k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
-        v_conv, v_state = self.v_conv(self.v_proj(x), v_state, mask, lengths)
+        conv_op = None
+        if (_KDA_CONV and self._can_kernel and not self.training
+                and lengths is None and self.head_dim in (64, 128, 256)
+                and dtype in (mx.float16, mx.bfloat16)):
+            conv_op = _kda_conv_op()
+        if conv_op is not None:
+            # conv, silu, l2 norm with the folded scale (kimi_linear
+            # convention: l2norm(x) = rms_norm(x)/sqrt(d), q additionally
+            # carries 1/sqrt(d)) and the conv tails in one dispatch each.
+            xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            if mask is not None:
+                xq = mx.where(mask[..., None], xq, 0)
+                xk = mx.where(mask[..., None], xk, 0)
+                xv = mx.where(mask[..., None], xv, 0)
+            if q_state is None:
+                q_state = k_state = v_state = mx.zeros(
+                    (B, self.conv_kernel - 1, self.projection_dim), dtype=dtype)
+            q_conv, q_state = conv_op(
+                xq, q_state, self.q_conv.conv.weight, self.head_dim,
+                self.scale**2, 1e-6)
+            k_conv, k_state = conv_op(
+                xk, k_state, self.k_conv.conv.weight, self.head_dim,
+                self.scale, 1e-6)
+            v_conv, v_state = conv_op(
+                xv, v_state, self.v_conv.conv.weight, self.head_dim, 0.0, 1e-6)
+        else:
+            q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
+            k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
+            v_conv, v_state = self.v_conv(self.v_proj(x), v_state, mask, lengths)
         if cache is not None:
             cache[0] = q_state
             cache[1] = k_state
@@ -903,17 +1197,16 @@ class Glm5NextDeltaAttention(nn.Module):
         k = k_conv.reshape(B, T, self.num_heads, self.head_dim)
         v = v_conv.reshape(B, T, self.num_heads, self.head_dim)
 
-        # l2-norm with the attention scale folded in (kimi_linear convention:
-        # l2norm(x) = rms_norm(x)/sqrt(d), q additionally carries 1/sqrt(d)).
-        q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
-        k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
+        if conv_op is None:
+            # l2-norm with the attention scale folded in.
+            q = (self.scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+            k = self.scale * mx.fast.rms_norm(k, None, 1e-6)
 
         # Decay: exp(lb * sigmoid(exp(A_log) * (f_b(f_a(x)) + dt_bias))),
         # per key channel. f/g/beta read the layer input, not the conv out.
         a_raw = self.f_b_proj(self.f_a_proj(x)).reshape(
             B, T, self.num_heads, self.head_dim)
         dt = self.dt_bias.reshape(self.num_heads, self.head_dim)
-        g = _kda_decay_lb(self.a_folded, a_raw, dt, self.gate_lower_bound)
         beta = mx.sigmoid(self.b_proj(x).reshape(B, T, self.num_heads))
 
         if ssm_state is None:
@@ -921,10 +1214,42 @@ class Glm5NextDeltaAttention(nn.Module):
                 (B, self.num_heads, self.head_dim, self.head_dim),
                 dtype=mx.float32)
 
-        if self._can_kernel and mx.default_device() == mx.gpu and not self.training:
-            out, ssm_state = gated_delta_kernel(q, k, v, g, beta, ssm_state, mask)
+        on_gpu = (self._can_kernel and mx.default_device() == mx.gpu
+                  and not self.training)
+        chunk_op = None
+        if (on_gpu and _KDA_CHUNK and T >= _KDA_CHUNK_MIN_T
+                and self.head_dim == 128
+                and q.dtype in (mx.float16, mx.bfloat16)):
+            chunk_op = _kda_chunk_op()
+        gated_op = None
+        if chunk_op is not None and mask is None and conv_op is not None:
+            gated_op = _kda_chunk_gated_op()
+        if gated_op is not None:
+            # The kernel forms the decay from the gate pre-activation
+            # (exp(A_log) = -a_folded, dt_bias, the lower bound) itself.
+            out, ssm_state = gated_op(
+                q, k, v, a_raw, -self.a_folded, self.dt_bias, beta,
+                ssm_state, self.gate_lower_bound)
+        elif chunk_op is not None:
+            # Chunked recurrence on the log decay; a masked row carries the
+            # state through unchanged (zero log decay and beta) and reads
+            # zero, as in the sequential kernel.
+            log_g = _kda_decay_lb_log(
+                self.a_folded, a_raw, dt, self.gate_lower_bound)
+            if mask is not None:
+                log_g = mx.where(mask[..., None, None], log_g, 0.0)
+                beta = mx.where(mask[..., None], beta, 0.0)
+            out, ssm_state = chunk_op(q, k, v, log_g, beta, ssm_state)
+            if mask is not None:
+                out = mx.where(mask[..., None, None], out, mx.array(0, out.dtype))
         else:
-            out, ssm_state = gated_delta_ops(q, k, v, g, beta, ssm_state, mask)
+            g = _kda_decay_lb(self.a_folded, a_raw, dt, self.gate_lower_bound)
+            if on_gpu:
+                out, ssm_state = gated_delta_kernel(
+                    q, k, v, g, beta, ssm_state, mask)
+            else:
+                out, ssm_state = gated_delta_ops(
+                    q, k, v, g, beta, ssm_state, mask)
 
         if cache is not None:
             cache[3] = ssm_state
@@ -934,19 +1259,30 @@ class Glm5NextDeltaAttention(nn.Module):
             B, T, self.num_heads, self.head_dim)
         # RMS over head_dim with one shared weight, then a plain sigmoid
         # gate (not a silu-gated norm).
-        out = (self.o_norm(out.reshape(B, T, self.num_heads, self.head_dim))
-               * mx.sigmoid(gate)).reshape(B, T, -1)
-        return self.o_proj(out.astype(dtype))
+        out = out.reshape(B, T, self.num_heads, self.head_dim)
+        ng_op = _rmsnorm_gate_op() if conv_op is not None else None
+        if ng_op is not None:
+            out = ng_op(out, self.o_norm.weight, gate, self.o_norm.eps)
+        else:
+            out = _kda_out_gate(out, gate, self.o_norm.weight, self.o_norm.eps)
+        return self.o_proj(out.reshape(B, T, -1).astype(dtype))
 
 
 def rollback_verify_sink(sink: list, n: int) -> None:
     """Rewind the KDA caches after an MTP verify forward over S positions
     to the state after its first ``n`` (the accepted prefix): restore the
-    recorded pre-verify conv tails + recurrent state, then replay the layer
-    over the accepted prefix. O(n <= block) per layer; the KV/pool leaves
-    are trimmed by the caller."""
+    state kept after the n-th verify token (fused route), or restore the
+    recorded pre-verify conv tails + recurrent state and replay the layer
+    over the accepted prefix (op chain). O(n <= block) per layer; the
+    KV/pool leaves are trimmed by the caller."""
     for e in sink:
         cache = e["cache"]
+        states = e.get("states")
+        if states is not None:
+            # Fused route: the state after each verify token was kept.
+            for i, v in enumerate(states[n]):
+                cache[i] = v
+            continue
         for i, v in enumerate(e["pre"]):
             cache[i] = v
         mask = e["mask"]

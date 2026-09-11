@@ -183,6 +183,121 @@ def _np_rms(x, eps):
     return x / np.sqrt((x ** 2).mean(-1, keepdims=True) + eps)
 
 
+@pytest.mark.parametrize("width", [1, 2, 3])
+def test_kda_chained_fused_step_matches_op_chain(monkeypatch, width):
+    """A cached step of `width` tokens through the chained fused kernels
+    (GMLX_GLM5_KDA_FUSED_MAX_T) matches the eager op chain: the layer
+    output, the conv tails and the recurrent state."""
+    args = _tiny_args()
+    model = _random_model(args, seed=7)
+    attn = model.layers[0].self_attn
+    mx.random.seed(21)
+    prompt = mx.random.normal((1, 5, args.hidden_size)) * 0.5
+    step = mx.random.normal((1, width, args.hidden_size)) * 0.5
+
+    def run(max_t):
+        monkeypatch.setattr(glm5_model, "_KDA_FUSED_MAX_T", max_t)
+        cache = glm5_model.ArraysCache(size=4)
+        attn(prompt, cache=cache)
+        y = attn(step, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y, [cache[i] for i in range(4)]
+
+    y_ref, st_ref = run(0)
+    y_fused, st_fused = run(8)
+    assert float(mx.abs(y_fused - y_ref).max()) < 2e-2
+    for a, b in zip(st_fused, st_ref):
+        assert a.shape == b.shape
+        assert float(mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max()) < 2e-2
+
+
+@pytest.mark.skipif(
+    not glm5_model._kda_chunk_op(),
+    reason="mlx-kquant kda_chunk needs tensor-op (NAX) hardware")
+@pytest.mark.parametrize("length", [32, 40])
+def test_kda_chunk_prefill_matches_sequential_kernel(monkeypatch, length):
+    """A prefill of `length` tokens through mlx-kquant's chunked delta-rule
+    kernel (GMLX_GLM5_KDA_CHUNK) matches the token-sequential kernel: the
+    layer output, the conv tails and the recurrent state, for a
+    chunk-aligned and a ragged length."""
+    args = _tiny_args(kda_head_dim=128)
+    model = _random_model(args, seed=7)
+    model.set_dtype(mx.bfloat16)
+    model.eval()
+    attn = model.layers[0].self_attn
+    mx.random.seed(21 + length)
+    x = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(
+        mx.bfloat16)
+
+    def run(on):
+        monkeypatch.setattr(glm5_model, "_KDA_CHUNK", on)
+        cache = glm5_model.ArraysCache(size=4)
+        y = attn(x, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y.astype(mx.float32), [cache[i].astype(mx.float32)
+                                      for i in range(4)]
+
+    y_ref, st_ref = run(False)
+    y_chunk, st_chunk = run(True)
+
+    def rel(a, b):
+        return float(mx.linalg.norm(a - b) / (mx.linalg.norm(b) + 1e-9))
+
+    assert rel(y_chunk, y_ref) < 1e-2
+    for a, b in zip(st_chunk, st_ref):
+        assert a.shape == b.shape
+        assert rel(a, b) < 1e-2
+
+
+@pytest.mark.skipif(
+    not glm5_model._kda_conv_op(),
+    reason="mlx-kquant build without kda_conv")
+@pytest.mark.parametrize("length", [1, 2, 40])
+@pytest.mark.parametrize("chunk", [False, True])
+def test_kda_conv_prefill_matches_eager_chain(monkeypatch, length, chunk):
+    """A step of `length` tokens through mlx-kquant's fused short conv
+    (GMLX_GLM5_KDA_CONV), and with the chunk route the in-kernel decay and
+    fused output gate, matches the eager chain: the layer output, the conv
+    tails and the recurrent state, for a step shorter than the carried
+    rows, one equal to them and a long one, each continued from a warm
+    cache."""
+    args = _tiny_args(kda_head_dim=128)
+    model = _random_model(args, seed=7)
+    model.set_dtype(mx.bfloat16)
+    model.eval()
+    attn = model.layers[0].self_attn
+    mx.random.seed(31 + length)
+    x0 = (mx.random.normal((1, 5, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    x = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(
+        mx.bfloat16)
+
+    if chunk and not glm5_model._kda_chunk_op():
+        pytest.skip("mlx-kquant kda_chunk needs tensor-op (NAX) hardware")
+
+    def run(on):
+        # With the chunk route on, the fused arm also takes the in-kernel
+        # decay (kda_chunk_gated) and the fused output gate.
+        monkeypatch.setattr(glm5_model, "_KDA_CONV", on)
+        monkeypatch.setattr(glm5_model, "_KDA_CHUNK", chunk)
+        cache = glm5_model.ArraysCache(size=4)
+        attn(x0, cache=cache)
+        y = attn(x, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y.astype(mx.float32), [cache[i].astype(mx.float32)
+                                      for i in range(4)]
+
+    y_ref, st_ref = run(False)
+    y_fused, st_fused = run(True)
+
+    def rel(a, b):
+        return float(mx.linalg.norm(a - b) / (mx.linalg.norm(b) + 1e-9))
+
+    assert rel(y_fused, y_ref) < 1e-2
+    for a, b in zip(st_fused, st_ref):
+        assert a.shape == b.shape
+        assert rel(a, b) < 1e-2
+
+
 def test_kda_layer_matches_naive_reference():
     # End-to-end KDA layer vs a step-loop reference implementing the
     # llama.cpp semantics: causal depthwise conv then silu, l2-normalized
@@ -258,10 +373,35 @@ def test_mla_absorbed_matches_naive_prefill(monkeypatch):
     x = mx.random.normal((1, 7, args.hidden_size)) * 0.5
     mask = mx.tril(mx.ones((7, 7), dtype=mx.bool_))
 
+    monkeypatch.setattr(glm5_model, "_ABSORBED_MAX_L", 0)
     naive = np.array(attn(x, mask=mask), dtype=np.float32)
     monkeypatch.setattr(glm5_model, "_ABSORBED_PREFILL", True)
     absorbed = np.array(attn(x, mask=mask), dtype=np.float32)
     np.testing.assert_allclose(absorbed, naive, rtol=2e-3, atol=2e-3)
+
+
+def test_mla_small_l_step_takes_absorbed_form(monkeypatch):
+    # An MTP verify is a 2..8 token forward on a warm cache. Under
+    # _ABSORBED_MAX_L it takes the absorbed MQA form (decode's route)
+    # instead of expanding the latent to per-head K/V over every key;
+    # both give the same logits up to rounding order.
+    args = _tiny_args()
+    model = _random_model(args, seed=5)
+    prompt = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 8, 21, 14, 6, 30, 1,
+              19, 42, 7, 12]
+    verify = [22, 35, 4]
+
+    def run(max_l):
+        monkeypatch.setattr(glm5_model, "_ABSORBED_MAX_L", max_l)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([prompt]), cache=cache))
+        out = model(mx.array([verify]), cache=cache)
+        mx.eval(out)
+        return np.array(out[0], dtype=np.float32)
+
+    naive = run(0)
+    absorbed = run(16)
+    np.testing.assert_allclose(absorbed, naive, rtol=2e-2, atol=2e-2)
 
 
 def test_indexer_dense_bypass_thresholds():
@@ -405,6 +545,78 @@ def test_sparse_decode_gather_matches_masked_path():
             np.array(oa[0, 0], dtype=np.float32),
             np.array(ob[0, 0], dtype=np.float32),
             rtol=2e-3, atol=2e-3, err_msg=f"decode step {step}")
+
+
+@pytest.mark.parametrize("width", [2, 3, 4])
+def test_sparse_verify_gather_matches_masked_path(width):
+    # An MTP verify forward (2..4 queries on a warm sparse cache) takes
+    # the per-query decode gather; it must match the masked application
+    # for every query row, across the q % 4 residues the block straddles.
+    args = _tiny_args()
+    a = _random_model(args, seed=23)
+    b = _random_model(args, seed=23)
+    for layer in b.model.layers:
+        if not layer.is_linear:
+            layer.self_attn._decode_gather = False
+
+    toks = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 44, 8, 19, 52, 6]  # T=15
+    ca, cb = a.make_cache(), b.make_cache()
+    mx.eval(a(mx.array([toks]), cache=ca), b(mx.array([toks]), cache=cb))
+    verify = [7, 21, 42, 13, 30, 6, 25, 1]
+    for start in range(0, 8 - width + 1, width):
+        blk = verify[start:start + width]
+        oa = a(mx.array([blk]), cache=ca)
+        ob = b(mx.array([blk]), cache=cb)
+        mx.eval(oa, ob)
+        np.testing.assert_allclose(
+            np.array(oa[0], dtype=np.float32),
+            np.array(ob[0], dtype=np.float32),
+            rtol=2e-3, atol=2e-3, err_msg=f"verify block at {start}")
+
+
+@pytest.mark.parametrize("L,offset,topk", [(1, 63, 32), (2, 17, 32), (3, 70, 32)])
+def test_sparse_decode_indexed_matches_gather_loop(L, offset, topk):
+    # The index-list route (one sdpa_fa_indexed call over every query's
+    # selected latent rows) must match the per-query gather + sdpa loop
+    # it replaces, including a spilled block (L=2 at offset 17: fewer
+    # visible pools than select_k) and lists of unequal tail length.
+    from mlx_lm.models.base import scaled_dot_product_attention
+
+    if glm5_model._indexed_sdpa() is None:
+        pytest.skip("mlx-kquant sdpa_fa_indexed unavailable here")
+    args = _tiny_args(kv_lora_rank=512, index_topk=topk)
+    attn = Glm5NextMLAAttention(args)
+    r, S = args.index_kpool, offset + L
+    select_k = attn.indexer.select_k
+    spill = L > 1 and (offset + 1) // r < select_k
+    mx.random.seed(offset)
+    q = (mx.random.normal((1, args.num_attention_heads, L, 512)) * 0.3
+         ).astype(mx.bfloat16)
+    latent = (mx.random.normal((1, 1, S, 512)) * 0.5).astype(mx.bfloat16)
+    n_vis = max(1, (offset + L) // r)
+    sel = mx.stack([mx.sort(mx.random.permutation(n_vis)[:select_k])
+                    if n_vis >= select_k else
+                    mx.concatenate([mx.arange(n_vis), mx.zeros(
+                        (select_k - n_vis,), dtype=mx.int32)])
+                    for _ in range(L)])[None].astype(mx.int32)
+    mx.eval(q, latent, sel)
+    scale = 512 ** -0.5
+    outs = []
+    for j in range(L):
+        kv_g, gmask = attn._sparse_decode_keys(
+            latent, sel[:, j], offset + j, 1, spill=spill)
+        outs.append(scaled_dot_product_attention(
+            q[:, :, j:j + 1], kv_g, kv_g, cache=None, scale=scale, mask=gmask))
+    ref = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
+    idx = attn._sparse_decode_index(latent, sel, offset, L, spill)
+    got = glm5_model._indexed_sdpa()(q, latent, idx, scale)
+    mx.eval(ref, got, idx)
+    assert idx.shape[0] == L and idx.dtype == mx.int32
+    if spill:
+        assert int((idx < 0).sum()) > 0
+    rf, gf = ref.astype(mx.float32), got.astype(mx.float32)
+    rel = float(mx.linalg.norm(gf - rf) / mx.linalg.norm(rf))
+    assert rel < 5e-3, f"indexed vs gather loop rel {rel:.3e}"
 
 
 def test_streamed_absorbed_attention_matches_sdpa(monkeypatch):
@@ -728,3 +940,54 @@ def test_moe_gate_cpu_device_keeps_compiled_select():
         mx.eval(inds, w)
     assert inds.shape == (1, 3, gate.top_k)
     assert bool(mx.isfinite(w).all())
+
+
+@pytest.mark.parametrize("length", [1, 2, 4])
+def test_indexer_decode_route_agrees_with_inline(monkeypatch, length):
+    """Decode-width steps score through mlx-kquant's fused scorer and
+    radix top-k; the selected pool set must match the inline f32
+    argpartition up to pools inside the bf16 rounding of the threshold."""
+    import gmlx.models.glm5_next.model as glm5_model
+
+    if not glm5_model._indexer_decode_available():
+        pytest.skip("mlx-kquant decode indexer unavailable here")
+    args = _tiny_args()
+    args.hidden_size = 256
+    args.q_lora_rank = 64
+    args.index_n_heads = 32
+    args.index_head_dim = 128
+    args.index_topk = 2048
+    args.index_kpool = 4
+    mx.random.seed(17)
+    idx = Glm5NextIndexer(args)
+    idx.set_dtype(mx.bfloat16)
+    from mlx.utils import tree_flatten, tree_unflatten
+    params = [(k, (mx.random.normal(v.shape) * 0.2).astype(v.dtype))
+              for k, v in tree_flatten(idx.parameters())]
+    idx.update(tree_unflatten(params))
+    idx.weights_proj.weight = idx.weights_proj.weight.astype(mx.float32)
+    mx.eval(idx.parameters())
+
+    T = 2400  # 600 complete pools, past the 512-pool selection width
+    x = (mx.random.normal((1, T, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    qr = (mx.random.normal((1, T, args.q_lora_rank)) * 0.5).astype(mx.bfloat16)
+    xs = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    qs = (mx.random.normal((1, length, args.q_lora_rank)) * 0.5).astype(mx.bfloat16)
+
+    sels = {}
+    for arm in ("kq", "inline"):
+        monkeypatch.setitem(glm5_model._INDEXER_DECODE_STATE, "ok",
+                            arm == "kq")
+        pool = PoolingCache(4, lookback=False)
+        assert idx(x, qr, pool, 0, T) is not None      # prefill, inline (L > 4)
+        sel = idx(xs, qs, pool, T, T + length)
+        mx.eval(sel)
+        # a kernel error flips the state off and falls back inline, which
+        # would make the arms trivially equal
+        assert glm5_model._INDEXER_DECODE_STATE["ok"] is (arm == "kq")
+        sels[arm] = np.array(sel)[0]
+    assert sels["kq"].shape == sels["inline"].shape == (length, idx.select_k)
+    for j in range(length):
+        a, b = set(sels["kq"][j].tolist()), set(sels["inline"][j].tolist())
+        assert len(a) == idx.select_k
+        assert len(a & b) >= idx.select_k - 8, f"row {j}: {idx.select_k - len(a & b)} differ"

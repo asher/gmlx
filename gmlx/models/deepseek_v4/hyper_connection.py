@@ -22,9 +22,17 @@ try:
 
     _KQ_HC = hasattr(_kq, "hc_front_reduce") and os.environ.get(
         "GMLX_HC_KQ", "1") != "0"
+    _KQ_HC_CYCLE = _KQ_HC and hasattr(_kq, "hc_front_expand_collapse")
 except ImportError:
     _kq = None
     _KQ_HC = False
+    _KQ_HC_CYCLE = False
+
+
+def _hc_fused_cycle() -> bool:
+    """Gate for the one-dispatch hyper-connection cycle. Read on every
+    call, never cached, so a toggle harness can flip it mid-process."""
+    return os.environ.get("GMLX_HC_FUSED_CYCLE", "1") != "0"
 
 
 def _make_hc_sinkhorn_collapse_kernel():
@@ -335,7 +343,8 @@ class HyperConnection(nn.Module):
                 and (self.fn.shape[1] // self.hc_mult) % 1024 == 0
             )
             self._m1_ok = ok
-        return ok and not self.training and x.shape[0] * x.shape[1] == 1
+        return (ok and not self.training
+                and x.shape[0] * x.shape[1] <= _HC_M1_MAX_ROWS)
 
     def _collapse_m1(self, x, mixes_raw, ssq, norm_weight):
         B, L, H, D = x.shape
@@ -392,6 +401,16 @@ class HyperConnection(nn.Module):
         B, L, D = x_sub.shape
         H = resid.shape[2]
         if _KQ_HC:
+            if _KQ_HC_CYCLE and _hc_fused_cycle():
+                # One dispatch for the expand, the front reduction and the
+                # collapse: the last threadgroup of each row to publish
+                # its mix dot runs the sinkhorn and the collapse.
+                # Bit-identical to the pair below.
+                h, x, post_o, comb_o = _kq.hc_front_expand_collapse(
+                    x_sub, resid, post, comb, self.fn, self.scale,
+                    self.base, norm_weight, iters=self.sinkhorn_iters,
+                    hc_eps=self.hc_eps, norm_eps=self.norm_eps)
+                return h, (x, post_o, comb_o)
             h, mixes_raw, ssq = _kq.hc_front_expand_reduce(
                 x_sub, resid, post, comb, self.fn)
             return h, self._collapse_m1(h, mixes_raw, ssq, norm_weight)
@@ -474,11 +493,16 @@ def hc_expand(x, residual, post, comb):
 #   sinkhorn_collapse_m1: existing kernel + deferred rms factor + the
 #                      sublayer RMSNorm folded into the output pass
 #   expand_m1:         post/comb expand as one elementwise kernel
-# Gated by GMLX_HC_M1_FUSED (default on); any other width or device uses
-# the original path. fp reduction order differs from the eager front, so
+# Gated by GMLX_HC_M1_FUSED (default on) and GMLX_HC_M1_MAX_ROWS (default
+# 8: decode steps and MTP verify blocks); wider steps or another device
+# use the original path. fp reduction order differs from the eager front, so
 # outputs match to rounding, not bit-exactly.
 
 _HC_M1_ENABLED = os.environ.get("GMLX_HC_M1_FUSED", "1") != "0"
+# Widest step (rows = batch x tokens) that takes the fused route. The
+# kernels are one threadgroup per row and read fn in full per row, which
+# suits a decode step or an MTP verify block, not a prefill chunk.
+_HC_M1_MAX_ROWS = int(os.environ.get("GMLX_HC_M1_MAX_ROWS", "8"))
 
 
 def _make_hc_front_reduce_kernel():

@@ -1,4 +1,4 @@
-"""Per-phase MLX command-buffer split caps for serving.
+"""Per-phase MLX command-buffer split caps.
 
 Decode wants coarse buffers: at the device defaults a step's encode
 splits into enough command buffers that submission blocks on in-flight
@@ -6,8 +6,10 @@ drain, so the engine's async lookahead hides nothing. Deep prefill
 needs fine buffers: a giant buffer keeps every layer's transients live
 at once and can exhaust GPU memory on multi-thousand-token chunks.
 kq.set_cb_caps writes the live device fields, so the serve engine
-flips coarse at decode steps and fine at prompt steps. GMLX_CB_PHASE=0
-disables the install.
+flips coarse at decode steps and fine at prompt steps, and the CLI
+generate path (run, chat, bench) wraps the token-step generators the
+same way: fine through the prefill, coarse from the first token on.
+GMLX_CB_PHASE=0 disables both installs.
 """
 
 from __future__ import annotations
@@ -69,4 +71,53 @@ def install_cb_phase_flips() -> bool:
     # Prompts short enough to skip chunked processing never reach
     # prompt_step: generate() runs their whole prefill in one call.
     _wrap(ar.PromptProcessingBatch, "generate", "prefill")
+    return True
+
+
+def phased_steps(gen):
+    """Iterate a token-step generator with fine caps through its prefill
+    and coarse caps from the first token on. The generator body runs on
+    the first next(), so the prefill flip happens here, not at call."""
+    flip("prefill")
+    first = True
+    for item in gen:
+        if first:
+            flip("decode")
+            first = False
+        yield item
+
+
+def install_cb_phase_steps(streaming: bool = False) -> bool:
+    """Wrap the generate_step functions the CLI generate path drives
+    (mlx-lm's plain and speculative loops, mlx-vlm's ar loop) in
+    phased_steps. A streaming placement keeps its lifetime coarse caps
+    (the argv lift, or a pinned MLX_MAX_OPS_PER_BUFFER) and is skipped."""
+    if os.environ.get("GMLX_CB_PHASE", "1") == "0":
+        return False
+    if streaming or os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
+        return False
+    if not _kq():
+        return False
+    import importlib
+
+    targets = [("mlx_lm.generate", "generate_step"),
+               ("mlx_lm.generate", "speculative_generate_step"),
+               ("mlx_vlm.generate.ar", "generate_step")]
+    for modname, name in targets:
+        try:
+            mod = importlib.import_module(modname)
+        except ImportError:
+            continue
+        orig = getattr(mod, name, None)
+        if orig is None or getattr(orig, "_gmlx_cb_phase", False):
+            continue
+
+        def wrapped(*args, _orig=orig, **kwargs):
+            return phased_steps(_orig(*args, **kwargs))
+
+        wrapped._gmlx_cb_phase = True
+        wrapped.__name__ = orig.__name__
+        wrapped.__doc__ = orig.__doc__
+        wrapped.__wrapped__ = orig
+        setattr(mod, name, wrapped)
     return True

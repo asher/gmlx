@@ -136,9 +136,15 @@ def _install_patches():
         install_owned_spec_engine,
         install_continuous_batch_admission,
     )
+    from gmlx.cache.apc_pooling import install_pooling_apc_support
+
     install_full_prompt_mtp_prefill()
     install_owned_spec_engine()
     install_continuous_batch_admission()
+    # Serve installs the PoolingCache arms of the APC exact store; without
+    # them the L1 tests on a pooling-stack model (GLM-5.3-Flash,
+    # DeepSeek-V4) fall back cold at every lookup.
+    install_pooling_apc_support()
 
 
 # The real MTP load patches process-wide seams in mlx_vlm's qwen3_5 module

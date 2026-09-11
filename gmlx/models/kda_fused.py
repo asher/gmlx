@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""Fused single-token KDA decode step (kimi_k3 / glm5_next linear layers).
+"""Fused KDA decode step (kimi_k3 / glm5_next linear layers), one token or
+a short block of tokens per dispatch.
 
 At M=1 the KDA sublayer is dispatch-latency bound: three short convs (each
 a concat, conv1d, silu and state slice), two l2 norms, the decay and beta
@@ -17,12 +18,24 @@ and o_proj into one dispatch per step:
 and emits the shifted conv tails plus the new recurrent state. One
 threadgroup per (batch, head): SG simdgroups split the Dv rows, each lane
 owns Dk / 32 key channels, so the Dk reductions are simd_sums and the Dv
-reduction for the output norm goes through threadgroup memory. All math is
+reduction for the output norm goes through threadgroup memory. SG comes
+from a probe of what the GPU will launch, since the register budget puts
+the limit well under 1024 threads on smaller GPUs. All math is
 f32 (the reference evaluation order); the eager path rounds the conv and
 norm outputs to bf16 between ops, so results agree to bf16 noise, not
 bit-exactly.
 
-Only the plain decode shape is fused (T == 1, no ssm mask, no per-row
+The simdgroup's state rows are loaded into registers up front (one float4
+per lane per row at head dim 128) and stay there across the NT tokens of
+a block, so an MTP verify block of NT tokens is one dispatch: the state is
+read and written once, the conv taps for a token come from the carried
+tails or the block's earlier tokens, and the state after every token but
+the last is written to a side output for the verify sink. The single-token
+kernel is the NT = 1 instance. Latency dominates this dispatch (the state
+pass is under 15 us at bandwidth), so the block form roughly halves the
+KDA cost of a two-token verify.
+
+Only the decode shape is fused (T <= max_t, no ssm mask, no per-row
 lengths). ``GMLX_KDA_FUSED=0`` disables the route.
 """
 
@@ -50,132 +63,310 @@ _SOURCE = """
     const float l2_eps   = params[2];
     const float norm_eps = params[3];
 
-    // ---- q / k: conv + silu, l2 norm over Dk, decay -------------------
-    float qn[NPT], kn[NPT], g[NPT];
-    float qss = 0.0f, kss = 0.0f;
-    for (int i = 0; i < NPT; ++i) {
-        int dk = lane * NPT + i;
-        int c  = h * DK + dk;
-        float aq = 0.0f, ak = 0.0f;
-        for (int t = 0; t < NS; ++t) {
-            aq = fma(float(wq[c * KW + t]), float(sq[(b * NS + t) * C + c]), aq);
-            ak = fma(float(wk[c * KW + t]), float(sk[(b * NS + t) * C + c]), ak);
-        }
-        aq = fma(float(wq[c * KW + NS]), float(xq[b * C + c]), aq);
-        ak = fma(float(wk[c * KW + NS]), float(xk[b * C + c]), ak);
-        aq = aq / (1.0f + metal::exp(-aq));
-        ak = ak / (1.0f + metal::exp(-ak));
-        qn[i] = aq; kn[i] = ak;
-        qss = fma(aq, aq, qss);
-        kss = fma(ak, ak, kss);
-        float a = float(a_raw[b * C + c]) + dt_bias[c];
-        float s = 1.0f / (1.0f + metal::exp(a_folded[h] * a));  // sigmoid(-a_folded * a)
-        g[i] = metal::exp(lb * s);
-    }
-    qss = simd_sum(qss);
-    kss = simd_sum(kss);
-    float qf = metal::rsqrt(qss / float(DK) + l2_eps) * scale * scale;
-    float kf = metal::rsqrt(kss / float(DK) + l2_eps) * scale;
-    for (int i = 0; i < NPT; ++i) { qn[i] *= qf; kn[i] *= kf; }
-
-    float beta = 1.0f / (1.0f + metal::exp(-float(b_logit[b * H + h])));
-
-    // ---- delta rule over this simdgroup's Dv rows ---------------------
     threadgroup float outbuf[DV];
     threadgroup float red[SG];
     const device float* st_in  = state_in  + (size_t)(n * DV) * DK;
     device float*       st_out = state_out + (size_t)(n * DV) * DK;
-    for (int r = 0; r < ROWS; ++r) {
-        int dv = sg * ROWS + r;
-        int cv = h * DV + dv;
-        float av = 0.0f;
-        for (int t = 0; t < NS; ++t)
-            av = fma(float(wv[cv * KW + t]), float(sv[(b * NS + t) * C + cv]), av);
-        av = fma(float(wv[cv * KW + NS]), float(xv[b * C + cv]), av);
-        av = av / (1.0f + metal::exp(-av));
 
-        float s[NPT];
-        float kv_mem = 0.0f;
+    // This simdgroup's state rows stay in registers for the whole block;
+    // every row's load is issued before any token's math.
+    __ROWS_DECL__
+
+    for (int t = 0; t < NT; ++t) {
+        // ---- q / k: conv (carried tails, then the block's earlier
+        // tokens), silu, l2 norm over Dk, per-channel decay ----------
+        float qn[NPT], kn[NPT], g[NPT];
+        float qss = 0.0f, kss = 0.0f;
         for (int i = 0; i < NPT; ++i) {
             int dk = lane * NPT + i;
-            s[i] = st_in[dv * DK + dk] * g[i];
-            kv_mem = fma(s[i], kn[i], kv_mem);
+            int c  = h * DK + dk;
+            float aq = 0.0f, ak = 0.0f;
+            for (int j = 0; j < NS; ++j) {
+                int m = t - NS + j;
+                float vq = (m < 0) ? float(sq[(b * NS + NS + m) * C + c])
+                                   : float(xq[(b * NT + m) * C + c]);
+                float vk = (m < 0) ? float(sk[(b * NS + NS + m) * C + c])
+                                   : float(xk[(b * NT + m) * C + c]);
+                aq = fma(float(wq[c * KW + j]), vq, aq);
+                ak = fma(float(wk[c * KW + j]), vk, ak);
+            }
+            aq = fma(float(wq[c * KW + NS]), float(xq[(b * NT + t) * C + c]), aq);
+            ak = fma(float(wk[c * KW + NS]), float(xk[(b * NT + t) * C + c]), ak);
+            aq = aq / (1.0f + metal::exp(-aq));
+            ak = ak / (1.0f + metal::exp(-ak));
+            qn[i] = aq; kn[i] = ak;
+            qss = fma(aq, aq, qss);
+            kss = fma(ak, ak, kss);
+            float a = float(a_raw[(b * NT + t) * C + c]) + dt_bias[c];
+            float s_ = 1.0f / (1.0f + metal::exp(a_folded[h] * a));  // sigmoid(-a_folded * a)
+            g[i] = metal::exp(lb * s_);
         }
-        kv_mem = simd_sum(kv_mem);
-        float delta = (av - kv_mem) * beta;
-        float o = 0.0f;
-        for (int i = 0; i < NPT; ++i) {
-            int dk = lane * NPT + i;
-            s[i] = fma(kn[i], delta, s[i]);
-            o = fma(s[i], qn[i], o);
-            st_out[dv * DK + dk] = s[i];
+        qss = simd_sum(qss);
+        kss = simd_sum(kss);
+        float qf = metal::rsqrt(qss / float(DK) + l2_eps) * scale * scale;
+        float kf = metal::rsqrt(kss / float(DK) + l2_eps) * scale;
+        for (int i = 0; i < NPT; ++i) { qn[i] *= qf; kn[i] *= kf; }
+        float beta = 1.0f / (1.0f + metal::exp(-float(b_logit[(b * NT + t) * H + h])));
+
+        // ---- v conv + silu for this simdgroup's rows -----------------
+        float av[ROWS];
+        for (int r = 0; r < ROWS; ++r) {
+            int cv = h * DV + sg * ROWS + r;
+            float a = 0.0f;
+            for (int j = 0; j < NS; ++j) {
+                int m = t - NS + j;
+                float vv = (m < 0) ? float(sv[(b * NS + NS + m) * C + cv])
+                                   : float(xv[(b * NT + m) * C + cv]);
+                a = fma(float(wv[cv * KW + j]), vv, a);
+            }
+            a = fma(float(wv[cv * KW + NS]), float(xv[(b * NT + t) * C + cv]), a);
+            av[r] = a / (1.0f + metal::exp(-a));
         }
-        o = simd_sum(o);
-        if (lane == 0) outbuf[dv] = o;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ---- output RMSNorm over Dv, sigmoid gate --------------------------
-    float ss = 0.0f;
-    for (int dv = tid; dv < DV; dv += 32 * SG) ss = fma(outbuf[dv], outbuf[dv], ss);
-    ss = simd_sum(ss);
-    if (lane == 0) red[sg] = ss;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float tot = 0.0f;
-    for (int i = 0; i < SG; ++i) tot += red[i];
-    float of = metal::rsqrt(tot / float(DV) + norm_eps);
-    for (int dv = tid; dv < DV; dv += 32 * SG) {
-        int cv = h * DV + dv;
-        float gt = 1.0f / (1.0f + metal::exp(-float(gate[b * C + cv])));
-        y[b * C + cv] = T(outbuf[dv] * of * float(w[dv]) * gt);
+        // ---- delta rule over the register rows -----------------------
+        __DELTA_RULE__
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- output RMSNorm over Dv, sigmoid gate --------------------
+        float ss = 0.0f;
+        for (int dv = tid; dv < DV; dv += 32 * SG) ss = fma(outbuf[dv], outbuf[dv], ss);
+        ss = simd_sum(ss);
+        if (lane == 0) red[sg] = ss;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float tot = 0.0f;
+        for (int i = 0; i < SG; ++i) tot += red[i];
+        float of = metal::rsqrt(tot / float(DV) + norm_eps);
+        for (int dv = tid; dv < DV; dv += 32 * SG) {
+            int cv = h * DV + dv;
+            float gt = 1.0f / (1.0f + metal::exp(-float(gate[(b * NT + t) * C + cv])));
+            y[(b * NT + t) * C + cv] = T(outbuf[dv] * of * float(w[dv]) * gt);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // ---- shifted conv tails -------------------------------------------
+    __ROWS_STORE__
+
+    // ---- conv tails after the block ----------------------------------
     if (sg == 0) {
         for (int i = 0; i < NPT; ++i) {
             int c = h * DK + lane * NPT + i;
-            for (int t = 0; t < NS; ++t) {
-                size_t o_ = (b * NS + t) * C + c;
-                if (t + 1 < NS) {
-                    size_t i_ = (b * NS + t + 1) * C + c;
+            for (int j = 0; j < NS; ++j) {
+                int m = NT - NS + j;
+                size_t o_ = (b * NS + j) * C + c;
+                if (m < 0) {
+                    size_t i_ = (b * NS + NS + m) * C + c;
                     sq_out[o_] = sq[i_]; sk_out[o_] = sk[i_]; sv_out[o_] = sv[i_];
                 } else {
-                    sq_out[o_] = xq[b * C + c]; sk_out[o_] = xk[b * C + c];
-                    sv_out[o_] = xv[b * C + c];
+                    size_t i_ = (b * NT + m) * C + c;
+                    sq_out[o_] = xq[i_]; sk_out[o_] = xk[i_]; sv_out[o_] = xv[i_];
                 }
             }
         }
     }
 """
 
-_KERNEL = None
+# Head dim 128: one float4 of state per lane per row (the vector loads
+# and dots are what make the block form pay; the scalar form is the same
+# math for other head dims).
+_VEC = {
+    "__ROWS_DECL__": """float4 s[ROWS];
+    for (int r = 0; r < ROWS; ++r)
+        s[r] = ((const device float4*)(st_in + (sg * ROWS + r) * DK))[lane];""",
+    "__DELTA_RULE__": """float4 gv = float4(g[0], g[1], g[2], g[3]);
+        float4 kv = float4(kn[0], kn[1], kn[2], kn[3]);
+        float4 qv = float4(qn[0], qn[1], qn[2], qn[3]);
+        for (int r = 0; r < ROWS; ++r) {
+            int dv = sg * ROWS + r;
+            s[r] *= gv;
+            float kv_mem = simd_sum(dot(s[r], kv));
+            float delta = (av[r] - kv_mem) * beta;
+            s[r] = fma(kv, float4(delta), s[r]);
+            float o = simd_sum(dot(s[r], qv));
+            if (lane == 0) outbuf[dv] = o;
+            if (t + 1 < NT)
+                ((device float4*)(state_mid + ((size_t)t * B * H + n) * DV * DK + dv * DK))[lane] = s[r];
+        }""",
+    "__ROWS_STORE__": """for (int r = 0; r < ROWS; ++r)
+        ((device float4*)(st_out + (sg * ROWS + r) * DK))[lane] = s[r];""",
+}
+
+_SCALAR = {
+    "__ROWS_DECL__": """float s[ROWS][NPT];
+    for (int r = 0; r < ROWS; ++r)
+        for (int i = 0; i < NPT; ++i)
+            s[r][i] = st_in[(sg * ROWS + r) * DK + lane * NPT + i];""",
+    "__DELTA_RULE__": """for (int r = 0; r < ROWS; ++r) {
+            int dv = sg * ROWS + r;
+            float kv_mem = 0.0f;
+            for (int i = 0; i < NPT; ++i) {
+                s[r][i] *= g[i];
+                kv_mem = fma(s[r][i], kn[i], kv_mem);
+            }
+            kv_mem = simd_sum(kv_mem);
+            float delta = (av[r] - kv_mem) * beta;
+            float o = 0.0f;
+            for (int i = 0; i < NPT; ++i) {
+                s[r][i] = fma(kn[i], delta, s[r][i]);
+                o = fma(s[r][i], qn[i], o);
+            }
+            o = simd_sum(o);
+            if (lane == 0) outbuf[dv] = o;
+            if (t + 1 < NT) {
+                device float* mid = state_mid + ((size_t)t * B * H + n) * DV * DK + dv * DK;
+                for (int i = 0; i < NPT; ++i) mid[lane * NPT + i] = s[r][i];
+            }
+        }""",
+    "__ROWS_STORE__": """for (int r = 0; r < ROWS; ++r)
+        for (int i = 0; i < NPT; ++i)
+            st_out[(sg * ROWS + r) * DK + lane * NPT + i] = s[r][i];""",
+}
+
+_KERNELS = {}
 
 
-def _kernel():
-    global _KERNEL
-    if _KERNEL is None:
-        _KERNEL = mx.fast.metal_kernel(
-            name="kda_decode_fused",
+def _kernel(vec: bool):
+    if vec not in _KERNELS:
+        src = _SOURCE
+        for k, v in (_VEC if vec else _SCALAR).items():
+            src = src.replace(k, v)
+        _KERNELS[vec] = mx.fast.metal_kernel(
+            name="kda_decode_fused_block" + ("" if vec else "_s"),
             input_names=["xq", "xk", "xv", "sq", "sk", "sv", "wq", "wk", "wv",
                          "a_raw", "dt_bias", "a_folded", "b_logit", "gate",
                          "state_in", "w", "params"],
-            output_names=["y", "sq_out", "sk_out", "sv_out", "state_out"],
-            source=_SOURCE,
+            output_names=["y", "sq_out", "sk_out", "sv_out", "state_out",
+                          "state_mid"],
+            source=src,
             ensure_row_contiguous=True,
         )
-    return _KERNEL
+    return _KERNELS[vec]
 
 
-def fused_ok(x, mask, cache) -> bool:
-    return (
+_SG_FIT: dict = {}
+# Probe the verify band as well as the single step, so one width serves
+# every block length: the threadgroup reduction for the output norm sums in
+# simdgroup order, and a block that ran at a different width would not match
+# the same tokens stepped one at a time.
+_PROBE_NT = 8
+
+
+def _dispatch(vec, sg, inputs, B, NT, H, D, KW, dtype):
+    return _kernel(vec)(
+        inputs=inputs,
+        template=[("T", dtype), ("B", B), ("H", H), ("DK", D), ("DV", D),
+                  ("KW", KW), ("SG", sg), ("NT", NT)],
+        grid=(32 * sg, 1, B * H),
+        threadgroup=(32 * sg, 1, 1),
+        output_shapes=[(B, NT, H * D), (B, KW - 1, H * D), (B, KW - 1, H * D),
+                       (B, KW - 1, H * D), (B, H, D, D),
+                       (NT - 1, B, H, D, D) if NT > 1 else (1,)],
+        output_dtypes=[dtype, dtype, dtype, dtype, mx.float32, mx.float32],
+    )
+
+
+def _launches(vec, sg, B, H, D, KW, dtype, nts) -> bool:
+    """Run the kernel on zeros at each block length, to see whether this GPU
+    accepts the launch."""
+    C = H * D
+    for nt in nts:
+        z = mx.zeros((B, nt, C), dtype=dtype)
+        tail = mx.zeros((B, KW - 1, C), dtype=dtype)
+        wc = mx.zeros((C, KW, 1), dtype=dtype)
+        try:
+            mx.eval(_dispatch(vec, sg, [
+                z, z, z, tail, tail, tail, wc, wc, wc, z,
+                mx.zeros((C,), dtype=mx.float32),
+                mx.zeros((H,), dtype=mx.float32),
+                mx.zeros((B, nt, H), dtype=dtype), z,
+                mx.zeros((B, H, D, D), dtype=mx.float32),
+                mx.zeros((D,), dtype=dtype),
+                mx.zeros((4,), dtype=mx.float32),
+            ], B, nt, H, D, KW, dtype))
+        except Exception:  # noqa: BLE001 - a launch this GPU will not take
+            return False
+    return True
+
+
+def sg_for(dtype, B, H, D, KW, max_nt: int = _PROBE_NT):
+    """Widest simdgroup split this GPU launches for the kernel, or None when
+    no split fits and the eager path has to run.
+
+    A threadgroup of 32 * SG threads is rejected above the pipeline's
+    maxTotalThreadsPerThreadgroup, which follows from register pressure and
+    is well under 1024 on GPUs with a smaller register file. The limit is per
+    pipeline and MLX exposes no way to read it, so the answer comes from a
+    dispatch, once per shape."""
+    key = (str(dtype), B, H, D, KW)
+    if key in _SG_FIT:
+        return _SG_FIT[key]
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    nts = (1, max_nt) if max_nt > 1 else (1,)
+    gen = gpu_arch_gen()
+    # M1 and M2 take the narrow split first, the way gdn_sg clamps the GDN
+    # kernels, so the probe skips two launches they have no budget for.
+    sg = 8 if 0 < gen < 15 else (16 if B == 1 else 32)
+    while sg > 1 and D % sg:      # SG splits the Dv rows evenly
+        sg //= 2
+    fit = None
+    while sg >= 1:
+        if _launches(D == 128, sg, B, H, D, KW, dtype, nts):
+            fit = sg
+            break
+        sg //= 2
+    _SG_FIT[key] = fit
+    return fit
+
+
+def fused_ok(x, mask, cache, max_t: int = 1, *, num_heads: int = 0,
+             head_dim: int = 0, conv_kernel: int = 0) -> bool:
+    ok = (
         _ENABLED
         and cache is not None
         and mask is None
-        and x.shape[1] == 1
+        and x.shape[1] <= max_t
         and getattr(cache, "lengths", None) is None
         and mx.default_device() == mx.gpu
         and mx.metal.is_available()
     )
+    if ok and head_dim:
+        ok = sg_for(x.dtype, x.shape[0], num_heads, head_dim, conv_kernel,
+                    max_t) is not None
+    return ok
+
+
+def kda_decode_fused_block(
+    xq, xk, xv, sq, sk, sv, wq, wk, wv, a_raw, dt_bias, a_folded, b_logit,
+    gate, state, w, *, lb: float, scale: float, l2_eps: float,
+    norm_eps: float, num_heads: int, head_dim: int, conv_kernel: int,
+):
+    """One fused decode block of NT tokens. Shapes: xq/xk/xv/a_raw/gate
+    [B, NT, H*D], sq/sk/sv [B, KW-1, H*D], wq/wk/wv [H*D, KW, 1], dt_bias
+    [H*D], a_folded [H], b_logit [B, NT, H], state [B, H, D, D] f32, w [D].
+    Returns (y [B, NT, H*D], sq', sk', sv', state' after the block,
+    states_mid [NT-1, B, H, D, D] f32: the state after each token but the
+    last, for the verify sink)."""
+    B, NT, C = xq.shape
+    H, D, KW = num_heads, head_dim, conv_kernel
+    assert C == H * D
+    dtype = xq.dtype
+    if sq is None:
+        z = mx.zeros((B, KW - 1, C), dtype=dtype)
+        sq = sk = sv = z
+    if state is None:
+        state = mx.zeros((B, H, D, D), dtype=mx.float32)
+    sg = sg_for(dtype, B, H, D, KW, max(NT, _PROBE_NT))
+    if sg is None:
+        raise RuntimeError(
+            "fused KDA decode needs a threadgroup wider than this GPU will "
+            "launch for the kernel; GMLX_KDA_FUSED=0 keeps the eager path")
+    params = mx.array([lb, scale, l2_eps, norm_eps], dtype=mx.float32)
+    return _dispatch(D == 128, sg, [
+        xq, xk, xv, sq, sk, sv, wq, wk, wv,
+        a_raw, dt_bias.astype(mx.float32),
+        a_folded.astype(mx.float32), b_logit.reshape(B, NT, H),
+        gate, state.astype(mx.float32), w, params,
+    ], B, NT, H, D, KW, dtype)
 
 
 def kda_decode_fused(
@@ -183,36 +374,16 @@ def kda_decode_fused(
     gate, state, w, *, lb: float, scale: float, l2_eps: float,
     norm_eps: float, num_heads: int, head_dim: int, conv_kernel: int,
 ):
-    """One fused decode step. Shapes: xq/xk/xv/a_raw/gate [B, 1, H*D],
-    sq/sk/sv [B, KW-1, H*D], wq/wk/wv [H*D, KW, 1], dt_bias [H*D],
-    a_folded [H], b_logit [B, 1, H], state [B, H, D, D] f32, w [D].
+    """One fused decode step (the NT = 1 block). Shapes: xq/xk/xv/a_raw/gate
+    [B, 1, H*D], sq/sk/sv [B, KW-1, H*D], wq/wk/wv [H*D, KW, 1], dt_bias
+    [H*D], a_folded [H], b_logit [B, 1, H], state [B, H, D, D] f32, w [D].
     Returns (y [B, 1, H*D], sq', sk', sv', state')."""
     B = xq.shape[0]
-    H, D, KW = num_heads, head_dim, conv_kernel
-    C = H * D
-    dtype = xq.dtype
-    if sq is None:
-        z = mx.zeros((B, KW - 1, C), dtype=dtype)
-        sq = sk = sv = z
-    if state is None:
-        state = mx.zeros((B, H, D, D), dtype=mx.float32)
-    sg = 16 if B == 1 else 32
-    params = mx.array([lb, scale, l2_eps, norm_eps], dtype=mx.float32)
-    outs = _kernel()(
-        inputs=[
-            xq.reshape(B, C), xk.reshape(B, C), xv.reshape(B, C),
-            sq, sk, sv, wq, wk, wv,
-            a_raw.reshape(B, C), dt_bias.astype(mx.float32),
-            a_folded.astype(mx.float32), b_logit.reshape(B, H),
-            gate.reshape(B, C), state.astype(mx.float32), w, params,
-        ],
-        template=[("T", dtype), ("H", H), ("DK", D), ("DV", D),
-                  ("KW", KW), ("SG", sg)],
-        grid=(32 * sg, 1, B * H),
-        threadgroup=(32 * sg, 1, 1),
-        output_shapes=[(B, C), (B, KW - 1, C), (B, KW - 1, C),
-                       (B, KW - 1, C), (B, H, D, D)],
-        output_dtypes=[dtype, dtype, dtype, dtype, mx.float32],
-    )
-    y, sq2, sk2, sv2, st2 = outs
-    return y.reshape(B, 1, C), sq2, sk2, sv2, st2
+    C = num_heads * head_dim
+    y, sq2, sk2, sv2, st2, _ = kda_decode_fused_block(
+        xq.reshape(B, 1, C), xk.reshape(B, 1, C), xv.reshape(B, 1, C),
+        sq, sk, sv, wq, wk, wv, a_raw.reshape(B, 1, C), dt_bias, a_folded,
+        b_logit.reshape(B, 1, num_heads), gate.reshape(B, 1, C), state, w,
+        lb=lb, scale=scale, l2_eps=l2_eps, norm_eps=norm_eps,
+        num_heads=num_heads, head_dim=head_dim, conv_kernel=conv_kernel)
+    return y, sq2, sk2, sv2, st2

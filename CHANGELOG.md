@@ -8,34 +8,70 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- GLM-5.3-Flash and Kimi Linear run KDA prefill on mlx-kquant's chunked
+  delta-rule kernels instead of stepping token by token. Tensor-op
+  hardware only. `GMLX_GLM5_KDA_CHUNK=0` keeps the sequential kernel and
+  `GMLX_GLM5_KDA_CONV=0` the eager conv, norm and gate chain.
+- Sorted-prefill MoE layers on mlx-kquant builds unsort and score-mix the
+  routed slots in one dispatch. `GMLX_MOE_MIX_PREFILL=0` keeps the eager
+  pair.
+- Hyper-connected models (DeepSeek-V4, GLM-5.3-Flash) run each
+  hyper-connection cycle of a decode or verify step as one dispatch
+  instead of two, bit-identically. `GMLX_HC_FUSED_CYCLE=0` restores the
+  pair.
+- GLM-5.3-Flash sparse decode and MTP verify read each query's selected
+  latent rows through index-gathered attention instead of gathering a copy
+  per query. `GMLX_GLM5_SPARSE_INDEXED=0` restores the gather loop.
+- `run`, `chat` and `bench` flip the MLX command-buffer caps per phase the
+  way `serve` does, so CLI decode no longer splits every step into dozens
+  of buffers. `GMLX_CB_PHASE=0` disables the flips.
 - DeepSeek-V4-Flash-Vision-Exp loads with its `deepseek4v` mmproj: image
-  turns on `run`, `chat` and `serve`; text turns unchanged.
-- `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`): a second
-  KV-cache quantization scheme, Huawei's KVarN (arXiv:2606.03458) in the
+  turns on `run`, `chat` and `serve`, text turns unchanged.
+- `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`), a second KV
+  cache quantization scheme: Huawei's KVarN (arXiv:2606.03458) in the
   beellama.cpp record format (MIT, see THIRD_PARTY_NOTICES.md). Widths
-  2/3/4/5/6/8 via `--kv-bits`, split pairs via `GMLX_KVARN_BITS=k6v5`, an
-  fp16 precision tail via `--kv-tail-tokens`. Same policy, `[kv]` line and
-  `/v1/models` report as the affine scheme; composes with `--max-kv-size`
-  on `run` and `chat`, native MTP at batch size 1, and the prompt cache.
-  Requires mlx-kquant 0.4.6; `GMLX_KVARN=0` disables. Fidelity tables in
-  docs/performance.md.
-- `scripts/kld_harness.py`: the teacher-forced KLD harness behind those
+  2/3/4/5/6/8 via `--kv-bits`, split pairs via `GMLX_KVARN_BITS`, an fp16
+  tail via `--kv-tail-tokens`. Reported and composed like the affine
+  scheme. Requires mlx-kquant 0.4.6. `GMLX_KVARN=0` disables. Fidelity
+  tables in docs/performance.md.
+- `scripts/kld_harness.py`, the teacher-forced KLD harness behind those
   tables.
 - A model loaded without KV quantization carries an explicit `off` policy,
   so request-time readers never inherit another model's boot env.
 
 ### Fixed
 
+- Every speculative request was shed on a 109 GB model with a native MTP
+  head, the prefill gate+up expert concat having left the governor 1-2 GB.
+  The concat is built only when the copy leaves
+  `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` (default 8) under the ceiling.
+- KDA prefill (GLM-5.3-Flash, Kimi-K3) no longer holds every layer's short
+  conv input until the chunk ends, which cuts the peak transient.
+- The fused KDA decode step asked for 512 or 1024 threads per threadgroup,
+  which a GPU with a smaller register file refuses, so GLM-5.3-Flash and
+  Kimi Linear decode raised `Thread group size ... is greater than the
+  maximum allowed threads per threadgroup` on M1 and M2 hardware. The
+  kernel takes the widest split the GPU accepts, measured once per shape,
+  and the eager chain runs when no split fits.
+- GLM-5.3-Flash MTP verify forwards run the MLA layers in the absorbed
+  form and each KDA layer as one dispatch for the whole verify block.
+  `GMLX_GLM5_ABSORBED_MAX_L` and `GMLX_GLM5_KDA_FUSED_MAX_T` set the bands.
+- GLM-5.3-Flash decode steps score the DSA indexer with a fused scorer and
+  radix top-k instead of an inline fp32 matmul chain and argpartition.
+  `GMLX_GLM5_INDEXER_DECODE=0` restores the inline scoring.
+- GLM-5.3-Flash sparse decode called mlx-kquant's indexed attention on a
+  CPU device, where the op has no implementation to dispatch. The route
+  now asks for a Metal device, as the other kquant routes do.
+- Hyper-connected models use the fused per-row hyper-connection kernels
+  for steps up to 8 rows, not only the single decode row.
+  `GMLX_HC_M1_MAX_ROWS` sets the band.
 - `quantized_kv_start` as a per-model server load key is applied to that
-  model; upstream read it once from the process environment at server
-  start.
+  model, rather than read once from the process environment at start.
 - A request admitted into a live MTP batch under `--kv-bits` failed with
-  `type object 'QuantizedKVCache' has no attribute 'merge'`: the injected
-  row's B=1 packed cache lifted through a class merge it does not have. It
-  now recovers to fp16 rows, the lift preemption already used.
+  `type object 'QuantizedKVCache' has no attribute 'merge'`. It now
+  recovers to fp16 rows.
 - `gmlx discover` listed a DeepSeek-V4 GGUF carrying `embedding_length_out`
   as an assistant drafter.
-
 ## [0.4.10] - 2026-09-07
 
 ### Added

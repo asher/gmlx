@@ -18,6 +18,20 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |
+| `GMLX_MOE_GATEUP_CONCAT=0` | Disable the prefill gate and up expert concat, which runs one gather over the concatenated wire bytes at the cost of a second resident copy of them. |
+| `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap in MB on the concat copies the install builds, default `2048`. Layers are stamped in order until the cap is reached. |
+| `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Room left under the memory ceiling after a concat copy, default `8`. A copy that would not fit is skipped and logged. `0` turns the check off. |
+| `GMLX_MOE_MIX_PREFILL=0` | Keep the eager unsort and score mix after the sorted-prefill MoE down gather instead of running them as one mlx-kquant `gather_mix` dispatch. |
+| `GMLX_GLM5_ABSORBED_MAX_L` | Widest query count GLM-5.3-Flash MLA layers run in the absorbed MQA form instead of expanding the latent per head, default `16`. `0` restores the expansion. |
+| `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash DSA indexer inline instead of through the mlx-kquant fused scorer and radix top-k. The fused route rounds scores before the select. |
+| `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify, restoring the per-query gather and sdpa loop. The route needs `sdpa_fa_indexed`. |
+| `GMLX_GLM5_KDA_FUSED_MAX_T` | Widest step GLM-5.3-Flash KDA layers run as one fused decode dispatch per layer, default `8`. Wider steps take the op chain, and `0` restores it everywhere. |
+| `GMLX_GLM5_KDA_CHUNK=0` | Keep GLM-5.3-Flash KDA prefill on the token-sequential kernel instead of the mlx-kquant chunked recurrence, which needs tensor-op hardware and head dim 128. |
+| `GMLX_GLM5_KDA_CONV=0` | Keep the eager GLM-5.3-Flash KDA prefill chain instead of the mlx-kquant glue `kda_conv`, `kda_chunk_gated` and `rmsnorm_gate`. |
+| `GMLX_HC_M1_MAX_ROWS` | Widest step in rows that hyper-connected models run the fused per-row hyper-connection kernels on, default `8`. Wider steps take the GEMM route. |
+| `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels on DeepSeek-V4 and GLM-5.3-Flash, leaving every step on the GEMM route. |
+| `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Bit-identical either way. |
+| `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round. |

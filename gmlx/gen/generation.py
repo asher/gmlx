@@ -835,6 +835,9 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
     width proven free of the single-shot MoE gather memory bug. The drafter's
     shared K/V is read back from this (fully populated) cache, so chunking is
     loss-free. Returns the cache."""
+    from gmlx.serve.cb_phase import flip
+
+    flip("prefill")
     from mlx_vlm.models import cache as _cache
 
     for attr in ("_position_ids", "_rope_deltas"):

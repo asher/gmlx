@@ -106,3 +106,71 @@ def test_decode_width_ignores_concat():
     y = model.experts(x, inds)
     mx.eval(y)
     assert y.shape == (1, 4, 4, DIM)
+
+
+def _prefill_rows(rng, tokens):
+    x, inds = _prefill_inputs(rng, tokens)
+    return x, inds
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_concat_build_honors_headroom(monkeypatch, fits):
+    """The copy is built at the first sorted-prefill call only when live
+    memory plus the copy leaves the headroom under the memory ceiling;
+    otherwise the module drops its pending stamp and the stock two-gather
+    path serves the call (same outputs, no resident copy)."""
+    rng = np.random.default_rng(11)
+    model = _build(rng)
+    assert getattr(model.experts, "_kq_gate_up_pending", False)
+    cost = (model.experts.gate_proj.weight.nbytes
+            + model.experts.up_proj.weight.nbytes)
+    room = 1e9
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_HEADROOM_GB", room / 1e9)
+    monkeypatch.setattr(modules, "_GATEUP_SKIP_LOGGED", False)
+    slack = 1e6 if fits else -1e6
+    monkeypatch.setattr(
+        modules, "_memory_ceiling_bytes",
+        lambda: mx.get_active_memory() + cost + room + slack)
+    x, inds = _prefill_rows(rng, 64)
+    y = model.experts(x, inds)
+    mx.eval(y)
+    built = getattr(model.experts, "_kq_gate_up", None) is not None
+    assert built == fits
+    assert not getattr(model.experts, "_kq_gate_up_pending", False)
+
+
+def test_concat_headroom_check_off_when_zero(monkeypatch):
+    rng = np.random.default_rng(11)
+    model = _build(rng)
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_HEADROOM_GB", 0.0)
+    monkeypatch.setattr(modules, "_memory_ceiling_bytes", lambda: 1.0)
+    x, inds = _prefill_rows(rng, 64)
+    mx.eval(model.experts(x, inds))
+    assert getattr(model.experts, "_kq_gate_up", None) is not None
+
+
+@pytest.mark.parametrize("concat", [True, False])
+@pytest.mark.parametrize("tokens", [16, 150])
+def test_prefill_mix_matches_eager(tokens, concat, monkeypatch):
+    """With routing scores, the sorted-prefill path returns the mixed
+    [B, T, N] through kq.gather_mix on both the gate+up concat path and
+    the stock two-gather path; it matches the eager unsort, score
+    multiply and sum over slots."""
+    import mlx_kquant as kq
+    if not hasattr(kq, "gather_mix"):
+        pytest.skip("mlx_kquant without gather_mix")
+    monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", concat)
+    rng = np.random.default_rng(11)
+    model = _build(rng)
+    x, inds = _prefill_inputs(rng, tokens)
+    scores = mx.array(rng.random((1, tokens, 4)).astype(np.float16))
+    y_fused = model.experts(x, inds, scores)
+    mx.eval(y_fused)
+    assert y_fused.shape == (1, tokens, DIM)
+    monkeypatch.setattr(modules, "_MIX_PREFILL_ENABLED", False)
+    y_eager = model.experts(x, inds, scores)
+    mx.eval(y_eager)
+    assert y_eager.shape == y_fused.shape and y_eager.dtype == y_fused.dtype
+    a = np.array(y_fused, np.float32)
+    b = np.array(y_eager, np.float32)
+    assert np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-9) < 5e-3
