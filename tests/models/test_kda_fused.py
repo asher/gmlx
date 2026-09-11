@@ -185,3 +185,35 @@ def test_route_gating():
     assert not kda_fused.fused_ok(mx.zeros((1, 2, args.hidden_size)), None, kda_cache)
     assert not kda_fused.fused_ok(x, mx.ones((1, 1), dtype=mx.bool_), kda_cache)
     assert not kda_fused.fused_ok(x, None, None)
+
+
+def test_launch_width_narrows_to_what_the_gpu_accepts(monkeypatch):
+    # maxTotalThreadsPerThreadgroup is a per-pipeline limit that follows from
+    # register pressure, and a GPU with a smaller register file refuses the
+    # 512- and 1024-thread launches this kernel asks for first. The probe
+    # steps the width down until one launches, and every block length takes
+    # the same width, so a block stays bit-identical to the same tokens
+    # stepped one at a time.
+    real = kda_fused._launches
+    monkeypatch.setattr(kda_fused, "_SG_FIT", {})
+    monkeypatch.setattr(kda_fused, "_launches",
+                        lambda vec, sg, *a: sg <= 8 and real(vec, sg, *a))
+    assert kda_fused.sg_for(mx.bfloat16, 1, 2, 128, KW) == 8
+    test_block_matches_chained_single_token(1, 128)
+    assert kda_fused._SG_FIT[(str(mx.bfloat16), 1, 2, 128, KW)] == 8
+
+
+def test_no_width_fits_routes_the_eager_path(monkeypatch):
+    # A GPU that takes no width at all keeps the eager op chain, rather than
+    # raising out of the decode step.
+    class _Cache:
+        lengths = None
+
+    monkeypatch.setattr(kda_fused, "_SG_FIT", {})
+    monkeypatch.setattr(kda_fused, "_launches", lambda *a: False)
+    assert kda_fused.sg_for(mx.bfloat16, 1, 2, 128, KW) is None
+    x = mx.zeros((1, 1, 256), dtype=mx.bfloat16)
+    assert not kda_fused.fused_ok(x, None, _Cache(), num_heads=2,
+                                  head_dim=128, conv_kernel=KW)
+    assert kda_fused.fused_ok(x, None, _Cache()) == (
+        mx.default_device() == mx.gpu)

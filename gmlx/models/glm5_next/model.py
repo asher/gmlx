@@ -189,7 +189,9 @@ _INDEXED_SDPA = None
 
 
 def _indexed_sdpa():
-    """mlx_kquant.sdpa_fa_indexed, or None when the installed build lacks it."""
+    """mlx_kquant.sdpa_fa_indexed, or None when the installed build lacks it
+    or the device cannot run it (the kernel is Metal only, and on a CPU
+    device the op has no implementation to dispatch)."""
     global _INDEXED_SDPA
     if _INDEXED_SDPA is None:
         try:
@@ -197,6 +199,8 @@ def _indexed_sdpa():
             _INDEXED_SDPA = getattr(kq, "sdpa_fa_indexed", False)
         except ImportError:
             _INDEXED_SDPA = False
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
     return _INDEXED_SDPA or None
 # Decode-width indexer scoring through mlx-kquant's fused scorer and
 # radix top-k (one dispatch each) instead of the inline per-head f32
@@ -1112,7 +1116,10 @@ class Glm5NextDeltaAttention(nn.Module):
             })
 
         if (self._can_kernel
-                and kda_fused.fused_ok(x, mask, cache, max_t=_KDA_FUSED_MAX_T)):
+                and kda_fused.fused_ok(
+                    x, mask, cache, max_t=_KDA_FUSED_MAX_T,
+                    num_heads=self.num_heads, head_dim=self.head_dim,
+                    conv_kernel=self.conv_kernel)):
             # Decode step, or an MTP verify block of T tokens: the
             # projections run once at M = T, then one fused dispatch for
             # the block (conv, norms, decay, delta rule, out-norm per token,

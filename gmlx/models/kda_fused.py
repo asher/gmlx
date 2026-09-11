@@ -18,7 +18,9 @@ and o_proj into one dispatch per step:
 and emits the shifted conv tails plus the new recurrent state. One
 threadgroup per (batch, head): SG simdgroups split the Dv rows, each lane
 owns Dk / 32 key channels, so the Dk reductions are simd_sums and the Dv
-reduction for the output norm goes through threadgroup memory. All math is
+reduction for the output norm goes through threadgroup memory. SG comes
+from a probe of what the GPU will launch, since the register budget puts
+the limit well under 1024 threads on smaller GPUs. All math is
 f32 (the reference evaluation order); the eager path rounds the conv and
 norm outputs to bf16 between ops, so results agree to bf16 noise, not
 bit-exactly.
@@ -240,8 +242,85 @@ def _kernel(vec: bool):
     return _KERNELS[vec]
 
 
-def fused_ok(x, mask, cache, max_t: int = 1) -> bool:
-    return (
+_SG_FIT: dict = {}
+# Probe the verify band as well as the single step, so one width serves
+# every block length: the threadgroup reduction for the output norm sums in
+# simdgroup order, and a block that ran at a different width would not match
+# the same tokens stepped one at a time.
+_PROBE_NT = 8
+
+
+def _dispatch(vec, sg, inputs, B, NT, H, D, KW, dtype):
+    return _kernel(vec)(
+        inputs=inputs,
+        template=[("T", dtype), ("B", B), ("H", H), ("DK", D), ("DV", D),
+                  ("KW", KW), ("SG", sg), ("NT", NT)],
+        grid=(32 * sg, 1, B * H),
+        threadgroup=(32 * sg, 1, 1),
+        output_shapes=[(B, NT, H * D), (B, KW - 1, H * D), (B, KW - 1, H * D),
+                       (B, KW - 1, H * D), (B, H, D, D),
+                       (NT - 1, B, H, D, D) if NT > 1 else (1,)],
+        output_dtypes=[dtype, dtype, dtype, dtype, mx.float32, mx.float32],
+    )
+
+
+def _launches(vec, sg, B, H, D, KW, dtype, nts) -> bool:
+    """Run the kernel on zeros at each block length, to see whether this GPU
+    accepts the launch."""
+    C = H * D
+    for nt in nts:
+        z = mx.zeros((B, nt, C), dtype=dtype)
+        tail = mx.zeros((B, KW - 1, C), dtype=dtype)
+        wc = mx.zeros((C, KW, 1), dtype=dtype)
+        try:
+            mx.eval(_dispatch(vec, sg, [
+                z, z, z, tail, tail, tail, wc, wc, wc, z,
+                mx.zeros((C,), dtype=mx.float32),
+                mx.zeros((H,), dtype=mx.float32),
+                mx.zeros((B, nt, H), dtype=dtype), z,
+                mx.zeros((B, H, D, D), dtype=mx.float32),
+                mx.zeros((D,), dtype=dtype),
+                mx.zeros((4,), dtype=mx.float32),
+            ], B, nt, H, D, KW, dtype))
+        except Exception:  # noqa: BLE001 - a launch this GPU will not take
+            return False
+    return True
+
+
+def sg_for(dtype, B, H, D, KW, max_nt: int = _PROBE_NT):
+    """Widest simdgroup split this GPU launches for the kernel, or None when
+    no split fits and the eager path has to run.
+
+    A threadgroup of 32 * SG threads is rejected above the pipeline's
+    maxTotalThreadsPerThreadgroup, which follows from register pressure and
+    is well under 1024 on GPUs with a smaller register file. The limit is per
+    pipeline and MLX exposes no way to read it, so the answer comes from a
+    dispatch, once per shape."""
+    key = (str(dtype), B, H, D, KW)
+    if key in _SG_FIT:
+        return _SG_FIT[key]
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    nts = (1, max_nt) if max_nt > 1 else (1,)
+    gen = gpu_arch_gen()
+    # M1 and M2 take the narrow split first, the way gdn_sg clamps the GDN
+    # kernels, so the probe skips two launches they have no budget for.
+    sg = 8 if 0 < gen < 15 else (16 if B == 1 else 32)
+    while sg > 1 and D % sg:      # SG splits the Dv rows evenly
+        sg //= 2
+    fit = None
+    while sg >= 1:
+        if _launches(D == 128, sg, B, H, D, KW, dtype, nts):
+            fit = sg
+            break
+        sg //= 2
+    _SG_FIT[key] = fit
+    return fit
+
+
+def fused_ok(x, mask, cache, max_t: int = 1, *, num_heads: int = 0,
+             head_dim: int = 0, conv_kernel: int = 0) -> bool:
+    ok = (
         _ENABLED
         and cache is not None
         and mask is None
@@ -250,6 +329,10 @@ def fused_ok(x, mask, cache, max_t: int = 1) -> bool:
         and mx.default_device() == mx.gpu
         and mx.metal.is_available()
     )
+    if ok and head_dim:
+        ok = sg_for(x.dtype, x.shape[0], num_heads, head_dim, conv_kernel,
+                    max_t) is not None
+    return ok
 
 
 def kda_decode_fused_block(
@@ -272,25 +355,18 @@ def kda_decode_fused_block(
         sq = sk = sv = z
     if state is None:
         state = mx.zeros((B, H, D, D), dtype=mx.float32)
-    sg = 16 if B == 1 else 32
+    sg = sg_for(dtype, B, H, D, KW, max(NT, _PROBE_NT))
+    if sg is None:
+        raise RuntimeError(
+            "fused KDA decode needs a threadgroup wider than this GPU will "
+            "launch for the kernel; GMLX_KDA_FUSED=0 keeps the eager path")
     params = mx.array([lb, scale, l2_eps, norm_eps], dtype=mx.float32)
-    outs = _kernel(D == 128)(
-        inputs=[
-            xq, xk, xv, sq, sk, sv, wq, wk, wv,
-            a_raw, dt_bias.astype(mx.float32),
-            a_folded.astype(mx.float32), b_logit.reshape(B, NT, H),
-            gate, state.astype(mx.float32), w, params,
-        ],
-        template=[("T", dtype), ("B", B), ("H", H), ("DK", D), ("DV", D),
-                  ("KW", KW), ("SG", sg), ("NT", NT)],
-        grid=(32 * sg, 1, B * H),
-        threadgroup=(32 * sg, 1, 1),
-        output_shapes=[(B, NT, C), (B, KW - 1, C), (B, KW - 1, C),
-                       (B, KW - 1, C), (B, H, D, D),
-                       (NT - 1, B, H, D, D) if NT > 1 else (1,)],
-        output_dtypes=[dtype, dtype, dtype, dtype, mx.float32, mx.float32],
-    )
-    return outs
+    return _dispatch(D == 128, sg, [
+        xq, xk, xv, sq, sk, sv, wq, wk, wv,
+        a_raw, dt_bias.astype(mx.float32),
+        a_folded.astype(mx.float32), b_logit.reshape(B, NT, H),
+        gate, state.astype(mx.float32), w, params,
+    ], B, NT, H, D, KW, dtype)
 
 
 def kda_decode_fused(

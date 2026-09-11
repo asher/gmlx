@@ -47,12 +47,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` (default 8) under the ceiling.
 - KDA prefill (GLM-5.3-Flash, Kimi-K3) no longer holds every layer's short
   conv input until the chunk ends, which cuts the peak transient.
+- The fused KDA decode step asked for 512 or 1024 threads per threadgroup,
+  which a GPU with a smaller register file refuses, so GLM-5.3-Flash and
+  Kimi Linear decode raised `Thread group size ... is greater than the
+  maximum allowed threads per threadgroup` on M1 and M2 hardware. The
+  kernel takes the widest split the GPU accepts, measured once per shape,
+  and the eager chain runs when no split fits.
 - GLM-5.3-Flash MTP verify forwards run the MLA layers in the absorbed
   form and each KDA layer as one dispatch for the whole verify block.
   `GMLX_GLM5_ABSORBED_MAX_L` and `GMLX_GLM5_KDA_FUSED_MAX_T` set the bands.
 - GLM-5.3-Flash decode steps score the DSA indexer with a fused scorer and
   radix top-k instead of an inline fp32 matmul chain and argpartition.
   `GMLX_GLM5_INDEXER_DECODE=0` restores the inline scoring.
+- GLM-5.3-Flash sparse decode called mlx-kquant's indexed attention on a
+  CPU device, where the op has no implementation to dispatch. The route
+  now asks for a Metal device, as the other kquant routes do.
 - Hyper-connected models use the fused per-row hyper-connection kernels
   for steps up to 8 rows, not only the single decode row.
   `GMLX_HC_M1_MAX_ROWS` sets the band.
