@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-09-11
+
 ### Added
 
 - GLM-5.3-Flash and Kimi Linear run KDA prefill on mlx-kquant's chunked
