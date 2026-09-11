@@ -30,6 +30,7 @@ import os
 import sys
 from types import SimpleNamespace
 
+from gmlx.serve.tick_guard import is_gpu_fault, is_memory_error
 _log = logging.getLogger(__name__)
 
 GB = 1e9
@@ -176,18 +177,21 @@ def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
     return est
 
 
-_ALLOC_MARKS = ("metal::malloc", "Insufficient Memory",
-                "Command buffer execution failed", "kIOGPUCommand")
-
-
 def guard_run(fn, est: dict | None = None):
-    """Run ``fn()``; a catchable allocator or command-buffer error
-    prints the same needs-versus-has numbers instead of a raw C++
-    message and exits 2. Everything else propagates."""
+    """Run ``fn()``; an allocator refusal prints the same
+    needs-versus-has numbers instead of a raw C++ message and exits 2,
+    and a command buffer that failed for another reason prints what
+    Metal reported. Everything else propagates."""
     try:
         return fn()
     except RuntimeError as e:
-        if not any(m in str(e) for m in _ALLOC_MARKS):
+        if is_gpu_fault(e):
+            # Memory arithmetic would be the wrong story here: the work
+            # itself faulted, so print what Metal said and nothing more.
+            print(f"error: the GPU failed a command buffer mid-run.\n  "
+                  f"{str(e).splitlines()[0][:200]}", file=sys.stderr)
+            raise SystemExit(2) from e
+        if not is_memory_error(e):
             raise
         import mlx.core as mx
 
