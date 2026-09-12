@@ -194,7 +194,7 @@ def install_table_streaming(model) -> tuple[int, list[str]]:
     neutralize the wired-limit sweep. Returns ``(offloaded_bytes,
     gguf_names)``; the caller (the loader's selection ladder) owns the
     residency deduction and the decision log line. Idempotent."""
-    from gmlx.load.loader import _neutralize_wired_limit_sweep
+    from gmlx.stream.wired_limit import _neutralize_wired_limit_sweep
 
     offloaded = 0
     names: list[str] = []

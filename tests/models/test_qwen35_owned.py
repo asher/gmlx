@@ -28,7 +28,7 @@ from gmlx.upstream.gdn_patches import (
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
-from gmlx.load.loader import _mtp_target_classes
+from gmlx.load.mtp_target import _mtp_target_classes
 
 ATOL = 2e-3  # differing-route bound (shortcut removed / kernel path)
 TIGHT_ATOL = 1e-5  # same-ops bound

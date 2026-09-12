@@ -148,7 +148,7 @@ def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello 
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
     monkeypatch.setattr("gmlx.load.loader.load_model",
                         load_model or (lambda *a, **k: (object(), {}, _FakeTok())))
-    monkeypatch.setattr("gmlx.load.loader._resolve_prefill_step",
+    monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
                         lambda model, step: (None, False))
     monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
     monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)
@@ -217,7 +217,7 @@ def _run_text_chat_kv(monkeypatch, tmp_path, lines, *, extra_argv=(), kv_cls=_KV
     monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
     monkeypatch.setattr("gmlx.load.loader.load_model",
                         lambda *a, **k: (object(), {}, _FakeTok()))
-    monkeypatch.setattr("gmlx.load.loader._resolve_prefill_step",
+    monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
                         lambda model, step: (None, False))
     monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
     monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)

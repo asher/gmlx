@@ -29,22 +29,26 @@ from gmlx.upstream.gdn_patches import (
 from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
-    _MTP_TARGET_HOOKS,
-    _MTP_TARGET_HOOKS_BY_TYPE,
     _active_now,
-    _ensure_argmax_hook,
     _install_and_load,
     _resolve_chat_template,
-    _spec_hook_key,
     build_model,
-    load_gguf_wire_bytes,
     materialize_module_arrays,
     model_is_moe,
     print_inventory,
+    weights_source_key,
+)
+from gmlx.load.mtp_target import (
+    _MTP_TARGET_HOOKS,
+    _MTP_TARGET_HOOKS_BY_TYPE,
+    _ensure_argmax_hook,
+    _spec_hook_key,
+)
+from gmlx.load.wire import (
+    load_gguf_wire_bytes,
     remap_arrays,
     remap_gemma4_assistant_arrays,
     remap_mtp_arrays,
-    weights_source_key,
 )
 from gmlx.load.native_fp import _strip_weight
 from gmlx.load.populate import maybe_populate_for_load
@@ -1757,7 +1761,7 @@ def load_mtp_model(
         n_head_kv=n_head_kv,
         owned_names=owned_names,
     )
-    from gmlx.load.loader import strip_nextn_trunk_overflow
+    from gmlx.load.wire import strip_nextn_trunk_overflow
 
     n_nextn_dropped = strip_nextn_trunk_overflow(hf_weights, hf_kquant_meta, meta, arch)
     if n_nextn_dropped:

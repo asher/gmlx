@@ -174,7 +174,7 @@ def test_logits_from_hidden_matches_forward():
 
 
 def _wrap_target(lm):
-    from gmlx.load.loader import MTPTextTarget
+    from gmlx.load.mtp_target import MTPTextTarget
 
     return MTPTextTarget(lm, {"model_type": "glm5_next"})
 
@@ -295,7 +295,7 @@ def test_mtp_greedy_identity_accept_path():
 
 
 def test_speclm_hooks_match_loader_contract():
-    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
+    from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
 
     for hook in _MTP_TARGET_HOOKS_BY_TYPE["glm5_next"]:
         assert callable(getattr(Glm5NextSpecLM, hook, None)), hook
@@ -372,7 +372,7 @@ def test_mtp_remap_covers_closed_tensor_set():
     params, covering the full drafter tree (both directions closed)."""
     from mlx.utils import tree_flatten
 
-    from gmlx.load.loader import remap_mtp_arrays
+    from gmlx.load.wire import remap_mtp_arrays
 
     args = _tiny_args()
     drafter = _build_drafter(args)

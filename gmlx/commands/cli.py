@@ -1155,12 +1155,8 @@ def print_family_note(args) -> None:
 def _report_only(args) -> int:
     """Load wire bytes + remap, print the inventory and the rendered prompt."""
     from gmlx.load.gguf_meta import first_nonzero_int, read_int
-    from gmlx.load.loader import (
-        _resolve_chat_template,
-        load_gguf_wire_bytes,
-        print_inventory,
-        remap_arrays,
-    )
+    from gmlx.load.loader import _resolve_chat_template, print_inventory
+    from gmlx.load.wire import load_gguf_wire_bytes, remap_arrays
 
     # Codec preflight so an IQ / unsupported-codec GGUF refuses cleanly here
     # instead of crashing kq.load_gguf. The arch gate is *skipped* - report-only
@@ -1470,7 +1466,7 @@ def _apply_placement(args, model) -> None:
         feeder_decode=getattr(args, "decode_feeder", None),
     )
     if stream_cpu:
-        from gmlx.load.loader import configure_stream_cpu
+        from gmlx.stream.expert_streaming import configure_stream_cpu
 
         n, _ = configure_stream_cpu(model, gguf_path=gguf_path, **feeders)
         if n == 0:
@@ -1479,7 +1475,7 @@ def _apply_placement(args, model) -> None:
                 "(dense?) model on the CPU device"
             )
     else:
-        from gmlx.load.loader import install_expert_streaming
+        from gmlx.stream.expert_streaming import install_expert_streaming
 
         n, _ = install_expert_streaming(
             model, gguf_path=gguf_path,
@@ -1492,7 +1488,7 @@ def _apply_placement(args, model) -> None:
             return
 
     if getattr(args, "moe_experts", None) is not None:
-        from gmlx.load.loader import install_moe_experts_override
+        from gmlx.stream.expert_streaming import install_moe_experts_override
 
         install_moe_experts_override(model, args.moe_experts)
     if getattr(args, "moe_expert_mass", None) is not None:

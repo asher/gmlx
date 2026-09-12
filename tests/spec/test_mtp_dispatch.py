@@ -15,7 +15,7 @@ pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 import gmlx.load.arch_table as arch_table
 import gmlx.models.qwen35.owned as qwen35_owned
 import gmlx.spec.mtp_load as mtp_load
-from gmlx.load.loader import (
+from gmlx.load.mtp_target import (
     _MTP_TARGET_HOOKS,
     _MTP_TARGET_HOOKS_BY_TYPE,
     _spec_hook_key,

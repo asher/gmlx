@@ -541,17 +541,17 @@ def _install_stream_placement(
         # The whole model runs on the CPU device, and this device change
         # applies to the process. Use it for one over-RAM model. Do not mix
         # it with GPU-resident models in one config-mode server.
-        from gmlx.load.loader import configure_stream_cpu
+        from gmlx.stream.expert_streaming import configure_stream_cpu
         configure_stream_cpu(
             text_model, gguf_path=gguf_path,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
     elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
-        from gmlx.load.loader import install_expert_streaming
+        from gmlx.stream.expert_streaming import install_expert_streaming
         install_expert_streaming(
             text_model, gguf_path=gguf_path,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
     if moe_experts is not None:
-        from gmlx.load.loader import install_moe_experts_override
+        from gmlx.stream.expert_streaming import install_moe_experts_override
         install_moe_experts_override(text_model, moe_experts)
     if moe_expert_mass is not None:
         from gmlx.stream.moe_experts import install_moe_expert_mass

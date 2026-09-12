@@ -128,10 +128,9 @@ def test_transient_bytes_follows_the_decay_cap(monkeypatch):
 
 def test_reclaimable_ram_bytes_prefers_the_kernel_counters(monkeypatch):
     import gmlx.serve.kernel_vm as kv
-    import gmlx.load.loader as loader
 
     monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 12.5e9)
-    monkeypatch.setattr(loader, "_available_ram_bytes", lambda include_inactive=True: 3)
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda include_inactive=True: 3)
     assert budget.reclaimable_ram_bytes() == int(12.5e9)
     monkeypatch.setattr(kv, "reclaimable_bytes", lambda: None)
     assert budget.reclaimable_ram_bytes() == 3
@@ -148,7 +147,7 @@ def test_available_ram_reads_the_mach_counters_without_a_spawn(monkeypatch):
     arena copies the arena, so the serve process must not fork here."""
     import subprocess
 
-    from gmlx.load.loader import _available_ram_bytes
+    from gmlx.stream.budget import _available_ram_bytes
     from gmlx.serve import kernel_vm
 
     if kernel_vm.snapshot() is None:

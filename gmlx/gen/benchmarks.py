@@ -21,7 +21,7 @@ from .generation import (
     generate_speculative,
     generate_speculative_owned,
 )
-import gmlx.load.loader as loader
+import gmlx.stream.expert_streaming as expert_streaming
 
 
 def _synth_prompt_ids(tokenizer, n: int) -> list[int]:
@@ -262,7 +262,7 @@ def bench(
     """
     import mlx_lm
 
-    step, defaulted = loader._resolve_prefill_step(model, prefill_step_size)
+    step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
@@ -422,7 +422,7 @@ def bench_tg_depth(
     # Same prefill-width policy as deployed generation (explicit > streaming
     # 8192 > stock). The mlx-lm path takes it as a stream_generate kwarg; the
     # drafter A/B baseline chunks through _bench_ar_tps(prefill_chunk=...).
-    step, defaulted = loader._resolve_prefill_step(model, prefill_step_size)
+    step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}

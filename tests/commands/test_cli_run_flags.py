@@ -137,16 +137,17 @@ def report_stubs(monkeypatch):
     import gmlx.load.tokenizer as tok_mod
     import gmlx.gen.generation as generation
     import gmlx.load.loader as loader
+    import gmlx.load.wire as wire
 
     monkeypatch.setattr(preflight_mod, "preflight", lambda path, arch=None: None)
     monkeypatch.setattr(
-        loader, "load_gguf_wire_bytes",
+        wire, "load_gguf_wire_bytes",
         lambda path, zero_copy=True: ({"t": 0}, {"t": {}}, "gemma4", {}, {}))
     import gmlx.load.gguf_meta as gguf_meta
     monkeypatch.setattr(gguf_meta, "read_int", lambda meta, key: None)
     monkeypatch.setattr(gguf_meta, "first_nonzero_int", lambda meta, key: None)
     monkeypatch.setattr(
-        loader, "remap_arrays",
+        wire, "remap_arrays",
         lambda arrays, kq, arch, no_remap=False, n_head=None, n_head_kv=None:
         (arrays, {}, {}))
     monkeypatch.setattr(loader, "print_inventory",

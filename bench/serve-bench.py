@@ -285,7 +285,7 @@ def _build_tokenizer(spec):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(t)
     src = spec.gguf if (not t or t.lower() == "gguf") else _expand(t)
-    from gmlx.load.loader import load_gguf_wire_bytes
+    from gmlx.load.wire import load_gguf_wire_bytes
     from gmlx.load.tokenizer import load_tokenizer_from_gguf
     arrays, kquant_meta, arch_meta, meta, _shapes = load_gguf_wire_bytes(src, zero_copy=True)
     del arrays, kquant_meta            # release mmap views; only meta+arch needed

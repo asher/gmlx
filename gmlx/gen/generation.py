@@ -15,7 +15,7 @@ import time
 
 import mlx.core as mx
 
-import gmlx.load.loader as loader
+import gmlx.stream.expert_streaming as expert_streaming
 
 
 # Tokens per target prefill forward on the speculative path only. mlx-vlm forces
@@ -514,8 +514,8 @@ def generate(
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
     # Module-attribute lookup so the monkeypatch seam
-    # gmlx.load.loader._resolve_prefill_step stays live for this path.
-    step, defaulted = loader._resolve_prefill_step(model, prefill_step_size)
+    # gmlx.stream.expert_streaming._resolve_prefill_step stays live for this path.
+    step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
     if defaulted and verbose:
         print(
             f"[prefill] streaming model: chunk size defaults to {step} "

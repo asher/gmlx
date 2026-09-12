@@ -1263,7 +1263,7 @@ def test_kimi_k3_kda_conv_weight_array_transform():
     # Both wire layouts reshape to mlx Conv1d (d_inner, d_conv, 1) exactly.
     import mlx.core as mx
     import numpy as np
-    from gmlx.load.loader import remap_arrays
+    from gmlx.load.wire import remap_arrays
     d_inner, d_conv = 6, 4
     base = np.arange(d_inner * d_conv, dtype=np.float32)
     arrays = {

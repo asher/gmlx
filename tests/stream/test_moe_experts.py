@@ -14,7 +14,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.load.loader import install_expert_streaming, install_moe_experts_override
+from gmlx.stream.expert_streaming import install_expert_streaming, install_moe_experts_override
 from gmlx.stream.moe_experts import (
     _INLINE_SWAPS,
     ExpertProbe,

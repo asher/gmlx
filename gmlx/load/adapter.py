@@ -144,7 +144,7 @@ def load_lora_adapter(adapter_path: str,
     """Read a GGUF LoRA adapter from disk and build its apply plan. The adapter's
     a/b tensors are full-precision (F32), so the wire-byte reader returns them as
     plain arrays (no kquant codec)."""
-    from .loader import load_gguf_wire_bytes
+    from .wire import load_gguf_wire_bytes
 
     arrays, _kquant_meta, _arch, meta, _shapes = load_gguf_wire_bytes(
         adapter_path, expect_quant=False)

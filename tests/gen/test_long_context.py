@@ -147,7 +147,7 @@ def _load(path):
 
     model, config, tok = load_model(path, verbose=False)
     if _over_wired_budget(model):
-        from gmlx.load.loader import install_expert_streaming
+        from gmlx.stream.expert_streaming import install_expert_streaming
 
         install_expert_streaming(model, gguf_path=path)
     return model, config, tok

@@ -46,7 +46,7 @@ def _tiny_config() -> dict:
 
 
 def _build_target(cfg):
-    from gmlx.load.loader import MTPTextTarget
+    from gmlx.load.mtp_target import MTPTextTarget
 
     lm = HyV3SpecLM(ModelArgs.from_dict(cfg))
     mx.eval(lm.parameters())
@@ -186,7 +186,7 @@ def test_mtp_greedy_identity_accept_path(block):
 
 
 def test_speclm_hooks_match_loader_contract():
-    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE
+    from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE
 
     for hook in _MTP_TARGET_HOOKS_BY_TYPE["hy_v3"]:
         assert callable(getattr(HyV3SpecLM, hook, None)), hook
@@ -236,7 +236,7 @@ def test_mtp_remap_covers_closed_tensor_set():
     hy3-1M-MTP-IQ2_M.gguf, with tiny shapes."""
     from mlx.utils import tree_flatten
 
-    from gmlx.load.loader import remap_mtp_arrays
+    from gmlx.load.wire import remap_mtp_arrays
 
     cfg = _tiny_config()
     drafter = _build_drafter(cfg)

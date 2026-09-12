@@ -59,7 +59,7 @@ def _randomize_zero_params(mod) -> None:
 
 
 def _build_target(cfg):
-    from gmlx.load.loader import MTPTextTarget
+    from gmlx.load.mtp_target import MTPTextTarget
 
     lm = DeepseekV4SpecLM(v4.ModelArgs.from_dict(cfg))
     mx.eval(lm.parameters())
@@ -477,7 +477,7 @@ def test_default_drafter_block_size_is_4():
 
 
 def test_speclm_hooks_match_loader_contract():
-    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE
+    from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE
 
     hooks = _MTP_TARGET_HOOKS_BY_TYPE["deepseek_v4"]
     for hook in hooks:
