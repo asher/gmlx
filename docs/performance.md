@@ -534,12 +534,17 @@ Decode speed depends on how much of a step the KV read is. On GDN hybrids
 and gemma-4 all three caches are within run-to-run spread, but a KV-bound
 dense stack is different: on Qwen3-0.6B Q8 with 27 of 28 layers quantized,
 kvarn 6 decodes at 0.81x fp16 and 0.69x affine 8 at 16k, and at 0.98x and
-0.75x at 32k, with prefill within 10% of both. Native MTP composes at batch
-size 1, where verify rounds attend the records on the matrix-unit verify
-kernels at about a decode step's cost: at head_dim 256 with 8 queries for
-each KV head at 16k, that is 1.0 ms for each layer and round against 0.9 for
-decode. Choose kvarn for memory and fidelity, or affine for peak decode speed
-on a KV-bound dense model. The debug switches are in
+0.75x at 32k, with prefill within 10% of both. Native MTP composes with
+kvarn at any batch width. At batch size 1 verify rounds attend the records
+on the matrix-unit verify kernels at about a decode step's cost: at head_dim
+256 with 8 queries for each KV head at 16k, that is 1.0 ms for each layer
+and round against 0.9 for decode. Batched verify rounds run on the decode
+kernels at up to four queries a row with mlx-kquant 0.4.9 or later, each row
+rolling back by its own rejected count. A drafter with a wider block
+(DFlash2's trained block, or a qwen3_5 head with three MTP layers at block
+5) drafts three tokens a round while more than one request decodes and its
+full block at batch size 1. Choose kvarn for memory and fidelity, or affine
+for peak decode speed on a KV-bound dense model. The debug switches are in
 [internals/debug-switches.md](internals/debug-switches.md).
 
 KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli at

@@ -851,10 +851,11 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                   "reporter's second symptom; the needle exercises the "
                   "flash arm through the spec prefill"))
         # The same crossing under kvarn: B=1 spec rounds trim kvarn
-        # records (frontier groups reopen from their codes) while the
-        # batched arm keeps fp16. The runner sends one request at a time,
-        # so mid-generation admission is not covered here; the serve
-        # stress runner under a kvarn boot is the place for that.
+        # records (frontier groups reopen from their codes), and the
+        # batched arm keeps kvarn rows too (per-row ends, mlx-kquant
+        # 0.4.9 or later). The runner sends one request at a time, so
+        # mid-generation admission is not covered here; the serve stress
+        # runner under a kvarn boot is the place for that.
         add(Scenario(
             key="mtp_kvarn6", tier="mtp", needs=native_needs,
             title=f"MTP x kvarn6: {native_needs[0]} native MTP, kvarn target KV",
@@ -873,7 +874,7 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                       chat_kwargs={"chat_template_kwargs":
                                    {"enable_thinking": False}}),
                   pc_kv_engagement("spec", verdict="partial",
-                                   verdict_batched="dropped", scheme="kvarn")],
+                                   verdict_batched="partial", scheme="kvarn")],
             notes="greedy spec vs greedy base under kvarn records; the "
                   "rollback path trims records instead of raw K/V"))
 

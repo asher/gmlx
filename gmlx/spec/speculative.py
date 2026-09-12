@@ -1798,9 +1798,22 @@ def _lift_injected_cache(cache, other):
         other.caches = tuple(_lift_injected_cache(c, o)
                              for c, o in zip(members, others))
         return other
-    if _packed_single(other):
-        from gmlx.spec.engine import lift_single_cache
+    if getattr(cache, "ragged_trim", False):
+        # A kvarn batch host: rows join as kvarn rows. A B=1 kvarn row
+        # adopts its buffers bit-exactly; an fp16 row (a warm hit from
+        # the exact tier) ingests into a fresh kvarn row.
+        if getattr(other, "ragged_trim", False):
+            return other
+        from gmlx.cache.kvarn_cache import kvarn_batch_row
 
+        return kvarn_batch_row(cache, other)
+    if _packed_single(other):
+        from gmlx.spec.engine import kvarn_lift_cache, lift_single_cache
+
+        if getattr(other, "kv_quant_scheme", None) == "kvarn":
+            # An fp16 batch host (the batched arm dropped): the kvarn row
+            # recovers its fp16 history.
+            return kvarn_lift_cache(other)
         return lift_single_cache(other)
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
@@ -1817,9 +1830,39 @@ def _lift_injected_cache(cache, other):
     return other
 
 
+def _leaf_caches(prompt_cache):
+    """Every leaf cache of a stack, CacheList members walked through."""
+    out = []
+    for c in prompt_cache or ():
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            out.extend(_leaf_caches(members))
+        else:
+            out.append(c)
+    return out
+
+
+def _is_kvarn_batch(cache) -> bool:
+    return bool(getattr(cache, "ragged_trim", False))
+
+
+def _packed_batch_cache(cache) -> bool:
+    """A batch cache holding packed (quantized) rows that cannot roll back
+    per row: a batch class (left_padding and _idx) carrying a quantized
+    scheme or affine widths without the ragged_trim contract."""
+    if not (hasattr(cache, "left_padding") and hasattr(cache, "_idx")):
+        return False
+    if getattr(cache, "ragged_trim", False):
+        return False
+    return (getattr(cache, "kv_quant_scheme", None) is not None
+            or hasattr(cache, "bits"))
+
+
 def _packed_single(cache) -> bool:
-    """A B=1 affine or kvarn KV cache: no merge of its own, and the
-    batched MTP arm runs fp16, so it lifts by recovering fp16 rows."""
+    """A B=1 affine or kvarn KV cache: no merge of its own. Affine lifts
+    by recovering fp16 rows (the batched MTP arm runs fp16 under
+    uniform); kvarn lifts to a kvarn batch row when the host batch keeps
+    kvarn rows, else recovers fp16 rows too."""
     if _batch_capable(cache):
         return False
     if getattr(cache, "kv_quant_scheme", None) == "kvarn":
@@ -2079,6 +2122,19 @@ def _owned_decode_rounds_batch(
     block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(
         getattr(drafter.config, "block_size", block_total))
+    if len(b) > 1 and any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
+        # kvarn batch rows verify on the decode kernels, which take at
+        # most KVARN_BATCH_QL queries; the clamp holds for the generator's
+        # life (block_total is computed once), like the width gate's
+        # latch. A B=1 formation keeps the drafter's full block.
+        from gmlx.cache.kvarn_sdpa import KVARN_BATCH_QL
+
+        if block_total > KVARN_BATCH_QL:
+            _log_width_cap_once(
+                f"clamp: kvarn batch KV verifies at {KVARN_BATCH_QL} queries; "
+                f"block {block_total} -> {KVARN_BATCH_QL} while this batch "
+                "lives")
+            block_total = KVARN_BATCH_QL
 
     # Width gate: speculation only pays off up to a per-family batch width
     # (measured knees; some drafters are B=1-only outright). Past the cap the
@@ -2092,6 +2148,17 @@ def _owned_decode_rounds_batch(
         _log_width_cap_once(
             f"gate: batch B={len(b)} > cap={cap} at formation; plain decode "
             f"until the batch drains")
+    # A packed batch cache without ragged rollback (a stale stack) can
+    # neither trim per row nor roll: the batch decodes plain for its whole
+    # life, never re-arming.
+    packed = [type(c).__name__ for c in _leaf_caches(prompt_cache)
+              if _packed_batch_cache(c)]
+    packed_gate = bool(packed) and len(b) > 1
+    if packed_gate and not gated:
+        gated = True
+        _log_width_cap_once(
+            f"gate: packed batch KV without ragged rollback ({packed[0]}); "
+            "plain decode until the batch drains")
 
     # Batched rounds reseed the shared drafter without the B=1 sidecar seam;
     # clear the request nonce so no earlier request's lazy retirement can
@@ -2415,7 +2482,7 @@ def _owned_decode_rounds_batch(
         # without re-dispatching, and the round after that arms.
         dispatch_next = not _inject_hold
         _inject_hold = False
-        if gated and _resume_ready():
+        if gated and not packed_gate and _resume_ready():
             if _gated_pending is None:
                 gated = False
                 need_arm = True

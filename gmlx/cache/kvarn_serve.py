@@ -26,9 +26,11 @@ with ``kv_quant_scheme: kvarn``:
   shared decline predicate stops the batch rebuild. Both sites gate on
   ``_ppb_rebuild_declined`` -- one predicate, no drift.
 
-Speculative targets stay stock: ``spec_cache_build()`` marks the stock
-speculative-cache construction so the ``_make_cache`` wrap declines inside
-it (the spec engine owns rollback, and the batch kvarn cache cannot trim).
+Speculative targets are the spec engine's: ``spec_cache_build()`` marks
+the stock speculative-cache construction so the ``_make_cache`` wrap
+declines inside it, and the engine converts the stack itself (B=1 rows,
+and batch rows through ``kvarn_convert_batch_stack`` when the installed
+mlx-kquant takes per-row ends) beside the rollback it owns.
 
 All three wraps install unconditionally at server boot and engage per
 call on the ``kv_quant_scheme`` kwarg, which the ResponseGenerator
@@ -102,7 +104,8 @@ def _serve_widths_and_tail(model=None):
     return k_bits, v_bits, parse_tail_tokens(os.environ.get("KV_TAIL_TOKENS"))
 
 
-def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched"):
+def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched",
+                       mtp=False):
     """The kvarn policy for one serve cache stack. Serve never builds a
     rotating stack (max_kv_size is not a serve key), so rotating_window
     stays None; a model's own sliding-window layers keep fp16."""
@@ -111,9 +114,38 @@ def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched"):
     from .kvarn_cache import kvarn_resolve_kwargs
 
     return resolve_kv_quant_policy(
-        caches, mode=mode,
+        caches, mode=mode, mtp=mtp,
         **kvarn_resolve_kwargs(model, k_bits, v_bits, tail),
     )
+
+
+def kvarn_convert_batch_stack(caches, policy, left_padding, k_bits, v_bits,
+                              tail) -> int:
+    """Replace the plain batch KV layers the policy quantizes with
+    BatchKVarNKVCache rows, in place, and arm the SDPA route. The plain
+    serve build and the batched speculative build share this walk, so
+    admission prices exactly what either builds (the last layer of a
+    deep stack stays fp16). Returns the number of layers converted."""
+    from .compat import cache_types
+    from .kvarn_cache import BatchKVarNKVCache, ensure_registered
+
+    ensure_registered()
+    batch_kv = cache_types("BatchKVCache")
+    n = 0
+    for i, plan in enumerate(policy.per_layer):
+        if plan.quantize and type(caches[i]) in batch_kv:
+            caches[i] = BatchKVarNKVCache(
+                left_padding,
+                k_bits=k_bits,
+                v_bits=v_bits,
+                tail_tokens=tail,
+            )
+            n += 1
+    if n:
+        from .kvarn_sdpa import install_kvarn_sdpa
+
+        install_kvarn_sdpa()
+    return n
 
 
 _PPB_DECLINE_NOTED: set = set()
@@ -146,7 +178,12 @@ def _ppb_kvarn_policy(batch, kwargs):
     if kwargs.get("warm_cache") is not None:
         return "warm_cache", None
     if kwargs.get("draft_model") is not None:
-        return "draft", None
+        # Rows prefilled under a drafter join a speculative batch; they
+        # convert only when that batch keeps kvarn rows (per-row ends).
+        from .kvarn_sdpa import kvarn_row_ends_ok
+
+        if not kvarn_row_ends_ok():
+            return "draft", None
     if kwargs.get("right_pad_per_row") is not None:
         return "right_pad", None
     if len(batch.uids) != 1:
@@ -259,9 +296,6 @@ def _install_make_cache(_ar, _gen):
             )
         from gmlx.cache.kv_policy import note_once
 
-        from .compat import cache_types
-        from .kvarn_cache import BatchKVarNKVCache, ensure_registered
-
         k_bits, v_bits, tail = _serve_widths_and_tail(model)
         # The scheme owns the width request either way: a declined model
         # serves fp16, never the affine quantized batch cache.
@@ -275,26 +309,11 @@ def _install_make_cache(_ar, _gen):
                     policy.reason,
                 )
             return caches
-        ensure_registered()
-        batch_kv = cache_types("BatchKVCache")
-        n = 0
-        # The policy picks the layers, so serve admission prices exactly
-        # what gets built (the last layer of a deep stack stays fp16).
-        for i, plan in enumerate(policy.per_layer):
-            if plan.quantize and type(caches[i]) in batch_kv:
-                caches[i] = BatchKVarNKVCache(
-                    left_padding,
-                    k_bits=k_bits,
-                    v_bits=v_bits,
-                    tail_tokens=tail,
-                )
-                n += 1
+        n = kvarn_convert_batch_stack(caches, policy, left_padding, k_bits,
+                                      v_bits, tail)
         if n:
             from gmlx.cache.kv_policy import kv_line
 
-            from .kvarn_sdpa import install_kvarn_sdpa
-
-            install_kvarn_sdpa()
             if note_once(model, "serve-batch"):
                 _log.info(kv_line("serve batch", policy))
         return caches

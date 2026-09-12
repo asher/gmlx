@@ -150,11 +150,13 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
 def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
     """kvarn arm of _boot_pricing: record cost on the growing KV entries
     the carve-out takes plus each one's fixed fp16 rows, priced as
-    admission prices them. Under MTP the batched rows run fp16, so the
-    per-entry price stays fp16 and the B=1 stack's rows and one slab per
-    taken entry ride on top. None (fp16) when the ops are absent, the
-    widths are malformed, or the header shape is one kvarn declines (MLA,
-    head_dim outside 128/256/512)."""
+    admission prices them. Batched MTP keeps its records when the
+    installed mlx-kquant takes per-row ends (0.4.9 or later); on an older
+    build the batched rows run fp16, so the per-entry price stays fp16
+    and the B=1 stack's rows and one slab per taken entry ride on top.
+    None (fp16) when the ops are absent, the widths are malformed, or the
+    header shape is one kvarn declines (MLA, head_dim outside
+    128/256/512)."""
     from types import SimpleNamespace
 
     try:
@@ -165,6 +167,7 @@ def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
                                           kvarn_step_tokens)
         from gmlx.cache.kvarn_cache import (KVARN_BITS, KVARN_DEFAULT_TAIL,
                                             kvarn_unsupported, kvarn_widths)
+        from gmlx.cache.kvarn_sdpa import kvarn_row_ends_ok
 
         text = (cfg or {}).get("text_config") or cfg or {}
         shim = SimpleNamespace(args=SimpleNamespace(**text))
@@ -172,6 +175,7 @@ def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
             return None
         k, v = kvarn_widths(int(float(raw)) if raw else None)
         tail = int(e.get("KV_TAIL_TOKENS") or KVARN_DEFAULT_TAIL)
+        mtp = mtp and not kvarn_row_ends_ok()
     except Exception:
         return None
     if k not in KVARN_BITS or v not in KVARN_BITS or tail < 0:

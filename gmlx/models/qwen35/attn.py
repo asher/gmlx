@@ -724,20 +724,22 @@ def _folded_or_group_attention(queries, keys, values, *, cache, scale, mask):
 def _kvarn_attention(queries, *, cache, scale, mask):
     """Kvarn arm of the owned dispatch: one claim right after the cache
     update covers every route below (the resolvers introspect keys, which
-    kvarn serves as views). Batched decode takes per-row starts from the
-    cache's own pad state -- the left_padded_decode protocol carries the
-    pads on a cache attr, not in the mask."""
+    kvarn serves as views). A batch cache carries its physical geometry
+    (per-row starts and ends) at any query width; the sliced stack mask
+    describes the fp16 layers' shadow and is not consulted for it, and
+    the left_padded_decode protocol carries no mask at all."""
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
     from gmlx.cache.kvarn_sdpa import kvarn_attention
 
-    starts = None
-    if queries.shape[2] == 1 and getattr(cache, "left_padding", None) is not None:
-        starts = cache.left_padding
+    if isinstance(cache, BatchKVarNKVCache):
+        return kvarn_attention(
+            queries, cache, scale, None, starts=cache.starts_mx, ends=cache.ends_mx
+        )
     qL = queries.shape[2]
     if (
         isinstance(mask, mx.array)
         and queries.shape[0] == 1
         and 1 <= qL <= 4
-        and getattr(cache, "left_padding", None) is None
         and mask.shape[-2] == qL
         and mask.shape[-1] == cache.offset
     ):
@@ -747,7 +749,7 @@ def _kvarn_attention(queries, *, cache, scale, mask):
         # Routing it fused keeps MTP verify on the same arithmetic as
         # plain decode (greedy byte-identity) and skips a materialize.
         mask = "causal"
-    return kvarn_attention(queries, cache, scale, mask, starts=starts)
+    return kvarn_attention(queries, cache, scale, mask)
 
 
 def _verify_attention(queries, keys, values, *, cache, scale, mask):

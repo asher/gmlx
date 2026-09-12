@@ -196,22 +196,28 @@ def _no_live_server(monkeypatch):
 
 
 def pytest_runtest_setup(item):
-    if item.get_closest_marker("needs_kvarn_ops") is None:
+    ops = item.get_closest_marker("needs_kvarn_ops") is not None
+    row_ends = item.get_closest_marker("needs_kvarn_row_ends") is not None
+    if not (ops or row_ends):
         return
     from gmlx.cache import kvarn_sdpa
 
     reason = kvarn_sdpa._probe()
     if reason:
         pytest.skip(f"kvarn ops unavailable: {reason}")
+    if row_ends and not kvarn_sdpa._probe_row_ends():
+        pytest.skip("kvarn per-row ends need mlx-kquant 0.4.9 or later")
 
 
 @pytest.fixture
 def kvarn_ops_ok(monkeypatch):
     """kvarn eligibility without the Metal kernels: the resolver reads the
-    ops probe, and the env knobs start clear."""
+    ops probe (and the per-row ends version gate), and the env knobs start
+    clear."""
     from gmlx.cache import kvarn_sdpa
 
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (True,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_TAIL_TOKENS",
               "KV_QUANT_SCHEME"):
         monkeypatch.delenv(k, raising=False)

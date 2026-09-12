@@ -60,16 +60,23 @@ def test_predicate_clean_batch_allows(kvarn_ops_ok):
     assert _ppb_rebuild_declined(_batch(), dict(KW)) is None
 
 
-def test_predicate_kwarg_declines(kvarn_ops_ok):
+def test_predicate_kwarg_declines(kvarn_ops_ok, monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
     for kw, reason in [
         ({}, "scheme"),
         ({**KW, "kv_bits": 6}, "kv_bits"),
         ({**KW, "warm_cache": object()}, "warm_cache"),
-        ({**KW, "draft_model": object()}, "draft"),
         ({**KW, "right_pad_per_row": [0]}, "right_pad"),
     ]:
         assert _ppb_rebuild_declined(_batch(), kw) == reason
     assert _ppb_rebuild_declined(_batch(uids=(0, 1)), dict(KW)) == "batch"
+    # a drafter's rows join a speculative batch: they convert when that
+    # batch keeps kvarn rows (per-row ends), and decline on an older kernel
+    drafted = {**KW, "draft_model": object()}
+    assert _ppb_rebuild_declined(_batch(), drafted) is None
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (False,))
+    assert _ppb_rebuild_declined(_batch(), drafted) == "draft"
 
 
 def test_predicate_converted_and_warm_decline(kvarn_ops_ok):

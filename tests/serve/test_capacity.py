@@ -171,12 +171,15 @@ def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
 
 
 def test_kvarn_mtp_table_charges_the_b1_residue(kvarn_ops_ok, rig, monkeypatch):
-    # Batched MTP rows run fp16, but the B=1 stack still holds the fixed
-    # fp16 rows and one code slab per taken layer: the table charges them
-    # on top of fp16 growth, so it reads below the fp16 table.
+    # On an mlx-kquant without per-row ends the batched MTP rows run fp16,
+    # but the B=1 stack still holds the fixed fp16 rows and one code slab
+    # per taken layer: the table charges them on top of fp16 growth, so it
+    # reads below the fp16 table.
     import gmlx.serve.mem_preflight as mp
+    from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (False,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
               "KV_TAIL_TOKENS", "MLX_VLM_GGUF_SPECULATIVE"):
         monkeypatch.delenv(k, raising=False)
@@ -194,6 +197,26 @@ def test_kvarn_mtp_table_charges_the_b1_residue(kvarn_ops_ok, rig, monkeypatch):
     rows = (kvarn_fixed_tokens(1024), bpt)
     assert priced[4:] == [slab, rows] * 3
     assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
+
+
+def test_kvarn_mtp_table_prices_records_with_row_ends(kvarn_ops_ok, rig,
+                                                      monkeypatch):
+    """With per-row ends installed the batched MTP rows keep their
+    records: the MTP table and its costs equal the plain kvarn ones."""
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS", "MLX_VLM_GGUF_SPECULATIVE"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = dict(CFG, head_dim=128)
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=cfg)
+    plain = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})
+    mtp = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn",
+                                      "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert mtp["max_ctx"] == plain["max_ctx"]
+    fp16, priced_plain = _boot_costs(cfg, {"KV_QUANT_SCHEME": "kvarn"})
+    _, priced_mtp = _boot_costs(
+        cfg, {"KV_QUANT_SCHEME": "kvarn", "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert priced_mtp == priced_plain
+    assert priced_mtp[:3] != fp16[:3]
 
 
 def test_kvarn_table_reads_a_nested_text_config(kvarn_ops_ok, rig, monkeypatch):
@@ -424,9 +447,12 @@ def test_nested_text_config_prices_like_flat(rig):
 
 
 def _kvarn_cache_bytes(c):
+    """Every K/V buffer the cache holds. The batch class also keeps int32
+    per-row vectors (a few bytes a row of bookkeeping, not KV)."""
     import mlx.core as mx
 
-    arrays = {id(a): a for a in vars(c).values() if isinstance(a, mx.array)}
+    arrays = {id(a): a for a in vars(c).values()
+              if isinstance(a, mx.array) and a.ndim > 1}
     mx.eval(list(arrays.values()))
     return sum(a.nbytes for a in arrays.values())
 
@@ -435,11 +461,10 @@ def _kvarn_cache_bytes(c):
 @pytest.mark.parametrize("width,bits,tail", [(1, 6, 1024), (1, 4, 0), (2, 6, 1024)])
 def test_kvarn_pricing_matches_a_real_cache(monkeypatch, width, bits, tail):
     """The boot price of one kvarn layer against the bytes a filled cache
-    holds: exact for a single stream at slab multiples, at most one slab
-    over just past a boundary (the planner charges the next slab before
-    the sink and horizon offsets make the cache grow it), and never below
-    the allocation when batched (rows carry no horizon buffers, so the
-    planner over-charges them by one fp16 group)."""
+    holds: exact at slab multiples for a single stream and for batch rows
+    alike (each row carries its own horizon group), at most one slab over
+    just past a boundary (the planner charges the next slab before the
+    sink and horizon offsets make the cache grow it)."""
     from types import SimpleNamespace
 
     import mlx.core as mx
@@ -461,7 +486,7 @@ def test_kvarn_pricing_matches_a_real_cache(monkeypatch, width, bits, tail):
     cache = (KVarNKVCache(bits, bits, tail) if width == 1
              else BatchKVarNKVCache([0] * width, bits, bits, tail))
     pos = 0
-    slack = 0 if width == 1 else width * 2 * h * 128 * d * 2
+    slack = 0
     slab = width * 4096 * sum(b for w, b in costs if isinstance(w, mp.StepTokens))
     for t in (1, 1664, 4096, 4224, 8192, 8320, 16384):
         while pos < t:

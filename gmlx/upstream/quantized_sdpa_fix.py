@@ -90,10 +90,12 @@ def _kq_q8_route():
     return fn
 
 
-def _register_starts(mask, left_padding):
-    """Record a mask's per-row starts at its creation site. No syncs:
-    left_padding is the creator's python-held pad state, taken on trust."""
-    _STARTS_MEMO[id(mask)] = (mask, left_padding.astype(mx.int32))
+def _register_starts(mask, left_padding, ends=None):
+    """Record a mask's per-row starts, and its per-row ends when the
+    creator knows them, at its creation site. No syncs: both are the
+    creator's python-held state, taken on trust."""
+    ends = None if ends is None else ends.astype(mx.int32)
+    _STARTS_MEMO[id(mask)] = (mask, left_padding.astype(mx.int32), ends)
     if len(_STARTS_MEMO) > _STARTS_MEMO_CAP:
         _STARTS_MEMO.popitem(last=False)
 
@@ -103,6 +105,15 @@ def _registered_starts(mask):
     ent = _STARTS_MEMO.get(id(mask))
     if ent is not None and ent[0] is mask:
         return ent[1]
+    return None
+
+
+def _registered_geometry(mask):
+    """(starts, ends) registered for this exact mask object, else None; a
+    starts-only registration declines too."""
+    ent = _STARTS_MEMO.get(id(mask))
+    if ent is not None and ent[0] is mask and ent[2] is not None:
+        return ent[1], ent[2]
     return None
 
 

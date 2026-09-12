@@ -664,14 +664,17 @@ resident model as a `kv_quant` object whose `verdict` is `full`, `partial`,
 `dropped` or `error`, as [api.md](api.md#endpoints) describes. A load fails
 with `error` for a width outside the scheme's list, a `kv_tail_tokens` that
 is not a multiple of 128, or split key and value widths under `uniform`.
-Speculative models quantize at batch size 1 and run fp16 KV while batched.
+Under `uniform`, speculative models quantize at batch size 1 and run fp16 KV
+while batched.
 
 `kv_quant_scheme: kvarn` uses the same layer policy with `kv_bits` picking
 the width and `kv_tail_tokens` the fp16 tail. Which layers convert and which
 architectures decline is in
 [performance.md](performance.md#kv-cache-quantization), and a model where no
 layer converts runs fp16 KV with a logged reason, never a silent affine
-fallback. Split key and value widths are a server-wide environment setting,
+fallback. Speculative models keep their kvarn records at any batch width
+when mlx-kquant 0.4.9 or later is installed; older kernels fall back to fp16
+while batched. Split key and value widths are a server-wide environment setting,
 listed in [env-vars.md](env-vars.md#load-and-cache-keys). Two things differ
 from `run` and `chat`. On the server `max_kv_size` only caps the request
 context budget and never builds a rotating window, and kvarn's fp16 sink and

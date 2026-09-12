@@ -81,7 +81,7 @@ def test_extract_padfree_row_is_bit_exact():
     batch.update_and_fetch(k, v)
     row = batch.extract(0)
     assert type(row) is KVarNKVCache and row.offset == 600
-    assert not row.horizon_valid
+    assert row.horizon_valid
     bk, bv = batch.materialize()
     rk, rv = row.materialize()
     assert np.array_equal(np.array(rk), np.array(bk[0:1]))
@@ -144,7 +144,7 @@ def test_finalize_allows_zero_right_padding():
     c.prepare(right_padding=[0])
     c.finalize()
     c.prepare(right_padding=[0, 4])
-    with pytest.raises(RuntimeError, match="right padding"):
+    with pytest.raises(ValueError, match="right padding"):
         c.finalize()
 
 
