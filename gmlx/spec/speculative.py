@@ -1857,6 +1857,31 @@ def _is_kvarn_batch(cache) -> bool:
     return bool(getattr(cache, "ragged_trim", False))
 
 
+def _kvarn_block_clamp(block_total: int, n_rows: int) -> int:
+    """The verify block over a kvarn batch KV stack. Kvarn batch rows
+    verify on the decode kernels, which take at most KVARN_BATCH_QL
+    queries; a wider block would materialize every round. A one-row
+    batch cache (a batch drained to one row, a row adopted onto an
+    emptied batch, a B=1 row lifted by an injection) takes the same
+    route, so the clamp does not depend on the width. Logged once per
+    clamp and once per width."""
+    from gmlx.cache.kvarn_sdpa import KVARN_BATCH_QL
+
+    if block_total > KVARN_BATCH_QL:
+        _log_width_cap_once(
+            f"clamp: kvarn batch KV verifies at {KVARN_BATCH_QL} queries; "
+            f"block {block_total} -> {KVARN_BATCH_QL} while this batch "
+            "lives")
+        block_total = KVARN_BATCH_QL
+    # The batched arm has three entry routes (a batched spec-cache build,
+    # a lifted B=1 row, an admission prefill); every kvarn batch passes
+    # here, so the serve log states the fact once per width.
+    _log_spec_once(
+        f"kvarn batch KV: B={n_rows} rows verify on kvarn records "
+        f"(block {block_total})")
+    return block_total
+
+
 def _packed_batch_cache(cache) -> bool:
     """A batch cache holding packed (quantized) rows that cannot roll back
     per row: a batch class (left_padding and _idx) carrying a quantized
@@ -1989,10 +2014,15 @@ _width_cap_logged: set[str] = set()
 def _log_width_cap_once(msg: str) -> None:
     """One line per distinct width-cap event per process; a clamp or trip that
     repeats every round would drown the serve log."""
+    _log_spec_once(f"width-cap {msg}")
+
+
+def _log_spec_once(msg: str) -> None:
+    """One ``[spec]`` line per distinct message per process."""
     if msg in _width_cap_logged:
         return
     _width_cap_logged.add(msg)
-    print(f"[spec] width-cap {msg}", file=sys.stderr, flush=True)
+    print(f"[spec] {msg}", file=sys.stderr, flush=True)
 
 
 def _pad_shared_kv_seq(arr, seq_len: int):
@@ -2133,19 +2163,13 @@ def _owned_decode_rounds_batch(
     block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(
         getattr(drafter.config, "block_size", block_total))
-    if len(b) > 1 and any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
-        # kvarn batch rows verify on the decode kernels, which take at
-        # most KVARN_BATCH_QL queries; the clamp holds for the generator's
-        # life (block_total is computed once), like the width gate's
-        # latch. A B=1 formation keeps the drafter's full block.
-        from gmlx.cache.kvarn_sdpa import KVARN_BATCH_QL
-
-        if block_total > KVARN_BATCH_QL:
-            _log_width_cap_once(
-                f"clamp: kvarn batch KV verifies at {KVARN_BATCH_QL} queries; "
-                f"block {block_total} -> {KVARN_BATCH_QL} while this batch "
-                "lives")
-            block_total = KVARN_BATCH_QL
+    if any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
+        # The clamp holds for the generator's life (block_total is
+        # computed once), like the width gate's latch; an injection that
+        # lifts a single-stream row onto the batch route applies it in
+        # _drain_injections. A B=1 formation on a single-stream kvarn
+        # cache keeps the drafter's full block.
+        block_total = _kvarn_block_clamp(block_total, len(b))
 
     # Width gate: speculation only pays off up to a per-family batch width
     # (measured knees; some drafters are B=1-only outright). Past the cap the
@@ -2350,7 +2374,7 @@ def _owned_decode_rounds_batch(
 
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig, _gated_pending, _inject_hold
+        nonlocal hidden, B_orig, _gated_pending, _inject_hold, block_total
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
             if forced_queue:
@@ -2460,6 +2484,10 @@ def _owned_decode_rounds_batch(
                             mx.array(positions_active)),
                         kv_valid_len=mx.array(positions_active),
                         left_padding=None)
+            if any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
+                # The live cache may have been a single-stream kvarn row
+                # lifted onto the batch route by this admission.
+                block_total = _kvarn_block_clamp(block_total, len(active_idx))
             # Injection grew B; the target caches text mrope deltas at the old
             # width and only handles too-WIDE (slices down), not too-narrow --
             # verify then dies on offsets(B) + rope_deltas(B_old) broadcast.

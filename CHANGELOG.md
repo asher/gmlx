@@ -11,7 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative models keep kvarn KV while batched: every row rolls back by
   its own rejected count, so concurrent requests no longer run fp16 KV.
   Needs mlx-kquant 0.4.9 or later; older kernels keep the fp16 fallback
-  with a logged reason. Batched verify rounds run at up to four queries.
+  with a logged reason. Verify rounds on a batch cache run at up to four
+  queries, a lone row that joined a batch included.
 - Serve admission prices a speculative model's batched rows as kvarn
   records when the kernels support it, so the `[kv]` table matches what
   the batch holds.

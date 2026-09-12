@@ -542,8 +542,9 @@ and round against 0.9 for decode. Batched verify rounds run on the decode
 kernels at up to four queries a row with mlx-kquant 0.4.9 or later, each row
 rolling back by its own rejected count. A drafter with a wider block
 (DFlash2's trained block, or a qwen3_5 head with three MTP layers at block
-5) drafts three tokens a round while more than one request decodes and its
-full block at batch size 1. Choose kvarn for memory and fidelity, or affine
+5) drafts three tokens a round on a batch cache, which a request keeps until
+its generator ends once it has shared a batch, and its full block while it
+decodes alone from the start. Choose kvarn for memory and fidelity, or affine
 for peak decode speed on a KV-bound dense model. The debug switches are in
 [internals/debug-switches.md](internals/debug-switches.md).
 

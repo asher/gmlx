@@ -1,7 +1,9 @@
 """Batch formation over a kvarn batch KV stack: the verify block clamps to
-the decode kernels' width (KVARN_BATCH_QL) for the generator's life when
-the batch is wider than one row, and a packed batch cache without the
-ragged rollback contract gates the batch for its life, never re-arming.
+the decode kernels' width (KVARN_BATCH_QL) for the generator's life
+whenever the stack holds a kvarn batch cache (one row included; a
+single-stream kvarn row keeps the full block until an injection lifts it
+onto the batch route), and a packed batch cache without the ragged
+rollback contract gates the batch for its life, never re-arming.
 
 Drives _owned_decode_rounds_batch with the armable fakes of the preempt
 tests: the drafter records the block size each draft_block call asked for."""
@@ -36,6 +38,12 @@ class _KvarnBatchFake(_FakeCache):
     ragged_trim = True
 
 
+class _SingleKvarnFake(_FakeCache):
+    """A single-stream KVarNKVCache stand-in: kvarn, no batch contract."""
+
+    kv_quant_scheme = "kvarn"
+
+
 class _PackedBatchFake(_FakeCache):
     """A packed batch cache without the ragged contract (a stale stack)."""
 
@@ -55,10 +63,12 @@ class _WidthDrafter(_ArmableDrafter):
         return mx.zeros((int(b.shape[0]), 0), dtype=dtype)
 
 
-def _drive(drafter, prompt_cache, *, B, max_tokens, emitted=None, lm=None):
+def _drive(drafter, prompt_cache, *, B, max_tokens, emitted=None, lm=None,
+           model=None):
     lm = lm if lm is not None else _VerifyEchoLM()
     gen = _owned_decode_rounds_batch(
-        SimpleNamespace(), drafter, lm, prompt_cache,
+        model if model is not None else SimpleNamespace(), drafter, lm,
+        prompt_cache,
         hidden=None,
         b=list(range(1, B + 1)),
         shared_kv=None,
@@ -83,10 +93,59 @@ def test_kvarn_batch_clamps_the_block(capsys):
     assert err.count("width-cap clamp") == 1
 
 
-def test_b1_keeps_the_full_block():
+def test_b1_single_stream_keeps_the_full_block():
+    d = _WidthDrafter(cap=0, block_size=8)
+    _drive(d, [_SingleKvarnFake(width=1)], B=1, max_tokens=20)
+    assert d.draft_calls and max(d.draft_calls) == 8
+
+
+def test_b1_batch_cache_clamps_too(capsys):
+    """A one-row batch cache still verifies through the batch route (a
+    drained batch, an adopted row, a lifted row): the kernels' width
+    applies, or every round would materialize."""
     d = _WidthDrafter(cap=0, block_size=8)
     _drive(d, [_KvarnBatchFake(width=1)], B=1, max_tokens=20)
-    assert d.draft_calls and max(d.draft_calls) == 8
+    assert d.draft_calls and max(d.draft_calls) == 4
+    err = capsys.readouterr().err
+    assert "kvarn batch KV: B=1 rows verify on kvarn records (block 4)" in err
+
+
+def test_injection_lifting_a_single_row_clamps(monkeypatch, capsys):
+    """A B=1 generator on a single-stream kvarn row drafts the full block;
+    the admission that lifts its cache onto the batch route clamps from
+    that round on."""
+    live = _SingleKvarnFake(width=1)
+    monkeypatch.setattr(
+        spec, "_lift_live_cache",
+        lambda c: _KvarnBatchFake(width=1) if c is live else c)
+    d = _WidthDrafter(cap=0, block_size=8)
+    model = SimpleNamespace()
+    lm = _VerifyEchoLM()
+    gen = _owned_decode_rounds_batch(
+        model, d, lm, [live], hidden=None, b=[1], shared_kv=None,
+        seed_tokens=None, emitted=[1], max_tokens=30, sampler=None,
+        draft_block_size=None, stop_check=None)
+    next(gen)
+    next(gen)
+    before = list(d.draft_calls)
+    assert before and max(before) == 8
+    model._generator_injections = [{
+        "uids": ["w"],
+        "prompt_cache": [_KvarnBatchFake(width=1, offset=9)],
+        "hidden": mx.zeros((1, 1, 8)),
+        "prompt_tokens": mx.zeros((1, 4), dtype=mx.int32),
+        "first_tokens": mx.array([7], dtype=mx.int32),
+        "first_tokens_list": [7],
+        "shared_kv_states": None,
+    }]
+    for _ in range(4):
+        next(gen)
+    gen.close()
+    after = d.draft_calls[len(before):]
+    assert after and max(after) == 4, (before, after)
+    err = capsys.readouterr().err
+    assert "clamp: kvarn batch KV verifies at 4 queries; block 8 -> 4" in err
+    assert "kvarn batch KV: B=2 rows verify on kvarn records (block 4)" in err
 
 
 def test_fp16_batch_keeps_the_full_block():

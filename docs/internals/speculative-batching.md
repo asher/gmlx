@@ -25,7 +25,10 @@ rows. Under kvarn KV each row of the batch cache keeps its own physical
 start and end, so a verify round's rollback trims each row by its own
 rejected count while the fp16 layers and the shared mask keep upstream's
 right-justified geometry, and the block is capped at four queries a row, the
-width the decode kernels verify at, for the generator's life.
+width the decode kernels verify at, for the generator's life. The cap
+follows the batch cache, not the width: a batch drained to one row, a row
+adopted onto an emptied batch and a lone row lifted by an admission all
+verify through the batch route at four queries.
 
 The loop also checks the per-model width cap. A batch wider than the cap
 decodes plain, because verification widens each row's weight reads and past
