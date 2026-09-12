@@ -105,6 +105,56 @@ def _build_prompt(tokenizer, n_tokens, seed=_SEED):
     return ids
 
 
+_SEED_F = (
+    "Cities grew up along rivers and coasts because water carried goods "
+    "more cheaply than any road. Ports collected merchants, artisans, and "
+    "the officials who taxed them, and the streets that formed around the "
+    "docks still shape the plans of many old towns. "
+)
+
+_SEED_G = (
+    "Weather forecasting depends on measurements taken at thousands of "
+    "stations, balloons, and satellites, fed into models that divide the "
+    "atmosphere into cells. Small errors in the starting values grow with "
+    "each step, which is why a forecast beyond ten days says little about "
+    "any particular afternoon. "
+)
+
+_SEED_H = (
+    "The printing press lowered the cost of a book by an order of magnitude "
+    "within a generation, and literacy followed wherever printed pages "
+    "became cheap. Pamphlets, almanacs, and newspapers reached readers who "
+    "had never owned a manuscript, and the pace of public argument changed "
+    "with them. "
+)
+
+_SEEDS = (_SEED, _SEED_B, _SEED_C, _SEED_D, _SEED_E, _SEED_F, _SEED_G, _SEED_H)
+
+
+def _build_text_prompt(tokenizer, n_tokens, start=0):
+    """Build a prompt of ``n_tokens`` tokens, or a few fewer, from the eight
+    seed paragraphs in rotation from ``start``, each used once. A repeated
+    paragraph (see _build_prompt) turns the continuation into a copy task
+    whose logits swing by several nats between two fp16 forward shapes, so
+    a token-level comparison of two engine paths on such a prompt reads
+    numerical chaos as a fork. This prompt keeps every position at ordinary
+    entropy; it is the one for tests that compare two paths token for
+    token. The cut leaves at least four tokens of a sentence to finish,
+    because a chat model handed a completed sentence or text can end the
+    sequence at once, and a row that ends in prefill never joins the decode
+    batch."""
+    parts = [f"Section {i + 1}. {_SEEDS[(start + i) % len(_SEEDS)]}"
+             for i in range(len(_SEEDS))]
+    ids = tokenizer.encode("".join(parts))
+    assert len(ids) >= n_tokens + 4, (
+        f"seed pool is {len(ids)} tokens, the prompt needs {n_tokens + 4}")
+    cut = n_tokens
+    while cut > 8 and any(ch in tokenizer.decode(ids[cut - 1:cut + 4])
+                          for ch in ".!?:;"):
+        cut -= 1
+    return ids[:cut]
+
+
 def _ref_first_token(model, ids):
     """Un-chunked greedy first token from the bare language model."""
     from mlx_lm.models.cache import make_prompt_cache
@@ -1166,11 +1216,7 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
     if not _drafter_supports_batch(drafter):
         pytest.skip("drafter does not support batched reset (assistant-model)")
 
-    ids = [
-        _build_prompt(tokenizer, 300, seed=_SEED),
-        _build_prompt(tokenizer, 300, seed=_SEED_B),
-        _build_prompt(tokenizer, 300, seed=_SEED_C),
-    ]
+    ids = [_build_text_prompt(tokenizer, 300, start=i) for i in range(3)]
 
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")      # uncapped reference
     spec._width_cap_memo = ("", None)
