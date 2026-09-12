@@ -1623,6 +1623,17 @@ class BatchKVarNKVCache(_KVarNStorage):
 
     def filter(self, batch_indices):
         idx = _int_list(batch_indices)
+        if not idx:
+            # No survivors: the empty state at watermark 0, so the rows
+            # extend() adopts next carry no shadow padding (the spec
+            # loop's all-rows-finished adoption; a one-row batch decodes
+            # at the watermark's position).
+            for f in self._ARRAY_FIELDS:
+                setattr(self, f, None)
+            self._idx = 0
+            self._right_padding = None
+            self._reset_rows([])
+            return
         sel = mx.array(idx, dtype=mx.int32)
         for f in self._ARRAY_FIELDS:
             a = getattr(self, f)
@@ -1667,6 +1678,18 @@ class BatchKVarNKVCache(_KVarNStorage):
                 f"[kvarn] cannot extend with {type(other).__name__} "
                 "(mismatched class or kvarn parameters)."
             )
+        if not self._pads:
+            # An emptied batch adopts the incoming rows as they are.
+            for f in self._ARRAY_FIELDS:
+                setattr(self, f, getattr(other, f))
+            self.starts = list(other.starts)
+            self.ends = list(other.ends)
+            self.tail_ends = list(other.tail_ends)
+            self.horizon_valid = list(other.horizon_valid)
+            self._right_padding = None
+            self._idx = other._idx
+            self._set_pads(other._pads)
+            return
         target = max(self._idx, other._idx)
         pads = [p + target - self._idx for p in self._pads] + [
             p + target - other._idx for p in other._pads

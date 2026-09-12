@@ -365,6 +365,28 @@ def test_filter_to_all_padding_rows_empties_the_cache():
 
 
 @needs_kvarn_ops
+def test_filter_to_no_rows_then_extend_adopts_without_padding():
+    """The spec loop's all-rows-finished adoption empties the batch and
+    extends it with the injected row. The shadow watermark resets with
+    the rows, so the adopted row carries no padding: a one-row batch
+    decodes at the watermark's position."""
+    c = _filled(300, [0, 64])
+    c.filter(mx.array([], dtype=mx.int32))
+    assert c._idx == 0 and c.stage_k is None
+    assert c.left_padding.shape == (0,) and c.offset.shape == (0,)
+    row = _filled(200, [0], seed=3)
+    c.extend(row)
+    assert c._idx == 200 and c._pads == [0]
+    assert c.starts == [0] and c.ends == [200]
+    _assert_shadow(c)
+    ref = _filled(200, [0], seed=3)
+    assert np.array_equal(np.array(c.materialize()[0]), np.array(ref.materialize()[0]))
+    q = _make_q(b=1)
+    mask = c.make_mask(1, window_size=None)
+    _assert_close(kvarn_attention(q, c, SCALE, mask), _ref_batch_decode(q, c))
+
+
+@needs_kvarn_ops
 def test_extend_equal_idx_is_bit_exact():
     a = _filled(300, [0, 32], seed=0)
     b = _filled(300, [16], seed=5)

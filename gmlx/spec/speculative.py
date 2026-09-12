@@ -1658,8 +1658,14 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
     the take to shift out shared padding; that reduce throws on an empty
     index set, so the all-rows-finished injection adoption could never
     empty a batch this way. Mirror filter's take for the empty set and
-    skip the shift (nothing left to shift); caches without the
-    keys/left_padding batch layout keep their own filter.
+    return the entry to its empty state (no buffers, watermark 0). An
+    emptied batch has nothing left to align against: with the finished
+    batch's watermark kept, extend() left-padded the adopted row by that
+    watermark, and the qwen3_5 language model resolves a one-row batch's
+    decode position from the watermark rather than the row's own offset,
+    so the adopted row decoded at the wrong position. Caches without the
+    keys/left_padding batch layout keep their own filter (the kvarn batch
+    cache resets its shadow the same way).
     """
     empty = mx.array([], dtype=mx.int32)
     for c in prompt_cache:
@@ -1671,13 +1677,18 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
         if lp is None or getattr(c, "keys", "no") == "no":
             c.filter(empty)
             continue
-        if c.keys is not None:
-            c.keys = c.keys[empty]
-            c.values = c.values[empty]
+        c.keys = None
+        c.values = None
         c.offset = c.offset[empty]
         c.left_padding = lp[empty]
-        if getattr(c, "_right_padding", None) is not None:
-            c._right_padding = c._right_padding[empty]
+        c._idx = 0
+        if hasattr(c, "_right_padding"):
+            c._right_padding = None
+        if hasattr(c, "rotated"):
+            # BatchRotatingKVCache: the constructor's empty ring state.
+            c.rotated = False
+            c._offset = 0
+            c._lengths = None
 
 
 def _retire_batch_row(model, prompt_cache: list, slot: int,
