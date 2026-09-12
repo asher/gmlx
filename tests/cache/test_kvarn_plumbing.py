@@ -255,11 +255,14 @@ def test_head_dims_flag_every_mla_arch(kvarn_ops_ok, monkeypatch):
 
 
 def test_resolve_kwargs_is_the_one_assembly_point(kvarn_ops_ok, monkeypatch):
+    from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
     kw = kvarn_resolve_kwargs(FakeLM())
     assert kw == dict(scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=1024,
-                      rotating_window=None, scheme_reason=None)
+                      rotating_window=None, scheme_reason=None, row_ends_ok=True)
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (False,))
+    assert kvarn_resolve_kwargs(FakeLM())["row_ends_ok"] is False
     kw = kvarn_resolve_kwargs(FakeLM(), 4, 3, 256, 4096)
     assert (kw["kv_bits"], kw["value_bits"], kw["tail_tokens"],
             kw["rotating_window"]) == (4, 3, 256, 4096)

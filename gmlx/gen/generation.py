@@ -253,35 +253,62 @@ def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=No
 
 
 def harden_mtp_rollback(obj) -> None:
-    """Instance-wrap ``rollback_speculative_cache`` with a trim pre-check:
-    every ``_can_trim``-aware cache must accept the full trim before the
+    """Instance-wrap ``rollback_speculative_cache`` with a trim pre-check
+    and the ragged step for kvarn batch caches.
+
+    Every ``_can_trim``-aware cache must accept its full trim before the
     stock body mutates any. Upstream rollbacks (qwen3_5, gemma4) ignore
     ``trim`` returns, so a cache that refused would silently desync layer
-    offsets; the guard turns that into a loud error. Idempotent."""
+    offsets; the guard turns that into a loud error.
+
+    Caches flagged ``ragged_trim`` (BatchKVarNKVCache) roll back here: the
+    uniform trim, then each row's own right padding through prepare and
+    finalize. Upstream sees None in those slots and skips them, trims and
+    rolls the fp16 rows as before, and builds its recurrent-state list
+    from the survivors, so its positional zip with gdn_states holds.
+    Idempotent."""
     fn = getattr(obj, "rollback_speculative_cache", None)
     if fn is None or getattr(fn, "_gmlx_kvarn_guard", False):
         return
 
     def _guarded(caches, gdn_states, accepted, block_size):
         if isinstance(accepted, int):
-            max_a = accepted
+            accepted_list = [int(accepted)]
         elif hasattr(accepted, "tolist"):
-            max_a = max(int(a) for a in accepted.reshape(-1).tolist())
+            accepted_list = [int(a) for a in accepted.reshape(-1).tolist()]
         else:
-            max_a = max(int(a) for a in accepted)
+            accepted_list = [int(a) for a in accepted]
+        max_a = max(accepted_list)
         trim = int(block_size) - max_a - 1
-        if trim > 0:
-            refused = [
-                type(c).__name__
-                for c in caches
-                if c is not None and hasattr(c, "_can_trim") and not c._can_trim(trim)
-            ]
-            if refused:
-                raise RuntimeError(
-                    f"MTP rollback: {', '.join(refused)} refuse trim({trim}); "
-                    "aborting before a partial rollback desyncs layer offsets"
-                )
-        return fn(caches, gdn_states, accepted, block_size)
+        right = [max_a - a for a in accepted_list]
+        ragged = [
+            c for c in caches
+            if c is not None and getattr(c, "ragged_trim", False)
+        ]
+        refused = []
+        for c in caches:
+            if c is None or not hasattr(c, "_can_trim"):
+                continue
+            need = max(0, trim)
+            if getattr(c, "ragged_trim", False) and len(right) > 1:
+                need += max(right)
+            if need > 0 and not c._can_trim(need):
+                refused.append(type(c).__name__)
+        if refused:
+            raise RuntimeError(
+                f"MTP rollback: {', '.join(refused)} refuse trim({trim}); "
+                "aborting before a partial rollback desyncs layer offsets"
+            )
+        if not ragged:
+            return fn(caches, gdn_states, accepted, block_size)
+        for c in ragged:
+            if trim > 0:
+                c.trim(trim)
+            if len(right) > 1 and any(right):
+                c.prepare(right_padding=right)
+                c.finalize()
+        rest = [None if getattr(c, "ragged_trim", False) else c for c in caches]
+        return fn(rest, gdn_states, accepted, block_size)
 
     _guarded._gmlx_kvarn_guard = True
     obj.rollback_speculative_cache = _guarded

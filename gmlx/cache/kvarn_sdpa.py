@@ -7,7 +7,13 @@ keys are KVarNView handles; everything else passes through untouched.
 
 Decode (qL 1, plain causal masking) runs fused on the vector kernel: the
 query is WHT-rotated, kq.sdpa_decode_gqa_kvarn walks sink rows + sealed
-records + live rows in one dispatch, and the output is un-rotated. Verify
+records + live rows in one dispatch, and the output is un-rotated. A
+batch cache (BatchKVarNKVCache) decodes and verifies at up to
+KVARN_BATCH_QL queries on the same kernel with a geometry per row: the
+body leg walks each row's records from its own start to tail_cap short of
+its own end, the tail leg covers each row's own tail window, and the mask
+the stack shares is never consulted (it describes the fp16 layers'
+right-justified shadow). Verify
 width (qL 2 to 8) runs the same walk on the matrix-unit FA kernels
 (kq.sdpa_fa_verify_kvarn over the kv-major GQA fold; a fold wider than the
 tile splits the group into at most four chunks): the vector kernel's
@@ -30,6 +36,7 @@ width on the vector kernel (an A/B). Both read at call time.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import mlx.core as mx
@@ -39,6 +46,12 @@ from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
 
 _MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
 _BASE_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
+
+_log = logging.getLogger(__name__)
+
+# Widest query block the batched kernel route serves (the decode kernels'
+# qL limit); a wider batched round materializes.
+KVARN_BATCH_QL = 4
 
 _probe_result = None
 
@@ -87,6 +100,43 @@ def _route_enabled() -> bool:
     if _sdpa_env is None:
         _sdpa_env = env_bool("GMLX_KVARN_SDPA", True)
     return _sdpa_env
+
+
+_row_ends_result = None
+
+
+def kvarn_row_ends_ok() -> bool:
+    """Whether the installed mlx-kquant takes per-row ``ends`` on the decode
+    ops (0.4.9 or later), memoized. The bound ops expose no signature, so
+    the version string decides."""
+    global _row_ends_result
+    if _row_ends_result is None:
+        _row_ends_result = (_probe_row_ends(),)
+    return _row_ends_result[0]
+
+
+def _probe_row_ends() -> bool:
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return False
+    return _version_tuple(getattr(kq, "__version__", "")) >= (0, 4, 9)
+
+
+def _version_tuple(text) -> tuple:
+    """The leading three integers of a version string, missing or
+    non-numeric pieces as 0."""
+    parts = []
+    for piece in str(text).split(".")[:3]:
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
 
 
 _tg_limits: dict[tuple[int, bool], int] = {}
@@ -368,30 +418,30 @@ def _decode_vector_one(q, cache, scale):
     return merged.astype(q.dtype)
 
 
-def _decode_batch(q, cache, scale, starts):
+def _decode_batch(q, cache, scale, starts, ends):
     kvh = cache.stage_k.shape[1]
-    n = _vector_chunks(q.shape[1] // kvh, 1, q.shape[-1]) or 1
+    n = _vector_chunks(q.shape[1] // kvh, q.shape[2], q.shape[-1]) or 1
     if n == 1:
-        return _decode_batch_one(q, cache, scale, starts)
-    outs = [_decode_batch_one(qc, cache, scale, starts) for qc in _split_heads(q, kvh, n)]
+        return _decode_batch_one(q, cache, scale, starts, ends)
+    outs = [
+        _decode_batch_one(qc, cache, scale, starts, ends)
+        for qc in _split_heads(q, kvh, n)
+    ]
     return _join_heads(outs, kvh, q.shape[1])
 
 
-def _decode_batch_one(q, cache, scale, starts):
-    """qL=1 batched decode: same body/tail split as _decode with per-row
-    key starts (left padding). A row admitted deep into an older batch can
-    start inside the tail window; its body leg then attends zero keys and
-    contributes nothing through the LSE weights."""
+def _decode_batch_one(q, cache, scale, starts, ends):
+    """Batched decode and verify (qL 1 to KVARN_BATCH_QL) with a geometry
+    per row. The body leg walks each row's records from its start to
+    tail_cap short of its end, every query seeing every body key; the tail
+    leg walks each row's last min(ends - starts, tail_cap) tail rows with
+    the causal clamp at the row's end; the two merge through their LSEs.
+    A row admitted deep into an older batch, or one still shorter than
+    the tail, has an empty body: the kernel writes an empty partial that
+    carries no weight in the merge. Without a tail the body leg runs
+    alone under the per-row causal clamp."""
     import mlx_kquant as kq
 
-    n = cache._idx
-    t = min(cache.tail_len, n)
-    n_body = n - t
-    if n_body == 0:
-        tk, tv = cache.tail_slices(t)
-        return kq.sdpa_decode_gqa(
-            q, tk.astype(q.dtype), tv.astype(q.dtype), scale, starts=starts
-        )
     q_rot = kq.kvarn_rotate(q)
     body_args = (
         q_rot,
@@ -401,28 +451,48 @@ def _decode_batch_one(q, cache, scale, starts):
         cache.axes_v,
         cache.stage_k,
         cache.stage_v,
-        n,
+        cache._pos,
         scale,
         cache.k_bits,
         cache.v_bits,
     )
-    if t == 0:
-        return kq.kvarn_rotate(kq.sdpa_decode_gqa_kvarn(*body_args, starts=starts))
+    if cache.tail_cap == 0:
+        return kq.kvarn_rotate(
+            kq.sdpa_decode_gqa_kvarn(*body_args, starts=starts, ends=ends)
+        )
+    own = starts is cache.starts_mx and ends is cache.ends_mx
+    if own:
+        tail_starts = cache.tail_leg_starts_mx
+    else:
+        tail_starts = cache.tail_ends_mx - mx.minimum(
+            mx.maximum(ends - starts, 0), cache.tail_cap
+        ).astype(mx.int32)
+    tail_k = cache.tail_k.astype(q.dtype)
+    tail_v = cache.tail_v.astype(q.dtype)
+    if own and all(
+        e - cache.tail_cap <= s for s, e in zip(cache.starts, cache.ends)
+    ):
+        # Every row sits inside its tail window: no records to read.
+        return kq.sdpa_decode_gqa(
+            q, tail_k, tail_v, scale, starts=tail_starts, ends=cache.tail_ends_mx
+        )
+    # With at least qL tail rows every body key precedes every query's
+    # causal position; a shorter tail keeps the per-row clamp on the body.
     body, lse_b = kq.sdpa_decode_gqa_kvarn(
         *body_args,
-        starts=mx.minimum(starts, n_body).astype(mx.int32),
-        n_attend=n_body,
-        full_visibility=True,
+        starts=starts,
+        ends=ends,
+        tail_rows=cache.tail_cap,
+        full_visibility=cache.tail_cap >= q.shape[2],
         return_lse=True,
     )
-    tk, tv = cache.tail_slices(t)
-    tail_starts = mx.maximum(starts - n_body, 0).astype(mx.int32)
     tail, lse_t = kq.sdpa_decode_gqa(
         q,
-        tk.astype(q.dtype),
-        tv.astype(q.dtype),
+        tail_k,
+        tail_v,
         scale,
         starts=tail_starts,
+        ends=cache.tail_ends_mx,
         return_lse=True,
     )
     merged = _lse_merge(kq.kvarn_rotate(body), lse_b, tail, lse_t)
@@ -439,49 +509,69 @@ def _prefill(q, cache, scale, mask):
     return kq.kvarn_rotate(out)
 
 
-def _batch_starts(cache, mask):
-    """Per-row starts for a batched decode call, or None to decline. The
-    mask must be one this cache's make_mask registered (provenance, not
-    content -- inspecting mask contents is a GPU sync); windowed or foreign
-    masks fall back to the materialize path."""
-    if not isinstance(mask, mx.array):
-        return None
-    from gmlx.upstream.quantized_sdpa_fix import _registered_starts
-
-    return _registered_starts(mask)
+def _ragged_mask(starts, ends, n, qL):
+    """Per-row causal bool mask [B, 1, qL, n] over the physical geometry,
+    for the materialize fallback: key p is visible to query i of row b
+    when starts[b] <= p <= ends[b] - qL + i."""
+    t = mx.arange(n, dtype=mx.int32)[None, None, :]
+    last = (ends[:, None, None] - qL) + mx.arange(qL, dtype=mx.int32)[None, :, None]
+    return ((t >= starts[:, None, None]) & (t <= last))[:, None]
 
 
-def _pad_mask(starts, n, qL):
-    """Left-pad + causal bool mask [B,1,qL,n] for the materialize fallback
-    when only per-row starts are known (no mask to reuse)."""
-    t = mx.arange(n)[None, None, :]
-    end = (n - qL) + mx.arange(qL)[None, :, None]
-    return ((t >= starts[:, None, None]) & (t <= end))[:, None]
+_materialize_noted: set = set()
 
 
-def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None):
-    """Attention over a kvarn cache. ``starts`` lets owned dispatches
-    (qwen3.5) pass per-row left padding directly when their mask protocol
-    carries none; unset, batched decode derives it from mask provenance."""
+def _note_materialize(qL: int, cache) -> None:
+    """One log line per reason a batched call left the kernel route."""
+    if not _route_enabled():
+        why = "GMLX_KVARN_SDPA=0"
+    elif not kvarn_row_ends_ok():
+        why = "mlx-kquant has no per-row ends (0.4.9 or later)"
+    elif qL > KVARN_BATCH_QL:
+        why = f"{qL} queries (the kernels take up to {KVARN_BATCH_QL})"
+    else:
+        why = "head geometry outside the fused route"
+    if why in _materialize_noted:
+        return
+    _materialize_noted.add(why)
+    _log.info(
+        "[kvarn] batched attention over %d rows materializes: %s",
+        cache.stage_k.shape[0],
+        why,
+    )
+
+
+def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None, ends=None):
+    """Attention over a kvarn cache. A batch cache carries its own
+    geometry (per-row physical starts and ends as int32 vectors);
+    ``starts``/``ends`` may pass those same vectors explicitly, and the
+    mask is never consulted for it: the stack's shared mask describes the
+    fp16 layers' right-justified shadow, which the physical rows do not
+    share. Decode and verify at up to KVARN_BATCH_QL queries run fused;
+    anything wider, and the kill switch, materialize under a per-row
+    mask."""
     if sinks is not None:
         raise RuntimeError(
             "[kvarn] attention sinks reached the kvarn route; this arch "
             "should have been declined at cache build time."
         )
     if isinstance(cache, BatchKVarNKVCache):
+        qL = q.shape[2]
+        if starts is None:
+            starts = cache.starts_mx
+        if ends is None:
+            ends = cache.ends_mx
         if (
-            q.shape[2] == 1
+            1 <= qL <= KVARN_BATCH_QL
             and q.shape[0] == cache.stage_k.shape[0]
+            and kvarn_row_ends_ok()
             and _fused_ok(q, cache)
         ):
-            s = starts if starts is not None else _batch_starts(cache, mask)
-            if s is not None:
-                return _decode_batch(q, cache, float(scale), s)
-        if starts is not None and not isinstance(mask, mx.array):
-            # Declined decode with explicit pads: the materialize path
-            # still needs the pad rows masked out.
-            mask = _pad_mask(starts, cache._idx, q.shape[2])
-        return _prefill(q, cache, float(scale), mask)
+            return _decode_batch(q, cache, float(scale), starts, ends)
+        _note_materialize(qL, cache)
+        return _prefill(
+            q, cache, float(scale), _ragged_mask(starts, ends, cache._pos, qL)
+        )
     plain_mask = mask is None or (isinstance(mask, str) and mask == "causal")
     if (
         1 <= q.shape[2] <= 8

@@ -211,12 +211,30 @@ def spec_state_bytes(gen):
         for c in dcache:
             nbytes = sum(a.nbytes for v in vars(c).values()
                          for a in _arrays(v))
-            off = getattr(c, "offset", None)
-            if isinstance(off, int) and off > 0:
+            if _cache_depth(c) > 0:
                 depth_scaled += nbytes
             else:
                 row_const += nbytes
     return depth_scaled, row_const
+
+
+def _cache_depth(c) -> int:
+    """Token depth of a cache for the rate model: its integer ``offset``,
+    else the batch classes' integer ``_idx`` watermark (their ``offset`` is
+    a per-row vector, and reading it would sync), else 0, which marks
+    constant-size state."""
+    off = getattr(c, "offset", None)
+    if isinstance(off, int):
+        return off
+    idx = getattr(c, "_idx", None)
+    return idx if isinstance(idx, int) else 0
+
+
+def _fold_window(kind: dict, c) -> None:
+    window = getattr(c, "max_size", None)
+    if isinstance(window, int) and window > 0:
+        kind["window"] = (window if kind["window"] is None
+                          else min(kind["window"], window))
 
 
 def update_kv_rates(gen) -> None:
@@ -228,7 +246,9 @@ def update_kv_rates(gen) -> None:
     projection prices their growth, and per-row constants land in
     ``_kq_admit_spec_row_const``. Offset-less caches (recurrent and conv
     state) are constant-size: they join the per-row constant, never the
-    rate map."""
+    rate map. A cache that owns its accounting (``admit_bytes``, the kvarn
+    classes) supplies its record rate, depth and per-row bytes directly,
+    because its arrays' time axis is not its token count."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
@@ -243,6 +263,23 @@ def update_kv_rates(gen) -> None:
     max_cache_bytes = 0.0
     n_caches = 0
     for c in _leaf_caches(pc):
+        acct = getattr(c, "admit_bytes", None)
+        if callable(acct):
+            per_token, depth, row_bytes = acct()
+            nbytes = per_token * depth + row_bytes
+            if not nbytes:
+                continue
+            live_bytes += nbytes
+            max_cache_bytes = max(max_cache_bytes, float(nbytes))
+            n_caches += 1
+            state_row_bytes += row_bytes
+            if depth > 0 and per_token > 0:
+                live_depth = max(live_depth, depth)
+                kind = fresh.setdefault(type(c).__name__,
+                                        {"rate": 0.0, "window": None})
+                kind["rate"] += per_token / rows
+                _fold_window(kind, c)
+            continue
         nbytes = 0
         alen = 0
         for v in vars(c).values():
@@ -255,8 +292,7 @@ def update_kv_rates(gen) -> None:
         live_bytes += nbytes
         max_cache_bytes = max(max_cache_bytes, float(nbytes))
         n_caches += 1
-        off = getattr(c, "offset", None)
-        off = off if isinstance(off, int) else 0
+        off = _cache_depth(c)
         if off <= 0:
             # No token offset means constant-size state, not KV: charge
             # per row, never per token. A bytes/state_dim rate would
@@ -268,10 +304,7 @@ def update_kv_rates(gen) -> None:
         kind = fresh.setdefault(type(c).__name__,
                                 {"rate": 0.0, "window": None})
         kind["rate"] += nbytes / tokens / rows
-        window = getattr(c, "max_size", None)
-        if isinstance(window, int) and window > 0:
-            kind["window"] = (window if kind["window"] is None
-                              else min(kind["window"], window))
+        _fold_window(kind, c)
     if not fresh:
         return
     spec_depth_bytes, spec_row_const = spec_state_bytes(gen)

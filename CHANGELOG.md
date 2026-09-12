@@ -6,6 +6,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Speculative models keep kvarn KV while batched: every row rolls back by
+  its own rejected count, so concurrent requests no longer run fp16 KV.
+  Needs mlx-kquant 0.4.9 or later; older kernels keep the fp16 fallback
+  with a logged reason. Verify rounds on a batch cache run at up to four
+  queries, a lone row that joined a batch included.
+- Serve admission prices a speculative model's batched rows as kvarn
+  records when the kernels support it, so the `[kv]` table matches what
+  the batch holds.
+
+### Fixed
+
+- Serve admission measured no batch wider than one row (the batch caches
+  report a per-row offset vector) and priced a kvarn cache's fp16 tail ring
+  per token, so wide batches projected from stale single-row figures and
+  every admission logged a rescale warning. The projection now reads the
+  batch watermark and the kvarn cache's own record rate.
+- A request admitted in the round every row of a speculative batch
+  finished decoded its first tokens at the wrong position (the emptied
+  batch kept its watermark and left-padded the adopted row).
+- A speculative request that ended on an accepted draft (an EOS inside
+  the block, or the token budget) retired without its drafter sidecar,
+  so the next turn's warm start drafted from a cold head. The retirement
+  now stores the target and the head at one length.
+
 ## [0.4.12] - 2026-09-11
 
 ### Added

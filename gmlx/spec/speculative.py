@@ -893,6 +893,33 @@ def _owned_decode_rounds(
     _draft_block = drafter.draft_block
     _prefer_fixed_bs = getattr(drafter, "prefer_requested_block_size", False)
 
+    def _finish_round(delivered: int) -> None:
+        """Close the final round at ``delivered`` tokens so the target KV and
+        the drafter head retire at one length.
+
+        The head holds row p as (token p+1, hidden p), so it pairs with the
+        target only through the last committed position whose successor is
+        known. When the bonus token was delivered every committed position
+        qualifies: the target keeps the delivered accepts and the head
+        ingests them plus the bonus. When the round closed on an accepted
+        draft (EOS or the budget inside the block), the successor of the
+        last delivered token is the undelivered tail, which the next turn
+        never replays, so the target drops that last token's KV and the
+        head ingests the delivered drafts without a bonus: both sit one
+        token short of the delivered text, the same warm token a round
+        boundary costs, and the retirement sidecar pairs with the entry.
+        """
+        k = min(delivered, accepted)
+        bonus_delivered = delivered > accepted
+        keep = k if bonus_delivered else max(k - 1, 0)
+        if _has_rollback and keep < bs - 1:
+            with mx.stream(generation_stream):
+                _rollback_fn(prompt_cache, verify.gdn_states, keep, bs)
+        if _has_accept and delivered > 0:
+            _accept_fn(verify.hidden, draft_tokens, k,
+                       new_tokens[:delivered] if bonus_delivered else [],
+                       draft_sampler, token_dtype, **draft_kwargs)
+
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()
     _last_clear = emitted
@@ -1021,39 +1048,18 @@ def _owned_decode_rounds(
                                          accepted, bs)
                     raise
                 # Consumer stopped mid-round (EOS / stop string). Roll the target
-                # cache back to exactly the delivered tokens so the finish seam
-                # sees KV consistent with what was consumed (APC retirement
-                # depends on this; without it the final round leaves rejected
-                # drafts and unconsumed accepts in the cache).
-                k = min(delivered, accepted)
-                if _has_rollback and k < bs - 1:
-                    with mx.stream(generation_stream):
-                        _rollback_fn(prompt_cache, verify.gdn_states, k, bs)
-                # Mirror the rollback into the drafter head: ingest exactly the
-                # delivered tokens so its KV pairs row-for-row with the retired
-                # target prefix (the retirement-time sidecar depends on this;
-                # without it the head lags by the final round and every
-                # retirement sidecar is skipped as unfaithful).
-                if _has_accept and delivered > 0:
-                    _accept_fn(verify.hidden, draft_tokens, k,
-                               new_tokens[:delivered] if delivered > accepted
-                               else [],
-                               draft_sampler, token_dtype, **draft_kwargs)
+                # cache back to the delivered tokens so the finish seam sees
+                # KV consistent with what was consumed (APC retirement depends
+                # on this; without it the final round leaves rejected drafts
+                # and unconsumed accepts in the cache), and mirror it into the
+                # drafter head so the two retire at one length.
+                _finish_round(delivered)
                 raise
             emitted += n_new
             if emitted >= max_tokens:
-                # Budget exhausted: same finish-seam contract as the mid-round
-                # close above -- drop this round's rejected-draft KV tail (and,
-                # when the budget truncated the round, the undelivered accepts),
-                # and top the drafter head up with the delivered tokens.
-                k = min(delivered, accepted)
-                if _has_rollback and k < bs - 1:
-                    with mx.stream(generation_stream):
-                        _rollback_fn(prompt_cache, verify.gdn_states, k, bs)
-                if _has_accept and delivered > 0:
-                    _accept_fn(verify.hidden, draft_tokens, k,
-                               new_tokens if delivered > accepted else [],
-                               draft_sampler, token_dtype, **draft_kwargs)
+                # Budget exhausted: the same finish-seam contract as the
+                # mid-round close above.
+                _finish_round(delivered)
                 return
             _t2 = time.perf_counter()
 
@@ -1658,8 +1664,14 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
     the take to shift out shared padding; that reduce throws on an empty
     index set, so the all-rows-finished injection adoption could never
     empty a batch this way. Mirror filter's take for the empty set and
-    skip the shift (nothing left to shift); caches without the
-    keys/left_padding batch layout keep their own filter.
+    return the entry to its empty state (no buffers, watermark 0). An
+    emptied batch has nothing left to align against: with the finished
+    batch's watermark kept, extend() left-padded the adopted row by that
+    watermark, and the qwen3_5 language model resolves a one-row batch's
+    decode position from the watermark rather than the row's own offset,
+    so the adopted row decoded at the wrong position. Caches without the
+    keys/left_padding batch layout keep their own filter (the kvarn batch
+    cache resets its shadow the same way).
     """
     empty = mx.array([], dtype=mx.int32)
     for c in prompt_cache:
@@ -1671,13 +1683,18 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
         if lp is None or getattr(c, "keys", "no") == "no":
             c.filter(empty)
             continue
-        if c.keys is not None:
-            c.keys = c.keys[empty]
-            c.values = c.values[empty]
+        c.keys = None
+        c.values = None
         c.offset = c.offset[empty]
         c.left_padding = lp[empty]
-        if getattr(c, "_right_padding", None) is not None:
-            c._right_padding = c._right_padding[empty]
+        c._idx = 0
+        if hasattr(c, "_right_padding"):
+            c._right_padding = None
+        if hasattr(c, "rotated"):
+            # BatchRotatingKVCache: the constructor's empty ring state.
+            c.rotated = False
+            c._offset = 0
+            c._lengths = None
 
 
 def _retire_batch_row(model, prompt_cache: list, slot: int,
@@ -1798,9 +1815,22 @@ def _lift_injected_cache(cache, other):
         other.caches = tuple(_lift_injected_cache(c, o)
                              for c, o in zip(members, others))
         return other
-    if _packed_single(other):
-        from gmlx.spec.engine import lift_single_cache
+    if getattr(cache, "ragged_trim", False):
+        # A kvarn batch host: rows join as kvarn rows. A B=1 kvarn row
+        # adopts its buffers bit-exactly; an fp16 row (a warm hit from
+        # the exact tier) ingests into a fresh kvarn row.
+        if getattr(other, "ragged_trim", False):
+            return other
+        from gmlx.cache.kvarn_cache import kvarn_batch_row
 
+        return kvarn_batch_row(cache, other)
+    if _packed_single(other):
+        from gmlx.spec.engine import kvarn_lift_cache, lift_single_cache
+
+        if getattr(other, "kv_quant_scheme", None) == "kvarn":
+            # An fp16 batch host (the batched arm dropped): the kvarn row
+            # recovers its fp16 history.
+            return kvarn_lift_cache(other)
         return lift_single_cache(other)
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
@@ -1817,9 +1847,64 @@ def _lift_injected_cache(cache, other):
     return other
 
 
+def _leaf_caches(prompt_cache):
+    """Every leaf cache of a stack, CacheList members walked through."""
+    out = []
+    for c in prompt_cache or ():
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            out.extend(_leaf_caches(members))
+        else:
+            out.append(c)
+    return out
+
+
+def _is_kvarn_batch(cache) -> bool:
+    return bool(getattr(cache, "ragged_trim", False))
+
+
+def _kvarn_block_clamp(block_total: int, n_rows: int) -> int:
+    """The verify block over a kvarn batch KV stack. Kvarn batch rows
+    verify on the decode kernels, which take at most KVARN_BATCH_QL
+    queries; a wider block would materialize every round. A one-row
+    batch cache (a batch drained to one row, a row adopted onto an
+    emptied batch, a B=1 row lifted by an injection) takes the same
+    route, so the clamp does not depend on the width. Logged once per
+    clamp and once per width."""
+    from gmlx.cache.kvarn_sdpa import KVARN_BATCH_QL
+
+    if block_total > KVARN_BATCH_QL:
+        _log_width_cap_once(
+            f"clamp: kvarn batch KV verifies at {KVARN_BATCH_QL} queries; "
+            f"block {block_total} -> {KVARN_BATCH_QL} while this batch "
+            "lives")
+        block_total = KVARN_BATCH_QL
+    # The batched arm has three entry routes (a batched spec-cache build,
+    # a lifted B=1 row, an admission prefill); every kvarn batch passes
+    # here, so the serve log states the fact once per width.
+    _log_spec_once(
+        f"kvarn batch KV: B={n_rows} rows on kvarn records "
+        f"(verify block {block_total})")
+    return block_total
+
+
+def _packed_batch_cache(cache) -> bool:
+    """A batch cache holding packed (quantized) rows that cannot roll back
+    per row: a batch class (left_padding and _idx) carrying a quantized
+    scheme or affine widths without the ragged_trim contract."""
+    if not (hasattr(cache, "left_padding") and hasattr(cache, "_idx")):
+        return False
+    if getattr(cache, "ragged_trim", False):
+        return False
+    return (getattr(cache, "kv_quant_scheme", None) is not None
+            or hasattr(cache, "bits"))
+
+
 def _packed_single(cache) -> bool:
-    """A B=1 affine or kvarn KV cache: no merge of its own, and the
-    batched MTP arm runs fp16, so it lifts by recovering fp16 rows."""
+    """A B=1 affine or kvarn KV cache: no merge of its own. Affine lifts
+    by recovering fp16 rows (the batched MTP arm runs fp16 under
+    uniform); kvarn lifts to a kvarn batch row when the host batch keeps
+    kvarn rows, else recovers fp16 rows too."""
     if _batch_capable(cache):
         return False
     if getattr(cache, "kv_quant_scheme", None) == "kvarn":
@@ -1935,10 +2020,15 @@ _width_cap_logged: set[str] = set()
 def _log_width_cap_once(msg: str) -> None:
     """One line per distinct width-cap event per process; a clamp or trip that
     repeats every round would drown the serve log."""
+    _log_spec_once(f"width-cap {msg}")
+
+
+def _log_spec_once(msg: str) -> None:
+    """One ``[spec]`` line per distinct message per process."""
     if msg in _width_cap_logged:
         return
     _width_cap_logged.add(msg)
-    print(f"[spec] width-cap {msg}", file=sys.stderr, flush=True)
+    print(f"[spec] {msg}", file=sys.stderr, flush=True)
 
 
 def _pad_shared_kv_seq(arr, seq_len: int):
@@ -2079,6 +2169,13 @@ def _owned_decode_rounds_batch(
     block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(
         getattr(drafter.config, "block_size", block_total))
+    if any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
+        # The clamp holds for the generator's life (block_total is
+        # computed once), like the width gate's latch; an injection that
+        # lifts a single-stream row onto the batch route applies it in
+        # _drain_injections. A B=1 formation on a single-stream kvarn
+        # cache keeps the drafter's full block.
+        block_total = _kvarn_block_clamp(block_total, len(b))
 
     # Width gate: speculation only pays off up to a per-family batch width
     # (measured knees; some drafters are B=1-only outright). Past the cap the
@@ -2092,6 +2189,17 @@ def _owned_decode_rounds_batch(
         _log_width_cap_once(
             f"gate: batch B={len(b)} > cap={cap} at formation; plain decode "
             f"until the batch drains")
+    # A packed batch cache without ragged rollback (a stale stack) can
+    # neither trim per row nor roll: the batch decodes plain for its whole
+    # life, never re-arming.
+    packed = [type(c).__name__ for c in _leaf_caches(prompt_cache)
+              if _packed_batch_cache(c)]
+    packed_gate = bool(packed) and len(b) > 1
+    if packed_gate and not gated:
+        gated = True
+        _log_width_cap_once(
+            f"gate: packed batch KV without ragged rollback ({packed[0]}); "
+            "plain decode until the batch drains")
 
     # Batched rounds reseed the shared drafter without the B=1 sidecar seam;
     # clear the request nonce so no earlier request's lazy retirement can
@@ -2272,7 +2380,7 @@ def _owned_decode_rounds_batch(
 
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig, _gated_pending, _inject_hold
+        nonlocal hidden, B_orig, _gated_pending, _inject_hold, block_total
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
             if forced_queue:
@@ -2382,6 +2490,10 @@ def _owned_decode_rounds_batch(
                             mx.array(positions_active)),
                         kv_valid_len=mx.array(positions_active),
                         left_padding=None)
+            if any(_is_kvarn_batch(c) for c in _leaf_caches(prompt_cache)):
+                # The live cache may have been a single-stream kvarn row
+                # lifted onto the batch route by this admission.
+                block_total = _kvarn_block_clamp(block_total, len(active_idx))
             # Injection grew B; the target caches text mrope deltas at the old
             # width and only handles too-WIDE (slices down), not too-narrow --
             # verify then dies on offsets(B) + rope_deltas(B_old) broadcast.
@@ -2415,7 +2527,7 @@ def _owned_decode_rounds_batch(
         # without re-dispatching, and the round after that arms.
         dispatch_next = not _inject_hold
         _inject_hold = False
-        if gated and _resume_ready():
+        if gated and not packed_gate and _resume_ready():
             if _gated_pending is None:
                 gated = False
                 need_arm = True

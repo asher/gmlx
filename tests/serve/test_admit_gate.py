@@ -231,6 +231,62 @@ def test_update_kv_rates_and_projection(monkeypatch):
     assert "kv" in parts and "reserve" in parts
 
 
+class FakeBatchKV(FakeKV):
+    """A batch class: an int ``_idx`` watermark, ``offset`` a per-row vector."""
+
+    def __init__(self, rows=2, length=256, idx=100):
+        super().__init__(rows=rows, length=length, offset=idx)
+        self._idx = idx
+        self.offset = mx.full((rows,), idx, dtype=mx.int32)
+
+
+class FakeAcctKV:
+    """A cache that owns its accounting; its arrays' time axis (a ring of
+    1280 rows) is not its token count."""
+
+    def __init__(self, per_token=1000.0, depth=300, row_bytes=5000.0):
+        self.acct = (per_token, depth, row_bytes)
+        self.keys = mx.zeros((2, 4, 1280, 8), dtype=mx.float16)
+        self.offset = mx.zeros((2,), dtype=mx.int32)
+
+    def admit_bytes(self):
+        return self.acct
+
+
+def test_update_kv_rates_reads_the_batch_watermark():
+    g = FakeGen(rows=2)
+    kv = FakeBatchKV(rows=2, idx=100)
+    g._generation_batch.prompt_cache = [kv]
+    sm.update_kv_rates(g)
+    per_tok = (kv.keys.nbytes + kv.values.nbytes) / 100 / 2
+    # the walk also counts the offset vector's few bytes
+    assert g._kq_admit_kv_rates["FakeBatchKV"]["rate"] == pytest.approx(
+        per_tok, rel=1e-3)
+    assert g._kq_admit_live_depth == 100
+    assert g._kq_admit_live_bytes == pytest.approx(
+        kv.keys.nbytes + kv.values.nbytes, rel=1e-3)
+    assert g._kq_admit_spec_row_const == 0
+
+
+def test_update_kv_rates_takes_the_cache_accounting(monkeypatch, caplog):
+    import gmlx.gen.prefill_decay as pd
+
+    g = FakeGen(rows=2)
+    kv = FakeAcctKV()
+    g._generation_batch.prompt_cache = [kv]
+    sm.update_kv_rates(g)
+    assert g._kq_admit_kv_rates["FakeAcctKV"]["rate"] == pytest.approx(500.0)
+    assert g._kq_admit_live_depth == 300
+    assert g._kq_admit_spec_row_const == pytest.approx(2500.0)
+    assert g._kq_admit_live_bytes == pytest.approx(1000.0 * 300 + 5000.0)
+    # the model reproduces the measurement at the live width: no rescale
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING", logger=sm._log.name):
+        out = sm.project_admission(g, [_pending(2, 300, 200)])
+    assert out is not None
+    assert "projection rescaled" not in caplog.text
+
+
 class FakeStateCache:
     """Offset-less constant-size state (GDN/conv), ArraysCache-shaped."""
 

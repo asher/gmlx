@@ -105,6 +105,56 @@ def _build_prompt(tokenizer, n_tokens, seed=_SEED):
     return ids
 
 
+_SEED_F = (
+    "Cities grew up along rivers and coasts because water carried goods "
+    "more cheaply than any road. Ports collected merchants, artisans, and "
+    "the officials who taxed them, and the streets that formed around the "
+    "docks still shape the plans of many old towns. "
+)
+
+_SEED_G = (
+    "Weather forecasting depends on measurements taken at thousands of "
+    "stations, balloons, and satellites, fed into models that divide the "
+    "atmosphere into cells. Small errors in the starting values grow with "
+    "each step, which is why a forecast beyond ten days says little about "
+    "any particular afternoon. "
+)
+
+_SEED_H = (
+    "The printing press lowered the cost of a book by an order of magnitude "
+    "within a generation, and literacy followed wherever printed pages "
+    "became cheap. Pamphlets, almanacs, and newspapers reached readers who "
+    "had never owned a manuscript, and the pace of public argument changed "
+    "with them. "
+)
+
+_SEEDS = (_SEED, _SEED_B, _SEED_C, _SEED_D, _SEED_E, _SEED_F, _SEED_G, _SEED_H)
+
+
+def _build_text_prompt(tokenizer, n_tokens, start=0):
+    """Build a prompt of ``n_tokens`` tokens, or a few fewer, from the eight
+    seed paragraphs in rotation from ``start``, each used once. A repeated
+    paragraph (see _build_prompt) turns the continuation into a copy task
+    whose logits swing by several nats between two fp16 forward shapes, so
+    a token-level comparison of two engine paths on such a prompt reads
+    numerical chaos as a fork. This prompt keeps every position at ordinary
+    entropy; it is the one for tests that compare two paths token for
+    token. The cut leaves at least four tokens of a sentence to finish,
+    because a chat model handed a completed sentence or text can end the
+    sequence at once, and a row that ends in prefill never joins the decode
+    batch."""
+    parts = [f"Section {i + 1}. {_SEEDS[(start + i) % len(_SEEDS)]}"
+             for i in range(len(_SEEDS))]
+    ids = tokenizer.encode("".join(parts))
+    assert len(ids) >= n_tokens + 4, (
+        f"seed pool is {len(ids)} tokens, the prompt needs {n_tokens + 4}")
+    cut = n_tokens
+    while cut > 8 and any(ch in tokenizer.decode(ids[cut - 1:cut + 4])
+                          for ch in ".!?:;"):
+        cut -= 1
+    return ids[:cut]
+
+
 def _ref_first_token(model, ids):
     """Un-chunked greedy first token from the bare language model."""
     from mlx_lm.models.cache import make_prompt_cache
@@ -114,6 +164,45 @@ def _ref_first_token(model, ids):
     out = lm(input_ids, cache=cache)
     logits = out.logits if hasattr(out, "logits") else out
     return int(mx.argmax(logits[:, -1, :], axis=-1).item())
+
+
+# Two engine paths compared under greedy agree token for token until the
+# model is nearly indifferent between two candidates: a quantized KV
+# cache, or the same cache read through a different kernel route, rounds
+# such a position either way. The bare fp16 model's logit gap at the
+# divergence classifies it; a real defect puts the losing candidate far
+# below, a rounding fork lands within this band.
+_NEAR_TIE_LOGITS = 1.0
+
+
+def _greedy_margin(model, ids, a, b):
+    """Bare-model logit gap logits[a] - logits[b] at the position after ids
+    (teacher-forced, fp16 KV)."""
+    from mlx_lm.models.cache import make_prompt_cache
+    lm = model.language_model
+    cache = make_prompt_cache(lm)
+    out = lm(mx.array([ids], dtype=mx.int32), cache=cache)
+    logits = out.logits if hasattr(out, "logits") else out
+    row = logits[0, -1, :].astype(mx.float32)
+    return float(row[a] - row[b])
+
+
+def _assert_greedy_match(model, ids, ref, got, label):
+    """``got`` reproduces ``ref`` token for token, except that the first
+    divergence is accepted at a near tie (see _NEAR_TIE_LOGITS); the two
+    streams have legitimately forked there, so nothing after it is
+    compared."""
+    n = min(len(ref), len(got))
+    for i in range(n):
+        if ref[i] == got[i]:
+            continue
+        margin = _greedy_margin(model, list(ids) + list(ref[:i]), ref[i], got[i])
+        assert abs(margin) <= _NEAR_TIE_LOGITS, (
+            f"{label}: diverged at token {i}: {list(got[:i + 2])} vs "
+            f"{list(ref[:i + 2])}; bare-model margin {margin:+.3f} logits "
+            f"(a rounding fork is within {_NEAR_TIE_LOGITS})"
+        )
+        return
 
 
 def _make_processor(tokenizer):
@@ -135,12 +224,20 @@ def _install_patches():
         install_full_prompt_mtp_prefill,
         install_owned_spec_engine,
         install_continuous_batch_admission,
+        install_spec_kv_quant,
     )
     from gmlx.cache.apc_pooling import install_pooling_apc_support
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
     install_full_prompt_mtp_prefill()
     install_owned_spec_engine()
     install_continuous_batch_admission()
+    # Serve installs the spec KV wrap and the kvarn APC arms; without
+    # them KV_QUANT_SCHEME and KV_BITS in the env never reach the MTP
+    # target caches (a kvarn run of this file would be an fp16 run) and
+    # kvarn records cannot enter the exact store. Unset, both are inert.
+    install_spec_kv_quant()
+    install_kvarn_apc()
     # Serve installs the PoolingCache arms of the APC exact store; without
     # them the L1 tests on a pooling-stack model (GLM-5.3-Flash,
     # DeepSeek-V4) fall back cold at every lookup.
@@ -733,10 +830,13 @@ def test_l1_sidecar_warm_start(mtp_model):
 
 
 def _is_hybrid(model):
-    from mlx_lm.models.cache import ArraysCache
+    # mlx-vlm language models build mlx-vlm's ArraysCache, a different
+    # class from mlx-lm's; either marks a recurrent layer.
+    from mlx_lm.models.cache import ArraysCache as _LmArrays
+    from mlx_vlm.models.cache import ArraysCache as _VlmArrays
     lm = getattr(model, "language_model", None) or model
     try:
-        return any(isinstance(c, ArraysCache) for c in lm.make_cache())
+        return any(isinstance(c, (_LmArrays, _VlmArrays)) for c in lm.make_cache())
     except Exception:
         return False
 
@@ -1116,11 +1216,7 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
     if not _drafter_supports_batch(drafter):
         pytest.skip("drafter does not support batched reset (assistant-model)")
 
-    ids = [
-        _build_prompt(tokenizer, 300, seed=_SEED),
-        _build_prompt(tokenizer, 300, seed=_SEED_B),
-        _build_prompt(tokenizer, 300, seed=_SEED_C),
-    ]
+    ids = [_build_text_prompt(tokenizer, 300, start=i) for i in range(3)]
 
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")      # uncapped reference
     spec._width_cap_memo = ("", None)
@@ -1137,10 +1233,9 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
         f"gate never fired at B=3 with cap=2; stderr: {err[-400:]}")
     for i, (a, b) in enumerate(zip(ref, got)):
         assert a and b, f"row {i}: empty output (ref {len(a)}, gated {len(b)})"
-        n = min(len(a), len(b))
-        assert a[:n] == b[:n], (
-            f"row {i}: gated decode diverged from speculative decode "
-            f"under greedy: {b[:8]} vs {a[:8]}")
+        _assert_greedy_match(
+            model, ids[i], a, b,
+            f"row {i}: gated decode vs speculative decode")
 
 
 def test_width_cap_leaves_single_stream_speculating(mtp_model, monkeypatch,

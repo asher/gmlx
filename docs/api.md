@@ -69,8 +69,10 @@ for a single stream. A harness sizes its context window from the second. A
 resident model with KV quantization configured adds a `kv_quant` object:
 `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`, a
 `verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`
-for a speculative model, which runs fp16 KV while batched. Under
-[kvarn](glossary.md) it also carries `value_bits` and `tail_tokens`. The
+for a speculative model, which differs from `verdict` under `uniform`, or
+under kvarn on an mlx-kquant older than 0.4.9, where the model runs fp16 KV
+while batched. Under [kvarn](glossary.md) it also carries `value_bits` and
+`tail_tokens`. The
 Hugging Face cache is never listed.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding

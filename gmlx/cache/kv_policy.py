@@ -282,17 +282,21 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                             head_dim=None, can_quantize_kv=True,
                             no_kv_reason=None, tail_tokens=None,
                             rotating_window=None,
-                            scheme_reason=None) -> KvQuantPolicy:
+                            scheme_reason=None,
+                            row_ends_ok=False) -> KvQuantPolicy:
     """Resolve the KV quantization policy for one constructed cache stack.
 
     stack must be the stack the engine will run, built with the same
     args. A bare make_cache() probe misses what max_kv_size builds.
-    mode is the batch axis: MTP quantizes at B=1 and runs fp16 KV when
-    batched. Layer rule: quantize growing KV layers except the last
-    layer of a deep stack. Recurrent state and opt-outs stay fp16, and
-    so do windows unless the scheme owns them. Pools pack at rest.
-    can_quantize_kv=False limits engagement to pooled packing and
-    no_kv_reason names why.
+    mode is the batch axis. Under uniform, MTP quantizes at B=1 and runs
+    fp16 KV when batched (the packed batch cache cannot trim). Under
+    kvarn, batched MTP keeps its records when the installed mlx-kquant
+    takes per-row ends (row_ends_ok, 0.4.9 or later) and drops to fp16
+    while batched otherwise. Layer rule: quantize growing KV layers
+    except the last layer of a deep stack. Recurrent state and opt-outs
+    stay fp16, and so do windows unless the scheme owns them. Pools pack
+    at rest. can_quantize_kv=False limits engagement to pooled packing
+    and no_kv_reason names why.
 
     scheme picks the packing: "uniform" is affine (bits/group_size),
     "kvarn" is variance-normalized plus rotation (bits/value_bits split
@@ -319,7 +323,8 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
             rotating_window=rotating_window, group=group,
             quantized_kv_start=quantized_kv_start,
             can_quantize_kv=can_quantize_kv, no_kv_reason=no_kv_reason,
-            scheme_reason=scheme_reason)
+            scheme_reason=scheme_reason,
+            row_ends_ok=row_ends_ok)
 
     fb = float(kv_bits)
     if fb != int(fb) or int(fb) not in VALID_BITS:
@@ -416,7 +421,7 @@ def _kvarn_owns(c, kind, rotating_window, batched=False):
 def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
                    tail_tokens, rotating_window, group,
                    quantized_kv_start, can_quantize_kv, no_kv_reason,
-                   scheme_reason) -> KvQuantPolicy:
+                   scheme_reason, row_ends_ok=False) -> KvQuantPolicy:
     """The kvarn arm of resolve_kv_quant_policy."""
     from gmlx.cache.kvarn_cache import HEAD_DIMS, ensure_registered
 
@@ -459,9 +464,10 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     types = _cache_kind_types()
     kinds = [_classify(c, types) for c in stack]
 
-    if mtp and mode == "batched":
+    if mtp and mode == "batched" and not row_ends_ok:
         return drop(
-            "MTP batch rollback cannot trim packed KV; fp16 when batched",
+            "kvarn batched MTP needs mlx-kquant 0.4.9 or later (per-row "
+            "ends); fp16 when batched",
             kinds)
 
     n = len(kinds)

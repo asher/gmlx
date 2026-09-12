@@ -362,8 +362,8 @@ def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
     The batched verdict stamped on the model rules the warm merge:
-    a warm hit joins a batch and MTP batches run fp16 KV. No stamp
-    means None. The only caller is the MTP prefill init, where fp16
+    a warm hit joins a batch, and under uniform MTP batches run fp16 KV.
+    No stamp means None. The only caller is the MTP prefill init, where fp16
     is the only correct merge. Key/value split overrides stay None."""
     stamped = getattr(model, "_gmlx_kv_policy", None)
     if stamped is None:
@@ -1997,14 +1997,14 @@ def dequantize_lift_cache(c):
 
 
 def kvarn_lift_cache(c):
-    """Recover a B=1 KVarNKVCache into a one-row BatchKVCache.
+    """Recover a B=1 KVarNKVCache into a one-row fp16 BatchKVCache, the
+    lift for an mlx-kquant without per-row ends (the batched arm then
+    runs fp16 KV).
 
-    The kvarn twin of dequantize_lift_cache: KVarNKVCache has no merge,
-    BatchKVarNKVCache.merge would hand the MTP path a packed batch cache
-    the batched arm forbids, and materialize() returns rotated-domain
-    K/V, which stock SDPA would attend with an un-rotated query -- no
-    crash, just wrong logits on every preempted row. _raw_single is the
-    original-domain accessor."""
+    The kvarn twin of dequantize_lift_cache: materialize() returns
+    rotated-domain K/V, which stock SDPA would attend with an un-rotated
+    query -- no crash, just wrong logits on every preempted row.
+    _raw_single is the original-domain accessor."""
     from mlx_vlm.models.cache import BatchKVCache
 
     lifted = BatchKVCache([0])
@@ -2045,17 +2045,30 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
 
 
 def lift_single_cache(c):
-    """Promote a single-sequence cache to its batch class. Affine and
-    kvarn B=1 caches recover to a one-row fp16 BatchKVCache (the batched
-    MTP arm runs fp16 KV); everything else lifts through its class's
-    merge. The cascade stamp rides along. One lift for the preempted
-    host row and the injected rows, so the two cannot drift."""
+    """Promote a single-sequence cache to its batch class. An affine B=1
+    cache recovers to a one-row fp16 BatchKVCache (the batched MTP arm
+    runs fp16 KV under uniform). A kvarn B=1 cache becomes a one-row
+    BatchKVarNKVCache, buffers and horizon adopted bit-exactly, when the
+    installed mlx-kquant takes per-row ends, and recovers to fp16 rows
+    otherwise. Everything else lifts through its class's merge. The
+    cascade stamp rides along. One lift for the preempted host row and
+    the injected rows, so the two cannot drift."""
     from gmlx.cache.compat import cache_types
 
     if isinstance(c, cache_types("QuantizedKVCache")):
         return dequantize_lift_cache(c)
     if getattr(c, "kv_quant_scheme", None) == "kvarn" and batch_liftable(c):
-        return kvarn_lift_cache(c)
+        from gmlx.cache.kvarn_sdpa import kvarn_row_ends_ok
+
+        if not kvarn_row_ends_ok():
+            return kvarn_lift_cache(c)
+        from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+
+        lifted = BatchKVarNKVCache.merge([c])
+        stamp = getattr(c, "_gmlx_cascade", None)
+        if stamp is not None:
+            lifted._gmlx_cascade = stamp
+        return lifted
     lifted = type(c).merge([c])
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
@@ -2732,6 +2745,61 @@ def _harden_spec_target(lm) -> None:
         harden_mtp_rollback(h)
 
 
+def _kvarn_spec_reason(lm):
+    """The kvarn declines the shared policy cannot see: the target's own
+    verify contract. Both MTP arms (B=1 and batched) check it."""
+    from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+    reason = kvarn_unsupported(lm)
+    if reason is None and _mtp_reads_kv_back(lm):
+        reason = (
+            "the target's verify path reads shared K/V back "
+            "from the cache (kvarn records are not raw K/V)"
+        )
+    return reason
+
+
+def _kvarn_batch_spec_cache(lm, caches, left_padding, params):
+    """Convert a B>1 MTP target stack to kvarn batch rows when the batched
+    arm is engaged, in place; None when it declines (the caller keeps the
+    fp16 batch stack). The B=1 declines apply: an ineligible model, a
+    target that reads K/V back, a sliding-window stack, and the policy's
+    own drop when mlx-kquant lacks per-row ends. The verify block is not
+    knowable here; batch formation clamps it to the kernels' width."""
+    from gmlx.cache.kv_policy import kv_line, note_once
+    from gmlx.cache.kvarn_cache import (KVARN_DEFAULT_TAIL,
+                                        kvarn_mtp_window_decline)
+    from gmlx.cache.kvarn_serve import (kvarn_batch_policy,
+                                        kvarn_convert_batch_stack)
+
+    def decline(reason):
+        if note_once(lm, "spec-kv-kvarn-batched"):
+            _log.warning(
+                "KV_QUANT_SCHEME=kvarn dropped on the batched MTP path: %s; "
+                "the batch runs fp16 KV", reason)
+        return None
+
+    reason = kvarn_mtp_window_decline(caches) or _kvarn_spec_reason(lm)
+    if reason is not None:
+        return decline(reason)
+    k_bits = int(params["kv_bits"])
+    v_bits = int(params.get("value_bits") or k_bits)
+    tail = params.get("tail_tokens")
+    tail = KVARN_DEFAULT_TAIL if tail is None else int(tail)
+    policy = kvarn_batch_policy(lm, caches, k_bits, v_bits, tail,
+                                mode="batched", mtp=True)
+    if policy.verdict not in ("full", "partial"):
+        return decline(policy.reason)
+    n = kvarn_convert_batch_stack(caches, policy, left_padding, k_bits,
+                                  v_bits, tail)
+    if not n:
+        return decline("no plain KV-cache layers in this arch's stack")
+    _harden_spec_target(lm)
+    if note_once(lm, "spec-kv-batched"):
+        _log.info("%s", kv_line("MTP spec path (batched)", policy))
+    return caches
+
+
 def install_spec_kv_quant() -> None:
     """Honor KV_BITS on the B=1 MTP serve path.
 
@@ -2747,10 +2815,14 @@ def install_spec_kv_quant() -> None:
     nesting depth. Scheme kvarn converts the same B=1 caches to
     ``KVarNKVCache`` instead (rollback rides the stage/horizon regions),
     declining targets whose verify path reads shared K/V back from cache
-    state. B>1 MTP keeps stock behavior with a one-shot warning (ragged
-    rollback on packed rows is unsupported). Scheme and widths come from
-    the policy stamped on the model at load; the boot env is the fallback
-    for unstamped models. Kill switch: GMLX_SPEC_KV_QUANT=0."""
+    state. B>1 MTP under kvarn converts the batch stack to
+    ``BatchKVarNKVCache`` rows when the installed mlx-kquant takes
+    per-row ends (each row rolls back by its own rejected count); under
+    uniform, or on an older mlx-kquant, B>1 keeps fp16 batch KV with a
+    one-shot warning (the packed batch cache cannot trim). Scheme and
+    widths come from the policy stamped on the model at load; the boot
+    env is the fallback for unstamped models. Kill switch:
+    GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server import generation as _gen
     from mlx_vlm.speculative import utils as _su
@@ -2773,19 +2845,6 @@ def install_spec_kv_quant() -> None:
                 "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
             )
 
-    def _kvarn_spec_reason(lm):
-        """The kvarn declines the shared policy cannot see: the target's
-        own verify contract."""
-        from gmlx.cache.kvarn_cache import kvarn_unsupported
-
-        reason = kvarn_unsupported(lm)
-        if reason is None and _mtp_reads_kv_back(lm):
-            reason = (
-                "the target's verify path reads shared K/V back "
-                "from the cache (kvarn records are not raw K/V)"
-            )
-        return reason
-
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding, make_cache):
         from gmlx.cache.kvarn_serve import spec_cache_build
 
@@ -2802,7 +2861,14 @@ def install_spec_kv_quant() -> None:
             )
         if draft_kind != "mtp":
             return caches
+        params = _stamped_spec_params(lm)
+        if params is None:
+            params = boot_params
         if batch_size != 1:
+            if params and params.get("scheme") == "kvarn":
+                out = _kvarn_batch_spec_cache(lm, caches, left_padding, params)
+                if out is not None:
+                    return out
             # Force fp16 batch KV: the stock rollback misfiles
             # BatchQuantizedKVCache as an SSM cache and never trims
             # rejected drafts.
@@ -2834,9 +2900,6 @@ def install_spec_kv_quant() -> None:
                     "batch rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
-        params = _stamped_spec_params(lm)
-        if params is None:
-            params = boot_params
         if not params:
             return caches
         kind = params["scheme"]

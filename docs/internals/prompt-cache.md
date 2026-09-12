@@ -96,7 +96,9 @@ tail, so a config change or a restart that switches between stock and kvarn
 misses instead of reading a stale format. Cascade shared-prefix decode is
 off under kvarn and logs that once. Speculative rollback into a sealed
 record reopens it from its codes, one lossy round trip, while rows still in
-the fp16 tail roll back exactly.
+the fp16 tail roll back exactly. A batch of kvarn rows snapshots each row's
+own start, end and tail window with its buffers, and a restore from an
+older batch layout refuses instead of misreading it.
 
 ## Environment switches
 

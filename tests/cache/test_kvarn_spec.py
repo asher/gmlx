@@ -1,5 +1,7 @@
-"""kvarn on the B=1 MTP path: serve spec-cache conversion, shared-KV
-declines, rollback contracts, and the R1 reject-cycle bit-equality gate."""
+"""kvarn on the MTP path: serve spec-cache conversion at B=1 and batched,
+shared-KV declines, rollback contracts (the ragged step for batch rows),
+the lifts at preempt and injection, and the R1 reject-cycle bit-equality
+gate."""
 
 from __future__ import annotations
 
@@ -227,12 +229,61 @@ def test_qwen35_arch_converts(restorable, kvarn_ops_ok):
     assert type(caches[1]) is _SSMCache
 
 
-def test_batch_passthrough(restorable, kvarn_ops_ok):
+def _batch_stack(lm, lp):
+    from mlx_vlm.models.cache import BatchKVCache
+
+    return [BatchKVCache(lp), _SSMCache(), BatchKVCache(lp)]
+
+
+def test_batch_without_kv_layers_passes_through(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     sentinel = ["stock"]
     out = _mk(batch_size=2, make_cache=lambda lm, lp: sentinel)
     assert out is sentinel
+
+
+@needs_kvarn_ops
+def test_batch_converts_to_kvarn_rows(restorable, kvarn_ops_ok, caplog):
+    """B>1 MTP under kvarn converts the stock batch stack to kvarn rows
+    when the installed mlx-kquant takes per-row ends; the shared
+    carve-out (last layer fp16) and the recurrent slot are untouched."""
+    import logging
+
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+
+    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
+    restorable.setenv("KV_QUANT_SCHEME", "kvarn")
+    spec_engine.install_spec_kv_quant()
+    caches = _mk(batch_size=2, make_cache=_batch_stack)
+    assert type(caches[0]) is BatchKVarNKVCache
+    assert isinstance(caches[1], _SSMCache)
+    assert type(caches[2]) is BatchKVCache
+    assert caches[0].k_bits == 6 and caches[0].tail_cap == 1024
+    assert caches[0].left_padding.tolist() == [0, 0]
+    assert "[kv] MTP spec path (batched)" in caplog.text
+
+
+def test_batch_declines_with_the_b1_reasons(restorable, kvarn_ops_ok, caplog):
+    import logging
+
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+
+    caplog.set_level(logging.WARNING, logger="gmlx.spec.engine")
+    restorable.setenv("KV_QUANT_SCHEME", "kvarn")
+    spec_engine.install_spec_kv_quant()
+    # a target that reads K/V back declines batched as it does at B=1
+    caches = _mk(lm=_ReadbackLM(), batch_size=2, make_cache=_batch_stack)
+    assert all(type(c) is not BatchKVarNKVCache for c in caches)
+    assert "dropped on the batched MTP path" in caplog.text
+    # an mlx-kquant without per-row ends keeps fp16 batch rows
+    restorable.setattr(kvarn_sdpa, "_row_ends_result", (False,))
+    caches = _mk(batch_size=2, make_cache=_batch_stack)
+    assert all(type(c) is not BatchKVarNKVCache for c in caches)
+    assert "0.4.9" in caplog.text
 
 
 def test_rotating_stack_declines(restorable, kvarn_ops_ok):
@@ -563,7 +614,7 @@ def test_injected_kvarn_row_lifts_to_fp16_batch():
     (27B speculative stress: every concurrent admission raised)."""
     from mlx_vlm.models.cache import BatchKVCache
 
-    from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
+    from gmlx.spec.speculative import _lift_injected_cache
 
     k, v = tokens(300, seed=3)
     base = KVCache()
@@ -578,4 +629,108 @@ def test_injected_kvarn_row_lifts_to_fp16_batch():
     k9, _ = tokens(300, seed=9)
     got = live.keys[1:, :, :300, :].astype(mx.float32)
     assert mx.abs(got - k9.astype(mx.float32)).max().item() < 0.2
+
+
+@needs_kvarn_ops
+def test_live_kvarn_cache_lifts_by_kernel_support(monkeypatch):
+    """A preempted B=1 kvarn cache becomes a one-row kvarn batch (buffers
+    and horizon adopted, cascade stamp carried) when the installed
+    mlx-kquant takes per-row ends, and recovers to fp16 rows otherwise."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+    from gmlx.spec.speculative import _lift_live_cache
+
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (True,))
+    c = filled(300, tail=256, seed=9)
+    c._gmlx_cascade = "stamp"
+    lifted = _lift_live_cache(c)
+    assert type(lifted) is BatchKVarNKVCache
+    assert lifted._gmlx_cascade == "stamp"
+    assert lifted.starts == [0] and lifted.ends == [300]
+    assert lifted.horizon_valid == [bool(c.horizon_valid)]
+    for x, y in zip(lifted.materialize(), c.materialize(), strict=True):
+        assert np.array_equal(np.array(x), np.array(y))
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (False,))
     assert type(_lift_live_cache(filled(64, tail=256))) is BatchKVCache
+
+
+@needs_kvarn_ops
+def test_injected_rows_join_a_kvarn_batch(monkeypatch):
+    """A kvarn batch host admits a B=1 kvarn row bit-exactly, an fp16 row
+    (a warm hit from the exact tier, batch or single) by ingesting it,
+    and a kvarn batch row as it is."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+    from gmlx.spec.speculative import _lift_injected_cache
+
+    monkeypatch.setattr(kvarn_sdpa, "_row_ends_result", (True,))
+    host = BatchKVarNKVCache.merge([filled(300, tail=256, seed=1)])
+    row = filled(300, tail=256, seed=9)
+    lifted = _lift_injected_cache(host, row)
+    assert type(lifted) is BatchKVarNKVCache
+    for x, y in zip(lifted.materialize(), row.materialize(), strict=True):
+        assert np.array_equal(np.array(x), np.array(y))
+    host.extend(lifted)
+    assert host.starts == [0, 0] and host.ends == [300, 300]
+    k, v = tokens(300, seed=5)
+    fp16 = KVCache()
+    fp16.update_and_fetch(k, v)
+    for other in (BatchKVCache.merge([fp16]), fp16):
+        lifted = _lift_injected_cache(host, other)
+        assert type(lifted) is BatchKVarNKVCache
+        assert lifted.ends == [300] and lifted.tail_cap == 256
+        got = lifted._raw_rows()[0].astype(mx.float32)
+        assert mx.abs(got - k.astype(mx.float32)).max().item() < 0.2
+    assert _lift_injected_cache(host, lifted) is lifted
+
+
+@needs_kvarn_ops
+def test_rollback_guard_applies_the_ragged_step():
+    """harden_mtp_rollback rolls kvarn batch rows itself (the uniform trim,
+    then each row's right padding) and hands upstream the stack with
+    those slots None, so upstream trims the fp16 rows and zips its
+    recurrent state by position as before."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache
+    from gmlx.gen.generation import harden_mtp_rollback
+
+    seen = []
+
+    class _LM:
+        def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
+            seen.append(([None if c is None else type(c).__name__ for c in caches],
+                         gdn_states, block_size))
+            return accepted
+
+    lm = _LM()
+    harden_mtp_rollback(lm)
+    k, v = tokens(300, seed=2)
+    kk, vv = mx.concatenate([k, k], axis=0), mx.concatenate([v, v], axis=0)
+    kv = BatchKVarNKVCache([0, 0], tail_tokens=256)
+    kv.update_and_fetch(kk, vv)
+    fp = BatchKVCache([0, 0])
+    fp.update_and_fetch(kk, vv)
+    bk, bv = tokens(4, seed=3)
+    bk2, bv2 = mx.concatenate([bk, bk], axis=0), mx.concatenate([bv, bv], axis=0)
+    kv.update_and_fetch(bk2, bv2)
+    fp.update_and_fetch(bk2, bv2)
+    ssm = _SSMCache()
+    # row 0 accepted 1 draft (keeps 2), row 1 none (keeps 1)
+    lm.rollback_speculative_cache([kv, fp, ssm], "gdn", mx.array([1, 0]), 4)
+    assert seen == [([None, "BatchKVCache", "_SSMCache"], "gdn", 4)]
+    assert kv.ends == [302, 301] and kv._idx == 302
+    assert kv.left_padding.tolist() == [0, 1]
+    ref = BatchKVarNKVCache([0], tail_tokens=256)
+    ref.update_and_fetch(k, v)
+    ref.update_and_fetch(bk[:, :, :1], bv[:, :, :1])
+    for x, y in zip(kv._raw_row(1), ref._raw_row(0), strict=True):
+        assert np.array_equal(np.array(x), np.array(y))
+    # the pre-check refuses what a row cannot serve, before any mutation
+    with pytest.raises(RuntimeError, match="refuse trim"):
+        lm.rollback_speculative_cache([kv], None, mx.array([0, 0]), 400)
+    assert kv.ends == [302, 301] and len(seen) == 1

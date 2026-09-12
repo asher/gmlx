@@ -245,9 +245,9 @@ def test_mtp_policy_batched_prices_fp16():
 
 
 def test_mtp_kvarn_policy_charges_the_b1_residue():
-    # Batching drops kvarn under MTP, so growth prices fp16; the B=1
-    # stack still holds each converted layer's fp16 rows and one code
-    # slab from the first token.
+    # Without per-row ends (the resolver's default) batching drops kvarn
+    # under MTP, so growth prices fp16; the B=1 stack still holds each
+    # converted layer's fp16 rows and one code slab from the first token.
     from mlx_vlm.models.cache import KVCache
 
     from gmlx.cache.kv_policy import (kvarn_bytes_per_element,
@@ -273,6 +273,36 @@ def test_mtp_kvarn_policy_charges_the_b1_residue():
     slab = (4096, elems * kvarn_bytes_per_element(6))
     assert costs[4:] == [rows, slab] * 3
     assert all(isinstance(w, mp.FixedRows) for w, _ in costs[4:])
+
+
+def test_mtp_kvarn_policy_with_row_ends_prices_records():
+    """With per-row ends the batched MTP arm engages, so the MTP policy
+    prices exactly what the plain kvarn policy prices."""
+    from mlx_vlm.models.cache import KVCache
+
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
+
+    model = _model(num_hidden_layers=4, num_attention_heads=8,
+                   num_key_value_heads=8, head_dim=128)
+
+    def _costs(mtp):
+        rg = _rg(model, kv_bits=6.0)
+        kw = dict(scheme="kvarn", kv_bits=6, mtp=mtp, head_dim=128,
+                  row_ends_ok=True)
+        pol = ServeKvPolicy(
+            resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                    mode="single", **kw),
+            resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                    mode="batched", **kw))
+        assert pol.single.verdict == "full" and pol.batched.verdict == "full"
+        setattr(rg, RG_ATTR, pol)
+        return mp._policy_costs(rg, model)
+
+    with_mtp, plain = _costs(True), _costs(False)
+    assert with_mtp == plain
+    elems = 2 * 8 * 128
+    assert all(b < elems * 2.0 for w, b in with_mtp[:3])
 
 
 def test_policy_layer_count_mismatch_falls_back():

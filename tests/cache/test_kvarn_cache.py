@@ -332,3 +332,23 @@ def test_trim_records_dequantizes_the_frontier_group():
         seg_a, seg_b = a[:, :, 384:512], b[:, :, 384:512]
         rel = np.sqrt(np.mean((seg_a - seg_b) ** 2)) / np.sqrt(np.mean(seg_b**2))
         assert 0 < rel < 0.1
+
+
+def _admit_total(c):
+    return sum(getattr(c, f).nbytes for f in (
+        "codes_k", "codes_v", "axes_k", "axes_v", "stage_k", "stage_v",
+        "tail_k", "tail_v", "horizon_k", "horizon_v")
+        if getattr(c, f, None) is not None)
+
+
+@needs_kvarn_ops
+def test_admit_bytes_prices_records_per_token():
+    assert KVarNKVCache(tail_tokens=384).admit_bytes() == (0.0, 0, 0.0)
+    for n in (300, 1500, 4500):
+        c = filled(n, tail=384)
+        per_token, depth, row_bytes = c.admit_bytes()
+        rec = sum(getattr(c, f).nbytes for f in ("codes_k", "codes_v", "axes_k", "axes_v"))
+        assert per_token == pytest.approx(rec / (c.codes_k.shape[2] * GROUP))
+        assert depth == c.offset == n
+        assert per_token * depth + row_bytes == pytest.approx(_admit_total(c))
+        assert row_bytes >= c.tail_k.nbytes + c.tail_v.nbytes

@@ -271,8 +271,9 @@ def test_kvarn_window_floor(_kvarn_ops):
 
 
 def test_kvarn_batched_verdicts(_kvarn_ops):
-    """The three rows serve prices from: B>1 without MTP quantizes and is
-    priced with the kvarn cost; B>1 with MTP drops to fp16."""
+    """The rows serve prices from: B>1 without MTP quantizes and is priced
+    with the kvarn cost; B>1 with MTP keeps its records when the installed
+    mlx-kquant takes per-row ends and drops to fp16 otherwise."""
     single = _kvarn(_dense(4), mode="single")
     assert single.verdict == "full" and single.n_quant == 3
     batched = _kvarn(_dense(4), mode="batched")
@@ -280,7 +281,13 @@ def test_kvarn_batched_verdicts(_kvarn_ops):
     assert batched.bytes_per_element_vector()[0] == kvarn_bytes_per_element(6)
     mtp_batched = _kvarn(_dense(4), mode="batched", mtp=True)
     assert mtp_batched.verdict == "dropped"
+    assert "0.4.9" in mtp_batched.reason
     assert all(b == 2.0 for b in mtp_batched.bytes_per_element_vector())
+    engaged = _kvarn(_dense(4), mode="batched", mtp=True, row_ends_ok=True)
+    assert engaged.verdict == "full" and engaged.n_quant == 3
+    assert engaged.bytes_per_element_vector() == batched.bytes_per_element_vector()
+    # single mode never needed the kernel feature
+    assert _kvarn(_dense(4), mode="single", mtp=True).verdict == "full"
 
 
 def test_kvarn_batched_leaves_cache_list_fp16(_kvarn_ops):
