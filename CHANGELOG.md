@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-09-12
+
 ### Changed
 
 - Speculative models keep kvarn KV while batched: every row rolls back by
