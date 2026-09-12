@@ -31,7 +31,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.8,<0.5",  # 0.4.8: KDA, gather_mix, fused hc, indexed SDPA
+    "mlx-kquant>=0.4.9,<0.5",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
