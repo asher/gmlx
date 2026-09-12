@@ -107,6 +107,93 @@ def test_bg_serve_args_forwards_thinking_flags():
     assert "--thinking" not in bare and "--thinking-budget" not in bare
 
 
+def test_single_model_cfg_kv_flags_ride_overrides_load(tmp_path):
+    """The KV flags land under overrides.load keyed like a config file, so a
+    positional model resolves, prices and prints like a config model."""
+    from gmlx.config import env_for, resolve_model
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), kv_quant_scheme="kvarn",
+                                    kv_bits=4, kv_tail_tokens=2048))
+    (mid, m), = cfg.models.items()
+    assert m.overrides["load"] == {"kv_bits": 4, "kv_quant_scheme": "kvarn",
+                                   "kv_tail_tokens": 2048}
+    env = env_for(resolve_model(mid, cfg))
+    assert (env["KV_QUANT_SCHEME"], env["KV_BITS"], env["KV_TAIL_TOKENS"]) \
+        == ("kvarn", "4", "2048")
+    assert "KV_GROUP_SIZE" not in env                  # unset flags stay unset
+    assert "kv_quant_scheme: kvarn" in srv._dump_cfg_yaml(cfg)
+
+
+def test_single_model_cfg_without_kv_flags_sets_no_load(tmp_path):
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g)))
+    (_, m), = cfg.models.items()
+    assert "load" not in m.overrides
+
+
+def test_single_model_cfg_system_and_template_kwargs(tmp_path):
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), system_prompt="Be terse.",
+                                    chat_template_config={"enable_thinking": False}))
+    (_, m), = cfg.models.items()
+    assert m.overrides["system"] == "Be terse."
+    assert m.overrides["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_single_model_cfg_stream_fast_disk(tmp_path):
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), stream_experts=True,
+                                    stream_fast_disk="on"))
+    (_, m), = cfg.models.items()
+    assert m.stream == "experts" and m.stream_fast_disk == "on"
+
+
+def test_serve_parser_model_flags_survive_bg_relaunch():
+    """Every positional-model flag added beside the config keys must parse,
+    forward through _bg_serve_args, and rebuild the same config."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    argv = ["m.gguf", "--kv-quant-scheme", "kvarn", "--kv-bits", "4",
+            "--kv-group-size", "32", "--kv-tail-tokens", "2048",
+            "--max-kv-size", "65536", "--quantized-kv-start", "128",
+            "--system-prompt", "Be terse.",
+            "--chat-template-config", '{"enable_thinking": false}',
+            "--stream-experts", "--stream-fast-disk", "off"]
+    a = ap.parse_args(argv)
+    assert a.chat_template_config == {"enable_thinking": False}
+    out = srv._bg_serve_args(a, None)
+    for flag, val in (("--kv-quant-scheme", "kvarn"), ("--kv-bits", "4"),
+                      ("--kv-group-size", "32"), ("--kv-tail-tokens", "2048"),
+                      ("--max-kv-size", "65536"), ("--quantized-kv-start", "128"),
+                      ("--system-prompt", "Be terse."),
+                      ("--stream-fast-disk", "off")):
+        assert out[out.index(flag) + 1] == val, flag
+    b = ap.parse_args(out)
+    assert srv._single_model_cfg(a).models == srv._single_model_cfg(b).models
+    bare = srv._bg_serve_args(ap.parse_args(["m.gguf"]), None)
+    assert not any(f.startswith(("--kv-", "--max-kv", "--quantized-kv",
+                                 "--system-prompt", "--chat-template-config",
+                                 "--stream-fast-disk")) for f in bare)
+
+
+def test_serve_parser_refuses_bad_scheme_and_template_json(capsys):
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    with pytest.raises(SystemExit):
+        ap.parse_args(["m.gguf", "--kv-quant-scheme", "turbo"])
+    with pytest.raises(SystemExit):
+        ap.parse_args(["m.gguf", "--chat-template-config", "{not json"])
+    with pytest.raises(SystemExit):
+        ap.parse_args(["m.gguf", "--chat-template-config", "[1, 2]"])
+    assert "JSON object" in capsys.readouterr().err
+
+
 def test_single_model_cfg_no_chat_template_has_empty_overrides(tmp_path):
     g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
     g.write_text("x")

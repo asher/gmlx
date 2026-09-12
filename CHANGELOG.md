@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx serve model.gguf` takes `--kv-quant-scheme`, `--kv-bits` and the other
+  `load` keys as flags, plus `--system-prompt`, `--chat-template-config` and
+  `--stream-fast-disk`, so a positional model gets them without a config file.
+
 ## [0.4.11] - 2026-09-11
 
 ### Added

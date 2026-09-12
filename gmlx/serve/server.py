@@ -43,6 +43,7 @@ from pathlib import Path
 import gmlx.load.discovery as discovery
 from gmlx.config import (
     DEFAULT_CONFIG_WRITE,
+    LOAD_ENV,
     LOOPBACK_HOSTS,
     ConfigError,
     DiscoverSpec,
@@ -691,6 +692,20 @@ def register_downloads(paths: list, config_path=None) -> None:
 
 
 # serve
+def _template_kwargs(raw: str) -> dict:
+    """argparse type for --chat-template-config: a JSON object, refused at
+    parse time so a typo never reaches a model load."""
+    import json
+
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from e
+    if not isinstance(out, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
+    return out
+
+
 def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     from gmlx.commands.cli import mass_share
 
@@ -763,6 +778,39 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="GGUF LoRA adapter applied live over a single positional "
                          "model at load - base stays K-quant, no merge (config mode: "
                          "set `adapter:` per model instead).")
+    ap.add_argument("--system-prompt", default=None, metavar="STR",
+                    help="System prompt for a single positional model, used when "
+                         "a request sends none (config mode: the per-profile/model "
+                         "`system:` key).")
+    ap.add_argument("--chat-template-config", type=_template_kwargs, default=None,
+                    metavar="JSON",
+                    help="JSON object of extra chat-template variables for a "
+                         "single positional model, passed through verbatim, "
+                         "e.g. '{\"enable_thinking\": false}' (config mode: the "
+                         "`chat_template_kwargs:` key).")
+    kv = ap.add_argument_group(
+        "KV cache of a single positional model",
+        "Each flag is a `load:` key in config mode; see docs/server-config.md.")
+    kv.add_argument("--kv-bits", type=int, default=None, metavar="N",
+                    help="Quantize the KV cache to N bits: 2, 3, 4, 6 or 8 affine, "
+                         "or 2, 3, 4, 5, 6 or 8 under kvarn (`load.kv_bits`).")
+    kv.add_argument("--kv-group-size", type=int, default=None, metavar="N",
+                    help="Affine KV quantization group size, default 64 "
+                         "(`load.kv_group_size`).")
+    kv.add_argument("--kv-quant-scheme", choices=("uniform", "kvarn"), default=None,
+                    help="KV cache quantization scheme: 'uniform' is affine, "
+                         "'kvarn' is variance-normalized, where --kv-bits defaults "
+                         "to 6 and the newest --kv-tail-tokens stay fp16 "
+                         "(`load.kv_quant_scheme`).")
+    kv.add_argument("--kv-tail-tokens", type=int, default=None, metavar="N",
+                    help="Under kvarn, the newest N tokens kept fp16, a multiple "
+                         "of 128, default 1024 (`load.kv_tail_tokens`).")
+    kv.add_argument("--max-kv-size", type=int, default=None, metavar="N",
+                    help="Cap the request context budget at N tokens "
+                         "(`load.max_kv_size`).")
+    kv.add_argument("--quantized-kv-start", type=int, default=None, metavar="N",
+                    help="Tokens kept unquantized at the start of the cache, not "
+                         "applied under kvarn (`load.quantized_kv_start`).")
     placement = ap.add_mutually_exclusive_group()
     placement.add_argument("--stream-experts", action="store_true",
                     help="Stream a single positional MoE model's routed-expert "
@@ -776,6 +824,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "with every weight streamed from the page cache - serves "
                          "models larger than the wired limit "
                          "(config mode: set `stream: cpu` per model).")
+    ap.add_argument("--stream-fast-disk", choices=("auto", "on", "off"),
+                    default=None,
+                    help="Streamed-decode prefetch recipe for a single positional "
+                         "--stream-experts model: 'auto' measures the drive at "
+                         "load, 'on' forces the aggressive recipe, 'off' the "
+                         "conservative one (config mode: set `stream_fast_disk:` "
+                         "per model).")
     ap.add_argument("--moe-expert-mass", type=mass_share, default=None,
                     metavar="P",
                     help="Lossy: adaptive experts-per-token for a single positional "
@@ -978,10 +1033,21 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--thinking", a.thinking]
     if getattr(a, "thinking_budget", None) is not None:
         out += ["--thinking-budget", str(a.thinking_budget)]
+    if getattr(a, "system_prompt", None) is not None:
+        out += ["--system-prompt", a.system_prompt]
+    if getattr(a, "chat_template_config", None):
+        import json
+        out += ["--chat-template-config", json.dumps(a.chat_template_config)]
+    for key in LOAD_ENV:
+        val = getattr(a, key, None)
+        if val is not None:
+            out += ["--" + key.replace("_", "-"), str(val)]
     if getattr(a, "stream_cpu", False):
         out.append("--stream-cpu")
     if getattr(a, "stream_experts", False):
         out.append("--stream-experts")
+    if getattr(a, "stream_fast_disk", None) is not None:
+        out += ["--stream-fast-disk", a.stream_fast_disk]
     if getattr(a, "moe_expert_mass", None) is not None:
         out += ["--moe-expert-mass", str(a.moe_expert_mass)]
     if getattr(a, "moe_experts", None) is not None:
@@ -1501,6 +1567,16 @@ def _single_model_cfg(a) -> ServerCfg:
         overrides["thinking"] = a.thinking
     if getattr(a, "thinking_budget", None) is not None:
         overrides["sampling"] = {"thinking_budget": a.thinking_budget}
+    if getattr(a, "system_prompt", None) is not None:
+        overrides["system"] = a.system_prompt
+    if getattr(a, "chat_template_config", None):
+        overrides["chat_template_kwargs"] = dict(a.chat_template_config)
+    # The load keys (kv_bits, kv_quant_scheme, ...) keyed exactly as the
+    # config `load:` section, so they resolve and price like a config model.
+    load = {k: getattr(a, k, None) for k in LOAD_ENV}
+    load = {k: v for k, v in load.items() if v is not None}
+    if load:
+        overrides["load"] = load
     model = ModelCfg(
         id=mid,
         path=mp,
@@ -1522,6 +1598,7 @@ def _single_model_cfg(a) -> ServerCfg:
         moe_prestage=getattr(a, "moe_prestage", None),
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
+        stream_fast_disk=getattr(a, "stream_fast_disk", None),
         pin=True,                            # the single model is always pinned
     )
     models = {mid: model}

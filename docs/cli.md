@@ -145,6 +145,18 @@ things are per-model keys under [models](server-config.md#models):
 | `--chat-template STR_OR_PATH` | the GGUF's | inline Jinja or a `.jinja` or `.txt` file |
 | `--thinking {on,off,adaptive}` | template default | the reasoning switch, mapped to the model's template variable |
 | `--thinking-budget N` | unlimited | cap reasoning tokens for each request. `0` closes thinking at once |
+| `--system-prompt STR` | none | a system prompt used when the request has none |
+| `--chat-template-config JSON` | none | extra chat-template variables, a JSON object passed through verbatim |
+| `--kv-bits N` | off | quantize the KV cache to N bits. 2, 3, 4, 6 or 8 affine, or 2, 3, 4, 5, 6 or 8 under kvarn |
+| `--kv-group-size N` | `64` | affine quantization group size |
+| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | affine or [kvarn](glossary.md). Under kvarn `--kv-bits` defaults to 6 |
+| `--kv-tail-tokens N` | `1024` | under kvarn, the newest tokens kept fp16. A multiple of 128 |
+| `--max-kv-size N` | none | cap the request context budget at N tokens |
+| `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache. Not applied under kvarn |
+
+The KV flags are the `load` keys of [server-config.md](server-config.md#load-keys),
+so `--kv-quant-scheme kvarn` on a positional model is what `load: {kv_quant_scheme: kvarn}`
+is on a config model, priced and reported the same way.
 
 These flags control speculative decoding:
 
@@ -164,6 +176,7 @@ These flags stream a model bigger than memory, as
 |------|---------|---------|
 | `--stream-experts` | off | stream the routed experts from disk. Attention and the KV cache stay on GPU |
 | `--stream-cpu` | off | run the whole model on the CPU device from the page cache |
+| `--stream-fast-disk {auto,on,off}` | `auto` | the streamed-decode prefetch policy under `--stream-experts`. `auto` probes the drive |
 | `--prefill-feeder`, `--no-prefill-feeder` | on | stage expert prefill directly from the GGUF |
 | `--decode-feeder`, `--no-decode-feeder` | on under `--stream-experts` | decode from a wired, popularity-managed expert [arena](glossary.md) |
 | `--gpu-keepwarm` | on for streamed loads | keep GPU clocks high while a streamed model decodes |
