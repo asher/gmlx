@@ -43,6 +43,7 @@ from pathlib import Path
 import gmlx.load.discovery as discovery
 from gmlx.config import (
     DEFAULT_CONFIG_WRITE,
+    LOAD_ENV,
     LOOPBACK_HOSTS,
     ConfigError,
     DiscoverSpec,
@@ -54,6 +55,7 @@ from gmlx.config import (
     default_config_write_path,
     edit_config_yaml,
     load_config,
+    resolve_model,
     resolve_path,
 )
 from gmlx.envflags import env_bool
@@ -691,6 +693,37 @@ def register_downloads(paths: list, config_path=None) -> None:
 
 
 # serve
+# (argparse dest, sampling key) for the positional-model sampling flags: the
+# server's SAMPLING_KEYS minus the three serve covers elsewhere (max_tokens is
+# the server-wide --max-tokens, thinking_budget has its own flag, and
+# enable_thinking is --thinking). Named as `gmlx run` names them.
+_SAMPLING_FLAGS = (
+    ("temp", "temperature"), ("top_p", "top_p"), ("top_k", "top_k"),
+    ("min_p", "min_p"), ("seed", "seed"),
+    ("repetition_penalty", "repetition_penalty"),
+    ("repetition_context_size", "repetition_context_size"),
+    ("presence_penalty", "presence_penalty"),
+    ("frequency_penalty", "frequency_penalty"), ("stop", "stop"),
+    ("xtc_probability", "xtc_probability"), ("xtc_threshold", "xtc_threshold"),
+    ("thinking_start_token", "thinking_start_token"),
+    ("thinking_end_token", "thinking_end_token"),
+)
+
+
+def _template_kwargs(raw: str) -> dict:
+    """argparse type for --chat-template-config: a JSON object, refused at
+    parse time so a typo never reaches a model load."""
+    import json
+
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from e
+    if not isinstance(out, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
+    return out
+
+
 def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     from gmlx.commands.cli import mass_share
 
@@ -763,6 +796,90 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="GGUF LoRA adapter applied live over a single positional "
                          "model at load - base stays K-quant, no merge (config mode: "
                          "set `adapter:` per model instead).")
+    ap.add_argument("--system-prompt", default=None, metavar="STR",
+                    help="System prompt for a single positional model, used when "
+                         "a request sends none (config mode: the per-profile/model "
+                         "`system:` key).")
+    ap.add_argument("--chat-template-config", type=_template_kwargs, default=None,
+                    metavar="JSON",
+                    help="JSON object of extra chat-template variables for a "
+                         "single positional model, passed through verbatim, "
+                         "e.g. '{\"enable_thinking\": false}' (config mode: the "
+                         "`chat_template_kwargs:` key).")
+    kv = ap.add_argument_group(
+        "KV cache of a single positional model",
+        "Each flag is a `load:` key in config mode; see docs/server-config.md.")
+    kv.add_argument("--kv-bits", type=int, default=None, metavar="N",
+                    help="Quantize the KV cache to N bits: 2, 3, 4, 6 or 8 affine, "
+                         "or 2, 3, 4, 5, 6 or 8 under kvarn (`load.kv_bits`).")
+    kv.add_argument("--kv-group-size", type=int, default=None, metavar="N",
+                    help="Affine KV quantization group size, default 64 "
+                         "(`load.kv_group_size`).")
+    kv.add_argument("--kv-quant-scheme", choices=("uniform", "kvarn"), default=None,
+                    help="KV cache quantization scheme: 'uniform' is affine, "
+                         "'kvarn' is variance-normalized, where --kv-bits defaults "
+                         "to 6 and the newest --kv-tail-tokens stay fp16 "
+                         "(`load.kv_quant_scheme`).")
+    kv.add_argument("--kv-tail-tokens", type=int, default=None, metavar="N",
+                    help="Under kvarn, the newest N tokens kept fp16, a multiple "
+                         "of 128, default 1024 (`load.kv_tail_tokens`).")
+    kv.add_argument("--max-kv-size", type=int, default=None, metavar="N",
+                    help="Cap the request context budget at N tokens "
+                         "(`load.max_kv_size`).")
+    kv.add_argument("--quantized-kv-start", type=int, default=None, metavar="N",
+                    help="Tokens kept unquantized at the start of the cache, not "
+                         "applied under kvarn (`load.quantized_kv_start`).")
+    sg = ap.add_argument_group(
+        "Sampling defaults of a single positional model",
+        "Used when a request omits the field; a request that sends it wins. "
+        "Each is a `sampling:` key in config mode, and `gmlx profiles` prints "
+        "the family defaults these sit on top of.")
+    sg.add_argument("--profile", default=None, metavar="NAME",
+                    help="Sampling profile: a built-in intent (coding, creative, "
+                         "instruct, reasoning-low/-medium/-high) resolved for the "
+                         "model's family (config mode: the model `profile:` key).")
+    sg.add_argument("--temp", type=float, default=None, metavar="T",
+                    help="Sampling temperature (`temperature`).")
+    sg.add_argument("--top-p", type=float, default=None, metavar="P",
+                    help="Nucleus probability; 0 disables the filter (`top_p`).")
+    sg.add_argument("--top-k", type=int, default=None, metavar="N",
+                    help="Candidate count; 0 disables the filter (`top_k`).")
+    sg.add_argument("--min-p", type=float, default=None, metavar="P",
+                    help="Minimum probability relative to the best token; 0 "
+                         "disables (`min_p`).")
+    sg.add_argument("--seed", type=int, default=None, metavar="N",
+                    help="Sampling seed for every request that sends none "
+                         "(`seed`).")
+    sg.add_argument("--repetition-penalty", type=float, default=None, metavar="X",
+                    help="Penalty over the last --repetition-context-size tokens "
+                         "(`repetition_penalty`).")
+    sg.add_argument("--repetition-context-size", type=int, default=None,
+                    metavar="N",
+                    help="Window for the repetition penalty, default 20 "
+                         "(`repetition_context_size`).")
+    sg.add_argument("--presence-penalty", type=float, default=None, metavar="X",
+                    help="Penalty on any token already generated "
+                         "(`presence_penalty`).")
+    sg.add_argument("--frequency-penalty", type=float, default=None, metavar="X",
+                    help="Penalty scaled by how often a token was generated "
+                         "(`frequency_penalty`).")
+    sg.add_argument("--stop", action="append", default=None, metavar="STR",
+                    help="Stop sequence, repeatable; chat completions only "
+                         "(`stop`).")
+    sg.add_argument("--xtc-probability", type=float, default=None, metavar="P",
+                    help="XTC sampling probability (`xtc_probability`).")
+    sg.add_argument("--xtc-threshold", type=float, default=None, metavar="T",
+                    help="XTC sampling threshold (`xtc_threshold`).")
+    sg.add_argument("--thinking-start-token", default=None, metavar="STR",
+                    help="The model's opening reasoning marker when it is not "
+                         "<think> (`thinking_start_token`).")
+    sg.add_argument("--thinking-end-token", default=None, metavar="STR",
+                    help="The model's closing reasoning marker when it is not "
+                         "</think> (`thinking_end_token`).")
+    sg.add_argument("--reasoning-effort", default=None, metavar="LEVEL",
+                    help="Reasoning level for models whose template grades "
+                         "thinking, such as low, medium or high (config mode: "
+                         "the `reasoning_effort:` key).")
     placement = ap.add_mutually_exclusive_group()
     placement.add_argument("--stream-experts", action="store_true",
                     help="Stream a single positional MoE model's routed-expert "
@@ -776,6 +893,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "with every weight streamed from the page cache - serves "
                          "models larger than the wired limit "
                          "(config mode: set `stream: cpu` per model).")
+    ap.add_argument("--stream-fast-disk", choices=("auto", "on", "off"),
+                    default=None,
+                    help="Streamed-decode prefetch recipe for a single positional "
+                         "--stream-experts model: 'auto' measures the drive at "
+                         "load, 'on' forces the aggressive recipe, 'off' the "
+                         "conservative one (config mode: set `stream_fast_disk:` "
+                         "per model).")
     ap.add_argument("--moe-expert-mass", type=mass_share, default=None,
                     metavar="P",
                     help="Lossy: adaptive experts-per-token for a single positional "
@@ -836,6 +960,11 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Pin a model (id or path) so it is never evicted (repeatable).")
     ap.add_argument("--max-tokens", type=int, default=None,
                     help="Server default max completion tokens.")
+    ap.add_argument("--no-family-defaults", action="store_true",
+                    help="Do not seed each model family's model-card sampling "
+                         "under profiles and requests (config mode: "
+                         "`server.family_defaults: false`, which a config "
+                         "reload restores).")
     ap.add_argument("--prefill-step-size", type=int, default=None, metavar="N",
                     help="Prefill chunk size in tokens (default 2048) - lower "
                          "it to cap peak memory on long prompts, at some "
@@ -978,10 +1107,32 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--thinking", a.thinking]
     if getattr(a, "thinking_budget", None) is not None:
         out += ["--thinking-budget", str(a.thinking_budget)]
+    if getattr(a, "system_prompt", None) is not None:
+        out += ["--system-prompt", a.system_prompt]
+    if getattr(a, "chat_template_config", None):
+        import json
+        out += ["--chat-template-config", json.dumps(a.chat_template_config)]
+    for key in LOAD_ENV:
+        val = getattr(a, key, None)
+        if val is not None:
+            out += ["--" + key.replace("_", "-"), str(val)]
+    if getattr(a, "profile", None):
+        out += ["--profile", a.profile]
+    for dest, _key in _SAMPLING_FLAGS:
+        val = getattr(a, dest, None)
+        if val is None:
+            continue
+        flag = "--" + dest.replace("_", "-")
+        for v in (val if isinstance(val, list) else [val]):
+            out += [flag, str(v)]
+    if getattr(a, "reasoning_effort", None) is not None:
+        out += ["--reasoning-effort", a.reasoning_effort]
     if getattr(a, "stream_cpu", False):
         out.append("--stream-cpu")
     if getattr(a, "stream_experts", False):
         out.append("--stream-experts")
+    if getattr(a, "stream_fast_disk", None) is not None:
+        out += ["--stream-fast-disk", a.stream_fast_disk]
     if getattr(a, "moe_expert_mass", None) is not None:
         out += ["--moe-expert-mass", str(a.moe_expert_mass)]
     if getattr(a, "moe_experts", None) is not None:
@@ -1000,6 +1151,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--pin", p]
     if a.max_tokens is not None:
         out += ["--max-tokens", str(a.max_tokens)]
+    if getattr(a, "no_family_defaults", False):
+        out.append("--no-family-defaults")
     if getattr(a, "prefill_step_size", None) is not None:
         out += ["--prefill-step-size", str(a.prefill_step_size)]
     if getattr(a, "decode_prefill_ratio", None) is not None:
@@ -1375,14 +1528,24 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
 
 
 def _resolve_cfg(a) -> tuple:
-    """Return ``(ServerCfg, reload_fn)`` for the selected start mode."""
+    """Return ``(ServerCfg, reload_fn)`` for the selected start mode, with
+    ``--no-family-defaults`` applied to whichever config that is."""
+    cfg, reload_fn = _resolve_mode_cfg(a)
+    if getattr(a, "no_family_defaults", False):
+        cfg.family_defaults = False
+    return cfg, reload_fn
+
+
+def _resolve_mode_cfg(a) -> tuple:
     if a.config:
         path = a.config
         return load_config(path), _make_reload_fn(path)
     if a.models_dir:
         return _discovery_cfg(a.models_dir, a), None
     if a.model:
-        return _single_model_cfg(a), None
+        cfg = _single_model_cfg(a)
+        _check_positional(cfg)
+        return cfg, None
     # bare: first existing default config, else discovery-scan the default dir.
     # Informational notes go to stderr: `--print-config > file` must leave
     # stdout pure YAML (the emitted header promises --config round-trips).
@@ -1499,11 +1662,28 @@ def _single_model_cfg(a) -> ServerCfg:
                  if getattr(a, "chat_template", None) else {})
     if getattr(a, "thinking", None) is not None:
         overrides["thinking"] = a.thinking
+    sampling = {key: getattr(a, dest, None) for dest, key in _SAMPLING_FLAGS}
+    sampling = {k: v for k, v in sampling.items() if v is not None}
     if getattr(a, "thinking_budget", None) is not None:
-        overrides["sampling"] = {"thinking_budget": a.thinking_budget}
+        sampling["thinking_budget"] = a.thinking_budget
+    if sampling:
+        overrides["sampling"] = sampling
+    if getattr(a, "reasoning_effort", None) is not None:
+        overrides["reasoning_effort"] = a.reasoning_effort
+    if getattr(a, "system_prompt", None) is not None:
+        overrides["system"] = a.system_prompt
+    if getattr(a, "chat_template_config", None):
+        overrides["chat_template_kwargs"] = dict(a.chat_template_config)
+    # The load keys (kv_bits, kv_quant_scheme, ...) keyed exactly as the
+    # config `load:` section, so they resolve and price like a config model.
+    load = {k: getattr(a, k, None) for k in LOAD_ENV}
+    load = {k: v for k, v in load.items() if v is not None}
+    if load:
+        overrides["load"] = load
     model = ModelCfg(
         id=mid,
         path=mp,
+        profile=getattr(a, "profile", None),
         mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
                     if a.draft_gguf and not native_mtp else None),
@@ -1522,6 +1702,7 @@ def _single_model_cfg(a) -> ServerCfg:
         moe_prestage=getattr(a, "moe_prestage", None),
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
+        stream_fast_disk=getattr(a, "stream_fast_disk", None),
         pin=True,                            # the single model is always pinned
     )
     models = {mid: model}
@@ -1538,9 +1719,20 @@ def _single_model_cfg(a) -> ServerCfg:
         budget_gb=a.budget_gb,
         max_models=a.max_models,
         hf_cache=a.hf_cache,
+        family_defaults=not getattr(a, "no_family_defaults", False),
         defaults=ServerDefaults(model=mid),
         models=models,
     )
+
+
+def _check_positional(cfg: ServerCfg) -> None:
+    """Run the positional model through the checks a config file gets at
+    parse, so an unknown --profile is refused at start instead of inside the
+    engine's first load, then resolve it once for the rest."""
+    from gmlx.config import _validate
+    _validate(cfg)
+    for mid in cfg.models:
+        resolve_model(mid, cfg)
 
 
 def _preload_id(cfg: ServerCfg) -> str | None:

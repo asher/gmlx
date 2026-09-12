@@ -644,7 +644,8 @@ These change how a model is built, so each model can have its own values
 and two ids that differ in a load key are two resident copies. Each key has
 a matching mlx-vlm environment variable, listed in
 [env-vars.md](env-vars.md#load-and-cache-keys), which sets the same thing
-for every model the process loads.
+for every model the process loads, and a positional `gmlx serve model.gguf`
+takes each key as a flag of the same name, listed in [cli.md](cli.md#gmlx-serve).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
