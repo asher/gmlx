@@ -18,7 +18,7 @@ live server. Scenarios are grouped into tiers:
 | --- | --- |
 | `core` | single positional GGUF; config profiles, `extends`, `@profile`, `system`, aliases, unknown-id 404 / unknown-profile 400 |
 | `kv` | quantized KV cache (baseline / 8-bit / 6-bit / 4-bit affine, 6-bit kvarn) under a deep planted-fact recall + long generation |
-| `cache` | APC prompt cache: disabled / memory-only / SSD disk tier / disk × 8-bit-KV combo; reuse must be byte-identical |
+| `cache` | APC prompt cache: disabled / memory-only / SSD disk tier / disk × 8-bit-KV and disk × 6-bit-kvarn combos; reuse must be byte-identical |
 | `residency` | multi-model LRU eviction under a tight weight-byte budget; idle-TTL reaping (pinned exempt) |
 | `template` | chat-template override (config profile + single-model `--chat-template`); distinct templates fork distinct resident entries |
 | `endpoints` | `/v1/models`, `/v1/metrics` resident view, `/unload` (one + all), `/v1/reload`, cache reset; plus the SSE streaming path |
