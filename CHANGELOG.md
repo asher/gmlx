@@ -19,6 +19,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Serve admission measured no batch wider than one row (the batch caches
+  report a per-row offset vector) and priced a kvarn cache's fp16 tail ring
+  per token, so wide batches projected from stale single-row figures and
+  every admission logged a rescale warning. The projection now reads the
+  batch watermark and the kvarn cache's own record rate.
 - A request admitted in the round every row of a speculative batch
   finished decoded its first tokens at the wrong position (the emptied
   batch kept its watermark and left-padded the adopted row).

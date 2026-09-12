@@ -332,6 +332,31 @@ class _KVarNStorage(_base_cache()):
     def head_dim(self):
         return self.stage_k.shape[-1] if self._allocated() else None
 
+    def admit_bytes(self):
+        """Accounting for the serve admission rate model: ``(per_token,
+        depth, row_bytes)``. ``per_token`` is the packed record cost of one
+        token summed over the rows (the codes and axes of one group over
+        GROUP), ``depth`` the physical watermark, and ``row_bytes`` the fp16
+        regions (stage, tail ring, horizon) plus the record growth slack,
+        which the model charges per row. ``per_token * depth + row_bytes``
+        is the allocated total, so the model reproduces the measurement
+        instead of reading the tail ring's length as the token count. Zeros
+        before the first append."""
+        if not self._allocated():
+            return 0.0, 0, 0.0
+        rec = sum(a.nbytes for a in (self.codes_k, self.codes_v,
+                                     self.axes_k, self.axes_v))
+        per_token = rec / (self.codes_k.shape[2] * GROUP)
+        depth = int(self._pos)
+        regions = sum(a.nbytes for a in (self.stage_k, self.stage_v,
+                                         self.tail_k, self.tail_v))
+        for f in ("horizon_k", "horizon_v"):
+            a = getattr(self, f, None)
+            if a is not None:
+                regions += a.nbytes
+        slack = rec - min(rec, per_token * depth)
+        return per_token, depth, regions + slack
+
     # -- lifecycle ----------------------------------------------------------
 
     def _check_kv(self, keys, values):

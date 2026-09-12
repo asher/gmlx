@@ -10,7 +10,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
+from gmlx.cache.kvarn_cache import GROUP, BatchKVarNKVCache, KVarNKVCache, KVarNView
 from gmlx.cache.kvarn_sdpa import kvarn_attention
 from kvarn_testlib import D, H, needs_kvarn_ops
 
@@ -766,3 +766,17 @@ def test_qwen35_arm_routes_fused_at_verify_width(d, monkeypatch):
     out = _kvarn_attention(q, cache=c, scale=d**-0.5, mask=mask)
     assert calls == [4]
     _assert_close(out, _ref_batch_decode(q, c))
+
+
+@needs_kvarn_ops
+def test_admit_bytes_sums_rows():
+    assert BatchKVarNKVCache([0, 0], tail_tokens=256).admit_bytes() == (0.0, 0, 0.0)
+    c = _filled(1500, [0, 64, 200], tail=256)
+    per_token, depth, row_bytes = c.admit_bytes()
+    rec = sum(getattr(c, f).nbytes for f in ("codes_k", "codes_v", "axes_k", "axes_v"))
+    assert per_token == pytest.approx(rec / (c.codes_k.shape[2] * GROUP))
+    assert depth == max(c.ends)
+    total = sum(getattr(c, f).nbytes for f in (
+        "codes_k", "codes_v", "axes_k", "axes_v", "stage_k", "stage_v",
+        "tail_k", "tail_v", "horizon_k", "horizon_v"))
+    assert per_token * depth + row_bytes == pytest.approx(total)
