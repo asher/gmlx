@@ -128,6 +128,7 @@ config, where the same settings apply to a config-mode server:
 | `--max-models N` | none | cap on resident models |
 | `--pin ID_OR_PATH` | none | never evict this model, repeatable |
 | `--max-tokens N` | none | default completion cap |
+| `--no-family-defaults` | off | do not seed each family's model-card sampling under profiles and requests. In config mode a reload restores `server.family_defaults` |
 | `--prefill-step-size N` | `2048` | prefill chunk size in tokens. Lower caps peak memory |
 | `--dtype {auto,bfloat16,float16}` | `auto` | activation width. `auto` is float16 on M1 and M2 |
 | `--decode-prefill-ratio R` | `auto` | GPU-time share prefill gets while streams decode. `0` is stock scheduling |
@@ -145,6 +146,8 @@ things are per-model keys under [models](server-config.md#models):
 | `--chat-template STR_OR_PATH` | the GGUF's | inline Jinja or a `.jinja` or `.txt` file |
 | `--thinking {on,off,adaptive}` | template default | the reasoning switch, mapped to the model's template variable |
 | `--thinking-budget N` | unlimited | cap reasoning tokens for each request. `0` closes thinking at once |
+| `--reasoning-effort LEVEL` | template default | the reasoning level for models whose template grades thinking, such as `low`, `medium` or `high` |
+| `--profile NAME` | none | a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. `gmlx profiles` lists them |
 | `--system-prompt STR` | none | a system prompt used when the request has none |
 | `--chat-template-config JSON` | none | extra chat-template variables, a JSON object passed through verbatim |
 | `--kv-bits N` | off | quantize the KV cache to N bits. 2, 3, 4, 6 or 8 affine, or 2, 3, 4, 5, 6 or 8 under kvarn |
@@ -157,6 +160,30 @@ things are per-model keys under [models](server-config.md#models):
 The KV flags are the `load` keys of [server-config.md](server-config.md#load-keys),
 so `--kv-quant-scheme kvarn` on a positional model is what `load: {kv_quant_scheme: kvarn}`
 is on a config model, priced and reported the same way.
+
+These flags set a positional model's sampling defaults, the `sampling` keys of
+[server-config.md](server-config.md#sampling-keys). A default applies to a
+request that omits the field, and a request that sends the field wins, so
+`--temp 0` does not pin a client that sends its own temperature. They sit on
+top of the family defaults `gmlx profiles` prints, and an unknown `--profile`
+is refused at start:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--temp T` | family base | sampling temperature |
+| `--top-p P` | family base | nucleus probability. `0` disables the filter |
+| `--top-k N` | family base | candidate count. `0` disables the filter |
+| `--min-p P` | family base | minimum probability relative to the best token. `0` disables |
+| `--seed N` | none | a sampling seed for every request that sends none |
+| `--repetition-penalty X` | none | penalty over the last `--repetition-context-size` tokens |
+| `--repetition-context-size N` | `20` | window for the repetition penalty |
+| `--presence-penalty X` | none | penalty on any token already generated |
+| `--frequency-penalty X` | none | penalty scaled by how often a token was generated |
+| `--stop STR` | none | a stop sequence, repeatable. Chat completions only |
+| `--xtc-probability P` | none | XTC sampling probability. Not available on speculative models |
+| `--xtc-threshold T` | none | XTC sampling threshold |
+| `--thinking-start-token STR` | `<think>` | the model's opening reasoning marker |
+| `--thinking-end-token STR` | `</think>` | the model's closing reasoning marker |
 
 These flags control speculative decoding:
 

@@ -15,7 +15,7 @@ import pytest
 import gmlx.serve.server as srv  # noqa: E402
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import observability as sp_obs  # noqa: E402
-from gmlx.config import ModelCfg, ServerCfg, ServerDefaults  # noqa: E402
+from gmlx.config import ConfigError, ModelCfg, ServerCfg, ServerDefaults  # noqa: E402
 
 
 def _ns(**kw):
@@ -179,6 +179,63 @@ def test_serve_parser_model_flags_survive_bg_relaunch():
     assert not any(f.startswith(("--kv-", "--max-kv", "--quantized-kv",
                                  "--system-prompt", "--chat-template-config",
                                  "--stream-fast-disk")) for f in bare)
+
+
+def test_single_model_cfg_sampling_flags_ride_overrides_sampling(tmp_path):
+    """Sampling flags land under overrides.sampling keyed like a config file,
+    merged with --thinking-budget, and resolve into the model's defaults."""
+    from gmlx.config import resolve_model
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), temp=0.6, top_p=0.9,
+                                    stop=["###", "END"], thinking_budget=0,
+                                    reasoning_effort="high"))
+    (mid, m), = cfg.models.items()
+    assert m.overrides["sampling"] == {"temperature": 0.6, "top_p": 0.9,
+                                       "stop": ["###", "END"],
+                                       "thinking_budget": 0}
+    assert m.overrides["reasoning_effort"] == "high"
+    r = resolve_model(mid, cfg)
+    assert r.sampling["temperature"] == 0.6
+    assert r.sampling["stop"] == ["###", "END"]
+
+
+def test_single_model_cfg_profile_and_family_defaults(tmp_path):
+    """--profile names the model's profile and is checked at start; the
+    family-defaults switch is server-wide."""
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg, _ = srv._resolve_cfg(_ns(model=str(g), profile="coding"))
+    (mid, m), = cfg.models.items()
+    assert m.profile == "coding" and cfg.family_defaults is True
+    cfg, _ = srv._resolve_cfg(_ns(model=str(g), no_family_defaults=True))
+    assert cfg.family_defaults is False
+    with pytest.raises(ConfigError):
+        srv._resolve_cfg(_ns(model=str(g), profile="no-such-profile"))
+
+
+def test_serve_parser_sampling_flags_survive_bg_relaunch():
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    argv = ["m.gguf", "--profile", "coding", "--temp", "0.6", "--top-p", "0.9",
+            "--top-k", "20", "--min-p", "0", "--seed", "7",
+            "--repetition-penalty", "1.1", "--repetition-context-size", "64",
+            "--presence-penalty", "0.5", "--frequency-penalty", "0.25",
+            "--stop", "###", "--stop", "END", "--xtc-probability", "0.1",
+            "--xtc-threshold", "0.2", "--thinking-start-token", "<t>",
+            "--thinking-end-token", "</t>", "--reasoning-effort", "high",
+            "--no-family-defaults"]
+    a = ap.parse_args(argv)
+    out = srv._bg_serve_args(a, None)
+    assert out.count("--stop") == 2 and "--no-family-defaults" in out
+    b = ap.parse_args(out)
+    assert srv._single_model_cfg(a).models == srv._single_model_cfg(b).models
+    assert srv._single_model_cfg(b).family_defaults is False
+    bare = srv._bg_serve_args(ap.parse_args(["m.gguf"]), None)
+    assert not any(f in bare for f in ("--temp", "--stop", "--profile",
+                                       "--reasoning-effort",
+                                       "--no-family-defaults"))
 
 
 def test_serve_parser_refuses_bad_scheme_and_template_json(capsys):

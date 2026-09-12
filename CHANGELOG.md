@@ -11,6 +11,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx serve model.gguf` takes `--kv-quant-scheme`, `--kv-bits` and the other
   `load` keys as flags, plus `--system-prompt`, `--chat-template-config` and
   `--stream-fast-disk`, so a positional model gets them without a config file.
+- `gmlx serve model.gguf` also takes the sampling defaults as `gmlx run` names
+  them (`--temp`, `--top-p`, `--stop` and the rest), `--profile`,
+  `--reasoning-effort` and `--no-family-defaults`. A request that sends a field
+  still wins, and an unknown `--profile` is refused at start.
 
 ## [0.4.11] - 2026-09-11
 
