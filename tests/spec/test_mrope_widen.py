@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import mlx.core as mx
 
-from gmlx.spec.engine import _widen_prompt_rope_state
+from gmlx.spec.mtp_prefill import _widen_prompt_rope_state
 
 
 def _batch(width, model):

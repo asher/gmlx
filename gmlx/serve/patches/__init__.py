@@ -214,11 +214,14 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         lora_rows.configure("rows", 1)
     lora_rows.install_lora_gen_args()
     lora_rows.install_row_channel()
-    import gmlx.spec.engine as spec_engine
-    spec_engine.install_full_prompt_mtp_prefill()
-    spec_engine.install_owned_spec_engine()
-    spec_engine.install_continuous_batch_admission()
-    spec_engine.install_spec_kv_quant()
+    from gmlx.spec.admission import install_continuous_batch_admission
+    from gmlx.spec.engine import install_owned_spec_engine
+    from gmlx.spec.kv_quant import install_spec_kv_quant
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+    install_full_prompt_mtp_prefill()
+    install_owned_spec_engine()
+    install_continuous_batch_admission()
+    install_spec_kv_quant()
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from gmlx.cache.apc_pooling import (

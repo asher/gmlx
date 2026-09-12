@@ -18,12 +18,11 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.spec.engine import (
-    _OWNED_MTP_ROUND_FLAG,
+from gmlx.spec.admission import (
     _RELEASED_FLAG,
     install_continuous_batch_admission,
-    install_owned_spec_engine,
 )
+from gmlx.spec.engine import _OWNED_MTP_ROUND_FLAG, install_owned_spec_engine
 
 
 class _Entry:

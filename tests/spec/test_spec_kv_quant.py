@@ -14,7 +14,8 @@ from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold  # noqa: E402
-import gmlx.spec.engine as spec_engine  # noqa: E402
+import gmlx.spec.engine as engine  # noqa: E402
+import gmlx.spec.kv_quant as kv_quant  # noqa: E402
 
 
 class _SSMCache:
@@ -54,7 +55,7 @@ def _mk(batch_size=1, make_cache=None, lm=None):
 
 def test_b1_mtp_converts(restorable):
     restorable.setenv("KV_BITS", "4")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk()
     assert isinstance(caches[0], QuantizedKVCache)
     # The last layer of a deep stack stays fp16. The MTP arm
@@ -65,14 +66,14 @@ def test_b1_mtp_converts(restorable):
     assert caches[0].offset == 0 and caches[0].is_trimmable()
     # idempotent: second install keeps the same wrapper
     wrapped = su.make_speculative_prompt_cache
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     assert su.make_speculative_prompt_cache is wrapped
 
 
 def test_group_size_env(restorable):
     restorable.setenv("KV_BITS", "8")
     restorable.setenv("KV_GROUP_SIZE", "32")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk()
     assert caches[0].bits == 8 and caches[0].group_size == 32
 
@@ -82,7 +83,7 @@ def test_no_env_installs_and_stays_fp16(restorable):
     # stamped policy even when the boot env asked for nothing.
     restorable.delenv("KV_BITS", raising=False)
     before = su.make_speculative_prompt_cache
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     assert su.make_speculative_prompt_cache is not before
     assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
 
@@ -100,7 +101,7 @@ def test_stamped_policy_rules_the_boot_env(restorable):
     from gmlx.cache.kv_policy import off_policy, resolve_kv_quant_policy
 
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     fp16 = _stamp(_FakeLM(), off_policy("single"))
     assert all(type(c) in (KVCache, _SSMCache) for c in _mk(lm=fp16))
     narrow = _stamp(_FakeLM(), resolve_kv_quant_policy(
@@ -116,7 +117,7 @@ def test_kill_switch(restorable):
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("GMLX_SPEC_KV_QUANT", "0")
     before = su.make_speculative_prompt_cache
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     assert su.make_speculative_prompt_cache is before
 
 
@@ -126,13 +127,13 @@ def test_kill_switch(restorable):
 def test_non_affine_stays_fp16(restorable, bits, scheme):
     restorable.setenv("KV_BITS", bits)
     restorable.setenv("KV_QUANT_SCHEME", scheme)
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
 
 
 def test_batch_passthrough(restorable):
     restorable.setenv("KV_BITS", "4")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     sentinel = ["stock"]
     out = _mk(batch_size=2, make_cache=lambda lm, lp: sentinel)
     assert out is sentinel
@@ -145,7 +146,7 @@ def test_batch_forces_fp16(restorable):
     from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
 
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     lp = [0, 0]
     stock = [BatchQuantizedKVCache(lp, group_size=64, bits=8),
              _SSMCache(),
@@ -163,7 +164,7 @@ def test_batch_forces_fp16_nested(restorable):
                                       CacheList)
 
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     lp = [0, 0]
     stock = [CacheList(BatchQuantizedKVCache(lp, group_size=64, bits=8),
                        _SSMCache()),
@@ -186,7 +187,7 @@ def test_dequantize_lift_cache():
     q = QuantizedKVCache(group_size=64, bits=8)
     q.update_and_fetch(k, v)
     q._gmlx_cascade = "stamp"
-    lifted = spec_engine.dequantize_lift_cache(q)
+    lifted = kv_quant.dequantize_lift_cache(q)
     assert type(lifted) is BatchKVCache
     assert lifted.offset == 41
     assert lifted._gmlx_cascade == "stamp"
@@ -332,7 +333,7 @@ def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
     # guard keys on model_type, direct or config fallback.
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("GMLX_QWEN_OWNED", "0")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         lm_cls(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail(
@@ -344,7 +345,7 @@ def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
 def test_owned_on_gdn_still_converts(restorable):
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("GMLX_QWEN_OWNED", "1")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _GdnFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail(
@@ -370,16 +371,16 @@ def test_warm_merge_config_follows_batched_policy(restorable):
                                      kv_group_size=64, mode="single")
     batched_drop = dropped_policy("mtp fp16 when batched", 8, 64, "batched")
     model._gmlx_kv_policy = ServeKvPolicy(single, batched_drop)
-    assert spec_engine._live_kv_quant_config(model) is None
+    assert engine._live_kv_quant_config(model) is None
 
     batched_full = resolve_kv_quant_policy([KVCache()], kv_bits=8,
                                            kv_group_size=64, mode="batched")
     model._gmlx_kv_policy = ServeKvPolicy(single, batched_full)
-    assert spec_engine._live_kv_quant_config(model) is not None
+    assert engine._live_kv_quant_config(model) is not None
 
     # no stamp: fail-safe None, never the environment
-    assert spec_engine._live_kv_quant_config(_Stamp()) is None
-    assert spec_engine._live_kv_quant_config(None) is None
+    assert engine._live_kv_quant_config(_Stamp()) is None
+    assert engine._live_kv_quant_config(None) is None
 
 
 # Hybrid arch shapes on the B=1 arm. CacheList members, opt-outs, nested
@@ -408,7 +409,7 @@ class _ListFakeLM:
 
 def test_b1_mtp_quantizes_the_kv_member_of_a_cache_list(restorable):
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _ListFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
@@ -429,7 +430,7 @@ class _OptOutFakeLM:
 
 def test_b1_mtp_honors_kv_quant_unsupported(restorable):
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _OptOutFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
@@ -450,7 +451,7 @@ class _NestedWindowFakeLM:
 def test_b1_mtp_sees_a_window_nested_in_a_cache_list(restorable):
     # A window-plus-state list classifies as state. Nothing converts.
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _NestedWindowFakeLM(), draft_kind="mtp", batch_size=1,
         left_padding=[0],
@@ -474,9 +475,9 @@ def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
     # layer kind. Every layer's pool packs, the held last layer included.
     import logging
 
-    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
+    caplog.set_level(logging.INFO, logger="gmlx.spec.kv_quant")
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _Glm5ShapeFakeLM(), draft_kind="mtp", batch_size=1,
         left_padding=[0],
@@ -504,9 +505,9 @@ def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):
     # Nothing converts, so the note must key off the pools armed.
     import logging
 
-    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
+    caplog.set_level(logging.INFO, logger="gmlx.spec.kv_quant")
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _PoolOnlyFakeLM(), draft_kind="mtp", batch_size=1,
         left_padding=[0],
@@ -529,7 +530,7 @@ def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
     # Top-level windows must not drop the whole stack: the verdict is
     # partial, windows stay fp16, full-attention layers convert.
     restorable.setenv("KV_BITS", "8")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
         _HybridFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
         make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
@@ -547,16 +548,16 @@ def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     kv_bits under MTP while serve quantized the same stack; the two
     stock verify walks are the only real declines."""
     restorable.setenv("GMLX_QWEN_OWNED", "1")
-    assert spec_engine.mtp_kv_decline(_FakeLM()) is None
-    assert spec_engine.mtp_kv_decline(_GdnFakeLM()) is None
+    assert kv_quant.mtp_kv_decline(_FakeLM()) is None
+    assert kv_quant.mtp_kv_decline(_GdnFakeLM()) is None
 
     restorable.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in spec_engine.mtp_kv_decline(_GdnFakeLM())
-    assert "stock fallback" in spec_engine.mtp_kv_decline(_GdnConfigFakeLM())
-    assert spec_engine.mtp_kv_decline(_FakeLM()) is None
+    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnFakeLM())
+    assert "stock fallback" in kv_quant.mtp_kv_decline(_GdnConfigFakeLM())
+    assert kv_quant.mtp_kv_decline(_FakeLM()) is None
 
     restorable.setenv("GMLX_QWEN_OWNED", "1")
-    reason = spec_engine.mtp_kv_decline(_FakeLM(), owned_round=False)
+    reason = kv_quant.mtp_kv_decline(_FakeLM(), owned_round=False)
     assert "GMLX_OWNED_ROUND=0" in reason
 
 

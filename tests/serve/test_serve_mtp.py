@@ -728,7 +728,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
     import mlx.core as mx
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    from gmlx.spec.engine import install_full_prompt_mtp_prefill
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
 
     install_full_prompt_mtp_prefill()
 

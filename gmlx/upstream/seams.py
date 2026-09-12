@@ -169,7 +169,7 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "_extend_cache",
          "cascade_sdpa.install_cascade_stamp (stamp carry across the "
          "B=1-to-batch merge lift on admission)", critical=True),
-    # --- speculative / AR batch engine (spec_engine owns these methods) ---
+    # --- speculative / AR batch engine (the spec package owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash + kvarn_serve APC gate",
          critical=True),
@@ -178,32 +178,32 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.generate.ar",
          "PromptProcessingBatch._store_apc_exact_checkpoints",
-         "spec_engine._install_ckpt_checkpoint_store (ckpt cursor rides "
+         "ckpt._install_ckpt_checkpoint_store (ckpt cursor rides "
          "the stock store)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
-         "spec_engine.install_full_prompt_mtp_prefill (prefill-step "
+         "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
          "restore + stock-path ckpt arming)", critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
-         "spec_engine._install_plain_ckpt_decode (token accounting + "
+         "ckpt._install_plain_ckpt_decode (token accounting + "
          "decode-time snapshots)", critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch.filter",
-         "spec_engine._install_plain_ckpt_decode (B=1 retirement at row "
+         "ckpt._install_plain_ckpt_decode (B=1 retirement at row "
          "exit)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
-         "spec_engine.install_full_prompt_mtp_prefill", critical=True),
+         "mtp_prefill.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
-         "spec_engine.install_full_prompt_mtp_prefill; "
+         "mtp_prefill.install_full_prompt_mtp_prefill; "
          "seed_rows.install_per_request_seed (row-uid publish); "
          "server_patches.mtp_thinking (thinking-hook transport, outermost)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
-         "spec_engine.install_continuous_batch_admission", critical=True),
+         "admission.install_continuous_batch_admission", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
-         "spec_engine._filter_with_release (per-row release rides the "
+         "admission._filter_with_release (per-row release rides the "
          "mark-finished contract; the rounds generator sheds via "
          "stop_check)", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.__len__",
-         "spec_engine._len_with_promotion (patched semantics are D-3's "
+         "admission._len_with_promotion (patched semantics are D-3's "
          "hazard; decision modules count rows via _orig_len only)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._eval_pending_state",
@@ -215,7 +215,7 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
-         "spec_engine.install_spec_kv_quant (B=1 KV_BITS/kvarn)",
+         "kv_quant.install_spec_kv_quant (B=1 KV_BITS/kvarn)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_pick_for",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
@@ -376,7 +376,7 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.cache", "BatchKVCache",
          "mtp_drafter / cache_snapshot row round-trip"),
     Seam("mlx_vlm.models.cache", "BatchKVCache.filter",
-         "spec_engine per-row release + governor retire (physical row "
+         "admission per-row release + governor retire (physical row "
          "drop through the cache's own filter)", critical=True),
     Seam("mlx_vlm.models.cache", "BatchKVCache.extract",
          "governor orange retire (contiguous single-row extract before "

@@ -339,7 +339,7 @@ def test_skeleton_disk_flag(monkeypatch):
 
 
 def test_cursor_skeleton_policy(monkeypatch):
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.ckpt as ckpt
 
     seen = []
 
@@ -359,6 +359,6 @@ def test_cursor_skeleton_policy(monkeypatch):
         _kq_ckpt_armed=True, _apc_manager=man, _apc_meta=[meta],
         prompt_cache=[], model=SimpleNamespace(_kq_apc_ckpt_layout=tags),
         _row_real_tokens_processed=lambda i: meta["checkpoint_len"])
-    spec_engine._ckpt_mid_prefill_store(batch)   # boundary 32: interval
-    spec_engine._ckpt_mid_prefill_store(batch)   # boundary 64: terminal
+    ckpt._ckpt_mid_prefill_store(batch)   # boundary 32: interval
+    ckpt._ckpt_mid_prefill_store(batch)   # boundary 64: terminal
     assert seen == [(32, False), (64, True)]

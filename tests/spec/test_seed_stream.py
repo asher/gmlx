@@ -23,7 +23,7 @@ pytest.importorskip("mlx_vlm")
 import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
-import gmlx.spec.engine as engine  # noqa: E402
+import gmlx.spec.mtp_prefill as mtp_prefill  # noqa: E402
 from gmlx.spec.mtp_drafter import QwenMTPDrafter  # noqa: E402
 
 D = 8
@@ -220,14 +220,14 @@ class _StubBatch:
 class TestEligibility:
 
     def _armed(self, batch):
-        engine._mtp_seed_stream_init(batch)
+        mtp_prefill._mtp_seed_stream_init(batch)
         return batch._mtp_seed_ctx is not None
 
     def test_eligible_cold_prefill_arms(self):
         assert self._armed(_StubBatch(FakeHead()))
 
     def test_env_kill_switch(self, monkeypatch):
-        monkeypatch.setattr(engine, "_SEED_STREAM_DISABLED", True)
+        monkeypatch.setattr(mtp_prefill, "_SEED_STREAM_DISABLED", True)
         assert not self._armed(_StubBatch(FakeHead()))
 
     def test_window_limited_head_defers(self):
@@ -259,7 +259,7 @@ class TestEligibility:
 
     def test_armed_ctx_rides_prompt_cache(self):
         b = _StubBatch(FakeHead())
-        engine._mtp_seed_stream_init(b)
+        mtp_prefill._mtp_seed_stream_init(b)
         assert b.prompt_cache[0]._kq_seed_stream is b._mtp_seed_ctx
         assert b._mtp_seed_ctx["len"] == 0
         assert b._mtp_seed_ctx["active"]

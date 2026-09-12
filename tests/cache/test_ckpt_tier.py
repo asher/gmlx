@@ -1110,7 +1110,7 @@ def test_ckpt_active_gating(monkeypatch):
 
 
 def test_mid_prefill_store_supersedes_stock(monkeypatch):
-    import gmlx.spec.engine as se
+    import gmlx.spec.ckpt as ckpt
 
     man = APCManager(num_blocks=64, block_size=16)
     ckpt_len = 32
@@ -1128,7 +1128,7 @@ def test_mid_prefill_store_supersedes_stock(monkeypatch):
         prompt_cache=cache,
         _row_real_tokens_processed=lambda idx: ckpt_len,
     )
-    se._ckpt_mid_prefill_store(batch)
+    ckpt._ckpt_mid_prefill_store(batch)
     # checkpoint_done set: the stock exact-clone store is now a no-op.
     assert batch._apc_meta[0]["checkpoint_done"] is True
     warm, got = ckpt_lookup(man, ids, extra_hash=5)
@@ -1142,7 +1142,7 @@ def test_mid_prefill_store_supersedes_stock(monkeypatch):
         prompt_cache=cache,
         _row_real_tokens_processed=lambda idx: ckpt_len,
     )
-    se._ckpt_mid_prefill_store(batch2)
+    ckpt._ckpt_mid_prefill_store(batch2)
     assert "checkpoint_done" not in batch2._apc_meta[0]
 
 
@@ -1174,7 +1174,9 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
     real owned-prefill APC entrypoint against a real APCManager with the master
     switch off and assert nothing is armed or stored; the switched-on control
     proves the same drive does store."""
+    import gmlx.spec.ckpt as ckpt
     import gmlx.spec.engine as se
+    import gmlx.spec.mtp_prefill as mtp_prefill
 
     p = 48
     ids = mx.array([list(range(100, 100 + p))])
@@ -1182,7 +1184,9 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
     def drive(disabled):
         for flag in ("_SPEC_APC_DISABLED", "_SPEC_APC_RETIRE_DISABLED",
                      "_SPEC_APC_SIDECAR_DISABLED", "_SPEC_APC_CKPT_DISABLED"):
-            monkeypatch.setattr(se, flag, disabled)
+            for mod in (se, ckpt, mtp_prefill):
+                if hasattr(mod, flag):
+                    monkeypatch.setattr(mod, flag, disabled)
         se._bind_l1_view()
         man = APCManager(num_blocks=64, block_size=16)
         model = SimpleNamespace(
@@ -1192,7 +1196,7 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
         batch = SimpleNamespace(
             model=model, _input_ids=ids, _inputs_embeds=mx.zeros((1, p, 4)),
             prompt_cache=make_hybrid_cache(p), _prompt_kwargs={})
-        se._mtp_prefill_init(batch)
+        mtp_prefill._mtp_prefill_init(batch)
         # The mid-prefill checkpoint moment fires either way; only an armed
         # batch stores.
         meta = (getattr(batch, "_apc_meta", None) or [{}])[0] or {}
@@ -1200,7 +1204,7 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
         if cl:
             batch.prompt_cache = make_hybrid_cache(cl)
             batch._row_real_tokens_processed = lambda idx: cl
-        se._ckpt_mid_prefill_store(batch)
+        ckpt._ckpt_mid_prefill_store(batch)
         return man, model, batch
 
     man_on, _model, batch_on = drive(disabled=False)     # switched-on control

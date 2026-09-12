@@ -220,12 +220,10 @@ def _embed_prompts(model, ids_list):
 
 
 def _install_patches():
-    from gmlx.spec.engine import (
-        install_full_prompt_mtp_prefill,
-        install_owned_spec_engine,
-        install_continuous_batch_admission,
-        install_spec_kv_quant,
-    )
+    from gmlx.spec.admission import install_continuous_batch_admission
+    from gmlx.spec.engine import install_owned_spec_engine
+    from gmlx.spec.kv_quant import install_spec_kv_quant
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
     from gmlx.cache.apc_pooling import install_pooling_apc_support
     from gmlx.cache.kvarn_apc import install_kvarn_apc
 
@@ -400,10 +398,10 @@ def test_prefill_step_env_override(monkeypatch):
 
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.mtp_prefill as mtp_prefill
 
-    spec_engine.install_full_prompt_mtp_prefill()
-    monkeypatch.setattr(spec_engine, "_mtp_prefill_init", lambda s: None)
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    monkeypatch.setattr(mtp_prefill, "_mtp_prefill_init", lambda s: None)
 
     def fake_batch():
         return types.SimpleNamespace(
@@ -765,7 +763,7 @@ def test_l1_sidecar_warm_start(mtp_model):
     switch and must fall back to a plain L1 hit (acceptance-parity numbers
     are the D-run's job; this certifies plumbing + correctness)."""
     import gmlx.spec.speculative as _spec
-    import gmlx.spec.engine as _eng
+    import gmlx.spec.ckpt as _ckpt
     from mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
@@ -808,9 +806,9 @@ def test_l1_sidecar_warm_start(mtp_model):
 
         _clear_l0(model)
         old_spec, old_eng = _spec._SIDECAR_DISABLED, \
-            _eng._SPEC_APC_SIDECAR_DISABLED
+            _ckpt._SPEC_APC_SIDECAR_DISABLED
         _spec._SIDECAR_DISABLED = True
-        _eng._SPEC_APC_SIDECAR_DISABLED = True
+        _ckpt._SPEC_APC_SIDECAR_DISABLED = True
         try:
             with _capture_spec_log() as messages:
                 toks_off = _run_mtp(
@@ -818,7 +816,7 @@ def test_l1_sidecar_warm_start(mtp_model):
                     apc_manager=manager)[0]
         finally:
             _spec._SIDECAR_DISABLED = old_spec
-            _eng._SPEC_APC_SIDECAR_DISABLED = old_eng
+            _ckpt._SPEC_APC_SIDECAR_DISABLED = old_eng
         assert any("APC L1 hit" in m for m in messages)
         assert not any("APC sidecar hit" in m for m in messages), (
             "kill switch did not disable the sidecar lookup"
@@ -1041,7 +1039,9 @@ def test_l1_kill_switch(mtp_model, monkeypatch):
     """GMLX_SPEC_APC=0 must disable the L1 lookup even with a manager
     stashed. (The flag is read at import; patch the module constant.)"""
     from mlx_vlm.apc import APCManager
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.ckpt as ckpt
+    import gmlx.spec.engine as engine
+    import gmlx.spec.mtp_prefill as mtp_prefill
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -1049,7 +1049,8 @@ def test_l1_kill_switch(mtp_model, monkeypatch):
     manager = APCManager(num_blocks=2048, block_size=16)
 
     prefix_ids = _build_prompt(tokenizer, 3000, seed=_SEED_B)
-    monkeypatch.setattr(spec_engine, "_SPEC_APC_DISABLED", True)
+    for mod in (engine, ckpt, mtp_prefill):
+        monkeypatch.setattr(mod, "_SPEC_APC_DISABLED", True)
     try:
         with _capture_spec_log() as messages:
             _run_mtp(model, drafter, tokenizer, [prefix_ids], N_DECODE,
@@ -1390,7 +1391,7 @@ def test_apc_hit_on_injected_request(mtp_model):
 
     Also asserts that PromptProcessingBatch prefills single-request (B=1)
     -- if mlx-vlm ever coalesces prefills into B>1, the b==1 guard in
-    spec_engine silently disables APC and this test fails loudly via the
+    mtp_prefill silently disables APC and this test fails loudly via the
     APC-hit assertion rather than producing a silent degradation.
     """
     import logging
@@ -1448,7 +1449,7 @@ def test_apc_hit_on_injected_request(mtp_model):
     apc_hit_seen = False
 
     # Capture APC log to verify the hit actually fired.
-    apc_log = logging.getLogger("gmlx.spec.engine")
+    apc_log = logging.getLogger("gmlx.spec.ckpt")
     log_messages = []
     handler = logging.Handler()
     handler.emit = lambda record: log_messages.append(record.getMessage())

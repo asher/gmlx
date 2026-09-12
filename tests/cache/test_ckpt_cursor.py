@@ -13,7 +13,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_vlm.apc import APCManager
 
+import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
+import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache.snapshot import ckpt_lookup
 from gmlx.spec.speculative import _sidecar_boundary
 
@@ -32,7 +34,7 @@ def _positions(bounds):
 
 
 def test_cursor_grid_and_terminal():
-    bounds, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
     assert (terminal, interval) == (26624, 4096)
     assert _positions(bounds) == [4096, 8192, 12288, 16384, 20480,
@@ -40,17 +42,17 @@ def test_cursor_grid_and_terminal():
 
 
 def test_cursor_skips_restored_prefix():
-    bounds, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
         _batch(), guard=27000, restored=8192, block_size=16)
     assert _positions(bounds)[0] == 12288
     # Restored past the terminal: nothing left to checkpoint.
-    assert se._ckpt_cursor_init(
+    assert ckpt._ckpt_cursor_init(
         _batch(), guard=27000, restored=26624, block_size=16) == ([], 0, 0)
 
 
 def test_cursor_interval_snaps_up_to_chunk_grid(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "1000")
-    bounds, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
     assert interval == 2048                       # never below one chunk
     assert _positions(bounds)[0] == 2048
@@ -58,14 +60,14 @@ def test_cursor_interval_snaps_up_to_chunk_grid(monkeypatch):
 
 def test_cursor_zero_interval_is_terminal_only(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "0")
-    bounds, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
     assert (terminal, interval) == (26624, 0)
     assert _positions(bounds) == [26624]
 
 
 def test_cursor_no_step_uses_block_grid():
-    bounds, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = ckpt._ckpt_cursor_init(
         _batch(step=None), guard=100, restored=0, block_size=16)
     assert (terminal, interval) == (96, 4096)
     assert _positions(bounds) == [96]
@@ -78,7 +80,7 @@ def _arm_meta(n, tags, restored=0, guard=None, step=2048):
         prefill_step_size=step,
         model=SimpleNamespace(_kq_apc_ckpt_layout=tuple(tags)))
     meta = {"full_input_ids": list(range(n))}
-    se._ckpt_arm_schedule(batch, meta, guard if guard is not None else n,
+    ckpt._ckpt_arm_schedule(batch, meta, guard if guard is not None else n,
                           restored, block_size=16)
     return meta
 
@@ -254,7 +256,7 @@ def test_cursor_advances_and_latches():
         batch.prompt_cache = make_hybrid_cache(boundary, seed=boundary)
         batch._row_real_tokens_processed = (
             lambda idx, b=boundary: b)
-        se._ckpt_mid_prefill_store(batch)
+        ckpt._ckpt_mid_prefill_store(batch)
         assert meta["ckpt_last_stored"] == boundary
     assert meta.get("checkpoint_done") is True
     # Strip-on-extend keeps the newest two boundaries hittable plus the
@@ -270,7 +272,7 @@ def test_cursor_off_boundary_chunk_is_a_noop():
     ids = list(range(500, 500 + 120))
     batch, meta = _armed_batch(man, ids, first=32, terminal=96, interval=32)
     batch._row_real_tokens_processed = lambda idx: 24
-    se._ckpt_mid_prefill_store(batch)
+    ckpt._ckpt_mid_prefill_store(batch)
     assert meta["checkpoint_len"] == 32 and meta["ckpt_last_stored"] == 0
 
 
@@ -283,11 +285,11 @@ def test_cursor_advances_past_failed_store():
     # Cache offset 48 != boundary 32: the store's offset guard declines.
     batch.prompt_cache = make_hybrid_cache(48)
     batch._row_real_tokens_processed = lambda idx: 32
-    se._ckpt_mid_prefill_store(batch)
+    ckpt._ckpt_mid_prefill_store(batch)
     assert meta["checkpoint_len"] == 64 and meta["ckpt_last_stored"] == 0
     batch.prompt_cache = make_hybrid_cache(64)
     batch._row_real_tokens_processed = lambda idx: 64
-    se._ckpt_mid_prefill_store(batch)
+    ckpt._ckpt_mid_prefill_store(batch)
     assert meta.get("checkpoint_done") and meta["ckpt_last_stored"] == 64
 
 
@@ -314,7 +316,7 @@ def test_stock_store_suppressed_by_advance():
         batch.prompt_cache = make_hybrid_cache(boundary, seed=boundary)
         batch._row_real_tokens_processed = (
             lambda idx, b=boundary: b)
-        se._ckpt_mid_prefill_store(batch)   # the two adjacent lines from
+        ckpt._ckpt_mid_prefill_store(batch)   # the two adjacent lines from
         stock_store(batch)                  # _mtp_prompt_step, same order
     assert calls == []
     assert meta.get("checkpoint_done") is True
@@ -353,14 +355,14 @@ def test_second_request_hits_first_requests_checkpoint():
         _inputs_embeds=mx.zeros((1, p_a, 4)),
         prompt_cache=make_hybrid_cache(p_a), _prompt_kwargs={},
         prefill_step_size=32)
-    se._mtp_prefill_init(batch_a)
+    mtp_prefill._mtp_prefill_init(batch_a)
     assert getattr(batch_a, "_kq_ckpt_armed", False)
     meta = batch_a._apc_meta[0]
     cl = int(meta["checkpoint_len"])
     assert cl == boundary                   # guard-trimmed terminal grid
     batch_a.prompt_cache = make_hybrid_cache(cl, seed=1)
     batch_a._row_real_tokens_processed = lambda idx: cl
-    se._ckpt_mid_prefill_store(batch_a)
+    ckpt._ckpt_mid_prefill_store(batch_a)
     assert meta["ckpt_last_stored"] == cl
 
     # Request B shares the first `boundary` tokens, diverges after.
@@ -370,7 +372,7 @@ def test_second_request_hits_first_requests_checkpoint():
         _inputs_embeds=mx.zeros((1, len(ids_b), 4)),
         prompt_cache=make_hybrid_cache(len(ids_b)), _prompt_kwargs={},
         prefill_step_size=32, _prompt_length_aware_keys=())
-    se._mtp_prefill_init(batch_b)
+    mtp_prefill._mtp_prefill_init(batch_b)
     assert batch_b._mtp_l1_prefix_len == boundary
 
 

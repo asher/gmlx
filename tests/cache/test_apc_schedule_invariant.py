@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from mlx_vlm.apc import APCManager
 
-import gmlx.spec.engine as se
+import gmlx.spec.ckpt as ckpt
 import gmlx.cache.retire_key as retire_key
 from gmlx.cache.snapshot import (
     _ckpt_records,
@@ -89,11 +89,11 @@ def _run_request(man, tags, ids, p_stable, monkeypatch):
         _apc_meta=[meta], prompt_cache=None,
         model=SimpleNamespace(_kq_apc_ckpt_layout=tags),
         _row_real_tokens_processed=lambda i: 0)
-    se._ckpt_arm_schedule(batch, meta, len(ids), 0, 16)
+    ckpt._ckpt_arm_schedule(batch, meta, len(ids), 0, 16)
     for pos, _kind in list(meta["ckpt_boundaries"]):
         batch.prompt_cache = make(pos, seed=pos % 977)
         batch._row_real_tokens_processed = lambda i, b=pos: b
-        se._ckpt_mid_prefill_store(batch)
+        ckpt._ckpt_mid_prefill_store(batch)
     assert meta.get("checkpoint_done", not meta["ckpt_boundaries"]) or \
         meta.get("ckpt_boundaries") == []
     if not ckpt_full_store_redundant(meta):

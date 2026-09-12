@@ -15,6 +15,7 @@ from mlx_vlm.apc import APCManager
 from mlx_vlm.models.cache import CacheList, KVCache
 
 import gmlx.cache.snapshot as cs
+import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
 from gmlx.cache.snapshot import anchor_exact_lookup, anchor_exact_store
 
@@ -123,33 +124,33 @@ def _bmeta(n=5000):
 def test_anchor_boundary_ungridded(monkeypatch):
     _stub_sys(monkeypatch, 2900)
     batch, meta = _bmeta()
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) == 2900
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) == 2900
 
 
 def test_anchor_boundary_clamps_to_guard(monkeypatch):
     _stub_sys(monkeypatch, 4500)
     batch, meta = _bmeta()
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) == 4000
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) == 4000
     # Guard 0 (stock checkpoint disabled): the divergence stands alone.
-    assert se._exact_anchor_boundary(batch, meta, 0, 0) == 4500
+    assert ckpt._exact_anchor_boundary(batch, meta, 0, 0) == 4500
 
 
 def test_anchor_boundary_floor_kill_restored(monkeypatch):
     _stub_sys(monkeypatch, 200)
     batch, meta = _bmeta()
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) is None
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) is None
     monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "100")
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) == 200
-    assert se._exact_anchor_boundary(batch, meta, 4000, 200) is None
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) == 200
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 200) is None
     monkeypatch.setenv("GMLX_APC_CKPT_SYS", "0")
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) is None
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) is None
 
 
 def test_anchor_boundary_no_render_ctx(monkeypatch):
     import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx", lambda ids: None)
     batch, meta = _bmeta()
-    assert se._exact_anchor_boundary(batch, meta, 4000, 0) is None
+    assert ckpt._exact_anchor_boundary(batch, meta, 4000, 0) is None
 
 
 # -- two-stop schedule: anchor store, then the untouched stock guard --
@@ -163,7 +164,7 @@ def _armed_exact_batch(man, guard, monkeypatch, lcp):
         _apc_manager=man, _apc_meta=[meta], _apc_mode="exact",
         prompt_cache=None)
     batch._apc_prompt_cache_for_store = lambda idx: batch.prompt_cache
-    se._exact_anchor_arm(batch, meta, guard, 0)
+    ckpt._exact_anchor_arm(batch, meta, guard, 0)
     return batch, meta
 
 
@@ -184,7 +185,7 @@ def test_anchor_two_stop_schedule(monkeypatch):
     # and the stock body (running right after, as in the wrap) skips.
     batch.prompt_cache = make_kv_cache(64)
     batch._row_real_tokens_processed = lambda idx: 64
-    se._exact_anchor_store(batch)
+    ckpt._exact_anchor_store(batch)
     stock(batch)
     assert meta["anchor_done"] and meta["checkpoint_len"] == 96
     assert not meta.get("checkpoint_done") and calls == []
@@ -193,7 +194,7 @@ def test_anchor_two_stop_schedule(monkeypatch):
     # Guard stop: the hook is spent; the stock store fires and latches.
     batch.prompt_cache = make_kv_cache(96)
     batch._row_real_tokens_processed = lambda idx: 96
-    se._exact_anchor_store(batch)
+    ckpt._exact_anchor_store(batch)
     stock(batch)
     assert calls == [96] and meta.get("checkpoint_done")
 
@@ -212,7 +213,7 @@ def test_anchor_at_guard_single_stop(monkeypatch):
     assert meta["anchor_len"] == 96 and meta["checkpoint_len"] == 96
     batch.prompt_cache = make_kv_cache(96)
     batch._row_real_tokens_processed = lambda idx: 96
-    se._exact_anchor_store(batch)
+    ckpt._exact_anchor_store(batch)
     ar.PromptProcessingBatch._store_apc_exact_checkpoints(batch)
     assert anchor_exact_lookup(man, IDS, extra_hash=7)[1] == 96
     assert calls == [96] and meta.get("checkpoint_done")
@@ -235,7 +236,7 @@ def _pooling_model(man):
 def _pick_gen(man):
     from mlx_vlm.generate.ar import BatchGenerator
 
-    se._install_exact_anchor_pick()
+    ckpt._install_exact_anchor_pick()
     gen = SimpleNamespace(
         apc_manager=man, apc_mode="exact", model=_pooling_model(man),
         _apc_media_token_ids=lambda: set())
@@ -295,7 +296,7 @@ def test_plain_anchor_init_arms_on_a_right_padded_row(monkeypatch):
     # sibling. Upstream's checkpoint column handles it, so must we: this
     # is the common shape once any request is warm.
     batch, meta = _plain_batch(man, right_pad=[0])
-    se._plain_anchor_init(batch)
+    ckpt._plain_anchor_init(batch)
     assert batch._kq_anchor_armed and meta["checkpoint_len"] == 64
     # Nothing is trimmed here: restores come from the admission pick.
     assert batch._input_ids.shape[1] == len(IDS)
@@ -310,7 +311,7 @@ def test_plain_anchor_init_arms_above_a_shallow_warm_prefix(monkeypatch):
     # matches a token or two off an unrelated request; the divergence
     # still needs its clone.
     batch, meta = _plain_batch(man, right_pad=[0], prefix_len=1)
-    se._plain_anchor_init(batch)
+    ckpt._plain_anchor_init(batch)
     assert batch._kq_anchor_armed and meta["checkpoint_len"] == 64
 
 
@@ -323,6 +324,6 @@ def test_plain_anchor_init_skips_a_row_restored_past_the_divergence(
     # Restored at the divergence: the anchor it would store exists, so
     # no second stop and the stock guard runs alone.
     batch, meta = _plain_batch(man, right_pad=None, prefix_len=64)
-    se._plain_anchor_init(batch)
+    ckpt._plain_anchor_init(batch)
     assert not getattr(batch, "_kq_anchor_armed", False)
     assert meta["checkpoint_len"] == 96
