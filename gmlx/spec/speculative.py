@@ -893,6 +893,33 @@ def _owned_decode_rounds(
     _draft_block = drafter.draft_block
     _prefer_fixed_bs = getattr(drafter, "prefer_requested_block_size", False)
 
+    def _finish_round(delivered: int) -> None:
+        """Close the final round at ``delivered`` tokens so the target KV and
+        the drafter head retire at one length.
+
+        The head holds row p as (token p+1, hidden p), so it pairs with the
+        target only through the last committed position whose successor is
+        known. When the bonus token was delivered every committed position
+        qualifies: the target keeps the delivered accepts and the head
+        ingests them plus the bonus. When the round closed on an accepted
+        draft (EOS or the budget inside the block), the successor of the
+        last delivered token is the undelivered tail, which the next turn
+        never replays, so the target drops that last token's KV and the
+        head ingests the delivered drafts without a bonus: both sit one
+        token short of the delivered text, the same warm token a round
+        boundary costs, and the retirement sidecar pairs with the entry.
+        """
+        k = min(delivered, accepted)
+        bonus_delivered = delivered > accepted
+        keep = k if bonus_delivered else max(k - 1, 0)
+        if _has_rollback and keep < bs - 1:
+            with mx.stream(generation_stream):
+                _rollback_fn(prompt_cache, verify.gdn_states, keep, bs)
+        if _has_accept and delivered > 0:
+            _accept_fn(verify.hidden, draft_tokens, k,
+                       new_tokens[:delivered] if bonus_delivered else [],
+                       draft_sampler, token_dtype, **draft_kwargs)
+
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()
     _last_clear = emitted
@@ -1021,39 +1048,18 @@ def _owned_decode_rounds(
                                          accepted, bs)
                     raise
                 # Consumer stopped mid-round (EOS / stop string). Roll the target
-                # cache back to exactly the delivered tokens so the finish seam
-                # sees KV consistent with what was consumed (APC retirement
-                # depends on this; without it the final round leaves rejected
-                # drafts and unconsumed accepts in the cache).
-                k = min(delivered, accepted)
-                if _has_rollback and k < bs - 1:
-                    with mx.stream(generation_stream):
-                        _rollback_fn(prompt_cache, verify.gdn_states, k, bs)
-                # Mirror the rollback into the drafter head: ingest exactly the
-                # delivered tokens so its KV pairs row-for-row with the retired
-                # target prefix (the retirement-time sidecar depends on this;
-                # without it the head lags by the final round and every
-                # retirement sidecar is skipped as unfaithful).
-                if _has_accept and delivered > 0:
-                    _accept_fn(verify.hidden, draft_tokens, k,
-                               new_tokens[:delivered] if delivered > accepted
-                               else [],
-                               draft_sampler, token_dtype, **draft_kwargs)
+                # cache back to the delivered tokens so the finish seam sees
+                # KV consistent with what was consumed (APC retirement depends
+                # on this; without it the final round leaves rejected drafts
+                # and unconsumed accepts in the cache), and mirror it into the
+                # drafter head so the two retire at one length.
+                _finish_round(delivered)
                 raise
             emitted += n_new
             if emitted >= max_tokens:
-                # Budget exhausted: same finish-seam contract as the mid-round
-                # close above -- drop this round's rejected-draft KV tail (and,
-                # when the budget truncated the round, the undelivered accepts),
-                # and top the drafter head up with the delivered tokens.
-                k = min(delivered, accepted)
-                if _has_rollback and k < bs - 1:
-                    with mx.stream(generation_stream):
-                        _rollback_fn(prompt_cache, verify.gdn_states, k, bs)
-                if _has_accept and delivered > 0:
-                    _accept_fn(verify.hidden, draft_tokens, k,
-                               new_tokens if delivered > accepted else [],
-                               draft_sampler, token_dtype, **draft_kwargs)
+                # Budget exhausted: the same finish-seam contract as the
+                # mid-round close above.
+                _finish_round(delivered)
                 return
             _t2 = time.perf_counter()
 

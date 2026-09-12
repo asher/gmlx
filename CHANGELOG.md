@@ -22,6 +22,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A request admitted in the round every row of a speculative batch
   finished decoded its first tokens at the wrong position (the emptied
   batch kept its watermark and left-padded the adopted row).
+- A speculative request that ended on an accepted draft (an EOS inside
+  the block, or the token budget) retired without its drafter sidecar,
+  so the next turn's warm start drafted from a cold head. The retirement
+  now stores the target and the head at one length.
 
 ## [0.4.12] - 2026-09-11
 
