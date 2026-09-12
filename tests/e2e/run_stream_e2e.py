@@ -517,7 +517,7 @@ def phase_warmth(a) -> None:
         recl1 = kernel_reclaimable()
         arena1 = (s2.get("memory") or {}).get("arena_bytes") or 0
         need = 0.25 * nominal
-        from gmlx.load.loader import _ram_floor_bytes
+        from gmlx.stream.budget import _ram_floor_bytes
         gate = need + _ram_floor_bytes(ram_bytes()) + (floor or 0)
         expected = recl1 is not None and recl1 >= gate
         print(f"warmth: released at +{time.monotonic() - t_rel:.0f}s; arena {gb(arena1)}, "

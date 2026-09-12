@@ -13,7 +13,7 @@ import importlib
 import mlx.core as mx
 import pytest
 
-from gmlx.load.loader import _install_wired_limit_warn_once
+from gmlx.stream.wired_limit import _install_wired_limit_warn_once
 
 # `import mlx_lm.generate` binds the function mlx_lm re-exports in
 # __init__, not the submodule - same trap the loader patches around.
@@ -117,7 +117,7 @@ def test_neutralize_lowers_a_raised_wired_limit(monkeypatch, capsys):
     # lowers the real limit itself, or the next walk wires the file's pages.
     import mlx.core as mx
 
-    from gmlx.load.loader import _neutralize_wired_limit_sweep
+    from gmlx.stream.wired_limit import _neutralize_wired_limit_sweep
 
     calls = []
 

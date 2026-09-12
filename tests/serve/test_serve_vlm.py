@@ -120,12 +120,12 @@ def spy_placement(monkeypatch):
     """Record the placement/lever installers instead of running them, so the
     branch is testable without a streamed model. Each entry is
     ``(target, args, kwargs)`` keyed by installer name."""
-    import gmlx.load.loader as loader
+    import gmlx.stream.expert_streaming as expert_streaming
     import gmlx.stream.moe_experts as moe_experts
 
     seen: dict[str, tuple] = {}
 
-    def _spy(name, module=loader):
+    def _spy(name, module=expert_streaming):
         def _fake(target, *args, **kwargs):
             seen[name] = (target, args, kwargs)
         monkeypatch.setattr(module, name, _fake, raising=True)

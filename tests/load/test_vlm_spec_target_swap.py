@@ -22,7 +22,7 @@ from mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
 
 import gmlx.models.gemma4.owned as gemma4_owned
 import gmlx.models.qwen35.owned as qwen35_owned
-from gmlx.load.loader import _spec_hook_key, _vlm_spec_language_model
+from gmlx.load.mtp_target import _spec_hook_key, _vlm_spec_language_model
 from gmlx.load.vlm import _swap_spec_language_model
 
 

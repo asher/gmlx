@@ -176,7 +176,7 @@ def test_remap_strips_prefix_and_threads_codecs():
 
 def test_arch_table_and_loader_rows():
     import gmlx.load.arch_table as arch_table
-    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
+    from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
     from gmlx.spec.mtp_load import _assistant_kind
 
     assert arch_table.drafter_arches("qwen4_exp") == (MTP_ARCH,)

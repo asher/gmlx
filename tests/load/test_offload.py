@@ -13,10 +13,10 @@ from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
 from mlx_lm.utils import _get_classes  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
-from gmlx.load.loader import (  # noqa: E402
+from gmlx.load.loader import moe_streaming_active  # noqa: E402
+from gmlx.stream.expert_streaming import (  # noqa: E402
     _resolve_prefill_step,
     install_expert_streaming,
-    moe_streaming_active,
 )
 
 from test_config_synth import _qwen3next_meta  # noqa: E402
@@ -364,7 +364,7 @@ def test_moe_experts_override_targets_offloaded_router(monkeypatch):
     raise; a model with no offloaded experts is a no-op."""
     import mlx.nn as nn
 
-    from gmlx.load.loader import install_moe_experts_override
+    from gmlx.stream.expert_streaming import install_moe_experts_override
 
     class _Gate(nn.Module):  # DeepSeek-style: top_k lives on the gate
         def __init__(self):

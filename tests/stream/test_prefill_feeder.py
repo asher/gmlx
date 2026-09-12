@@ -14,7 +14,7 @@ import numpy as np
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.load.loader import install_expert_streaming
+from gmlx.stream.expert_streaming import install_expert_streaming
 
 from test_decode_feeder import (
     _KINDS,

@@ -14,13 +14,11 @@ import numpy as np
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
-import gmlx.load.loader
+import gmlx.stream.budget
 import gmlx.serve.kernel_vm
-from gmlx.load.loader import (
-    _decode_arena_bytes,
-    _resolve_feeder_defaults,
-    install_expert_streaming,
-)
+from gmlx.load.loader import _resolve_feeder_defaults
+from gmlx.stream.budget import _decode_arena_bytes
+from gmlx.stream.expert_streaming import install_expert_streaming
 
 _KINDS = ("gate", "up", "down")
 _E = 4  # experts per layer
@@ -235,7 +233,7 @@ def test_regrow_leaves_both_floors_behind(monkeypatch, tmp_path):
     _pressure_setup(monkeypatch, level, regrow_polls=1)
     import gmlx.stream.budget as budget
 
-    monkeypatch.setattr(gmlx.load.loader, "_ram_floor_bytes", lambda ram: 10 << 30)
+    monkeypatch.setattr(gmlx.stream.budget, "_ram_floor_bytes", lambda ram: 10 << 30)
     monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: float(4 << 30))
     avail = {"v": 0}
     monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
@@ -262,7 +260,7 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
 
     # The regrow reads the governor's reclaimable measure (file-backed
     # pages included), never the free-pages-only set.
-    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes",
+    monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes",
                         lambda include_inactive=True: 0)
     monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
     monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 4e9)
@@ -315,7 +313,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
     monkeypatch.setattr(
-        gmlx.load.loader, "_available_ram_bytes", lambda: None
+        gmlx.stream.budget, "_available_ram_bytes", lambda: None
     )  # available-RAM ceiling out of the way for the deterministic cases
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 1000 << 30}
@@ -356,7 +354,7 @@ def test_arena_budget_math(monkeypatch):
     # Available-RAM ceiling binds when the machine is busy: 40 GB
     # reclaimable minus the floor beats the fraction of a 100 GB machine.
     monkeypatch.setattr(
-        gmlx.load.loader, "_available_ram_bytes", lambda: 40 << 30
+        gmlx.stream.budget, "_available_ram_bytes", lambda: 40 << 30
     )
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
@@ -386,7 +384,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
-    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes", lambda: None)
+    monkeypatch.setattr(gmlx.stream.budget, "_available_ram_bytes", lambda: None)
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
 
 
@@ -1576,9 +1574,9 @@ def test_available_ram_counts_active_file_cache(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
     monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
     page = 16384
-    assert gmlx.load.loader._available_ram_bytes() == (1000 + 500 + 700000) * page
+    assert gmlx.stream.budget._available_ram_bytes() == (1000 + 500 + 700000) * page
     # Strict no-victims set: free + purgeable + speculative only.
-    assert gmlx.load.loader._available_ram_bytes(include_inactive=False) == \
+    assert gmlx.stream.budget._available_ram_bytes(include_inactive=False) == \
         (1000 + 500 + 5000) * page
 
 
@@ -1597,7 +1595,7 @@ def test_available_ram_fallback_without_file_backed_line(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
     monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
-    assert gmlx.load.loader._available_ram_bytes() == \
+    assert gmlx.stream.budget._available_ram_bytes() == \
         (1000 + 500 + 5000 + 200000) * 16384
 
 
@@ -1798,7 +1796,7 @@ def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path
 
 
 def test_prefill_ring_reason(monkeypatch, tmp_path):
-    from gmlx.load.loader import _prefill_ring_reason
+    from gmlx.stream.budget import _prefill_ring_reason
     from gmlx.stream.prefill_feeder import ring_bytes
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)

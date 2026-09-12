@@ -264,7 +264,7 @@ def test_image_processor_geometry_matches_reference_rules():
 
 @pytest.mark.skipif(not os.path.exists(MMPROJ), reason="local mmproj absent")
 def test_real_mmproj_remaps_onto_the_tower():
-    from gmlx.load.loader import load_gguf_wire_bytes
+    from gmlx.load.wire import load_gguf_wire_bytes
     arrays, codecs, _arch, mm_meta, _shapes = load_gguf_wire_bytes(
         MMPROJ, zero_copy=True, expect_quant=False)
     out, skipped, kq = remap_vision_arrays(arrays, "deepseek_v4_vl")

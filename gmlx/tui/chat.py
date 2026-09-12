@@ -2981,7 +2981,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
 
         _apply_cli_adapter(args, b.model, b.config)
         _apply_placement(args, b.model)
-        from gmlx.load.loader import _resolve_prefill_step
+        from gmlx.stream.expert_streaming import _resolve_prefill_step
 
         step, defaulted = _resolve_prefill_step(
             b.model, kv_kwargs.get("prefill_step_size")

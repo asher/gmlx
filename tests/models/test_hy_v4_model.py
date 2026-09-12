@@ -292,14 +292,15 @@ def test_streaming_prefill_step_is_narrowed_for_hy_v4():
 
 def test_prefill_step_resolves_from_the_model_type(monkeypatch):
     from gmlx.load import loader
+    from gmlx.stream import expert_streaming
 
-    monkeypatch.setattr(loader, "moe_streaming_active", lambda _m: True)
+    monkeypatch.setattr(expert_streaming, "moe_streaming_active", lambda _m: True)
     model = _model()
-    step, defaulted = loader._resolve_prefill_step(model, None)
+    step, defaulted = expert_streaming._resolve_prefill_step(model, None)
     assert defaulted is True
     assert step == loader._STREAMING_PREFILL_STEP_BY_MODEL_TYPE["hy_v4"]
     # An explicit request always wins.
-    assert loader._resolve_prefill_step(model, 1024) == (1024, False)
+    assert expert_streaming._resolve_prefill_step(model, 1024) == (1024, False)
 
 
 # --- forward integrity -------------------------------------------------------

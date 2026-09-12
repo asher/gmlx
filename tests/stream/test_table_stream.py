@@ -12,7 +12,7 @@ import pytest
 import mlx.core as mx
 
 import gmlx.stream.table_stream as ts
-from gmlx.load.loader import install_expert_streaming
+from gmlx.stream.expert_streaming import install_expert_streaming
 
 
 def _kquant_table(rows=8, dims=32, seed=7):
@@ -251,7 +251,7 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
 
     deducted = []
     monkeypatch.setattr(
-        "gmlx.load.loader.deduct_untracked_weights",
+        "gmlx.stream.expert_streaming.deduct_untracked_weights",
         lambda n, key=None: deducted.append(n))
 
     n, offloaded = install_expert_streaming(model)
@@ -476,11 +476,11 @@ def test_streamed_table_bytes_keys_on_streamed_state(monkeypatch):
 
 
 def test_arena_sizing_excludes_streamable_bytes(monkeypatch):
-    from gmlx.load.loader import _decode_arena_bytes
-    import gmlx.load.loader as loader
+    from gmlx.stream.budget import _decode_arena_bytes
+    import gmlx.stream.budget as budget
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
-    monkeypatch.setattr(loader, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(
         mx, "device_info",
         lambda: {"memory_size": 137 * 10**9,

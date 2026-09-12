@@ -1494,7 +1494,7 @@ class DecodeFeeder:
         it, so a regrow cannot trip the floor that shrank the arena."""
         need = self._arena_bytes_at(self._pressure_steps - 1) - self.arena_bytes
         try:
-            from gmlx.load.loader import _ram_floor_bytes
+            from gmlx.stream.budget import _ram_floor_bytes
             from gmlx.stream.budget import kernel_floor_bytes, reclaimable_ram_bytes
 
             avail = reclaimable_ram_bytes()

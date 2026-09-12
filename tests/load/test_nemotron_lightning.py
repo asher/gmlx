@@ -63,7 +63,7 @@ def test_pattern_no_nextn_unchanged():
 
 
 def test_strip_nextn_trunk_overflow():
-    from gmlx.load.loader import strip_nextn_trunk_overflow
+    from gmlx.load.wire import strip_nextn_trunk_overflow
 
     meta = {f"{ARCH}.nextn_predict_layers": 1, f"{ARCH}.block_count": 5}
     w = {
@@ -80,7 +80,7 @@ def test_strip_nextn_trunk_overflow():
 
 
 def test_strip_noop_other_arch():
-    from gmlx.load.loader import strip_nextn_trunk_overflow
+    from gmlx.load.wire import strip_nextn_trunk_overflow
 
     w = {"backbone.layers.4.mixer.in_proj.weight": 1}
     assert strip_nextn_trunk_overflow(w, {}, {}, "qwen3") == 0

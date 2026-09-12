@@ -21,6 +21,8 @@ from mlx.utils import tree_flatten  # noqa: E402
 
 import gmlx.upstream.gdn_patches as gdn_patches  # noqa: E402
 import gmlx.load.loader as loader  # noqa: E402
+import gmlx.load.mtp_target as mtp_target  # noqa: E402
+import gmlx.load.wire as wire  # noqa: E402
 
 
 @pytest.fixture
@@ -35,16 +37,16 @@ def cpu_device():
 # target hook contract (version tripwire)
 @pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
 def test_mtp_target_exposes_speculative_hooks(model_type):
-    LanguageModel, _build = loader._mtp_target_classes(model_type)
-    missing = [h for h in loader._MTP_TARGET_HOOKS if not hasattr(LanguageModel, h)]
+    LanguageModel, _build = mtp_target._mtp_target_classes(model_type)
+    missing = [h for h in mtp_target._MTP_TARGET_HOOKS if not hasattr(LanguageModel, h)]
     assert not missing, (
         f"mlx-vlm {model_type} LanguageModel missing hooks {missing}; "
-        f"the MTP engine needs all of {loader._MTP_TARGET_HOOKS}")
+        f"the MTP engine needs all of {mtp_target._MTP_TARGET_HOOKS}")
 
 
 def test_mtp_target_resolver_rejects_unknown_arch():
     with pytest.raises(NotImplementedError):
-        loader._mtp_target_classes("llama")
+        mtp_target._mtp_target_classes("llama")
 
 
 # seam 3: mlx-vlm gated_delta tiled-V patch
@@ -116,7 +118,7 @@ def _find_mtp_gguf(gguf_dir):
         except Exception:
             continue
         try:
-            _a, _k, _am, meta, shapes = loader.load_gguf_wire_bytes(
+            _a, _k, _am, meta, shapes = wire.load_gguf_wire_bytes(
                 str(path), shards=pf.shards)
             cfg = synthesize_config(meta, shapes)
         except Exception:
@@ -136,7 +138,7 @@ def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
         pytest.skip("no native-head MTP GGUF found in KQUANT_TEST_GGUF_DIR")
 
     pf = preflight(path)
-    arrays, kqm, _am, meta, shapes = loader.load_gguf_wire_bytes(
+    arrays, kqm, _am, meta, shapes = wire.load_gguf_wire_bytes(
         path, shards=pf.shards)
     config = synthesize_config(meta, shapes)
 
@@ -152,7 +154,7 @@ def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
     n_head = gguf_meta.read_int(meta, f"{arch}.attention.head_count")
     n_head_kv = gguf_meta.first_nonzero_int(
         meta, f"{arch}.attention.head_count_kv")
-    d_w, d_m, _stats = loader.remap_mtp_arrays(
+    d_w, d_m, _stats = wire.remap_mtp_arrays(
         arrays, kqm, arch,
         first_mtp_block=int(config["num_hidden_layers"]),
         num_mtp_layers=int(config.get("mtp_num_hidden_layers", 1)),

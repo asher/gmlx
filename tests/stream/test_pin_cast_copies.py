@@ -22,7 +22,7 @@ from unittest import mock
 
 import mlx.core as mx
 
-from gmlx.load.loader import _decode_arena_bytes
+from gmlx.stream.budget import _decode_arena_bytes
 from gmlx.stream.pin_weights import cast_copies
 
 VOCAB, HIDDEN = 120832, 6144
@@ -110,10 +110,10 @@ def test_dead_bytes_are_the_wire_minus_the_copy():
 
 def test_the_arena_gains_what_the_dead_wire_gave_up(monkeypatch):
     """Without this the sizer re-charges every byte the pin released."""
-    import gmlx.load.loader as loader
+    import gmlx.stream.budget as budget
 
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
-    monkeypatch.setattr(loader, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(budget, "_available_ram_bytes", lambda *a, **k: None)
     monkeypatch.setattr(mx, "device_info",
                         lambda: {"memory_size": 137 * 10**9})
     offsets = {0: [(0, 0, 200 << 30)]}

@@ -6,7 +6,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.load.loader import install_expert_streaming
+from gmlx.stream.expert_streaming import install_expert_streaming
 from gmlx.stream.lookahead import (
     LookaheadProbe,
     _gate_module_select,

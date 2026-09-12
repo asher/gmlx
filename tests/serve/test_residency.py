@@ -316,7 +316,7 @@ def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch
     import pytest
 
     import gmlx.gen.prefill_decay as pd
-    import gmlx.load.loader as loader
+    import gmlx.stream.wired_limit as wired_limit
     import gmlx.serve.capacity as cap
 
     monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
@@ -332,7 +332,7 @@ def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "60")
     seen = []
-    monkeypatch.setattr(loader, "_neutralize_wired_limit_sweep",
+    monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
                         lambda: seen.append("neutralized"))
     proxy = _RuntimeProxy(_FakeOriginal())
 

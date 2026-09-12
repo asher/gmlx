@@ -39,12 +39,11 @@ from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
-    _vlm_spec_language_model,
-    load_gguf_wire_bytes,
     materialize_module_arrays,
-    remap_arrays,
     weights_source_key,
 )
+from .mtp_target import _vlm_spec_language_model
+from .wire import load_gguf_wire_bytes, remap_arrays
 from .preflight import preflight
 from .transforms import coalesce_split_experts
 

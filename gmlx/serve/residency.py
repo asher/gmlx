@@ -922,7 +922,7 @@ class _ResidencyPool:
             # Before the walk, not at the install after it: a resident
             # model's generator left the wired limit raised, and the walk
             # under it wires the file's pages (see the loader).
-            from gmlx.load.loader import _neutralize_wired_limit_sweep
+            from gmlx.stream.wired_limit import _neutralize_wired_limit_sweep
             _neutralize_wired_limit_sweep()
             # The walk wraps the routed experts as tracked MLX views. They
             # are page cache, but the install credits them only at the

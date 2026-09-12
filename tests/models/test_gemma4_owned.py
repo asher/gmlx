@@ -78,18 +78,18 @@ PROMPT = (3, 17, 42, 99, 7, 63, 5, 28)
 
 
 def test_loader_selects_owned_by_default(monkeypatch):
-    import gmlx.load.loader as loader
+    import gmlx.load.mtp_target as mtp_target
 
     monkeypatch.delenv("GMLX_GEMMA_OWNED", raising=False)
-    cls, build = loader._mtp_target_classes("gemma4_text")
+    cls, build = mtp_target._mtp_target_classes("gemma4_text")
     assert cls is OwnedGemma4LanguageModel
 
 
 def test_loader_env_reverts_to_stock(monkeypatch):
-    import gmlx.load.loader as loader
+    import gmlx.load.mtp_target as mtp_target
 
     monkeypatch.setenv("GMLX_GEMMA_OWNED", "0")
-    cls, build = loader._mtp_target_classes("gemma4_text")
+    cls, build = mtp_target._mtp_target_classes("gemma4_text")
     assert cls is _G.LanguageModel
 
 
