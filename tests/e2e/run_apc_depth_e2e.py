@@ -1231,7 +1231,9 @@ def main() -> int:
                 "content": f"Follow-up: which technician logged entry {e2}?",
             }
         )
-        st, rt_text, rt_content, _, rt_wall = chat(base, mid, msgs, max_tokens=192)
+        # 256 like the phase's other probes: a model that reasons in content
+        # spends most of 192 tokens recapping the turn before it scans
+        st, rt_text, rt_content, _, rt_wall = chat(base, mid, msgs, max_tokens=256)
         dm = tick(K["matched"]) - m0
         rt_req = [rx for n, rx in witness if n.startswith("tech")]
         rep.check(
