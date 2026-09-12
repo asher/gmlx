@@ -11,11 +11,11 @@ sites route through the guard.
 from __future__ import annotations
 
 import ast
-import os
-import re
 from pathlib import Path
 
 import pytest
+
+from helpers import _real_apple_gpu
 
 import mlx.core as mx
 
@@ -28,16 +28,6 @@ from gmlx.eval_guard import (
 )
 
 GMLX_DIR = Path(eg.__file__).resolve().parent
-
-
-def _real_apple_gpu() -> bool:
-    if os.environ.get("KQUANT_FORCE_CPU"):
-        return False
-    try:
-        name = str(mx.device_info().get("device_name", ""))
-    except Exception:
-        return False
-    return bool(re.search(r"Apple M\d", name))
 
 
 def _trip():

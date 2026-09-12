@@ -94,12 +94,12 @@ def test_prune_time_corruption_also_quarantined(tmp_path, monkeypatch):
     # open-time prune; construction must still self-heal, not abort.
     import sqlite3
 
-    import gmlx.assistant.memory as talk_memory
+    from gmlx.assistant import memory
 
     def bad_prune(self):
         raise sqlite3.DatabaseError("database disk image is malformed")
 
-    monkeypatch.setattr(talk_memory.MemoryStore, "_prune", bad_prune)
+    monkeypatch.setattr(memory.MemoryStore, "_prune", bad_prune)
     warned = []
     m = _store(tmp_path, warn=warned.append)
     m.remember("I like green tea", "Noted.")
@@ -296,8 +296,8 @@ def test_recall_caches_matrix_and_tracks_inserts(tmp_path):
 
 
 def test_cache_capacity_doubles(tmp_path, monkeypatch):
-    import gmlx.assistant.memory as talk_memory
-    monkeypatch.setattr(talk_memory, "_INITIAL_CAP", 1)
+    from gmlx.assistant import memory
+    monkeypatch.setattr(memory, "_INITIAL_CAP", 1)
     m = _store(tmp_path)
     m.remember("green tea daily", "")
     m.recall("tea?")                              # cache: capacity 1, n 1
@@ -311,8 +311,8 @@ def test_cache_capacity_doubles(tmp_path, monkeypatch):
 def test_recall_correct_after_growth(tmp_path, monkeypatch):
     # The promise behind the doubling rule: recall stays CORRECT after the
     # cache matrix has grown - rows appended through growth are recallable.
-    import gmlx.assistant.memory as talk_memory
-    monkeypatch.setattr(talk_memory, "_INITIAL_CAP", 1)
+    from gmlx.assistant import memory
+    monkeypatch.setattr(memory, "_INITIAL_CAP", 1)
     m = _store(tmp_path)
     m.remember("I like green tea", "")
     m.recall("tea?")                              # cache built at capacity 1
@@ -433,7 +433,7 @@ def test_old_schema_gains_recalled_column(tmp_path):
 
 
 def test_make_extractor_prompts_and_parses(monkeypatch):
-    import gmlx.assistant.memory as talk_memory
+    from gmlx.assistant import memory
     seen = {}
 
     def fake_stream(base_url, *, model, messages, max_tokens,
@@ -444,8 +444,8 @@ def test_make_extractor_prompts_and_parses(monkeypatch):
         yield {"content": "NONE\n2) rides a red bike"}
         yield {"_finish": "stop"}
 
-    monkeypatch.setattr(talk_memory.talk_client, "stream_chat", fake_stream)
-    extract = talk_memory.make_extractor("http://h:1/v1", "m1")
+    monkeypatch.setattr(memory.talk_client, "stream_chat", fake_stream)
+    extract = memory.make_extractor("http://h:1/v1", "m1")
     assert extract("I like tea", "noted") == ["likes green tea",
                                               "rides a red bike"]
     assert seen["model"] == "m1"

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import re
 
 import mlx.core as mx
 import numpy as np
 import pytest
+
+from helpers import _real_apple_gpu
 
 import gmlx.models.qwen4_exp.model as q4
 from gmlx.models.qwen4_exp.model import ModelArgs, PLEEmbedding
@@ -31,16 +32,6 @@ _PLE_KW = dict(
         260000955, 280001114, 300001275,
     ],
 )
-
-
-def _real_apple_gpu() -> bool:
-    if os.environ.get("KQUANT_FORCE_CPU"):
-        return False
-    try:
-        name = str(mx.device_info().get("device_name", ""))
-    except Exception:
-        return False
-    return bool(re.search(r"Apple M\d", name))
 
 
 def _ple():

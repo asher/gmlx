@@ -2,7 +2,7 @@
 
 Composes the gmlx loader bridge (:func:`server_bridge_vlm.install_gguf_server_bridge`),
 the multi-model residency pool (:func:`residency.install_gguf_residency_pool`),
-the config-driven HTTP surface (:func:`server_patches.install_server_patches`),
+the config-driven HTTP surface (:func:`gmlx.serve.patches.install_server_patches`),
 and mlx-vlm's FastAPI app + ``BatchGenerator`` continuous-batching engine into one
 GGUF-only HTTP server - **text**, **VLM** (LLM GGUF + float ``mmproj``), and
 **speculative/MTP** models.
@@ -92,7 +92,7 @@ def _import_serving():
     bare ModuleNotFoundError."""
     try:
         from . import residency  # noqa: F401
-        from . import patches as server_patches  # noqa: F401
+        from . import patches  # noqa: F401
         from . import bridge_vlm as server_bridge_vlm  # noqa: F401
     except ImportError as exc:
         root = (exc.name or "").split(".")[0]
@@ -2052,7 +2052,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
 
     import uvicorn
 
-    from . import patches as server_patches
+    from . import patches
 
     # Preload off the startup path: mlx-vlm's lifespan loads MLX_VLM_PRELOAD_MODEL
     # synchronously *before* the port accepts connections, so a big model makes the
@@ -2068,7 +2068,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
               if m != preload]
     if preload or extras:
         os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
-        server_patches.spawn_preload_warm(preload, extras)
+        patches.spawn_preload_warm(preload, extras)
         if extras:
             print(f"[server] preload: warming {', '.join(extras)} in background")
 
@@ -2087,7 +2087,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                 # gmlx/mlx_vlm loggers, so the flag governs the whole server
                 # while the timestamped formatters and noise filters stay.
                 log_level=getattr(a, "log_level", None),
-                log_config=server_patches.uvicorn_log_config(
+                log_config=patches.uvicorn_log_config(
                     getattr(a, "log_level", None)))
     return 0
 

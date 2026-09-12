@@ -5,11 +5,11 @@ reference."""
 
 from __future__ import annotations
 
-import os
-import re
 
 import mlx.core as mx
 import pytest
+
+from helpers import _real_apple_gpu
 
 import gmlx.models.qwen4_exp.model as q4
 from gmlx.models.qwen4_exp.model import (
@@ -19,16 +19,6 @@ from gmlx.models.qwen4_exp.model import (
     QSAKVCache,
     SparseMoeBlock,
 )
-
-
-def _real_apple_gpu() -> bool:
-    if os.environ.get("KQUANT_FORCE_CPU"):
-        return False
-    try:
-        name = str(mx.device_info().get("device_name", ""))
-    except Exception:
-        return False
-    return bool(re.search(r"Apple M\d", name))
 
 
 gpu_only = pytest.mark.skipif(

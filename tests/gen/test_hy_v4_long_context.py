@@ -51,7 +51,7 @@ BELOW_BOUNDARY = 1024
 # not the total depth.
 ABOVE_BOUNDARY = int(os.environ.get("GMLX_HY4_LONGCTX_TOKENS", "4096"))
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 
 def _greedy_text(model, tok, ids, n):

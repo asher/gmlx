@@ -20,7 +20,7 @@ import pytest
 
 import mlx.core as mx
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)
 

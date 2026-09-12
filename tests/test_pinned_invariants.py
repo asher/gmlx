@@ -23,13 +23,14 @@ each probe finishes in seconds. Requires a real Apple GPU: skipped
 under KQUANT_FORCE_CPU (CI) and on paravirtual Metal devices.
 """
 
-import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from helpers import _real_apple_gpu
 
 PROBES = Path(__file__).parent / "invariant_probes"
 
@@ -42,18 +43,6 @@ def _mlx_version():
         m = re.match(r"\d+", p)
         parts.append(int(m.group()) if m else 0)
     return tuple(parts)
-
-
-def _real_apple_gpu() -> bool:
-    if os.environ.get("KQUANT_FORCE_CPU"):
-        return False
-    try:
-        import mlx.core as mx
-
-        name = str(mx.device_info().get("device_name", ""))
-    except Exception:
-        return False
-    return "Apple" in name and "Paravirtual" not in name
 
 
 pytestmark = pytest.mark.skipif(

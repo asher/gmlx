@@ -29,7 +29,7 @@ pytest.importorskip("mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)  # noqa: E731
 N_DECODE = 8
