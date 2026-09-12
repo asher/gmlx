@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-09-11
+
 ### Added
 
 - `gmlx serve model.gguf` takes `--kv-quant-scheme`, `--kv-bits` and the other
