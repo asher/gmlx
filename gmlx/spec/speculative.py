@@ -1883,8 +1883,8 @@ def _kvarn_block_clamp(block_total: int, n_rows: int) -> int:
     # a lifted B=1 row, an admission prefill); every kvarn batch passes
     # here, so the serve log states the fact once per width.
     _log_spec_once(
-        f"kvarn batch KV: B={n_rows} rows verify on kvarn records "
-        f"(block {block_total})")
+        f"kvarn batch KV: B={n_rows} rows on kvarn records "
+        f"(verify block {block_total})")
     return block_total
 
 

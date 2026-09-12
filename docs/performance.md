@@ -402,8 +402,11 @@ vectors in each record undo the scaling on read. The first 128 tokens, the
 attention sink, stay fp16, as do the newest `--kv-tail-tokens` tokens, 1024 by
 default. A record is sealed once the tail has moved past it. Decode and MTP
 verify read the records in the mlx-kquant kernels and merge the fp16 tail
-through a single softmax. The prompt cache stores records on its exact and
-checkpoint tiers.
+through a single softmax. Prefill reads the dequantized records for every
+sealed group and does not use the tail, so the K and V a prompt leaves in the
+cache depend on where its prefill chunks fall against the 128-token group
+boundaries. The prompt cache stores records on its exact and checkpoint
+tiers.
 
 Which layers quantize is decided by cache shape, not model name. Growing
 attention KV quantizes, except the last layer of a deep stack, which stays
@@ -540,12 +543,14 @@ on the matrix-unit verify kernels at about a decode step's cost: at head_dim
 256 with 8 queries for each KV head at 16k, that is 1.0 ms for each layer
 and round against 0.9 for decode. Batched verify rounds run on the decode
 kernels at up to four queries a row with mlx-kquant 0.4.9 or later, each row
-rolling back by its own rejected count. A drafter with a wider block
-(DFlash2's trained block, or a qwen3_5 head with three MTP layers at block
-5) drafts three tokens a round on a batch cache, which a request keeps until
-its generator ends once it has shared a batch, and its full block while it
-decodes alone from the start. Choose kvarn for memory and fidelity, or affine
-for peak decode speed on a KV-bound dense model. The debug switches are in
+rolling back by its own rejected count. A drafter with a block wider than
+four (DFlash 2 trains at block 8) drafts three tokens a round on a batch
+cache, which a request keeps until its generator ends once it has shared a
+batch, and its full block while it decodes alone from the start. The width
+cap applies first: DFlash 2 is single-stream, so a batch of its requests
+decodes plain on the kvarn cache and drafting resumes for the last request
+left. Choose kvarn for memory and fidelity, or affine for peak decode speed
+on a KV-bound dense model. The debug switches are in
 [internals/debug-switches.md](internals/debug-switches.md).
 
 KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli at

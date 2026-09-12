@@ -107,7 +107,7 @@ def test_b1_batch_cache_clamps_too(capsys):
     _drive(d, [_KvarnBatchFake(width=1)], B=1, max_tokens=20)
     assert d.draft_calls and max(d.draft_calls) == 4
     err = capsys.readouterr().err
-    assert "kvarn batch KV: B=1 rows verify on kvarn records (block 4)" in err
+    assert "kvarn batch KV: B=1 rows on kvarn records (verify block 4)" in err
 
 
 def test_injection_lifting_a_single_row_clamps(monkeypatch, capsys):
@@ -145,7 +145,7 @@ def test_injection_lifting_a_single_row_clamps(monkeypatch, capsys):
     assert after and max(after) == 4, (before, after)
     err = capsys.readouterr().err
     assert "clamp: kvarn batch KV verifies at 4 queries; block 8 -> 4" in err
-    assert "kvarn batch KV: B=2 rows verify on kvarn records (block 4)" in err
+    assert "kvarn batch KV: B=2 rows on kvarn records (verify block 4)" in err
 
 
 def test_fp16_batch_keeps_the_full_block():
