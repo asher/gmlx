@@ -125,12 +125,12 @@ def _harvest() -> None:
     register_stream(mx.default_stream(mx.Device(mx.cpu)))
     try:
         register_stream(mx.default_stream(mx.Device(mx.gpu)))
-    except Exception:
-        pass  # no Metal device (CI)
+    except Exception:  # noqa: S110 - no Metal device (CI)
+        pass
     try:
         from mlx_lm.generate import generation_stream
         register_stream(generation_stream)
-    except Exception:
+    except Exception:  # noqa: S110 - optional: mlx_lm's generation stream is harvested when present
         pass
 
 

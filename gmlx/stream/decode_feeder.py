@@ -219,7 +219,7 @@ class _DaemonReadPool:
         if self._on_start is not None:
             try:
                 self._on_start()
-            except Exception:
+            except Exception:  # noqa: S110 - start hook is advisory
                 pass
         while True:
             item = self._q.get()
@@ -717,7 +717,7 @@ class DecodeFeeder:
             import mlx.core as mx
 
             mx.synchronize()  # no in-flight gather may reference a layer
-        except Exception:
+        except Exception:  # noqa: S110 - no Metal device: nothing in flight
             pass
         freed = 0
         for li in list(self._layers):
@@ -1507,7 +1507,7 @@ class DecodeFeeder:
             import mlx.core as mx
 
             ram = int(mx.device_info()["memory_size"])
-        except Exception:
+        except Exception:  # noqa: S110 - no device info; the floor prices from avail
             pass
         if avail < need + _ram_floor_bytes(ram or avail) + kernel_floor_bytes():
             return False
@@ -1534,7 +1534,7 @@ class DecodeFeeder:
             import mlx.core as mx
 
             (getattr(mx, "clear_cache", None) or mx.metal.clear_cache)()
-        except Exception:
+        except Exception:  # noqa: S110 - cache release is advisory
             pass
 
     def _resize_layer(self, li: int, new_s: int) -> None:
@@ -1718,7 +1718,7 @@ class DecodeFeeder:
     def __del__(self):
         try:
             self.close()
-        except BaseException:  # noqa: BLE001 - incl. ^C during interpreter exit
+        except BaseException:  # noqa: BLE001, S110 - incl. ^C during interpreter exit
             pass
 
 

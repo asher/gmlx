@@ -244,7 +244,7 @@ async def _blocking_completion(request, runtime, gen_mod, start, stops,
         finally:
             try:
                 token_iter.close()
-            except Exception:
+            except Exception:  # noqa: S110 - iterator already finished
                 pass
         if stops and not hit_stop:
             text += scanner.flush()
@@ -364,8 +364,10 @@ async def _stream_completion(request, runtime, gen_mod, start, stops,
                 _put(e)
             finally:
                 try:
-                    token_iter.close()  # normal end or disconnect: cancels
-                except Exception:       # the in-flight batch generation
+                    # normal end or disconnect: cancels the in-flight
+                    # batch generation
+                    token_iter.close()
+                except Exception:  # noqa: S110 - iterator already finished
                     pass
 
         threading.Thread(target=_pump, name="gmlx-completions-pump",

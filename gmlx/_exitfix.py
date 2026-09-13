@@ -93,7 +93,7 @@ def _guard() -> None:
     try:
         sys.stdout.flush()
         sys.stderr.flush()
-    except Exception:
+    except Exception:  # noqa: S110 - stdio may already be closed at exit
         pass
     os._exit(_code)
 

@@ -185,5 +185,5 @@ class HotkeyTap:
     def _fire(self) -> None:
         try:
             self.on_fire()
-        except Exception:
-            pass  # a failing callback must not kill the event tap
+        except Exception:  # noqa: S110 - a failing callback must not kill the event tap
+            pass

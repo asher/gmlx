@@ -277,7 +277,7 @@ class AssistantBrain:
             if self.memory is not None and completed:
                 try:
                     self.memory.remember(user_text, "".join(spoken))
-                except Exception:                 # noqa: BLE001 - best-effort
+                except Exception:                 # noqa: BLE001, S110 - best-effort
                     pass
         if completed:
             if timings:

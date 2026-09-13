@@ -836,7 +836,7 @@ def wait_ready(runtime, proc, timeout):
             if r.status_code == 200:
                 data = (r.json() or {}).get("data") or []
                 return data[0]["id"] if data else "model"
-        except Exception:
+        except Exception:  # noqa: S110 - not ready yet; the poll loop retries
             pass
         time.sleep(1.0)
     raise TimeoutError(f"{runtime} server not ready within {timeout}s")
@@ -972,7 +972,7 @@ def die_temp():
         parts = out.split()                      # "DIE 62.4 MAX 66.1 (n=42)"
         if len(parts) >= 4 and parts[0] == "DIE":
             return float(parts[1]), float(parts[3])
-    except Exception:
+    except Exception:  # noqa: S110 - no die-temp probe -> None
         pass
     return None
 
@@ -991,7 +991,7 @@ def thermal_snapshot():
         for line in out.splitlines():
             if "CPU_Speed_Limit" in line:
                 return line.strip()
-    except Exception:
+    except Exception:  # noqa: S110 - no thermal readout -> None
         pass
     return None
 
@@ -2055,7 +2055,7 @@ def main():
                 ["git", "-C", os.path.dirname(args.ds4_bin), "rev-parse",
                  "--short", "HEAD"], capture_output=True, text=True,
                 timeout=5).stdout.strip() or None
-        except Exception:
+        except Exception:  # noqa: S110 - unknown ds4 commit -> None
             pass
 
     def _meta(partial):

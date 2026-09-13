@@ -110,7 +110,7 @@ def _format_timing_line(envelope: dict) -> str:
         import mlx.core as mx
         parts.append(f"active={mx.get_active_memory() / 1e9:.1f}G")
         parts.append(f"cache={mx.get_cache_memory() / 1e9:.1f}G")
-    except Exception:
+    except Exception:  # noqa: S110 - memory readout is cosmetic
         pass
     return "[req] " + " ".join(parts)
 
@@ -135,16 +135,16 @@ def install_request_timing_log() -> None:
         orig_success(self, envelope)
         try:
             print(_format_timing_line(envelope), flush=True)
-        except Exception:
-            pass  # a logging hiccup must never disturb the metrics store
+        except Exception:  # noqa: S110 - a logging hiccup must never disturb the metrics store
+            pass
 
     def record_failure(self, *, endpoint, model, stream, error):
         orig_failure(self, endpoint=endpoint, model=model, stream=stream, error=error)
         try:
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"[req] {ts} {endpoint} {model} failed {error}", flush=True)
-        except Exception:
-            pass  # a logging hiccup must never disturb the metrics store
+        except Exception:  # noqa: S110 - a logging hiccup must never disturb the metrics store
+            pass
 
     record_success.__dict__[_REQUEST_LOG_FLAG] = True
     store.record_success = record_success

@@ -624,7 +624,7 @@ def _enter(gen, st: _GovState, band: int, ws: float, margin: float) -> None:
     if band >= YELLOW and up:
         try:
             mx.reset_peak_memory()
-        except Exception:
+        except Exception:  # noqa: S110 - peak reset is advisory
             pass
         st.rung_peak = 0.0
         st.rung_tick = st.tick_no
@@ -879,7 +879,7 @@ def _governor_tick(gen) -> None:
         if st.rung_rate_before is None and st.tick_no - st.rung_tick >= 1:
             try:
                 st.rung_peak = float(mx.get_peak_memory())
-            except Exception:
+            except Exception:  # noqa: S110 - peak read is advisory; the rung measures without it
                 pass
         _measure_rung(gen, st)
         return

@@ -72,7 +72,7 @@ def _load_deferred_response(model_id, exc):
         ready, _reason, r = readiness()
         if not ready and r:
             retry = max(int(r), int(_RETRY_MIN_S))
-    except Exception:
+    except Exception:  # noqa: S110 - readiness unreadable -> the floor Retry-After
         pass
     return JSONResponse(status_code=503, content={
         "error": {"message": str(exc), "type": "model_load_deferred",
@@ -122,8 +122,8 @@ def install_chat_load_offload() -> None:
                     # while a load was being refused.
                     return await asyncio.to_thread(
                         _load_deferred_response, model_id, exc)
-                except Exception:
-                    pass        # stock handler re-resolves + surfaces errors
+                except Exception:  # noqa: S110 - stock handler re-resolves + surfaces errors
+                    pass
             return await original(*args, **kwargs)
         return endpoint
 
@@ -244,7 +244,7 @@ async def _keepalive_sse(body, interval: float | None):
         if aclose is not None:
             try:
                 await aclose()
-            except Exception:
+            except Exception:  # noqa: S110 - upstream body may already be closed
                 pass
 
 
@@ -356,8 +356,8 @@ def install_request_profile_capture() -> None:
                 if m is not None and not str(m).strip():
                     try:
                         arg.model = serving._default_model_id()
-                    except Exception:
-                        pass   # the resolver raises its typed error below
+                    except Exception:  # noqa: S110 - the resolver raises its typed error below
+                        pass
                     break
             profile = await _extract_request_profile(
                 list(args) + list(kwargs.values()))

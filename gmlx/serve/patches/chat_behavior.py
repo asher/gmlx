@@ -669,7 +669,7 @@ async def _stop_filter_sse(body, stops: list):
         if aclose is not None:
             try:
                 await aclose()
-            except Exception:
+            except Exception:  # noqa: S110 - upstream body may already be closed
                 pass
 
 
@@ -821,7 +821,7 @@ async def _timings_sse(body, cell):
         if aclose is not None:
             try:
                 await aclose()
-            except Exception:
+            except Exception:  # noqa: S110 - upstream body may already be closed
                 pass
 
 

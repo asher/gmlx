@@ -453,7 +453,7 @@ def _log_aux_request(endpoint: str, model: str | None, started: float,
         mark = "" if status == "ok" else f" {status}"
         tail = f"{extra} total={elapsed:.2f}s" if extra else f"total={elapsed:.2f}s"
         print(f"[req] {ts} {endpoint} {model or '?'}{mark} {tail}", flush=True)
-    except Exception:
+    except Exception:  # noqa: S110 - a logging hiccup must never disturb the response
         pass
 
 
@@ -909,7 +909,7 @@ def _spawn_keep_warm(model_id: str):
     def _run():
         try:
             _warm_and_release(model_id)
-        except Exception:
+        except Exception:  # noqa: S110 - a load failure surfaces on the first real request
             pass
 
     thread = threading.Thread(target=_run, name="gmlx-keep-warm", daemon=True)
@@ -943,7 +943,7 @@ def _warm_context_lengths() -> None:
     try:
         for rm in serving.resolved_models().values():
             _capacity.trained_context_length(rm.path)
-    except Exception:
+    except Exception:  # noqa: S110 - warm only; the request path scans on demand
         pass
 
 

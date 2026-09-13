@@ -977,7 +977,7 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
             size_bytes=sum(os.stat(s).st_size for s in pf.shards),
             n_shards=len(pf.shards),
         )
-    except Exception:
+    except Exception:  # noqa: S110 - info panel; the fields stay absent
         pass
     info["model_type"] = _model_type(config)
     if args.mmproj:

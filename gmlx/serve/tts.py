@@ -170,7 +170,7 @@ def _configure_espeak() -> None:
     # possibly-too-long one. Import it now so the settings below are final.
     try:
         import misaki.espeak  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: S110 - the import runs espeak setup that raises past ImportError; the paths are set again below
         pass
     EspeakWrapper.set_library(lib)
     data = _espeak_data_path(espeakng_loader.get_data_path())

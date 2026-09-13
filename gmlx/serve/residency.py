@@ -238,8 +238,8 @@ class _BusyHold:
     def __del__(self):
         try:
             self.release()
-        except Exception:
-            pass  # GC-time cleanup must never raise
+        except Exception:  # noqa: S110 - GC-time cleanup must never raise
+            pass
 
 
 class _ReleasingTokenIterator:
@@ -276,8 +276,8 @@ class _ReleasingTokenIterator:
     def __del__(self):
         try:
             self._hold.release()
-        except Exception:
-            pass  # GC-time cleanup must never raise
+        except Exception:  # noqa: S110 - GC-time cleanup must never raise
+            pass
 
 
 class _GenerationGuard:
@@ -695,8 +695,8 @@ class _ResidencyPool:
             try:
                 _close()
                 n += 1
-            except Exception:
-                pass  # best-effort sweep; count only the successful closes
+            except Exception:  # noqa: S110 - best-effort sweep; count only the successful closes
+                pass
         return n
 
     def stats(self) -> dict:
@@ -1135,7 +1135,7 @@ class _ResidencyPool:
         try:
             from gmlx.stream.pagecache import release_streaming_for
             release_streaming_for(entry.model_path)
-        except Exception:
+        except Exception:  # noqa: S110 - page-cache sweep is advisory
             pass
         # Every eviction and reap funnels through here: drop this entry's
         # untracked-weights attributions so an evicted model stops taxing
@@ -1186,7 +1186,7 @@ def _collect_failed_build() -> None:
         import mlx.core as mx
 
         (getattr(mx, "clear_cache", None) or mx.metal.clear_cache)()
-    except Exception:
+    except Exception:  # noqa: S110 - cache release is advisory
         pass
 
 
@@ -1207,7 +1207,7 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
     for target in wrapper_chain(model):
         try:
             object.__setattr__(target, "_kq_boot_kv_costs", costs)
-        except Exception:                                  # noqa: BLE001
+        except Exception:                                  # noqa: BLE001, S110 - stamp only; an unsettable module reads as unstamped
             pass
 
 

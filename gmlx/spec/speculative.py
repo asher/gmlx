@@ -83,7 +83,7 @@ def _round_log_close():
     if fh is not None:
         try:
             fh.close()
-        except Exception:
+        except Exception:  # noqa: S110 - atexit; the handle may be gone
             pass
 
 
@@ -1433,8 +1433,8 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
         try:
             drafter._kq_head_covered = False
             drafter._kq_head_request = None
-        except Exception:
-            pass  # slotted/frozen drafter forbids ad-hoc attrs
+        except Exception:  # noqa: S110 - slotted/frozen drafter forbids ad-hoc attrs
+            pass
     if sidecar_ctx is None or _SIDECAR_DISABLED:
         return
     if not getattr(drafter, "supports_kv_sidecar", False):
@@ -1513,7 +1513,7 @@ def _pop_drafter_warm(prompt_cache: list) -> list | None:
     if warm is not None:
         try:
             prompt_cache[0]._kq_apc_drafter_warm = None
-        except Exception:
+        except AttributeError:
             pass  # slotted/frozen cache forbids ad-hoc attrs
     return warm
 
@@ -1529,7 +1529,7 @@ def _pop_seed_stream(prompt_cache: list) -> dict | None:
     if ctx is not None:
         try:
             prompt_cache[0]._kq_seed_stream = None
-        except Exception:
+        except AttributeError:
             pass  # slotted/frozen cache forbids ad-hoc attrs
     return ctx
 
@@ -1568,7 +1568,7 @@ def _pop_retire_ctx(prompt_cache: list) -> dict | None:
     if retire is not None:
         try:
             prompt_cache[0]._kq_apc_retire = None
-        except Exception:
+        except AttributeError:
             pass  # slotted/frozen cache forbids ad-hoc attrs
     return retire
 
@@ -2207,8 +2207,8 @@ def _owned_decode_rounds_batch(
     try:
         drafter._kq_head_covered = False
         drafter._kq_head_request = None
-    except Exception:
-        pass  # slotted/frozen drafter forbids ad-hoc attrs
+    except Exception:  # noqa: S110 - slotted/frozen drafter forbids ad-hoc attrs
+        pass
     def _reset_armed(n: int) -> None:
         # B=1-only drafters raise on a left_padding list; fall back bare.
         try:

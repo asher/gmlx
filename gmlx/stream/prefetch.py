@@ -317,7 +317,7 @@ class ExpertPrefetcher:
     def __del__(self):
         try:
             self.close()
-        except Exception:
+        except Exception:  # noqa: S110 - GC-time cleanup must never raise
             pass
 
 

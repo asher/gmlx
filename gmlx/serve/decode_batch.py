@@ -47,6 +47,6 @@ def decode_batch() -> int:
         fw = frontier_width()
         if fw:
             return min(DEFAULT_DECODE_BATCH, fw)
-    except Exception:
+    except Exception:  # noqa: S110 - capacity table unreadable -> default width
         pass
     return DEFAULT_DECODE_BATCH
