@@ -22,48 +22,44 @@ kernels in its own forward pass. There is no engine fork.
 ```mermaid
 flowchart TD
     subgraph DISK["GGUF on disk"]
+        direction LR
         LLM["text LLM GGUF<br/>K-quant: Q4_K / Q6_K / MXFP4 ..."]
         MM["mmproj GGUF<br/>float or Q8_0, VLM only"]
+        LLM ~~~ MM
     end
 
     subgraph LOAD["Loader: gmlx.load_model"]
-        direction TB
-        PARSE["parse file bytes + GGUF->HF name remap"]
+        direction LR
+        PARSE["parse file bytes<br/>GGUF->HF name remap"]
         SYNTH["config + tokenizer synth<br/>including the chat template"]
-        BUILD["build stock model class"]
-        KQ["install K-quant leaves<br/>KQuantLinear, gather_qmm, KQuantMultiLinear"]
+        BUILD["build stock<br/>model class"]
+        KQ["install K-quant leaves<br/>KQuantLinear, gather_qmm"]
         PARSE --> SYNTH --> BUILD --> KQ
     end
-    LLM --> PARSE
-    MM -. VLM .-> PARSE
 
     subgraph ADAPT["Model adapter + residency"]
-        direction TB
-        WRAP["text -> gmlx vendored text_only.Model<br/>(VLM -> mlx_vlm vision/audio model class)"]
-        STOP["attach StoppingCriteria to tokenizer"]
-        REG["multi-model residency pool<br/>pinned + LRU, one process wired_limit"]
+        direction LR
+        WRAP["text -> gmlx vendored text_only.Model<br/>VLM -> mlx_vlm vision/audio class"]
+        STOP["attach StoppingCriteria<br/>to tokenizer"]
+        REG["residency pool<br/>pinned + LRU, one wired_limit"]
         WRAP --> STOP --> REG
     end
-    KQ --> WRAP
 
-    subgraph TICK["gmlx tick policy: wrappers on BatchGenerator._next"]
-        direction TB
-        TG["tick guard<br/>OOM / GPU-fault containment"]
-        GOV["governor<br/>ticks-to-collision bands"]
+    subgraph TICK["gmlx tick policy: wrappers on BatchGenerator._next, install order"]
+        direction LR
+        TG["tick guard<br/>OOM / GPU-fault"]
+        GOV["governor<br/>collision bands"]
         MT["memtrace (opt)<br/>GMLX_SERVE_MEMSTATS"]
-        QCC["queue-cap census"]
+        QCC["queue-cap<br/>census"]
         FG["fresh gate<br/>cache-freshness hold"]
-        AG["admit gate<br/>memory-headroom projection"]
-        PACE["pacer<br/>decode-priority prefill pacing"]
+        AG["admit gate<br/>headroom projection"]
+        PACE["pacer<br/>prefill pacing"]
         ST["step timing (opt)<br/>GMLX_STEP_LOG"]
         TG --> GOV --> MT --> QCC --> FG --> AG --> PACE --> ST
     end
-    REG --> TG
-    LR["live requests<br/>per-request rows, wraps ResponseGenerator._step"]
-    TICK -.- LR
 
     subgraph ENGINE["Upstream mechanism: mlx_vlm.generate.ar"]
-        direction TB
+        direction LR
         EMB["precompute inputs_embeds<br/>get_input_embeddings(input_ids)"]
         BG["step loop (embeds-in)<br/>one decode step + one prefill chunk"]
         KVC["BatchKVCache (ragged, left-pad)<br/>or gmlx kvarn KV, per-row ends"]
@@ -76,31 +72,29 @@ flowchart TD
         BG --- SAMP
         BG --- MTP
     end
-    ST --> BG
 
-    subgraph PROTO["HTTP: mlx-vlm FastAPI + gmlx route patches"]
-        direction TB
+    subgraph PROTO["HTTP: mlx-vlm FastAPI, ~20 gmlx route patches incl. added /v1/completions"]
+        direction LR
         TOOLS["tool-call extractor<br/>mlx_lm.tool_parsers (from chat template)"]
-        RP["~20 gmlx route-level patches<br/>incl. added /v1/completions"]
         ANTH["/v1/messages (Anthropic)"]
         OAI["/v1/chat/completions (OpenAI)"]
         RESP["/v1/responses (OpenAI Responses)"]
         SSE["streaming SSE formatters"]
         TOOLS --> ANTH & OAI & RESP
-        RP -.- ANTH
-        RP -.- OAI
-        RP -.- RESP
-        ANTH --- SSE
-        OAI --- SSE
-        RESP --- SSE
+        ANTH & OAI & RESP --> SSE
     end
-    BG --> TOOLS
 
-    CC["Anthropic-API client<br/>such as Claude Code via ANTHROPIC_BASE_URL"]
-    SDK["OpenAI SDK / curl / apps"]
-    ANTH --> CC
-    OAI --> SDK
-    RESP --> SDK
+    subgraph CLIENTS["Clients"]
+        direction LR
+        CC["Anthropic-API client on /v1/messages<br/>such as Claude Code via ANTHROPIC_BASE_URL"]
+        SDK["OpenAI SDK / curl / apps<br/>on /v1/chat/completions, /v1/responses"]
+        CC ~~~ SDK
+    end
+
+    LR["live requests: per-request rows,<br/>wraps ResponseGenerator._step, never steps the engine"]
+
+    DISK --> LOAD --> ADAPT --> TICK --> ENGINE --> PROTO --> CLIENTS
+    TICK -.- LR
 ```
 
 Eight wrappers assign `BatchGenerator._next`, shown in install order in the
