@@ -1571,12 +1571,17 @@ def ckpt_store(
             len(states), rec.nbytes / (1 << 20))
         return p
     except Exception:
+        # One swallow per call: a failing decline (telemetry) or first
+        # release must not leak the other block set out of the manager.
         try:
             _ckpt_decline(manager, "exception")
-            manager.release(main_blocks)
-            manager.release(bounded_blocks)
         except Exception:
-            pass  # best-effort release on the failure path
+            pass  # decline is telemetry only
+        for blks in (main_blocks, bounded_blocks):
+            try:
+                manager.release(blks)
+            except Exception:
+                pass  # best-effort release on the failure path
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
         return 0
 
@@ -2155,11 +2160,13 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         _log.info("APC ckpt hit: prefix=%d (disk skeleton)", p)
         return warm, p
     except Exception:
-        try:
-            manager.release(blocks)
-            manager.release(wblocks)
-        except Exception:
-            pass  # best-effort release on the failure path
+        # One swallow per release: a failing first release must not leak
+        # the second block set out of the manager.
+        for blks in (blocks, wblocks):
+            try:
+                manager.release(blks)
+            except Exception:
+                pass  # best-effort release on the failure path
         _log.warning("APC ckpt disk lookup failed; continuing",
                      exc_info=True)
         return None, 0

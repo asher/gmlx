@@ -362,3 +362,34 @@ def test_cursor_skeleton_policy(monkeypatch):
     ckpt._ckpt_mid_prefill_store(batch)   # boundary 32: interval
     ckpt._ckpt_mid_prefill_store(batch)   # boundary 64: terminal
     assert seen == [(32, False), (64, True)]
+
+
+def test_disk_lookup_failure_attempts_every_release(caplog):
+    """A failing release in the disk-lookup failure handler must not
+    skip the other block set: each release gets its own attempt."""
+    from gmlx.cache.compat import runtime_cache_module
+
+    KVCache = runtime_cache_module().KVCache
+    releases = []
+
+    class _Man:
+        block_size = 16
+
+        def lookup_exact_cache(self, ids, *, extra_hash, min_prefix_tokens):
+            return [KVCache()], 32
+
+        def lookup_prefix(self, ids, *, extra_hash):
+            raise RuntimeError("prefix lookup broke")
+
+        def release(self, blocks):
+            releases.append(blocks)
+            if len(releases) == 1:
+                raise RuntimeError("first release broke")
+
+    with caplog.at_level("WARNING", logger="gmlx.cache.snapshot"):
+        out = cs._ckpt_disk_lookup(
+            _Man(), list(range(40)), extra_hash=0,
+            min_prefix_tokens=1, layout=None)
+    assert out == (None, 0)
+    assert len(releases) == 2
+    assert any("disk lookup failed" in r.message for r in caplog.records)
