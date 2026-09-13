@@ -6,6 +6,8 @@ spec-cache build) resolves here and acts on the verdict, so engagement,
 logging, and memory pricing all read the same object.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 VALID_BITS = (2, 3, 4, 6, 8)
