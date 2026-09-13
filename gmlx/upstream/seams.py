@@ -1,7 +1,7 @@
 """Contract registry for every upstream symbol gmlx patches or deep-imports.
 
-gmlx monkeypatches ~30 private symbols across mlx-vlm and mlx-lm and
-deep-imports model internals. Those seams are guarded structurally (try/except
+gmlx monkeypatches well over a hundred symbols across mlx-vlm and mlx-lm
+and deep-imports model internals. Those seams are guarded structurally (try/except
 ImportError + idempotence flags), so upstream renames or rewrites fail
 silently - stock behavior quietly returns, or a confusing error surfaces far
 downstream (mlx-vlm 0.6.4 vendoring switch_layers turned into a gather_mm

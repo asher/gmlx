@@ -153,10 +153,11 @@ profile. `requests[]` is high-cardinality and contributes only its count.
 
 ## API capabilities
 
-The protocol surface is inherited from mlx-vlm, since gmlx swaps the model
-layer and not the handlers, so its request features work unchanged on GGUF
-models. Context windows come from the GGUF's metadata, with no server-side
-override or request-level context setting.
+The protocol surface follows mlx-vlm's, with gmlx patches on the handlers
+(around twenty route-level patches, including the added `/v1/completions`
+route), so upstream request features work on GGUF models. Context windows
+come from the GGUF's metadata, with no server-side override or
+request-level context setting.
 
 ### Tool calling
 
