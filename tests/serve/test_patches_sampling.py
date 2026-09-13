@@ -387,6 +387,22 @@ def test_xtc_special_tokens_dedup_and_defensive():
         types.SimpleNamespace(tokenizer=_IntEosTok())) == [7, 9]
 
 
+def test_xtc_newline_probe_failure_warns_once_keeps_eos(monkeypatch, caplog):
+    class _BadEncodeTok:
+        eos_token_id = 7
+
+        def encode(self, s, add_special_tokens=True):
+            raise RuntimeError("tokenizer shape miss")
+
+    monkeypatch.setattr(sp_sampling, "_NEWLINE_PROBE_WARNED", False)
+    proc = types.SimpleNamespace(tokenizer=_BadEncodeTok())
+    with caplog.at_level("WARNING", logger="gmlx.serve.patches.sampling"):
+        assert sp_sampling._xtc_special_tokens(proc) == [7]   # EOS survives
+        assert sp_sampling._xtc_special_tokens(proc) == [7]
+    warns = [r for r in caplog.records if "XTC newline probe" in r.message]
+    assert len(warns) == 1
+
+
 def test_install_xtc_wraps_and_stacks_with_profile_injection():
     sp.install_gen_args_profile_injection()
     sp.install_xtc_sampling()
