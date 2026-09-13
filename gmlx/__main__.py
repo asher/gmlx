@@ -2,6 +2,8 @@
 script). A lazy import keeps ``-m gmlx <verb>`` light; this is also the form the
 background / launchd re-exec uses, so it must route to the umbrella (note that
 ``-m gmlx.commands.cli`` runs ``run``'s ``main`` instead)."""
+from __future__ import annotations
+
 import sys
 
 

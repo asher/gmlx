@@ -16,6 +16,8 @@ engine's own next len() promotes it, which is the decision-side view
 of the batch as it currently is.
 """
 
+from __future__ import annotations
+
 
 def batch_rows(gen) -> int:
     """Active rows in ``gen._generation_batch``; 0 when there is none.

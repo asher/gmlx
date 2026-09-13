@@ -6,6 +6,8 @@ the memory preflight, /v1/models, and the engagement log read the same
 object. An error verdict fails residency with the reason.
 """
 
+from __future__ import annotations
+
 import logging
 import math
 import os

@@ -18,6 +18,8 @@ step (response build), bnext - gnext (scheduler), step gap - (bnext - step)
 (above the batch generator). No-op unless the env var is set.
 """
 
+from __future__ import annotations
+
 import atexit
 import os
 import sys

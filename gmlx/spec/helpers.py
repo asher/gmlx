@@ -9,6 +9,8 @@ consumed from mlx-vlm by design -- only the round logic is owned here.
 Logic is a faithful copy (acceptance must stay token-identical to the validated
 path); keep it in sync when mlx-vlm's round changes in a way we want to track.
 """
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass
