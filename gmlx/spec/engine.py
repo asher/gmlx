@@ -153,7 +153,10 @@ def _install_apc_manager_stash() -> None:
         try:
             model._kq_apc_manager = kwargs.get("apc_manager")
         except Exception:
-            pass
+            if kwargs.get("apc_manager") is not None:
+                _log.warning(
+                    "APC OFF for this model: manager stash failed -- "
+                    "every request prefills cold", exc_info=True)
         _orig_init(self, model, processor, **kwargs)
         # Stock admission forms a prompt batch only when free slots >=
         # prefill_batch_size. Stock pairs 32/8 (24 slots stay open); the
@@ -289,7 +292,12 @@ def _ckpt_layout_for(model, block_size: int = 16):
         try:
             tags = tuple(ckpt_layout(lm.make_cache(), block_size) or ())
         except Exception:
+            # An empty stash reads as "no ckpt signature" below, never as
+            # a valid all-empty layout that could sign entries.
             tags = ()
+            _log.warning(
+                "APC ckpt layout probe failed; ckpt tier off for this "
+                "model", exc_info=True)
         try:
             model._kq_apc_ckpt_layout = tags
         except Exception:
