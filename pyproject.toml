@@ -159,6 +159,113 @@ markers = [
     "needs_kvarn_row_ends: dispatches the decode kernels with per-row ends; skipped unless the installed mlx-kquant is 0.4.9 or later",
 ]
 
+[tool.pyright]
+# Structural drift guard at the static upstream import sites: pyright
+# infers signatures from the installed mlx-vlm / mlx-lm source, so a
+# moved symbol, changed signature or class-identity move fails here
+# before it fails at runtime. Scope is exactly the files that import
+# mlx_vlm / mlx_lm statically, minus gmlx/models (mirrors, annotation
+# exempt); tests/test_pyright_scope.py keeps the list in step with the
+# tree. Seams reached through importlib.import_module are opaque to
+# pyright and stay covered by gmlx/upstream/seams.py. Runs in the macOS
+# CI job, not the deps-free lint job: without the libraries installed
+# there is nothing to infer from.
+include = [
+    "gmlx/cache/apc_manager.py",
+    "gmlx/load/modules.py",
+    "gmlx/serve/bridge_lm.py",
+    "gmlx/serve/bridge_vlm.py",
+    "gmlx/spec/dflash_drafter.py",
+    "gmlx/spec/helpers.py",
+    "gmlx/spec/mtp_drafter.py",
+]
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+pythonPlatform = "Darwin"
+reportMissingTypeStubs = false
+reportMissingModuleSource = false
+# Deep-importing upstream privates is the design; the contract is the
+# seam registry, not the upstream __all__.
+reportPrivateImportUsage = false
+# mlx ships py.typed with an unannotated nn.Module.__getattr__ whose else
+# branch never returns, so every undeclared attribute of any Module infers
+# as "Any | None". These rules then fire on ordinary submodule access and
+# carry no drift signal (a moved symbol is an attribute-access, import or
+# call error, never an Optional one).
+reportOptionalMemberAccess = "none"
+reportOptionalSubscript = "none"
+reportOptionalCall = "none"
+reportOptionalIterable = "none"
+reportOptionalOperand = "none"
+
+[tool.gmlx.pyright]
+# Static mlx_vlm / mlx_lm importers not yet in the pyright gate. A file
+# moves from here to [tool.pyright].include once it checks clean; the
+# list only shrinks. tests/test_pyright_scope.py holds both lists to
+# the tree.
+backlog = [
+    "gmlx/cache/apc_pooling.py",
+    "gmlx/cache/fresh_gate.py",
+    "gmlx/cache/kv_policy.py",
+    "gmlx/cache/kvarn_cache.py",
+    "gmlx/cache/kvarn_serve.py",
+    "gmlx/cache/retire_key.py",
+    "gmlx/cache/snapshot.py",
+    "gmlx/commands/cli.py",
+    "gmlx/commands/train.py",
+    "gmlx/eval_guard.py",
+    "gmlx/gen/benchmarks.py",
+    "gmlx/gen/diffusion.py",
+    "gmlx/gen/generation.py",
+    "gmlx/gen/media_spans.py",
+    "gmlx/gen/prefill_decay.py",
+    "gmlx/gen/thinking_budget.py",
+    "gmlx/load/loader.py",
+    "gmlx/load/mtp_target.py",
+    "gmlx/load/vlm.py",
+    "gmlx/lora_rows.py",
+    "gmlx/serve/admit_gate.py",
+    "gmlx/serve/batch_sched.py",
+    "gmlx/serve/capacity.py",
+    "gmlx/serve/cb_phase.py",
+    "gmlx/serve/decode_batch.py",
+    "gmlx/serve/estimate.py",
+    "gmlx/serve/governor.py",
+    "gmlx/serve/kv_policy.py",
+    "gmlx/serve/live_requests.py",
+    "gmlx/serve/mem_preflight.py",
+    "gmlx/serve/memtrace.py",
+    "gmlx/serve/patches/chat_behavior.py",
+    "gmlx/serve/patches/mtp_thinking.py",
+    "gmlx/serve/patches/row_failed.py",
+    "gmlx/serve/patches/sampling.py",
+    "gmlx/serve/queue_cap.py",
+    "gmlx/serve/residency.py",
+    "gmlx/serve/seed_rows.py",
+    "gmlx/serve/step_timing.py",
+    "gmlx/serve/tick_guard.py",
+    "gmlx/spec/admission.py",
+    "gmlx/spec/ckpt.py",
+    "gmlx/spec/engine.py",
+    "gmlx/spec/kv_quant.py",
+    "gmlx/spec/mtp_load.py",
+    "gmlx/spec/mtp_prefill.py",
+    "gmlx/spec/ragged_decode.py",
+    "gmlx/tui/chat.py",
+    "gmlx/upstream/cascade_sdpa.py",
+    "gmlx/upstream/dsv32_patches.py",
+    "gmlx/upstream/gdn_patches.py",
+    "gmlx/upstream/occupancy_fuse.py",
+    "gmlx/upstream/qkv_fuse.py",
+    "gmlx/upstream/quantized_cache_pack_fix.py",
+    "gmlx/upstream/quantized_sdpa_fix.py",
+    "gmlx/upstream/rotating_cache_fix.py",
+    "gmlx/upstream/seams.py",
+    "gmlx/upstream/softcap_f32.py",
+    "scripts/check-coverage.py",
+    "scripts/kld_harness.py",
+]
+
 [tool.ruff]
 # Vendored third-party code is linted upstream, not here.
 extend-exclude = ["gmlx/_vendor"]

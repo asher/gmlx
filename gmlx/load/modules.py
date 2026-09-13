@@ -1594,6 +1594,9 @@ class LoRAKQuantLinear(nn.Module):
     with nothing published the static ``scale`` applies to every row.
     """
 
+    _kq_tables: dict
+    _kq_extra: list
+
     def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float,
                  slot: int = 0):
         super().__init__()

@@ -47,7 +47,7 @@ token drawn at j-1), which is the proposal the verifier divides by.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -501,6 +501,9 @@ class DFlashDrafter(nn.Module):
         caches = []
         for layer_type in self.config.layer_types:
             if layer_type == "sliding_attention":
+                if self.config.sliding_window is None:
+                    raise ValueError(
+                        "sliding_attention layer without a sliding_window")
                 # Temporal and slack-backed: the draft path reads cache.state
                 # directly and indexes its rows as time.
                 caches.append(BufferedRotatingKVCache(
@@ -692,7 +695,15 @@ class DFlash2Drafter(DFlashDrafter):
 
 # --- target side --------------------------------------------------------------
 
-class DFlashCaptureHooks:
+if TYPE_CHECKING:
+    # The hooks are mixed in ahead of this class; giving pyright the real
+    # base resolves the super() calls against upstream's method set.
+    from mlx_vlm.models.qwen3_5.language import LanguageModel as _CaptureBase
+else:
+    _CaptureBase = object
+
+
+class DFlashCaptureHooks(_CaptureBase):
     """Packed-hidden capture for owned qwen3.5 LanguageModels.
 
     While armed, every hidden the engine sees is ``[trunk | cap ...]``: the

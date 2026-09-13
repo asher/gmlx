@@ -48,7 +48,19 @@ tests, in
 ruff check .
 python scripts/check-docs.py   # docs style and link check, also a CI step
 pre-commit install             # optional, runs ruff on each commit
+pip install "pyright[nodejs]==1.1.414" && pyright   # seam drift check, needs the deps installed
 ```
+
+pyright is a guard against upstream symbol and signature drift, not a type
+checker for the tree. It covers the files in `[tool.pyright].include`, all
+of them at zero errors; the other files that import mlx_vlm or mlx_lm
+statically are listed in `[tool.gmlx.pyright].backlog` and join the gate
+one file at a time as each reaches zero. `tests/test_pyright_scope.py`
+holds both lists to the tree, so a new static import lands in one list or
+the other. A `# pyright: ignore[rule]` is allowed only where the false
+positive comes from upstream typing (a stub that omits the attribute, a
+scalar union, a field added to an upstream dataclass), with a comment
+saying which; keep the count under twenty repo-wide.
 
 ## Things to know before you patch
 

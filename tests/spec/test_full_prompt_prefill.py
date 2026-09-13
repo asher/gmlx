@@ -1449,7 +1449,7 @@ def test_apc_hit_on_injected_request(mtp_model):
     apc_hit_seen = False
 
     # Capture APC log to verify the hit actually fired.
-    apc_log = logging.getLogger("gmlx.spec.ckpt")
+    apc_log = logging.getLogger("gmlx.spec.mtp_prefill")
     log_messages = []
     handler = logging.Handler()
     handler.emit = lambda record: log_messages.append(record.getMessage())
