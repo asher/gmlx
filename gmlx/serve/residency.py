@@ -412,7 +412,8 @@ def _stamp_apc_mode(rg) -> None:
         try:
             rg.apc_mode = mode
         except Exception:
-            pass
+            _log.warning("apc_mode stamp failed; the generator keeps its "
+                         "default mode", exc_info=True)
 
 
 class _ResidencyPool:

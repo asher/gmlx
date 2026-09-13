@@ -15,6 +15,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import time
 import uuid
 from typing import Any, List, Optional
@@ -28,6 +29,8 @@ from .api_contract import COMPLETIONS_CONSUMED, warn_ignored_fields
 from .chat_behavior import _request_stop_sequences
 
 _COMPLETIONS_PATHS = ("/completions", "/v1/completions")
+
+_log = logging.getLogger(__name__)
 
 # Bound once at install time (the route cannot run before install); the
 # sibling patches bind their upstream modules the same way.
@@ -126,13 +129,20 @@ def _include_usage(request: CompletionRequest) -> bool:
     return bool(getattr(so, "include_usage", False))
 
 
+_RECORD_FAILURE_WARNED = False
+
+
 def _record_failure(runtime, model: str, stream: bool, error: str) -> None:
+    global _RECORD_FAILURE_WARNED
     try:
         runtime.metrics.record_failure(endpoint="/v1/completions",
                                        model=model, stream=stream,
                                        error=error)
     except Exception:
-        pass
+        if not _RECORD_FAILURE_WARNED:
+            _RECORD_FAILURE_WARNED = True
+            _log.warning("failure-metrics record raised; failed requests "
+                         "are missing from /v1/metrics", exc_info=True)
 
 
 def _completion_envelope(gen_mod, *, model, stream, prompt_tokens,
