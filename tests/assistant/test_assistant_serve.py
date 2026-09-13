@@ -491,6 +491,9 @@ def test_memory_default_off_and_per_alias_store(monkeypatch, tmp_path):
         def __init__(self, **kw):
             created.append(kw)
 
+        def close(self):
+            pass
+
     import gmlx.assistant.memory as tm
     monkeypatch.setattr(tm, "MemoryStore", FakeStore)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))

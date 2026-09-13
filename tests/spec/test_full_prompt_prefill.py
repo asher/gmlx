@@ -404,10 +404,13 @@ def test_prefill_step_env_override(monkeypatch):
     monkeypatch.setattr(mtp_prefill, "_mtp_prefill_init", lambda s: None)
 
     def fake_batch():
+        # _inputs_embeds: the span-aware wrapper (media_spans) reads it
+        # when a serve test has layered it over prompt_step.
         return types.SimpleNamespace(
             draft_kind="mtp",
             prefill_step_size=None,
             needs_processing=lambda: False,
+            _inputs_embeds=None,
         )
 
     monkeypatch.setenv("PREFILL_STEP_SIZE", "97")
