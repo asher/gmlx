@@ -81,7 +81,7 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
-    def autosize(self, model, budget_fraction: float = None) -> None:
+    def autosize(self, model, budget_fraction: float | None = None) -> None:
         """Size the caches to the box post-load. Pool: raise the block
         cap to a working-budget share when APC_NUM_BLOCKS is unset
         (blocks allocate lazily, so the cap costs nothing until
@@ -166,7 +166,8 @@ class GmlxAPCManager(_apc.APCManager):
                 total -= sizes.pop(k, 0)
             # Mirror of pool_bytes for the exact tier: lets harnesses
             # separate budgeted, evictable retention from real residue.
-            self.stats.exact_bytes = int(total)
+            # gmlx side counter on the stock stats dataclass.
+            self.stats.exact_bytes = int(total)  # pyright: ignore[reportAttributeAccessIssue]
 
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
@@ -524,7 +525,7 @@ class GmlxAPCManager(_apc.APCManager):
                         "APC disk save scheduling failed: %s", e)
             self.stats.pool_used = sum(
                 1 for x in self.pool if x.block_hash is not None)
-            self.stats.pool_bytes = int(
+            self.stats.pool_bytes = int(  # pyright: ignore[reportAttributeAccessIssue]
                 self.stats.pool_used * self.block_size
                 * getattr(self, "_pool_per_token_bytes", 0))
             return new_blocks

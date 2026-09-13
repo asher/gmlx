@@ -48,13 +48,19 @@ generation_stream = _generation_stream()
 
 # --- draft/target sampler RNG coupling -------------------------------------
 
+def _rng_state() -> list[mx.array]:
+    # The mlx.core.random stub does not type ``state``.
+    return mx.random.state  # pyright: ignore[reportReturnType]
+
+
 def _copy_rng_state() -> list[mx.array]:
-    return [mx.array(state) for state in mx.random.state]
+    return [mx.array(state) for state in _rng_state()]
 
 
 def _restore_rng_state(state: list[mx.array]) -> None:
+    live = _rng_state()
     for i, value in enumerate(state):
-        mx.random.state[i] = value
+        live[i] = value
 
 
 def _append_arrays(value: Any, arrays: list[mx.array]) -> None:
@@ -91,8 +97,10 @@ class _SpeculativeSamplerRNG:
     def __init__(self, draft_model: nn.Module, *, enabled: bool):
         self.draft_model = draft_model
         self.enabled = bool(enabled)
-        self._target_rng_state = _copy_rng_state() if self.enabled else None
-        self._draft_rng_state = _copy_rng_state() if self.enabled else None
+        self._target_rng_state: list[mx.array] = (
+            _copy_rng_state() if self.enabled else [])
+        self._draft_rng_state: list[mx.array] = (
+            _copy_rng_state() if self.enabled else [])
 
     def draft_call(self, fn: Callable, *args, **kwargs):
         if not self.enabled:
@@ -109,7 +117,7 @@ class _SpeculativeSamplerRNG:
         result = fn(*args, **kwargs)
 
         arrays = _draft_sampler_state_arrays(self.draft_model)
-        arrays.extend(mx.random.state)
+        arrays.extend(_rng_state())
         if arrays:
             mx.async_eval(*arrays)
 
@@ -133,7 +141,7 @@ class _SpeculativeSamplerRNG:
         arrays = []
         _append_arrays(result, arrays)
         arrays.extend(_draft_sampler_state_arrays(self.draft_model))
-        arrays.extend(mx.random.state)
+        arrays.extend(_rng_state())
         if arrays:
             mx.async_eval(*arrays)
 
@@ -239,10 +247,11 @@ def _mtp_next_block_size(
         return min(budget, native)
     if getattr(draft_model, "prefer_requested_block_size", False):
         return budget
+    accept_lens: Any = draft_model.accept_lens
     return _effective_mtp_block_size(
         requested_block_total,
         configured_block_total,
-        draft_model.accept_lens,
+        accept_lens,
         remaining_budget,
     )
 
@@ -291,7 +300,7 @@ def _mtp_cache_offset(prompt_cache: list[Any]) -> Any:
 
 def _mtp_cache_offset_max(prompt_cache: list[Any]) -> int:
     offset = _mtp_cache_offset(prompt_cache)
-    return int(offset.max().item()) if isinstance(offset, mx.array) else int(offset)
+    return int(offset.max()) if isinstance(offset, mx.array) else int(offset)
 
 
 def _mtp_draft_position(kv_valid_len: Any) -> Any:
@@ -350,7 +359,7 @@ class _MTPVerifyResult:
 
 
 def _mtp_draft_hidden(lm: nn.Module, hidden: mx.array) -> mx.array:
-    prepare = getattr(lm, "speculative_draft_hidden", None)
+    prepare: Callable[..., Any] | None = getattr(lm, "speculative_draft_hidden", None)
     return prepare(hidden) if callable(prepare) else hidden
 
 
@@ -399,7 +408,8 @@ def _mtp_verify_without_logits(
     verify_input: mx.array,
     prompt_cache: list[Any],
 ) -> _MTPVerifyResult | None:
-    verify_hidden = getattr(lm, "speculative_verify_hidden", None)
+    verify_hidden: Callable[..., Any] | None = getattr(
+        lm, "speculative_verify_hidden", None)
     if callable(verify_hidden):
         _note_verify_branch("hook:speculative_verify_hidden", lm)
         result = verify_hidden(verify_input, prompt_cache)
@@ -481,7 +491,8 @@ def _mtp_verify_target(
     sample_target_tokens: bool = True,
 ) -> _MTPVerifyResult:
     if sample_target_tokens:
-        argmax_from_hidden = getattr(lm, "speculative_argmax_from_hidden", None)
+        argmax_from_hidden: Callable[..., Any] | None = getattr(
+            lm, "speculative_argmax_from_hidden", None)
         if callable(argmax_from_hidden):
             result = _mtp_verify_without_logits(lm, verify_input, prompt_cache)
             if result is not None:

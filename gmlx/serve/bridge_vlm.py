@@ -48,7 +48,9 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from contextvars import ContextVar
+from typing import Any
 
 from mlx_vlm import tokenizer_utils as _mlxvlm_tok
 from gmlx.models.vlm_text_only import Model as TextOnlyModel
@@ -233,11 +235,11 @@ class _GgufServerProcessor:
         return getattr(self._wrapper, name)
 
 
-def _as_dict(config) -> dict:
+def _as_dict(config: Any) -> dict:
     if isinstance(config, dict):
         return config
     for attr in ("to_dict", "__dict__"):
-        value = getattr(config, attr, None)
+        value: Callable[..., Any] | dict | None = getattr(config, attr, None)
         if callable(value):
             return dict(value())
         if isinstance(value, dict):
@@ -372,9 +374,10 @@ def _load_serveable_vlm(
     """
     from gmlx.load.vlm import load_vlm_model
 
-    model, _config_dict, processor = load_vlm_model(
+    loaded = load_vlm_model(
         gguf_path, mmproj_path, hf_source=hf_source, verbose=False
     )
+    model, processor = loaded[0], loaded[2]
     # Return the model's own dataclass config (what stock load_model_resources
     # returns as the 3rd element), not the synthesized dict.
     return model, processor, model.config
@@ -387,7 +390,7 @@ def _make_text_processor(tokenizer) -> "_GgufServerProcessor":
     detokenizer. (The VLM path gets an engine-ready processor from the loader and
     does not use this.)"""
     backend = getattr(tokenizer, "_tokenizer", tokenizer)
-    eos = getattr(tokenizer, "eos_token_ids", None) or getattr(
+    eos: Any = getattr(tokenizer, "eos_token_ids", None) or getattr(
         tokenizer, "eos_token_id", None
     )
     # StoppingCriteria.add_eos_token_ids() mutates this list in place, so it must
@@ -662,7 +665,7 @@ def load_serveable_model(
                 )
         moe_experts = moe_expert_mass = None
         moe_miss_shed = moe_layer_shed = moe_prestage = None
-    _levers = dict(
+    _levers: dict[str, Any] = dict(
         moe_experts=moe_experts, moe_expert_mass=moe_expert_mass,
         moe_miss_shed=moe_miss_shed, moe_prestage=moe_prestage,
         moe_layer_shed=moe_layer_shed)
@@ -761,7 +764,7 @@ def _install_drafter_injection() -> None:
         _apply_draft_block_size_override(result)
         return result
 
-    drafters.load_drafter = load_drafter
+    setattr(drafters, "load_drafter", load_drafter)
     setattr(drafters, _DRAFTER_PATCH_FLAG, True)
 
 
@@ -825,7 +828,7 @@ class _DrafterSourceFilter(logging.Filter):
     def filter(self, record):
         if str(record.msg).startswith("Loading speculative drafter"):
             args = record.args or ()
-            path = args[-1] if args else None
+            path = args[-1] if isinstance(args, tuple) and args else None
             if isinstance(path, str) and os.path.abspath(path) in _MTP_DRAFTER_STASH:
                 return False
         return True
@@ -951,7 +954,7 @@ def install_gguf_server_bridge() -> None:
             # `moe_layer_shed:`/`moe_prestage:` / the paired serve flags) ride
             # along; None keeps the loader default / trained fan-out.
             stream = getattr(spec, "stream", None)
-            feeders = dict(
+            feeders: dict[str, Any] = dict(
                 moe_experts=getattr(spec, "moe_experts", None),
                 moe_expert_mass=getattr(spec, "moe_expert_mass", None),
                 moe_miss_shed=getattr(spec, "moe_miss_shed", None),
@@ -1053,7 +1056,7 @@ def install_gguf_server_bridge() -> None:
             _raise_if_first_party_import(e)
             raise
 
-    generation.load_model_resources = load_model_resources
+    setattr(generation, "load_model_resources", load_model_resources)
     setattr(generation, _BRIDGE_FLAG, True)
     # generation.py logs on the parent "mlx_vlm.server" logger.
     engine_log = logging.getLogger("mlx_vlm.server")
@@ -1077,7 +1080,7 @@ def install_gguf_server_bridge() -> None:
 # finds it, and exposes the resolved spec for *this* request through a ContextVar
 # (mirroring residency's ``_active_entry`` discipline).
 
-_RESOLVED_MODELS: dict[str, "object"] = {}     # id -> ResolvedModel
+_RESOLVED_MODELS: dict[str, Any] = {}          # id -> ResolvedModel
 _PATH_TO_IDS: dict[str, list[str]] = {}        # abspath -> [id, ...]
 _SERVER_CFG = None                             # the live ServerCfg (for re-resolve)
 # The ResolvedModel for the request in flight - set at the residency seam, read at

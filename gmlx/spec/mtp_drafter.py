@@ -83,7 +83,7 @@ def _cache_offset(caches) -> int:
         return 0
     off = getattr(caches[0], "offset", 0)
     if isinstance(off, mx.array):
-        return int(off.max().item()) if off.size else 0
+        return int(off.max()) if off.size else 0
     return int(off)
 
 
@@ -459,7 +459,7 @@ class QwenMTPDrafter(nn.Module):
             for cache in self._cache:
                 cache.trim(self._round_appended)
 
-        draft_rows = draft_tokens.tolist()
+        draft_rows: Any = draft_tokens.tolist()
         row_tokens: list[list[int]] = []
         row_hiddens: list[list[mx.array]] = []
         for row, accepted_i in enumerate(accepted):
