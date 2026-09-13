@@ -54,12 +54,16 @@ dispatchers read the module global at call time).
 from __future__ import annotations
 
 import collections
+import logging
 
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
 
+_log = logging.getLogger(__name__)
+
 _installed = False
+_FALLBACK_WARNED = False
 
 _MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
 
@@ -196,8 +200,14 @@ def _make_fixed(orig, kq_fn):
                         queries, kw, vw, float(scale), starts=starts,
                         k_scales=ks, k_biases=kb,
                         v_scales=vs, v_biases=vb)
-                except Exception:
-                    pass  # any unsupported layout -> stock fallback
+                except Exception as exc:  # unsupported layout -> stock
+                    global _FALLBACK_WARNED
+                    if not _FALLBACK_WARNED:
+                        _FALLBACK_WARNED = True
+                        _log.warning(
+                            "quantized sdpa route failed (%s: %s); using "
+                            "the stock fallback for such shapes",
+                            type(exc).__name__, exc)
         if (
             isinstance(mask, mx.array)
             and mask.ndim == 4

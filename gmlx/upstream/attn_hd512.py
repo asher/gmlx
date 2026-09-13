@@ -50,10 +50,26 @@ entirely with GMLX_HD512=0.
 """
 from __future__ import annotations
 
+import logging
 
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+
+_log = logging.getLogger(__name__)
+
+_FALLBACK_WARNED: set[str] = set()
+
+
+def _warn_fallback_once(route: str, exc: BaseException) -> None:
+    """Kernel build failed at call time: the route stays eligible and
+    fails again every call, silently costing the fallback path. Eval-time
+    (lazy) errors escape this guard by design."""
+    if route not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(route)
+        _log.warning("sdpa route %s failed (%s: %s); using the stock "
+                     "fallback for such shapes", route,
+                     type(exc).__name__, exc)
 
 try:
     import mlx_kquant
@@ -454,8 +470,8 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
             _route("gqa_decode", q, k, mask)
             return mlx_kquant.sdpa_decode_gqa(
                 q, k, v, float(scale), sinks=kw.get("sinks"))
-        except Exception:
-            pass  # any unsupported shape -> stock fallback
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("gqa_decode", exc)
     if (_FA_DECODE and _HAS_FA_VERIFY and kw.get("sinks") is None
             and _fa_decode_eligible(q, k, v, mask)):
         try:
@@ -466,8 +482,8 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
                 mx.contiguous(q.reshape(B, kv, hq // kv, hd)),
                 k, v, float(scale), 1)
             return out.reshape(B, hq, 1, hd)
-        except Exception:
-            pass  # older kernel gate (q_len >= 2) -> stock fallback
+        except Exception as exc:  # older kernel gate (q_len >= 2) -> stock
+            _warn_fallback_once("fa_decode", exc)
     if (_VERIFY_FA and _HAS_FA_VERIFY and kw.get("sinks") is None
             and _fa_verify_eligible(q, k, v, mask)):
         try:
@@ -491,30 +507,30 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
                      for i in range(n)],
                     axis=2)
             return out.reshape(B, hq, qL, hd)
-        except Exception:
-            pass  # any unsupported shape -> stock fallback
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("fa_verify", exc)
     if (_VERIFY_GEMM and kw.get("sinks") is None
             and _verify_gemm_eligible(q, k, v, mask)):
         try:
             _route("verify_gemm", q, k, mask)
             return _verify_gemm(q, k, v, float(scale), mask == "causal")
-        except Exception:
-            pass  # any unsupported shape -> stock fallback
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("verify_gemm", exc)
     if (_HAS_COMPILED and _eligible(q, k, v, mask)
             and kw.get("sinks") is None):
         try:
             _route("sdpa_vector", q, k, mask)
             return mlx_kquant.sdpa_vector(
                 q, k, v, float(scale), causal=(mask == "causal"))
-        except Exception:
-            pass  # any unsupported shape -> stock fallback
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("sdpa_vector", exc)
     elif _prefill_eligible(q, k, v, mask):
         try:
             _route("chunked_prefill", q, k, mask)
             return _chunked_prefill(q, k, v, scale, mask, _PREFILL_TILE,
                                     sinks=kw.get("sinks"))
-        except Exception:
-            pass  # any unsupported shape -> stock fallback
+        except Exception as exc:  # any unsupported shape -> stock fallback
+            _warn_fallback_once("chunked_prefill", exc)
     _route("stock", q, k, mask)
     _stock_depth_warning(q, k, mask, kw.get("sinks"))
     return _orig_sdpa(q, k, v, scale=scale, mask=mask, **kw)
