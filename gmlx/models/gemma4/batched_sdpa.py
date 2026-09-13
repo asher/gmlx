@@ -222,8 +222,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
                                       starts=starts)
             _ONECALL[0] += 1
             return out
-        except Exception:
-            pass  # op-build rejection -> per-row loop
+        except Exception as exc:  # op-build rejection -> per-row loop
+            attn_hd512._warn_fallback_once("g4_batched_decode", exc)
     # qL==1 needs no mask after the tail slice; verify blocks (qL 2..8)
     # occupy the LAST qL key positions, which is exactly mx.fast's
     # end-aligned "causal" semantics on the sliced row.

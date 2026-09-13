@@ -123,6 +123,28 @@ def test_salt_gated_on_conversion(kvarn_ops_ok):
         assert man._exact_extra_salt == 0, type(model).__name__
 
 
+def test_salt_failure_on_converting_model_salts_per_boot(
+        kvarn_ops_ok, monkeypatch, caplog):
+    # A converting model whose salt computation fails must not fall back
+    # to the XOR identity: identity keys would warm-adopt fp16 entries
+    # under the wrong wire config. It gets a random per-boot salt.
+    import gmlx.cache.kvarn_apc as ka
+
+    def _boom(model=None):
+        raise RuntimeError("salt probe broke")
+
+    monkeypatch.setattr(ka, "kvarn_entry_salt", _boom)
+    man = SimpleNamespace(_exact_extra_salt=0)
+    with caplog.at_level("WARNING", logger="gmlx.cache.kvarn_apc"):
+        apply_kvarn_salt(man, _stamped(_hybrid(), "kvarn"))
+    assert man._exact_extra_salt != 0
+    assert any("per-boot" in r.message for r in caplog.records)
+    # Non-converting models still take the identity default on failure.
+    man2 = SimpleNamespace(_exact_extra_salt=0)
+    apply_kvarn_salt(man2, _stamped(_rec_gemma(), "kvarn"))
+    assert man2._exact_extra_salt == 0
+
+
 def test_salt_zero_without_a_kvarn_stamp(kvarn_ops_ok, monkeypatch):
     monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")  # the env is not read
     man = SimpleNamespace(_exact_extra_salt=0)

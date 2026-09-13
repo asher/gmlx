@@ -6,6 +6,7 @@ bodies."""
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import time
 
@@ -19,6 +20,8 @@ from ._common import (
     _get_pool,
     _remove_routes,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _mtime(path) -> int:
@@ -854,9 +857,17 @@ def _release_preload_holds(pool, path, *, only_evicted: bool = False) -> int:
         try:
             if hasattr(pool, "unmark_retained"):
                 pool.unmark_retained(hold)
+        except Exception:
+            _log.warning("preload hold unmark failed; releasing anyway",
+                         exc_info=True)
+        try:
             hold.release()
         except Exception:
-            pass
+            # A dropped-but-unreleased hold would pin the model resident
+            # for the process lifetime; keep it tracked for a retry.
+            _log.warning("preload hold release failed; keeping it tracked",
+                         exc_info=True)
+            continue
         _PRELOAD_HOLDS.remove(hold)
         released += 1
     return released

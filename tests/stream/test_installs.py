@@ -87,17 +87,25 @@ def test_release_closes_every_helper_and_drops_the_record():
     assert installs.live_wired_bytes() == 0
 
 
-def test_release_survives_a_helper_that_raises():
-    # One failing close must not leak the others' arenas and fds.
+def test_release_survives_a_helper_that_raises(caplog):
+    # One failing close must not leak the others' arenas and fds. The
+    # failed helper stays attached and the model keeps its wired charge:
+    # its mlocked ranges may still be live.
     class _Bad(_Helper):
         def close(self):
             raise RuntimeError("closed twice")
 
     m = _Holder()
-    pin = _Helper()
-    m._kq_decode_feeder, m._kq_weights_pin = _Bad(), pin
-    installs.release(m)
+    bad, pin = _Bad(), _Helper()
+    m._kq_decode_feeder, m._kq_weights_pin = bad, pin
+    installs.record(m, 90)
+    with caplog.at_level("WARNING", logger="gmlx.stream.installs"):
+        installs.release(m)
     assert pin.closed
+    assert m._kq_decode_feeder is bad and m._kq_weights_pin is None
+    assert installs.live_wired_bytes() == 90
+    assert any("close failed" in r.message for r in caplog.records)
+    installs._LIVE.clear()
 
 
 def test_streaming_owner_descends_the_wrapper_chain():

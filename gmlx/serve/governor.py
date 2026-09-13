@@ -980,6 +980,7 @@ def install_governor() -> bool:
     if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
         return True
     _orig = _ar.BatchGenerator._next
+    harvest_warned = [False]
 
     def _governed_next(self, **kwargs):
         try:
@@ -991,7 +992,10 @@ def install_governor() -> bool:
         try:
             _harvest_tick(self, _state(self), out)
         except Exception:
-            pass
+            if not harvest_warned[0]:
+                harvest_warned[0] = True
+                _log.warning("[governor] harvest failed; band inputs may "
+                             "go stale (warn-once)", exc_info=True)
         return out
 
     setattr(_governed_next, _INSTALLED_FLAG, True)

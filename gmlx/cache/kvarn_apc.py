@@ -31,6 +31,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import logging
+import secrets
+
+_log = logging.getLogger(__name__)
 
 _FLAG = "_gmlx_kvarn_apc"
 _MODE_STAMP = "_gmlx_kvarn_apc_exact"
@@ -99,15 +103,31 @@ def apply_kvarn_salt(manager, model) -> None:
     pairing, gated on the model actually converting: a kvarn-window boot
     of a zero-conversion arch (deepseek4, recurrent_gemma) runs pure fp16
     caches, and salting its entries would cold-miss every cross-boot
-    lookup. Failures leave the salt at its XOR-identity default."""
+    lookup. The XOR-identity default is correct only for that
+    non-converting case; a converting model whose salt computation fails
+    gets a random per-boot salt instead, so its entries stay out of the
+    fp16 hash space and cold-miss across boots rather than warm-adopt
+    under the wrong wire config."""
+    if manager is None or model is None:
+        return
+    if not kvarn_model_converts(model):
+        return
     try:
-        if manager is None or model is None:
-            return
         salt = kvarn_entry_salt(model)
-        if salt and kvarn_model_converts(model):
-            manager._exact_extra_salt = salt
     except Exception:
-        pass
+        salt = secrets.randbits(63) | 1
+        _log.warning(
+            "kvarn exact-tier salt computation failed; salting with a "
+            "per-boot value (cross-boot APC reuse off for this model)",
+            exc_info=True)
+    if not salt:
+        return
+    try:
+        manager._exact_extra_salt = salt
+    except Exception:
+        _log.warning(
+            "kvarn exact-tier salt could not be applied; kvarn entries "
+            "share the fp16 hash space until the next boot", exc_info=True)
 
 
 def kvarn_entry_salt(model=None) -> int:

@@ -4,11 +4,15 @@ sampler."""
 
 from __future__ import annotations
 
+import logging
+
 import gmlx.serve.bridge_vlm as serving
 from ._common import (
     _PATCH_FLAG,
     _install_gen_args_transform,
 )
+
+_log = logging.getLogger(__name__)
 
 
 # Sampling-profile injection
@@ -78,9 +82,22 @@ def _effective_request_param(request, spec, key, default=None):
     return default
 
 
+_NEWLINE_PROBE_WARNED = False
+
+
+def _warn_newline_probe_once(exc: BaseException) -> None:
+    global _NEWLINE_PROBE_WARNED
+    if not _NEWLINE_PROBE_WARNED:
+        _NEWLINE_PROBE_WARNED = True
+        _log.warning(
+            "XTC newline probe failed (%s: %s); newline stays maskable "
+            "by XTC for this process", type(exc).__name__, exc)
+
+
 def _xtc_special_tokens(processor) -> list:
     """Newline + EOS token ids, excluded from XTC masking (the same convention
-    as the run/chat CLI). Defensive: any tokenizer shape miss degrades to []."""
+    as the run/chat CLI). Defensive: any tokenizer shape miss degrades to the
+    ids that did resolve, with a warn-once for the newline probe."""
     tok = getattr(processor, "tokenizer", processor)
     if tok is None:
         return []
@@ -90,10 +107,10 @@ def _xtc_special_tokens(processor) -> list:
     except TypeError:
         try:
             ids.extend(tok.encode("\n"))
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except Exception as exc:
+            _warn_newline_probe_once(exc)
+    except Exception as exc:
+        _warn_newline_probe_once(exc)
     eos = getattr(tok, "eos_token_ids", None)
     if eos is None:
         eos = getattr(tok, "eos_token_id", None)
