@@ -32,6 +32,8 @@ for _sub in sorted(_TESTS_DIR.iterdir()):
         _p = str(_sub)
         if _p not in sys.path:
             sys.path.insert(0, _p)
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
 
 
 def pytest_configure(config):

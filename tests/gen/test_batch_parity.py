@@ -90,7 +90,7 @@ TIE_EPS = 1.3
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 
 # helpers

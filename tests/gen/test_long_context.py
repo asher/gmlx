@@ -111,7 +111,7 @@ _NEEDLE_SENTENCE = (f"For the record, the vault access code written in the "
 _NEEDLE_QUERY = ("\nAs noted near the beginning of this document, the vault "
                  "access code written in the expedition logbook is")
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 
 # helpers

@@ -155,7 +155,6 @@ gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
 testpaths = ["tests"]
 markers = [
     "integration: end-to-end test needing a real GGUF (and, for parity, a llama.cpp binary); skipped unless KQUANT_TEST_GGUF_DIR is set",
-    "slow: long-running (large prompts / long generation)",
     "needs_kvarn_ops: dispatches kvarn Metal kernels; skipped when the mlx-kquant ops probe fails (CPU device, op-less wheel)",
     "needs_kvarn_row_ends: dispatches the decode kernels with per-row ends; skipped unless the installed mlx-kquant is 0.4.9 or later",
 ]

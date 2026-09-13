@@ -21,7 +21,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 # A 30B-class VLM forward is a GPU workload; the forced-CPU stream keeps to
 # logic tests.

@@ -22,7 +22,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+pytestmark = pytest.mark.integration
 
 _NEEDS_GPU = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),
