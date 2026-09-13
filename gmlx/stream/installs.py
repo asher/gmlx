@@ -14,7 +14,10 @@ charged against the new one (``live_wired_bytes``).
 
 from __future__ import annotations
 
+import logging
 import weakref
+
+_log = logging.getLogger(__name__)
 
 # The attributes the loader hangs a streaming install on. Each is closeable
 # and each holds host resources (shard fds, staging pools, mlocked ranges)
@@ -136,6 +139,7 @@ def release(model) -> None:
     import gc
 
     owner = streaming_owner(model)
+    close_failed = False
     for attr in STREAM_ATTRS:
         helper = getattr(owner, attr, None)
         if helper is None:
@@ -145,12 +149,18 @@ def release(model) -> None:
             try:
                 close()
             except Exception:
-                pass
+                close_failed = True
+                _log.warning("streaming teardown: %s close failed; keeping "
+                             "it tracked", attr, exc_info=True)
+                continue    # keep the attr so the helper stays reachable
         try:
             object.__setattr__(owner, attr, None)
         except Exception:
             pass
-    _LIVE[:] = [(r, n) for r, n in _LIVE if r() is not model]
+    # A model with an un-closed helper keeps its wired-byte charge; the
+    # arena prune already keeps open feeders via _open.
+    if not close_failed:
+        _LIVE[:] = [(r, n) for r, n in _LIVE if r() is not model]
     _ARENAS[:] = [r for r in _ARENAS if _open(r())]
     del owner, model
     gc.collect()
