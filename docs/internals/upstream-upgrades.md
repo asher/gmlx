@@ -23,6 +23,7 @@ environment inside those bounds:
 | declared versions | `pyproject.toml` | the exact mlx-vlm pin and the mlx-lm and mlx-kquant floors described above |
 | seam contract | `tests/upstream/test_upstream_seams.py` | every patched symbol is pinned to a source fingerprint. Drift fails CI naming the seam |
 | runtime gate | `check_upstream_versions`, at CLI entry | mlx, mlx-lm or mlx-vlm below its floor refuses to run with an upgrade message, and newer than the qualified set warns once. `gmlx doctor` is exempt |
+| static-import check | `pyright`, in the macOS CI job | the files in `[tool.pyright].include` are checked against the installed upstream source; a moved symbol or changed signature there fails CI |
 
 ## Watching upstream releases
 

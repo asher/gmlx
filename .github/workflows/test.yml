@@ -89,6 +89,17 @@ jobs:
         # renaming a model_type - the weekly cron catches those) must not leave
         # the committed doc lying about what loads.
         run: python scripts/check-coverage.py --check --strict
+      - name: Seam drift check (pyright)
+        # Pyright infers upstream signatures from the installed mlx-vlm /
+        # mlx-lm source, so it needs this job's environment, not the
+        # deps-free lint job. One interpreter is enough: the checked
+        # surface does not vary by Python version. On the weekly cron a
+        # new upstream release can fail this step with no repo change;
+        # that is the drift signal, handled per docs/internals/upstream-upgrades.md.
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install "pyright[nodejs]==1.1.414"
+          pyright
       - name: Run CPU logic tests
         env:
           # Hosted runners have no dependable Metal device; the conftest flips
