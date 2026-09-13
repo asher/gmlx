@@ -1126,7 +1126,8 @@ class _ResidencyPool:
             try:
                 close()
             except Exception:
-                pass
+                _log.warning("teardown: %s close failed",
+                             type(owner).__name__, exc_info=True)
         # A larger-than-RAM model leaves a page-cache remnant that taxes
         # whoever faults next (gmlx.stream.pagecache). Process exit sweeps it for
         # CLI runs; a long-lived server sweeps at eviction, before the next
@@ -1161,7 +1162,8 @@ class _ResidencyPool:
                         kq.residency_erase(a)
                     kq.residency_commit()
             except Exception:
-                pass
+                _log.warning("teardown: residency erase failed; the wired "
+                             "accounting may be stale", exc_info=True)
             m._kq_resident_arrays = None
         entry.model_cache = {}
         entry.response_generator = None
@@ -1242,7 +1244,8 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
             if box.ring_fits:
                 ring = int(model.ring_bytes)
     except Exception:
-        pass
+        _log.warning("streaming footprint: plan for %s failed; arena and "
+                     "ring priced at zero", model_path, exc_info=True)
     return every + max(0, arena or 0) + ring
 
 

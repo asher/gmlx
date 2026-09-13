@@ -276,14 +276,14 @@ def install_runtime_snapshot_enrichment() -> None:
                     k: st[k] for k in ("budget_bytes", "resident_bytes")
                     if k in st}
             except Exception:
-                pass
+                _log.debug("metrics snapshot: residency unavailable", exc_info=True)
             # gmlx wires APC per residency entry. Any resident manager
             # counts as enabled.
             try:
                 if pool.apc_managers() and isinstance(base.get("apc"), dict):
                     base["apc"]["enabled"] = True
             except Exception:
-                pass
+                _log.debug("metrics snapshot: apc unavailable", exc_info=True)
         try:
             import mlx.core as mx
 
@@ -311,25 +311,25 @@ def install_runtime_snapshot_enrichment() -> None:
                     int(getattr(f, "_lookups", 0)) for f in arenas)
             base["memory"] = mem
         except Exception:
-            pass
+            _log.debug("metrics snapshot: memory unavailable", exc_info=True)
         try:
             from ..admit_gate import admit_stats
 
             base["admission"] = admit_stats()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: admission unavailable", exc_info=True)
         try:
             from gmlx.cache.fresh_gate import fresh_stats
 
             base["freshness"] = fresh_stats()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: freshness unavailable", exc_info=True)
         try:
             from ..governor import governor_stats
 
             base["governor"] = governor_stats()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: governor unavailable", exc_info=True)
         try:
             from ..capacity import get_table
 
@@ -337,31 +337,31 @@ def install_runtime_snapshot_enrichment() -> None:
             if cap is not None:
                 base["capacity"] = cap
         except Exception:
-            pass
+            _log.debug("metrics snapshot: capacity unavailable", exc_info=True)
         try:
             from ..queue_cap import queue_cap_stats
 
             base["queue"] = queue_cap_stats()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: queue unavailable", exc_info=True)
         try:
             from ..queue_cap import concurrency_stats
 
             base["concurrency"] = concurrency_stats()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: concurrency unavailable", exc_info=True)
         try:
             from ..estimate import rates_view
 
             base["rates"] = rates_view()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: rates unavailable", exc_info=True)
         try:
             from ..live_requests import live_requests_view
 
             base["requests"] = live_requests_view()
         except Exception:
-            pass
+            _log.debug("metrics snapshot: requests unavailable", exc_info=True)
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True
@@ -1004,8 +1004,9 @@ def spawn_preload_warm(model_id: str | None, extras=()):
                 continue
             try:
                 _warm_and_release(mid)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[server] preload: {mid} failed, loads lazily on "
+                      f"first request ({type(exc).__name__}: {exc})")
 
     thread = threading.Thread(target=_run, name="gmlx-preload-warm", daemon=True)
     thread.start()

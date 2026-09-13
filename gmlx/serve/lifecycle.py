@@ -1322,8 +1322,9 @@ def service_uninstall(host: str, port) -> int:
             settings = _mb.load_menubar_settings()
             settings["autostart"] = None
             _mb.save_menubar_settings(settings)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"  note: could not clear the menu-bar autostart record "
+                  f"({exc})", file=sys.stderr)
         print(f"uninstalled launchd agent {MENUBAR_AGENT_LABEL} "
               "(menu bar login item; a running server is left up - "
               "`gmlx stop` for that)")

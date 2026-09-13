@@ -45,6 +45,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import os
 import sys
 import threading
@@ -53,6 +54,8 @@ import uuid
 
 from .brain import AssistantBrain, ToolRegistry
 from gmlx.talk.client import TalkClientError, stream_chat
+
+_log = logging.getLogger(__name__)
 
 _ASSISTANT_FLAG = "_kq_gguf_assistant_serve"
 _MAX_CONCURRENT_TURNS = 4    # immediate 429 above this, per process
@@ -100,7 +103,8 @@ class _AssistantState:
             try:
                 m.close()
             except Exception:
-                pass
+                _log.warning("assistant memory store close failed; queued "
+                             "facts may be lost", exc_info=True)
 
     def try_acquire(self) -> bool:
         with self._lock:
