@@ -342,3 +342,35 @@ def test_keep_missing_model_field():
     r = client.post("/v1/keep", json={})
     assert r.status_code == 400, r.text
     assert r.json() == {"status": "error", "message": "missing 'model'"}
+
+
+def test_release_preload_holds_keeps_hold_on_release_failure(caplog):
+    """A hold whose release() raises must stay tracked: dropping it
+    un-released would pin the model resident for the process lifetime."""
+    from types import SimpleNamespace
+
+    class _BadHold:
+        _entry = SimpleNamespace(model_path="/abs/qwen.gguf")
+        released = False
+
+        def release(self):
+            raise RuntimeError("release broke")
+
+    class _GoodHold:
+        _entry = SimpleNamespace(model_path="/abs/qwen.gguf")
+        released = False
+
+        def release(self):
+            self.released = True
+
+    bad, good = _BadHold(), _GoodHold()
+    sp_routes._PRELOAD_HOLDS[:] = [bad, good]
+    try:
+        with caplog.at_level("WARNING", logger="gmlx.serve.patches.routes"):
+            n = sp_routes._release_preload_holds(object(), None)
+        assert n == 1
+        assert good.released
+        assert sp_routes._PRELOAD_HOLDS == [bad]
+        assert any("keeping it tracked" in r.message for r in caplog.records)
+    finally:
+        sp_routes._PRELOAD_HOLDS.clear()
