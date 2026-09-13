@@ -5,6 +5,7 @@ profile capture."""
 from __future__ import annotations
 
 import importlib
+import logging
 
 
 import gmlx.serve.bridge_vlm as serving
@@ -14,6 +15,8 @@ from ._common import (
     _wrap_post_routes,
 )
 from . import routes as _routes
+
+_log = logging.getLogger(__name__)
 
 
 # Off-loop model load - keep /health (and siblings) responsive during a load
@@ -232,8 +235,11 @@ async def _keepalive_sse(body, interval: float | None):
         task.cancel()
         try:
             await task
-        except BaseException:
-            pass
+        except asyncio.CancelledError:
+            pass    # the expected unwind of our own cancel
+        except Exception:
+            _log.warning("SSE pump task died with an unreported error",
+                         exc_info=True)
         aclose = getattr(body, "aclose", None)
         if aclose is not None:
             try:
