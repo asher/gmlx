@@ -21,7 +21,7 @@ from mlx_vlm.speculative import utils as su  # noqa: E402
 
 import mlx_kquant as kq  # noqa: E402
 
-import gmlx.spec.engine as spec_engine  # noqa: E402
+import gmlx.spec.kv_quant as kv_quant  # noqa: E402
 from gmlx.cache.kvarn_cache import KVarNKVCache  # noqa: E402
 from kvarn_testlib import Args, D, H, filled, needs_kvarn_ops, tokens  # noqa: E402
 
@@ -84,7 +84,7 @@ def _mk(lm=None, batch_size=1, make_cache=None):
 
 def test_params_kvarn_scheme_alone(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    assert spec_engine._spec_kv_quant_params() == dict(
+    assert kv_quant._spec_kv_quant_params() == dict(
         scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=1024)
 
 
@@ -92,28 +92,28 @@ def test_params_kvarn_bits_and_tail(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("KV_TAIL_TOKENS", "256")
-    assert spec_engine._spec_kv_quant_params() == dict(
+    assert kv_quant._spec_kv_quant_params() == dict(
         scheme="kvarn", kv_bits=4, value_bits=4, tail_tokens=256)
 
 
 def test_params_kvarn_malformed(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("KV_BITS", "4.5")
-    assert spec_engine._spec_kv_quant_params() is None
+    assert kv_quant._spec_kv_quant_params() is None
 
 
 def test_params_kvarn_kill_switch(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("GMLX_SPEC_KV_QUANT", "0")
-    assert spec_engine._spec_kv_quant_params() is None
+    assert kv_quant._spec_kv_quant_params() is None
 
 
 def test_params_affine_unchanged(restorable):
     restorable.setenv("KV_BITS", "8")
-    assert spec_engine._spec_kv_quant_params() == dict(
+    assert kv_quant._spec_kv_quant_params() == dict(
         scheme="uniform", kv_bits=8, kv_group_size=64)
     restorable.setenv("KV_QUANT_SCHEME", "turboquant")
-    assert spec_engine._spec_kv_quant_params() is None
+    assert kv_quant._spec_kv_quant_params() is None
 
 
 def _stamp(lm, verdict="full", **single):
@@ -127,19 +127,19 @@ def _stamp(lm, verdict="full", **single):
 def test_stamped_params_rule_the_boot_env(restorable):
     # No stamp: None, so the boot env decides. A stamp: its scheme and
     # widths, {} when it quantizes nothing.
-    assert spec_engine._stamped_spec_params(_FakeLM()) is None
+    assert kv_quant._stamped_spec_params(_FakeLM()) is None
     kv = _stamp(_FakeLM(), scheme="kvarn", bits=4, value_bits=None,
                 tail_tokens=256)
-    assert spec_engine._stamped_spec_params(kv) == dict(
+    assert kv_quant._stamped_spec_params(kv) == dict(
         scheme="kvarn", kv_bits=4, value_bits=4, tail_tokens=256)
     kv = _stamp(_FakeLM(), scheme="kvarn", bits=6, value_bits=5,
                 tail_tokens=None)
-    assert spec_engine._stamped_spec_params(kv) == dict(
+    assert kv_quant._stamped_spec_params(kv) == dict(
         scheme="kvarn", kv_bits=6, value_bits=5, tail_tokens=1024)
     off = _stamp(_FakeLM(), scheme="uniform", bits=None, group_size=64)
-    assert spec_engine._stamped_spec_params(off) == {}
+    assert kv_quant._stamped_spec_params(off) == {}
     aff = _stamp(_FakeLM(), scheme="uniform", bits=8, group_size=32)
-    assert spec_engine._stamped_spec_params(aff) == dict(
+    assert kv_quant._stamped_spec_params(aff) == dict(
         scheme="uniform", kv_bits=8, kv_group_size=32)
 
 
@@ -150,17 +150,17 @@ def test_stamped_params_keep_a_declined_stamp_fp16():
     for scheme in ("uniform", "kvarn"):
         dropped = _stamp(_FakeLM(), verdict="dropped", scheme=scheme, bits=8,
                          group_size=64, value_bits=None, tail_tokens=None)
-        assert spec_engine._stamped_spec_params(dropped) == {}
+        assert kv_quant._stamped_spec_params(dropped) == {}
     err = _stamp(_FakeLM(), verdict="error", scheme="uniform", bits=8,
                  group_size=64)
-    assert spec_engine._stamped_spec_params(err) == {}
+    assert kv_quant._stamped_spec_params(err) == {}
 
 
 def test_stamped_params_honor_a_zero_tail():
     # tail 0 disables the fp16 tail; it is not the default's absence.
     kv = _stamp(_FakeLM(), scheme="kvarn", bits=6, value_bits=None,
                 tail_tokens=0)
-    assert spec_engine._stamped_spec_params(kv) == dict(
+    assert kv_quant._stamped_spec_params(kv) == dict(
         scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=0)
 
 
@@ -171,9 +171,9 @@ def test_stamped_params_honor_a_zero_tail():
 def test_b1_mtp_kvarn_converts(restorable, kvarn_ops_ok, caplog):
     import logging
 
-    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
+    caplog.set_level(logging.INFO, logger="gmlx.spec.kv_quant")
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk()
     # The shared carve-out holds the last layer of a deep stack fp16.
     assert type(caches[0]) is KVarNKVCache
@@ -189,7 +189,7 @@ def test_b1_mtp_kvarn_env_widths(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("KV_TAIL_TOKENS", "256")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk()
     assert caches[0].k_bits == 4 and caches[0].v_bits == 4
     assert caches[0].tail_cap == 256
@@ -199,7 +199,7 @@ def test_b1_mtp_kvarn_env_widths(restorable, kvarn_ops_ok):
 def test_b1_mtp_kvarn_from_the_stamp(restorable, kvarn_ops_ok):
     # Boot env says fp16; this model was loaded at kvarn k4 tail 256.
     restorable.delenv("KV_QUANT_SCHEME", raising=False)
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     lm = _stamp(_FakeLM(), scheme="kvarn", bits=4, value_bits=None,
                 tail_tokens=256)
     caches = _mk(lm=lm)
@@ -213,7 +213,7 @@ def test_b1_mtp_kvarn_from_the_stamp(restorable, kvarn_ops_ok):
 
 def test_readback_target_declines(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk(lm=_ReadbackLM())
     assert all(type(c) is not KVarNKVCache for c in caches)
 
@@ -223,7 +223,7 @@ def test_qwen35_arch_converts(restorable, kvarn_ops_ok):
     # The dispatch arm lifted the qwen3.5 bypass: the arch converts like
     # any other 128-dim stack (recurrent layers stay untouched).
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk(lm=_FakeLM(model_type="qwen3_5"))
     assert sum(type(c) is KVarNKVCache for c in caches) == 1
     assert type(caches[1]) is _SSMCache
@@ -237,7 +237,7 @@ def _batch_stack(lm, lp):
 
 def test_batch_without_kv_layers_passes_through(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     sentinel = ["stock"]
     out = _mk(batch_size=2, make_cache=lambda lm, lp: sentinel)
     assert out is sentinel
@@ -254,9 +254,9 @@ def test_batch_converts_to_kvarn_rows(restorable, kvarn_ops_ok, caplog):
 
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
 
-    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
+    caplog.set_level(logging.INFO, logger="gmlx.spec.kv_quant")
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     caches = _mk(batch_size=2, make_cache=_batch_stack)
     assert type(caches[0]) is BatchKVarNKVCache
     assert isinstance(caches[1], _SSMCache)
@@ -272,9 +272,9 @@ def test_batch_declines_with_the_b1_reasons(restorable, kvarn_ops_ok, caplog):
     from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kvarn_cache import BatchKVarNKVCache
 
-    caplog.set_level(logging.WARNING, logger="gmlx.spec.engine")
+    caplog.set_level(logging.WARNING, logger="gmlx.spec.kv_quant")
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
     # a target that reads K/V back declines batched as it does at B=1
     caches = _mk(lm=_ReadbackLM(), batch_size=2, make_cache=_batch_stack)
     assert all(type(c) is not BatchKVarNKVCache for c in caches)
@@ -288,7 +288,7 @@ def test_batch_declines_with_the_b1_reasons(restorable, kvarn_ops_ok, caplog):
 
 def test_rotating_stack_declines(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    spec_engine.install_spec_kv_quant()
+    kv_quant.install_spec_kv_quant()
 
     class _RotatingLM(_FakeLM):
         def make_cache(self):
@@ -303,9 +303,9 @@ def test_reads_kv_back_detection():
         def speculative_verify_hidden(self, x, pc):
             return x, {}
 
-    assert spec_engine._mtp_reads_kv_back(_ReadbackLM())
-    assert not spec_engine._mtp_reads_kv_back(_Owned())
-    assert not spec_engine._mtp_reads_kv_back(_FakeLM())
+    assert kv_quant._mtp_reads_kv_back(_ReadbackLM())
+    assert not kv_quant._mtp_reads_kv_back(_Owned())
+    assert not kv_quant._mtp_reads_kv_back(_FakeLM())
 
 
 def test_spec_probes_read_through_the_serve_wrapper(monkeypatch):
@@ -321,12 +321,12 @@ def test_spec_probes_read_through_the_serve_wrapper(monkeypatch):
     inner = _LM()
     wrapper = SimpleNamespace(language_model=inner,
                               config={"model_type": "qwen3_5"})
-    assert spec_engine._mtp_reads_kv_back(wrapper)
-    spec_engine._harden_spec_target(wrapper)
+    assert kv_quant._mtp_reads_kv_back(wrapper)
+    kv_quant._harden_spec_target(wrapper)
     assert getattr(inner.rollback_speculative_cache, "_gmlx_kvarn_guard",
                    False)
     monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
-    assert "stock fallback" in spec_engine.mtp_kv_decline(wrapper)
+    assert "stock fallback" in kv_quant.mtp_kv_decline(wrapper)
 
 
 # -- shared-KV readback guard ------------------------------------------------
@@ -547,7 +547,7 @@ def test_kvarn_lift_cache_recovers_original_domain():
     c.update_and_fetch(k, v)
     c._gmlx_cascade = "stamp"
 
-    lifted = spec_engine.kvarn_lift_cache(c)
+    lifted = kv_quant.kvarn_lift_cache(c)
     assert type(lifted) is BatchKVCache
     assert lifted.offset == 300
     assert lifted._gmlx_cascade == "stamp"
@@ -572,7 +572,7 @@ def test_kvarn_lift_matches_stock_attention():
     k, v = tokens(260, seed=11)
     c = KVarNKVCache(tail_tokens=256)
     c.update_and_fetch(k, v)
-    lifted = spec_engine.kvarn_lift_cache(c)
+    lifted = kv_quant.kvarn_lift_cache(c)
 
     q = mx.random.normal((1, H, 1, D)).astype(mx.float16)
     scale = D ** -0.5
@@ -595,16 +595,16 @@ def test_preemption_gate_admits_what_the_lift_handles():
 
     from gmlx.cache.kvarn_cache import KVarNRotatingKVCache
 
-    assert spec_engine.batch_liftable(KVarNKVCache(tail_tokens=256))
+    assert kv_quant.batch_liftable(KVarNKVCache(tail_tokens=256))
     # offset counts evicted tokens the rotating buffers no longer hold
-    assert not spec_engine.batch_liftable(KVarNRotatingKVCache(2048, tail_tokens=256))
-    assert spec_engine.batch_liftable(KVCache())
-    assert spec_engine.batch_liftable(QuantizedKVCache(group_size=64, bits=8))
+    assert not kv_quant.batch_liftable(KVarNRotatingKVCache(2048, tail_tokens=256))
+    assert kv_quant.batch_liftable(KVCache())
+    assert kv_quant.batch_liftable(QuantizedKVCache(group_size=64, bits=8))
 
     class _Opaque:
         pass
 
-    assert not spec_engine.batch_liftable(_Opaque())
+    assert not kv_quant.batch_liftable(_Opaque())
 
 
 @needs_kvarn_ops

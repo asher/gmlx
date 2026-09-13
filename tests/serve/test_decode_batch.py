@@ -38,7 +38,7 @@ def test_garbage_falls_back(monkeypatch):
 def test_stash_wrapper_injects(monkeypatch):
     from mlx_vlm.generate import ar
 
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.engine as engine
 
     seen = {}
 
@@ -47,7 +47,7 @@ def test_stash_wrapper_injects(monkeypatch):
             seen.update(kwargs)
 
     monkeypatch.setattr(ar, "BatchGenerator", _BG)
-    spec_engine._install_apc_manager_stash()
+    engine._install_apc_manager_stash()
 
     monkeypatch.setenv("GMLX_DECODE_BATCH", "5")
     ar.BatchGenerator(SimpleNamespace(), None)
@@ -65,7 +65,7 @@ def test_stash_wrapper_clamps_full_width_prefill_group(monkeypatch):
     # group to 1 only in that regime.
     from mlx_vlm.generate import ar
 
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.engine as engine
 
     class _BG:
         def __init__(self, model, processor, **kwargs):
@@ -74,7 +74,7 @@ def test_stash_wrapper_clamps_full_width_prefill_group(monkeypatch):
             self.prefill_batch_size = kwargs.get("prefill_batch_size", 8)
 
     monkeypatch.setattr(ar, "BatchGenerator", _BG)
-    spec_engine._install_apc_manager_stash()
+    engine._install_apc_manager_stash()
 
     monkeypatch.setenv("GMLX_DECODE_BATCH", "8")
     gen = ar.BatchGenerator(SimpleNamespace(), None)

@@ -19,7 +19,8 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-import gmlx.spec.engine as spec_engine
+import gmlx.spec.ckpt as ckpt
+import gmlx.spec.engine as engine
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.compat import runtime_cache_module
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
@@ -152,16 +153,16 @@ def test_layout_live_ignores_model_memo():
     model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
     b = SimpleNamespace(model=model,
                         prompt_cache=[KVarNKVCache(), ArraysCache(size=2)])
-    assert spec_engine._ckpt_layout_live(b) == (KVARN_TAG, "arr")
+    assert engine._ckpt_layout_live(b) == (KVARN_TAG, "arr")
     b2 = SimpleNamespace(model=model,
                          prompt_cache=[KVCache(), ArraysCache(size=2)])
-    assert spec_engine._ckpt_layout_live(b2) == ("kv", "arr")
+    assert engine._ckpt_layout_live(b2) == ("kv", "arr")
 
 
 def test_layout_live_falls_back_to_model_probe():
     model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
     b = SimpleNamespace(model=model, prompt_cache=None)
-    assert spec_engine._ckpt_layout_live(b) == ("kv", "arr")
+    assert engine._ckpt_layout_live(b) == ("kv", "arr")
 
 
 def test_layout_live_unsupported_refuses_all_records():
@@ -170,8 +171,8 @@ def test_layout_live_unsupported_refuses_all_records():
         prompt_cache=[BatchKVarNKVCache(left_padding=[0]),
                       ArraysCache(size=2)],
     )
-    sig = spec_engine._ckpt_layout_live(b)
-    assert sig == spec_engine._LAYOUT_UNSUPPORTED
+    sig = engine._ckpt_layout_live(b)
+    assert sig == engine._LAYOUT_UNSUPPORTED
     man = GmlxAPCManager(num_blocks=8, block_size=16)
     ids = list(range(500, 532))
     assert ckpt_store(man, ids, [_hollow_kvarn(32), _arr()], extra_hash=0)
@@ -188,7 +189,7 @@ def test_store_lookup_signature_agreement_live():
                         prompt_cache=[_hollow_kvarn(p), _arr(seed=p)])
     assert ckpt_store(man, ids, b.prompt_cache, extra_hash=0)
     warm, got = ckpt_lookup(man, ids + [999], extra_hash=0,
-                            layout=spec_engine._ckpt_layout_live(b))
+                            layout=engine._ckpt_layout_live(b))
     assert got == p and type(warm[0]) is KVarNKVCache
 
 
@@ -217,13 +218,13 @@ def _plain_batch(man, ids, caches):
 def test_plain_init_adopts_kvarn_record():
     # End to end on the stock path: a kvarn-boot batch's live signature
     # matches a kvarn record and the warm adoption trims the prompt.
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     ids = list(range(300, 396))
     assert ckpt_store(man, ids[:32], [_hollow_kvarn(32), _arr(seed=5)],
                       extra_hash=0)
     b = _plain_batch(man, ids, [KVarNKVCache(), ArraysCache(size=2)])
-    spec_engine._plain_ckpt_init(b)
+    ckpt._plain_ckpt_init(b)
     assert b._processed_prompt_columns == 32
     assert type(b.prompt_cache[0]) is KVarNKVCache
     assert b.prompt_cache[0].offset == 32
@@ -233,13 +234,13 @@ def test_plain_init_adopts_kvarn_record():
 def test_plain_init_stock_batch_refuses_kvarn_record():
     # Same model, stock caches (the conversion declined this request):
     # the live signature refuses the kvarn record instead of adopting.
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     ids = list(range(300, 396))
     assert ckpt_store(man, ids[:32], [_hollow_kvarn(32), _arr(seed=5)],
                       extra_hash=0)
     b = _plain_batch(man, ids, [KVCache(), ArraysCache(size=2)])
-    spec_engine._plain_ckpt_init(b)
+    ckpt._plain_ckpt_init(b)
     assert b._processed_prompt_columns == 0
     assert b._kq_ckpt_armed
 
@@ -254,9 +255,9 @@ import importlib
 # importlib, not `import mlx_vlm.generate.ar as ...`: the package exports
 # a `generate` function that shadows the submodule attribute.
 ar = importlib.import_module("mlx_vlm.generate.ar")
-import gmlx.spec.engine as spec_engine
+import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache import kvarn_serve as ks
-spec_engine.install_full_prompt_mtp_prefill()
+mtp_prefill.install_full_prompt_mtp_prefill()
 ks.install_kvarn_serve()
 
 def closure_names(fn):

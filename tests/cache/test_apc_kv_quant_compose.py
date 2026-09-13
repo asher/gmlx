@@ -8,7 +8,7 @@ tests pin the seams gmlx rides so the owned L1 merge stays aligned.
 
 import mlx.core as mx
 
-import gmlx.spec.engine as spec_engine
+import gmlx.spec.engine as engine
 
 
 def _stamped_model(bits=8, group=32):
@@ -31,12 +31,12 @@ def _stamped_model(bits=8, group=32):
 def test_live_kv_quant_config_off_without_stamp(monkeypatch):
     # env alone never decides the warm merge
     monkeypatch.setenv("KV_BITS", "8")
-    assert spec_engine._live_kv_quant_config() is None
-    assert spec_engine._live_kv_quant_config(object()) is None
+    assert engine._live_kv_quant_config() is None
+    assert engine._live_kv_quant_config(object()) is None
 
 
 def test_live_kv_quant_config_reads_stamped_policy():
-    cfg = spec_engine._live_kv_quant_config(_stamped_model(8, 32))
+    cfg = engine._live_kv_quant_config(_stamped_model(8, 32))
     assert cfg is not None
     assert float(cfg["bits"]) == 8.0 and int(cfg["group_size"]) == 32
 
@@ -54,7 +54,7 @@ def test_warm_merge_requantizes_float_row():
         k = mx.random.normal((1, 2, 64, 64))
         c.update_and_fetch(k, k)
         row.append(c)
-    cfg = spec_engine._live_kv_quant_config(_stamped_model(8, 32))
+    cfg = engine._live_kv_quant_config(_stamped_model(8, 32))
     warm, n = apc.make_warm_batch_exact_cache_multi(
         [row], prefix_lens=[64], kv_quant_config=cfg)
     assert warm is not None and n == 64

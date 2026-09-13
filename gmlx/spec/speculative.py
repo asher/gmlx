@@ -1520,7 +1520,7 @@ def _pop_drafter_warm(prompt_cache: list) -> list | None:
 
 def _pop_seed_stream(prompt_cache: list) -> dict | None:
     """Detach the streamed-seed context ({"kv", "len", ...}) stashed by the
-    prefill's seed streaming (engine._mtp_seed_stream_init) on the request's
+    prefill's seed streaming (mtp_prefill._mtp_seed_stream_init) on the request's
     first cache entry. Same request-scoped discipline and pop-before-buffer
     timing as the drafter warm sidecar above."""
     if not prompt_cache:
@@ -1825,7 +1825,7 @@ def _lift_injected_cache(cache, other):
 
         return kvarn_batch_row(cache, other)
     if _packed_single(other):
-        from gmlx.spec.engine import kvarn_lift_cache, lift_single_cache
+        from gmlx.spec.kv_quant import kvarn_lift_cache, lift_single_cache
 
         if getattr(other, "kv_quant_scheme", None) == "kvarn":
             # An fp16 batch host (the batched arm dropped): the kvarn row
@@ -1935,7 +1935,7 @@ def _lift_live_cache(cache):
             cache.caches = tuple(_lift_live_cache(m) for m in members)
         return cache
     if _packed_single(cache):
-        from gmlx.spec.engine import lift_single_cache
+        from gmlx.spec.kv_quant import lift_single_cache
 
         return lift_single_cache(cache)
     if _batch_capable(cache) or not callable(getattr(type(cache), "merge", None)):

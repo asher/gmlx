@@ -2891,7 +2891,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
         from gmlx.cache.kv_policy import resolve_and_report
-        from gmlx.spec.engine import mtp_kv_decline
+        from gmlx.spec.kv_quant import mtp_kv_decline
         from gmlx.spec.speculative import use_owned_engine
 
         lm = b.model.language_model

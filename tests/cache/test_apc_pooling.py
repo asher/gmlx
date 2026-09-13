@@ -151,7 +151,7 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
     import importlib
     from types import SimpleNamespace
 
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.engine as engine
 
     ar = importlib.import_module("mlx_vlm.generate.ar")
     seen = {}
@@ -161,16 +161,16 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
             seen.update(kwargs)
 
     monkeypatch.setattr(ar, "BatchGenerator", _ProbeBG)
-    spec_engine._install_apc_manager_stash()
+    engine._install_apc_manager_stash()
     mgr = object()
 
-    monkeypatch.setattr(spec_engine, "_SPEC_APC_DISABLED", True)
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
     model = SimpleNamespace()
     ar.BatchGenerator(model, None, draft_model=object(), apc_manager=mgr)
     assert seen["apc_manager"] is None
     assert model._kq_apc_manager is None
 
-    monkeypatch.setattr(spec_engine, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
     seen.clear()
     model = SimpleNamespace()
     ar.BatchGenerator(model, None, draft_model=object(), apc_manager=mgr)
@@ -178,7 +178,7 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
     assert model._kq_apc_manager is mgr
 
     # Non-speculative batches are outside the spec kill switch's scope.
-    monkeypatch.setattr(spec_engine, "_SPEC_APC_DISABLED", True)
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
     seen.clear()
     ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr)
     assert seen["apc_manager"] is mgr
@@ -194,7 +194,7 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
     import logging
     from types import SimpleNamespace
 
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.engine as engine
 
     ar = importlib.import_module("mlx_vlm.generate.ar")
 
@@ -206,8 +206,8 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
             self.apc_manager = mgr
 
     monkeypatch.setattr(ar, "BatchGenerator", _UpstreamLikeBG)
-    monkeypatch.setattr(spec_engine, "_SPEC_APC_DISABLED", False)
-    spec_engine._install_apc_manager_stash()
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
+    engine._install_apc_manager_stash()
     mgr = object()
 
     with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):

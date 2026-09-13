@@ -61,7 +61,7 @@ def test_missing_or_none_batch_reads_zero():
 
 def test_no_len_on_generation_batch_in_decision_modules():
     # The loud tripwire for new call sites. The engine-side len() calls in
-    # spec_engine are the promotion mechanism and are exempt by design.
+    # spec.admission are the promotion mechanism and are exempt by design.
     root = Path(gmlx.__file__).parent
     offenders = []
     for name in DECISION_MODULES:

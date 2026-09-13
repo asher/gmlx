@@ -62,9 +62,9 @@ def family(request, gguf_index):
         pytest.skip(f"no {arch!r} GGUF under KQUANT_TEST_GGUF_DIR "
                     f"(have: {sorted(gguf_index)})")
     import gmlx.serve.bridge_vlm as serving
-    import gmlx.spec.engine as spec_engine
+    import gmlx.spec.mtp_prefill as mtp_prefill
 
-    spec_engine.install_full_prompt_mtp_prefill()   # the serve installs
+    mtp_prefill.install_full_prompt_mtp_prefill()   # the serve installs
     if scheme == "kvarn":
         from gmlx.cache.kvarn_apc import install_kvarn_apc
         from gmlx.cache.kvarn_serve import install_kvarn_serve

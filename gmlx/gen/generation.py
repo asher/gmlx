@@ -1212,7 +1212,7 @@ def generate_speculative_owned(
         # Owned rounds take the layers serve takes; the stock walks
         # decline. No later converter runs here, so convert now.
         from gmlx.cache.kv_policy import quantize_stack, resolve_and_report
-        from gmlx.spec.engine import mtp_kv_decline
+        from gmlx.spec.kv_quant import mtp_kv_decline
 
         decline = mtp_kv_decline(lm)
         policy = resolve_and_report(

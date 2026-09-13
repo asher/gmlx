@@ -11,7 +11,8 @@ import mlx.core as mx
 from mlx_vlm.apc import APCManager
 
 import gmlx.cache.retire_key as retire_key
-import gmlx.spec.engine as spec_engine
+import gmlx.spec.ckpt as ckpt
+import gmlx.spec.engine as engine
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
 from test_ckpt_tier import LAYOUT, make_hybrid_cache
 
@@ -46,11 +47,11 @@ def _plain_batch(man, ids, model=None):
 
 
 def test_plain_init_arms_cold_batch():
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(100, 148))
     b = _plain_batch(man, ids)
-    spec_engine._plain_ckpt_init(b)
+    ckpt._plain_ckpt_init(b)
     meta = b._apc_meta[0]
     assert b._kq_ckpt_armed and b._apc_harvest_enabled is False
     assert meta["ckpt_terminal"] > 0 and meta["checkpoint_len"] > 0
@@ -65,13 +66,13 @@ def test_plain_init_arms_cold_batch():
 
 
 def test_plain_init_restores_and_trims():
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(300, 396))
     warm_src = make_hybrid_cache(32, seed=5)
     assert ckpt_store(man, ids[:32], warm_src)
     b = _plain_batch(man, ids)
-    spec_engine._plain_ckpt_init(b)
+    ckpt._plain_ckpt_init(b)
     assert b._processed_prompt_columns == 32
     assert b._input_ids.shape[1] == 64
     assert b._inputs_embeds.shape[1] == 64
@@ -84,12 +85,12 @@ def test_plain_init_restores_and_trims():
 
 
 def test_plain_init_leaves_batched_rows_stock():
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(48))
     b = _plain_batch(man, ids)
     b._right_pad_per_row = [0]
-    spec_engine._plain_ckpt_init(b)
+    ckpt._plain_ckpt_init(b)
     assert not getattr(b, "_kq_ckpt_armed", False)
     assert b._apc_harvest_enabled is True
 
@@ -97,7 +98,7 @@ def test_plain_init_leaves_batched_rows_stock():
 def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    spec_engine._install_ckpt_checkpoint_store()
+    ckpt._install_ckpt_checkpoint_store()
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(400, 448))
     meta = {"full_input_ids": ids, "prefix_len": 0, "extra_hash": 0,
@@ -128,7 +129,7 @@ def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
 def test_gen_batch_filter_retires_lone_row(monkeypatch):
     from mlx_vlm.generate.ar import GenerationBatch
 
-    spec_engine._install_plain_ckpt_decode()
+    ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
     full = list(range(500, 532))
     gen = list(range(900, 916))
@@ -151,7 +152,7 @@ def test_gen_batch_filter_retires_lone_row(monkeypatch):
 def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
     from mlx_vlm.generate.ar import GenerationBatch
 
-    spec_engine._install_plain_ckpt_decode()
+    ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
     full = list(range(600, 632))
     gen = list(range(950, 966))
@@ -205,7 +206,7 @@ def _batched_hybrid_cache(lens, total):
 def test_gen_batch_filter_retires_leaving_row_batched():
     from mlx_vlm.generate.ar import GenerationBatch
 
-    spec_engine._install_plain_ckpt_decode()
+    ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
     full = list(range(700, 724))
     gen = list(range(970, 986))                 # row 1: 24 + 16 = 40
@@ -228,7 +229,7 @@ def test_gen_batch_filter_retires_leaving_row_batched():
 def test_gen_batch_extend_carries_stash():
     from mlx_vlm.generate.ar import GenerationBatch
 
-    spec_engine._install_plain_ckpt_decode()
+    ckpt._install_plain_ckpt_decode()
     stash = {"full_ids": [1, 2], "mode": "ckpt", "gen": []}
     other = GenerationBatch.empty(model=None, sampler=None,
                                   stop_criteria=None)
@@ -242,12 +243,12 @@ def test_gen_batch_extend_carries_stash():
 
 
 def test_exact_anchor_init_arms_retire_stash():
-    spec_engine._bind_l1_view()
+    engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(800, 848))
     model = SimpleNamespace(_kq_apc_ckpt=False, config=SimpleNamespace())
     b = _plain_batch(man, ids, model=model)
-    spec_engine._plain_anchor_init(b)
+    ckpt._plain_anchor_init(b)
     stash = b.prompt_cache[0]._kq_apc_retire
     assert stash["mode"] == "exact" and stash["manager"] is man
     assert stash["full_ids"] == ids and stash["gen"] == []
@@ -257,7 +258,7 @@ def test_gen_batch_filter_retires_exact_row():
     from mlx_vlm.generate.ar import GenerationBatch
     from mlx_vlm.models.cache import KVCache
 
-    spec_engine._install_plain_ckpt_decode()
+    ckpt._install_plain_ckpt_decode()
     man = APCManager(num_blocks=64, block_size=16)
     full = list(range(850, 882))
     gen = list(range(990, 1006))                # 32 + 16 = 48
@@ -285,9 +286,9 @@ def test_plain_step_tick_disables_on_failure():
     stash = {"mode": "ckpt", "gen": 7}        # broken accounting slot
     gb = SimpleNamespace(
         uids=[3], prompt_cache=[SimpleNamespace(_kq_apc_retire=stash)])
-    spec_engine._plain_step_tick(gb, [[5]])
+    ckpt._plain_step_tick(gb, [[5]])
     assert stash["snap_ok"] is False and "gen" not in stash
-    spec_engine._plain_step_tick(gb, [[6]])   # gated off: silent no-op
+    ckpt._plain_step_tick(gb, [[6]])   # gated off: silent no-op
     assert "gen" not in stash
 
 
@@ -300,12 +301,12 @@ def test_plain_step_tick_reads_step_tuple_rows():
     s2 = {"mode": "exact", "gen": []}
     gb = SimpleNamespace(uids=[1, 2], prompt_cache=[SimpleNamespace()],
                          _kq_apc_retire_rows={1: s1, 2: s2})
-    spec_engine._plain_step_tick(gb, ([5, 9], None, None, None))
+    ckpt._plain_step_tick(gb, ([5, 9], None, None, None))
     assert s1["gen"] == [5] and s2["gen"] == [9]
-    spec_engine._plain_step_tick(gb, ([6, None], None, None, None))
+    ckpt._plain_step_tick(gb, ([6, None], None, None, None))
     assert s1["gen"] == [5, 6] and s2["gen"] == [9]
     assert s2.get("snap_ok") is not False
-    spec_engine._plain_step_tick(gb, (None, None, None, None))
+    ckpt._plain_step_tick(gb, (None, None, None, None))
     assert s1["gen"] == [5, 6] and s2["gen"] == [9]
 
 
