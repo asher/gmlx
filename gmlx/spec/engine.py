@@ -232,7 +232,7 @@ def _resolve_l1(model):
             kinds = []
             try:
                 kinds = sorted({type(c).__name__ for c in lm.make_cache()})
-            except Exception:
+            except Exception:  # noqa: S110 - unprobeable stack; the warning below says so
                 pass
             _log.warning(
                 "APC OFF for this model: no tier serves its cache stack "
@@ -240,7 +240,7 @@ def _resolve_l1(model):
                 ", ".join(kinds) or "unprobeable")
         try:
             model._kq_apc_mode = mode
-        except Exception:
+        except Exception:  # noqa: S110 - memo stamp; recomputed when the model forbids ad-hoc attrs
             pass
     if mode is None:
         return None, None
@@ -276,7 +276,7 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
                 sum(1 for t in tags if t.startswith("kvarn")))
         try:
             model._kq_apc_ckpt = flag
-        except Exception:
+        except Exception:  # noqa: S110 - memo stamp; recomputed when the model forbids ad-hoc attrs
             pass
     return bool(flag)
 
@@ -300,7 +300,7 @@ def _ckpt_layout_for(model, block_size: int = 16):
                 "model", exc_info=True)
         try:
             model._kq_apc_ckpt_layout = tags
-        except Exception:
+        except Exception:  # noqa: S110 - memo stamp; recomputed when the model forbids ad-hoc attrs
             pass
     return tags or None
 

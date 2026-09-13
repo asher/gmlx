@@ -669,7 +669,7 @@ def warm_kernel_pipelines() -> int:
             guard.eval(*(out if isinstance(out, (tuple, list)) else (out,)),
                        site="dsa-warm-probe", owner="scratch")
             n += 1
-        except Exception:  # noqa: BLE001 - warm only, probes stay live
+        except Exception:  # noqa: BLE001, S110 - warm only, probes stay live
             pass
 
     B, H, L, D, P = 1, 64, 64, 128, 1024

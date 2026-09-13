@@ -333,8 +333,8 @@ class PrefillFeeder:
     def __del__(self):
         try:
             self.close()
-        except Exception:
-            pass  # GC-time cleanup must never raise
+        except Exception:  # noqa: S110 - GC-time cleanup must never raise
+            pass
 
 
 def ring_bytes(offsets) -> int:

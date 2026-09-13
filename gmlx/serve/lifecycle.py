@@ -587,7 +587,7 @@ def _warn_missing_models(host, port, api_key, config_abspath) -> None:
                   f"model{plural_s(len(configured))} "
                   f"available - see `gmlx logs` for what was skipped",
                   file=sys.stderr)
-    except Exception:
+    except Exception:  # noqa: S110 - advisory note only
         pass
 
 
@@ -1322,8 +1322,9 @@ def service_uninstall(host: str, port) -> int:
             settings = _mb.load_menubar_settings()
             settings["autostart"] = None
             _mb.save_menubar_settings(settings)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"  note: could not clear the menu-bar autostart record "
+                  f"({exc})", file=sys.stderr)
         print(f"uninstalled launchd agent {MENUBAR_AGENT_LABEL} "
               "(menu bar login item; a running server is left up - "
               "`gmlx stop` for that)")
@@ -1367,7 +1368,7 @@ def service_status(host: str, port) -> int:
         try:
             import gmlx.commands.menubar as _mb
             auto = _mb.load_menubar_settings().get("autostart")
-        except Exception:
+        except Exception:  # noqa: S110 - autostart record unreadable -> reported off
             pass
         state = "loaded" if mb_loaded else "installed but not loaded"
         extra = (f"; server autostart on ({auto.get('host')}:{auto.get('port')})"

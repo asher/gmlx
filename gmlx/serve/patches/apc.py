@@ -5,7 +5,19 @@ subclass (``gmlx.cache.apc_manager.GmlxAPCManager``), not as a method patch here
 from __future__ import annotations
 
 import importlib
+import logging
 import weakref
+
+_log = logging.getLogger(__name__)
+_CAPTURE_WARNED: set[str] = set()
+
+
+def _warn_capture_once(site: str) -> None:
+    if site in _CAPTURE_WARNED:
+        return
+    _CAPTURE_WARNED.add(site)
+    _log.warning("retirement %s capture failed; next-turn retirement keys "
+                 "are off for such requests", site, exc_info=True)
 
 
 def install_apc_lone_harvest() -> None:
@@ -118,7 +130,7 @@ def install_retire_render_capture() -> None:
                                       or kw.get("video")),
                     })
             except Exception:
-                pass
+                _warn_capture_once("render")
             return out
 
         apply_chat_template._kq_retire_capture = True
@@ -160,7 +172,7 @@ def install_retire_render_capture() -> None:
 
                     retire_key.register_ids(prompt, row, preprocess)
         except Exception:
-            pass
+            _warn_capture_once("ids")
         return raw
 
     _preprocess_request._kq_retire_capture = True

@@ -1575,13 +1575,13 @@ def ckpt_store(
         # release must not leak the other block set out of the manager.
         try:
             _ckpt_decline(manager, "exception")
-        except Exception:
-            pass  # decline is telemetry only
+        except Exception:  # noqa: S110 - decline is telemetry only
+            pass
         for blks in (main_blocks, bounded_blocks):
             try:
                 manager.release(blks)
-            except Exception:
-                pass  # best-effort release on the failure path
+            except Exception:  # noqa: S110 - best-effort release on the failure path
+                pass
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
         return 0
 
@@ -2165,8 +2165,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         for blks in (blocks, wblocks):
             try:
                 manager.release(blks)
-            except Exception:
-                pass  # best-effort release on the failure path
+            except Exception:  # noqa: S110 - best-effort release on the failure path
+                pass
         _log.warning("APC ckpt disk lookup failed; continuing",
                      exc_info=True)
         return None, 0

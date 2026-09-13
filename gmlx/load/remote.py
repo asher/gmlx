@@ -242,8 +242,8 @@ def _auth_headers(url: str) -> dict:
         try:
             from huggingface_hub import get_token
             token = get_token()
-        except Exception:
-            pass  # no stored hub token -> anonymous request
+        except Exception:  # noqa: S110 - no stored hub token -> anonymous request
+            pass
     if token:
         return {"Authorization": f"Bearer {token}"}
     return {}

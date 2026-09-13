@@ -273,7 +273,7 @@ def _decode_arena_bytes(
     ram = None
     try:
         ram = int(mx.device_info()["memory_size"])
-    except Exception:
+    except Exception:  # noqa: S110 - no device info (CPU-only build); the RAM fraction lever is skipped
         pass
     frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
     if frac and ram:

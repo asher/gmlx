@@ -304,8 +304,8 @@ def _save_header_cache(cache: dict) -> None:
         with os.fdopen(fd, "w") as f:
             json.dump(cache, f)
         os.replace(tmp, p)
-    except Exception:
-        pass  # best-effort cache write; discovery just re-scans next time
+    except Exception:  # noqa: S110 - best-effort cache write; discovery re-scans next time
+        pass
 
 
 # Model-card sampling embedded in the GGUF header (llama.cpp writes

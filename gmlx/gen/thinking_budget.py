@@ -435,7 +435,7 @@ def think_tokenizer_for(processor):
             wrapped = tok
     try:
         processor._gmlx_think_tokenizer = wrapped
-    except Exception:  # noqa: BLE001 - unsettable processor: skip the cache
+    except Exception:  # noqa: BLE001, S110 - unsettable processor: skip the cache
         pass
     return wrapped
 
@@ -754,7 +754,7 @@ def _quiet_kernel_status() -> None:
         attrs = termios.tcgetattr(fd)
         attrs[3] |= nokerninfo
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    except Exception:  # noqa: BLE001 - cosmetic; never block generation
+    except Exception:  # noqa: BLE001, S110 - cosmetic; never block generation
         pass
 
 

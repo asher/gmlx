@@ -116,7 +116,7 @@ def queue_cap_stats() -> dict:
         out["waiting"] = depth
         out["eta_s"] = (_retry_after_s(getattr(runtime, "metrics", None),
                                        depth) if depth > 0 else 0)
-    except Exception:
+    except Exception:  # noqa: S110 - live fields stay None
         pass
     return out
 
@@ -137,11 +137,11 @@ def concurrency_stats() -> dict:
             # preload); older pool stats without it fall back to busy.
             out["in_flight"] = sum(int(e.get("in_flight", e.get("busy")) or 0)
                                    for e in pool.stats().get("resident", []))
-    except Exception:
+    except Exception:  # noqa: S110 - in_flight stays None
         pass
     try:
         out["waiting"] = _waiting_depth_all()
-    except Exception:
+    except Exception:  # noqa: S110 - waiting stays None
         pass
     return out
 
@@ -177,7 +177,7 @@ def _waiting_depth(rg) -> int:
     if callable(qsize):
         try:
             depth += max(0, int(qsize()))
-        except Exception:
+        except Exception:  # noqa: S110 - racy census; magnitude only
             pass
     reg = _ENGINES.get(id(rg))
     if reg is not None and reg[0]() is rg:

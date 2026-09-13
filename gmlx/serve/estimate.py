@@ -76,7 +76,7 @@ def rates_view() -> dict:
         out["decode_streams"] = len(rows)
         out["decode_tok_s"] = round(sum(float(r.get("decode_tok_s") or 0)
                                         for r in rows), 1)
-    except Exception:
+    except Exception:  # noqa: S110 - advisory rate fields stay at their defaults
         pass
     try:
         runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
@@ -88,7 +88,7 @@ def rates_view() -> dict:
         secs = float(getattr(metrics, "_decode_time_total_s", 0.0) or 0.0)
         if gen > 0 and secs > 0:
             out["decode_tok_s_lifetime"] = round(gen / secs, 1)
-    except Exception:
+    except Exception:  # noqa: S110 - advisory rate fields stay None
         pass
     return out
 
@@ -150,7 +150,7 @@ def capacity_plan(width: int, depth: int) -> dict:
                 ids = getattr(serving, "_PATH_TO_IDS", {}).get(str(t.get("path"))) or []
                 if ids:
                     out["model"] = ids[0]
-            except Exception:
+            except Exception:  # noqa: S110 - model id is cosmetic; the path basename stands
                 pass
     except Exception:
         _log.debug("capacity plan: table read failed", exc_info=True)
@@ -245,7 +245,7 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
                               model, int(manager.block_size)))
             if n > best:
                 best, tier = int(n), "ckpt"
-        except Exception:
+        except Exception:  # noqa: S110 - ckpt peek is advisory; the block tier still answers
             pass
     try:
         blocks, n = manager.lookup_prefix(ids, extra_hash=extra_hash)
@@ -255,7 +255,7 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
         finally:
             if blocks:
                 manager.release(blocks)
-    except Exception:
+    except Exception:  # noqa: S110 - block peek is advisory
         pass
     # Exact-tier entries carry the manager's wire salt (kvarn widths);
     # the block and ckpt tiers key on the caller's hash.
@@ -266,7 +266,7 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
             n = int(hit[1]) if isinstance(hit, (tuple, list)) else int(hit)
             if n > best:
                 best, tier = n, "exact"
-    except Exception:
+    except Exception:  # noqa: S110 - exact peek is advisory
         pass
     n = _exact_peek(manager, ids, exact_hash)
     if n > best:
@@ -312,7 +312,7 @@ def _queue_wait_s(metrics, waiting: int) -> float:
         secs = float(getattr(metrics, "_decode_time_total_s", 0.0) or 0.0)
         if done > 0 and toks > 0 and gen > 0 and secs > 0:
             return waiting * (toks / done) / (gen / secs)
-    except Exception:
+    except Exception:  # noqa: S110 - metrics unreadable -> flat 5 s per waiting request
         pass
     return 5.0 * waiting
 
@@ -354,7 +354,7 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
         conc = concurrency_stats()
         out["waiting"], out["in_flight"] = conc.get("waiting"), conc.get("in_flight")
         out["decode_batch"] = conc.get("decode_batch")
-    except Exception:
+    except Exception:  # noqa: S110 - advisory fields stay None
         pass
 
     pkg = importlib.import_module("mlx_vlm.server")
@@ -383,7 +383,7 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
         if tok is not None:
             try:
                 serving.reset_active_spec(tok)
-            except Exception:
+            except Exception:  # noqa: S110 - token from another context; nothing to reset
                 pass
 
 
@@ -467,7 +467,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
             if trained:
                 out["context_limit"], out["context_limit_source"] = int(trained), "trained"
                 out["context_ok"] = bool(tokens + max(0, pinned) <= int(trained))
-    except Exception:
+    except Exception:  # noqa: S110 - context verdict stays None
         pass
 
     # warm prefix
@@ -517,7 +517,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
             suffix = max(0, tokens - int(out["warm_tokens"] or 0))
             eta = _queue_wait_s(metrics, out.get("waiting") or 0) + suffix / pre
             out["est_ttft_s"] = round(eta, 2)
-    except Exception:
+    except Exception:  # noqa: S110 - ETA stays None
         pass
     out["estimate_ms"] = round((time.perf_counter() - t0) * 1000, 1)
     return 200, out

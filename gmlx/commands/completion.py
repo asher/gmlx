@@ -344,7 +344,7 @@ def cmd_complete(argv: list[str]) -> int:
     try:
         for line in _complete(list(argv)):
             print(line)
-    except Exception:  # noqa: BLE001 - never let completion fail loudly
+    except Exception:  # noqa: BLE001, S110 - never let completion fail loudly
         pass
     return 0
 

@@ -56,7 +56,7 @@ def stamp_model(model) -> None:
         if obj is not None:
             try:
                 setattr(obj, _MODE_STAMP, True)
-            except Exception:
+            except Exception:  # noqa: S110 - stamp only; an unsettable object reads as unstamped
                 pass
 
 
@@ -93,7 +93,7 @@ def kvarn_model_converts(model) -> bool:
         val = False
     try:
         setattr(model, _CONVERTS_ATTR, val)
-    except Exception:
+    except Exception:  # noqa: S110 - memo stamp; recomputed when the model forbids ad-hoc attrs
         pass
     return val
 

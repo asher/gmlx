@@ -155,7 +155,7 @@ def release(model) -> None:
                 continue    # keep the attr so the helper stays reachable
         try:
             object.__setattr__(owner, attr, None)
-        except Exception:
+        except Exception:  # noqa: S110 - owner forbids the attr clear; the helper is closed already
             pass
     # A model with an un-closed helper keeps its wired-byte charge; the
     # arena prune already keeps open feeders via _open.

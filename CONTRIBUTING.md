@@ -62,6 +62,11 @@ positive comes from upstream typing (a stub that omits the attribute, a
 scalar union, a field added to an upstream dataclass), with a comment
 saying which; keep the count under twenty repo-wide.
 
+ruff's S110 rule flags a `try`/`except Exception: pass`. Either log the
+failure, or say where the error goes on the except line:
+`except Exception:  # noqa: S110 - <reason>`. A bare marker without a
+reason is not accepted in review. Tests are exempt.
+
 ## Things to know before you patch
 
 - The serving stack is stock mlx-vlm with late-bound patches over its

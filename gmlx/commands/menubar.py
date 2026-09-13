@@ -97,8 +97,8 @@ def ptt_modifier_from_config(run: dict | None) -> str:
                           "push_to_talk_modifier", "globe")
             if mod in PUSH_TO_TALK_MODIFIERS:
                 return mod
-        except Exception:
-            pass  # unreadable config -> default modifier
+        except Exception:  # noqa: S110 - unreadable config -> default modifier
+            pass
     return "globe"
 
 
@@ -160,8 +160,8 @@ def _existing_default_config() -> str | None:
         for p in default_config_paths():
             if p.exists():
                 return str(p)
-    except Exception:
-        pass  # probe only; no readable default config -> no path
+    except Exception:  # noqa: S110 - probe only; no readable default config -> no path
+        pass
     return None
 
 
@@ -275,8 +275,8 @@ def _autostart_server_once() -> None:
         lifecycle.launch_detached(argv, host=host, port=port,
                                   config_abspath=auto.get("config_abspath"),
                                   api_key_set=bool(auto.get("api_key_set")))
-    except Exception:
-        pass  # best-effort autostart replay; the menu stays usable without it
+    except Exception:  # noqa: S110 - best-effort autostart replay; the menu stays usable without it
+        pass
 
 
 def build_menu_model(snapshot: dict, run: dict | None,
@@ -774,8 +774,8 @@ class _MenuBarApp:
                 _post_json(_server_root(self.url) + "/unload",
                            {"model": model_id},
                            api_key=self._resolve_key(), timeout=8.0)
-            except Exception:
-                pass  # fire-and-forget; the next poll shows the real state
+            except Exception:  # noqa: S110 - fire-and-forget; the next poll shows the real state
+                pass
         self._spawn(work)
 
     def _reload(self) -> None:
@@ -783,8 +783,8 @@ class _MenuBarApp:
             try:
                 _post_json(_server_root(self.url) + "/v1/reload",
                            {}, api_key=self._resolve_key(), timeout=15.0)
-            except Exception:
-                pass  # fire-and-forget; the next poll shows the real state
+            except Exception:  # noqa: S110 - fire-and-forget; the next poll shows the real state
+                pass
         self._spawn(work)
 
     def _copy_url(self) -> None:
@@ -939,9 +939,8 @@ class _MenuBarApp:
         def post():
             try:
                 self._rumps.notification("gmlx voice", None, msg)
-            except Exception:
-                pass    # notification center unavailable (bare interpreter,
-                        # no Info.plist) - the transcript line still has it
+            except Exception:  # noqa: S110 - no notification center (bare interpreter); the transcript line still has it
+                pass
         try:
             from PyObjCTools import AppHelper
             AppHelper.callAfter(post)
@@ -1086,8 +1085,8 @@ class _MenuBarApp:
             if hotkey.preflight():
                 self._hotkey_error = None
                 self._arm_hotkey_async()
-        except Exception:
-            pass  # advisory probe; the next tick retries
+        except Exception:  # noqa: S110 - advisory probe; the next tick retries
+            pass
 
     def _set_hotkey(self, choice: str) -> None:
         """Menu callback (main run-loop thread): switch the hotkey on or
@@ -1212,9 +1211,8 @@ class _MenuBarApp:
         msg = down_message(snap.get("url") or self.url, run, pid_dead)
         try:
             self._rumps.notification("gmlx", None, msg)
-        except Exception:
-            pass    # notification center unavailable (bare interpreter, no
-                    # Info.plist) - the glyph flip still shows the state
+        except Exception:  # noqa: S110 - no notification center (bare interpreter); the glyph flip still shows the state
+            pass
 
     def _make_unload(self, model_id: str):
         return lambda _sender: self._unload(model_id)

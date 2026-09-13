@@ -200,8 +200,8 @@ def _build_detokenizer(backend):
                 return _mlxvlm_tok.SPMStreamingDetokenizer(backend, trim_space=False)
             if _mlxvlm_tok._is_bpe_decoder(decoder):
                 return _mlxvlm_tok.BPEStreamingDetokenizer(backend)
-    except Exception:
-        pass  # unprobeable tokenizer json -> naive detokenizer
+    except Exception:  # noqa: S110 - unprobeable tokenizer json -> naive detokenizer
+        pass
     return naive(backend)
 
 
@@ -343,7 +343,7 @@ def _ensure_text_embedding_probe(model, raw_model) -> None:
     try:
         if lm._token_embedding() is not None:
             return                             # stock probe already reaches it
-    except Exception:                          # noqa: BLE001 - exotic wrapper
+    except Exception:                          # noqa: BLE001, S110 - exotic wrapper
         pass
     emb = _find_token_embedding(raw_model)
     if emb is None:
@@ -798,8 +798,8 @@ def _apply_draft_block_size_override(result) -> None:
             cfg.runtime_block_size = n
         else:
             cfg.block_size = n
-    except Exception:
-        pass  # frozen/odd config object -> keep the drafter's own default
+    except Exception:  # noqa: S110 - frozen/odd config object -> keep the drafter's own default
+        pass
 
 
 def _log_drafter_source(gguf_path: str, drafter, draft_gguf_path: str | None) -> None:
@@ -855,7 +855,7 @@ def _degrade_failed_mtp(model_path: str, error: str) -> None:
         import mlx.core as mx
 
         mx.clear_cache()
-    except Exception:
+    except Exception:  # noqa: S110 - cache release is advisory after a failed load
         pass
 
 

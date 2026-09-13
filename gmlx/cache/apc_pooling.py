@@ -401,7 +401,7 @@ def model_has_pools(model) -> bool:
                 break
     try:
         model._kq_has_pools = found
-    except Exception:
+    except Exception:  # noqa: S110 - memo stamp; recomputed when the model forbids ad-hoc attrs
         pass
     return found
 

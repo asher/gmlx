@@ -180,7 +180,7 @@ def _memo_tiers(rg, batch_gen, active) -> None:
                 _TIER[(key, uid)] = tier
             if warm:
                 _WARM[(key, uid)] = warm
-    except Exception:
+    except Exception:  # noqa: S110 - memo only; rows fall back to the ledger
         pass
 
 
@@ -277,7 +277,7 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
                              max_tokens=getattr(args, "max_tokens", None),
                              warm=None, tier=None, position=position))
             position += 1
-    except Exception:
+    except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
     # engine-side: unadmitted prompts
@@ -289,7 +289,7 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
                              max_tokens=m, warm=None, tier=None,
                              position=position))
             position += 1
-    except Exception:
+    except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
     live_uids = set()
@@ -318,7 +318,7 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
                     generated=0,
                     max_tokens=getattr(led, "max_tokens", None),
                     warm=warm, tier=_TIER.get((key, uid))))
-    except Exception:
+    except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
     # decode batch
@@ -348,7 +348,7 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
                 rows.append(_row(uid, info, model=model, state="decode", now=now,
                                  prompt_tokens=None, generated=ntok, max_tokens=None,
                                  warm=None, tier=None))
-    except Exception:
+    except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
     # speculative engine: rows tracked from the loop's logging hooks
@@ -356,7 +356,7 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
         table = _SPEC.get(key)
         if table and table["rows"]:
             rows.extend(_spec_rows(rg, table, now, model))
-    except Exception:
+    except Exception:  # noqa: S110 - one unreadable section must not hide the others
         pass
 
     return rows
@@ -470,7 +470,7 @@ def publish(rg, batch_gen, active, *, force: bool = False) -> None:
                 from .queue_cap import note_engine
 
                 note_engine(rg, batch_gen)
-            except Exception:
+            except Exception:  # noqa: S110 - engine census is advisory
                 pass
         with _LOCK:
             snap = _SNAPS.get(key)

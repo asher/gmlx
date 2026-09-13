@@ -116,7 +116,7 @@ def _absolute_offset(batch) -> int:
         if callable(real):
             try:
                 return int(real(0))
-            except Exception:
+            except Exception:  # noqa: S110 - odd batch without the row helper; the column count is the offset
                 pass
     return int(getattr(batch, "_processed_prompt_columns", 0))
 

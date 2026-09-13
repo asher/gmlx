@@ -452,13 +452,15 @@ def _disarm_throttle(gen, st: _GovState) -> None:
         try:
             mx.set_memory_limit(st.saved_mem_limit)
         except Exception:
-            pass
+            _log.warning("[governor] memory limit restore failed; the "
+                         "throttle limit stays", exc_info=True)
         st.saved_mem_limit = None
     if st.saved_cache_limit is not None:
         try:
             mx.set_cache_limit(st.saved_cache_limit)
         except Exception:
-            pass
+            _log.warning("[governor] cache limit restore failed; the "
+                         "throttle limit stays", exc_info=True)
         st.saved_cache_limit = None
 
 
@@ -501,7 +503,8 @@ def _restore_demand_rungs(gen, st: _GovState) -> None:
 
             set_governor_width_clamp(0)
         except Exception:
-            pass
+            _log.warning("[governor] speculative width clamp release failed",
+                         exc_info=True)
         st.width_clamped = False
     st.rung = 0
     st.rung_rate_before = None
@@ -524,7 +527,9 @@ def _registered_bytes() -> float:
         try:
             total += float(bytes_fn() or 0)
         except Exception:
-            pass
+            _log.warning("[governor] registered cache %r bytes() failed; "
+                         "dropping registrant", name, exc_info=True)
+            _REG.pop(name, None)
     return total
 
 
@@ -619,7 +624,7 @@ def _enter(gen, st: _GovState, band: int, ws: float, margin: float) -> None:
     if band >= YELLOW and up:
         try:
             mx.reset_peak_memory()
-        except Exception:
+        except Exception:  # noqa: S110 - peak reset is advisory
             pass
         st.rung_peak = 0.0
         st.rung_tick = st.tick_no
@@ -874,7 +879,7 @@ def _governor_tick(gen) -> None:
         if st.rung_rate_before is None and st.tick_no - st.rung_tick >= 1:
             try:
                 st.rung_peak = float(mx.get_peak_memory())
-            except Exception:
+            except Exception:  # noqa: S110 - peak read is advisory; the rung measures without it
                 pass
         _measure_rung(gen, st)
         return
