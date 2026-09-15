@@ -283,6 +283,10 @@ def synthesize_config(meta, tensor_shapes=None) -> dict[str, Any]:
     shapes = tensor_shapes
     config: dict[str, Any] = {"model_type": model_type}
 
+    dialect = _DIALECTS.get(arch)
+    if dialect is not None:
+        meta = dialect(meta, shapes)
+
     _add_universal_fields(meta, shapes, config, arch)
     synth(meta, shapes, config)
 
@@ -2853,6 +2857,106 @@ def _synth_deepseek_v4_core(meta, shapes, config: dict, arch: str) -> None:
 
 # deepseek41 (DeepSeek-V4.1-Flash)
 
+
+# The ds4 converter writes the reference config's own field names; llama.cpp
+# PR #28696 writes the GGUF spellings. Same model, same tensors bar three
+# engram names, so the dialect is translated here and one synth reads both.
+_DEEPSEEK41_DS4_KEYS = {
+    "hidden_size": "embedding_length",
+    "num_hidden_layers": "block_count",
+    "num_attention_heads": "attention.head_count",
+    "num_key_value_heads": "attention.head_count_kv",
+    "head_dim": "attention.key_length",
+    "max_position_embeddings": "context_length",
+    "rms_norm_eps": "attention.layer_norm_rms_epsilon",
+    "rope_theta": "rope.freq_base",
+    "qk_rope_head_dim": "rope.dimension_count",
+    "q_lora_rank": "attention.q_lora_rank",
+    "o_lora_rank": "attention.output_lora_rank",
+    "o_groups": "attention.output_group_count",
+    "sliding_window": "attention.sliding_window",
+    "index_n_heads": "attention.indexer.head_count",
+    "index_head_dim": "attention.indexer.key_length",
+    "index_topk": "attention.indexer.top_k",
+    "compress_ratios": "attention.compress_ratios",
+    "compress_rope_theta": "attention.compress_rope_freq_base",
+    "hc_mult": "hyper_connection.count",
+    "hc_sinkhorn_iters": "hyper_connection.sinkhorn_iterations",
+    "hc_eps": "hyper_connection.epsilon",
+    "n_routed_experts": "expert_count",
+    "num_experts_per_tok": "expert_used_count",
+    "moe_intermediate_size": "expert_feed_forward_length",
+    "n_shared_experts": "expert_shared_count",
+    "routed_scaling_factor": "expert_weights_scale",
+    "norm_topk_prob": "expert_weights_norm",
+    "swiglu_limit": "swiglu_clamp_exp",
+    "rope_scaling.factor": "rope.scaling.factor",
+    "rope_scaling.beta_fast": "rope.scaling.yarn_beta_fast",
+    "rope_scaling.beta_slow": "rope.scaling.yarn_beta_slow",
+    "rope_scaling.original_max_position_embeddings":
+        "rope.scaling.original_context_length",
+}
+
+_DEEPSEEK41_GATING = {"sqrtsoftplus": 4}
+
+
+def _deepseek41_dialect(meta, shapes):
+    """Translate a ds4-converted deepseek41 header into the llama.cpp
+    spelling. Identified by ds4's own keys rather than by a llama.cpp key
+    being absent, so a rename on the llama.cpp side cannot misfire it; a
+    llama.cpp header has neither and passes through untouched."""
+    arch = "deepseek41"
+    if not any(f"{arch}.{k}" in meta for k in ("engram.encoding", "config")):
+        return meta
+
+    out = dict(meta)
+    for src, dst in _DEEPSEEK41_DS4_KEYS.items():
+        key, tgt = f"{arch}.{src}", f"{arch}.{dst}"
+        if key in out and tgt not in out:
+            out[tgt] = out[key]
+    # key_length doubles as value_length on the shared KV latent.
+    out.setdefault(f"{arch}.attention.value_length",
+                   out.get(f"{arch}.attention.key_length"))
+    scoring = _read_string(meta, f"{arch}.scoring_func")
+    if scoring is not None:
+        gate = _DEEPSEEK41_GATING.get(scoring)
+        if gate is None:
+            raise ValueError(
+                f"deepseek41 synth: scoring_func {scoring!r} is not the "
+                "V4.1 sqrt-softplus gate")
+        out.setdefault(f"{arch}.expert_gating_func", gate)
+    if f"{arch}.rope.scaling.factor" in out:
+        out.setdefault(f"{arch}.rope.scaling.type", "yarn")
+
+    # The engram dims are not written out; they follow from the array
+    # lengths and the projection shape, the same way the tables' bucket
+    # ranges follow from the primes.
+    tables = len(_read_int_array(meta, f"{arch}.engram.layer_ids") or ())
+    primes = _read_int_array(meta, f"{arch}.engram.primes") or ()
+    mults = _read_int_array(meta, f"{arch}.engram.multipliers") or ()
+    if tables and primes and mults:
+        cols = len(primes) // tables
+        ngram = len(mults) // tables
+        out.setdefault(f"{arch}.engram.max_ngram_size", ngram)
+        out.setdefault(f"{arch}.engram.head_count", cols // (ngram - 1))
+        wkv = (shapes or {}).get(f"blk.{_read_int_array(meta, f'{arch}.engram.layer_ids')[0]}"
+                                 ".engram_kv.weight")
+        if wkv is not None:
+            out.setdefault(f"{arch}.engram.key_length", int(wkv[0]) // cols)
+    return out
+
+
+_DIALECTS = {"deepseek41": _deepseek41_dialect}
+
+
+def _engram_row_width(config: dict) -> int:
+    """Bytes per stored engram row: the key length for a native quant, or
+    the byte-blob width the row encoding names."""
+    from gmlx.models.deepseek_v41.engram_codec import row_width
+
+    return row_width(config["engram_head_dim"], config["engram_row_encoding"])
+
+
 def _synth_deepseek41(meta, shapes, config: dict) -> None:
     """Synthesize a deepseek_v41 config from a 'deepseek41'-arch GGUF.
 
@@ -2896,12 +3000,16 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             "deepseek41 synth: no attn_compressor_kv tensors, so no layer "
             "owns a compressed-KV stream")
 
-    # Two-level candidate selection. Absent from the GGUF; the reference
-    # config is the only source, and it only engages past 16K compressed
-    # positions.
-    config["candidate_source_layer"] = 20
-    config["candidate_topk_blocks"] = 2048
-    config["candidate_block_size"] = 8
+    # Two-level candidate selection, which only engages past 16K compressed
+    # positions. The llama.cpp conversion writes none of it, so the
+    # reference config's values are the fallback.
+    for cfg, key, default in (
+        ("candidate_source_layer", "candidate_source_layer_id", 20),
+        ("candidate_topk_blocks", "candidate_topk_blocks", 2048),
+        ("candidate_block_size", "candidate_block_size", 8),
+    ):
+        got = _read_int(meta, f"{arch}.{key}")
+        config[cfg] = default if got is None else int(got)
 
     layer_ids = _read_int_array(meta, f"{arch}.engram.layer_ids")
     if not layer_ids:
@@ -2916,14 +3024,29 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             _read_int(meta, f"{arch}.engram.{key}"),
             arch=arch, gguf_field=f"{arch}.engram.{key}")
     for cfg, key in (("engram_multipliers", "multipliers"),
-                     ("engram_primes", "primes"),
-                     ("engram_offsets", "offsets")):
+                     ("engram_primes", "primes")):
         vals = _read_int_array(meta, f"{arch}.engram.{key}")
         if not vals:
             raise ValueError(
                 f"deepseek41 synth: missing {arch}.engram.{key} (needed to "
                 f"hash n-grams into the engram tables)")
         config[cfg] = [int(v) for v in vals]
+    # Bucket ranges tile each table in column order, so the offsets are a
+    # running sum of the primes. The ds4 conversion leaves them out and its
+    # runtime accumulates them the same way.
+    offsets = _read_int_array(meta, f"{arch}.engram.offsets")
+    if offsets:
+        config["engram_offsets"] = [int(v) for v in offsets]
+    else:
+        per = len(config["engram_primes"]) // len(layer_ids)
+        config["engram_offsets"] = [
+            sum(config["engram_primes"][t * per: t * per + c])
+            for t in range(len(layer_ids)) for c in range(per)]
+
+    # The engram row codec. The ds4 conversion stores the table as raw bytes
+    # under GGML's I8 type and names the layout here instead.
+    config["engram_row_encoding"] = _read_string(
+        meta, f"{arch}.engram.encoding") or None
     # The token map has one entry per vocab id, over the header scan's array
     # limit, so a planning-only scan does not see it. The load path reads the
     # full metadata; the model class refuses to build without it.
@@ -2952,10 +3075,12 @@ def _synth_deepseek41(meta, shapes, config: dict) -> None:
             raise ValueError(
                 f"deepseek41 synth: engram layer {lid} has no "
                 f"blk.{lid}.engram_embd.weight tensor")
-        if int(shape[0]) != config["engram_head_dim"]:
+        width = _engram_row_width(config)
+        if int(shape[0]) != width:
             raise ValueError(
                 f"deepseek41 synth: engram table row is {int(shape[0])} wide "
-                f"but engram.key_length is {config['engram_head_dim']}")
+                f"but {config['engram_row_encoding'] or 'the key length'} "
+                f"needs {width}")
         rows.append(int(shape[1]))
         # The bucket ranges tile the table exactly; a mismatch means the
         # constants and the tensor disagree and every gather would be wrong.

@@ -43,6 +43,12 @@ from gmlx.models.deepseek_v4.hyper_connection import (
     _hc_split_sinkhorn_ops,
     hc_expand,
 )
+from gmlx.models.deepseek_v41.engram_codec import (
+    decode_rows,
+    parse_row_encoding,
+    row_width,
+)
+from gmlx.models.deepseek_v41.engram_codec import tables as engram_tables
 
 DeepseekV4RoPE = _v4.DeepseekV4RoPE
 DeepseekV41MoE = _v4.DeepseekV4MoE
@@ -107,6 +113,9 @@ class ModelArgs(BaseModelArgs):
     engram_primes: List[int] = field(default_factory=list)
     engram_offsets: List[int] = field(default_factory=list)
     engram_token_map: Optional[List[int]] = None
+    # Row byte layout, when the conversion stores the tables as raw bytes
+    # rather than a GGUF quant (see engram_codec).
+    engram_row_encoding: Optional[str] = None
     # intermediate_size is unused: every V4.1 layer is MoE.
     intermediate_size: int = 0
 
@@ -228,6 +237,36 @@ class EngramHash(nn.Module):
         return ids, new_history
 
 
+class EngramTable(nn.Embedding):
+    """Row gather over one n-gram table.
+
+    A conversion that stores rows as a GGUF quant leaves this a plain
+    gather, which the loader swaps for the kquant one. A conversion that
+    stores raw bytes names its layout instead, so the gather returns
+    ``row_bytes`` of uint8 and the codec turns them into ``head_dim``
+    values (reference ``ds4_engram_read``, which rounds to bfloat16).
+    """
+
+    def __init__(self, rows: int, head_dim: int, encoding: Optional[str] = None):
+        codec = parse_row_encoding(encoding)
+        super().__init__(max(int(rows), 1), row_width(head_dim, encoding))
+        self.head_dim = int(head_dim)
+        self._codec = codec
+        if codec is not None:
+            values, scales = engram_tables()
+            self._value_lut = mx.array(values)
+            self._scale_lut = mx.array(scales)
+
+    def decode_gathered(self, raw: mx.array) -> mx.array:
+        if self._codec is None:
+            return raw
+        return decode_rows(raw, self._codec, self.head_dim,
+                           self._value_lut, self._scale_lut).astype(mx.bfloat16)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.decode_gathered(super().__call__(x))
+
+
 class Engram(nn.Module):
     """One n-gram lookup written into the residual streams, gated by how
     well it matches them."""
@@ -239,7 +278,8 @@ class Engram(nn.Module):
         self.eps = config.rms_norm_eps
         self.clamp_value = 1e-6
         cols = (config.engram_max_ngram_size - 1) * config.engram_n_heads
-        self.embed = nn.Embedding(max(int(table_rows), 1), config.engram_head_dim)
+        self.embed = EngramTable(table_rows, config.engram_head_dim,
+                                 config.engram_row_encoding)
         self.wkv = nn.Linear(
             cols * config.engram_head_dim,
             config.hidden_size * (config.hc_mult + 1),

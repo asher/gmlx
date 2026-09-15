@@ -1769,6 +1769,76 @@ def test_deepseek41_synth_needs_a_compressed_kv_owner():
         synthesize_config(_deepseek41_meta(), tensor_shapes=shapes)
 
 
+# --- the ds4 conversion of the same model ---------------------------------
+
+# key_length 8 values plus one E8M0 scale byte per block of 32.
+_DS4_ENCODING = "e4m3_e8m0_32_row9"
+
+# Same tables, raw bytes instead of a GGUF quant, plus the engram_kv shape
+# the key_length derivation reads.
+_DS4_SHAPES = dict(
+    _DEEPSEEK41_SHAPES,
+    **{"blk.1.engram_embd.weight": [9, _ENGRAM_ROWS[0]],
+       "blk.3.engram_embd.weight": [9, _ENGRAM_ROWS[1]],
+       "blk.1.engram_kv.weight": [48, 64]})   # in = cols x key_length
+
+
+def _deepseek41_ds4_meta() -> dict:
+    """The same header as ds4 writes it: HF-style key names, the engram
+    dims and offsets left to be derived, and ds4's own encoding marker."""
+    from gmlx.load.config_synth import _DEEPSEEK41_DS4_KEYS
+
+    arch = "deepseek41"
+    m = _deepseek41_meta()
+    for src, dst in _DEEPSEEK41_DS4_KEYS.items():
+        if f"{arch}.{dst}" in m:
+            m[f"{arch}.{src}"] = m.pop(f"{arch}.{dst}")
+    for derived in ("attention.value_length", "expert_gating_func",
+                    "rope.scaling.type", "engram.max_ngram_size",
+                    "engram.head_count", "engram.key_length",
+                    "engram.offsets"):
+        m.pop(f"{arch}.{derived}", None)
+    m[f"{arch}.scoring_func"] = "sqrtsoftplus"
+    m[f"{arch}.engram.encoding"] = _DS4_ENCODING
+    return m
+
+
+def test_deepseek41_ds4_dialect_matches_the_llamacpp_header():
+    # Two conversions of one model. Only the row encoding differs; every
+    # other field, including the offsets ds4 does not write, must agree.
+    want = synthesize_config(_deepseek41_meta(),
+                             tensor_shapes=_DEEPSEEK41_SHAPES)
+    got = synthesize_config(_deepseek41_ds4_meta(), tensor_shapes=_DS4_SHAPES)
+    assert got["engram_row_encoding"] == _DS4_ENCODING
+    assert want["engram_row_encoding"] is None
+    assert got["engram_offsets"] == _ENGRAM_OFFSETS
+    del got["engram_row_encoding"], want["engram_row_encoding"]
+    assert got == want
+
+
+def test_deepseek41_ds4_dialect_leaves_a_llamacpp_header_alone():
+    # Detection keys on ds4's own markers, so a rename on the llama.cpp
+    # side cannot make this misfire.
+    from gmlx.load.config_synth import _deepseek41_dialect
+
+    meta = _deepseek41_meta()
+    assert _deepseek41_dialect(meta, _DEEPSEEK41_SHAPES) is meta
+
+
+def test_deepseek41_ds4_row_encoding_must_match_the_table():
+    shapes = dict(_DS4_SHAPES)
+    shapes["blk.1.engram_embd.weight"] = [8, _ENGRAM_ROWS[0]]
+    with pytest.raises(ValueError, match="row"):
+        synthesize_config(_deepseek41_ds4_meta(), tensor_shapes=shapes)
+
+
+def test_deepseek41_ds4_rejects_an_unknown_gate():
+    meta = _deepseek41_ds4_meta()
+    meta["deepseek41.scoring_func"] = "softmax"
+    with pytest.raises(ValueError, match="sqrt-softplus"):
+        synthesize_config(meta, tensor_shapes=_DS4_SHAPES)
+
+
 def _qwen4exp_meta(with_indexer: bool = True, with_ple: bool = True) -> dict:
     arch = "qwen4exp"
     m = _base_meta(arch)

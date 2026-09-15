@@ -348,6 +348,17 @@ def test_deepseek41_engram_routing():
         "model.layers.1.engram.k_weight"
 
 
+def test_deepseek41_ds4_spellings_reach_the_same_targets():
+    # The ds4 conversion names three engram tensors differently; both
+    # spellings must land on the same module path.
+    for ds4, llamacpp in (
+        ("blk.1.engram_kv.weight", "blk.1.engram_wkv.weight"),
+        ("blk.1.engram_q_norm.weight", "blk.1.engram_q.weight"),
+        ("blk.1.engram_k_norm.weight", "blk.1.engram_k.weight"),
+    ):
+        assert d("deepseek41", ds4).hf_name == d("deepseek41", llamacpp).hf_name
+
+
 def test_deepseek41_indexer_owns_its_key_projection():
     # V4 derives index keys from a private compressor; V4.1 gives the indexer
     # its own wk/k_norm over the shared latent.

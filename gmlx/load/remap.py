@@ -1934,6 +1934,13 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.engram.q_weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.engram_k\.weight$"),
          "model.layers.{bid}.engram.k_weight", "passthrough"),
+        # The ds4 conversion spells the same three tensors differently.
+        (re.compile(r"^blk\.(\d+)\.engram_kv\.weight$"),
+         "model.layers.{bid}.engram.wkv.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_q_norm\.weight$"),
+         "model.layers.{bid}.engram.q_weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_k_norm\.weight$"),
+         "model.layers.{bid}.engram.k_weight", "passthrough"),
         # V4.1 index keys come from the kv-source layer's own latent, so the
         # indexer has its own wk/k_norm instead of V4's private compressor.
         (re.compile(r"^blk\.(\d+)\.indexer\.attn_k\.weight$"),
