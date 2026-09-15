@@ -92,6 +92,45 @@ def test_concat_prefill_matches_stock(tokens, weights_after_install,
                - np.array(y_stock, np.float32)).max())
 
 
+def test_concat_bypassed_under_weight_swap():
+    """A feeder swap binds a staging slot's bytes (arena: slot order, ids
+    are slot ids) through swapped_weights; the sorted-prefill call must
+    gather from the bound weights, never from the resident concat, and
+    must not build the concat from the slot. Outputs under the swap equal
+    the unswapped call with expert ids, and the concat serves again once
+    the originals are restored."""
+    from gmlx.stream.feeder_common import swapped_weights
+    rng = np.random.default_rng(5)
+    model = _build(rng)
+    glu = model.experts
+    entry = {k: (glu,) for k in ("gate", "up", "down")}
+    perm = rng.permutation(E)
+    inv = np.argsort(perm)
+    views = {k: getattr(glu, f"{k}_proj").weight[mx.array(perm)]
+             for k in ("gate", "up", "down")}
+    mx.eval(*views.values())
+    x, inds = _prefill_inputs(rng, 64)  # 256 routed rows: sorted prefill
+    slot_ids = mx.array(inv.astype(np.uint32))[inds]
+    # swap before any concat exists: nothing is built from the slot
+    with swapped_weights(entry, views):
+        assert glu._kq_weights_swapped
+        y_swap_first = glu(x, slot_ids)
+        mx.eval(y_swap_first)
+    assert not glu._kq_weights_swapped
+    assert getattr(glu, "_kq_gate_up", None) is None
+    assert glu._kq_gate_up_pending
+    y_ref = glu(x, inds)  # builds the concat in expert order
+    mx.eval(y_ref)
+    assert glu._kq_gate_up is not None
+    assert np.array_equal(np.array(y_swap_first), np.array(y_ref))
+    with swapped_weights(entry, views):
+        y_swap = glu(x, slot_ids)
+        mx.eval(y_swap)
+    assert np.array_equal(np.array(y_swap), np.array(y_ref))
+    y_after = glu(x, inds)
+    mx.eval(y_after)
+    assert np.array_equal(np.array(y_after), np.array(y_ref))
+
 def test_concat_skipped_when_disabled(monkeypatch):
     monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", False)
     model = _build(np.random.default_rng(7))

@@ -704,7 +704,13 @@ def _make_fused_kquant(base_cls, caps):
             run as one dispatch (kq.gather_mix) and the result comes back
             mixed, [..., N]; the shexp-fold stamp keeps it unmixed."""
             if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
-                    or self.training):
+                    or self.training
+                    or getattr(self, "_kq_weights_swapped", False)):
+                # A feeder swap binds a staging slot's bytes (ring: expert
+                # order, arena: slot order with slot ids): the concat is a
+                # copy of the resident bytes and would gather the wrong
+                # experts, and one built here would freeze the slot's
+                # bytes. The stock two-gather path reads what is bound.
                 return None
             gu = getattr(self, "_kq_gate_up", None)
             if gu is None:
