@@ -395,6 +395,15 @@ class Glm5NextMoEGate(nn.Module):
             "sigmoid",
         )
 
+    def _kq_route_weights(self, x, inds):
+        # Route replay (stream/moe_routes): the weight branch of
+        # _expert_select at caller-chosen ids, sigmoid scoring.
+        logits = x.astype(mx.float32) @ self.weight.T
+        w = mx.take_along_axis(mx.sigmoid(logits), inds, axis=-1)
+        if self.norm_topk_prob:
+            w = w / (w.sum(axis=-1, keepdims=True) + 1e-20)
+        return w * self.routed_scaling_factor
+
 
 class Glm5NextMoE(nn.Module):
     def __init__(self, args: ModelArgs):

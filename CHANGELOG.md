@@ -6,6 +6,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- MoE route record and replay (`gmlx.stream.moe_routes`): a forward's
+  per-layer expert ids can be captured and fed back so a later forward
+  over the same positions selects the same experts with live mixing
+  weights. Covers the qwen3, qwen3-next, minimax, gpt-oss, hunyuan,
+  kimi-k3 and DeepSeek-shaped gate families, resident or streamed.
+
+### Changed
+
+- `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
+  blocks, which were reported as unsupported before.
+
 ## [0.4.13] - 2026-09-12
 
 ### Changed

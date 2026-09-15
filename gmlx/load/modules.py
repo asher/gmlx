@@ -473,6 +473,14 @@ def _make_fused_gptoss_mlp(base_cls, caps):
             d = x.shape[-1]
             t = x.size // d
             k = self.num_experts_per_tok
+            from gmlx.stream.moe_experts import expert_controls_active
+
+            if expert_controls_active(self):
+                # Every control (mass, probe, route record and replay)
+                # lives at the eager forward's selection seam.
+                from gmlx.stream.moe_experts import gptoss_moe_forward
+
+                return gptoss_moe_forward(self, x)
             if not (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
@@ -964,10 +972,16 @@ def _make_fused_block(base_cls, caps):
         def __call__(self, x):
             d = x.shape[-1]
             t = x.size // d
-            expert_ctl = (
-                getattr(self, "_kq_expert_mass", None) is not None
-                or getattr(self, "_kq_expert_probe", None) is not None
-            )
+            from gmlx.stream.moe_experts import expert_controls_active
+
+            expert_ctl = expert_controls_active(self)
+            if getattr(self, "_kq_route_replay", None) is not None:
+                # Replay recomputes the mixing weights at the replayed ids
+                # on the eager path; the fused router epilogue has no seam
+                # for that.
+                from gmlx.stream.moe_experts import qwen3_next_moe_forward
+
+                return qwen3_next_moe_forward(self, x)
             if not (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
@@ -1010,7 +1024,8 @@ def _make_fused_block(base_cls, caps):
                     [scores, shared_g.astype(scores.dtype)], axis=-1)
             if expert_ctl:
                 # Adaptive fan-out on the routed slots only; the trailing
-                # shared-gate mix weight rides along untouched.
+                # shared-gate mix weight rides along untouched. Replay
+                # returned above, so no reweight callable is needed here.
                 from gmlx.stream.moe_experts import _apply_expert_controls
 
                 k = self.top_k

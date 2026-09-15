@@ -32,6 +32,16 @@ loader.install_moe_experts_override):
 - qwen3-next-shaped blocks the loader fused at load (_FusedKQuantMoeBlock in
   modules.py) hook inside the fused forward, and their non-fused fallback
   routes through qwen3_next_moe_forward below.
+- gpt-oss's MLPBlock (plain-Linear router, softmax over the selected
+  logits) gets the same block-seam swap; the fused decode block the loader
+  installs falls back to that forward whenever a control is set.
+
+Every call site hands the seam a ``reweight`` callable that recomputes the
+block's own mixing weights for an arbitrary id set (the block's gate
+probabilities gathered at those ids, then its usual renormalization). The
+route controls in stream/moe_routes.py use it to replay a recorded route
+set through the block with live weights; the mass filter and the probe
+never call it.
 """
 
 from __future__ import annotations
@@ -180,9 +190,37 @@ class ExpertProbe:
                 )
 
 
-def _apply_expert_controls(mod, inds, weights):
-    """Shared post-selection hook: probe recording and/or mass filtering,
-    driven by attrs the installer set on ``mod``."""
+_CONTROL_ATTRS = (
+    "_kq_expert_mass", "_kq_expert_probe", "_kq_route_replay", "_kq_route_record",
+)
+
+
+def expert_controls_active(mod) -> bool:
+    """True when an installer set any control attr on ``mod`` (the gate
+    submodule or the block), so a forward with a fused fast path knows to
+    take the seam-carrying path instead."""
+    return any(getattr(mod, a, None) is not None for a in _CONTROL_ATTRS)
+
+
+def _apply_expert_controls(mod, inds, weights, reweight=None):
+    """Shared post-selection hook, driven by attrs the installers set on
+    ``mod``: route replay (ids swapped for the recorded set, weights from
+    ``reweight``), route recording, probe recording, mass filtering, in
+    that order. ``reweight(inds)`` returns the block's mixing weights for
+    the given ids; a call site that cannot provide one passes None and
+    replay refuses at forward time."""
+    replay = getattr(mod, "_kq_route_replay", None)
+    if replay is not None:
+        if reweight is None:
+            raise RuntimeError(
+                f"route replay on {type(mod).__name__} needs the block's "
+                "reweight callable and the forward passed none"
+            )
+        inds = replay.ids_for(getattr(mod, "_kq_li", -1), inds)
+        weights = reweight(inds)
+    rec = getattr(mod, "_kq_route_record", None)
+    if rec is not None:
+        rec.record(getattr(mod, "_kq_li", -1), inds)
     probe = getattr(mod, "_kq_expert_probe", None)
     if probe is not None:
         probe.record(getattr(mod, "_kq_li", -1), weights)
@@ -205,7 +243,9 @@ def _expert_ctl_gate_class(cls):
                 # Extra args pass through untouched (deepseek_v4 hands the
                 # gate its input_ids for the hash-routed layers).
                 inds, weights = super().__call__(x, *args, **kwargs)
-                return _apply_expert_controls(self, inds, weights)
+                fn = getattr(self, "_kq_route_weights_fn", None)
+                reweight = None if fn is None else (lambda i: fn(self, x, i))
+                return _apply_expert_controls(self, inds, weights, reweight)
 
         _ExpertCtlGate.__name__ = cls.__name__ + "_ExpertCtl"
         _GATE_CLASS_CACHE[cls] = sub = _ExpertCtlGate
@@ -230,11 +270,15 @@ def _qwen3_moe_forward(mod, x):
     gates = mod.gate(x)
     gates = mx.softmax(gates, axis=-1, precise=True)
     k = mod.top_k
+
+    def weights_at(inds):
+        scores = mx.take_along_axis(gates, inds, axis=-1)
+        if mod.norm_topk_prob:
+            scores = scores / mx.sum(scores, axis=-1, keepdims=True)
+        return scores
+
     inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
-    scores = mx.take_along_axis(gates, inds, axis=-1)
-    if mod.norm_topk_prob:
-        scores = scores / mx.sum(scores, axis=-1, keepdims=True)
-    inds, scores = _apply_expert_controls(mod, inds, scores)
+    inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
     return y
@@ -252,11 +296,15 @@ def qwen3_next_moe_forward(mod, x):
     gates = mod.gate(x)
     gates = mx.softmax(gates, axis=-1, precise=True)
     k = mod.top_k
+
+    def weights_at(inds):
+        scores = mx.take_along_axis(gates, inds, axis=-1)
+        if mod.norm_topk_prob:
+            scores = scores / scores.sum(axis=-1, keepdims=True)
+        return scores
+
     inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
-    scores = mx.take_along_axis(gates, inds, axis=-1)
-    if mod.norm_topk_prob:
-        scores = scores / scores.sum(axis=-1, keepdims=True)
-    inds, scores = _apply_expert_controls(mod, inds, scores)
+    inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
     shared_y = mod.shared_expert(x)
@@ -277,11 +325,14 @@ def _minimax_forward(mod, x):
     orig_scores = scores
     scores = scores + mod.e_score_correction_bias
     k = mod.num_experts_per_tok
+
+    def weights_at(inds):
+        w = mx.take_along_axis(orig_scores, inds, axis=-1)
+        w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
+        return w.astype(x.dtype)
+
     inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
-    scores = mx.take_along_axis(orig_scores, inds, axis=-1)
-    scores = scores / (mx.sum(scores, axis=-1, keepdims=True) + 1e-20)
-    scores = scores.astype(x.dtype)
-    inds, scores = _apply_expert_controls(mod, inds, scores)
+    inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
     if mod.sharding_group is not None:
@@ -295,14 +346,42 @@ def _minimax_m3_forward(mod, x):
     orig_scores = scores
     scores = scores + mod.e_score_correction_bias
     k = mod.num_experts_per_tok
+
+    def weights_at(inds):
+        w = mx.take_along_axis(orig_scores, inds, axis=-1)
+        w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
+        return (w * mod.routed_scaling_factor).astype(x.dtype)
+
     inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
-    weights = mx.take_along_axis(orig_scores, inds, axis=-1)
-    weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
-    weights = (weights * mod.routed_scaling_factor).astype(x.dtype)
-    inds, weights = _apply_expert_controls(mod, inds, weights)
+    inds, weights = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * weights[..., None]).sum(axis=-2)
     return y + mod.shared_experts(x)
+
+
+def gptoss_moe_forward(mod, x):
+    """Stock gpt-oss MLPBlock forward (mlx-lm 0.31: plain-Linear router,
+    top-k on the raw logits, softmax over the selected logits) with the
+    expert-controls hook at the selection seam. Shared by the class swap and
+    the fused decode block's fallback in modules.py."""
+    from mlx.nn.layers.distributed import sum_gradients
+
+    if mod.sharding_group is not None:
+        x = sum_gradients(mod.sharding_group)(x)
+    g = mod.router(x)
+    k = mod.num_experts_per_tok
+
+    def weights_at(inds):
+        return mx.softmax(
+            mx.take_along_axis(g, inds, axis=-1), axis=-1, precise=True)
+
+    inds = mx.argpartition(g, kth=-k, axis=-1)[..., -k:]
+    inds, weights = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
+    y = mod.experts(x, inds)
+    y = (y * mx.expand_dims(weights, axis=-1)).sum(axis=-2)
+    if mod.sharding_group is not None:
+        y = mx.distributed.all_sum(y, group=mod.sharding_group)
+    return y
 
 
 # Block name -> the arch's stock forward with the expert-controls hook at the
@@ -314,6 +393,71 @@ _INLINE_SWAPS = {
     "MiniMaxSparseMoeBlock": _minimax_forward,
     "MiniMaxM3SparseMoeBlock": _minimax_m3_forward,
 }
+
+# Blocks whose forward calls back into _apply_expert_controls when a control
+# attr is set: the hunyuan renorm patch, the two fused decode blocks
+# (modules.py) and the gmlx-owned kimi-k3 latent MoE, whose projections and
+# mix seam make a call-back safer than a forward swap.
+_CALLBACK_BLOCKS = (
+    "_NormTopKMoE", "_FusedKQuantMoeBlock", "_FusedGptOssMLPBlock", "KimiK3MoE",
+)
+
+
+def _inline_forward(owner):
+    """The swapped forward for ``owner``'s class, or None. gpt-oss's block
+    is named MLPBlock like several dense blocks, so it keys on the module."""
+    name = type(owner).__name__
+    if name == "MLPBlock" and "gpt_oss" in type(owner).__module__:
+        return gptoss_moe_forward
+    return _INLINE_SWAPS.get(name)
+
+
+def _hook_target(owner):
+    """The module the installers set control attrs on: the DeepSeek-shaped
+    gate submodule (class-swapped for the seam-carrying subclass), or the
+    block itself (class-swapped when an inline forward exists, left alone
+    for the call-back blocks). None for an unsupported block."""
+    gate = _gate_submodule(owner)
+    if gate is not None:
+        if not type(gate).__name__.endswith("_ExpertCtl"):
+            gate.__class__ = _expert_ctl_gate_class(type(gate))
+        return gate
+    name = type(owner).__name__
+    if name in _CALLBACK_BLOCKS or name.endswith("_ExpertCtl"):
+        return owner
+    forward = _inline_forward(owner)
+    if forward is not None:
+        owner.__class__ = _block_class(type(owner), forward)
+        return owner
+    return None
+
+
+def _is_moe_block(owner) -> bool:
+    """A block that routes tokens over an expert container, supported by the
+    seam or not, so the resident walk can report the unsupported ones."""
+    if _gate_submodule(owner) is not None or _inline_forward(owner) is not None:
+        return True
+    name = type(owner).__name__
+    if name in _CALLBACK_BLOCKS or name.endswith("_ExpertCtl"):
+        return True
+    for attr in ("switch_mlp", "experts"):
+        c = getattr(owner, attr, None)
+        if isinstance(c, nn.Module) and hasattr(c, "gate_proj"):
+            return True
+    return False
+
+
+def _moe_owners(model):
+    """Yield (layer index, MoE block) for every layer of ``model``, resident
+    or streamed. One block per layer, the first found."""
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = model.model.layers
+    for li, layer in enumerate(layers):
+        for owner in layer.modules():
+            if _is_moe_block(owner):
+                yield li, owner
+                break
 
 
 def _gate_submodule(owner):
@@ -353,27 +497,8 @@ def _install(model, *, mass=None, probe=None) -> int:
     hooked = 0
     unsupported: set = set()
     for li, owner in _offloaded_moe_owners(model):
-        gate = _gate_submodule(owner)
-        if gate is not None and type(gate).__name__.endswith("_ExpertCtl"):
-            target = gate  # already swapped by an earlier install
-        elif gate is not None:
-            target = gate
-            gate.__class__ = _expert_ctl_gate_class(type(gate))
-        elif type(owner).__name__ in (
-            "_NormTopKMoE", "_FusedKQuantMoeBlock", "KimiK3MoE",
-        ):
-            # hunyuan renorm patch / fused kquant MoE block / gmlx-owned
-            # kimi-k3 latent MoE: these forwards call back into the hook
-            # when the attrs are set (kimi-k3's latent projections and
-            # mix seam make a call-back safer than a forward swap)
-            target = owner
-        elif type(owner).__name__.endswith("_ExpertCtl"):
-            target = owner  # already swapped by an earlier install
-        elif type(owner).__name__ in _INLINE_SWAPS:
-            target = owner
-            owner.__class__ = _block_class(
-                type(owner), _INLINE_SWAPS[type(owner).__name__])
-        else:
+        target = _hook_target(owner)
+        if target is None:
             unsupported.add(type(owner).__name__)
             continue
         object.__setattr__(target, "_kq_expert_mass", mass)

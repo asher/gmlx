@@ -251,18 +251,22 @@ def _patch_hunyuan_norm_topk(model) -> None:
         def __call__(self, x):
             gates = mx.softmax(self.gate(x), axis=-1, precise=True)
             k = self.top_k
+
+            def weights_at(inds):
+                scores = mx.take_along_axis(gates, inds, axis=-1)
+                return scores / scores.sum(axis=-1, keepdims=True)
+
             inds = mx.stop_gradient(
                 mx.argpartition(-gates, kth=k - 1, axis=-1)[..., :k]
             )
-            scores = mx.take_along_axis(gates, inds, axis=-1)
-            scores = scores / scores.sum(axis=-1, keepdims=True)
-            if (
-                getattr(self, "_kq_expert_mass", None) is not None
-                or getattr(self, "_kq_expert_probe", None) is not None
-            ):
+            scores = weights_at(inds)
+            from gmlx.stream.moe_experts import expert_controls_active
+
+            if expert_controls_active(self):
                 from gmlx.stream.moe_experts import _apply_expert_controls
 
-                inds, scores = _apply_expert_controls(self, inds, scores)
+                inds, scores = _apply_expert_controls(
+                    self, inds, scores, weights_at)
             y = self.switch_mlp(x, inds)
             y = (y * scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
             if self.use_shared_mlp:
