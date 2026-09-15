@@ -221,17 +221,21 @@ snapshot read about 45 GB at install, the second ceiling clamped the arena to
 13 GB, and the governor then shed toward 3 GB.
 
 The reader now gives the window a second dimension when no width fits, and
-the tensor becomes a whole-row slice of it. Shard 4 loaded alone, before and
-after:
+the tensor becomes a whole-row slice of it. The GGUF data section is not
+page-aligned, so the window base also walks back page by page until it lands
+on a row boundary. One tensor per file, loaded alone, before and after:
 
 | | copied | 2-D window |
 |---|---|---|
-| zero-copy views | 61 of 62 | 62 of 62 |
-| `IOAccelerator` after a gather | 30.0 GB | 64 KB |
-| resident mapped file | 30.0 GB | 528 KB |
+| Q2_K table, zero-copy views | 61 of 62 | 62 of 62 |
+| Q2_K table, `IOAccelerator` | 30.0 GB | 64 KB |
+| Q2_K table, resident mapped file | 30.0 GB | 528 KB |
+| q8_0 geometry, `IOAccelerator` | 17.7 GB | 64 KB |
 
 Gathered rows match `pread` at the first, the last and two interior rows in
-both cases. A load line names the reclaimable-RAM clamp whenever it binds; on
+every case. The q8_0 row is a 19.0 GB tensor of 272-byte rows, the shape a
+q8_0 build of the same table carries: 272 divides by 8, so its 1-D ceiling is
+the widest one, 17.2 GB, and it is still past it. A load line names the reclaimable-RAM clamp whenever it binds; on
 this file it no longer binds.
 
 The per-token split at 120 tokens, from `GMLX_DECODE_PHASE_STATS=1`, before
