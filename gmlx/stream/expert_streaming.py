@@ -119,7 +119,8 @@ def configure_stream_cpu(
 
 def _install_gpu_residency(model, moe_modules, *,
                            skip_ids=frozenset(),
-                           include_expert_stacks: bool = False) -> None:
+                           include_expert_stacks: bool = False,
+                           room: int | None = None) -> None:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
@@ -130,7 +131,17 @@ def _install_gpu_residency(model, moe_modules, *,
     tables (a residency insert wires the buffer as surely as a GPU op).
     ``include_expert_stacks``: table-only streaming keeps the experts
     resident, so the GB-scale-stack belt is lifted and they are wired
-    with everything else."""
+    with everything else.
+
+    ``room``: bytes of the working set the arena, the ring and other live
+    installs have not taken. This runs last, so it is the one step that
+    can push their sum past the set; a residency set larger than the
+    working set cannot be honored, buys nothing, and has been seen to
+    panic the kernel (IOGPUGroupMemory). The room is an estimate - the
+    arena is charged from its computed size, before the decode feeder
+    exists, so a run that builds no feeder caps tighter than it needs to.
+    That costs speed, never correctness, which is why this clamps instead
+    of raising."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
@@ -146,12 +157,17 @@ def _install_gpu_residency(model, moe_modules, *,
                     skip.add(id(w))
     inserted = []
     nbytes = 0
+    left_out = left_out_bytes = 0
     for _, a in tree_flatten(model.parameters()):
         if id(a) in skip:
             continue
         if (not include_expert_stacks
                 and a.ndim == 3 and a.nbytes > (1 << 30)):
             continue  # belt: any GB-scale stack is an expert container
+        if room is not None and nbytes + a.nbytes > room:
+            left_out += 1
+            left_out_bytes += a.nbytes
+            continue
         if kq.residency_insert(a):
             inserted.append(a)
             nbytes += a.nbytes
@@ -161,6 +177,10 @@ def _install_gpu_residency(model, moe_modules, *,
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
           "(GMLX_GPU_RESIDENT=0 disables)")
+    if left_out:
+        print(f"[stream] gpu-resident weights: {left_out} buffers "
+              f"({left_out_bytes / 1e9:.1f} GB) left out - the working set "
+              f"has {room / 1e9:.1f} GB free of it")
 
 
 def install_expert_streaming(
@@ -1004,9 +1024,16 @@ def install_expert_streaming(
             from gmlx.stream.table_stream import streamed_table_array_ids
 
             tskip = streamed_table_array_ids(model)
+        # The pin is NOT a term here: it mlocks the same every-token
+        # arrays this inserts, and the arena already priced them (it is
+        # sized as ceiling - non_expert - room - ring - floor), so
+        # subtracting both would leave the unpinned remainder and
+        # disable the residency set rather than cap it.
         _install_gpu_residency(
             model, moe_modules, skip_ids=tskip,
-            include_expert_stacks=bool(table_offloaded) and not streaming)
+            include_expert_stacks=bool(table_offloaded) and not streaming,
+            room=(None if budget is None
+                  else max(0, budget - held_wired - int(arena or 0) - ring)))
     if streaming and dfeeder is not None:
         import gmlx.stream.gpu_token as gpu_token
 
