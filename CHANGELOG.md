@@ -19,6 +19,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image turns. Each image expands to a block of up to 1024 tokens in plain
   reading order that the language model attends to causally, so image turns
   chunk and cache like text.
+- The ds4 conversion of DeepSeek-V4.1-Flash loads alongside the llama.cpp
+  one. It spells its metadata differently and stores the engram tables as
+  raw fp8 rows, which are too large for one GPU buffer on a 128 GB Mac; a
+  table past that limit is read from the GGUF row by row instead. Its
+  sentinel tokens, which the conversion types as ordinary text, are made
+  atomic again so prompts tokenize as the model expects.
 
 ### Fixed
 
@@ -30,6 +36,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or derives one internally, got a variable it discards.
 - `--stream-cpu` now streams a declared lookup table instead of holding it
   resident.
+- The Metal residency set is capped at the working set the arena, the ring
+  and other live installs leave. An over-sized set is not honored anyway,
+  and a large enough one can panic the kernel.
 - A quantized tensor that lands on a raw array beside sub-modules is
   dequantized at load instead of reaching the forward as wire bytes.
 - The bundled chat template is applied on the report-only, MTP and VLM
