@@ -196,6 +196,32 @@ n-gram tables, so the every-token weights are 3 GiB, not 63 GiB. The same
 credit reaches the server's preload gate and its resident-bytes bookkeeping,
 so a streamed entry is not priced for room it never takes.
 
+### A table no single buffer can hold
+
+A GPU buffer cannot exceed the device's `max_buffer_length`, which scales
+with RAM: about 81 GiB on a 128 GB Mac, about 320 GiB on a 512 GB one. A
+tensor past that has no buffer at all, so neither a mapped view nor a copy
+of it exists. The ds4 conversion of DeepSeek-V4.1-Flash stores each engram
+table as raw fp8 bytes at 264 B/row, which is 101 GB per table and past
+the ceiling on a 128 GB machine; the llama.cpp conversion stores the same
+tables at Q2_K, 84 B/row, and stays under it.
+
+gmlx leaves such a table out of the weight load and reads its rows from
+the GGUF as the model asks for them, the way the reference runtime does.
+The reads bypass the page cache and the table is never resident, so it
+weighs nothing in the memory budget and does not appear in the
+`streamed tables` figure. The load names it instead:
+
+```
+[install] 2 table(s) read from the GGUF, 202.8 GB: blk.1.engram_embd.weight, blk.14.engram_embd.weight
+```
+
+Two limits. Reading rows this way needs an mlx-kquant whose GGUF loader
+takes a skip list; gmlx names that in the error when it is missing, and no
+other model is affected. And a build with no Metal device has no ceiling to
+compare against, so nothing is deferred and such a file fails in the loader
+as before.
+
 `gmlx validate --json` carries the same numbers under `stream`, and
 `gmlx doctor` adds a clause for each streamed entry to its memory row. A
 load prints the live budget as `[stream] memory budget:`, and because that

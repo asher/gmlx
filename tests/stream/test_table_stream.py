@@ -597,3 +597,41 @@ def test_arena_sizing_excludes_streamable_bytes(monkeypatch):
                                 streamable_bytes=54 * G)
     assert fixed - base >= 53 * G
     assert fixed > 40 * G
+
+
+# --- tables read from the file (past the device buffer ceiling) -----------
+
+
+def _file_backed_model():
+    """A declared table with no ``weight``: too large for any MTLBuffer,
+    so ``table_pread`` reads its rows and drops the array."""
+    model = _table_model()
+    mod = model.model.ple_embed
+    del mod["weight"]
+    mod._kq_table_source = _Node()
+    mod._kq_table_source.nbytes = 101 << 30
+    mod._kq_table_streamed = True
+    return model, mod
+
+
+def test_file_backed_table_is_still_declared():
+    model, mod = _file_backed_model()
+    assert [m for _, m in ts.streamable_tables_for(model)] == [mod]
+
+
+def test_file_backed_table_weighs_nothing_in_the_budget_seams():
+    """The figure both callers subtract counts live arrays only. Charging
+    the file bytes made the ladder pick table-only streaming and leave
+    163 GB of experts resident."""
+    model, _mod = _file_backed_model()
+    assert ts.table_bytes(model) == 0
+    assert ts.streamed_table_bytes(model) == 0
+
+
+def test_selection_skips_a_table_that_is_already_off_the_books(monkeypatch):
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    model, _mod = _file_backed_model()
+    # Deeply over budget: the experts must stream, and no arithmetic on
+    # the table may say otherwise.
+    assert not ts.table_stream_selected(model, 137 << 30, 103 << 30)
+    assert ts.install_table_streaming(model) == (0, ["per_layer_token_embd.weight"])

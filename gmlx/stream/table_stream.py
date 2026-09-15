@@ -62,15 +62,21 @@ class ArchTables(NamedTuple):
     tiers: TableTiers    # ordered, cheapest-to-stream first
 
 
-def _deepseek_v41_tiers(model) -> tuple[StreamableTable, ...]:
+def _deepseek_v41_tiers(model, prefix: str = "") -> tuple[StreamableTable, ...]:
     """One engram table per engram layer."""
-    layers = getattr(getattr(model, "model", model), "layers", None) or ()
+    root = _resolve(model, prefix.rstrip(".")) if prefix else model
+    layers = getattr(getattr(root, "model", root), "layers", None) or ()
     return tuple(
-        StreamableTable(f"model.layers.{i}.engram.embed",
+        StreamableTable(f"{prefix}model.layers.{i}.engram.embed",
                         f"blk.{i}.engram_embd.weight")
         for i, layer in enumerate(layers)
         if getattr(layer, "engram", None) is not None
     )
+
+
+def _deepseek_v41_vl_tiers(model) -> tuple[StreamableTable, ...]:
+    """The same tables, under the VLM container's text tower."""
+    return _deepseek_v41_tiers(model, "language_model.")
 
 
 # model_type -> tables, cheapest-to-stream first; implemented archs only
@@ -86,6 +92,11 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         arch="deepseek41",
         name_pattern=r"blk\.\d+\.engram_embd\.weight",
         tiers=_deepseek_v41_tiers,
+    ),
+    "deepseek_v41_vl": ArchTables(
+        arch="deepseek41",
+        name_pattern=r"blk\.\d+\.engram_embd\.weight",
+        tiers=_deepseek_v41_vl_tiers,
     ),
 }
 
@@ -124,6 +135,14 @@ def _resolve(model, path: str):
     return obj
 
 
+def resident_table_bytes(mod) -> int:
+    """Bytes of ``mod``'s table that live in an array. A table past the
+    device buffer ceiling is read from the GGUF and has no array, so it
+    weighs nothing here - its file size is on ``_kq_table_source``."""
+    w = getattr(mod, "weight", None)
+    return 0 if w is None else int(w.nbytes)
+
+
 def streamable_tables_for(model) -> list[tuple[StreamableTable, object]]:
     """The declared streamable tables present on ``model`` (missing paths
     are skipped: e.g. a build without the optional table)."""
@@ -134,21 +153,32 @@ def streamable_tables_for(model) -> list[tuple[StreamableTable, object]]:
     out = []
     for tier in tiers:
         mod = _resolve(model, tier.param_path)
-        if mod is not None and getattr(mod, "weight", None) is not None:
+        if mod is None:
+            continue
+        if (getattr(mod, "weight", None) is not None
+                or getattr(mod, "_kq_table_source", None) is not None):
             out.append((tier, mod))
     return out
 
 
 def table_bytes(model) -> int:
-    """Total bytes of the declared streamable tables on ``model``."""
-    return sum(int(m.weight.nbytes) for _, m in streamable_tables_for(model))
+    """Total bytes of the declared streamable tables on ``model``.
+
+    Array bytes only. Both callers subtract this from a total that sums
+    live parameter arrays, and a figure subtracted from a total may only
+    count what that total counts: ``expert_streaming`` goes negative and
+    picks the wrong tier otherwise, ``budget._decode_arena_bytes`` clamps
+    at 0 and silently zeroes the arena. ``plan.ModelPlan`` subtracts a
+    table figure too, but from a header-derived total that DOES count the
+    file bytes, so that one is right to count them."""
+    return sum(resident_table_bytes(m) for _, m in streamable_tables_for(model))
 
 
 def streamed_table_bytes(model) -> int:
     """Bytes of tables actually streamed. A declared table left resident
     (fallback) is wired like any other weight and must stay charged in
     wired-budget accounting."""
-    return sum(int(m.weight.nbytes) for _, m in streamable_tables_for(model)
+    return sum(resident_table_bytes(m) for _, m in streamable_tables_for(model)
                if getattr(m, "_kq_table_streamed", False))
 
 
@@ -259,7 +289,10 @@ def _wrapped_class(cls, kquant: bool):
 
             def __call__(self, x):
                 out = mx.take(self.weight, x, axis=0, stream=table_stream())
-                return out
+                # A table whose rows are a byte blob decodes off the table
+                # buffer, on the default stream.
+                decode = getattr(self, "decode_gathered", None)
+                return out if decode is None else decode(out)
 
             def as_linear(self, x):
                 raise RuntimeError(
@@ -282,13 +315,10 @@ def install_table_streaming(model) -> tuple[int, list[str]]:
     offloaded = 0
     names: list[str] = []
     for tier, mod in streamable_tables_for(model):
-        if getattr(mod, "_kq_table_streamed", False):
-            offloaded += int(mod.weight.nbytes)
-            names.append(tier.gguf_name)
-            continue
-        mod.__class__ = _wrapped_class(
-            mod.__class__, hasattr(mod, "kquant_type"))
-        offloaded += int(mod.weight.nbytes)
+        if not getattr(mod, "_kq_table_streamed", False):
+            mod.__class__ = _wrapped_class(
+                mod.__class__, hasattr(mod, "kquant_type"))
+        offloaded += resident_table_bytes(mod)
         names.append(tier.gguf_name)
     if offloaded:
         _neutralize_wired_limit_sweep()

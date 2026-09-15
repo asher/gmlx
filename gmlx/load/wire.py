@@ -27,6 +27,7 @@ def load_gguf_wire_bytes(
     zero_copy: bool = True,
     shards: list[str] | None = None,
     expect_quant: bool = True,
+    arch: str | None = None,
 ) -> tuple[dict[str, mx.array], dict[str, str], str | None, dict, dict]:
     """Load GGUF tensors as raw kquant wire bytes via the C++ ``kq.load_gguf``.
 
@@ -46,16 +47,33 @@ def load_gguf_wire_bytes(
 
     Handles split GGUFs by loading all shards and merging; metadata +
     tensor_shapes come from the first shard. ``shards`` may be passed (e.g. from
-    a prior preflight pass) to skip re-discovery.
+    a prior preflight pass) to skip re-discovery, ``arch`` to skip the header
+    peek the oversize-table check needs.
+
+    A streamable table past the device buffer ceiling gets no array: no
+    MTLBuffer holds it, so the load would fail on the whole file. The model
+    reads its rows from the GGUF instead (``stream.table_pread``), and the
+    loader attaches the sources with ``install_deferred_tables``.
     """
     if shards is None:
         shards = find_split_shards(gguf_path)
+    skip = _oversize_table_names(shards, arch)
     arrays: dict[str, mx.array] = {}
     kquant_meta: dict[str, str] = {}
     meta: dict = {}
     tensor_shapes: dict = {}
     for i, shard in enumerate(shards):
-        s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(shard, zero_copy)
+        if skip:
+            try:
+                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
+                    shard, zero_copy, skip)
+            except TypeError as e:
+                raise RuntimeError(
+                    f"this model has a tensor past the device buffer ceiling "
+                    f"({', '.join(sorted(skip))}); reading it needs an "
+                    f"mlx-kquant with load_gguf(skip=...)") from e
+        else:
+            s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(shard, zero_copy)
         arrays.update(s_arrays)
         kquant_meta.update(s_codecs)
         tensor_shapes.update(s_shapes)
@@ -73,6 +91,18 @@ def load_gguf_wire_bytes(
 
     arch = meta.get("general.architecture")
     return arrays, kquant_meta, arch, meta, tensor_shapes
+
+
+def _oversize_table_names(shards: list[str], arch: str | None) -> list[str]:
+    """Wire names of streamable tables too large for one array."""
+    from gmlx.stream.table_pread import oversize_tables
+
+    if arch is None:
+        from .headerscan import scan_gguf
+        arch = scan_gguf(
+            shards[0], include_tensors=False, array_limit=0
+        ).kv.get("general.architecture")
+    return sorted(oversize_tables(shards, arch))
 
 
 # Tensor-name remap + layout transforms

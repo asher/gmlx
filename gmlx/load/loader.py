@@ -979,6 +979,7 @@ def _install_and_load(
     f16_keep: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
+    deferred_tables: dict | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -999,6 +1000,9 @@ def _install_and_load(
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
     their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
+
+    ``deferred_tables``: wire name -> file source for tables the wire load
+    skipped (past the device buffer ceiling); attached after the kquant swap.
 
     ``active_before``: active-memory baseline for the untracked-weights split.
     Callers that read wire bytes before installing must pass the pre-read
@@ -1055,6 +1059,15 @@ def _install_and_load(
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     log(f"[install] replaced {n_replaced} leaves with kquant modules")
+
+    from gmlx.stream.table_pread import install_deferred_tables
+    attached = install_deferred_tables(model, deferred_tables or {})
+    if attached:
+        # These bytes are in no [stream] line: a file-backed table
+        # is in no budget total either.
+        gb = sum((deferred_tables or {})[n].nbytes for n in attached) / 1e9
+        log(f"[install] {len(attached)} table(s) read from the GGUF, "
+             f"{gb:.1f} GB: {', '.join(attached)}")
 
     if install_hd512_sdpa():
         log("[install] head_dim-512 fused SDPA active")
@@ -1307,7 +1320,7 @@ def load_model(
     loadlog.stage("reading tensors")
     t0 = time.perf_counter()
     arrays, kquant_meta, _arch_meta, meta, tensor_shapes = load_gguf_wire_bytes(
-        gguf_path, zero_copy=zero_copy, shards=pf.shards
+        gguf_path, zero_copy=zero_copy, shards=pf.shards, arch=arch
     )
     _log(
         f"[gguf] {len(arrays)} arrays, {len(kquant_meta)} kquant "
@@ -1520,6 +1533,8 @@ def load_model(
 
     # 6. swap leaves with kquant equivalents.
     loadlog.stage("installing quantized weights")
+    from gmlx.stream.table_pread import oversize_tables
+    deferred = oversize_tables(pf.shards, arch)
     dequant = dequantize_unattachable_leaves(model, hf_weights, hf_kquant_meta)
     if dequant:
         _log(f"[install] dequantized {len(dequant)} raw-array leaves to f32: "
@@ -1528,6 +1543,15 @@ def load_model(
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
+
+    from gmlx.stream.table_pread import install_deferred_tables
+    attached = install_deferred_tables(model, deferred)
+    if attached:
+        # These bytes are in no [stream] line: a file-backed table
+        # is in no budget total either.
+        gb = sum((deferred)[n].nbytes for n in attached) / 1e9
+        _log(f"[install] {len(attached)} table(s) read from the GGUF, "
+              f"{gb:.1f} GB: {', '.join(attached)}")
 
     if install_hd512_sdpa():
         _log("[install] head_dim-512 fused SDPA active")

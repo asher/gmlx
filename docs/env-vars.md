@@ -108,6 +108,8 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Default on, skipped with a printed reason above 60% of RAM. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights into the Metal residency set on streamed models. |
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, for measurement. `--stream-cpu` forces them too. |
+| `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. Default: the device limit. A table past it is read from the GGUF row by row. |
+| `GMLX_TABLE_PREAD_WORKERS` | Reader threads per file-backed lookup table. Default `8`. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. Default `1`. `0` runs continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |

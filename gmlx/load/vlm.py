@@ -43,6 +43,7 @@ from .loader import (
     weights_source_key,
 )
 from .mtp_target import _vlm_spec_language_model
+from gmlx.stream.table_pread import oversize_tables
 from .wire import load_gguf_wire_bytes, remap_arrays
 from .preflight import preflight
 from .transforms import coalesce_split_experts
@@ -3288,7 +3289,7 @@ def load_vlm_model(
     loadlog.stage("reading tensors")
     active_before = _active_now()
     arrays, kquant_meta, _arch, llm_meta, llm_shapes = load_gguf_wire_bytes(
-        gguf_path, zero_copy=zero_copy, shards=pf.shards)
+        gguf_path, zero_copy=zero_copy, shards=pf.shards, arch=llm_arch)
     arrays, kquant_meta, n_coalesced = coalesce_split_experts(arrays, kquant_meta)
     if n_coalesced:
         _log(f"[vlm] coalesced {n_coalesced} split-expert groups -> stacked _exps")
@@ -3422,7 +3423,8 @@ def load_vlm_model(
                       fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
-                      active_before=active_before)
+                      active_before=active_before,
+                      deferred_tables=oversize_tables(pf.shards, llm_arch))
     materialize_module_arrays(model)
     if model_type == "qwen4_exp":
         from gmlx.models.qwen4_exp.model import prepare_runtime
