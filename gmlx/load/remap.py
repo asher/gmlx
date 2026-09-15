@@ -89,6 +89,7 @@ ARCH_ALIAS = {
     # (vendored mlx-lm PR #1192). NEOX-style tail rope on q/kv after the
     # low-rank projections => everything passes through un-permuted.
     "deepseek4": "DEEPSEEK4",
+    "deepseek41": "DEEPSEEK41",
     # Moonshot Kimi-K3 (llama.cpp PR #26185 'kimi-k3'): hybrid KDA linear
     # attention + nope-only MLA (per-layer head_count_kv array, 0 = KDA), with
     # cross-layer residual-attention score vectors, a latent MoE (routed_down/
@@ -1820,6 +1821,125 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.hc_head.base", "passthrough"),
         (re.compile(r"^output_hc_scale\.weight$"),
          "model.hc_head.scale", "passthrough"),
+    ],
+    "DEEPSEEK41": [
+        # DeepSeek-V4.1-Flash ('deepseek41', llama.cpp PR #28696). Same
+        # module paths as DEEPSEEK4 for everything the two share; V4.1 drops
+        # the compressor ape, the indexer's private compressor, the hash-route
+        # table and the final-collapse HyperHead, and adds the engram families
+        # and the indexer's own key projection.
+
+        # DeepSeek V4 Flash (dwarfstar 'deepseek4', not a llama.cpp arch).
+        # Complete override block - none of the MLA-lite / compressor /
+        # hyper-connection names exist in the canonical map, and the ones that
+        # do (attn_norm, ffn_norm, ffn_gate_inp, exp_probs_b) target different
+        # module paths in the vendored gmlx.models.deepseek_v4.model (block attrs
+        # `attn_norm`/`ffn_norm`, MoE under `ffn.gate`). All passthrough: no
+        # gemma unbake, and the NEOX-style tail rope is applied to q/kv after
+        # the low-rank projections, so there's no llama Q/K permute to undo.
+        #
+        # Query: low-rank A -> RMSNorm -> B (per-head q_norms are weightless).
+        (re.compile(r"^blk\.(\d+)\.attn_q_a\.weight$"),
+         "model.layers.{bid}.attn.wq_a.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_a_norm\.weight$"),
+         "model.layers.{bid}.attn.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_b\.weight$"),
+         "model.layers.{bid}.attn.wq_b.weight", "passthrough"),
+        # KV: one shared 512-dim latent (K == V), RMSNorm'd before rope.
+        (re.compile(r"^blk\.(\d+)\.attn_kv\.weight$"),
+         "model.layers.{bid}.attn.wkv.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_norm\.weight$"),
+         "model.layers.{bid}.attn.kv_norm.weight", "passthrough"),
+        # Output: grouped low-rank wo_a (GGUF ships it 2D [o_groups*o_lora,
+        # hidden]; the vendored sanitize() reshapes the wire bytes to the 3D
+        # (o_groups, o_lora, -1) MultiLinear layout - pure header reshape,
+        # rows unchanged) -> wo_b.
+        (re.compile(r"^blk\.(\d+)\.attn_output_a\.weight$"),
+         "model.layers.{bid}.attn.wo_a.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output_b\.weight$"),
+         "model.layers.{bid}.attn.wo_b.weight", "passthrough"),
+        # Per-head fp32 attention sinks - raw array, no `.weight` (gpt-oss
+        # `self_attn.sinks` precedent below).
+        (re.compile(r"^blk\.(\d+)\.attn_sinks\.weight$"),
+         "model.layers.{bid}.attn.attn_sink", "passthrough"),
+        # Attention compressor (ratio-4 and ratio-128 layers): softmax-pooled
+        # window summaries. `ape` is a raw (ratio, out_dim) positional table.
+        (re.compile(r"^blk\.(\d+)\.attn_compressor_kv\.weight$"),
+         "model.layers.{bid}.attn.compressor.wkv.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_compressor_gate\.weight$"),
+         "model.layers.{bid}.attn.compressor.wgate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_compressor_norm\.weight$"),
+         "model.layers.{bid}.attn.compressor.norm.weight", "passthrough"),
+        # Lightning indexer (ratio-4 layers): top-k selector over pooled rows.
+        # Its own tensors are dotted (indexer.*); its private compressor's are
+        # underscore-joined (indexer_compressor_*) - both spellings verified
+        # against the real GGUF.
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_q_b\.weight$"),
+         "model.layers.{bid}.attn.indexer.wq_b.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.proj\.weight$"),
+         "model.layers.{bid}.attn.indexer.weights_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.attn_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.ffn_norm.weight", "passthrough"),
+        # Hyper-connections: raw fp32 arrays on HyperConnection (fn/base/scale,
+        # no `.weight`).
+        (re.compile(r"^blk\.(\d+)\.hc_attn_fn\.weight$"),
+         "model.layers.{bid}.attn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_base\.weight$"),
+         "model.layers.{bid}.attn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_scale\.weight$"),
+         "model.layers.{bid}.attn_hc.scale", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_fn\.weight$"),
+         "model.layers.{bid}.ffn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_base\.weight$"),
+         "model.layers.{bid}.ffn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_scale\.weight$"),
+         "model.layers.{bid}.ffn_hc.scale", "passthrough"),
+        # MoE router: sqrt-softplus gate; e_score_correction_bias is the
+        # selection-only bias; tid2eid is the raw I32 [vocab, top_k] hash-route
+        # table on the first num_hash_layers layers.
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.ffn.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.ffn.gate.e_score_correction_bias", "passthrough"),
+        # Vision-Exp conversions add a second correction bias, applied to
+        # image-block tokens only (every layer, hash layers included).
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b_vl\.bias$"),
+         "model.layers.{bid}.ffn.gate.e_score_correction_bias_vl", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.ffn.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.ffn.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.ffn.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.ffn.shared_experts.gate_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.ffn.shared_experts.up_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.ffn.shared_experts.down_proj.weight",
+         "passthrough"),
+        # Final-collapse HyperHead (non-blk; no capture group -> target used
+        # as-is). token_embd/output_norm/output resolve via the canonical map.
+        # Engram n-gram memory (layers 1 and 14). The table is the streamed
+        # one; q/k are fp32 gate scalers kept as raw arrays, no `.weight`.
+        (re.compile(r"^blk\.(\d+)\.engram_embd\.weight$"),
+         "model.layers.{bid}.engram.embed.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_wkv\.weight$"),
+         "model.layers.{bid}.engram.wkv.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_q\.weight$"),
+         "model.layers.{bid}.engram.q_weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.engram_k\.weight$"),
+         "model.layers.{bid}.engram.k_weight", "passthrough"),
+        # V4.1 index keys come from the kv-source layer's own latent, so the
+        # indexer has its own wk/k_norm instead of V4's private compressor.
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_k\.weight$"),
+         "model.layers.{bid}.attn.indexer.wk.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.weight$"),
+         "model.layers.{bid}.attn.indexer.k_norm.weight", "passthrough"),
     ],
     "GPT_OSS": [
         # OpenAI gpt-oss (mlx_lm.models.gpt_oss). The two per-layer norms
