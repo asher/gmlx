@@ -431,6 +431,43 @@ def streamed_expert_bytes(gguf_path: str) -> int:
         return 0
 
 
+def streamed_table_bytes(gguf_path: str) -> int:
+    """A-priori bytes of the arch's declared streamable lookup tables
+    (deepseek41's two engram n-gram tables are 60 GiB of the file). Like
+    the routed experts, they serve from disk and never enter the resident
+    set, so the preload gate and the residency footprint must discount
+    them. 0 when the header cannot be read or the arch declares none.
+
+    The name test comes from ``table_stream.streamable_table_names``, the
+    same registry the runtime wrap selects on, so the two cannot drift."""
+    try:
+        from gmlx.load.headerscan import scan_gguf
+        from gmlx.load.preflight import find_split_shards
+        from gmlx.stream.table_stream import streamable_table_names
+
+        shards = find_split_shards(gguf_path)
+        if not shards:
+            return 0
+        arch = scan_gguf(shards[0]).kv.get("general.architecture")
+        names = streamable_table_names(arch)
+        if names is None:
+            return 0
+        total = 0
+        for shard in shards:
+            for t in scan_gguf(shard).tensors:
+                if names.fullmatch(t.name):
+                    total += int(t.nbytes)
+        return total
+    except Exception:
+        return 0
+
+
+def streamed_off_disk_bytes(gguf_path: str) -> int:
+    """Everything a ``stream: experts`` build serves from disk: the routed
+    experts plus the arch's streamable tables."""
+    return streamed_expert_bytes(gguf_path) + streamed_table_bytes(gguf_path)
+
+
 def preload_gate_bytes(footprint: int, stream, expert_bytes: int) -> int:
     """Resident bytes the preload gate should judge. ``stream: experts``
     never wires the routed-expert stacks (they decode through the disk

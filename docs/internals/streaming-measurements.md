@@ -163,6 +163,40 @@ nonfunctional program in one try. The usable range on this model at this
 quant is therefore 0.65 to 0.80, and where to sit within it depends on how
 much content fidelity the workload can lose.
 
+## DeepSeek-V4.1-Flash: two engram tables
+
+The engram tier is the first case of more than one streamable table, and of
+a table read 24 rows deep per token. Measured on the Q2_K file (7 shards,
+246 GiB) on an M3 Max with 128 GB, gathering from the layer-1 table
+directly: 384,006,168 rows of 84 bytes, 30.04 GiB. Rows are 84 bytes, which
+does not divide a 16 KiB page, so a row spans two pages.
+
+| Case | Page cache | Result |
+|---|---|---|
+| decode, 24 rows, 200 steps | cold | 0.32 ms mean, 0.19 p50, 0.33 p90, 18.09 max |
+| decode, 24 rows, 200 steps | warm | 0.17 ms mean |
+| prefill, 4096 tokens, 98,304 rows | cold | 0.02 s, 5.8M rows/s |
+| the same with a thread-pool page touch issued ahead | cold | 6.35 s, of which 6.34 s is the touch |
+| the same as plain, with a concurrent F_NOCACHE reader at 15.8 GiB/s | cold | 0.02 s, 6.1M rows/s |
+
+The gather is not the bottleneck at either width, so the tier needs no
+prefill prefetch. Touching the pages ahead costs 300 times what it saves,
+because 98,304 rows reach 96,250 distinct pages and the touch pays a fault
+for each one that the gather would have paid anyway. Ring-bandwidth
+contention from another reader costs nothing measurable, so the tables and
+the expert ring need no I/O arbitration between them.
+
+The fit plan that follows from crediting both tables as off-disk:
+
+```text
+  streaming: every-token weights 3.2 GB, streamed tables 64.5 GB, routed experts 196.8 GB (40 layers, 384 experts, 6 per token), prefill ring 9.8 GB
+    this Mac: 128 GB RAM, ceiling 109.7 GB, KV room 11.6 GB at 32768 tokens, host floor 9.6 GB
+    => decode arena 75.5 GB (38% of the experts); a cold token reads about 3.1 GB of experts
+```
+
+Without the credit the planner prices the tables as every-token weights and
+the arena falls to 11 GB, a sixth of the experts.
+
 ## Certifying a setting
 
 Quality degrades in a consistent order as the settings become more

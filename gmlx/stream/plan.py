@@ -24,6 +24,7 @@ VERDICT_TOO_BIG = "too_big"
 
 GROUP_LABELS = {
     "attention": "attention",
+    "table": "streamed tables",
     "recurrent": "recurrent layers",
     "shared_experts": "shared experts",
     "ffn": "dense ffn and routers",
@@ -33,13 +34,19 @@ GROUP_LABELS = {
 }
 
 
-def group_of(name: str) -> str | None:
-    """The every-token group of a tensor, or None for a routed-expert
-    stack (the tensors ``stream: experts`` serves from disk)."""
+def group_of(name: str, arch: str | None = None) -> str | None:
+    """The group of a tensor, or None for a routed-expert stack (the
+    tensors ``stream: experts`` serves from disk). ``table`` is the other
+    group that streams: a lookup table the arch declares streamable, such
+    as deepseek41's engram n-gram tables."""
     from gmlx.stream.prefetch import _EXPS_RE
+    from gmlx.stream.table_stream import streamable_table_names
 
     if _EXPS_RE.fullmatch(name):
         return None
+    tbl = streamable_table_names(arch)
+    if tbl is not None and tbl.fullmatch(name):
+        return "table"
     if "shexp" in name:
         return "shared_experts"
     if name.startswith("token_embd"):
@@ -67,10 +74,13 @@ class ModelPlan:
     ring_bytes: int
     kv_costs: tuple | None
     trained_ctx: int | None
+    table_bytes: int = 0
 
     @property
     def every_token_bytes(self) -> int:
-        return self.total_bytes - self.expert_bytes
+        """Bytes that stay resident. Both the routed experts and the
+        declared streamable tables serve from disk, so neither counts."""
+        return self.total_bytes - self.expert_bytes - self.table_bytes
 
     @property
     def streamable(self) -> bool:
@@ -126,7 +136,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
     groups: dict[str, int] = {}
     # layer -> offsets-shaped entries, so the ring is the runtime's formula
     stacks: dict[int, list] = {}
-    total = expert = 0
+    total = expert = table = 0
     exps_shape = None
     for hs in scans:
         for t in hs.tensors:
@@ -138,8 +148,11 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
                     (hs.path, 0, t.nbytes, 0, m.group(2)))
                 exps_shape = exps_shape or t.shape
             else:
-                g = group_of(t.name)
-                groups[g] = groups.get(g, 0) + t.nbytes
+                g = group_of(t.name, arch)
+                if g == "table":
+                    table += t.nbytes      # streamed, not an every-token group
+                else:
+                    groups[g] = groups.get(g, 0) + t.nbytes
     n_experts = _int(kv.get(f"{arch}.expert_count"))
     if n_experts is None and exps_shape and len(exps_shape) == 3:
         n_experts = _int(exps_shape[-1])
@@ -159,7 +172,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
         moe_layers=len(stacks), n_experts=n_experts,
         experts_per_token=_int(kv.get(f"{arch}.expert_used_count")),
         ring_bytes=ring_bytes(stacks),
-        kv_costs=costs, trained_ctx=trained)
+        kv_costs=costs, trained_ctx=trained, table_bytes=table)
 
 
 def ceiling_for(ram_bytes: float, ws_bytes: float) -> float:
@@ -240,8 +253,10 @@ def model_line(m: ModelPlan) -> str:
         detail += f", {m.n_experts} experts"
     if m.experts_per_token:
         detail += f", {m.experts_per_token} per token"
-    return (f"every-token weights {gb(m.every_token_bytes)}, routed experts "
-            f"{gb(m.expert_bytes)} ({detail}), prefill ring {gb(m.ring_bytes)}")
+    table = (f"streamed tables {gb(m.table_bytes)}, " if m.table_bytes else "")
+    return (f"every-token weights {gb(m.every_token_bytes)}, {table}"
+            f"routed experts {gb(m.expert_bytes)} ({detail}), prefill ring "
+            f"{gb(m.ring_bytes)}")
 
 
 def group_line(m: ModelPlan) -> str:
@@ -310,6 +325,7 @@ def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:
         "arch": m.arch,
         "total_bytes": m.total_bytes,
         "expert_bytes": m.expert_bytes,
+        "table_bytes": m.table_bytes,
         "every_token_bytes": m.every_token_bytes,
         "groups": dict(m.groups),
         "moe_layers": m.moe_layers,

@@ -218,80 +218,82 @@ def install_expert_streaming(
     # against the experts' every-MoE-layer surcharge. The table wrap runs
     # its row gather on a dedicated CPU stream so the buffer is never a
     # GPU-stream input (a single GPU reference would wire all of it).
-    # When the post-table estimate is still over budget, v1 falls back to
-    # expert streaming with the table resident: streaming both at once
-    # (compose) needs the hot-row arena and is not shipped.
+    # When the post-table estimate is still over budget, the experts
+    # stream too (compose). --stream-cpu streams the experts whatever the
+    # model size, so it always composes: leaving 60 GiB of deepseek41
+    # engram tables resident is the case the flag exists to avoid.
     table_offloaded = 0
-    if not force_stream:
-        from gmlx.stream.table_stream import (
-            install_table_streaming,
-            table_bytes,
-            table_stream_selected,
-        )
+    from gmlx.stream.table_stream import (
+        install_table_streaming,
+        table_bytes,
+        table_stream_selected,
+    )
 
-        compose = False
-        if table_stream_selected(model, total_bytes, budget):
-            post = total_bytes - table_bytes(model)
-            # Step 2 default: over budget even post-table streams both
-            # (compose). GMLX_STREAM_PLE_COMPOSE=0 keeps the table
-            # resident; the selection test already honors it in auto
-            # mode, so this only fires under GMLX_STREAM_PLE=1.
-            if budget is not None and post > budget:
-                if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
-                    compose = True
-                    table_offloaded, table_names = (
-                        install_table_streaming(model))
-                else:
-                    print(
-                        "[stream] table stays resident "
-                        "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
-                    )
+    compose = False
+    if table_stream_selected(model, total_bytes, budget, force_stream):
+        post = total_bytes - table_bytes(model)
+        # Step 2 default: over budget even post-table streams both
+        # (compose). --stream-cpu streams the experts unconditionally,
+        # so its tables always compose. GMLX_STREAM_PLE_COMPOSE=0
+        # keeps them resident; the selection test already honors it in
+        # auto mode, so that branch only fires under GMLX_STREAM_PLE=1
+        # or --stream-cpu.
+        if force_stream or (budget is not None and post > budget):
+            if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
+                compose = True
+                table_offloaded, table_names = (
+                    install_table_streaming(model))
             else:
-                table_offloaded, table_names = install_table_streaming(model)
-        if table_offloaded and compose:
-            loadlog.info(
-                f"[stream] compose: streamable table "
-                f"{'+'.join(table_names)} "
-                f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
-                "AND experts streamed"
-            )
-            key = getattr(model, "_kq_weights_key", None)
-            from gmlx.gen.prefill_decay import (
-                note_streamed_tracked_bytes,
-                untracked_weight_bytes_for,
-            )
-            tracked = max(
-                0.0, total_bytes - untracked_weight_bytes_for(key))
-            credit = min(float(table_offloaded), tracked)
-            if credit > 0:
-                note_streamed_tracked_bytes(
-                    credit, key, source="table", cap=tracked)
-            deduct_untracked_weights(table_offloaded, key)
-        elif table_offloaded:
-            # The selection test admits the table only when the remainder
-            # clears the budget (or streaming is forced on a fits model),
-            # so experts are resident from here on.
-            over_budget = False
-            base = ("" if budget is None
-                    else f" of {budget / 2**30:.1f} GiB budget")
-            loadlog.info(
-                f"[stream] streamable table {'+'.join(table_names)} "
-                f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
-                "the CPU stream; experts resident (post-deduction "
-                f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
-            )
-            key = getattr(model, "_kq_weights_key", None)
-            from gmlx.gen.prefill_decay import (
-                note_streamed_tracked_bytes,
-                untracked_weight_bytes_for,
-            )
-            tracked = max(
-                0.0, total_bytes - untracked_weight_bytes_for(key))
-            credit = min(float(table_offloaded), tracked)
-            if credit > 0:
-                note_streamed_tracked_bytes(
-                    credit, key, source="table", cap=tracked)
-            deduct_untracked_weights(table_offloaded, key)
+                print(
+                    "[stream] table stays resident "
+                    "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
+                )
+        else:
+            table_offloaded, table_names = install_table_streaming(model)
+    if table_offloaded and compose:
+        loadlog.info(
+            f"[stream] compose: streamable table "
+            f"{'+'.join(table_names)} "
+            f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
+            "AND experts streamed"
+        )
+        key = getattr(model, "_kq_weights_key", None)
+        from gmlx.gen.prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(
+            0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(table_offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(
+                credit, key, source="table", cap=tracked)
+        deduct_untracked_weights(table_offloaded, key)
+    elif table_offloaded:
+        # The selection test admits the table only when the remainder
+        # clears the budget (or streaming is forced on a fits model),
+        # so experts are resident from here on.
+        over_budget = False
+        base = ("" if budget is None
+                else f" of {budget / 2**30:.1f} GiB budget")
+        loadlog.info(
+            f"[stream] streamable table {'+'.join(table_names)} "
+            f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
+            "the CPU stream; experts resident (post-deduction "
+            f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
+        )
+        key = getattr(model, "_kq_weights_key", None)
+        from gmlx.gen.prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(
+            0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(table_offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(
+                credit, key, source="table", cap=tracked)
+        deduct_untracked_weights(table_offloaded, key)
 
     streaming = force_stream or over_budget
     prefetcher = None

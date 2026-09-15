@@ -286,3 +286,43 @@ def test_prompt_cache_restore_rejects_a_changed_layout():
     entry = model.make_cache()[args.kv_source_layers[0]]
     with pytest.raises(ValueError, match="layout changed"):
         _restore_entry(entry, (_CACHELIST_TAG, [None]))
+
+
+# --- engram SSD offload ----------------------------------------------------
+
+
+def test_engram_tables_are_the_declared_streamable_components():
+    """One table per engram layer, addressed by layer index, and the wire
+    names the header-only pricing paths match on."""
+    import gmlx.stream.table_stream as ts
+
+    args = _args()
+    model = Model(args)
+    tabs = ts.streamable_tables_for(model)
+    assert [t.gguf_name for t, _ in tabs] == [
+        f"blk.{i}.engram_embd.weight" for i in args.engram_layer_ids]
+    assert [m for _, m in tabs] == [
+        model.model.layers[i].engram.embed for i in args.engram_layer_ids]
+    names = ts.streamable_table_names("deepseek41")
+    assert all(names.fullmatch(t.gguf_name) for t, _ in tabs)
+    assert not names.fullmatch("blk.1.engram_wkv.weight")
+
+
+def test_streamed_engram_tables_do_not_change_the_output():
+    import gmlx.stream.table_stream as ts
+
+    args = _args()
+    model = Model(args)
+    mx.eval(model.parameters())
+    toks = mx.array(
+        np.random.default_rng(3).integers(0, args.vocab_size, (1, 9)),
+        dtype=mx.int32)
+    ref = model(toks, cache=model.make_cache())
+    mx.eval(ref)
+    offloaded, names = ts.install_table_streaming(model)
+    assert offloaded == ts.table_bytes(model) > 0
+    assert names == [f"blk.{i}.engram_embd.weight"
+                     for i in args.engram_layer_ids]
+    got = model(toks, cache=model.make_cache())
+    mx.eval(got)
+    assert bool(mx.all(got == ref))

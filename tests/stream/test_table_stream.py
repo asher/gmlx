@@ -35,6 +35,12 @@ class _Node:
     pass
 
 
+@pytest.fixture(autouse=True)
+def _clear_force_latch():
+    yield
+    ts.force_table_stream(False)
+
+
 def _table_model(model_type="qwen4_exp", rows=8, dims=32):
     model = _Node()
     model.model_type = model_type
@@ -55,6 +61,57 @@ def test_descriptor_resolves_declared_table():
     assert tier.gguf_name == "per_layer_token_embd.weight"
     assert mod is model.model.ple_embed
     assert ts.table_bytes(model) == int(mod.weight.nbytes)
+
+
+def _engram_model(layer_ids=(1, 3), n_layers=5):
+    """A deepseek_v41-shaped stand-in: the tables hang off indexed layers,
+    so the descriptor must be a callable and the path must index a list."""
+    model = _Node()
+    model.model_type = "deepseek_v41"
+    inner = _Node()
+    inner.layers = []
+    for i in range(n_layers):
+        layer = _Node()
+        layer.engram = None
+        if i in layer_ids:
+            layer.engram = _Node()
+            layer.engram.embed = _kquant_table(rows=8 + i)
+        inner.layers.append(layer)
+    model.model = inner
+    return model
+
+
+def test_descriptor_resolves_indexed_layer_tables():
+    model = _engram_model()
+    tabs = ts.streamable_tables_for(model)
+    assert [t.gguf_name for t, _ in tabs] == [
+        "blk.1.engram_embd.weight", "blk.3.engram_embd.weight"]
+    assert [t.param_path for t, _ in tabs] == [
+        "model.layers.1.engram.embed", "model.layers.3.engram.embed"]
+    assert [m for _, m in tabs] == [
+        model.model.layers[1].engram.embed,
+        model.model.layers[3].engram.embed]
+    assert ts.table_bytes(model) == sum(
+        int(m.weight.nbytes) for _, m in tabs)
+
+
+def test_descriptor_out_of_range_index_resolves_to_nothing():
+    model = _engram_model(layer_ids=(1,))
+    model.model.layers = model.model.layers[:1]   # the table's layer is gone
+    assert ts.streamable_tables_for(model) == []
+
+
+def test_streamable_table_names_by_arch():
+    qwen = ts.streamable_table_names("qwen4exp")
+    ds = ts.streamable_table_names("deepseek41")
+    assert qwen.fullmatch("per_layer_token_embd.weight")
+    assert not qwen.fullmatch("blk.1.engram_embd.weight")
+    assert ds.fullmatch("blk.1.engram_embd.weight")
+    assert ds.fullmatch("blk.14.engram_embd.weight")
+    assert not ds.fullmatch("blk.1.engram_q.weight")
+    assert not ds.fullmatch("per_layer_token_embd.weight")
+    assert ts.streamable_table_names("llama") is None
+    assert ts.streamable_table_names(None) is None
 
 
 def test_descriptor_empty_for_unknown_arch_and_missing_path():
@@ -83,6 +140,24 @@ def test_selection_streams_table_only_when_it_clears_budget(monkeypatch):
     assert not ts.table_stream_selected(model, tbytes + 100, tbytes + 200)
     # unknown budget -> conservative no
     assert not ts.table_stream_selected(model, tbytes + 100, None)
+
+
+def test_selection_forced_by_stream_cpu(monkeypatch):
+    model = _table_model()
+    tbytes = ts.table_bytes(model)
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    fits = tbytes + 200
+    assert not ts.table_stream_selected(model, tbytes + 100, fits)
+    # --stream-cpu streams the experts whatever the size; the table rides
+    assert ts.table_stream_selected(model, tbytes + 100, fits,
+                                    force_stream=True)
+    # the latch reaches callers that never see the flag (the warm touch)
+    ts.force_table_stream()
+    assert ts.table_stream_selected(model, tbytes + 100, fits)
+    # an explicit off still wins
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    assert not ts.table_stream_selected(model, tbytes + 100, fits,
+                                        force_stream=True)
 
 
 def test_selection_env_override(monkeypatch):
@@ -155,6 +230,12 @@ def test_warm_touch_excludes_table_iff_it_will_stream(monkeypatch):
     # over budget with the table clearing it: the ladder will stream it
     skip = ts.warm_touch_exclusions(model, tbytes + 100, 150)
     assert id(emb.weight) in skip
+    # --stream-cpu latched before the load: must also skip
+    ts.force_table_stream()
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
+    assert id(emb.weight) in skip and id(emb.scales) in skip
+    ts.force_table_stream(False)
+    assert ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200) == set()
     # forced on a fits model (the P1 overhead A/B): must also skip
     monkeypatch.setenv("GMLX_STREAM_PLE", "1")
     skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
@@ -293,6 +374,29 @@ def test_ladder_compose_env_streams_both(monkeypatch):
     install_expert_streaming(model)
     assert ts.table_streaming_active(model)
     assert getattr(glu, "_kq_cpu_only", False)  # experts stream too
+
+
+def test_ladder_streams_table_under_force_stream(monkeypatch):
+    # --stream-cpu on a model that fits: the table used to stay resident,
+    # which on deepseek41 means holding 60 GiB of engram tables.
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    _fake_budget(monkeypatch, 1 << 40)       # far under budget
+    install_expert_streaming(model, force_stream=True)
+    assert ts.table_streaming_active(model)
+    assert getattr(glu, "_kq_cpu_only", False)
+
+
+def test_ladder_force_stream_honors_compose_kill_switch(monkeypatch):
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    _fake_budget(monkeypatch, 1 << 40)
+    install_expert_streaming(model, force_stream=True)
+    assert not ts.table_streaming_active(model)
+    assert getattr(glu, "_kq_cpu_only", False)
 
 
 def test_ladder_env_disable(monkeypatch):

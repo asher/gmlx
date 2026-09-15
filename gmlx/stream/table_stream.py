@@ -21,15 +21,18 @@ touch both exclude declared components through it, so a streamed table
 can be neither mlocked nor GPU-touched by the load path.
 
 ``GMLX_STREAM_PLE``: unset = automatic (stream the table when the model
-is over budget and the table alone clears it); ``0`` = never stream the
-table; ``1`` = force table streaming even on a fits-in-RAM model (the
-overhead A/B) - still subject to the compose guard: v1 refuses to
-stream the table and the experts at once.
+is over budget); ``0`` = never stream the table; ``1`` = force table
+streaming even on a fits-in-RAM model (the overhead A/B). ``--stream-cpu``
+forces it too, because that mode streams the experts whatever the model
+size. When the model is still over budget without the tables, the
+experts stream as well (compose); ``GMLX_STREAM_PLE_COMPOSE=0`` keeps
+the tables resident and streams only the experts.
 """
 from __future__ import annotations
 
 import os
-from typing import NamedTuple
+import re
+from typing import Any, Callable, NamedTuple, Union
 
 import mlx.core as mx
 
@@ -40,19 +43,82 @@ class StreamableTable(NamedTuple):
     gguf_name: str    # wire tensor name, e.g. "per_layer_token_embd.weight"
 
 
-# model_type -> ordered tiers, cheapest-to-stream first; implemented tiers
-# only (embed_tokens is the next candidate, not wired yet).
-STREAMABLE_TABLES: dict[str, tuple[StreamableTable, ...]] = {
-    "qwen4_exp": (
-        StreamableTable("model.ple_embed", "per_layer_token_embd.weight"),
+# Fixed tiers, or a callable for an arch whose tables sit on a variable
+# set of layers (deepseek41 reads its engram layer ids from the config).
+TableTiers = Union[
+    tuple[StreamableTable, ...], Callable[[Any], "tuple[StreamableTable, ...]"]
+]
+
+
+class ArchTables(NamedTuple):
+    """An arch's streamable tables, addressed two ways.
+
+    ``tiers`` needs a loaded model; ``name_pattern`` matches the wire
+    names and serves the header-only pricing paths (the fit planner, the
+    preload gate, the residency footprint), which never hold one.
+    """
+    arch: str            # GGUF general.architecture
+    name_pattern: str    # full-match regex over wire tensor names
+    tiers: TableTiers    # ordered, cheapest-to-stream first
+
+
+def _deepseek_v41_tiers(model) -> tuple[StreamableTable, ...]:
+    """One engram table per engram layer."""
+    layers = getattr(getattr(model, "model", model), "layers", None) or ()
+    return tuple(
+        StreamableTable(f"model.layers.{i}.engram.embed",
+                        f"blk.{i}.engram_embd.weight")
+        for i, layer in enumerate(layers)
+        if getattr(layer, "engram", None) is not None
+    )
+
+
+# model_type -> tables, cheapest-to-stream first; implemented archs only
+# (embed_tokens is the next candidate, not wired yet).
+STREAMABLE_TABLES: dict[str, ArchTables] = {
+    "qwen4_exp": ArchTables(
+        arch="qwen4exp",
+        name_pattern=r"per_layer_token_embd\.weight",
+        tiers=(StreamableTable("model.ple_embed",
+                               "per_layer_token_embd.weight"),),
+    ),
+    "deepseek_v41": ArchTables(
+        arch="deepseek41",
+        name_pattern=r"blk\.\d+\.engram_embd\.weight",
+        tiers=_deepseek_v41_tiers,
     ),
 }
+
+_NAME_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def streamable_table_names(arch: str | None) -> re.Pattern | None:
+    """Wire names of ``arch``'s streamable tables, or None when it has
+    none. The name-level half of the registry: header-only callers price
+    a match as streamed, not as an every-token weight."""
+    if not arch:
+        return None
+    hit = _NAME_RE_CACHE.get(arch)
+    if hit is not None:
+        return hit
+    for spec in STREAMABLE_TABLES.values():
+        if spec.arch == arch:
+            hit = re.compile(spec.name_pattern)
+            _NAME_RE_CACHE[arch] = hit
+            return hit
+    return None
 
 
 def _resolve(model, path: str):
     obj = model
     for part in path.split("."):
-        obj = getattr(obj, part, None)
+        if part.isdigit():
+            try:
+                obj = obj[int(part)]
+            except (IndexError, KeyError, TypeError):
+                return None
+        else:
+            obj = getattr(obj, part, None)
         if obj is None:
             return None
     return obj
@@ -61,7 +127,10 @@ def _resolve(model, path: str):
 def streamable_tables_for(model) -> list[tuple[StreamableTable, object]]:
     """The declared streamable tables present on ``model`` (missing paths
     are skipped: e.g. a build without the optional table)."""
-    tiers = STREAMABLE_TABLES.get(getattr(model, "model_type", None), ())
+    spec = STREAMABLE_TABLES.get(getattr(model, "model_type", None))
+    if spec is None:
+        return []
+    tiers = spec.tiers(model) if callable(spec.tiers) else spec.tiers
     out = []
     for tier in tiers:
         mod = _resolve(model, tier.param_path)
@@ -87,10 +156,24 @@ def stream_ple_env() -> str:
     return os.environ.get("GMLX_STREAM_PLE", "")
 
 
-def table_stream_selected(model, total_bytes: int, budget: int | None) -> bool:
+_FORCED = False
+
+
+def force_table_stream(on: bool = True) -> None:
+    """Latch ``--stream-cpu`` before the weights load. The load-time warm
+    touch runs before ``install_expert_streaming``, so it cannot see the
+    flag the placement call carries; without the latch it would GPU-touch
+    a table the placement then streams."""
+    global _FORCED
+    _FORCED = bool(on)
+
+
+def table_stream_selected(model, total_bytes: int, budget: int | None,
+                          force_stream: bool = False) -> bool:
     """The selection ladder's step-1 test, shared by the loader and the
     load-time warm touch so both see the same decision: stream the
-    declared tables iff forced (``GMLX_STREAM_PLE=1``) or the model is
+    declared tables iff forced (``GMLX_STREAM_PLE=1``, or ``--stream-cpu``,
+    which streams the experts whatever the model size) or the model is
     over budget. When the tables alone bring it back under, the experts
     go resident (table-only); otherwise the experts stream too (compose;
     ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the table resident instead)."""
@@ -102,7 +185,7 @@ def table_stream_selected(model, total_bytes: int, budget: int | None) -> bool:
     tbytes = table_bytes(model)
     if not tbytes:
         return False
-    if env == "1":
+    if env == "1" or force_stream or _FORCED:
         return True
     if budget is None or total_bytes <= budget:
         return False
@@ -238,8 +321,8 @@ def warm_touch_exclusions(model, total_bytes: int,
     declared tables, whenever the selection ladder will stream them. The
     warm touch runs before ``install_expert_streaming``, so this re-runs
     the same ladder test; without it, a fits-in-RAM load under
-    ``GMLX_STREAM_PLE=1`` would GPU-touch the table and wire it before
-    streaming ever installs."""
+    ``GMLX_STREAM_PLE=1`` or ``--stream-cpu`` would GPU-touch the table
+    and wire it before streaming ever installs."""
     if not table_stream_selected(model, total_bytes, budget):
         return set()
     out: set[int] = set()

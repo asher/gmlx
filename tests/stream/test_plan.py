@@ -66,6 +66,45 @@ def _mint_dense(path):
     return str(path)
 
 
+@pytest.fixture
+def _shexp_is_a_table(monkeypatch):
+    """Declare llama's shexp tensors streamable, so the planner's table
+    split can be exercised on a header a llama synth can price."""
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setitem(
+        ts.STREAMABLE_TABLES, "llama_test",
+        ts.ArchTables(arch="llama",
+                      name_pattern=r"blk\.\d+\.ffn_gate_shexp\.weight",
+                      tiers=()))
+    monkeypatch.setattr(ts, "_NAME_RE_CACHE", {})
+    yield
+
+
+def test_group_of_names_streamable_tables(_shexp_is_a_table):
+    assert sp.group_of("blk.3.ffn_gate_shexp.weight", "llama") == "table"
+    # the same name on an arch that declares no table stays every-token
+    assert sp.group_of("blk.3.ffn_gate_shexp.weight") == "shared_experts"
+    assert sp.group_of("blk.1.engram_embd.weight", "deepseek41") == "table"
+    assert sp.group_of("blk.1.engram_embd.weight", "llama") == "other"
+    assert sp.group_of("per_layer_token_embd.weight", "qwen4exp") == "table"
+
+
+def test_streamable_tables_leave_the_every_token_share(tmp_path,
+                                                       _shexp_is_a_table):
+    p = _mint_moe(tmp_path / "moe.gguf", layers=2)
+    m = sp.model_plan(sp.scan_path(p))
+    tbytes = 2 * 16 * 64 * F16
+    assert m.table_bytes == tbytes
+    assert "table" not in m.groups          # priced as streamed, not a group
+    assert "shared_experts" not in m.groups
+    assert (m.every_token_bytes
+            == m.total_bytes - m.expert_bytes - tbytes)
+    assert sum(m.groups.values()) == m.every_token_bytes
+    assert sp.to_dict(m, None)["table_bytes"] == tbytes
+    assert "streamed tables" in sp.model_line(m)
+
+
 def test_group_of_names_every_token_groups():
     assert sp.group_of("blk.3.ffn_gate_exps.weight") is None
     assert sp.group_of("blk.3.ffn_gate_up_exps.weight") is None

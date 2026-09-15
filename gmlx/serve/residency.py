@@ -860,17 +860,24 @@ class _ResidencyPool:
             install_boot_table,
             preload_gate,
             preload_gate_bytes,
-            streamed_expert_bytes,
+            streamed_off_disk_bytes,
         )
+        if getattr(build_spec, "stream", None) == "cpu":
+            # Before the load, as in the CLI: --stream-cpu forces table
+            # streaming, and the warm touch must not wire the table first.
+            from gmlx.stream.table_stream import force_table_stream
+
+            force_table_stream()
         gate_bytes = footprint
         streamed = 0
         if getattr(build_spec, "stream", None) == "experts":
-            streamed = streamed_expert_bytes(str(model_path))
+            streamed = streamed_off_disk_bytes(str(model_path))
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
             if streamed:
                 _log.info(
                     "preload gate: stream=experts discounts %.1f GB of "
-                    "routed-expert bytes (gating on %.1f GB resident)",
+                    "off-disk bytes (routed experts and streamable tables; "
+                    "gating on %.1f GB resident)",
                     streamed / 1e9, gate_bytes / 1e9)
         preload_gate(gate_bytes, str(model_path),
                      streaming=getattr(build_spec, "stream", None) == "experts",
@@ -1215,14 +1222,15 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
     weights, the decode arena the loader sizes at install (the env override
     when set, else the fit planner's arena) and the prefill ring's room,
-    which the budget keeps for the process lifetime. The routed experts
-    stay on disk, so the file size overstates the entry by their bytes and
-    would evict every other model for room they never take."""
-    from .capacity import preload_gate_bytes, streamed_expert_bytes
+    which the budget keeps for the process lifetime. The routed experts and
+    the arch's streamable tables stay on disk, so the file size overstates
+    the entry by their bytes and would evict every other model for room
+    they never take."""
+    from .capacity import preload_gate_bytes, streamed_off_disk_bytes
 
     try:
         every = preload_gate_bytes(
-            file_bytes, "experts", streamed_expert_bytes(str(model_path)))
+            file_bytes, "experts", streamed_off_disk_bytes(str(model_path)))
     except Exception:
         every = int(file_bytes)
     raw = ((env or {}).get("GMLX_DECODE_ARENA_GB")

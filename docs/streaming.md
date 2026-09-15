@@ -189,6 +189,13 @@ Face with a header read for each shard:
     => streams, but no decode arena (0.0 GB left after the ring and the host floor), decode runs from the page cache; expect slow decode
 ```
 
+An architecture with streamable lookup tables gets a `streamed tables`
+figure between the two, and those bytes are out of the every-token total.
+DeepSeek-V4.1-Flash at Q2_K is 246 GiB of which 60 GiB is its two engram
+n-gram tables, so the every-token weights are 3 GiB, not 63 GiB. The same
+credit reaches the server's preload gate and its resident-bytes bookkeeping,
+so a streamed entry is not priced for room it never takes.
+
 `gmlx validate --json` carries the same numbers under `stream`, and
 `gmlx doctor` adds a clause for each streamed entry to its memory row. A
 load prints the live budget as `[stream] memory budget:`, and because that
@@ -209,7 +216,7 @@ GLM-5.2, and `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
 | lookahead prestage | runs the next layer's router early and pre-reads its predicted misses while the current layer computes. It moves bytes only, never routing | `GMLX_DECODE_LOOKAHEAD=0`, and `=1` where the family default is off |
 | weight pin | locks the every-token weights in memory so the kernel cannot evict them between tokens on a machine at its free-page floor | `GMLX_PIN_WEIGHTS=0` |
 | GPU keep-warm | keeps GPU clocks high through the host and disk gaps between layers with a tiny heartbeat kernel | `GMLX_GPU_KEEPWARM=0` |
-| streamable lookup tables | on architectures with a large table in each layer that all tokens read a few rows of, streams the table before the experts | `GMLX_STREAM_PLE=0` |
+| streamable lookup tables | on architectures with a large table that every token reads a few rows of, streams the tables before the experts | `GMLX_STREAM_PLE=0` |
 
 The prefill feeder stages only the experts the router chose on short prompts,
 which is the source of its time-to-first-token gain. Its ring reads bypass
