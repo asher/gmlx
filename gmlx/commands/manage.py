@@ -16,7 +16,9 @@ HF cache. It lands in the server config's first ``model_dirs`` root by default
 (under ``<dir>/<org>__<repo>/`` for hf refs, so ``serve`` discovery / ``sync-models``
 find it), or into ``--to DIR`` exactly. Several files fetch in one go - multipart
 GGUFs expand automatically, and extra bare filenames resolve in the first ref's
-repo (an mmproj companion, a second quant). Interrupted transfers resume.
+repo (an mmproj companion, a second quant). Interrupted transfers resume: a
+stalled or dropped read retries with backoff from the bytes already on disk
+(``GMLX_PULL_RETRIES``, ``GMLX_PULL_TIMEOUT``).
 
 ``list`` tables the local GGUFs a directory holds (the same header-only scan
 ``serve`` discovery uses); ``ps`` shows the models resident in a running server.
@@ -24,6 +26,8 @@ repo (an mmproj companion, a second quant). Interrupted transfers resume.
 from __future__ import annotations
 
 import argparse
+import errno
+import http.client
 import json
 import os
 import re
@@ -33,6 +37,7 @@ import time
 import urllib.error
 import urllib.request
 
+from gmlx.envflags import env_float, env_int
 from gmlx.textfmt import plural_s
 import gmlx.load.remote as remote
 from gmlx.load.preflight import (
@@ -504,15 +509,100 @@ def _hf_download(repo: str, filename: str, revision: str, dest_dir: str) -> str:
     return _url_download(url, dest_path)
 
 
-def _url_download(url: str, dest_path: str) -> str:
-    """Stream a URL to ``dest_path``, resuming an interrupted transfer.
+# Pull streams tens of GB off a CDN that stalls, resets and rate-limits, so one
+# bad read must not discard the whole transfer. Each retry resumes from the
+# .part file, and the socket timeout doubles as the per-read stall budget.
+_PULL_TIMEOUT_S = 60.0
+_PULL_RETRIES = 10
+_BACKOFF_CAP_S = 30.0
+_RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+# Local filesystem failures never clear by waiting.
+_FATAL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT, errno.EACCES,
+                           errno.EPERM, errno.EROFS, errno.ENOENT,
+                           errno.EISDIR, errno.EFBIG})
+
+
+def _retryable(e: BaseException) -> bool:
+    """True when a later attempt may get past ``e``."""
+    if isinstance(e, urllib.error.HTTPError):    # before OSError: a subclass
+        return e.code in _RETRY_STATUS
+    if isinstance(e, remote.RemoteError):
+        # A truncated body resumes; a stale/oversized .part needs the user.
+        return "connection closed early" in str(e)
+    if isinstance(e, http.client.HTTPException):
+        return True
+    if isinstance(e, OSError):                   # timeouts, resets, DNS
+        return e.errno not in _FATAL_ERRNOS
+    return False
+
+
+def _retry_after_s(e: BaseException) -> float | None:
+    """``Retry-After`` seconds from a 429/503, else None (a date form falls
+    back to the backoff)."""
+    headers = getattr(e, "headers", None)
+    try:
+        return max(0.0, float(str(headers["Retry-After"]).strip()))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _retry_delay(failures: int) -> float:
+    return min(_BACKOFF_CAP_S, 2.0 ** failures)
+
+
+def _pull_sleep(seconds: float) -> None:
+    """Backoff sleep. Module-level seam: monkeypatched in tests."""
+    time.sleep(seconds)
+
+
+def _url_download(url: str, dest_path: str, *, retries: int | None = None,
+                  timeout: float | None = None) -> str:
+    """Stream a URL to ``dest_path``, retrying a stalled or dropped transfer.
+
+    Every attempt resumes from the ``.part`` file, so a retry re-reads nothing
+    already on disk. ``retries`` bounds *consecutive* failures: an attempt that
+    moves bytes resets the count, so one download survives many separate stalls
+    (and, against a server that drops after every chunk, still ends -- each
+    attempt starts further into the file). A failure that waiting cannot fix
+    (an unlisted 4xx, a full disk, a stale ``.part``) raises at once.
+    ``GMLX_PULL_RETRIES`` and ``GMLX_PULL_TIMEOUT`` set the defaults; 0 retries
+    restores single-shot behaviour. Module-level seam: monkeypatched in tests."""
+    if retries is None:
+        retries = max(0, env_int("GMLX_PULL_RETRIES", _PULL_RETRIES))
+    if timeout is None:
+        timeout = env_float("GMLX_PULL_TIMEOUT", _PULL_TIMEOUT_S)
+    part = dest_path + ".part"
+    fname = os.path.basename(dest_path)
+    failures = 0
+    while True:
+        before = os.path.getsize(part) if os.path.exists(part) else 0
+        try:
+            return _url_download_once(url, dest_path, timeout=timeout)
+        except Exception as e:
+            after = os.path.getsize(part) if os.path.exists(part) else 0
+            failures = 0 if after > before else failures + 1
+            print(file=sys.stderr)           # close the unterminated progress line
+            if retries <= 0 or failures > retries or not _retryable(e):
+                raise
+            delay = _retry_after_s(e)
+            if delay is None:
+                delay = _retry_delay(max(0, failures - 1))
+            # failures == 0 means the attempt still moved bytes, so the budget
+            # reset and quoting it would read as "retry 0 of 10".
+            budget = "resuming" if not failures else f"retry {failures}/{retries}"
+            print(f"  {fname}: {e} - {budget} in {delay:.0f}s", file=sys.stderr)
+            _pull_sleep(delay)
+
+
+def _url_download_once(url: str, dest_path: str, *, timeout: float) -> str:
+    """One transfer attempt for :func:`_url_download`.
 
     Downloads to a sibling ``.part`` file, requesting a byte ``Range`` to continue
-    where a previous run left off (the server must honour it; a ``200`` answer means
-    it didn't, so we restart from byte 0). The ``.part`` is renamed into place only
-    on completion -- a failure leaves it behind so a re-run resumes rather than
-    restarts. A finished ``dest_path`` short-circuits (idempotent re-pull).
-    Module-level seam: monkeypatched in tests."""
+    where a previous attempt left off (the server must honour it; a ``200`` answer
+    means it didn't, so we restart from byte 0). The ``.part`` is renamed into place
+    only on completion -- a failure leaves it behind so the next attempt resumes
+    rather than restarts. A finished ``dest_path`` short-circuits (idempotent
+    re-pull)."""
     if os.path.exists(dest_path):
         return dest_path
     part = dest_path + ".part"
@@ -522,7 +612,7 @@ def _url_download(url: str, dest_path: str) -> str:
         headers["Range"] = f"bytes={have}-"
     req = urllib.request.Request(url, headers=headers)
     try:
-        resp = remote.http_open(req, timeout=30)
+        resp = remote.http_open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         if e.code == 416 and have > 0:
             # 416 = our .part already covers the remote range. Only an exact

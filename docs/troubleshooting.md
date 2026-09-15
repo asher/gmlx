@@ -62,6 +62,12 @@ never has this problem.
 `gmlx pull` stopped mid-download, or refused to start with
 `error: not enough disk space`.
 
+A stalled or dropped read retries by itself, with backoff, from the bytes
+already on disk. Raise `GMLX_PULL_RETRIES` above its default of 10 when the
+remote host is having a bad day, and `GMLX_PULL_TIMEOUT` above its default
+of 60 seconds when the transfer is slow but alive. A permanent failure, such
+as a 404 or a full disk, still stops at once.
+
 Interrupted downloads resume: re-run the same `pull` and it continues from
 where it stopped, shard by shard for sharded files. The disk-space refusal
 is a preflight check that names how much the file needs and how much is
