@@ -327,16 +327,17 @@ def test_merged_template_kwargs_spec_thinking_controls_mapped():
         req, spec, "{% if enable_thinking %}...{% endif %}") == \
         {"enable_thinking": False}
     assert sp_chat._merged_template_kwargs(
-        req, spec, "reasoning_effort in ['low','high','no_think']") == \
+        req, spec,
+        "{% if reasoning_effort in ['low','high','no_think'] %}{% endif %}") == \
         {"reasoning_effort": "no_think"}
     spec.thinking = "adaptive"
     assert sp_chat._merged_template_kwargs(
-        req, spec, 'thinking_mode == "adaptive"') == \
+        req, spec, '{% if thinking_mode == "adaptive" %}{% endif %}') == \
         {"thinking_mode": "adaptive"}
     spec.thinking = None
     spec.reasoning_effort = "high"
     assert sp_chat._merged_template_kwargs(
-        req, spec, 'set reasoning_effort = "medium"') == \
+        req, spec, '{%- if reasoning_effort is not defined %}{%- set reasoning_effort = "medium" %}{%- endif %}') == \
         {"reasoning_effort": "high"}
 
 

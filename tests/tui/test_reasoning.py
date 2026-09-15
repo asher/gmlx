@@ -393,7 +393,7 @@ def test_fold_thinking_flag_hy3_dialect(monkeypatch):
     import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
-                        lambda a: "reasoning_effort in ['low','high','no_think']")
+                        lambda a: "{% if reasoning_effort in ['low','high','no_think'] %}{% endif %}")
     args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "no_think"}
     args.thinking = "on"
@@ -409,7 +409,7 @@ def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
     import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
-                        lambda a: 'set reasoning_effort = "medium"')
+                        lambda a: '{%- if reasoning_effort is not defined %}{%- set reasoning_effort = "medium" %}{%- endif %}')
     args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
     assert "reasoning_effort" in capsys.readouterr().err
@@ -420,11 +420,11 @@ def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys)
     import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
-                        lambda a: 'set reasoning_effort = "medium"')
+                        lambda a: '{%- if reasoning_effort is not defined %}{%- set reasoning_effort = "medium" %}{%- endif %}')
     args = SimpleNamespace(thinking=None, reasoning_effort="high", gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
     assert capsys.readouterr().err == ""
-    monkeypatch.setattr(chat, "_template_text", lambda a: "enable_thinking only")
+    monkeypatch.setattr(chat, "_template_text", lambda a: "{% if enable_thinking %}{% endif %}")
     assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
     assert "no-op" in capsys.readouterr().err
 
@@ -435,7 +435,7 @@ def test_fold_thinking_flag_minimax_thinking_mode(monkeypatch):
     import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
-                        lambda a: 'thinking_mode == "adaptive"')
+                        lambda a: '{% if thinking_mode == "adaptive" %}{% endif %}')
     args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "disabled"}
     args.thinking = "on"
@@ -751,3 +751,51 @@ def test_hy4_reply_splits_at_its_suffixed_close_tag():
         "weighing it up</think:6124c78e>Hello!", think_open=True)
     assert reason == "weighing it up"
     assert answer == "Hello!"
+
+
+def test_thinking_spelling_ignores_prose_and_derived_variables():
+    """The switch must be a variable the template reads from its caller.
+    DeepSeek-V4.1 derives its own ``thinking_mode`` from ``enable_thinking``
+    and names it in the rendered prose, so a substring probe picks the
+    spelling the template discards."""
+    from gmlx.load.tokenizer import bundled_chat_template_for_arch
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    template = bundled_chat_template_for_arch("deepseek41")
+    assert "thinking_mode" in template
+    assert map_thinking_controls({}, "off", None, template) == {
+        "enable_thinking": False}
+    assert map_thinking_controls({}, "on", None, template) == {
+        "enable_thinking": True}
+    # and the mapped kwarg actually turns the reasoning block off
+    import jinja2
+    env = jinja2.Environment()
+    env.policies["json.dumps_kwargs"] = {"ensure_ascii": False}
+    render = env.from_string(template).render
+    msgs = [{"role": "user", "content": "hi"}]
+    on = render(messages=msgs, add_generation_prompt=True, bos_token="")
+    off = render(messages=msgs, add_generation_prompt=True, bos_token="",
+                 enable_thinking=False)
+    assert on.endswith("<think>") and off.endswith("</think>")
+    assert "Reasoning Effort" in on and "Reasoning Effort" not in off
+
+
+def test_bundled_template_wins_the_spelling_probe(monkeypatch, tmp_path):
+    """gmlx replaces the embedded template for some arches, so the probe
+    must read the one that will render."""
+    import gmlx.tui.chat as chat
+    from gmlx.load.tokenizer import bundled_chat_template_for_arch
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"")
+    kv = {"general.architecture": "deepseek41",
+          "tokenizer.chat_template": "{% if thinking_mode %}{% endif %}"}
+    monkeypatch.setattr(
+        "gmlx.load.headerscan.scan_gguf",
+        lambda *a, **k: type("S", (), {"kv": kv})())
+    from types import SimpleNamespace
+    args = SimpleNamespace(thinking="off", reasoning_effort=None,
+                           chat_template=None, gguf=str(gguf))
+    assert chat._template_text(args) == bundled_chat_template_for_arch(
+        "deepseek41")
+    assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": False}

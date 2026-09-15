@@ -25,6 +25,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `pull` fetches a file in bounded range windows once it knows the remote
   length, so downloading or resuming a very large GGUF from Hugging Face's
   xet CDN no longer fails with HTTP 400.
+- `--thinking on|off` now finds the switch a chat template really reads. It
+  was picked by substring, so a template that names a switch in its prose,
+  or derives one internally, got a variable it discards.
 - `--stream-cpu` now streams a declared lookup table instead of holding it
   resident.
 - A quantized tensor that lands on a raw array beside sub-modules is
