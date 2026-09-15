@@ -804,3 +804,31 @@ def _self_test_roundtrip(fast: PreTrainedTokenizerFast) -> None:
         if back != s:
             raise RuntimeError(
                 f"tokenizer round-trip failed: {s!r} -> {ids[:10]} -> {back!r}")
+
+
+# Model type -> package that ships the chat template gmlx applies when the
+# GGUF carries none of its own or the wrong one. deepseek_v41: converters
+# copy the V4 template, whose DSML tags lack the V4.1 leading space and
+# whose reasoning effort is a string, not the 1-100 budget.
+BUNDLED_CHAT_TEMPLATES: dict[str, str] = {
+    "deepseek_v41": "gmlx.models.deepseek_v41",
+}
+
+
+def bundled_chat_template(model_type: str | None) -> str | None:
+    """The template gmlx ships for ``model_type``, or None."""
+    package = BUNDLED_CHAT_TEMPLATES.get(model_type or "")
+    if package is None:
+        return None
+    from importlib.resources import files
+
+    return files(package).joinpath("chat_template.jinja").read_text(
+        encoding="utf-8")
+
+
+def bundled_chat_template_for_arch(arch: str | None) -> str | None:
+    """The same, addressed by GGUF architecture, for the paths that read a
+    header rather than a synthesized config."""
+    from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
+
+    return bundled_chat_template(GGUF_ARCH_TO_MODEL_TYPE.get(arch or ""))

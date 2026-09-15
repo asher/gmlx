@@ -1197,9 +1197,13 @@ def _report_only(args) -> int:
     # Render the prompt the way generate would, so --report-only can preview a
     # --chat-template override without building the model.
     if not args.no_chat_template:
-        from gmlx.load.tokenizer import load_tokenizer_from_gguf
+        from gmlx.load.tokenizer import (
+            bundled_chat_template_for_arch,
+            load_tokenizer_from_gguf,
+        )
 
-        override = _resolve_chat_template(args.chat_template)
+        override = (_resolve_chat_template(args.chat_template)
+                    or bundled_chat_template_for_arch(arch))
         tok = load_tokenizer_from_gguf(meta, arch, chat_template_override=override)
         if tok.chat_template is not None:
             rendered = tok.apply_chat_template(

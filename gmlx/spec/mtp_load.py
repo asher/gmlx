@@ -1837,9 +1837,13 @@ def load_mtp_model(
     loadlog.stage("building tokenizer")
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+    from gmlx.load.tokenizer import (
+        bundled_chat_template_for_arch,
+        load_tokenizer_from_gguf,
+    )
 
-    template_override = _resolve_chat_template(chat_template)
+    template_override = (_resolve_chat_template(chat_template)
+                         or bundled_chat_template_for_arch(arch))
     raw_tokenizer = load_tokenizer_from_gguf(
         meta, arch, chat_template_override=template_override
     )

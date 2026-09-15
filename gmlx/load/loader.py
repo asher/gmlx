@@ -1670,11 +1670,11 @@ def load_model(
     loadlog.stage("building tokenizer")
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from .tokenizer import load_tokenizer_from_gguf
+    from .tokenizer import bundled_chat_template, load_tokenizer_from_gguf
 
     template_override = _resolve_chat_template(chat_template)
     if template_override is None:
-        template_override = _bundled_chat_template(config.get("model_type"))
+        template_override = bundled_chat_template(config.get("model_type"))
     # The override is threaded *into* the synthesizer so it's set on the fast
     # tokenizer before turn-end-EOS inference (multi-EOS detection must see the
     # override, not the GGUF template).
@@ -1746,25 +1746,6 @@ def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
         "[tokenizer] XTML think channel detected; "
         "enable_thinking defaults on"
     )
-
-
-# Arch -> package that ships the chat template gmlx applies when the file
-# carries none of its own or the wrong one. deepseek_v41: converters copy
-# the V4 template, whose DSML tags lack the V4.1 leading space and whose
-# reasoning effort is a string, not the 1-100 budget.
-_BUNDLED_CHAT_TEMPLATES: dict[str, str] = {
-    "deepseek_v41": "gmlx.models.deepseek_v41",
-}
-
-
-def _bundled_chat_template(model_type: str | None) -> str | None:
-    package = _BUNDLED_CHAT_TEMPLATES.get(model_type or "")
-    if package is None:
-        return None
-    from importlib.resources import files
-
-    return files(package).joinpath("chat_template.jinja").read_text(
-        encoding="utf-8")
 
 
 def _resolve_chat_template(chat_template: str | None) -> str | None:

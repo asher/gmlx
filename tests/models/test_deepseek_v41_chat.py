@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
-from gmlx.load.loader import _bundled_chat_template
+from gmlx.load.tokenizer import bundled_chat_template
 from gmlx.models.deepseek_v41 import tools as ds41_tools
 
 _CASES = Path(__file__).resolve().parents[1] / "fixtures" / "deepseek41_encoding"
@@ -19,7 +19,7 @@ _CASES = Path(__file__).resolve().parents[1] / "fixtures" / "deepseek41_encoding
 
 @pytest.fixture(scope="module")
 def template():
-    return _compile_jinja_template(_bundled_chat_template("deepseek_v41"))
+    return _compile_jinja_template(bundled_chat_template("deepseek_v41"))
 
 
 def _case(idx: int):
@@ -185,3 +185,14 @@ def test_normalize_messages_leaves_unparseable_arguments_alone():
     msgs = [{"role": "assistant", "tool_calls": [
         {"type": "function", "function": {"name": "t", "arguments": "oops"}}]}]
     assert ds41_tools.normalize_messages(msgs) is msgs
+
+
+def test_bundled_template_resolves_by_gguf_arch():
+    """The header-only paths (--report-only, the MTP and VLM loads) address
+    the template by architecture, not by synthesized model type."""
+    from gmlx.load.tokenizer import bundled_chat_template_for_arch
+
+    assert (bundled_chat_template_for_arch("deepseek41")
+            == bundled_chat_template("deepseek_v41"))
+    assert bundled_chat_template_for_arch("deepseek4") is None
+    assert bundled_chat_template_for_arch(None) is None

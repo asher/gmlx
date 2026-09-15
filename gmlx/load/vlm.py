@@ -3122,8 +3122,13 @@ def load_vlm_model(
         processor = load_processor(src)
         mtp_tokenizer = getattr(processor, "tokenizer", None)
     else:
-        from .tokenizer import load_tokenizer_from_gguf
-        tokenizer = load_tokenizer_from_gguf(llm_meta, llm_arch)
+        from .tokenizer import (
+            bundled_chat_template_for_arch,
+            load_tokenizer_from_gguf,
+        )
+        tokenizer = load_tokenizer_from_gguf(
+            llm_meta, llm_arch,
+            chat_template_override=bundled_chat_template_for_arch(llm_arch))
         processor = _synthesize_vlm_processor(
             model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
