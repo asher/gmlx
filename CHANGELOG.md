@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A stalled or dropped read no longer abandons a `pull`: the transfer
+  retries with backoff from the bytes already on disk, tunable by
+  `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.
+
 ## [0.4.13] - 2026-09-12
 
 ### Changed

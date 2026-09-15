@@ -637,9 +637,11 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 Inside a `model_dirs` root, downloads nest under `<org>__<repo>/` so that a
 model's siblings stay together. Before the first byte, `pull` checks that
 the volume has space for every shard, and it notes, without refusing, a
-model that will not fit this Mac's RAM. An interrupted download resumes
-from its `.part` file. Gated repositories need `HF_TOKEN` in the
-environment.
+model that will not fit this Mac's RAM. A stalled or dropped read retries
+with backoff, resuming from the `.part` file. `GMLX_PULL_RETRIES` and 
+`GMLX_PULL_TIMEOUT` tune the retry logic. An interrupted `pull` also resumes 
+from the `.part` file on the next run. Gated repositories need `HF_TOKEN` in 
+the environment.
 
 ## gmlx validate
 

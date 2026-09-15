@@ -6,6 +6,7 @@ downloaders (``manage._hf_download`` / ``manage._url_download``) are seams.
 
 from __future__ import annotations
 
+import errno
 import json
 import urllib.error
 
@@ -687,7 +688,7 @@ def test_url_download_passes_timeout_and_writes(tmp_path, monkeypatch):
     out = manage._url_download("https://example.com/m.gguf", str(dest))
     assert out == str(dest)
     assert dest.read_bytes() == b"GGUFbytes"
-    assert seen["timeout"] == 30
+    assert seen["timeout"] == 60
     assert seen["url"] == "https://example.com/m.gguf"
 
 
@@ -715,7 +716,7 @@ def test_url_download_keeps_partial_on_error(tmp_path, monkeypatch):
     monkeypatch.setattr(remote, "http_open",
                         lambda req, *, timeout: Drops())
     with pytest.raises(OSError, match="connection dropped"):
-        manage._url_download("https://example.com/m.gguf", str(dest))
+        manage._url_download("https://example.com/m.gguf", str(dest), retries=0)
     assert not dest.exists()                          # no half file at the final path
     assert (tmp_path / "m.gguf.part").read_bytes() == b"partial"   # kept for resume
 
@@ -809,9 +810,186 @@ def test_url_download_rejects_truncated_transfer(tmp_path, monkeypatch):
     monkeypatch.setattr(remote, "http_open",
                         lambda req, *, timeout: Truncated())
     with pytest.raises(remote.RemoteError, match="closed early"):
-        manage._url_download("https://example.com/m.gguf", str(dest))
+        manage._url_download("https://example.com/m.gguf", str(dest), retries=0)
     assert not dest.exists()                          # nothing promoted
     assert (tmp_path / "m.gguf.part").read_bytes() == b"x" * 50  # resumable
+
+
+class _Attempt:
+    """One scripted transfer: hand back ``data``, then drop or close cleanly."""
+
+    def __init__(self, data, drop, have, total):
+        self.data, self.drop, self.have, self.total = data, drop, have, total
+        self.status = 206 if have else 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        if self.data is not None:
+            d, self.data = self.data, None
+            return d
+        if self.drop:
+            raise TimeoutError("The read operation timed out")
+        return b""
+
+    def getheader(self, name):
+        if name != "Content-Range":
+            return None
+        return f"bytes {self.have}-{self.total - 1}/{self.total}"
+
+
+def _script(scripted, ranges):
+    """An ``http_open`` fake driving ``scripted`` [(data, drop)] attempts."""
+    def fake_open(req, *, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        have = int(rng.split("=")[1].rstrip("-")) if rng else 0
+        data, drop = scripted.pop(0)
+        return _Attempt(data, drop, have, 6)
+    return fake_open
+
+
+def test_url_download_retries_and_resumes(tmp_path, monkeypatch):
+    # A mid-stream read timeout must not discard the bytes already written: the
+    # next attempt asks for a Range covering them and finishes the file.
+    dest = tmp_path / "m.gguf"
+    ranges, slept = [], []
+    monkeypatch.setattr(remote, "http_open",
+                        _script([(b"aabb", True), (b"cc", False)], ranges))
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    out = manage._url_download("https://example.com/m.gguf", str(dest))
+    assert out == str(dest)
+    assert dest.read_bytes() == b"aabbcc"
+    assert ranges == [None, "bytes=4-"]
+    assert slept == [1.0]
+    assert not (tmp_path / "m.gguf.part").exists()
+
+
+def test_url_download_progress_resets_failure_budget(tmp_path, monkeypatch):
+    # A server dropping after every chunk still finishes on a budget of 1: each
+    # attempt moves bytes, so the *consecutive* failure count never reaches it.
+    dest = tmp_path / "m.gguf"
+    ranges, slept = [], []
+    monkeypatch.setattr(
+        remote, "http_open",
+        _script([(b"aa", True), (b"bb", True), (b"cc", False)], ranges))
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    out = manage._url_download("https://example.com/m.gguf", str(dest),
+                               retries=1)
+    assert out == str(dest)
+    assert dest.read_bytes() == b"aabbcc"
+    assert ranges == [None, "bytes=2-", "bytes=4-"]
+    assert slept == [1.0, 1.0]          # no escalation: the budget keeps resetting
+
+
+def test_url_download_gives_up_after_retries(tmp_path, monkeypatch):
+    # No attempt moves a byte, so the budget runs out and the last error is the
+    # one the caller sees. The backoff doubles between tries.
+    dest = tmp_path / "m.gguf"
+    calls, slept = [], []
+
+    def fake_open(req, *, timeout):
+        calls.append(1)
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    with pytest.raises(OSError, match="timed out"):
+        manage._url_download("https://example.com/m.gguf", str(dest), retries=3)
+    assert len(calls) == 4                            # first try plus 3 retries
+    assert slept == [1.0, 2.0, 4.0]
+
+
+def test_url_download_honours_retry_after(tmp_path, monkeypatch):
+    # A rate-limited host names the wait it wants; the backoff defers to it.
+    dest = tmp_path / "m.gguf"
+    slept, ranges = [], []
+    inner = _script([(b"aabbcc", False)], ranges)
+    first = [True]
+
+    def fake_open(req, *, timeout):
+        if first[0]:
+            first[0] = False
+            raise urllib.error.HTTPError(
+                req.full_url, 429, "Too Many Requests",
+                {"Retry-After": "7"}, None)
+        return inner(req, timeout=timeout)
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    assert manage._url_download("https://example.com/m.gguf",
+                                str(dest)) == str(dest)
+    assert slept == [7.0]
+    assert dest.read_bytes() == b"aabbcc"
+
+
+def test_url_download_does_not_retry_client_error(tmp_path, monkeypatch):
+    # A 404 is permanent; retrying only spends the user's time.
+    dest = tmp_path / "m.gguf"
+    calls, slept = [], []
+
+    def fake_open(req, *, timeout):
+        calls.append(1)
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    with pytest.raises(urllib.error.HTTPError):
+        manage._url_download("https://example.com/m.gguf", str(dest))
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_url_download_does_not_retry_full_disk(tmp_path, monkeypatch):
+    # ENOSPC never clears by waiting - the write side, not the wire.
+    dest = tmp_path / "m.gguf"
+    calls, slept = [], []
+
+    class Full:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fake_open(req, *, timeout):
+        calls.append(1)
+        return Full()
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_pull_sleep", slept.append)
+    with pytest.raises(OSError, match="No space left"):
+        manage._url_download("https://example.com/m.gguf", str(dest))
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_url_download_env_overrides_timeout_and_retries(tmp_path, monkeypatch):
+    dest = tmp_path / "m.gguf"
+    seen, calls = {}, []
+    monkeypatch.setenv("GMLX_PULL_TIMEOUT", "5")
+    monkeypatch.setenv("GMLX_PULL_RETRIES", "1")
+    monkeypatch.setattr(manage, "_pull_sleep", lambda s: None)
+
+    def fake_open(req, *, timeout):
+        seen["timeout"] = timeout
+        calls.append(1)
+        raise TimeoutError("stalled")
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    with pytest.raises(OSError):
+        manage._url_download("https://example.com/m.gguf", str(dest))
+    assert seen["timeout"] == 5.0
+    assert len(calls) == 2                            # first try plus 1 retry
 
 
 def test_hf_download_delegates_to_url_download(tmp_path, monkeypatch):

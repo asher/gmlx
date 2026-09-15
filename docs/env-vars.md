@@ -132,5 +132,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, with `0` uncapped. Overrides each model's `speculative_width_cap` and is read on each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`. Same as `--ignore-eos`, for forced-length benchmarking. |
 | `GMLX_API_KEY` | Client-side default key for `ps` when `--api-key` is not passed. The server reads its key only from `server.api_key`. |
+| `GMLX_PULL_RETRIES` | Consecutive failed attempts `pull` accepts on one file, default `10`. An attempt that moves bytes resets the count. `0` fails on the first error. |
+| `GMLX_PULL_TIMEOUT` | Socket timeout in seconds for a `pull` transfer, default `60`. It is also the budget for one stalled read. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for `validate` and `pull` on gated or private repos. |
 | `XDG_CACHE_HOME` | The root of the `gmlx/` cache directory, which holds `chat`'s prompt history, backgrounded servers' runfiles and logs, and the models `talk` downloads. |
