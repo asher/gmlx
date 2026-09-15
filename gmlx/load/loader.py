@@ -30,6 +30,7 @@ from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
 import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
+from .invariant_linear import install_batch_invariant_linears
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
 from gmlx.upstream.qkv_fuse import install_fused_qkv
@@ -1068,6 +1069,9 @@ def _install_and_load(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
@@ -1541,6 +1545,9 @@ def load_model(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        _log(f"[install] batch-invariant kernel on {n_inv} small float projections")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
