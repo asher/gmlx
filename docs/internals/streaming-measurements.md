@@ -200,29 +200,55 @@ the arena falls to 11 GB, a sixth of the experts.
 What the box then does, on the same M3 Max with 128 GB, `--stream-experts`
 at streaming defaults:
 
-| | 120 tokens | 200 tokens |
+| | 120 tokens | 200 tokens | 120 tokens, tables viewed |
+|---|---|---|---|
+| decode | 2.03 tok/s | 2.07 tok/s | 5.97 tok/s |
+| prefill | 2.11 tok/s | 2.24 tok/s | 3.28 tok/s |
+| arena | 13 GB, shed to 3 | 13 GB, shed to 3 | 75.3 GB, no shed |
+| arena hit rate | 42.5% | 44.4% | n/a |
+| expert bytes read per token | 2.6 GB | 2.6 GB | n/a |
+| demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s | n/a |
+
+The arena was the limit, not the plan's 75 GB, until the GGUF reader stopped
+copying the tables. mlx-kquant wraps a tensor's mmap window in a Metal buffer
+and built that window as a 1-D array. `mx::Shape` dims are int32, so the
+window held at most INT32_MAX elements. The window dtype widens to fit, but
+only to a width that the row byte count divides: 84 bytes divides by 4, which
+puts the ceiling at 8.6 GB. A 30 GiB engram table is past it, so each table
+was copied into 30 GiB of dirty, partly swapped Metal memory, which
+`vmmap -summary` showed as 60.1 GB of `IOAccelerator`. The reclaimable
+snapshot read about 45 GB at install, the second ceiling clamped the arena to
+13 GB, and the governor then shed toward 3 GB.
+
+The reader now gives the window a second dimension when no width fits, and
+the tensor becomes a whole-row slice of it. Shard 4 loaded alone, before and
+after:
+
+| | copied | 2-D window |
 |---|---|---|
-| decode | 2.03 tok/s | 2.07 tok/s |
-| prefill | 2.11 tok/s | 2.24 tok/s |
-| arena hit rate | 42.5% | 44.4% |
-| expert bytes read per token | 2.6 GB | 2.6 GB |
-| demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s |
+| zero-copy views | 61 of 62 | 62 of 62 |
+| `IOAccelerator` after a gather | 30.0 GB | 64 KB |
+| resident mapped file | 30.0 GB | 528 KB |
 
-The arena is the limit, not the plan's 75 GB. At install the reclaimable
-snapshot is about 45 GB, so the second ceiling clamps the arena to 13 GB
-and the governor then sheds it toward 3 GB. A load line now names the clamp
-whenever it binds.
+Gathered rows match `pread` at the first, the last and two interior rows in
+both cases. A load line names the reclaimable-RAM clamp whenever it binds; on
+this file it no longer binds.
 
-The per-token split at 120 tokens, from `GMLX_DECODE_PHASE_STATS=1`:
+The per-token split at 120 tokens, from `GMLX_DECODE_PHASE_STATS=1`, before
+and after:
 
 ```text
 [phase] decode per-token ms over 120 tokens: total 495.6 | ev 3.8 la 237.8 stage_wait 210.0 stage_book 41.3 prestage 4.1 build 2.2 | resid -3.6
 [phase] la split: build 0.4 | sync 234.2 | post 3.2
+
+[phase] decode per-token ms over 120 tokens: total 176.2 | ev 5.8 la 117.3 stage_wait 33.1 stage_book 12.2 prestage 0.7 build 1.1 | resid 6.0
+[phase] la split: build 0.3 | sync 115.5 | post 1.5
 ```
 
-Disk stalls take 210 ms and the GPU sync bucket 234 ms. The sync bucket is
-GPU work at the streamed-decode clock floor, so the every-token graph is
-the other half of the per-token time, not a rounding error.
+A 75 GB arena takes the disk stalls from 210 ms per token to 33 ms. The GPU
+sync bucket also halves, because a decode that does not wait on the SSD keeps
+the GPU off its clock floor. The every-token graph is still about two thirds
+of the per-token time.
 
 ### The every-token graph of one V4.1 block
 
