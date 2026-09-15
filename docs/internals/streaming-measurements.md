@@ -197,6 +197,69 @@ The fit plan that follows from crediting both tables as off-disk:
 Without the credit the planner prices the tables as every-token weights and
 the arena falls to 11 GB, a sixth of the experts.
 
+What the box then does, on the same M3 Max with 128 GB, `--stream-experts`
+at streaming defaults:
+
+| | 120 tokens | 200 tokens |
+|---|---|---|
+| decode | 2.03 tok/s | 2.07 tok/s |
+| prefill | 2.11 tok/s | 2.24 tok/s |
+| arena hit rate | 42.5% | 44.4% |
+| expert bytes read per token | 2.6 GB | 2.6 GB |
+| demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s |
+
+The arena is the limit, not the plan's 75 GB. At install the reclaimable
+snapshot is about 45 GB, so the second ceiling clamps the arena to 13 GB
+and the governor then sheds it toward 3 GB. A load line now names the clamp
+whenever it binds.
+
+The per-token split at 120 tokens, from `GMLX_DECODE_PHASE_STATS=1`:
+
+```text
+[phase] decode per-token ms over 120 tokens: total 495.6 | ev 3.8 la 237.8 stage_wait 210.0 stage_book 41.3 prestage 4.1 build 2.2 | resid -3.6
+[phase] la split: build 0.4 | sync 234.2 | post 3.2
+```
+
+Disk stalls take 210 ms and the GPU sync bucket 234 ms. The sync bucket is
+GPU work at the streamed-decode clock floor, so the every-token graph is
+the other half of the per-token time, not a rounding error.
+
+### The every-token graph of one V4.1 block
+
+Measured by ablation on a real-width block (hidden 5120, 64 heads x 512,
+hc_mult 4, 8 float experts standing in for the 384 streamed ones), decode
+width, GPU at full clocks:
+
+| Component | ms per block | ms per token over 40 layers |
+|---|---|---|
+| MoE | 2.64 | n/a, the real one streams |
+| attention | 1.41 | 56 |
+| hyper-connection mixes, twice | 1.10 | 44 |
+| hyper-connection collapse, twice | 0.01 | 0.4 |
+
+The mixes figure is a launch cost, not a bandwidth cost: each `fn` matrix
+is 24 x 20480 in f32, under 2 MB, and the 20 Sinkhorn iterations that
+follow are dozens of dispatches over 4 x 4 arrays. The loader dequantizes
+`fn` to f32, so this measurement carries over to the real model, while the
+attention and MoE figures are float stand-ins for Q2_K weights and
+overstate both.
+
+DeepSeek-V4 and GLM-5.3-Flash run this front through mlx-kquant. V4.1 does
+not, because it collapses with the previous sublayer's mixes and the fused
+collapse uses the mixes it just computed. `hc_front_expand_reduce` still
+fits, since it stops before the collapse:
+
+| Route | ms per sublayer |
+|---|---|
+| expand then mixes, what V4.1 runs | 0.800 |
+| `hc_front_expand_reduce` then the ops Sinkhorn | 0.536 |
+| `hc_front_expand_reduce` alone | 0.180 |
+
+That is 21 ms per token over 40 layers for a change that needs no new
+kernel. The remaining 0.36 ms per sublayer is the Sinkhorn split, which
+would need an mlx-kquant kernel that returns the pre coefficients instead
+of applying them.
+
 ## Certifying a setting
 
 Quality degrades in a consistent order as the settings become more

@@ -2138,6 +2138,11 @@ def dequantize_unattachable_leaves(model: nn.Module,
     forward; a codec'd raw leaf over ``max_bytes`` (f32 size) raises
     for the same reason - there is no loud downstream failure.
 
+    Every module is visited, not only the leaves: deepseek41's ``Engram``
+    holds its q/k gate weights as raw arrays beside two sub-modules, so a
+    leaves-only walk skipped them and the forward broadcast Q2_K wire
+    bytes against the residual streams.
+
     llama.cpp's quantize never codecs router gates, so its GGUFs never
     hit this path; so far only an antirez DeepSeek-V4-Flash dspark
     drafter GGUF does. If quantized routers become a pattern in model
@@ -2159,11 +2164,11 @@ def dequantize_unattachable_leaves(model: nn.Module,
 
     def _visit(path: str, module):
         if isinstance(module, attachable):
-            return module
+            return
         for attr, target in list(module.items()):
             if not isinstance(target, mx.array):
                 continue
-            weight_key = f"{path}.{attr}"
+            weight_key = f"{path}.{attr}" if path else attr
             codec = hf_kquant_meta.get(weight_key)
             if codec is None or codec not in known_codecs:
                 continue
@@ -2174,7 +2179,7 @@ def dequantize_unattachable_leaves(model: nn.Module,
                     f"({target.size * 4} bytes f32 > {max_bytes})")
             # Wire scales for ``X.weight`` live at ``X.scales``; for any
             # other leaf name at ``<key>.scales`` (loader _strip_weight).
-            scales_key = (f"{path}.scales" if attr == "weight"
+            scales_key = (f"{path}.scales" if attr == "weight" and path
                           else f"{weight_key}.scales")
             scales = hf_weights.get(scales_key)
             if scales is None:
@@ -2187,10 +2192,9 @@ def dequantize_unattachable_leaves(model: nn.Module,
             hf_weights[weight_key] = deq.reshape(target.shape)
             del hf_kquant_meta[weight_key]
             handled.append(f"{weight_key} ({codec})")
-        return module
 
-    leaves = model.leaf_modules()
-    tree_map_with_path(_visit, leaves, is_leaf=nn.Module.is_module)
+    for path, module in model.named_modules():
+        _visit(path, module)
     return handled
 
 

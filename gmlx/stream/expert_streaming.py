@@ -841,6 +841,7 @@ def install_expert_streaming(
     feeder = None
     dfeeder = None
     room = arena = None
+    arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
         from gmlx.stream.budget import kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
@@ -964,12 +965,18 @@ def install_expert_streaming(
                 floor = _ram_floor_bytes(int(mx.device_info()["memory_size"]))
             except Exception:
                 floor = _ram_floor_bytes(None)
+            # Streamed tables are page-cache citizens like the experts, so
+            # they are out of the every-token term the arena is sized
+            # against (arena_kw carries the same figure).
+            tbytes = int(arena_kw.get("streamable_bytes", 0))
+            every = total_bytes - expert_bytes - tbytes
+            tables = f"tables {tbytes / 1e9:.1f} off-disk, " if tbytes else ""
             print(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
-                f"every-token {(total_bytes - expert_bytes) / 1e9:.1f} + "
+                f"every-token {every / 1e9:.1f} + "
                 f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
                 f"{ring / 1e9:.1f} + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f}; "
+                f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)

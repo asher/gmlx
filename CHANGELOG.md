@@ -22,7 +22,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length, so downloading or resuming a very large GGUF from Hugging Face's
   xet CDN no longer fails with HTTP 400.
 - `--stream-cpu` now streams a declared lookup table instead of holding it
-  resident, which on DeepSeek-V4.1-Flash is 60 GiB of engram tables.
+  resident.
+- A quantized tensor that lands on a raw array beside sub-modules is
+  dequantized at load instead of reaching the forward as wire bytes.
+- The bundled chat template is applied on the report-only, MTP and VLM
+  loads, not only the text load.
+- A streamed model logs when its decode arena is clamped by reclaimable
+  RAM rather than by the memory ceiling.
 - A stalled or dropped read no longer abandons a `pull`: the transfer
   retries with backoff from the bytes already on disk, tunable by
   `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.

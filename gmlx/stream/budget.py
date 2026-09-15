@@ -306,11 +306,18 @@ def _decode_arena_bytes(
     avail = _available_ram_bytes()
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
-        arena = min(
-            arena,
-            avail - _ram_floor_bytes(ram or avail) - room - unpinned
-            - int(ring_bytes),
-        )
+        reclaimable = (avail - _ram_floor_bytes(ram or avail) - room
+                       - unpinned - int(ring_bytes))
+        if reclaimable < arena:
+            from gmlx.load import loadlog
+
+            loadlog.info(
+                f"[stream] arena clamped to reclaimable RAM: "
+                f"{max(0, reclaimable) / 1e9:.1f} GB, not the ceiling's "
+                f"{arena / 1e9:.1f} GB (reclaimable now {avail / 1e9:.1f} GB "
+                "of RAM; a co-resident workload or a cold page cache is the "
+                "usual cause)")
+        arena = min(arena, reclaimable)
     return min(max(0, arena), expert_bytes)
 
 

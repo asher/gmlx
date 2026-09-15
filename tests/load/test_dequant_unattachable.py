@@ -103,3 +103,33 @@ def test_nonweight_raw_leaf_dequantized():
     assert deq.shape == (8, 256) and deq.dtype == mx.float32
     ref = kq.dequantize(wq, scales, "q8_0", mx.float32).reshape(8, 256)
     assert mx.array_equal(deq, ref)
+
+
+class MixedCarrier(nn.Module):
+    """Engram-style carrier: raw gate arrays beside real sub-modules, so the
+    module is not a leaf and a leaves-only walk never sees the arrays."""
+
+    def __init__(self, dims):
+        super().__init__()
+        self.embed = nn.Embedding(16, dims)
+        self.wkv = nn.Linear(dims, dims, bias=False)
+        self.q_weight = mx.ones((4, dims))
+        self.k_weight = mx.ones((4, dims))
+
+
+def test_raw_arrays_on_a_non_leaf_module_dequantize():
+    mx.random.seed(1)
+    model = MixedCarrier(256)
+    q = mx.random.normal((4, 256))
+    wq, scales = kq.quantize(q, "q8_0")
+    hf_weights = {"q_weight": wq, "q_weight.scales": scales}
+    meta = {"q_weight": "q8_0", "wkv.weight": "q8_0"}
+
+    handled = dequantize_unattachable_leaves(model, hf_weights, meta)
+
+    assert handled == ["q_weight (q8_0)"]
+    assert meta == {"wkv.weight": "q8_0"}     # the Linear still installs
+    deq = hf_weights["q_weight"]
+    assert deq.shape == (4, 256) and deq.dtype == mx.float32
+    ref = kq.dequantize(wq, scales, "q8_0", mx.float32).reshape(4, 256)
+    assert mx.array_equal(deq, ref)
