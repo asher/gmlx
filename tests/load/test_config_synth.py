@@ -1654,6 +1654,121 @@ def test_deepseek4_synth_instantiates():
     assert out.shape[-1] == VOCAB
 
 
+def _deepseek41_meta() -> dict:
+    arch = "deepseek41"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.attention.head_count_kv"] = 1
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.expert_gating_func"] = 4
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 32
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_weights_scale"] = 1.5
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.hash_layer_count"] = 0
+    m[f"{arch}.attention.q_lora_rank"] = 32
+    m[f"{arch}.attention.output_lora_rank"] = 16
+    m[f"{arch}.attention.output_group_count"] = 2
+    m[f"{arch}.rope.dimension_count"] = 8
+    m[f"{arch}.attention.sliding_window"] = 16
+    m[f"{arch}.attention.indexer.head_count"] = 2
+    m[f"{arch}.attention.indexer.key_length"] = 16
+    m[f"{arch}.attention.indexer.top_k"] = 4
+    # One entry per DSpark stage past the trunk; the synth truncates.
+    m[f"{arch}.attention.compress_ratios"] = [0, 0, 2, 1, 0, 0]
+    m[f"{arch}.attention.compress_rope_freq_base"] = 160000.0
+    m[f"{arch}.rope.scaling.type"] = "yarn"
+    m[f"{arch}.rope.scaling.factor"] = 16.0
+    m[f"{arch}.rope.scaling.original_context_length"] = 512
+    m[f"{arch}.rope.scaling.yarn_beta_fast"] = 32.0
+    m[f"{arch}.rope.scaling.yarn_beta_slow"] = 1.0
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.sinkhorn_iterations"] = 5
+    m[f"{arch}.hyper_connection.epsilon"] = 1e-5
+    m[f"{arch}.swiglu_clamp_exp"] = [10.0] * 4
+    m[f"{arch}.vocab_size"] = VOCAB
+    m[f"{arch}.engram.layer_ids"] = [1, 3]
+    m[f"{arch}.engram.max_ngram_size"] = 4
+    m[f"{arch}.engram.head_count"] = 2
+    m[f"{arch}.engram.key_length"] = 8
+    m[f"{arch}.engram.pad_id"] = 2
+    m[f"{arch}.engram.multipliers"] = [3, 5, 7, 11, 13, 17, 19, 23]
+    m[f"{arch}.engram.primes"] = _ENGRAM_PRIMES
+    m[f"{arch}.engram.offsets"] = _ENGRAM_OFFSETS
+    m[f"{arch}.engram.token_map"] = [(i * 7) % 11 for i in range(VOCAB)]
+    return m
+
+
+# Bucket ranges tile each table end to end, so the offsets are the running
+# sum of the primes and the last one reaches the table's row count.
+_ENGRAM_PRIMES = [7, 11, 13, 5, 17, 19, 23, 29, 31, 37, 41, 43]
+_ENGRAM_OFFSETS = [0, 7, 18, 31, 36, 53, 0, 23, 52, 83, 120, 161]
+_ENGRAM_ROWS = [72, 204]
+
+_DEEPSEEK41_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.1.engram_embd.weight": [8, _ENGRAM_ROWS[0]],
+    "blk.3.engram_embd.weight": [8, _ENGRAM_ROWS[1]],
+    # Roles come from tensor presence: layer 2 owns the compressed KV and
+    # the index keys, layers 2 and 3 compute their own top-k.
+    "blk.2.attn_compressor_kv.weight": [64, 16],
+    "blk.2.indexer.attn_k.weight": [16, 16],
+    "blk.2.indexer.attn_q_b.weight": [32, 32],
+    "blk.3.indexer.attn_q_b.weight": [32, 32],
+}
+
+
+def test_deepseek41_synth_instantiates():
+    # DeepSeek-V4.1-Flash: the V4 skeleton plus engram n-gram memory on two
+    # layers, roles derived from tensor presence, and compress_ratios cut to
+    # the trunk. A forward proves config and model agree.
+    import gmlx.models.deepseek_v41.model as deepseek_v41_model
+    deepseek_v41_model.ensure_registered()
+
+    c = synthesize_config(_deepseek41_meta(), tensor_shapes=_DEEPSEEK41_SHAPES)
+    assert c["model_type"] == "deepseek_v41"
+    assert c["num_hidden_layers"] == 4
+    assert c["compress_ratios"] == [0, 0, 2, 1]
+    assert c["kv_source_layers"] == [2]
+    assert c["index_key_layers"] == [2]
+    assert c["index_source_layers"] == [2, 3]
+    assert c["num_hash_layers"] == 0
+    assert c["scoring_func"] == "sqrtsoftplus"
+    assert c["sliding_window"] == 16
+    assert c["engram_layer_ids"] == [1, 3]
+    assert c["engram_table_rows"] == _ENGRAM_ROWS
+    assert c["engram_pad_id"] == 2
+    assert c["engram_multipliers"] == [3, 5, 7, 11, 13, 17, 19, 23]
+    assert c["engram_primes"] == _ENGRAM_PRIMES
+    assert c["engram_offsets"] == _ENGRAM_OFFSETS
+    assert len(c["engram_token_map"]) == VOCAB
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    cache = model.make_cache()
+    out = model(mx.array([[1, 2, 3]]), cache=cache)
+    mx.eval(out)
+    assert out.shape[-1] == VOCAB
+
+
+def test_deepseek41_synth_rejects_buckets_that_miss_the_table():
+    # The offsets and primes tile the table exactly; a table one row short
+    # means the constants and the tensor disagree and every gather is wrong.
+    shapes = dict(_DEEPSEEK41_SHAPES)
+    shapes["blk.3.engram_embd.weight"] = [8, _ENGRAM_ROWS[1] - 1]
+    with pytest.raises(ValueError, match="buckets reach row"):
+        synthesize_config(_deepseek41_meta(), tensor_shapes=shapes)
+
+
+def test_deepseek41_synth_needs_a_compressed_kv_owner():
+    shapes = {k: v for k, v in _DEEPSEEK41_SHAPES.items()
+              if "attn_compressor_kv" not in k}
+    with pytest.raises(ValueError, match="no layer"):
+        synthesize_config(_deepseek41_meta(), tensor_shapes=shapes)
+
+
 def _qwen4exp_meta(with_indexer: bool = True, with_ple: bool = True) -> dict:
     arch = "qwen4exp"
     m = _base_meta(arch)

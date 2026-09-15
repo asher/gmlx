@@ -334,6 +334,59 @@ def test_deepseek4_block_norms_and_everything_passthrough():
     assert d("deepseek4", "output.weight").hf_name == "lm_head.weight"
 
 
+# deepseek41 (DeepSeek-V4.1-Flash): DEEPSEEK4 minus the V4-only names, plus
+# the engram families and the indexer's own key projection.
+def test_deepseek41_engram_routing():
+    assert d("deepseek41", "blk.1.engram_embd.weight").hf_name == \
+        "model.layers.1.engram.embed.weight"
+    assert d("deepseek41", "blk.1.engram_wkv.weight").hf_name == \
+        "model.layers.1.engram.wkv.weight"
+    # The gate weights are raw arrays on the module, not Linear leaves.
+    assert d("deepseek41", "blk.1.engram_q.weight").hf_name == \
+        "model.layers.1.engram.q_weight"
+    assert d("deepseek41", "blk.1.engram_k.weight").hf_name == \
+        "model.layers.1.engram.k_weight"
+
+
+def test_deepseek41_indexer_owns_its_key_projection():
+    # V4 derives index keys from a private compressor; V4.1 gives the indexer
+    # its own wk/k_norm over the shared latent.
+    assert d("deepseek41", "blk.2.indexer.attn_k.weight").hf_name == \
+        "model.layers.2.attn.indexer.wk.weight"
+    assert d("deepseek41", "blk.2.indexer.k_norm.weight").hf_name == \
+        "model.layers.2.attn.indexer.k_norm.weight"
+    assert d("deepseek41", "blk.2.indexer.attn_q_b.weight").hf_name == \
+        "model.layers.2.attn.indexer.wq_b.weight"
+    assert d("deepseek41", "blk.2.indexer.proj.weight").hf_name == \
+        "model.layers.2.attn.indexer.weights_proj.weight"
+
+
+def test_deepseek41_inherits_the_v4_families():
+    for name, target in (
+        ("blk.2.attn_q_a.weight", "model.layers.2.attn.wq_a.weight"),
+        ("blk.2.attn_compressor_kv.weight",
+         "model.layers.2.attn.compressor.wkv.weight"),
+        ("blk.2.attn_sinks.weight", "model.layers.2.attn.attn_sink"),
+        ("blk.1.hc_attn_fn.weight", "model.layers.1.attn_hc.fn"),
+        ("blk.1.ffn_gate_inp.weight", "model.layers.1.ffn.gate.weight"),
+        ("blk.1.exp_probs_b.bias",
+         "model.layers.1.ffn.gate.e_score_correction_bias"),
+    ):
+        r = d("deepseek41", name)
+        assert r.kind == MAP and r.transform == "passthrough", name
+        assert r.hf_name == target, name
+
+
+def test_deepseek41_drops_the_v4_only_families():
+    # ape, the indexer's private compressor, the hash-route table and the
+    # final-collapse HyperHead do not exist in V4.1.
+    for name in ("blk.2.attn_compressor_ape.weight",
+                 "blk.2.indexer_compressor_kv.weight",
+                 "blk.0.ffn_gate_tid2eid.weight",
+                 "output_hc_fn.weight"):
+        assert d("deepseek41", name).kind != MAP, name
+
+
 # hyv4 (HY4-preview): complete override block, everything passthrough. The MLA
 # and MoE rows follow mlx_lm's deepseek_v32 naming so KQuantMultiLinear
 # engages; the HY4-only rows (gate, sinks, iHC) have no canonical enum.
