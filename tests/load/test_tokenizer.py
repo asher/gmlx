@@ -671,3 +671,40 @@ def test_solar_open_stop_set_drops_message_end():
 
     toks = ["<|end|>", "<|calls|>", "<|flush|>", "<|endoftext|>"] + _ALPHABET
     assert _drop_message_end_eog([3, 0, 1, 2], toks) == [3, 1, 2]
+
+
+# ds4-converted headers type a token CONTROL only when the source added_tokens
+# marks it special, leaving the rest of the sentinel block NORMAL.
+
+def _ds4_meta() -> dict:
+    meta = _bytelevel_meta()
+    meta["general.architecture"] = "deepseek41"
+    meta["tokenizer.ggml.tokens"] = meta["tokenizer.ggml.tokens"] + ["<|User|>"]
+    meta["tokenizer.ggml.token_type"] = meta["tokenizer.ggml.token_type"] + [1]
+    return meta
+
+
+def test_ds4_unreachable_normal_token_made_atomic():
+    meta = _ds4_meta()
+    meta["deepseek41.config"] = "{}"
+    tok = load_tokenizer_from_gguf(meta, "deepseek41")
+    uid = meta["tokenizer.ggml.tokens"].index("<|User|>")
+    assert tok.encode("<|User|>", add_special_tokens=False) == [uid]
+    # Non-special, so it stays visible on decode.
+    assert tok.decode([uid], skip_special_tokens=True) == "<|User|>"
+
+
+def test_unreachable_normal_token_kept_without_the_ds4_marker():
+    tok = load_tokenizer_from_gguf(_ds4_meta(), "deepseek41")
+    uid = _ds4_meta()["tokenizer.ggml.tokens"].index("<|User|>")
+    assert tok.encode("<|User|>", add_special_tokens=False) != [uid]
+
+
+def test_ds4_marker_leaves_reachable_tokens_alone():
+    meta = _ds4_meta()
+    meta["deepseek41.config"] = "{}"
+    tok = load_tokenizer_from_gguf(meta, "deepseek41")
+    # "He" is built by a merge, so it keeps its ordinary NORMAL treatment.
+    assert tok.encode("He", add_special_tokens=False) == [
+        meta["tokenizer.ggml.tokens"].index("He")]
+    assert "He" not in tok.get_added_vocab()
