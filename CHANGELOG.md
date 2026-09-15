@@ -13,11 +13,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the same positions selects the same experts with live mixing
   weights. Covers the qwen3, qwen3-next, minimax, gpt-oss, hunyuan,
   kimi-k3 and DeepSeek-shaped gate families, resident or streamed.
+- `GMLX_BATCH_INVARIANT=1` runs the small float projections (expert
+  router, gated-delta gates) on a kernel whose result does not depend on
+  the row count, so a row's logits are the same at any batch size. About
+  one percent of prefill on a 35B MoE; off by default.
 
 ### Changed
 
 - `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
   blocks, which were reported as unsupported before.
+
+### Fixed
+
+- Streamed MoE experts could return wrong values at layers whose gate+up
+  concat had been built, since the copy is expert-ordered while the
+  decode arena binds slot bytes and slot ids. Feeder-swapped calls now
+  gather from the bound bytes, and streamed stacks never build the copy.
 
 ## [0.4.13] - 2026-09-12
 
