@@ -176,6 +176,14 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
         deepseek_v4_model.ensure_registered()
+    if mt == "deepseek_v41":
+        # DeepSeek-V4.1-Flash (llama.cpp PR #28696 arch): the V4 skeleton
+        # plus engram memory layers; registers deepseek_v4's companions too.
+        import gmlx.models.deepseek_v41.model as deepseek_v41_model
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_model.ensure_registered()
+        deepseek_v41_tools.ensure_registered()
     if mt == "hy_v3":
         # mlx-lm ships no hy_v3 module yet (PR #1485 unmerged); same vendored-
         # registration pattern as minimax_m3. The tool parser registers with
@@ -815,6 +823,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # keeps its norms and rope tables fp32 internally).
     "deepseek_v4_vl": ("_hc.", "hc_head.", ".attn_sink", ".ape",
                        ".e_score_correction_bias", ".gate.weight"),
+    # deepseek_v41: the same hyper-connection kernel and QAT-parity params
+    # as deepseek_v4, minus the compressor ape table (V4.1 has none), plus
+    # the engram gate weights, which the reference multiplies in fp32.
+    "deepseek_v41": ("_hc.", ".attn_sink", ".e_score_correction_bias",
+                     ".gate.weight", ".engram.q_weight", ".engram.k_weight"),
     # hy_v3 routing is semantically fp32 (F32 wire; llama.cpp routes in fp32,
     # and the vendored class's cast_predicate exempts expert_bias): sigmoid
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips
@@ -1660,12 +1673,18 @@ def load_model(
     from .tokenizer import load_tokenizer_from_gguf
 
     template_override = _resolve_chat_template(chat_template)
+    if template_override is None:
+        template_override = _bundled_chat_template(config.get("model_type"))
     # The override is threaded *into* the synthesizer so it's set on the fast
     # tokenizer before turn-end-EOS inference (multi-EOS detection must see the
     # override, not the GGUF template).
     raw_tokenizer = load_tokenizer_from_gguf(
         meta, arch, chat_template_override=template_override
     )
+    if config.get("model_type") == "deepseek_v41":
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_tools.install_message_normalizer(raw_tokenizer)
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
     _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)
@@ -1727,6 +1746,25 @@ def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
         "[tokenizer] XTML think channel detected; "
         "enable_thinking defaults on"
     )
+
+
+# Arch -> package that ships the chat template gmlx applies when the file
+# carries none of its own or the wrong one. deepseek_v41: converters copy
+# the V4 template, whose DSML tags lack the V4.1 leading space and whose
+# reasoning effort is a string, not the 1-100 budget.
+_BUNDLED_CHAT_TEMPLATES: dict[str, str] = {
+    "deepseek_v41": "gmlx.models.deepseek_v41",
+}
+
+
+def _bundled_chat_template(model_type: str | None) -> str | None:
+    package = _BUNDLED_CHAT_TEMPLATES.get(model_type or "")
+    if package is None:
+        return None
+    from importlib.resources import files
+
+    return files(package).joinpath("chat_template.jinja").read_text(
+        encoding="utf-8")
 
 
 def _resolve_chat_template(chat_template: str | None) -> str | None:

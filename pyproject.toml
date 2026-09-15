@@ -148,6 +148,7 @@ include = ["gmlx*"]
 
 [tool.setuptools.package-data]
 "gmlx.upstream" = ["seams.json"]
+"gmlx.models.deepseek_v41" = ["chat_template.jinja"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
 

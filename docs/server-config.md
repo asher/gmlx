@@ -880,6 +880,7 @@ here as well. Each value is cited to its model card in
 | `gpt-oss` | `gpt-oss` | temperature=1.0 top_p=1.0 | `@reasoning-high`: temperature=1.0 top_p=1.0 reasoning_effort=high; `@reasoning-low`: temperature=1.0 top_p=1.0 reasoning_effort=low; `@reasoning-medium`: temperature=1.0 top_p=1.0 reasoning_effort=medium |
 | `glm` | `glm4`, `glm4moe`, `glm-dsa`, `glm5next` | temperature=1.0 top_p=0.95 | - |
 | `deepseek` | `deepseek2`, `deepseek4` | temperature=0.6 top_p=0.95 | - |
+| `deepseek41` | `deepseek41` | temperature=1.0 top_p=0.95 | `@reasoning-high`: temperature=1.0 top_p=0.95 reasoning_effort=high; `@reasoning-low`: temperature=1.0 top_p=0.95 reasoning_effort=low; `@reasoning-max`: temperature=1.0 top_p=0.95 reasoning_effort=max |
 | `minimax` | `minimax-m2`, `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 | - |
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | - |
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |

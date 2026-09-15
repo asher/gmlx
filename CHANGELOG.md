@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek-V4.1-Flash (`deepseek41`) loads and generates: engram n-gram
+  memory layers, a hyper-connection collapse that lags one sublayer, and
+  CSA2 attention. gmlx ships the V4.1 chat template and DSML tool parser,
+  because the GGUF embeds the V4 ones.
+
 ### Fixed
 
 - `pull` fetches a file in bounded range windows once it knows the remote

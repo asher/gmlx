@@ -165,6 +165,13 @@ def _restore_entry(c: Any, snap: Any) -> None:
     from .compat import cache_types
     if isinstance(snap, tuple) and snap[0] == _CACHELIST_TAG:
         if isinstance(c, cache_types("CacheList")):
+            # Member counts vary per layer on the mixed stacks (deepseek_v41
+            # gives only its source layers a pool), so a zip would restore a
+            # prefix and leave the rest stale.
+            if len(c.caches) != len(snap[1]):
+                raise ValueError(
+                    f"prompt cache layout changed: {len(snap[1])} saved cache "
+                    f"members, {len(c.caches)} live")
             for sub, sub_snap in zip(c.caches, snap[1]):
                 _restore_entry(sub, sub_snap)
         return
