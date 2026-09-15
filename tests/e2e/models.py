@@ -90,6 +90,10 @@ _CANDIDATES = {
     "dsv4_vision_mmproj": [
         "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/mmproj-BF16.gguf",
     ],
+    # The V4.1 encoder GGUF, which pairs with the text shards above.
+    "dsv41_flash_mmproj": [
+        "antirez__deepseek-v4.1-flash-gguf/DeepSeek-V4.1-Flash-Vision.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -119,6 +123,8 @@ _SOURCES = {
     "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
     "dsv41_flash_q2": "hf:vcruz305/DeepSeek-V4.1-Flash-GGUF/"
     "DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf",
+    "dsv41_flash_mmproj": "hf:antirez/deepseek-v4.1-flash-gguf/"
+    "DeepSeek-V4.1-Flash-Vision.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -132,8 +138,10 @@ _JUDGE_PREFERENCE = ["gemma4_12b", "gemma4_e2b", "qwen3_0_6b_q8", "qwen3_0_6b_q4
 _ROLES = {
     "judged": [("gemma4_e2b",), ("gemma4_12b",), ("qwen3_0_6b_q8",)],
     "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj"),
-            ("dsv4_vision", "dsv4_vision_mmproj")],
+            ("dsv4_vision", "dsv4_vision_mmproj"),
+            ("dsv41_flash_q2", "dsv41_flash_mmproj")],
     "vlm_dsv4": [("dsv4_vision", "dsv4_vision_mmproj")],
+    "vlm_dsv41": [("dsv41_flash_q2", "dsv41_flash_mmproj")],
     "mtp_pair": [
         ("gemma4_e2b", "gemma4_e2b_assistant"),
         ("gemma4_12b", "gemma4_12b_assistant"),

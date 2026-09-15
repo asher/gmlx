@@ -15,6 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SSD through the lookup-table tier while the experts stream through the
   arena, and the fit planner, the preload gate and the resident-bytes
   bookkeeping all credit the tables as off-disk.
+- DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
+  image turns. Each image expands to a block of up to 1024 tokens in plain
+  reading order that the language model attends to causally, so image turns
+  chunk and cache like text.
 
 ### Fixed
 

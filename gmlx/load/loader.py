@@ -828,6 +828,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # the engram gate weights, which the reference multiplies in fp32.
     "deepseek_v41": ("_hc.", ".attn_sink", ".e_score_correction_bias",
                      ".gate.weight", ".engram.q_weight", ".engram.k_weight"),
+    # deepseek_v41_vl: the same set under language_model.*; the ViT and
+    # aligner cast normally.
+    "deepseek_v41_vl": ("_hc.", ".attn_sink", ".e_score_correction_bias",
+                        ".gate.weight", ".engram.q_weight",
+                        ".engram.k_weight"),
     # hy_v3 routing is semantically fp32 (F32 wire; llama.cpp routes in fp32,
     # and the vendored class's cast_predicate exempts expert_bias): sigmoid
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips

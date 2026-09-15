@@ -26,6 +26,7 @@ the grid (n_h, n_w).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -49,7 +50,7 @@ class VisionConfig(BaseModelConfig):
     # Arch constants (llama.cpp clip.cpp PROJECTOR_TYPE_DEEPSEEK4V; not GGUF
     # metadata): token budget per image, width cap, pre-resize minimum.
     max_n_token: int = 384
-    max_wh_ratio: int = 8
+    max_wh_ratio: Optional[int] = 8      # None = no cap (V4.1)
     min_pixels: int = 147456
 
 

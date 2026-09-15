@@ -782,6 +782,11 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
 
         # Image tokens take no part in an n-gram and get no engram write.
         engram_mask = None if image_mask is None else ~image_mask
+        if image_mask is not None:
+            # Image ids sit past the vocab: clamp before ANY gather
+            # (embedding, n-gram token map). The container supplies the
+            # embeddings for those rows.
+            inputs = mx.where(image_mask, mx.zeros_like(inputs), inputs)
         row_ids = None
         if self.engram_hash is not None:
             slot = self._history_slot(cache, cache_list_types)
@@ -831,8 +836,9 @@ class Model(nn.Module):
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
-                 **kwargs) -> mx.array:
-        out = self.model(inputs, cache, input_embeddings=input_embeddings)
+                 image_mask=None, **kwargs) -> mx.array:
+        out = self.model(inputs, cache, input_embeddings=input_embeddings,
+                         image_mask=image_mask)
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(out)
         return self.lm_head(out)

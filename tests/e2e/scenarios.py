@@ -449,6 +449,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     vlm_paths = reg.role_paths("vlm")
     dsv4_needs = list(reg.role("vlm_dsv4"))
     dsv4_paths = reg.role_paths("vlm_dsv4")
+    dsv41_needs = list(reg.role("vlm_dsv41"))
+    dsv41_paths = reg.role_paths("vlm_dsv41")
     mtp_needs = list(reg.role("mtp_pair"))
     mtp_paths = reg.role_paths("mtp_pair")
     native_needs = list(reg.role("mtp_native"))
@@ -825,6 +827,21 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                image_handle=image_path)],
             notes="expanded image block ids and the span-aware chunker under "
                   "the harness; judge rates the caption"))
+
+    # vlm: DeepSeek-V4.1-Flash image blocks (reading order, causal, chunkable)
+    # on a streamed 246 GB text tower
+    if dsv41_paths and image_path:
+        add(Scenario(
+            key="vlm_image_dsv41", tier="vlm", needs=dsv41_needs,
+            title=f"VLM: {dsv41_needs[0]} + deepseek4-vision mmproj "
+                  "describes an image",
+            serve_args=[dsv41_paths[0], "--mmproj", dsv41_paths[1],
+                        "--stream-experts"],
+            targets=[ReqTarget("describe", "", prompts=[P.p_vlm_describe()],
+                               image_handle=image_path)],
+            notes="the fused-row mmproj and the reading-order image block "
+                  "over streamed experts and engram tables; judge rates the "
+                  "caption"))
 
     # mtp: speculative + lossless-greedy vs base
     if mtp_paths:

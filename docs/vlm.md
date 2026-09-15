@@ -61,6 +61,7 @@ architecture it found in the error.
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | vision tower and processor implemented in gmlx, so no `--hf-source` is needed |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | over-RAM MoE, needs `--stream-experts` |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | the unsloth UD builds | differs in a few ways, described below |
+| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | the antirez encoder GGUF | vision tower and processor implemented in gmlx, so no `--hf-source` is needed |
 
 Qwen2-VL and Qwen2.5-VL companions, projector `qwen2vl_merger`, are not
 supported yet. That load fails immediately and the error names the family.
@@ -74,6 +75,18 @@ image expands to a block of up to 384 tokens that prefills as one chunk,
 and the prompt cache keys on those blocks, so a conversation that repeats
 its earlier image turns verbatim hits the cache. Third, its text output is
 not token-for-token comparable with the text-only release.
+
+The V4.1 encoder is not a `clip.*` conversion: it declares its own
+architecture and keeps the checkpoint's own tensor names, with the q, k
+and v rows fused and the gate and up rows fused. The loader splits them at
+load. The tower itself is the V4 tower with a larger token budget and no
+width cap.
+
+V4.1 image turns are ordinary text turns to the language model. Each image
+expands to a block of up to 1024 tokens laid out in plain reading order,
+the language model attends to it causally, and a block may be split across
+prefill chunks, so nothing special applies to `--kv-bits`, to chunking or
+to how many requests run at once.
 
 ## Combining with other features
 
