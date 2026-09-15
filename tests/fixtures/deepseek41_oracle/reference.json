@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "llama.cpp greedy references for DeepSeek-V4.1-Flash, recorded once: the",
+    "only oracle is a CPU-only build that prefills the 246 GB Q2_K file at",
+    "2.3 tok/s, so the 2049-token run costs about 15 minutes.",
+    "",
+    "Reproduce from a clone of vcruz305/llama.cpp branch runtime/deepseek41",
+    "at 5210c7c, built CPU-only, with a passthrough chat template",
+    "('{{ messages[0][\"content\"] }}') so the prompt file is consumed",
+    "verbatim:",
+    "  llama-cli -m <first shard> --chat-template-file passthrough.jinja",
+    "    --single-turn -f <prompt> --temp 0 --top-k 1 --seed 0 -n <n_predict>",
+    "    -c 4096 --no-display-prompt --no-warmup",
+    "This build has no -no-cnv; --single-turn replaces it.",
+    "",
+    "Each prompt file is gmlx's OWN rendered V4.1 prompt, so a matching",
+    "prompt_tokens count also checks the bundled chat template.",
+    "",
+    "Greedy trajectories are NOT the instrument at Q2_K. Two gmlx runs that",
+    "differ only in prefill chunk size fork from each other after 5 tokens on",
+    "the arithmetic prompt, exactly where gmlx and the oracle fork, and the",
+    "16-token-chunk gmlx run then tracks the oracle for 16 of 20 tokens. The",
+    "2049-token runs fork after 2 tokens. What is stable across every run is",
+    "the answer, so 'answer' is what the tests assert; 'continuation' is",
+    "recorded for diagnosis only."
+  ],
+  "model": "vcruz305/DeepSeek-V4.1-Flash-GGUF DeepSeek-V4.1-Flash-Q2_K (7 shards)",
+  "llama_cpp_commit": "5210c7c",
+  "llama_cpp_branch": "vcruz305/llama.cpp runtime/deepseek41",
+  "runs": [
+    {
+      "name": "arith",
+      "prompt": "prompt_arith.txt",
+      "prompt_tokens": 41,
+      "n_predict": 48,
+      "answer": "391",
+      "note": "17 x 23, thinking on at reasoning effort 75. Short enough that the compressed stream never engages, so this isolates the window attention, the engram layers and the MoE.",
+      "continuation": "We need answer simple. 17*23 = 391. Need brief. Final.</think>391",
+      "gmlx_continuation": "We need answer simple. Need comply. 17*23 = 391. Brief.</think>391",
+      "gmlx_common_prefix_tokens": 5
+    },
+    {
+      "name": "needle_2k",
+      "prompt": "prompt_needle_2k.txt",
+      "prompt_tokens": 2049,
+      "n_predict": 200,
+      "answer": "1629",
+      "note": "25 handbook sections, each with its own access code, and the question asks for section 17's. The needle sits mid-prompt, so answering it needs the compressed pool and the indexer's top-k, not just the 128-token window.",
+      "continuation": "The user wants the access code for Section 17. From the text: \"Section 17. ... The access code for Section 17 is 1629.\"\n\nThey ask: \"what is the access code for Section 17? Answer with the number only.\"\n\nSo answer: 1629.\n\nBut wait, this is a \"Station Operations Handbook\" with 25 sections. The question is straightforward. The answer is the number only.\n\nLet me double-check: Section 17 access code is 1629. Yes.\n\nI should answer with the number only.</think>1629",
+      "gmlx_continuation": "The user asks: \"what is the access code for Section 17? Answer with the number only.\" The text says Section 17 access code is 1629. So answer: 1629.\n\nNeed to answer with number only. Final should be just number.</think>1629",
+      "gmlx_common_prefix_tokens": 2
+    }
+  ]
+}
