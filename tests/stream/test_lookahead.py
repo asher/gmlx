@@ -239,6 +239,29 @@ def test_install_and_probe_end_to_end(monkeypatch):
     assert cells[K] == [float(K), float(K)]
 
 
+def test_bf16_router_scores_reach_numpy(monkeypatch):
+    """A bf16 router's scores have no numpy buffer format; the predictor
+    hands them over as float32 so on_call's host copy works."""
+    model = _streaming_model(monkeypatch)
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_PROBE", "1")
+    assert install_lookahead(model, model.layers, probe=True) == 1
+    la0 = model.layers[0].mlp.switch_mlp._kq_lookahead
+    stock = la0.predictor._router_fn
+
+    def bf16_router(x):
+        ids, scores = stock(x)
+        return ids, scores.astype(mx.bfloat16)
+
+    monkeypatch.setattr(la0.predictor, "_router_fn", bf16_router)
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(model.layers[0].mlp(x))
+    assert not la0.predictor.dead
+    preds = la0.probe._pending[la0.predictor.dst_li]
+    assert preds and all(isinstance(v, np.ndarray) for v in preds.values())
+    mx.eval(model.layers[1].mlp(x))
+    assert la0.probe._recall
+
+
 def test_dead_predictor_disables_cleanly(monkeypatch):
     model = _streaming_model(monkeypatch)
     install_lookahead(model, model.layers, probe=True)

@@ -259,7 +259,11 @@ class _LayerPredictor:
         ``indices``-like) for ``dst_li``."""
         if variant == "ratio":
             x = x * self._ratio.astype(x.dtype)
-        return self._router_fn(x)
+        ids, scores = self._router_fn(x)
+        # The hook reads the scores back through numpy, which has no
+        # bfloat16 buffer format; cast inside the lazy graph so the joint
+        # eval covers it and a bf16 router never crashes decode.
+        return ids, scores.astype(mx.float32)
 
 
 class LookaheadProbe:
