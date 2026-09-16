@@ -41,6 +41,8 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DECODE_PHASE_STATS=1` | Print a streamed decode's per-token split between disk stalls and the eval and sync bucket at exit. A clock frequency drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses, so a cold layer or a cold start shows where it is. |
 | `GMLX_DECODE_LAYER_PROFILE=1` | DeepSeek-V4.1 decode: eval after each layer component and print the wall per token of attention, experts, hyper-connections and engram at exit. Slows the run. |
+| `GMLX_DECODE_LAYER_PROFILE=2` | Also eval inside attention and the MoE, so each sub-step (projections, indexer, core, router, experts, shared expert) is one command buffer in a GPU trace. |
+| `GMLX_DECODE_LAYER_PROFILE_LOG` | With the layer profile, write every mark as `key layer wall_t0 wall_t1` to this path at exit, for aligning a Metal System Trace to the marks. |
 | `GMLX_PIN_CAST_EXCLUDE=0` | Pin the file bytes of every every-token tensor on a streamed model, including tensors the loader converts at load. By default converted tensors are left out. |
 | `GMLX_STREAM_PLE_COMPOSE=0` | Keep a streamable lookup table resident when the experts also stream, instead of streaming both. |
 | `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload instead of invalidating them. |

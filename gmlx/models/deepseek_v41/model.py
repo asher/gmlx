@@ -52,7 +52,31 @@ from gmlx.models.deepseek_v41.engram_codec import (
 from gmlx.models.deepseek_v41.engram_codec import tables as engram_tables
 
 DeepseekV4RoPE = _v4.DeepseekV4RoPE
-DeepseekV41MoE = _v4.DeepseekV4MoE
+class DeepseekV41MoE(_v4.DeepseekV4MoE):
+    """The V4 MoE, plus the level-2 decode profile marks."""
+
+    def __init__(self, config, layer_idx: int):
+        super().__init__(config, layer_idx)
+        self._li = layer_idx
+
+    def __call__(self, x, input_ids, image_mask=None):
+        if not (_SUB_PROFILE and x.shape[1] == 1) or self.sharding_group is not None:
+            return super().__call__(x, input_ids, image_mask)
+        import time
+
+        t0 = time.perf_counter()
+        inds, scores = self.gate(x, input_ids, image_mask)
+        t0 = _prof_mark("f.route", self._li, (inds, scores), t0)
+        if _v4._MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
+            y = self.switch_mlp(x, inds, scores)
+        else:
+            y = self.switch_mlp(x, inds)
+            if y.ndim == scores.ndim + 1:
+                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        t0 = _prof_mark("f.exp", self._li, y, t0)
+        y = y + self.shared_experts(x)
+        _prof_mark("f.shexp", self._li, y, t0)
+        return y
 
 
 @dataclass
@@ -673,17 +697,26 @@ class DeepseekV41Attention(nn.Module):
     def __call__(self, x, mask, caches, offset, streams):
         B, L, _ = x.shape
         local_cache, pool_cache, idx_cache = caches
+        prof = _SUB_PROFILE and L == 1
+        if prof:
+            import time
+
+            t0 = time.perf_counter()
 
         q_residual = self.q_norm(self.wq_a(x))
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = self.rope(q, offset)
+        if prof:
+            t0 = _prof_mark("a.q", self.layer_idx, q, t0)
 
         kv = self.kv_norm(self.wkv(x)).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
         kv = _kv_qat(kv)
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
+        if prof:
+            t0 = _prof_mark("a.kv", self.layer_idx, kv, t0)
 
         sinks = self.attn_sink.astype(q.dtype)
         if not self.compress_ratio:
@@ -691,10 +724,19 @@ class DeepseekV41Attention(nn.Module):
                 q, kv, kv, cache=local_cache, scale=self.scale, mask=mask,
                 sinks=sinks,
             )
-            return self._project(out, offset, B, L)
+            if prof:
+                t0 = _prof_mark("a.core", self.layer_idx, out, t0)
+            out = self._project(out, offset, B, L)
+            if prof:
+                _prof_mark("a.out", self.layer_idx, out, t0)
+            return out
 
         if self.is_kv_source:
             self._publish(x, pool_cache, idx_cache, offset, streams, L)
+            if prof:
+                t0 = _prof_mark(
+                    "a.pub", self.layer_idx, (streams.pooled, streams.index_k), t0
+                )
         pooled = streams.pooled
         plen = 0 if pooled is None else pooled.shape[1]
 
@@ -725,6 +767,8 @@ class DeepseekV41Attention(nn.Module):
                         x, q_residual, self.rope, streams.index_k, pmask,
                         offset, streams,
                     )
+                    if prof:
+                        t0 = _prof_mark("a.idx", self.layer_idx, streams.topk, t0)
                 topk = streams.topk
                 sparse_mask = None
                 if pmask is not None:
@@ -750,7 +794,12 @@ class DeepseekV41Attention(nn.Module):
                         q, kv, pooled, topk, mask, sparse_mask, self.scale,
                         sinks,
                     )
-        return self._project(out, offset, B, L)
+        if prof:
+            t0 = _prof_mark("a.core", self.layer_idx, out, t0)
+        out = self._project(out, offset, B, L)
+        if prof:
+            _prof_mark("a.out", self.layer_idx, out, t0)
+        return out
 
     def _project(self, out, offset, B, L):
         """De-rope, then the block-diagonal output projection: group g
@@ -796,9 +845,16 @@ def _hc_fused_route() -> bool:
 # print the per-component wall per token at exit. Attribution only: the
 # extra syncs slow the run and split each layer into one command buffer
 # per component (which is what makes a GPU trace of it readable).
-_LAYER_PROFILE = os.environ.get("GMLX_DECODE_LAYER_PROFILE", "0") == "1"
+_LAYER_PROFILE_LEVEL = int(os.environ.get("GMLX_DECODE_LAYER_PROFILE", "0") or 0)
+_LAYER_PROFILE = _LAYER_PROFILE_LEVEL >= 1
+# Level 2 also evals inside attention (q, kv, publish, indexer, core, out)
+# and the MoE (route, experts, shared), one command buffer each in a trace.
+_SUB_PROFILE = _LAYER_PROFILE_LEVEL >= 2
 _PROF: Dict[tuple, float] = {}
 _PROF_CALLS = [0]
+
+
+_PROF_LOG: list = []
 
 
 def _prof_mark(key: str, li: int, arr, t0: float) -> float:
@@ -807,6 +863,11 @@ def _prof_mark(key: str, li: int, arr, t0: float) -> float:
     mx.eval(arr)
     t1 = time.perf_counter()
     _PROF[(key, li)] = _PROF.get((key, li), 0.0) + (t1 - t0)
+    if _SUB_PROFILE:
+        # Wall-clock window of the mark, for aligning a GPU trace's command
+        # buffers to the marks (GMLX_DECODE_LAYER_PROFILE_LOG=<path>).
+        w1 = time.time()
+        _PROF_LOG.append((key, li, w1 - (t1 - t0), w1))
     return t1
 
 
@@ -830,6 +891,21 @@ def _prof_dump() -> None:
                 + " ".join(f"{li}:{1e3 * v / n:.2f}" for li, v in rows),
                 flush=True,
             )
+    path = os.environ.get("GMLX_DECODE_LAYER_PROFILE_LOG")
+    if path and _PROF_LOG:
+        with open(path, "w") as f:
+            for key, li, w0, w1 in _PROF_LOG:
+                f.write(f"{key} {li} {w0:.6f} {w1:.6f}\n")
+    subs = sorted({kk for (kk, _) in _PROF if "." in kk})
+    if subs:
+        print(
+            "[layerprof] sub per token ms: "
+            + " | ".join(
+                f"{k} {1e3 * sum(v for (kk, _), v in _PROF.items() if kk == k) / n:.1f}"
+                for k in subs
+            ),
+            flush=True,
+        )
 
 
 if _LAYER_PROFILE:
