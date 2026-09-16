@@ -94,7 +94,7 @@ explained in [streaming.md](streaming.md) and
 |----------|---------|
 | `GMLX_STREAM_GPU_TOKENS` | Expert calls with at least this many tokens run on the GPU stream during streamed prefill. Default `32`. `0` keeps all expert calls on the CPU. |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch on streamed models. By default, prefill-sized expert calls advise the kernel two layers ahead. |
-| `GMLX_STREAM_CACHE_GB` | MLX buffer cache a streamed model keeps, default `4`. The gc limit sits past the file-backed weights, so this cap alone bounds the pool. |
+| `GMLX_STREAM_CACHE_GB` | MLX buffer cache a streamed model keeps. Default: the priced KV room, `4` when unpriced. A pool under one layer's temporaries allocates fresh every layer. |
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default memory and cache limits on a streamed model. Every cache miss then purges the whole buffer cache. |
 | `GMLX_DECODE_ARENA_GB` | Decode arena size override in GB. The default is what the memory limit leaves after the every-token weights, KV room and prefill ring. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. No default. |

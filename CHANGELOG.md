@@ -54,6 +54,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serve them from the file. The Metal driver slows every command buffer
   while a process's mapped total passes RAM, which a streamed model always
   did; deep prefill and decode both gain.
+- A streamed model's MLX buffer cache defaults to the priced KV room
+  instead of 4 GB, so a deep prefill reuses each layer's temporaries
+  instead of populating fresh buffers every layer.
 
 ### Fixed
 

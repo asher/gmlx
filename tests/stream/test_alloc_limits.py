@@ -26,6 +26,16 @@ def test_limits_follow_the_tracked_bytes_and_the_cache_env(limits, monkeypatch):
     assert limits["cache"] == 2 * 2**30
 
 
+@pytest.mark.skipif(not mx.metal.is_available(), reason="Metal allocator only")
+def test_cache_defaults_to_the_kv_room(limits, monkeypatch):
+    monkeypatch.delenv("GMLX_STREAM_CACHE_GB", raising=False)
+    es._set_allocator_limits(10**9, room_bytes=11 * 10**9)
+    assert limits["cache"] == 11 * 10**9
+    limits.clear()
+    es._set_allocator_limits(10**9)   # no priced room: the flat 4 GB
+    assert limits["cache"] == 4 * 2**30
+
+
 def test_switch_keeps_the_defaults(limits, monkeypatch):
     monkeypatch.setenv("GMLX_STREAM_ALLOC_LIMITS", "0")
     es._set_allocator_limits(10**9)

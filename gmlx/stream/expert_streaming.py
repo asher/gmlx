@@ -204,24 +204,35 @@ def _physical_ram() -> int:
     return ram
 
 
-def _set_allocator_limits(tracked_bytes: int) -> None:
+def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
     """MLX's allocator counts the file-backed weights as active memory,
     which on a streamed model sits past its default gc limit; every cache
     miss then purged the whole buffer cache and every temporary was a
     fresh Metal allocation. Put the gc limit out of reach and let the
-    cache limit alone bound the pool. GMLX_STREAM_ALLOC_LIMITS=0 keeps
-    the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    cache limit alone bound the pool. The pool defaults to the priced KV
+    room (``room_bytes``, already reserved under the ceiling): a pool
+    smaller than one layer's transient set allocates fresh buffers every
+    layer, and each pays page population. GMLX_STREAM_ALLOC_LIMITS=0
+    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
     if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
         return
     limit = int(tracked_bytes + 2 * _physical_ram())
-    cache = float(os.environ.get("GMLX_STREAM_CACHE_GB", "4") or 0)
+    env = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if env:
+        cache = int(float(env) * 2**30)
+        how = "GMLX_STREAM_CACHE_GB"
+    elif room_bytes > 0:
+        cache = int(room_bytes)
+        how = "the KV room; GMLX_STREAM_CACHE_GB overrides"
+    else:
+        cache = 4 * 2**30
+        how = "GMLX_STREAM_CACHE_GB sizes it"
     mx.set_memory_limit(limit)
-    mx.set_cache_limit(int(cache * 2**30))
+    mx.set_cache_limit(cache)
     loadlog.info(
         f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
-        f"tracked file-backed bytes; buffer cache {cache:g} GB "
-        "(GMLX_STREAM_CACHE_GB sizes it, GMLX_STREAM_ALLOC_LIMITS=0 keeps "
-        "the MLX defaults)"
+        f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
+        f"({how}, GMLX_STREAM_ALLOC_LIMITS=0 keeps the MLX defaults)"
     )
 
 
@@ -1196,7 +1207,8 @@ def install_expert_streaming(
                 f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
     if streaming:
-        _set_allocator_limits(total_bytes)
+        _set_allocator_limits(
+            total_bytes, room.bytes if room is not None else 0)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.
