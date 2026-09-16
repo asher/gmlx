@@ -346,6 +346,30 @@ class HyperConnection(nn.Module):
         return (ok and not self.training
                 and x.shape[0] * x.shape[1] <= _HC_M1_MAX_ROWS)
 
+    def wide_fused_ok(self, x):
+        """True when a step wider than the M=1 route takes the GEMM front
+        plus the lag-collapse and expand kernels."""
+        if self._m1_ok is None:
+            self.m1_fused_ok(x)
+        return (
+            self._m1_ok
+            and not self.training
+            and _hc_sinkhorn_collapse_lag_kernel is not None
+            and x.shape[0] * x.shape[1] > _HC_M1_MAX_ROWS
+        )
+
+    def front_wide(self, x):
+        """The front at prefill width: one GEMM over the f32 rows and one
+        norm pass. The per-row kernel rereads fn for every row."""
+        fn_t = getattr(self, "_fn_t", None)
+        if fn_t is None:
+            fn_t = mx.contiguous(self.fn.T)
+            mx.eval(fn_t)
+            self._fn_t = fn_t
+        y = x.astype(mx.float32).flatten(-2)
+        ssq = mx.square(mx.linalg.norm(y, axis=-1, keepdims=True))
+        return y @ fn_t, ssq
+
     def _collapse_m1(self, x, mixes_raw, ssq, norm_weight):
         B, L, H, D = x.shape
         if _KQ_HC:

@@ -121,6 +121,34 @@ def test_install_swaps_the_table_onto_the_file(table_gguf, monkeypatch):
         table._kq_table_source.close()
 
 
+def test_prefetch_joins_the_same_ids_and_rereads_others(table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    table = _engram_table()
+    model = _FakeModel(table)
+    install_deferred_tables(model, src)
+    s = table._kq_table_source
+    try:
+        ids = mx.array([[3, 900, 3]])
+        table.prefetch(ids)
+        assert table._kq_ahead is not None
+        got = table(ids)
+        assert table._kq_ahead is None
+        assert s.gathers == 1, "the call must join the read, not repeat it"
+        want = table.decode_gathered(mx.array(raw[[3, 900, 3]])).reshape(1, 3, 32)
+        assert mx.array_equal(got, want)
+        # Other ids than the prefetched ones: the call reads for itself.
+        table.prefetch(ids)
+        other = mx.array([[5, 6]])
+        got = table(other)
+        assert s.gathers == 3
+        assert mx.array_equal(
+            got, table.decode_gathered(mx.array(raw[[5, 6]])).reshape(1, 2, 32))
+        assert table(other).shape == (1, 2, 32)  # no prefetch pending
+    finally:
+        s.close()
+
+
 def test_install_refuses_a_source_with_no_module(table_gguf, monkeypatch):
     path, _raw = table_gguf
     src = _sources(path, monkeypatch)

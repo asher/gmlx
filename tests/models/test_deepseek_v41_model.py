@@ -439,3 +439,68 @@ def test_fused_route_engages_at_decode_width_only(monkeypatch):
     monkeypatch.setenv("GMLX_DS41_HC_FUSED", "0")
     mx.eval(model(mx.array([[25]]), cache=cache))
     assert calls == []
+
+
+@pytest.mark.skipif(mx.default_device() != mx.gpu,
+                    reason="the fused hyper-connection kernels are Metal-only")
+@pytest.mark.skipif(mx.default_device() != mx.gpu,
+                    reason="the fused hyper-connection kernels are Metal-only")
+def test_wide_front_and_kernels_match_the_ops():
+    """The GEMM front feeding the lag-collapse kernel gives the ops
+    route's mixes and normed stream, and the expand kernel the ops
+    expand, to rounding."""
+    from gmlx.models.deepseek_v4.hyper_connection import hc_expand, hc_expand_m1
+    from gmlx.models.deepseek_v41.model import _hc_collapse, _hc_mixes
+
+    model = _wide_bf16_model()
+    hc = model.model.layers[1].attn_hc
+    norm = model.model.layers[1].attn_norm
+    L = 22
+    h = (mx.random.normal((1, L, 4, 1024)) * 0.5).astype(mx.bfloat16)
+    pre_in = mx.softmax(mx.random.normal((1, L, 4)), axis=-1)
+    mixes_raw, ssq = hc.front_wide(h)
+    x_w, pre_w, post_w, comb_w = hc.lag_collapse_m1(
+        h, mixes_raw, ssq, norm.weight, pre_in
+    )
+    pre_o, post_o, comb_o = _hc_mixes(hc, h)
+    x_o = norm(_hc_collapse(h, pre_in))
+    mx.eval(x_w, pre_w, post_w, comb_w, x_o, pre_o, post_o, comb_o)
+    assert mx.abs(pre_w - pre_o).max().item() < 1e-3
+    assert mx.abs(post_w - post_o).max().item() < 1e-3
+    assert mx.abs(comb_w - comb_o).max().item() < 1e-3
+    scale = mx.abs(x_o.astype(mx.float32)).max().item()
+    dx = mx.abs(x_w.astype(mx.float32) - x_o.astype(mx.float32))
+    assert dx.max().item() < 0.03 * scale
+    x_sub = mx.random.normal((1, L, 1024)).astype(mx.bfloat16)
+    e_w = hc_expand_m1(x_sub, h, post_o, comb_o)
+    e_o = hc_expand(x_sub, h, post_o, comb_o)
+    mx.eval(e_w, e_o)
+    scale = mx.abs(e_o.astype(mx.float32)).max().item()
+    de = mx.abs(e_w.astype(mx.float32) - e_o.astype(mx.float32))
+    assert de.max().item() < 0.03 * scale
+
+
+@pytest.mark.skipif(mx.default_device() != mx.gpu,
+                    reason="the fused hyper-connection kernels are Metal-only")
+def test_wide_route_engages_past_decode_width(monkeypatch):
+    import gmlx.models.deepseek_v41.model as m41
+
+    model = _wide_bf16_model()
+    calls = []
+    orig = m41.DeepseekV41Block._wide_step
+
+    def spy(self, *a, **k):
+        calls.append(self.layer_idx)
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(m41.DeepseekV41Block, "_wide_step", spy)
+    prompt = mx.array([[5 + 2 * i for i in range(22)]])
+    cache = model.make_cache()
+    mx.eval(model(prompt, cache=cache))
+    assert calls == list(range(6))          # prefill: every layer
+    calls.clear()
+    mx.eval(model(mx.array([[49]]), cache=cache))
+    assert calls == []                      # decode: the M=1 route
+    monkeypatch.setenv("GMLX_DS41_HC_FUSED", "0")
+    mx.eval(model(prompt, cache=model.make_cache()))
+    assert calls == []

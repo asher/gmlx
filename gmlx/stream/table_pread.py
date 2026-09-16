@@ -54,6 +54,7 @@ class TableSource:
     row_bytes: int
     _fd: int | None = field(default=None, repr=False)
     _pool: ThreadPoolExecutor | None = field(default=None, repr=False)
+    _ahead: ThreadPoolExecutor | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _size: int = field(default=0, repr=False)
     _workers: int = field(default=0, repr=False)
@@ -76,10 +77,19 @@ class TableSource:
                 self._size = os.fstat(fd).st_size
             if self._pool is None:
                 self._workers = max(
-                    1, int(os.environ.get("GMLX_TABLE_PREAD_WORKERS", "8")))
+                    1, int(os.environ.get("GMLX_TABLE_PREAD_WORKERS", "32")))
                 self._pool = ThreadPoolExecutor(
                     self._workers, thread_name_prefix="gmlx-table")
+                # One thread runs a whole read() ahead of the forward; it
+                # must not sit in the row pool, whose workers it joins.
+                self._ahead = ThreadPoolExecutor(
+                    1, thread_name_prefix="gmlx-table-ahead")
             return self._fd, self._pool
+
+    def read_ahead(self, ids: np.ndarray):
+        """``read(ids)`` on its own thread; a Future of the rows."""
+        self._ready()
+        return self._ahead.submit(self.read, ids)
 
     def read(self, ids: np.ndarray) -> np.ndarray:
         """Rows ``ids`` as raw bytes, shape ``[len(ids), row_bytes]``."""
@@ -115,6 +125,9 @@ class TableSource:
 
     def close(self) -> None:
         with self._lock:
+            if self._ahead is not None:
+                self._ahead.shutdown(wait=True)
+                self._ahead = None
             if self._pool is not None:
                 self._pool.shutdown(wait=True)
                 self._pool = None
@@ -166,10 +179,30 @@ def _pread_class(cls):
     class _TablePread(cls):
         _kq_table_streamed = True
 
+        def prefetch(self, x) -> None:
+            """Start the gather for ``x`` now; the ``__call__`` with the
+            same ids joins it instead of reading. The ids depend only on
+            the input tokens, so a forward can issue every table's read
+            before its first layer runs."""
+            src = self._kq_table_source
+            mx.eval(x)
+            ids = np.asarray(x, dtype=np.int64).reshape(-1)
+            self._kq_ahead = (ids, src.read_ahead(ids))
+
         def __call__(self, x):
             src = self._kq_table_source
             mx.eval(x)
-            rows = src.read(np.asarray(x, dtype=np.int64).reshape(-1))
+            ids = np.asarray(x, dtype=np.int64).reshape(-1)
+            ahead = getattr(self, "_kq_ahead", None)
+            if ahead is not None:
+                self._kq_ahead = None
+                if ahead[0].shape == ids.shape and np.array_equal(ahead[0], ids):
+                    rows = ahead[1].result()
+                else:
+                    ahead[1].result()  # a stale read still owns the pool
+                    rows = src.read(ids)
+            else:
+                rows = src.read(ids)
             out = mx.array(rows).reshape(*x.shape, src.row_bytes)
             if hasattr(self, "kquant_type"):
                 # A skipped tensor brings no <name>.scales, so the module

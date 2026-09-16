@@ -994,6 +994,14 @@ class DeepseekV41Block(nn.Module):
 
     def __call__(self, h, pre_mix, mask, caches, offset, streams, input_ids,
                  image_mask=None):
+        if (
+            _hc_fused_route()
+            and h.dtype in (mx.float16, mx.bfloat16)
+            and self.attn_hc.wide_fused_ok(h)
+        ):
+            return self._wide_step(
+                h, pre_mix, mask, caches, offset, streams, input_ids, image_mask
+            )
         prof = _prof_on(h.shape[1])
         if prof:
             import time
@@ -1020,6 +1028,44 @@ class DeepseekV41Block(nn.Module):
         if prof:
             t0 = _prof_mark("ffn", self.layer_idx, x, t0)
         h = hc_expand(x, residual, ffn_post, ffn_comb)
+        if prof:
+            _prof_mark("hc", self.layer_idx, h, t0)
+        return h, ffn_pre
+
+    def _wide_step(self, h, pre_mix, mask, caches, offset, streams, input_ids,
+                   image_mask):
+        """``__call__`` past the M=1 width: the GEMM front, then the lag
+        collapse and the expand as one kernel each."""
+        prof = _prof_on(h.shape[1])
+        if prof:
+            import time
+
+            if self.layer_idx == 0:
+                _PROF_CALLS[0] += 1
+            t0 = time.perf_counter()
+        hc = self.attn_hc
+        mixes_raw, ssq = hc.front_wide(h)
+        x, attn_pre, attn_post, attn_comb = hc.lag_collapse_m1(
+            h, mixes_raw, ssq, self.attn_norm.weight, pre_mix
+        )
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
+        x = self.attn(x, mask, caches, offset, streams)
+        if prof:
+            t0 = _prof_mark("attn", self.layer_idx, x, t0)
+        h = hc_expand_m1(x, h, attn_post, attn_comb)
+
+        hc = self.ffn_hc
+        mixes_raw, ssq = hc.front_wide(h)
+        x, ffn_pre, ffn_post, ffn_comb = hc.lag_collapse_m1(
+            h, mixes_raw, ssq, self.ffn_norm.weight, attn_pre
+        )
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
+        x = self.ffn(x, input_ids, image_mask)
+        if prof:
+            t0 = _prof_mark("ffn", self.layer_idx, x, t0)
+        h = hc_expand_m1(x, h, ffn_post, ffn_comb)
         if prof:
             _prof_mark("hc", self.layer_idx, h, t0)
         return h, ffn_pre
@@ -1149,6 +1195,13 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             window_size=self.args.sliding_window, return_array=True,
         )
 
+        if row_ids is not None:
+            # File-backed tables read their rows off-thread from here on,
+            # under the layers that run before each engram.
+            for layer in self.layers:
+                pf = getattr(getattr(layer.engram, "embed", None), "prefetch", None)
+                if pf is not None:
+                    pf(row_ids[:, :, layer.engram_slot, :])
         streams = SharedStreams()
         pre_mix = mx.zeros(
             (h.shape[0], h.shape[1], self.args.hc_mult), dtype=mx.float32

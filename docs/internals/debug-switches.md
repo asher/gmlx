@@ -31,7 +31,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_HC_M1_MAX_ROWS` | Widest step in rows that hyper-connected models run the fused per-row hyper-connection kernels on, default `8`. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels on DeepSeek-V4 and GLM-5.3-Flash, leaving every step on the GEMM route. |
 | `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Bit-identical either way. |
-| `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 decode steps on the op-by-op hyper-connection chain instead of the two fused kernels per cycle. Same numerics to bfloat16 rounding. |
+| `GMLX_DS41_HC_FUSED=0` | DeepSeek-V4.1 hyper-connection cycles on the op-by-op chain instead of the fused kernels, at decode and at prefill width. Same numerics to bfloat16 rounding. |
 | `GMLX_DS41_QAT_FUSED=0` | DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | DeepSeek-V4.1 decode attention as the gather and compiled op chain instead of the mlx-kquant `sdpa_sparse_decode` kernel. The kernel keeps its softmax in fp32. |
 | `GMLX_DS4_PREFILL_BLOCK=N` | DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores, default `512`. `0` scores every query against the whole chunk. |
