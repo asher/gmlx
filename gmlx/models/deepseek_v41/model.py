@@ -60,7 +60,7 @@ class DeepseekV41MoE(_v4.DeepseekV4MoE):
         self._li = layer_idx
 
     def __call__(self, x, input_ids, image_mask=None):
-        if not (_SUB_PROFILE and x.shape[1] == 1) or self.sharding_group is not None:
+        if not _subprof_on(x.shape[1]) or self.sharding_group is not None:
             return super().__call__(x, input_ids, image_mask)
         import time
 
@@ -447,26 +447,50 @@ class Indexer(nn.Module):
         q = rope(q, offset)
         q = _indexer_qat(q)
 
-        scores = q.astype(mx.float32) @ index_k[:, None].swapaxes(-1, -2).astype(
-            mx.float32
-        )
-        scores = mx.maximum(scores, 0) * self.scale
+        q = q.astype(mx.float32)
+        keys = index_k[:, None].swapaxes(-1, -2).astype(mx.float32)
         weights = _v4._skinny_linear(self.weights_proj, x).astype(mx.float32) * (
             self.n_heads ** -0.5
         )
-        scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
-        floor = mx.finfo(scores.dtype).min
-        if pmask is not None:
-            scores = mx.where(
-                pmask if pmask.ndim == 3 else pmask[None], scores, floor
+        weights = weights.swapaxes(-1, -2)[..., None]
+        if pmask is not None and pmask.ndim == 2:
+            pmask = pmask[None]
+        floor = mx.finfo(mx.float32).min
+        source = self.is_candidate_source and self.candidate_block_size > 0
+        given = (
+            streams.candidates
+            if self.uses_candidates and not source
+            else None
+        )
+        # Query blocks: a full-length pass holds an [heads, L, P] score
+        # per layer, square in the prompt for the ratio-1 layers.
+        block = _v4._prefill_block()
+        block = L if not 0 < block < L else block
+        tops, cands = [], []
+        for qs in range(0, L, block):
+            qe = min(L, qs + block)
+            scores = q[:, :, qs:qe] @ keys
+            scores = mx.maximum(scores, 0) * self.scale
+            scores = (scores * weights[:, :, qs:qe]).sum(axis=1)
+            if pmask is not None:
+                scores = mx.where(pmask[:, qs:qe], scores, floor)
+            if source:
+                cands.append(
+                    _select_candidate_blocks(
+                        scores, self.candidate_topk_blocks,
+                        self.candidate_block_size, floor,
+                    )
+                )
+            elif given is not None:
+                scores = mx.where(given[:, qs:qe], scores, floor)
+            tops.append(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
+        if source:
+            streams.candidates = (
+                None if any(c is None for c in cands)
+                else cands[0] if len(cands) == 1
+                else mx.concatenate(cands, axis=1)
             )
-        if self.is_candidate_source and self.candidate_block_size > 0:
-            streams.candidates = _select_candidate_blocks(
-                scores, self.candidate_topk_blocks, self.candidate_block_size, floor
-            )
-        elif self.uses_candidates and streams.candidates is not None:
-            scores = mx.where(streams.candidates, scores, floor)
-        return mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+        return tops[0] if len(tops) == 1 else mx.concatenate(tops, axis=1)
 
 
 def _select_candidate_blocks(scores, topk_blocks, block_size, floor):
@@ -692,7 +716,7 @@ class DeepseekV41Attention(nn.Module):
     def __call__(self, x, mask, caches, offset, streams):
         B, L, _ = x.shape
         local_cache, pool_cache, idx_cache = caches
-        prof = _SUB_PROFILE and L == 1
+        prof = _subprof_on(L)
         if prof:
             import time
 
@@ -714,10 +738,12 @@ class DeepseekV41Attention(nn.Module):
             t0 = _prof_mark("a.kv", self.layer_idx, kv, t0)
 
         sinks = self.attn_sink.astype(q.dtype)
+        block = _v4._prefill_block()
+        arrays = isinstance(kv, mx.array) and isinstance(mask, mx.array)
+        banded = 0 < block < L and arrays
         if not self.compress_ratio:
-            out = scaled_dot_product_attention(
-                q, kv, kv, cache=local_cache, scale=self.scale, mask=mask,
-                sinks=sinks,
+            out = self._window_attention(
+                q, kv, mask, local_cache, sinks, banded, block
             )
             if prof:
                 t0 = _prof_mark("a.core", self.layer_idx, out, t0)
@@ -736,9 +762,8 @@ class DeepseekV41Attention(nn.Module):
         plen = 0 if pooled is None else pooled.shape[1]
 
         if plen == 0:
-            out = scaled_dot_product_attention(
-                q, kv, kv, cache=local_cache, scale=self.scale, mask=mask,
-                sinks=sinks,
+            out = self._window_attention(
+                q, kv, mask, local_cache, sinks, banded, block
             )
         else:
             src = streams.pool_cache
@@ -772,9 +797,17 @@ class DeepseekV41Attention(nn.Module):
                     )[:, None]
                 out = None
                 if _v4._sparse_kernel_ok():
-                    out = _v4._sparse_kernel_attention(
-                        q, kv, pooled, topk, mask, sparse_mask, self.scale, sinks
-                    )
+                    kblock = _v4._sparse_kernel_block() if arrays and L > 16 else 0
+                    if 0 < kblock < L:
+                        out = _v4._sparse_kernel_attention_banded(
+                            q, kv, pooled, topk, mask, sparse_mask, self.scale,
+                            sinks, self.config.sliding_window, kblock,
+                        )
+                    else:
+                        out = _v4._sparse_kernel_attention(
+                            q, kv, pooled, topk, mask, sparse_mask, self.scale,
+                            sinks,
+                        )
                 if out is not None:
                     pass
                 elif (
@@ -791,6 +824,11 @@ class DeepseekV41Attention(nn.Module):
                     out = _v4._sparse_gathered_attention_c(
                         q, kv, gathered, mask, sparse_mask, self.scale, sinks
                     )
+                elif banded:
+                    out = _v4._sparse_pooled_attention_banded(
+                        q, kv, pooled, topk, mask, sparse_mask, self.scale,
+                        sinks, self.config.sliding_window, block,
+                    )
                 else:
                     out = _v4._sparse_pooled_attention(
                         q, kv, pooled, topk, mask, sparse_mask, self.scale,
@@ -802,6 +840,16 @@ class DeepseekV41Attention(nn.Module):
         if prof:
             _prof_mark("a.out", self.layer_idx, out, t0)
         return out
+
+    def _window_attention(self, q, kv, mask, local_cache, sinks, banded, block):
+        if banded:
+            return _v4._banded_window_attention(
+                q, kv, mask, self.scale, sinks, self.config.sliding_window, block
+            )
+        return scaled_dot_product_attention(
+            q, kv, kv, cache=local_cache, scale=self.scale, mask=mask,
+            sinks=sinks,
+        )
 
     def _project(self, out, offset, B, L):
         """De-rope, then the block-diagonal output projection: group g
@@ -852,8 +900,19 @@ _LAYER_PROFILE = _LAYER_PROFILE_LEVEL >= 1
 # Level 2 also evals inside attention (q, kv, publish, indexer, core, out)
 # and the MoE (route, experts, shared), one command buffer each in a trace.
 _SUB_PROFILE = _LAYER_PROFILE_LEVEL >= 2
+# GMLX_LAYER_PROFILE_PREFILL=1 also marks steps wider than one token (the
+# prefill chunks, on the plain block route).
+_PROFILE_WIDE = os.environ.get("GMLX_LAYER_PROFILE_PREFILL", "0") == "1"
 _PROF: Dict[tuple, float] = {}
 _PROF_CALLS = [0]
+
+
+def _prof_on(width: int) -> bool:
+    return _LAYER_PROFILE and (width == 1 or _PROFILE_WIDE)
+
+
+def _subprof_on(width: int) -> bool:
+    return _SUB_PROFILE and (width == 1 or _PROFILE_WIDE)
 
 
 _PROF_LOG: list = []
@@ -935,17 +994,34 @@ class DeepseekV41Block(nn.Module):
 
     def __call__(self, h, pre_mix, mask, caches, offset, streams, input_ids,
                  image_mask=None):
+        prof = _prof_on(h.shape[1])
+        if prof:
+            import time
+
+            if self.layer_idx == 0:
+                _PROF_CALLS[0] += 1
+            t0 = time.perf_counter()
         residual = h
         attn_pre, attn_post, attn_comb = _hc_mixes(self.attn_hc, h)
         x = self.attn_norm(_hc_collapse(h, pre_mix))
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
         x = self.attn(x, mask, caches, offset, streams)
+        if prof:
+            t0 = _prof_mark("attn", self.layer_idx, x, t0)
         h = hc_expand(x, residual, attn_post, attn_comb)
 
         residual = h
         ffn_pre, ffn_post, ffn_comb = _hc_mixes(self.ffn_hc, h)
         x = self.ffn_norm(_hc_collapse(h, attn_pre))
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
         x = self.ffn(x, input_ids, image_mask)
+        if prof:
+            t0 = _prof_mark("ffn", self.layer_idx, x, t0)
         h = hc_expand(x, residual, ffn_post, ffn_comb)
+        if prof:
+            _prof_mark("hc", self.layer_idx, h, t0)
         return h, ffn_pre
 
     def fused_step(self, h, pre_mix, carry, mask, caches, offset, streams,
@@ -1084,7 +1160,9 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             and self.layers[0].attn_hc.m1_fused_ok(h)
         )
         carry = None
-        prof = _LAYER_PROFILE and fused and h.shape[1] == 1
+        prof = _LAYER_PROFILE and (
+            (fused and h.shape[1] == 1) or (_PROFILE_WIDE and h.shape[1] > 1)
+        )
         for idx, layer in enumerate(self.layers):
             if layer.engram is not None and row_ids is not None:
                 if prof:

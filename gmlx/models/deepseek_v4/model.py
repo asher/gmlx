@@ -1042,6 +1042,55 @@ def _sparse_gathered_attention(
 _sparse_gathered_attention_c = mx.compile(_sparse_gathered_attention)
 _COMPILE_SPARSE = os.environ.get("GMLX_COMPILE_SPARSE", "1") != "0"
 
+# Prefill query-block width. A full-length pass scores every query against
+# every key of the chunk, so its work and its score tensors grow with the
+# square of the prompt; each block scores only the keys its window reaches
+# and its own top-k rows. 0 keeps the full-length pass.
+_PREFILL_BLOCK = int(os.environ.get("GMLX_DS4_PREFILL_BLOCK", "512") or 0)
+
+
+def _prefill_block() -> int:
+    return max(0, _PREFILL_BLOCK)
+
+
+def _query_bands(L: int, S: int, window: int, block: int):
+    """(qs, qe, ks, ke) per query block over a key array of S rows whose
+    last L rows are this call's queries."""
+    koff = S - L
+    for qs in range(0, L, block):
+        qe = min(L, qs + block)
+        yield qs, qe, max(0, qs + koff - (window - 1)), qe + koff
+
+
+def _banded_window_attention(q, kv, mask, scale, sinks, window: int, block: int):
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], kv.shape[2], window, block):
+        band = kv[:, :, ks:ke]
+        m = None if mask is None else mask[..., qs:qe, ks:ke]
+        outs.append(
+            mx.fast.scaled_dot_product_attention(
+                q[:, :, qs:qe], band, band, scale=scale, mask=m, sinks=sinks
+            )
+        )
+    return mx.concatenate(outs, axis=2)
+
+
+def _sparse_pooled_attention_banded(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int, block: int,
+):
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], local_kv.shape[2], window, block):
+        lm = None if local_mask is None else local_mask[..., qs:qe, ks:ke]
+        pm = None if pooled_mask is None else pooled_mask[..., qs:qe, :]
+        outs.append(
+            _sparse_pooled_attention(
+                q[:, :, qs:qe], local_kv[:, :, ks:ke], pooled, topk[:, qs:qe],
+                lm, pm, scale, sinks,
+            )
+        )
+    return mx.concatenate(outs, axis=2)
+
 
 # Sparse decode attention kernel (mlx-kquant sdpa_sparse_decode): the window
 # and the index-listed pool rows in two dispatches in place of the gather
@@ -1052,8 +1101,44 @@ _COMPILE_SPARSE = os.environ.get("GMLX_COMPILE_SPARSE", "1") != "0"
 # chain for A/Bs.
 _SPARSE_KERNEL_DIMS = (128, 256, 512)
 _SPARSE_KERNEL_DTYPES = (mx.float16, mx.bfloat16)
-_SPARSE_KERNEL_MAX_L = 16
-_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None}
+_SPARSE_KERNEL_MAX_L = 4096
+# Queries per kernel call at prefill: each block reads the window rows
+# its own queries reach, so a narrow block wastes fewer masked rows and a
+# wide one makes fewer calls.
+_SPARSE_KERNEL_BLOCK = int(os.environ.get("GMLX_DS41_SPARSE_KERNEL_BLOCK", "64") or 0)
+_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None, "wide": None}
+
+
+def _sparse_kernel_wide() -> bool:
+    """Whether the kernel takes more than 16 queries per call (earlier
+    mlx-kquant builds stop there); probed once, on first need."""
+    wide = _SPARSE_KERNEL["wide"]
+    if wide is None:
+        import mlx_kquant as kq
+
+        D = 128
+        try:
+            out = kq.sdpa_sparse_decode(
+                mx.zeros((1, 1, 17, D), mx.bfloat16),
+                mx.zeros((1, 1, 1, D), mx.bfloat16),
+                mx.zeros((1, 1, D), mx.bfloat16),
+                mx.zeros((1, 17, 1), mx.uint32),
+                1.0,
+            )
+            mx.eval(out)
+            wide = True
+        except Exception:  # noqa: BLE001 - any refusal means the old cap
+            wide = False
+        _SPARSE_KERNEL["wide"] = wide
+    return wide
+
+
+def _sparse_kernel_max_l() -> int:
+    return _SPARSE_KERNEL_MAX_L if _sparse_kernel_wide() else 16
+
+
+def _sparse_kernel_block() -> int:
+    return max(0, min(_SPARSE_KERNEL_BLOCK, _sparse_kernel_max_l()))
 
 
 def _sparse_kernel_probe() -> bool:
@@ -1133,7 +1218,7 @@ def _sparse_kernel_attention(
     B, _, L, D = q.shape
     if (
         D not in _SPARSE_KERNEL_DIMS
-        or L > _SPARSE_KERNEL_MAX_L
+        or (L > 16 and L > _sparse_kernel_max_l())
         or q.dtype not in _SPARSE_KERNEL_DTYPES
         or topk.dtype not in (mx.int32, mx.uint32)
         or topk.shape != (B, L, topk.shape[-1])
@@ -1149,6 +1234,27 @@ def _sparse_kernel_attention(
         q, local_kv, pooled, topk, scale,
         sinks=sinks, win_mask=win_mask, sel_mask=sel_mask,
     )
+
+
+def _sparse_kernel_attention_banded(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int, block: int,
+) -> Optional[mx.array]:
+    """Prefill through the kernel, one query block per call over the
+    window rows that block reaches; None when the kernel declines the
+    first block (the caller then runs the chain)."""
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], local_kv.shape[2], window, block):
+        lm = None if local_mask is None else local_mask[..., qs:qe, ks:ke]
+        pm = None if pooled_mask is None else pooled_mask[..., qs:qe, :]
+        out = _sparse_kernel_attention(
+            q[:, :, qs:qe], local_kv[:, :, ks:ke], pooled, topk[:, qs:qe],
+            lm, pm, scale, sinks,
+        )
+        if out is None:
+            return None
+        outs.append(out)
+    return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
 def _dense_sinks_attention(q, kv, sinks, scale):

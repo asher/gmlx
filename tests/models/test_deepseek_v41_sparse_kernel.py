@@ -78,6 +78,7 @@ def _install_kq(monkeypatch, fn):
 
 def _reset(monkeypatch):
     monkeypatch.setitem(v4._SPARSE_KERNEL, "on", None)
+    monkeypatch.setitem(v4._SPARSE_KERNEL, "wide", None)
 
 
 def test_switch_off_keeps_the_chain(monkeypatch):
@@ -119,10 +120,6 @@ def test_wrapper_declines_what_the_kernel_cannot_take(monkeypatch):
     # head dim outside the kernel's set
     narrow = (q[..., :64], kv[..., :64], pooled[..., :64]) + args[3:]
     assert v4._sparse_kernel_attention(*narrow) is None
-    # too many queries
-    wide = (mx.broadcast_to(q, (B, H, 17, D)), kv, pooled,
-            mx.broadcast_to(topk, (B, 17, N))) + args[4:]
-    assert v4._sparse_kernel_attention(*wide) is None
     # an additive float mask
     add = args[:4] + (mx.zeros((L, W), mx.float32), None) + args[6:]
     assert v4._sparse_kernel_attention(*add) is None
@@ -133,6 +130,22 @@ def test_wrapper_declines_what_the_kernel_cannot_take(monkeypatch):
     odd = args[:4] + (mx.ones((L, W + 1), mx.bool_), None) + args[6:]
     assert v4._sparse_kernel_attention(*odd) is None
     assert len(calls) == 1
+    # more queries than one call takes (the 17-query probe asks the kernel
+    # once whether it takes prefill blocks at all)
+    _reset(monkeypatch)
+    wide = (mx.broadcast_to(q, (B, H, 4097, D)), kv, pooled,
+            mx.broadcast_to(topk, (B, 4097, N))) + args[4:]
+    assert v4._sparse_kernel_attention(*wide) is None
+    assert [c[0] for c in calls] == [1, 17]
+    # a kernel that stops at 16 queries
+    monkeypatch.setitem(v4._SPARSE_KERNEL, "wide", False)
+    wide17 = (mx.broadcast_to(q, (B, H, 17, D)), kv, pooled,
+              mx.broadcast_to(topk, (B, 17, N))) + args[4:]
+    assert v4._sparse_kernel_attention(*wide17) is None
+    assert v4._sparse_kernel_block() == 16
+    monkeypatch.setitem(v4._SPARSE_KERNEL, "wide", True)
+    assert v4._sparse_kernel_attention(*wide17) is not None
+    assert [c[0] for c in calls] == [1, 17, 17]
 
 
 def test_decode_steps_take_the_kernel_and_match_the_chain(monkeypatch):
@@ -165,6 +178,32 @@ def test_decode_steps_take_the_kernel_and_match_the_chain(monkeypatch):
     widths = sorted({c[0] for c in calls})
     assert widths == [1, 2, 14]
     assert all(c[1] == (c[0] > 1) for c in calls), calls
+    for a, b in zip(outs[True], outs[False]):
+        assert mx.allclose(a, b, atol=1e-4, rtol=1e-4)
+
+
+def test_prefill_blocks_take_the_kernel_and_match_the_chain(monkeypatch):
+    """A 22-token prompt in kernel blocks of 4 (window 4: each block reads
+    3 rows of the block before it) gives the chain's logits. The 17-wide
+    call is the one-time probe for prefill-block support."""
+    tm = _model_module()
+    calls = []
+    _install_kq(monkeypatch, _chain_kernel(calls))
+    _reset(monkeypatch)
+    monkeypatch.setattr(v4, "_SPARSE_KERNEL_DIMS", (16,))
+    monkeypatch.setattr(v4, "_SPARSE_KERNEL_DTYPES", (mx.float32,))
+    monkeypatch.setattr(v4, "_SPARSE_KERNEL_BLOCK", 4)
+    model = tm._randomized(tm.Model(tm._args()))
+    prompt = mx.array([[5 + 2 * i for i in range(22)]])
+    outs = {}
+    for on in (True, False):
+        monkeypatch.setitem(v4._SPARSE_KERNEL, "on", on)
+        cache = model.make_cache()
+        out = model(prompt, cache=cache)
+        step = model(mx.array([[49]]), cache=cache)
+        mx.eval(out, step)
+        outs[on] = (out, step)
+    assert sorted({c[0] for c in calls}) == [1, 2, 4, 17]
     for a, b in zip(outs[True], outs[False]):
         assert mx.allclose(a, b, atol=1e-4, rtol=1e-4)
 

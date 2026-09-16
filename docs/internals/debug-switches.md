@@ -34,6 +34,8 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 decode steps on the op-by-op hyper-connection chain instead of the two fused kernels per cycle. Same numerics to bfloat16 rounding. |
 | `GMLX_DS41_QAT_FUSED=0` | DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | DeepSeek-V4.1 decode attention as the gather and compiled op chain instead of the mlx-kquant `sdpa_sparse_decode` kernel. The kernel keeps its softmax in fp32. |
+| `GMLX_DS4_PREFILL_BLOCK=N` | DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores, default `512`. `0` scores every query against the whole chunk. |
+| `GMLX_DS41_SPARSE_KERNEL_BLOCK=N` | Queries per `sdpa_sparse_decode` call in a DeepSeek-V4.1 prefill, default `64`. `0` keeps prefill blocks on the op chain. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
@@ -44,6 +46,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DECODE_LAYER_PROFILE=1` | DeepSeek-V4.1 decode: eval after each layer component and print the wall per token of attention, experts, hyper-connections and engram at exit. Slows the run. |
 | `GMLX_DECODE_LAYER_PROFILE=2` | Also eval inside attention and the MoE, so each sub-step (projections, indexer, core, router, experts, shared expert) is one command buffer in a GPU trace. |
 | `GMLX_DECODE_LAYER_PROFILE_LOG` | With the layer profile, write every mark as `key layer wall_t0 wall_t1` to this path at exit, for aligning a Metal System Trace to the marks. |
+| `GMLX_LAYER_PROFILE_PREFILL=1` | With the layer profile, also mark the steps wider than one token (the prefill chunks); the per-token figures then average over forward calls. |
 | `GMLX_PIN_CAST_EXCLUDE=0` | Pin the file bytes of every every-token tensor on a streamed model, including tensors the loader converts at load. By default converted tensors are left out. |
 | `GMLX_STREAM_PLE_COMPOSE=0` | Keep a streamable lookup table resident when the experts also stream, instead of streaming both. |
 | `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload instead of invalidating them. |

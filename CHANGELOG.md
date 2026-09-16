@@ -41,6 +41,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compiled op chain, on an mlx-kquant that carries `sdpa_sparse_decode`.
   The kernel keeps its softmax in fp32, so greedy trajectories can differ
   from the chain's within bfloat16 rounding.
+- DeepSeek-V4.1-Flash prefill scores each block of queries against the
+  window rows it reaches and its own selected pool rows, through the same
+  kernel where present, instead of every query against the whole chunk.
 - A streamed decode starts with a warm arena: the prompt's most routed
   experts of each layer are copied from the prefill ring into the arena and
   wired while the prefill runs, so the first tokens no longer miss on every
