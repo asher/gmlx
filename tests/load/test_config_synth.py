@@ -1816,6 +1816,42 @@ def test_deepseek41_ds4_dialect_matches_the_llamacpp_header():
     assert got == want
 
 
+def test_deepseek41_ds4_dialect_reads_a_ggufreader(tmp_path):
+    """The shim rewrites keys, so a gguf-py reader must be decoded to a
+    dict first: every caller shape of the dual-mode API synthesizes."""
+    from gguf import GGUFReader, GGUFWriter
+
+    meta = _deepseek41_ds4_meta()
+    path = tmp_path / "ds4.gguf"
+    w = GGUFWriter(str(path), meta["general.architecture"])
+    for k, v in meta.items():
+        if k == "general.architecture":
+            continue
+        if isinstance(v, bool):
+            w.add_bool(k, v)
+        elif isinstance(v, int):
+            (w.add_int32 if v < 0 else w.add_uint32)(k, v)
+        elif isinstance(v, float):
+            w.add_float64(k, v)
+        elif isinstance(v, str):
+            w.add_string(k, v)
+        else:
+            w.add_array(k, list(v))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    want = synthesize_config(meta, tensor_shapes=_DS4_SHAPES)
+    got = synthesize_config(GGUFReader(str(path)), tensor_shapes=_DS4_SHAPES)
+    assert got.keys() == want.keys()
+    for k, v in want.items():
+        if isinstance(v, float) or (
+                isinstance(v, list) and v and isinstance(v[0], float)):
+            assert got[k] == pytest.approx(v), k
+        else:
+            assert got[k] == v, k
+
+
 def test_deepseek41_ds4_dialect_leaves_a_llamacpp_header_alone():
     # Detection keys on ds4's own markers, so a rename on the llama.cpp
     # side cannot make this misfire.

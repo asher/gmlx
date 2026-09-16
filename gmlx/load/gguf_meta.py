@@ -17,6 +17,26 @@ def is_reader(meta) -> bool:
     return hasattr(meta, "fields")
 
 
+def as_kv_dict(meta) -> dict:
+    """``meta`` as a decoded KV dict: a reader is decoded field by field
+    (scalars plain, arrays lists, strings str), a dict is returned as is.
+    For code that rewrites metadata rather than reading single keys."""
+    if not is_reader(meta):
+        return meta
+    from gguf import GGUFValueType
+
+    out = {}
+    for key, f in meta.fields.items():
+        if not f.data or not f.types:
+            continue
+        if f.types[-1] == GGUFValueType.STRING:
+            vals = [bytes(f.parts[i]).decode("utf-8", "replace") for i in f.data]
+        else:
+            vals = [f.parts[i][0].item() for i in f.data]
+        out[key] = vals if f.types[0] == GGUFValueType.ARRAY else vals[0]
+    return out
+
+
 def scalar(meta, key):
     """The scalar value for ``key``, the first element if it's an array, or
     None if absent - matching gguf-py's first-element semantics."""

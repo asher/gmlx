@@ -39,6 +39,7 @@ from . import loadlog
 # in gguf_meta; aliased to keep the per-arch synthesizers' call sites short.
 from .gguf_meta import (
     array_len as _array_len,
+    as_kv_dict,
     is_reader as _is_reader,
     read_bool as _read_bool,
     read_bool_array as _read_bool_array,
@@ -2906,6 +2907,7 @@ def _deepseek41_dialect(meta, shapes):
     being absent, so a rename on the llama.cpp side cannot misfire it; a
     llama.cpp header has neither and passes through untouched."""
     arch = "deepseek41"
+    meta = as_kv_dict(meta)  # the shim rewrites keys: dict mode only
     if not any(f"{arch}.{k}" in meta for k in ("engram.encoding", "config")):
         return meta
 
