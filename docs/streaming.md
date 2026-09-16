@@ -249,9 +249,16 @@ which is the source of its time-to-first-token gain. Its ring reads bypass
 the page cache, since a pass reads each routed expert once and would otherwise
 evict the rest of the machine's page cache for pages it never reads again.
 
-The decode feeder's arena starts empty and converges within a few dozen
-tokens, which is why the first tokens of a session are slower. Under memory
-pressure from another model or a build it shrinks,
+The decode feeder's arena starts warm. Every expert of a layer passes
+through the prefill ring, so while the ring moves on to the next layer the
+prompt's most routed experts of the layer are copied from the ring slot into
+the arena and wired there, at memory speed and off the prefill's path. The
+first decode token then finds the arena as full as the prompt's routing can
+make it, and the wiring pass that used to run at the first token is already
+done. A prefill too short for the ring leaves the arena empty and decode
+converges within a few dozen tokens instead; `GMLX_DECODE_SEED=0` restores
+that cold start for A/Bs. Under memory pressure from another model or a
+build the arena shrinks,
 keeping its most routed experts, and grows again when the pressure ends.
 Multi-token expert calls whose routed set exceeds the arena, such as the
 next chat turn's prefill, are split along the token axis and served from the

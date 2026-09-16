@@ -81,6 +81,8 @@ marked as read per tick or per chunk take effect on a running server.
 | `GMLX_MTP_PREEMPT=0` | Keep a speculating stream from converting to plain decode when a batch grows past the width cap. |
 | `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it drains. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`. Same as `--stream-fast-disk`. |
+| `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it from the prefill ring with the prompt's most routed experts. |
+| `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
 
 ## Runtime
 

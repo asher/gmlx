@@ -33,6 +33,19 @@ from .budget import _decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
 
+def _ph_li(ph, li, key, dt):
+    """Per-layer phase sums (GMLX_DECODE_PHASE_LAYERS=1 prints them)."""
+    d = ph.setdefault("by_li", {}).setdefault(li, {})
+    d[key] = d.get(key, 0.0) + dt
+
+
+# Submit a staged layer's expert gather as soon as it is built, so the GPU
+# runs it while the host builds the next layer's graph (measured -8 ms of
+# GPU wait per token). The next layer's router eval is still the fence
+# that orders it before any slot overwrite.
+_ASYNC_GATHER = env_bool("GMLX_DECODE_ASYNC_GATHER", True)
+
+
 # MoE expert CPU offload (hybrid GPU+CPU inference)
 #
 # On unified memory the GPU constraint is the wired limit, not a separate
@@ -509,7 +522,9 @@ def install_expert_streaming(
                         if ph is not None:
                             t_la = time.perf_counter()
                             la_pred = la.on_call(x_la, indices)
-                            ph["la"] += time.perf_counter() - t_la
+                            _dt = time.perf_counter() - t_la
+                            ph["la"] += _dt
+                            _ph_li(ph, self._kq_li, "la", _dt)
                         else:
                             la_pred = la.on_call(x_la, indices)
                     if (
@@ -531,6 +546,9 @@ def install_expert_streaming(
                         t0 = time.perf_counter() if ph is not None else 0.0
                         if n_tokens == 1:
                             dfr.ensure_wired()
+                        if ph is not None:
+                            ph["ev_wire"] = ph.get("ev_wire", 0.0) + (
+                                time.perf_counter() - t0)
                         # Miss-shed is decode-only: a single-token leaf of an
                         # arena token split is prefill work, and a shedding
                         # leaf would return a mixed rank-3 output next to a
@@ -551,7 +569,10 @@ def install_expert_streaming(
                         if ph is not None:
                             t1 = time.perf_counter()
                             ph["ev"] += t1 - t0
+                            _ph_li(ph, self._kq_li, "ev", t1 - t0)
                             wait0 = getattr(dfr, "_t_demand", 0.0)
+                            ph.setdefault("miss_hist", []).append(
+                                (self._kq_li, dfr._lookups - dfr._hits))
                         ids = np.array(indices)
                         shed_args = None
                         shed_mix = None
@@ -584,6 +605,9 @@ def install_expert_streaming(
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
                             ph["stage_wait"] += w
                             ph["stage_book"] += (t2 - t1) - w
+                            _ph_li(ph, self._kq_li, "stage_wait", w)
+                            _ph_li(ph, self._kq_li, "stage_book",
+                                   (t2 - t1) - w)
                         if la_pred:
                             # This layer's demand misses have joined
                             # (stage returned); the predicted layers'
@@ -623,6 +647,8 @@ def install_expert_streaming(
                                                 and y.ndim == x.ndim + 1):
                                             y = (y * shed_mix[..., None]).sum(
                                                 axis=-2)
+                                        if _ASYNC_GATHER and n_tokens == 1:
+                                            mx.async_eval(y)
                                 if ph is not None:
                                     ph["build"] += time.perf_counter() - t3
                                 return y
@@ -708,7 +734,8 @@ def install_expert_streaming(
                         # layer (see feeder.prefill_partial_call).
                         mx.eval(indices)
                         ids = np.unique(np.array(indices)).tolist()
-                        with fdr.prefill_partial_call(self, self._kq_li, ids):
+                        with fdr.prefill_partial_call(
+                                self, self._kq_li, ids, routing=indices):
                             with mx.stream(mx.gpu):
                                 return super().__call__(
                                     x, indices, *args, **kwargs)
@@ -728,7 +755,7 @@ def install_expert_streaming(
                         # whole-layer advisory below): both sweep the full
                         # expert range, poisoned bytes included.
                         mx.eval(x)
-                        with fdr.prefill_call(self, self._kq_li):
+                        with fdr.prefill_call(self, self._kq_li, ids=indices):
                             with mx.stream(mx.gpu):
                                 return super().__call__(
                                     x, indices, *args, **kwargs)
@@ -956,6 +983,7 @@ def install_expert_streaming(
                 # the box has lost that room.
                 dfeeder._release_ring = feeder.release_slots
                 feeder._lend_hook = dfeeder.lend_for_ring
+                feeder._seed_hook = dfeeder.seed_from_ring
             wired = (
                 "fully wired at first decode"
                 if dfeeder._mlock_deferred

@@ -29,8 +29,11 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from contextlib import contextmanager
+
+import numpy as np
 
 from .feeder_common import (
     ATTRS,
@@ -151,6 +154,15 @@ class PrefillFeeder:
         # rebuild; it shrinks the arena only when the kernel has lost the
         # ring's room.
         self._lend_hook = None
+        # Set by the loader to DecodeFeeder.seed_from_ring: after a layer's
+        # compute, its slot's most-routed experts are copied into the
+        # decode arena before the slot is rewritten (see _submit_seed).
+        self._seed_hook = None
+        self._seed_ids: dict[int, object] = {}  # li -> routing ids of its pass
+        self._seed_present: dict[int, np.ndarray | None] = {}
+        self._seed_futs: dict[int, list] = {}  # parity -> copies to join
+        self._seed_prev: int | None = None
+        self._t_seed_wait = 0.0
 
     def _alloc_slots(self) -> None:
         import mlx_kquant as kq
@@ -186,6 +198,17 @@ class PrefillFeeder:
             return
         for ev in self._ready.values():  # a worker may still write a slot
             ev.wait(_STAGE_TIMEOUT_S)
+        self._submit_seed()
+        for futs in self._seed_futs.values():
+            futures_wait(futs)
+        self._seed_futs.clear()
+        self._seed_ids.clear()
+        self._seed_present.clear()
+        if self._t_seed_wait >= 0.05:
+            print(
+                f"[stream] feeder prefill: ring waited "
+                f"{self._t_seed_wait:.2f}s for arena seed copies")
+            self._t_seed_wait = 0.0
         self._ready.clear()
         self._error = None
         self._last_li = None
@@ -209,6 +232,11 @@ class PrefillFeeder:
 
     def _stage(self, li: int) -> None:
         try:
+            seeds = self._seed_futs.pop(self._slot_of[li], None)
+            if seeds:  # the slot's last layer is still being copied out
+                t0 = time.monotonic()
+                futures_wait(seeds)
+                self._t_seed_wait += time.monotonic() - t0
             slot = self._slots[self._slot_of[li]]
             futs = []
             for kind, (_, path, off, nbytes) in self._layers[li].items():
@@ -268,12 +296,48 @@ class PrefillFeeder:
         with swapped_weights(entry, views):
             yield
 
+    def _submit_seed(self) -> None:
+        """Seed the decode arena from the last staged layer's slot. Called
+        once that layer's compute is done (the next call's eval fence, a
+        new pass, or the ring release) and before the slot is rewritten:
+        _stage joins the copies for the slot it targets."""
+        li, self._seed_prev = self._seed_prev, None
+        ids = self._seed_ids.pop(li, None)
+        present = self._seed_present.pop(li, None)
+        if li is None or ids is None or self._seed_hook is None \
+                or not self._slots:
+            return
+        entry = self._layers[li]
+        kind0 = next(iter(entry))
+        n_exp = getattr(entry[kind0][0], ATTRS[kind0]).weight.shape[0]
+        ids = np.asarray(np.array(ids))
+        # (batch, tokens, top-k): rows are tokens, whatever the batch dim.
+        n_tokens = max(1, ids.size // ids.shape[-1]) if ids.ndim >= 2 else 1
+        flat = ids.reshape(-1).astype(np.int64)
+        flat = flat[(flat >= 0) & (flat < n_exp)]
+        counts = np.bincount(flat, minlength=n_exp).astype(np.float64)
+        slot = self._slots[self._slot_of[li]]
+        mvs = {kind: slot[kind][1] for kind in entry}
+        futs = self._seed_hook(li, counts, n_tokens, mvs, present)
+        if futs:
+            self._seed_futs.setdefault(self._slot_of[li], []).extend(futs)
+
+    def _note_routing(self, li: int, ids, present) -> None:
+        if ids is None or self._seed_hook is None:
+            return
+        self._seed_ids[li] = ids
+        self._seed_present[li] = present
+        self._seed_prev = li
+
     @contextmanager
-    def prefill_call(self, module, li: int):
+    def prefill_call(self, module, li: int, ids=None):
         """Caller contract: ``mx.eval`` of this call's input has run (so the
         previous covered layer's compute is finished and its slot is free),
-        and the expert call happens inside the ``with`` body."""
+        and the expert call happens inside the ``with`` body. ``ids`` is
+        the call's routing (may be lazy): it seeds the decode arena once
+        this layer's compute has run."""
         self._drain_on_new_pass(li)
+        self._submit_seed()
         self._kick(li)
         nxt = min((t for t in self._layers if t > li), default=None)
         if nxt is not None:
@@ -284,9 +348,10 @@ class PrefillFeeder:
             raise RuntimeError(f"[feeder] staging failed: {self._error}")
         with self._swapped(li):
             yield
+        self._note_routing(li, ids, None)
 
     @contextmanager
-    def prefill_partial_call(self, module, li: int, ids):
+    def prefill_partial_call(self, module, li: int, ids, routing=None):
         """Router-aware partial staging for short-chunk passes: stage only
         the routed experts' slices into the parity slot, at their original
         expert indices (the gather reads nothing else from the slot, so the
@@ -298,9 +363,15 @@ class PrefillFeeder:
         both proves the previous layer's slot free and materialized ``ids``).
         """
         self._drain_on_new_pass(li)
+        self._submit_seed()
         entry = self._layers[li]
-        slot = self._slots[self._slot_of[li]]
+        parity = self._slot_of[li]
+        seeds = self._seed_futs.pop(parity, None)
+        if seeds:
+            futures_wait(seeds)
+        slot = self._slots[parity]
         futs = []
+        n_exp = 0
         for kind, (mod, path, off, nbytes) in entry.items():
             n_exp = getattr(mod, ATTRS[kind]).weight.shape[0]
             stride = nbytes // n_exp
@@ -315,6 +386,10 @@ class PrefillFeeder:
             f.result()
         with self._swapped(li):
             yield
+        if routing is not None:
+            present = np.zeros(n_exp, dtype=bool)
+            present[[e for e in ids if 0 <= e < n_exp]] = True
+            self._note_routing(li, routing, present)
 
     def close(self) -> None:
         pool = getattr(self, "_stage_pool", None)

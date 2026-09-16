@@ -581,10 +581,10 @@ def test_stage_read_failure_leaves_no_poisoned_slot(monkeypatch, tmp_path):
     feeder.stage(0, np.array([0]))  # expert 1 is the eviction victim
 
     real_read = feeder._read_expert
-    def failing_read(li, kind, e, slot):
+    def failing_read(li, kind, e, slot, *rest):
         if e == 2:
             raise OSError("injected read failure")
-        return real_read(li, kind, e, slot)
+        return real_read(li, kind, e, slot, *rest)
     monkeypatch.setattr(feeder, "_read_expert", failing_read)
     with pytest.raises(OSError, match="injected"):
         feeder.stage(0, np.array([0, 2]))

@@ -31,6 +31,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DeepSeek-V4.1-Flash decode runs each hyper-connection cycle as two fused
   kernels instead of the op-by-op Sinkhorn chain, which was most of the
   dispatches in a decode step.
+- A streamed decode starts with a warm arena: the prompt's most routed
+  experts of each layer are copied from the prefill ring into the arena and
+  wired while the prefill runs, so the first tokens no longer miss on every
+  expert and the wiring pass leaves the first token. Each layer's expert
+  gather is submitted to the GPU as soon as it is built, and the fast-disk
+  recipe engages from 5 GB/s of measured drive bandwidth instead of 9.
 
 ### Fixed
 

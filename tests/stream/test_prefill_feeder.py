@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
@@ -118,12 +119,12 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
                 return True
 
             @contextmanager
-            def prefill_partial_call(self, module, li, ids):
+            def prefill_partial_call(self, module, li, ids, routing=None):
                 self.partial_calls.append((li, list(ids)))
                 yield
 
             @contextmanager
-            def prefill_call(self, module, li):
+            def prefill_call(self, module, li, ids=None):
                 self.whole_calls.append(li)
                 yield
 
@@ -331,3 +332,86 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
                 assert ln % page == 0 or o + ln == len(data)
     finally:
         os.close(fd)
+
+
+def _seeded_pair(monkeypatch, tmp_path, n_layers=3, slots=2):
+    from test_decode_feeder import _make_feeder
+
+    dfeeder, _ = _make_feeder(
+        monkeypatch, tmp_path, slots_per_layer=slots, n_layers=n_layers)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers)
+    feeder._seed_hook = dfeeder.seed_from_ring
+    return dfeeder, feeder, modules
+
+
+def test_prefill_pass_seeds_decode_arena(monkeypatch, tmp_path):
+    """A whole-layer pass copies each layer's most-routed experts from its
+    ring slot into the empty decode-arena slots; decode then hits them
+    without a read. The ring must not rewrite a slot mid-copy: seeding is
+    slowed so the next-but-one layer's staging would race it."""
+    import time
+
+    from test_decode_feeder import _arena_slot
+
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path)
+    real = dfeeder._seed_layer
+
+    def slow(li, pairs, mvs):
+        time.sleep(0.15)
+        real(li, pairs, mvs)
+
+    monkeypatch.setattr(dfeeder, "_seed_layer", slow)
+    routing = {
+        0: np.array([[3, 1], [3, 0], [3, 1]]),  # top-2: 3, 1
+        1: np.array([[2, 0], [2, 1]]),  # top-2: 2, 0 (tie broken low)
+        2: np.array([[1, 2]]),
+    }
+    for li in range(3):
+        with feeder.prefill_call(modules[li][0], li, ids=mx.array(routing[li])):
+            pass
+    feeder.release_slots()  # seeds the last layer, joins every copy
+    assert feeder._seed_prev is None and not feeder._seed_futs
+    assert feeder._error is None
+    dfeeder.ensure_wired()  # publishes the seeds
+    assert dfeeder._seeded == 6
+    for li, top in ((0, (3, 1)), (1, (2, 0)), (2, (1, 2))):
+        assert set(dfeeder._owner[li].tolist()) == set(top)
+        for e in top:
+            s = int(dfeeder._slot_of[li][e])
+            assert s >= 0
+            for kind in _KINDS:
+                assert _arena_slot(dfeeder, li, kind, s) == _expert_bytes(li, kind, e)
+    assert dfeeder._counts[0][3] > dfeeder._counts[0][1] > 0
+    # Three prompt tokens routed expert 3 every time: its count is worth
+    # the seed weight of 32 tokens, not 32 per routing (batch dim ignored).
+    assert dfeeder._counts[0][3] == pytest.approx(32.0)
+    dfeeder.stage(0, np.array([[3, 1]], dtype=np.uint32))
+    assert dfeeder._hits == 2 and dfeeder._lookups == 2
+
+
+def test_partial_pass_seeds_only_staged_experts(monkeypatch, tmp_path):
+    from test_decode_feeder import _arena_slot
+
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, n_layers=1)
+    # Routing names expert 2 most, but the partial pass staged only 1 and
+    # 3: seeding never copies an unstaged slice.
+    with feeder.prefill_partial_call(
+            modules[0][0], 0, [1, 3],
+            routing=mx.array([[2, 3], [2, 1], [2, 3]])):
+        pass
+    feeder.release_slots()
+    dfeeder.stage(0, np.array([[3]], dtype=np.uint32))  # publishes first
+    assert set(dfeeder._owner[0].tolist()) == {1, 3}
+    assert dfeeder._hits == 1
+    s = int(dfeeder._slot_of[0][1])
+    assert _arena_slot(dfeeder, 0, "down", s) == _expert_bytes(0, "down", 1)
+
+
+def test_seeding_off_leaves_arena_cold(monkeypatch, tmp_path):
+    monkeypatch.setenv("GMLX_DECODE_SEED", "0")
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, n_layers=1)
+    with feeder.prefill_call(modules[0][0], 0, ids=mx.array([[0, 1]])):
+        pass
+    feeder.release_slots()
+    dfeeder.ensure_wired()
+    assert dfeeder._seeded == 0 and (dfeeder._owner[0] == -1).all()

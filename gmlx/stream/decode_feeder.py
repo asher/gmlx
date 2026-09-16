@@ -43,7 +43,8 @@ import os
 import queue
 import threading
 import time
-from concurrent.futures import Future, wait as futures_wait
+from concurrent.futures import (
+    Future, ThreadPoolExecutor, wait as futures_wait)
 from contextlib import contextmanager
 from functools import lru_cache
 
@@ -98,12 +99,13 @@ _SETTLE_DEFAULT = "auto"
 
 # Fast-disk recipe (GMLX_DECODE_FAST_DISK=auto|on|off). Both policies above
 # and the lookahead pool's disk priority turn on one question: does
-# speculation steal bandwidth demand misses wanted? M3 Max class, yes;
-# M5 Max reads 14 GB/s against a 6-8 GB/s workload, no. "auto" probes at
+# speculation steal bandwidth demand misses wanted? With the arena seeded
+# from the prefill ring, a 5.7 GB/s M3 Max drive says no (measured +7%
+# decode on the fast recipe); M5 Max reads 14 GB/s. "auto" probes at
 # load, takes the fast recipe above _FAST_DISK_GBPS, and demotes for good
 # after _FAST_DISK_DEMOTE_WINDOWS saturated duty windows. Pool threads keep
 # their start priority: Darwin sets disk policy per thread at thread start.
-_FAST_DISK_GBPS = 9.0
+_FAST_DISK_GBPS = 5.0
 _FAST_DISK_PROBE_READS = 32
 _FAST_DISK_PROBE_DEPTH = 4
 _FAST_DISK_PROBE_TIMEOUT_S = 5.0
@@ -142,11 +144,27 @@ _MAX_WEDGES = 3
 # ~128 on a 32-layer one. GMLX_DECODE_DECAY_EVERY overrides.
 _DECAY_EVERY = 4096
 
-# Deliberately absent: a background seeder that pre-fills empty slots.
-# Rejected on a saturated drive (a seed read is a guess spending bandwidth a
-# targeted read wanted), then rebuilt and measured on a fast one: 1295 slots
-# seeded over 1000 tokens, 0.1 tok/s lost. Prestage claims the empty slots
-# first, on router evidence rather than a popularity guess.
+# Deliberately absent: a background seeder that pre-fills empty slots from
+# the drive. Rejected on a saturated drive (a seed read is a guess spending
+# bandwidth a targeted read wanted), then rebuilt and measured on a fast
+# one: 1295 slots seeded over 1000 tokens, 0.1 tok/s lost. Prestage claims
+# the empty slots first, on router evidence rather than a popularity guess.
+#
+# Prefill seeding is different: every expert of a layer passes through the
+# prefill ring anyway, so the prompt's most-routed experts are copied from
+# the ring slot into empty arena slots (memory bandwidth only) while the
+# ring moves on. Without it decode starts cold and misses every expert of
+# its first tokens. The prompt's routing counts enter the popularity ledger
+# at the weight of _SEED_COUNT_TOKENS decode tokens. GMLX_DECODE_SEED=0
+# disables.
+_SEED_COUNT_TOKENS = 32
+_SEED_COPY_WORKERS = 4
+
+
+def _copy_experts(dst, src, pairs, stride: int) -> None:
+    for e, s in pairs:
+        np.copyto(dst[s * stride:(s + 1) * stride],
+                  src[e * stride:(e + 1) * stride])
 
 # System memory pressure: the arena is wired, so the kernel can never
 # reclaim it - pressure arriving after load (another model, a build) must
@@ -446,6 +464,15 @@ class DecodeFeeder:
         # main thread publishes it. Workers only ever write slot bytes;
         # all residency metadata stays main-thread.
         self._pending: dict[int, dict[int, tuple[int, list, float]]] = {}
+        # Prefill seeds (seed_from_ring): li -> ((expert, slot) rows, copy
+        # future). Seeded slots hold -4 until _flush_seeds publishes them.
+        self._seeds: dict[int, tuple[np.ndarray, Future]] = {}
+        self._seed_on = env_bool("GMLX_DECODE_SEED", True)
+        self._seed_pool: ThreadPoolExecutor | None = None
+        self._seed_copy_pool: ThreadPoolExecutor | None = None
+        self._seeded = 0
+        self._seed_bytes = 0
+        self._t_seed = 0.0
         self._la_pool: _DaemonReadPool | None = None
         self._la_bounce: queue.Queue | None = None
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
@@ -588,21 +615,30 @@ class DecodeFeeder:
         mv = self._arena[(li, kind)][1]
         dest = mv[slot * stride:(slot + 1) * stride]
         off_e = off + e * stride
+        n = stride
         if not self._aligned:
-            self._bytes_read += stride
+            self._bytes_read += n
             read_range(self._fds[path], dest, off_e)
             return
         a = off_e & ~(_PAGE - 1)
         b = min(
-            (off_e + stride + _PAGE - 1) & ~(_PAGE - 1),
+            (off_e + n + _PAGE - 1) & ~(_PAGE - 1),
             self._sizes[path])
         self._bytes_read += b - a
+        # Measured: a pread straight into the Metal-shared slot (aligned
+        # middle direct, edges via scratch) saved 7 ms/token of read wait
+        # but cost 18 ms/token of GPU time on the gathers running against
+        # the same buffer; the bounce copy stays.
         pool = bounce if bounce is not None else self._bounce
         buf = pool.get()
         try:
             bmv = buf[1][: b - a]
             read_range(self._fds[path], bmv, a)
-            dest[:] = bmv[off_e - a: off_e - a + stride]
+            src = bmv[off_e - a: off_e - a + n]
+            # numpy releases the GIL for the copy; a memoryview
+            # assignment holds it for the whole expert.
+            np.copyto(np.frombuffer(dest, dtype=np.uint8),
+                      np.frombuffer(src, dtype=np.uint8))
         finally:
             pool.put(buf)
 
@@ -643,10 +679,20 @@ class DecodeFeeder:
                 # Ring buffers land in MLX's freed-buffer cache; flush so
                 # the arena wires into pages the OS actually has back.
                 self._clear_mlx_cache()
+            for li in list(self._seeds):
+                self._flush_seeds(li)
+            if self._seeded:
+                print(
+                    f"[stream] decode arena seeded from the prefill ring: "
+                    f"{self._seeded} experts ({self._seed_bytes / 1e9:.1f} "
+                    f"GB), copies {self._t_seed:.1f}s off the prefill path")
+            t0 = time.monotonic()
             self._mlock_arena()
+            t1 = time.monotonic()
             # The ring is gone: layers regrow to capacity at their own
             # stage() calls.
             self._lend_frac = 1.0
+            t2 = t3 = t1
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
 
@@ -654,7 +700,14 @@ class DecodeFeeder:
                     self._gpu_resident = True
                     for a in self._arena.values():
                         kq.residency_insert(a[0])
+                    t2 = time.monotonic()
                     kq.residency_commit()
+                    t3 = time.monotonic()
+            if env_bool("GMLX_DECODE_PHASE_STATS", False):
+                print(
+                    f"[phase] first decode: arena wiring {t1 - t0:.2f}s, "
+                    f"residency insert {t2 - t1:.2f}s, commit {t3 - t2:.2f}s",
+                    flush=True)
             return
         if self._lend_frac < 1.0:
             if self._release_ring is not None:
@@ -721,6 +774,7 @@ class DecodeFeeder:
             pass
         freed = 0
         for li in list(self._layers):
+            self._flush_seeds(li)
             if li in self._wedged_layers or self._pending.get(li):
                 continue  # same no-resize contract as stage()
             target = self._target_slots(li)
@@ -782,6 +836,8 @@ class DecodeFeeder:
             # Decode-shaped calls only (a prefill-tail batch would skew the
             # per-token trace).
             self._routed_log.append((li, uniq.astype(np.uint16)))
+        if li in self._seeds:
+            self._flush_seeds(li)
         if self._pending.get(li):
             # Serve-time barrier: every speculative read for this layer
             # lands (or is quarantined) before any residency decision or
@@ -1195,7 +1251,8 @@ class DecodeFeeder:
                 slot_of[old] = -1
             owner[s] = -4
             futs = [
-                pool.submit(self._read_expert, li, kind, e, s, self._la_bounce)
+                pool.submit(self._read_expert, li, kind, e, s,
+                            self._la_bounce)
                 for kind in KINDS
             ]
             pending[e] = (s, futs, time.monotonic())
@@ -1244,6 +1301,97 @@ class DecodeFeeder:
                 self._quarantine(
                     li, e, s, -1,
                     np.zeros(len(owner), dtype=bool), pend, pool="la")
+
+    # prefill seeding
+
+    def seed_from_ring(
+        self,
+        li: int,
+        counts: np.ndarray,
+        n_tokens: int,
+        ring_mvs: dict[str, memoryview],
+        present: np.ndarray | None = None,
+    ) -> list[Future]:
+        """Copy the layer's most-routed experts from its prefill ring slot
+        into empty arena slots, off-thread. ``counts`` is the pass's
+        routing count per expert, ``ring_mvs`` the slot bytes per kind
+        (expert e at e * stride), ``present`` a mask of the experts the
+        slot holds (None: all). Returns the copy futures the ring joins
+        before it rewrites the slot. Slots publish at the layer's next
+        stage() or at ensure_wired, on the main thread."""
+        if not self._seed_on or li not in self._layers or li in self._seeds:
+            return []
+        owner = self._owner[li]
+        slot_of = self._slot_of[li]
+        if n_tokens > 0:
+            self._counts[li] += counts * (_SEED_COUNT_TOKENS / n_tokens)
+        if self._routed_log is not None:
+            # The pass's routing multiset, keyed past the layer range, so
+            # an offline replay can seed the same arena.
+            self._routed_log.append((1000 + li, np.repeat(
+                np.arange(len(counts)), counts.astype(np.int64)
+            ).astype(np.uint16)))
+        empty = np.flatnonzero(owner == -1)
+        cand = np.flatnonzero((counts > 0) & (slot_of < 0))
+        if present is not None:
+            cand = cand[present[cand]]
+        n = min(len(empty), len(cand))
+        if n <= 0:
+            return []
+        order = np.argsort(-counts[cand], kind="stable")[:n]
+        pairs = np.stack([cand[order], empty[:n]], axis=1).astype(np.int64)
+        owner[pairs[:, 1]] = -4
+        if self._seed_pool is None:
+            self._seed_pool = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="gmlx-seed")
+            self._seed_copy_pool = ThreadPoolExecutor(
+                max_workers=_SEED_COPY_WORKERS,
+                thread_name_prefix="gmlx-seed-copy")
+        fut = self._seed_pool.submit(self._seed_layer, li, pairs, ring_mvs)
+        self._seeds[li] = (pairs, fut)
+        return [fut]
+
+    def _seed_layer(self, li: int, pairs: np.ndarray, ring_mvs) -> None:
+        t0 = time.monotonic()
+        entry = self._layers[li]
+        jobs = []
+        for kind, (_, _, _, stride, _) in entry.items():
+            dst = np.frombuffer(self._arena[(li, kind)][1], dtype=np.uint8)
+            src = np.frombuffer(ring_mvs[kind], dtype=np.uint8)
+            for chunk in np.array_split(pairs, _SEED_COPY_WORKERS):
+                if len(chunk):
+                    jobs.append(self._seed_copy_pool.submit(
+                        _copy_experts, dst, src, chunk, stride))
+        for j in jobs:
+            j.result()
+        # Wire the layer now: its pages are resident from the copy, so
+        # the first-decode wiring pass has nothing left to fault in.
+        if self._lend_frac >= 1.0:
+            for kind in entry:
+                self._mlock_buf((li, kind))
+        self._seed_bytes += len(pairs) * self._per_expert[li]
+        self._t_seed += time.monotonic() - t0
+
+    def _flush_seeds(self, li: int) -> None:
+        item = self._seeds.pop(li, None)
+        if item is None:
+            return
+        pairs, fut = item
+        owner = self._owner[li]
+        try:
+            fut.result()
+        except Exception as e:
+            owner[pairs[:, 1]] = -1
+            print(
+                f"[stream] decode feeder: prefill seed of layer {li} failed "
+                f"({e}); its slots stay empty")
+            return
+        owner[pairs[:, 1]] = pairs[:, 0]
+        self._slot_of[li][pairs[:, 0]] = pairs[:, 1]
+        self._seeded += len(pairs)
+        if self._verify:
+            for e, s in pairs:
+                self._verify_slot(li, int(e), int(s), "seed")
 
     def _settle_pending(self, li: int, uniq: np.ndarray) -> None:
         """Serve-time barrier, first step of ``stage``: join EVERY pending
@@ -1608,6 +1756,10 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        for pool in (getattr(self, "_seed_pool", None),
+                     getattr(self, "_seed_copy_pool", None)):
+            if pool is not None:
+                pool.shutdown(wait=True)
         if getattr(self, "_gpu_resident", False):
             import mlx_kquant as kq
 
@@ -1676,6 +1828,11 @@ class DecodeFeeder:
             print(
                 f"[stream] decode feeder bytes read: "
                 f"{getattr(self, '_bytes_read', 0) / 1e9:.1f} GB")
+        if getattr(self, "_seeded", 0):
+            print(
+                f"[stream] decode feeder seeded {self._seeded} experts "
+                f"({self._seed_bytes / 1e9:.1f} GB) from the prefill ring, "
+                f"copies {self._t_seed:.1f}s")
         if getattr(self, "_shed_tokens", 0):
             print(
                 f"[stream] miss-shed: {self._shed_n} experts shed over "
