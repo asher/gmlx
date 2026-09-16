@@ -11,6 +11,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A stalled or dropped read no longer abandons a `pull`: the transfer
   retries with backoff from the bytes already on disk, tunable by
   `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.
+- Streaming decode with the lookahead prestage no longer crashes on a
+  model whose router scores are bfloat16 ("'bfloat16' is not a valid
+  PEP 3118 buffer format string").
 
 ## [0.4.13] - 2026-09-12
 
