@@ -243,6 +243,7 @@ GLM-5.2, and `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
 | weight pin | locks the every-token weights in memory so the kernel cannot evict them between tokens on a machine at its free-page floor | `GMLX_PIN_WEIGHTS=0` |
 | GPU keep-warm | keeps GPU clocks high through the host and disk gaps between layers with a tiny heartbeat kernel | `GMLX_GPU_KEEPWARM=0` |
 | streamable lookup tables | on architectures with a large table that every token reads a few rows of, streams the tables before the experts | `GMLX_STREAM_PLE=0` |
+| stack unmap | drops the expert stacks' Metal buffers once both feeders serve a layer from the file; the driver slows every command buffer while the mapped total passes RAM | `GMLX_STREAM_UNMAP_STACKS=0` |
 
 The prefill feeder stages only the experts the router chose on short prompts,
 which is the source of its time-to-first-token gain. Its ring reads bypass

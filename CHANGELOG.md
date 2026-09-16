@@ -50,6 +50,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expert and the wiring pass leaves the first token. Each layer's expert
   gather is submitted to the GPU as soon as it is built, and the fast-disk
   recipe engages from 5 GB/s of measured drive bandwidth instead of 9.
+- A streamed model drops the expert stacks' GPU buffers once both feeders
+  serve them from the file. The Metal driver slows every command buffer
+  while a process's mapped total passes RAM, which a streamed model always
+  did; deep prefill and decode both gain.
 
 ### Fixed
 

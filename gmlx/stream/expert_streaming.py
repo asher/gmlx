@@ -30,6 +30,7 @@ from gmlx.load.loader import (
 )
 
 from .budget import _decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes
+from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
 
 
@@ -194,6 +195,34 @@ def _install_gpu_residency(model, moe_modules, *,
         print(f"[stream] gpu-resident weights: {left_out} buffers "
               f"({left_out_bytes / 1e9:.1f} GB) left out - the working set "
               f"has {room / 1e9:.1f} GB free of it")
+
+
+def _physical_ram() -> int:
+    ram = int(mx.device_info().get("memory_size", 0)) if mx.metal.is_available() else 0
+    if not ram:
+        ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    return ram
+
+
+def _set_allocator_limits(tracked_bytes: int) -> None:
+    """MLX's allocator counts the file-backed weights as active memory,
+    which on a streamed model sits past its default gc limit; every cache
+    miss then purged the whole buffer cache and every temporary was a
+    fresh Metal allocation. Put the gc limit out of reach and let the
+    cache limit alone bound the pool. GMLX_STREAM_ALLOC_LIMITS=0 keeps
+    the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
+        return
+    limit = int(tracked_bytes + 2 * _physical_ram())
+    cache = float(os.environ.get("GMLX_STREAM_CACHE_GB", "4") or 0)
+    mx.set_memory_limit(limit)
+    mx.set_cache_limit(int(cache * 2**30))
+    loadlog.info(
+        f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
+        f"tracked file-backed bytes; buffer cache {cache:g} GB "
+        "(GMLX_STREAM_CACHE_GB sizes it, GMLX_STREAM_ALLOC_LIMITS=0 keeps "
+        "the MLX defaults)"
+    )
 
 
 def install_expert_streaming(
@@ -789,12 +818,18 @@ def install_expert_streaming(
                             self._kq_li,
                             np.unique(np.array(indices)).tolist(),
                         )
-                    if gpu_tokens > 0 and n_tokens >= gpu_tokens and not cpu_only:
-                        # Prefill regime: GEMM on the GPU stream, same
-                        # zero-copy buffers.
-                        return super().__call__(x, indices, *args, **kwargs)
-                    with mx.stream(mx.cpu):
-                        return super().__call__(x, indices, *args, **kwargs)
+                    # No feeder path: the stack's own file view, mapped
+                    # back for this call where the install dropped it.
+                    with stacks_remapped(self):
+                        if (gpu_tokens > 0 and n_tokens >= gpu_tokens
+                                and not cpu_only):
+                            # Prefill regime: GEMM on the GPU stream, same
+                            # zero-copy buffers.
+                            return super().__call__(
+                                x, indices, *args, **kwargs)
+                        with mx.stream(mx.cpu):
+                            return super().__call__(
+                                x, indices, *args, **kwargs)
 
             _CPUOffload.__name__ = cls.__name__ + "_CPUOffload"
             _CPU_OFFLOAD_CLASS_CACHE[cls] = sub = _CPUOffload
@@ -1062,6 +1097,24 @@ def install_expert_streaming(
             include_expert_stacks=bool(table_offloaded) and not streaming,
             room=(None if budget is None
                   else max(0, budget - held_wired - int(arena or 0) - ring)))
+    if (
+        streaming and feeder is not None and dfeeder is not None
+        and env_bool("GMLX_STREAM_UNMAP_STACKS", True)
+    ):
+        # Both feeders read a covered layer's stacks from the file; the
+        # module's no-copy views only keep the mapping, and the driver's
+        # per-command-buffer work grows with the mapped total past RAM.
+        active0 = mx.get_active_memory()
+        n_un, b_un = unmap_stacks({
+            li: e for li, e in feeder._layers.items() if dfeeder.covers(li)})
+        if n_un:
+            freed = active0 - mx.get_active_memory()
+            loadlog.info(
+                f"[stream] expert stacks unmapped from the GPU on {n_un} "
+                f"layers ({b_un / 1e9:.1f} GB, {freed / 1e9:.1f} GB of "
+                "buffers freed): the feeders read them from the file "
+                "(GMLX_STREAM_UNMAP_STACKS=0 keeps the views)"
+            )
     if streaming and dfeeder is not None:
         import gmlx.stream.gpu_token as gpu_token
 
@@ -1143,6 +1196,7 @@ def install_expert_streaming(
                 f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
     if streaming:
+        _set_allocator_limits(total_bytes)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.

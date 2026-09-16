@@ -163,6 +163,7 @@ class PrefillFeeder:
         self._seed_futs: dict[int, list] = {}  # parity -> copies to join
         self._seed_prev: int | None = None
         self._t_seed_wait = 0.0
+        self._t_ready_wait = 0.0  # compute blocked on a slot still staging
 
     def _alloc_slots(self) -> None:
         import mlx_kquant as kq
@@ -189,6 +190,13 @@ class PrefillFeeder:
             self._locked = [
                 e for slot in self._slots for _, mv in slot.values()
                 if (e := lock_pages(mv)) is not None]
+            want = sum(len(mv) for slot in self._slots for _, mv in slot.values())
+            got = sum(n for _, n in self._locked)
+            if got < want:
+                print(
+                    f"[stream] feeder prefill: ring wired {got / 1e9:.1f} of "
+                    f"{want / 1e9:.1f} GB; unwired slots page out under "
+                    f"pressure and the GPU pays on every use")
 
     def release_slots(self) -> None:
         """Drop the ring (its physical pages with it) once decode starts;
@@ -209,6 +217,11 @@ class PrefillFeeder:
                 f"[stream] feeder prefill: ring waited "
                 f"{self._t_seed_wait:.2f}s for arena seed copies")
             self._t_seed_wait = 0.0
+        if self._t_ready_wait >= 0.05:
+            print(
+                f"[stream] feeder prefill: compute waited "
+                f"{self._t_ready_wait:.2f}s for slots still staging")
+            self._t_ready_wait = 0.0
         self._ready.clear()
         self._error = None
         self._last_li = None
@@ -342,7 +355,10 @@ class PrefillFeeder:
         nxt = min((t for t in self._layers if t > li), default=None)
         if nxt is not None:
             self._kick(nxt)
-        if not self._ready[li].wait(_STAGE_TIMEOUT_S):
+        t0 = time.monotonic()
+        ready = self._ready[li].wait(_STAGE_TIMEOUT_S)
+        self._t_ready_wait += time.monotonic() - t0
+        if not ready:
             raise RuntimeError(f"[feeder] staging layer {li} timed out")
         if self._error is not None:
             raise RuntimeError(f"[feeder] staging failed: {self._error}")
