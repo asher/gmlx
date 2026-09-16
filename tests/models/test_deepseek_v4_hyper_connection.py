@@ -222,3 +222,55 @@ def test_fused_cycle_matches_pair(length, monkeypatch):
     assert mx.array_equal(n_f, n_p)
     assert mx.array_equal(post_f, post_p)
     assert mx.array_equal(comb_f, comb_p)
+
+
+@pytest.mark.parametrize("length", [1, 2, 5])
+def test_lag_collapse_matches_reference(length):
+    """The lagged M=1 route (V4.1): the front reduction plus the sinkhorn
+    kernel that emits this sublayer's pre and collapses with a pre handed
+    in, the sublayer RMSNorm folded into the output."""
+    cfg = _Cfg()
+    cfg.hidden_size = 1024
+    mx.random.seed(41)
+    hc = HyperConnection(cfg)
+    hc.eval()
+    mix_rows = (2 + cfg.hc_mult) * cfg.hc_mult
+    hc.fn = (
+        mx.random.normal((mix_rows, cfg.hc_mult * cfg.hidden_size)) * 0.02
+    ).astype(mx.float32)
+    hc.base = (mx.random.normal((mix_rows,)) * 0.5).astype(mx.float32)
+    hc.scale = mx.array([1.1, 0.9, 1.3], dtype=mx.float32)
+    w = (mx.random.normal((cfg.hidden_size,)) * 0.1 + 1.0).astype(mx.bfloat16)
+    x = (
+        mx.random.normal((1, length, cfg.hc_mult, cfg.hidden_size)) * 1.7
+    ).astype(mx.bfloat16)
+    pre_in = mx.softmax(mx.random.normal((1, length, cfg.hc_mult)), axis=-1)
+    if not hc.m1_fused_ok(x):
+        pytest.skip("fused hyper-connection front unavailable here")
+
+    mixes_raw, ssq = hc.front_m1(x)
+    normed, pre, post, comb = hc.lag_collapse_m1(x, mixes_raw, ssq, w, pre_in)
+
+    ref_collapsed, ref_post, ref_comb = _reference(
+        x, hc.fn, hc.base, hc.scale, cfg)
+    y = x.astype(mx.float32)
+    z = mx.fast.rms_norm(y.flatten(-2), None, cfg.rms_norm_eps)
+    mixes = z @ hc.fn.T
+    ref_pre = mx.sigmoid(
+        mixes[..., :cfg.hc_mult] * hc.scale[0] + hc.base[:cfg.hc_mult]
+    ) + cfg.hc_eps
+    ref_lag = (pre_in[..., None] * y).sum(axis=2).astype(x.dtype)
+    ref_normed = mx.fast.rms_norm(ref_lag, w, cfg.rms_norm_eps)
+    mx.eval(normed, pre, post, comb, ref_normed, ref_pre, ref_post, ref_comb)
+
+    assert normed.shape == ref_normed.shape == (1, length, cfg.hidden_size)
+    assert mx.abs(normed.astype(mx.float32)
+                  - ref_normed.astype(mx.float32)).max().item() < 1e-1
+    assert mx.abs(pre - ref_pre).max().item() < 3e-3
+    assert mx.abs(post - ref_post).max().item() < 3e-3
+    assert mx.abs(comb - ref_comb).max().item() < 3e-3
+    # the collapse read pre_in, not this sublayer's pre
+    own = (pre[..., None] * y).sum(axis=2).astype(x.dtype)
+    mx.eval(own)
+    assert mx.abs(own.astype(mx.float32)
+                  - ref_lag.astype(mx.float32)).max().item() > 1e-1

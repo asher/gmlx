@@ -42,6 +42,7 @@ from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     _hc_split_sinkhorn_ops,
     hc_expand,
+    hc_expand_m1,
 )
 from gmlx.models.deepseek_v41.engram_codec import (
     decode_rows,
@@ -728,6 +729,11 @@ def _hc_collapse(x: mx.array, pre: mx.array) -> mx.array:
     return (pre[..., None] * x.astype(mx.float32)).sum(axis=2).astype(x.dtype)
 
 
+def _hc_fused_route() -> bool:
+    """GMLX_DS41_HC_FUSED=0 keeps the ops route at decode width, for A/Bs."""
+    return os.environ.get("GMLX_DS41_HC_FUSED", "1") != "0"
+
+
 class DeepseekV41Block(nn.Module):
     """Attention and FFN between a collapse and an expand, with the
     collapse weights coming from the previous sublayer.
@@ -759,6 +765,29 @@ class DeepseekV41Block(nn.Module):
         x = self.ffn(x, input_ids, image_mask)
         h = hc_expand(x, residual, ffn_post, ffn_comb)
         return h, ffn_pre
+
+    def fused_step(self, h, pre_mix, carry, mask, caches, offset, streams,
+                   input_ids, image_mask=None):
+        """``__call__`` on the fused M=1 route: two dispatches per
+        hyper-connection cycle instead of the Sinkhorn's ~100 ops. The
+        FFN expand is not applied here; it returns as ``carry`` for the
+        next layer's front (or the model's final expand) to fold in.
+        Returns (h, ffn_pre, carry) with h the post-attention stream."""
+        hc = self.attn_hc
+        if carry is None:
+            mixes_raw, ssq = hc.front_m1(h)
+        else:
+            h, mixes_raw, ssq = hc.front_expand_m1(carry)
+        x, attn_pre, attn_post, attn_comb = hc.lag_collapse_m1(
+            h, mixes_raw, ssq, self.attn_norm.weight, pre_mix)
+        x = self.attn(x, mask, caches, offset, streams)
+
+        hc = self.ffn_hc
+        h, mixes_raw, ssq = hc.front_expand_m1((x, h, attn_post, attn_comb))
+        x, ffn_pre, ffn_post, ffn_comb = hc.lag_collapse_m1(
+            h, mixes_raw, ssq, self.ffn_norm.weight, attn_pre)
+        x = self.ffn(x, input_ids, image_mask)
+        return h, ffn_pre, (x, h, ffn_post, ffn_comb)
 
 
 class DeepseekV41Model(PipelineMixin, nn.Module):
@@ -852,16 +881,32 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             (h.shape[0], h.shape[1], self.args.hc_mult), dtype=mx.float32
         )
         pre_mix[:, :, 0] = 1.0
+        fused = (
+            _hc_fused_route()
+            and h.dtype in (mx.float16, mx.bfloat16)
+            and self.layers[0].attn_hc.m1_fused_ok(h)
+        )
+        carry = None
         for idx, layer in enumerate(self.layers):
             if layer.engram is not None and row_ids is not None:
+                if carry is not None:
+                    h, carry = hc_expand_m1(*carry), None
                 h = layer.engram(
                     h, row_ids[:, :, layer.engram_slot, :], engram_mask
                 )
-            h, pre_mix = layer(
-                h, pre_mix, mask,
-                self._split_cache(idx, cache[idx], cache_list_types),
-                offset, streams, inputs, image_mask,
-            )
+            caches = self._split_cache(idx, cache[idx], cache_list_types)
+            if fused:
+                h, pre_mix, carry = layer.fused_step(
+                    h, pre_mix, carry, mask, caches, offset, streams,
+                    inputs, image_mask,
+                )
+            else:
+                h, pre_mix = layer(
+                    h, pre_mix, mask, caches, offset, streams, inputs,
+                    image_mask,
+                )
+        if carry is not None:
+            h = hc_expand_m1(*carry)
         _v4._materialize_cache_arrays(cache)
         return self.norm(_hc_collapse(h, pre_mix))
 

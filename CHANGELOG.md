@@ -26,6 +26,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sentinel tokens, which the conversion types as ordinary text, are made
   atomic again so prompts tokenize as the model expects.
 
+### Changed
+
+- DeepSeek-V4.1-Flash decode runs each hyper-connection cycle as two fused
+  kernels instead of the op-by-op Sinkhorn chain, which was most of the
+  dispatches in a decode step.
+
 ### Fixed
 
 - `pull` fetches a file in bounded range windows once it knows the remote

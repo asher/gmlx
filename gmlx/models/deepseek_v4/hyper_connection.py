@@ -370,17 +370,14 @@ class HyperConnection(nn.Module):
             output_dtypes=[x.dtype, mx.float32, mx.float32],
         )
 
-    def fused_m1(self, x, norm_weight):
-        """Two-dispatch M=1 front: front_reduce then sinkhorn+collapse with
-        the sublayer RMSNorm (weight ``norm_weight``) folded into the output.
-        Returns (normed_collapsed, post, comb); matches __call__ + RMSNorm to
-        rounding (fp reduction order differs)."""
+    def front_m1(self, x):
+        """One dispatch: raw mix dots and the stream sum of squares of
+        ``x``. Returns (mixes_raw, sumsq)."""
         B, L, H, D = x.shape
         if _KQ_HC:
-            mixes_raw, ssq = _kq.hc_front_reduce(x, self.fn)
-            return self._collapse_m1(x, mixes_raw, ssq, norm_weight)
+            return _kq.hc_front_reduce(x, self.fn)
         mix = (2 + H) * H
-        mixes_raw, ssq = _hc_front_reduce_kernel(
+        return _hc_front_reduce_kernel(
             inputs=[x, self.fn],
             template=[("T", x.dtype), ("HC", H), ("D", D)],
             grid=(B * L * (mix + 1) * 256, 1, 1),
@@ -388,6 +385,55 @@ class HyperConnection(nn.Module):
             output_shapes=[(B, L, mix), (B, L, 1)],
             output_dtypes=[mx.float32, mx.float32],
         )
+
+    def front_expand_m1(self, carry):
+        """One dispatch: the pending expand ``carry`` = (x_sub, residual,
+        post, comb) materialized as h, plus h's front reduction. Returns
+        (h, mixes_raw, sumsq); h is bit-identical to hc_expand_m1."""
+        x_sub, resid, post, comb = carry
+        if _KQ_HC:
+            return _kq.hc_front_expand_reduce(x_sub, resid, post, comb, self.fn)
+        B, L, D = x_sub.shape
+        H = resid.shape[2]
+        mix = (2 + H) * H
+        return _hc_front_expand_reduce_kernel(
+            inputs=[x_sub, resid, post, comb, self.fn],
+            template=[("T", x_sub.dtype), ("HC", H), ("D", D)],
+            grid=(B * L * (mix + 1) * 256, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(B, L, H, D), (B, L, mix), (B, L, 1)],
+            output_dtypes=[x_sub.dtype, mx.float32, mx.float32],
+        )
+
+    def lag_collapse_m1(self, x, mixes_raw, ssq, norm_weight, pre_in):
+        """Sinkhorn on this sublayer's mixes, collapse with the previous
+        sublayer's ``pre_in`` (the V4.1 lag), sublayer RMSNorm folded in.
+        Returns (normed_collapsed, pre, post, comb)."""
+        B, L, H, D = x.shape
+        return _hc_sinkhorn_collapse_lag_kernel(
+            inputs=[x, mixes_raw, ssq, self.scale, self.base, norm_weight,
+                    pre_in],
+            template=[
+                ("T", x.dtype),
+                ("U", x.dtype),
+                ("HC", H),
+                ("ITERS", self.sinkhorn_iters),
+                ("D", D),
+                ("EPS_INT", round(self.hc_eps / 1e-9)),
+                ("NEPS_INT", round(self.norm_eps / 1e-9)),
+            ],
+            grid=(B * L * 256, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(B, L, D), (B, L, H), (B, L, H), (B, L, H, H)],
+            output_dtypes=[x.dtype, mx.float32, mx.float32, mx.float32],
+        )
+
+    def fused_m1(self, x, norm_weight):
+        """Two-dispatch M=1 front: front_reduce then sinkhorn+collapse with
+        the sublayer RMSNorm (weight ``norm_weight``) folded into the output.
+        Returns (normed_collapsed, post, comb); matches __call__ + RMSNorm to
+        rounding (fp reduction order differs)."""
+        mixes_raw, ssq = self.front_m1(x)
         return self._collapse_m1(x, mixes_raw, ssq, norm_weight)
 
     def fused_m1_expand(self, carry, norm_weight):
@@ -397,32 +443,18 @@ class HyperConnection(nn.Module):
         is the materialized expanded stream and front is (normed_collapsed,
         post, comb) for this cycle. Bit-identical to
         hc_expand_m1 followed by fused_m1."""
-        x_sub, resid, post, comb = carry
-        B, L, D = x_sub.shape
-        H = resid.shape[2]
-        if _KQ_HC:
-            if _KQ_HC_CYCLE and _hc_fused_cycle():
-                # One dispatch for the expand, the front reduction and the
-                # collapse: the last threadgroup of each row to publish
-                # its mix dot runs the sinkhorn and the collapse.
-                # Bit-identical to the pair below.
-                h, x, post_o, comb_o = _kq.hc_front_expand_collapse(
-                    x_sub, resid, post, comb, self.fn, self.scale,
-                    self.base, norm_weight, iters=self.sinkhorn_iters,
-                    hc_eps=self.hc_eps, norm_eps=self.norm_eps)
-                return h, (x, post_o, comb_o)
-            h, mixes_raw, ssq = _kq.hc_front_expand_reduce(
-                x_sub, resid, post, comb, self.fn)
-            return h, self._collapse_m1(h, mixes_raw, ssq, norm_weight)
-        mix = (2 + H) * H
-        h, mixes_raw, ssq = _hc_front_expand_reduce_kernel(
-            inputs=[x_sub, resid, post, comb, self.fn],
-            template=[("T", x_sub.dtype), ("HC", H), ("D", D)],
-            grid=(B * L * (mix + 1) * 256, 1, 1),
-            threadgroup=(256, 1, 1),
-            output_shapes=[(B, L, H, D), (B, L, mix), (B, L, 1)],
-            output_dtypes=[x_sub.dtype, mx.float32, mx.float32],
-        )
+        if _KQ_HC and _KQ_HC_CYCLE and _hc_fused_cycle():
+            # One dispatch for the expand, the front reduction and the
+            # collapse: the last threadgroup of each row to publish
+            # its mix dot runs the sinkhorn and the collapse.
+            # Bit-identical to the pair below.
+            x_sub, resid, post, comb = carry
+            h, x, post_o, comb_o = _kq.hc_front_expand_collapse(
+                x_sub, resid, post, comb, self.fn, self.scale,
+                self.base, norm_weight, iters=self.sinkhorn_iters,
+                hc_eps=self.hc_eps, norm_eps=self.norm_eps)
+            return h, (x, post_o, comb_o)
+        h, mixes_raw, ssq = self.front_expand_m1(carry)
         return h, self._collapse_m1(h, mixes_raw, ssq, norm_weight)
 
     def __call__(self, x: mx.array):
@@ -720,6 +752,159 @@ def _make_hc_sinkhorn_collapse_m1_kernel():
     )
 
 
+def _make_hc_sinkhorn_collapse_lag_kernel():
+    """The M=1 sinkhorn+collapse kernel for a lagged collapse (V4.1): the
+    sinkhorn emits this sublayer's pre as an output and the collapse
+    weights come from ``pre_in``, the previous sublayer's pre."""
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
+
+    source = """
+        uint tid  = thread_position_in_threadgroup.x;
+        uint row  = threadgroup_position_in_grid.x;
+        uint lane = tid % 32;
+        uint sg   = tid / 32;
+
+        constexpr int MIX      = (2 + HC) * HC;
+        constexpr int BASE_OFF = 2 * HC;
+        constexpr float EPS  = EPS_INT * 1e-9;
+        constexpr float NEPS = NEPS_INT * 1e-9;
+
+        const device float* mix      = (const device float*)mixes_raw
+                                       + row * MIX;
+        device float*       pre_out  = (device float*)pre + row * HC;
+        device float*       post_out = (device float*)post + row * HC;
+        device float*       comb_out = (device float*)comb + row * HC * HC;
+
+        const float factor = metal::rsqrt(
+            sumsq[row] / (float)(HC * D) + NEPS);
+
+        threadgroup float ssq_shared[8];
+        threadgroup float inv_shared[1];
+
+        if (sg == 0) {
+            const float pre_scale  = scale[0] * factor;
+            const float post_scale = scale[1] * factor;
+            const float comb_scale = scale[2] * factor;
+
+            const float active = (lane < (uint)HC) ? 1.0f : 0.0f;
+            const uint  llane  = metal::min(lane, (uint)(HC - 1));
+
+            float pre_z  = mix[llane]      * pre_scale  + base[llane];
+            float post_z = mix[HC + llane] * post_scale + base[HC + llane];
+            float pre_v  = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + EPS;
+            float post_v = 2.0f / (1.0f + metal::fast::exp(-post_z));
+
+            if (lane < (uint)HC) {
+                pre_out[lane]  = pre_v;
+                post_out[lane] = post_v;
+            }
+
+            float4 v = (*(const device float4*)(mix  + BASE_OFF + llane * HC)
+                            * comb_scale
+                      + *(const device float4*)(base + BASE_OFF + llane * HC))
+                     * active;
+
+            float row_max = metal::max(metal::max(v.x, v.y),
+                                       metal::max(v.z, v.w));
+            float4 e = metal::fast::exp(v - row_max) * active;
+            float4 r = e * (1.0f / (e.x + e.y + e.z + e.w + EPS))
+                     + EPS * active;
+
+            float4 col_inv = 1.0f / (float4(
+                simd_sum(r.x), simd_sum(r.y),
+                simd_sum(r.z), simd_sum(r.w)
+            ) + EPS);
+            r *= col_inv;
+
+            for (int iter = 1; iter < ITERS; ++iter) {
+                r *= (1.0f / (r.x + r.y + r.z + r.w + EPS)) * active;
+                col_inv = 1.0f / (float4(
+                    simd_sum(r.x), simd_sum(r.y),
+                    simd_sum(r.z), simd_sum(r.w)
+                ) + EPS);
+                r *= col_inv;
+            }
+
+            if (lane < (uint)HC) {
+                *(device float4*)(comb_out + lane * HC) = r;
+            }
+        }
+
+        // pre_in is indexed directly: at qL=1 it is small enough that
+        // metal_kernel binds it in the constant address space.
+        const uint pb = row * HC;
+        const float p0 = pre_in[pb + 0];
+        const float p1 = pre_in[pb + 1];
+        const float p2 = pre_in[pb + 2];
+        const float p3 = pre_in[pb + 3];
+
+        const device T* x_row  = (const device T*)x_in + row * (HC * D);
+        device U*       out_row = (device U*)collapsed + row * D;
+
+        using T4 = vec<T, 4>;
+        using U4 = vec<U, 4>;
+        const device T4* x_row0 = (const device T4*)(x_row + 0*D);
+        const device T4* x_row1 = (const device T4*)(x_row + 1*D);
+        const device T4* x_row2 = (const device T4*)(x_row + 2*D);
+        const device T4* x_row3 = (const device T4*)(x_row + 3*D);
+        device U4*       out4   = (device U4*)out_row;
+
+        constexpr uint D4 = (uint)D / 4;
+        constexpr uint CHUNKS = (D4 + 255) / 256;
+
+        float4 vals[CHUNKS];
+        float ssq = 0.0f;
+        for (uint c = 0; c < CHUNKS; ++c) {
+            uint d4 = c * 256 + tid;
+            float4 result = float4(0.0f);
+            if (d4 < D4) {
+                float4 x0 = float4(x_row0[d4]);
+                float4 x1 = float4(x_row1[d4]);
+                float4 x2 = float4(x_row2[d4]);
+                float4 x3 = float4(x_row3[d4]);
+                result = fma(float4(p0), x0,
+                         fma(float4(p1), x1,
+                         fma(float4(p2), x2, float4(p3) * x3)));
+                ssq += result.x * result.x + result.y * result.y
+                     + result.z * result.z + result.w * result.w;
+            }
+            vals[c] = result;
+        }
+
+        ssq = simd_sum(ssq);
+        if (lane == 0) ssq_shared[sg] = ssq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sg == 0) {
+            float v = (lane < 8) ? ssq_shared[lane] : 0.0f;
+            v = simd_sum(v);
+            if (lane == 0) {
+                inv_shared[0] = metal::rsqrt(v / (float)D + NEPS);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const float inv = inv_shared[0];
+
+        for (uint c = 0; c < CHUNKS; ++c) {
+            uint d4 = c * 256 + tid;
+            if (d4 < D4) {
+                uint d = d4 * 4;
+                float4 wv = float4((float)w[d],     (float)w[d + 1],
+                                   (float)w[d + 2], (float)w[d + 3]);
+                out4[d4] = U4(vals[c] * inv * wv);
+            }
+        }
+    """
+    return mx.fast.metal_kernel(
+        name="hc_sinkhorn_collapse_lag",
+        input_names=["x_in", "mixes_raw", "sumsq", "scale", "base", "w",
+                     "pre_in"],
+        output_names=["collapsed", "pre", "post", "comb"],
+        source=source,
+        ensure_row_contiguous=True,
+    )
+
+
 def _make_hc_front_expand_reduce_kernel():
     """Step-2 fusion: the previous cycle's expand computed inline ahead of
     the front reduction, one dispatch for both. Every threadgroup recomputes
@@ -881,6 +1066,7 @@ def _make_hc_expand_m1_kernel():
 _hc_front_reduce_kernel = _make_hc_front_reduce_kernel()
 _hc_front_expand_reduce_kernel = _make_hc_front_expand_reduce_kernel()
 _hc_sinkhorn_collapse_m1_kernel = _make_hc_sinkhorn_collapse_m1_kernel()
+_hc_sinkhorn_collapse_lag_kernel = _make_hc_sinkhorn_collapse_lag_kernel()
 _hc_expand_m1_kernel = _make_hc_expand_m1_kernel()
 
 

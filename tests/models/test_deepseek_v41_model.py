@@ -15,6 +15,7 @@ from gmlx.models.deepseek_v41.model import (
     EngramHash,
     Model,
     ModelArgs,
+    SharedStreams,
     _latent_qat,
 )
 
@@ -326,3 +327,85 @@ def test_streamed_engram_tables_do_not_change_the_output():
     got = model(toks, cache=model.make_cache())
     mx.eval(got)
     assert bool(mx.all(got == ref))
+
+
+# --- fused hyper-connection route ------------------------------------------
+
+
+def _wide_bf16_model():
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    mx.random.seed(3)
+    args = _args(hidden_size=1024, moe_intermediate_size=64,
+                 num_attention_heads=8, head_dim=64, q_lora_rank=64,
+                 o_lora_rank=32, index_head_dim=32)
+    model = _randomized(Model(args))
+    model.eval()
+    keep = model.cast_predicate
+    model.update(tree_unflatten([
+        (k, v.astype(mx.bfloat16) if keep(k) and v.dtype == mx.float32 else v)
+        for k, v in tree_flatten(model.parameters())]))
+    mx.eval(model.parameters())
+    return model
+
+
+@pytest.mark.skipif(mx.default_device() != mx.gpu,
+                    reason="the fused hyper-connection kernels are Metal-only")
+@pytest.mark.parametrize("li", [0, 2, 5])
+def test_fused_step_matches_the_ops_block(li):
+    """At decode width the block runs the two-dispatch hyper-connection
+    route; its stream, pre and next-layer carry agree with the ops
+    block to rounding."""
+    from gmlx.cache.compat import cache_types
+    from gmlx.models.deepseek_v4.hyper_connection import hc_expand_m1
+
+    model = _wide_bf16_model()
+    inner = model.model
+    layer = inner.layers[li]
+    toks = [5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
+    h = (mx.random.normal((1, 1, 4, 1024)) * 0.5).astype(mx.bfloat16)
+    pre = mx.softmax(mx.random.normal((1, 1, 4)), axis=-1)
+    ids = mx.array([[33]])
+    assert layer.attn_hc.m1_fused_ok(h)
+
+    def fresh():
+        cache = model.make_cache()
+        mx.eval(model(mx.array([toks]), cache=cache))
+        return inner._split_cache(li, cache[li], cache_types("CacheList"))
+
+    h_ops, pre_ops = layer(h, pre, None, fresh(), len(toks), SharedStreams(),
+                           ids)
+    _, pre_f, carry = layer.fused_step(h, pre, None, None, fresh(), len(toks),
+                                       SharedStreams(), ids)
+    h_f = hc_expand_m1(*carry)
+    mx.eval(h_ops, pre_ops, h_f, pre_f)
+    scale = mx.abs(h_ops.astype(mx.float32)).max().item()
+    dh = mx.abs(h_ops.astype(mx.float32) - h_f.astype(mx.float32))
+    assert dh.max().item() < 0.03 * scale
+    assert dh.mean().item() < 0.01 * scale
+    assert mx.abs(pre_ops - pre_f).max().item() < 1e-2
+
+
+@pytest.mark.skipif(mx.default_device() != mx.gpu,
+                    reason="the fused hyper-connection kernels are Metal-only")
+def test_fused_route_engages_at_decode_width_only(monkeypatch):
+    import gmlx.models.deepseek_v41.model as m41
+
+    model = _wide_bf16_model()
+    calls = []
+    orig = m41.DeepseekV41Block.fused_step
+
+    def spy(self, *a, **k):
+        calls.append(self.layer_idx)
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(m41.DeepseekV41Block, "fused_step", spy)
+    cache = model.make_cache()
+    mx.eval(model(mx.array([[5, 7, 9, 11, 13, 15, 17, 19, 21]]), cache=cache))
+    assert calls == []                      # prefill: ops route
+    mx.eval(model(mx.array([[23]]), cache=cache))
+    assert calls == list(range(6))          # decode: every layer
+    calls.clear()
+    monkeypatch.setenv("GMLX_DS41_HC_FUSED", "0")
+    mx.eval(model(mx.array([[25]]), cache=cache))
+    assert calls == []
