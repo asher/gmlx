@@ -125,3 +125,28 @@ def test_qat_switches_off_together(monkeypatch, sample):
     x = mx.array(sample)
     for fn in (_kv_qat, _indexer_qat, _latent_qat):
         assert np.array_equal(np.array(fn(x)), sample)
+
+
+def test_fused_kernels_match_the_chains_on_the_model_geometry():
+    from gmlx.models.deepseek_v4 import model as _v4
+    from gmlx.models.deepseek_v41 import model as m
+
+    if not (m._qat_fused("kv") and m._qat_fused("indexer")):
+        pytest.skip("fused QAT kernels not armed (CPU device or older kq)")
+    rng = np.random.default_rng(3)
+    kv = mx.array(rng.standard_normal((1, 1, 3, 512)).astype(np.float32) * 3.0)
+    kv = kv.astype(mx.bfloat16)
+    assert mx.array_equal(_kv_qat(kv), _v4._fp8_e4m3_roundtrip(kv, block=32)).item()
+    q = mx.array(rng.standard_normal((1, 32, 2, 128)).astype(np.float32) * 4.0)
+    q = q.astype(mx.bfloat16)
+    assert mx.array_equal(_indexer_qat(q), _v4._fp4_e2m1_roundtrip(q, block=32)).item()
+
+
+def test_fused_switch_off_keeps_the_chains(monkeypatch, sample):
+    from gmlx.models.deepseek_v41 import model as m
+
+    monkeypatch.setenv("GMLX_DS41_QAT_FUSED", "0")
+    monkeypatch.setattr(m, "_QAT_FUSED", {"kv": None, "indexer": None})
+    assert not m._qat_fused("kv") and not m._qat_fused("indexer")
+    got = np.array(_kv_qat(mx.array(sample)), dtype=np.float64)
+    assert np.array_equal(got, _ref_act_quant(sample, 32))

@@ -498,15 +498,57 @@ def _qat_enabled() -> bool:
     return os.environ.get("GMLX_DS41_QAT", "1") != "0"
 
 
+# Fused QAT kernels (mlx-kquant dsa_kv_qat block 32 / dsa_indexer_qat
+# without the Hadamard), bit-identical to the compiled chains below and one
+# dispatch each in place of ~6. Probed once with a real eval so a kq without
+# the arguments, or a CPU default device, leaves the chains in charge;
+# GMLX_DS41_QAT_FUSED=0 keeps them off for A/Bs.
+_QAT_FUSED: Dict[str, Optional[bool]] = {"kv": None, "indexer": None}
+
+
+def _qat_fused(which: str) -> bool:
+    on = _QAT_FUSED[which]
+    if on is None:
+        on = False
+        if (
+            os.environ.get("GMLX_DS41_QAT_FUSED", "1") != "0"
+            and mx.metal.is_available()
+            and mx.default_device() == mx.Device(mx.gpu)
+        ):
+            try:
+                import mlx_kquant as kq
+
+                x = mx.arange(128, dtype=mx.float32).reshape(1, 128)
+                if which == "kv":
+                    got = kq.dsa_kv_qat(x, 0, f16_round=False, block=32)
+                    ref = _v4._fp8_e4m3_roundtrip(x, block=32)
+                else:
+                    got = kq.dsa_indexer_qat(x, hadamard=False)
+                    ref = _v4._fp4_e2m1_roundtrip(x, block=32)
+                on = bool(mx.array_equal(got, ref).item())
+            except Exception:  # noqa: BLE001 - any failure means the chain
+                on = False
+        _QAT_FUSED[which] = on
+    return on
+
+
 def _kv_qat(kv: mx.array) -> mx.array:
     if not _qat_enabled():
         return kv
+    if kv.shape[-1] % 32 == 0 and _qat_fused("kv"):
+        import mlx_kquant as kq
+
+        return kq.dsa_kv_qat(kv, 0, f16_round=False, block=32)
     return _v4._fp8_e4m3_roundtrip(kv, block=32)
 
 
 def _indexer_qat(x: mx.array) -> mx.array:
     if not _qat_enabled():
         return x
+    if x.shape[-1] == 128 and _qat_fused("indexer"):
+        import mlx_kquant as kq
+
+        return kq.dsa_indexer_qat(x, hadamard=False)
     return _v4._fp4_e2m1_roundtrip(x, block=32)
 
 
