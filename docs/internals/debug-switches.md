@@ -33,6 +33,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Bit-identical either way. |
 | `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 decode steps on the op-by-op hyper-connection chain instead of the two fused kernels per cycle. Same numerics to bfloat16 rounding. |
 | `GMLX_DS41_QAT_FUSED=0` | DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Bit-identical. |
+| `GMLX_DS41_SPARSE_KERNEL=0` | DeepSeek-V4.1 decode attention as the gather and compiled op chain instead of the mlx-kquant `sdpa_sparse_decode` kernel. The kernel keeps its softmax in fp32. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |

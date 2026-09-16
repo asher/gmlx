@@ -770,7 +770,14 @@ class DeepseekV41Attention(nn.Module):
                     sparse_mask = mx.take_along_axis(
                         pmask[None] if pmask.ndim == 2 else pmask, topk, axis=2
                     )[:, None]
-                if (
+                out = None
+                if _v4._sparse_kernel_ok():
+                    out = _v4._sparse_kernel_attention(
+                        q, kv, pooled, topk, mask, sparse_mask, self.scale, sinks
+                    )
+                if out is not None:
+                    pass
+                elif (
                     L <= 4
                     and _v4._COMPILE_SPARSE
                     and kv.shape[2] >= self.config.sliding_window

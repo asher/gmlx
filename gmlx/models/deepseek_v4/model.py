@@ -1043,6 +1043,114 @@ _sparse_gathered_attention_c = mx.compile(_sparse_gathered_attention)
 _COMPILE_SPARSE = os.environ.get("GMLX_COMPILE_SPARSE", "1") != "0"
 
 
+# Sparse decode attention kernel (mlx-kquant sdpa_sparse_decode): the window
+# and the index-listed pool rows in two dispatches in place of the gather
+# and the compiled chain above. It reads the same inputs but keeps the
+# softmax in fp32, so it is not bit-identical to the chain; the first use
+# checks it against an fp32 reference and keeps it only when it lands at
+# least as close as the chain does. GMLX_DS41_SPARSE_KERNEL=0 keeps the
+# chain for A/Bs.
+_SPARSE_KERNEL_DIMS = (128, 256, 512)
+_SPARSE_KERNEL_DTYPES = (mx.float16, mx.bfloat16)
+_SPARSE_KERNEL_MAX_L = 16
+_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None}
+
+
+def _sparse_kernel_probe() -> bool:
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "sdpa_sparse_decode"):
+        return False
+    keys = mx.random.split(mx.random.key(7), 4)
+    L, D = 2, 128
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, 8, D), key=keys[1]).astype(mx.bfloat16)
+    pooled = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    topk = mx.array([[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8]]], mx.uint32)
+    mask = mx.tril(mx.ones((L, 8), dtype=mx.bool_), k=6)
+    sparse_mask = mx.array([[[True] * 5 + [False]] * L])[:, None]
+    scale = D ** -0.5
+    got = _sparse_kernel_attention(
+        q, kv, pooled, topk, mask, sparse_mask, scale, sinks
+    )
+    if got is None:
+        return False
+
+    def run(cast):
+        g = _sparse_topk_gather(cast(pooled), topk, L, D)
+        return _sparse_gathered_attention(
+            cast(q), cast(kv), g, mask, sparse_mask, scale, cast(sinks)
+        )
+
+    ref = run(lambda a: a.astype(mx.float32))
+    err_k = mx.abs(got.astype(mx.float32) - ref).max().item()
+    err_c = mx.abs(run(lambda a: a).astype(mx.float32) - ref).max().item()
+    return err_k <= max(err_c, 1e-2)
+
+
+def _sparse_kernel_ok() -> bool:
+    on = _SPARSE_KERNEL["on"]
+    if on is None:
+        on = False
+        if (
+            os.environ.get("GMLX_DS41_SPARSE_KERNEL", "1") != "0"
+            and mx.metal.is_available()
+            and mx.default_device() == mx.Device(mx.gpu)
+        ):
+            try:
+                on = _sparse_kernel_probe()
+            except Exception:  # noqa: BLE001 - any failure means the chain
+                on = False
+        _SPARSE_KERNEL["on"] = on
+    return on
+
+
+def _sparse_kernel_mask(mask, L: int, X: int) -> Optional[mx.array]:
+    """A bool mask in the kernel's [L, X] / [B, L, X] form, or False when
+    the mask is one the kernel cannot take."""
+    if mask is None:
+        return None
+    if not isinstance(mask, mx.array) or mask.dtype != mx.bool_:
+        return False
+    if mask.size % (L * X) != 0:
+        return False
+    return mask.reshape(-1, L, X)
+
+
+def _sparse_kernel_attention(
+    q: mx.array,
+    local_kv: mx.array,
+    pooled: mx.array,
+    topk: mx.array,
+    local_mask: Optional[mx.array],
+    pooled_mask: Optional[mx.array],
+    scale: float,
+    sinks: Optional[mx.array],
+) -> Optional[mx.array]:
+    """The kernel's answer, or None when the shapes or masks fall outside
+    what it takes; the caller then runs the chain."""
+    B, _, L, D = q.shape
+    if (
+        D not in _SPARSE_KERNEL_DIMS
+        or L > _SPARSE_KERNEL_MAX_L
+        or q.dtype not in _SPARSE_KERNEL_DTYPES
+        or topk.dtype not in (mx.int32, mx.uint32)
+        or topk.shape != (B, L, topk.shape[-1])
+    ):
+        return None
+    win_mask = _sparse_kernel_mask(local_mask, L, local_kv.shape[2])
+    sel_mask = _sparse_kernel_mask(pooled_mask, L, topk.shape[-1])
+    if win_mask is False or sel_mask is False:
+        return None
+    import mlx_kquant as kq
+
+    return kq.sdpa_sparse_decode(
+        q, local_kv, pooled, topk, scale,
+        sinks=sinks, win_mask=win_mask, sel_mask=sel_mask,
+    )
+
+
 def _dense_sinks_attention(q, kv, sinks, scale):
     return mx.fast.scaled_dot_product_attention(
         q, kv, kv, scale=scale, mask=None, sinks=sinks
