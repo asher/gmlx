@@ -1399,6 +1399,7 @@ class MoEGate(nn.Module):
                 and t * self.top_k < 64
                 and not self.training
                 and _kq_router_available()
+                and mx.default_device().type == mx.gpu  # kernel has no CPU arm
             ):
                 import mlx_kquant as kq
 
@@ -1476,20 +1477,31 @@ class DeepseekV4MoE(nn.Module):
             x = sum_gradients(self.sharding_group)(x)
 
         inds, scores = self.gate(x, input_ids, image_mask)
-        if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
-            # Fused arm folds the score-weighted sum into the down gather
-            # (one dispatch, no [..., k, H] intermediate); the wrapper
-            # applies the sum itself whenever the fused path is ineligible.
-            y = self.switch_mlp(x, inds, scores)
-        else:
-            y = self.switch_mlp(x, inds)
-            if y.ndim == scores.ndim + 1:
-                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
-        y = y + self.shared_experts(x)
+        y = self._routed(x, inds, scores)
+        y = self._with_shared(x, y, scores)
 
         if self.sharding_group is not None:
             y = mx.distributed.all_sum(y, group=self.sharding_group)
         return y
+
+    def _routed(self, x, inds, scores):
+        """The routed experts: the fused arm takes the scores and folds the
+        weighted sum into the down gather (one dispatch, no [..., k, H]
+        intermediate); it returns unmixed whenever that path is
+        ineligible."""
+        if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
+            return self.switch_mlp(x, inds, scores)
+        return self.switch_mlp(x, inds)
+
+    def _with_shared(self, x, y, scores):
+        """Add the shared expert exactly once: an unmixed return is mixed
+        here and gets it; a mixed return from a stamped shexp fold
+        (``_kq_shexp_mod``) already carries it."""
+        if y.ndim == scores.ndim + 1:
+            y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is not None:
+            return y
+        return y + self.shared_experts(x)
 
 
 class Compressor(nn.Module):

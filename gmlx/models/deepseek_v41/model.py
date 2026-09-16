@@ -67,14 +67,9 @@ class DeepseekV41MoE(_v4.DeepseekV4MoE):
         t0 = time.perf_counter()
         inds, scores = self.gate(x, input_ids, image_mask)
         t0 = _prof_mark("f.route", self._li, (inds, scores), t0)
-        if _v4._MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
-            y = self.switch_mlp(x, inds, scores)
-        else:
-            y = self.switch_mlp(x, inds)
-            if y.ndim == scores.ndim + 1:
-                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        y = self._routed(x, inds, scores)
         t0 = _prof_mark("f.exp", self._li, y, t0)
-        y = y + self.shared_experts(x)
+        y = self._with_shared(x, y, scores)
         _prof_mark("f.shexp", self._li, y, t0)
         return y
 

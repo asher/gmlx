@@ -243,6 +243,10 @@ class _FusedMoeCaps:
         self.has_silu_limit = self.has_kq_fused and "silu_limit" in glu_doc
         self.has_swiglu_clamp = (
             self.has_kq_fused and "swiglu_clamp" in glu_doc)
+        # the shared-expert fold learned silu_limit later; same sniff
+        self.has_shexp_limit = self.has_silu_limit and "silu_limit" in (
+            getattr(getattr(kq, "moe_glu_gather_shexp_kq", None), "__doc__", "")
+            or "")
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -1056,30 +1060,19 @@ def _install_kq_block_fusion(model, caps) -> int:
 # expert-streaming offload wrapper stays in the call path.
 
 
-def _eligible_hyv3_shexp(m, caps):
-    """hy_v3 MoE whose ungated shared expert can ride the fused SwitchGLU
-    gathers as one extra slot with mix weight 1 (moe_glu_gather_shexp_kq +
-    gather_qmv_mix_kq): K-quant projections shape-matched to the expert
-    stacks (same codec, or a q6_k/q8_0 upcast), SwitchGLU already swapped
-    to the scores-taking fused class."""
+def _shexp_fold_ok(sw, se, caps):
+    """Whether ``se`` (an ungated gate/up/down shared expert) can ride
+    ``sw``'s fused SwitchGLU gathers as one extra slot with mix weight 1
+    (moe_glu_gather_shexp_kq + gather_qmv_mix_kq): K-quant projections
+    shape-matched to the expert stacks (same codec, or a q5_k/q6_k/q8_0
+    upcast), SwitchGLU already swapped to the scores-taking fused class."""
     kq = caps.kq
     _KQ_SHEXP_UPCAST = caps.shexp_upcast
     if not hasattr(kq, "moe_glu_gather_shexp_kq"):
         return False
     if not hasattr(kq, "gather_qmv_mix_kq"):
         return False
-    for attr in ("router", "switch_mlp", "shared_mlp", "fp32_combine"):
-        if not hasattr(m, attr):
-            return False
-    if hasattr(m, "shared_expert_gate"):  # qwen3-next shape: regime 3
-        return False
-    se = m.shared_mlp
-    if se is None:
-        return False
-    sw = m.switch_mlp
     if not getattr(sw, "_kq_mix_scores", False):
-        return False
-    if getattr(sw, "_kq_glu_act", None) != "silu":
         return False
     # kernel geometry: whole codec blocks on both matvec K dims (the kq
     # kernels stride K in block-width chunks; q8_0 off 256 takes the
@@ -1095,7 +1088,7 @@ def _eligible_hyv3_shexp(m, caps):
     for attr in ("gate_proj", "up_proj", "down_proj"):
         if not hasattr(se, attr):
             return False
-    # plain silu(gate) * up shared expert only (hy_v3 MLP shape)
+    # act(gate) * up with the kernel epilogue's own activation only
     if hasattr(se, "activation"):
         return False
     # the GLU gather runs both shexp slots with one codec
@@ -1115,19 +1108,71 @@ def _eligible_hyv3_shexp(m, caps):
     return True
 
 
+def _eligible_hyv3_shexp(m, caps):
+    """hy_v3 MoE: plain SwiGLU shared expert next to a plain-silu stack."""
+    for attr in ("router", "switch_mlp", "shared_mlp", "fp32_combine"):
+        if not hasattr(m, attr):
+            return False
+    if hasattr(m, "shared_expert_gate"):  # qwen3-next shape: regime 3
+        return False
+    se = m.shared_mlp
+    if se is None:
+        return False
+    if getattr(m.switch_mlp, "_kq_glu_act", None) != "silu":
+        return False
+    return _shexp_fold_ok(m.switch_mlp, se, caps)
+
+
+def _eligible_dsv4_shexp(m, caps):
+    """deepseek-v4 MoE: the LimitedSwiGLU shared expert rides the stack's
+    ``silu_limit`` gathers (the kernel clamps every slot with one limit),
+    so its limit must equal the stack's; a zero limit is plain silu."""
+    for attr in ("gate", "switch_mlp", "shared_experts"):
+        if not hasattr(m, attr):
+            return False
+    se = m.shared_experts
+    sw = m.switch_mlp
+    if se is None or not hasattr(se, "swiglu_limit"):
+        return False
+    limit = float(se.swiglu_limit or 0.0)
+    act = getattr(sw, "_kq_glu_act", None)
+    if act == "silu":
+        if limit > 0.0:
+            return False
+    elif act == "silu_limit":
+        if not caps.has_shexp_limit:
+            return False
+        if limit != float(getattr(sw, "_kq_glu_limit", 0.0)):
+            return False
+    else:
+        return False
+    return _shexp_fold_ok(sw, se, caps)
+
+
+def _shexp_fold_target(m, caps):
+    """The shared-expert module an eligible MoE block folds, else None."""
+    if _eligible_hyv3_shexp(m, caps):
+        return m.shared_mlp
+    if _eligible_dsv4_shexp(m, caps):
+        return m.shared_experts
+    return None
+
+
 def install_hyv3_shexp_fold(model) -> int:
-    """Stamp eligible hy_v3 MoE blocks' fused SwitchGLUs with their shared
+    """Stamp eligible MoE blocks' fused SwitchGLUs with their shared
     expert (``_kq_shexp_mod``, a module ref: install runs before
-    load_weights). Call after install_fused_moe_glu. Disable with
+    load_weights): hy_v3's plain SwiGLU one and deepseek-v4's LimitedSwiGLU
+    one. Call after install_fused_moe_glu. Disable with
     GMLX_FUSED_MOE_BLOCK=0. Returns the number of blocks stamped."""
     caps = _FusedMoeCaps()
     if not caps.enabled or not caps.has_base or not caps.block_env_on:
         return 0
     n = 0
     for _, m in model.named_modules():
-        if not _eligible_hyv3_shexp(m, caps):
+        se = _shexp_fold_target(m, caps)
+        if se is None:
             continue
-        object.__setattr__(m.switch_mlp, "_kq_shexp_mod", m.shared_mlp)
+        object.__setattr__(m.switch_mlp, "_kq_shexp_mod", se)
         n += 1
     return n
 

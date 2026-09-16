@@ -1123,7 +1123,7 @@ def _install_and_load(
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
-        log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
+        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -1607,7 +1607,7 @@ def load_model(
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
-        _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
+        _log(f"[install] shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")

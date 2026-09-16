@@ -33,6 +33,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dispatches in a decode step. Its window-KV and indexer quantization
   round-trips run as one mlx-kquant kernel each, bit-identical to the op
   chains they replace.
+- DeepSeek-V4 and V4.1 MoE blocks run the shared expert inside the two
+  routed expert gathers, as the Hunyuan 3 blocks already did, on an
+  mlx-kquant whose shared-expert fold takes the LimitedSwiGLU clamp.
 - A streamed decode starts with a warm arena: the prompt's most routed
   experts of each layer are copied from the prefill ring into the arena and
   wired while the prefill runs, so the first tokens no longer miss on every
