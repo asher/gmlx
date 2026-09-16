@@ -721,6 +721,114 @@ def test_url_download_keeps_partial_on_error(tmp_path, monkeypatch):
     assert (tmp_path / "m.gguf.part").read_bytes() == b"partial"   # kept for resume
 
 
+class _Ranged:
+    """A 206 response carrying ``data``."""
+    status = 206
+
+    def __init__(self, data):
+        self.data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        d, self.data = self.data, b""
+        return d
+
+
+def test_url_download_retries_bounded_after_a_400(tmp_path, monkeypatch):
+    # HF's xet CDN refuses an open-ended range and an unranged GET alike. The
+    # remote length is probed once and the transfer repeats with an end offset,
+    # off the failure budget (nothing was wrong with the transfer).
+    dest = tmp_path / "m.gguf"
+    ranges = []
+
+    def fake_open(req, *, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        if rng is None or rng.endswith("-"):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {}, None)
+        return _Ranged(b"GGUFbytes")
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_remote_total", lambda url, *, timeout: 9)
+    monkeypatch.setattr(manage, "_pull_sleep",
+                        lambda s: pytest.fail("a bounded retry must not sleep"))
+    out = manage._url_download("https://example.com/m.gguf", str(dest))
+    assert out == str(dest)
+    assert ranges == [None, "bytes=0-8"]
+    assert dest.read_bytes() == b"GGUFbytes"
+
+
+def test_url_download_bounded_resume_from_part(tmp_path, monkeypatch):
+    # The same CDN on a resume: the open-ended bytes=4- is refused, and the
+    # retry names the end so the remaining bytes append onto the .part.
+    dest = tmp_path / "m.gguf"
+    (tmp_path / "m.gguf.part").write_bytes(b"GGUF")
+    ranges = []
+
+    def fake_open(req, *, timeout):
+        rng = req.get_header("Range")
+        ranges.append(rng)
+        if rng.endswith("-"):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {}, None)
+        return _Ranged(b"more")
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_remote_total", lambda url, *, timeout: 8)
+    out = manage._url_download("https://example.com/m.gguf", str(dest))
+    assert out == str(dest)
+    assert ranges == ["bytes=4-", "bytes=4-7"]
+    assert dest.read_bytes() == b"GGUFmore"
+
+
+def test_url_download_bounded_rejects_stale_part(tmp_path, monkeypatch):
+    # A .part longer than the remote file must not be promoted; with the length
+    # known this is decided without asking the server.
+    dest = tmp_path / "m.gguf"
+    (tmp_path / "m.gguf.part").write_bytes(b"toolongalready")
+
+    def fake_open(req, *, timeout):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    monkeypatch.setattr(manage, "_remote_total", lambda url, *, timeout: 8)
+    with pytest.raises(remote.RemoteError, match="stale partial download"):
+        manage._url_download("https://example.com/m.gguf", str(dest))
+
+
+def test_remote_total_reads_content_range(monkeypatch):
+    seen = {}
+
+    class Resp:
+        headers = {"Content-Range": "bytes 0-0/12345"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_open(req, *, timeout):
+        seen["range"] = req.get_header("Range")
+        return Resp()
+
+    monkeypatch.setattr(remote, "http_open", fake_open)
+    assert manage._remote_total("https://example.com/m.gguf", timeout=5) == 12345
+    assert seen["range"] == "bytes=0-0"
+
+
+def test_remote_total_is_none_when_unavailable(monkeypatch):
+    monkeypatch.setattr(remote, "http_open", lambda req, *, timeout: (_ for _ in ()).throw(
+        urllib.error.URLError("no route")))
+    assert manage._remote_total("https://example.com/m.gguf", timeout=5) is None
+
+
 def test_url_download_resumes_from_part(tmp_path, monkeypatch):
     # A pre-existing .part triggers a Range request; a 206 means we append.
     dest = tmp_path / "m.gguf"

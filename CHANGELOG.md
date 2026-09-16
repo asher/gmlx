@@ -8,6 +8,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `pull` fetches a file in bounded range windows once it knows the remote
+  length, so downloading or resuming a very large GGUF from Hugging Face's
+  xet CDN no longer fails with HTTP 400.
 - A stalled or dropped read no longer abandons a `pull`: the transfer
   retries with backoff from the bytes already on disk, tunable by
   `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.
