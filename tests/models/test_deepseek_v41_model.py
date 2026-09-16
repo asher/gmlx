@@ -190,6 +190,36 @@ def test_sparse_regime_runs_when_the_pool_outgrows_index_topk():
     assert pool.size() > args.index_topk
 
 
+def test_sparse_decode_compiled_route_matches_eager(monkeypatch):
+    """A decode step on a full window and an outgrown pool takes the
+    compiled gathered-attention core; its logits match the eager chain."""
+    from gmlx.models.deepseek_v4 import model as v4
+
+    args = _args()
+    model = _randomized(Model(args))
+    prompt = mx.array([[5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]])
+    tok = mx.array([[33]])
+    calls = []
+    real = v4._sparse_gathered_attention_c
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    outs = []
+    for compiled in (True, False):
+        monkeypatch.setattr(v4, "_COMPILE_SPARSE", compiled)
+        monkeypatch.setattr(v4, "_sparse_gathered_attention_c", spy)
+        cache = model.make_cache()
+        mx.eval(model(prompt, cache=cache))
+        n = len(calls)
+        out = model(tok, cache=cache)
+        mx.eval(out)
+        outs.append(out)
+        assert (len(calls) - n > 0) == compiled
+    assert mx.allclose(outs[0], outs[1], atol=1e-4, rtol=1e-4)
+
+
 def test_only_kv_source_layers_own_pools():
     args = _args()
     model = Model(args)

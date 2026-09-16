@@ -424,9 +424,35 @@ def _phase_dump():
         b, s = 1e3 * lap["build"] / n, 1e3 * lap["sync"] / n
         print(
             f"[phase] la split: build {b:.1f} | sync {s:.1f} | "
-            f"post {ms['la'] - b - s:.1f}",
+            f"post {ms['la'] - b - s:.1f} | ev wire "
+            f"{1e3 * ph.get('ev_wire', 0.0) / n:.2f}",
             flush=True,
         )
+    hist = ph.get("miss_hist")
+    if hist and env_bool("GMLX_DECODE_PHASE_LAYERS", False):
+        first = hist[0][0]
+        marks = [m for li, m in hist if li == first]
+        per_tok = [b - a for a, b in zip(marks[:-1], marks[1:])]
+        print(
+            "[phase] arena misses per token: "
+            + " ".join(str(m) for m in per_tok[:24])
+            + (" ..." if len(per_tok) > 24 else "")
+            + f" | last 8: {per_tok[-8:]}",
+            flush=True,
+        )
+    by_li = ph.get("by_li")
+    if by_li and env_bool("GMLX_DECODE_PHASE_LAYERS", False):
+        print("[phase] per layer ms/token: li ev la stage_wait stage_book")
+        for li in sorted(by_li):
+            d = by_li[li]
+            print(
+                f"[phase]   {li:3d} "
+                + " ".join(
+                    f"{1e3 * d.get(k, 0.0) / n:6.2f}"
+                    for k in ("ev", "la", "stage_wait", "stage_book")
+                ),
+                flush=True,
+            )
 
 
 if _PHASE is not None:

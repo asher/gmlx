@@ -689,9 +689,25 @@ class DeepseekV41Attention(nn.Module):
                     sparse_mask = mx.take_along_axis(
                         pmask[None] if pmask.ndim == 2 else pmask, topk, axis=2
                     )[:, None]
-                out = _v4._sparse_pooled_attention(
-                    q, kv, pooled, topk, mask, sparse_mask, self.scale, sinks
-                )
+                if (
+                    L <= 4
+                    and _v4._COMPILE_SPARSE
+                    and kv.shape[2] >= self.config.sliding_window
+                ):
+                    # Decode on a full window: steady shapes, so the
+                    # compiled core traces once. The gather stays eager
+                    # (it alone sees the growing pool).
+                    gathered = _v4._sparse_topk_gather(
+                        pooled, topk, L, self.head_dim
+                    )
+                    out = _v4._sparse_gathered_attention_c(
+                        q, kv, gathered, mask, sparse_mask, self.scale, sinks
+                    )
+                else:
+                    out = _v4._sparse_pooled_attention(
+                        q, kv, pooled, topk, mask, sparse_mask, self.scale,
+                        sinks,
+                    )
         return self._project(out, offset, B, L)
 
     def _project(self, out, offset, B, L):
@@ -734,6 +750,52 @@ def _hc_fused_route() -> bool:
     return os.environ.get("GMLX_DS41_HC_FUSED", "1") != "0"
 
 
+# GMLX_DECODE_LAYER_PROFILE=1: eval after each decode-layer component and
+# print the per-component wall per token at exit. Attribution only: the
+# extra syncs slow the run and split each layer into one command buffer
+# per component (which is what makes a GPU trace of it readable).
+_LAYER_PROFILE = os.environ.get("GMLX_DECODE_LAYER_PROFILE", "0") == "1"
+_PROF: Dict[tuple, float] = {}
+_PROF_CALLS = [0]
+
+
+def _prof_mark(key: str, li: int, arr, t0: float) -> float:
+    import time
+
+    mx.eval(arr)
+    t1 = time.perf_counter()
+    _PROF[(key, li)] = _PROF.get((key, li), 0.0) + (t1 - t0)
+    return t1
+
+
+def _prof_dump() -> None:
+    n = _PROF_CALLS[0]
+    if not n:
+        return
+    keys = ("engram", "hc", "attn", "ffn")
+    tot = {k: sum(v for (kk, _), v in _PROF.items() if kk == k) for k in keys}
+    print(
+        "[layerprof] per token ms: "
+        + " | ".join(f"{k} {1e3 * tot[k] / n:.1f}" for k in keys)
+        + f" | total {1e3 * sum(tot.values()) / n:.1f} over {n} tokens",
+        flush=True,
+    )
+    for k in ("attn", "ffn", "engram"):
+        rows = sorted((li, v) for (kk, li), v in _PROF.items() if kk == k)
+        if rows:
+            print(
+                f"[layerprof] {k} by layer ms/token: "
+                + " ".join(f"{li}:{1e3 * v / n:.2f}" for li, v in rows),
+                flush=True,
+            )
+
+
+if _LAYER_PROFILE:
+    import atexit
+
+    atexit.register(_prof_dump)
+
+
 class DeepseekV41Block(nn.Module):
     """Attention and FFN between a collapse and an expand, with the
     collapse weights coming from the previous sublayer.
@@ -773,6 +835,13 @@ class DeepseekV41Block(nn.Module):
         FFN expand is not applied here; it returns as ``carry`` for the
         next layer's front (or the model's final expand) to fold in.
         Returns (h, ffn_pre, carry) with h the post-attention stream."""
+        prof = _LAYER_PROFILE and h.shape[1] == 1
+        if prof:
+            import time
+
+            if self.layer_idx == 0:
+                _PROF_CALLS[0] += 1
+            t0 = time.perf_counter()
         hc = self.attn_hc
         if carry is None:
             mixes_raw, ssq = hc.front_m1(h)
@@ -780,13 +849,21 @@ class DeepseekV41Block(nn.Module):
             h, mixes_raw, ssq = hc.front_expand_m1(carry)
         x, attn_pre, attn_post, attn_comb = hc.lag_collapse_m1(
             h, mixes_raw, ssq, self.attn_norm.weight, pre_mix)
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
         x = self.attn(x, mask, caches, offset, streams)
+        if prof:
+            t0 = _prof_mark("attn", self.layer_idx, x, t0)
 
         hc = self.ffn_hc
         h, mixes_raw, ssq = hc.front_expand_m1((x, h, attn_post, attn_comb))
         x, ffn_pre, ffn_post, ffn_comb = hc.lag_collapse_m1(
             h, mixes_raw, ssq, self.ffn_norm.weight, attn_pre)
+        if prof:
+            t0 = _prof_mark("hc", self.layer_idx, x, t0)
         x = self.ffn(x, input_ids, image_mask)
+        if prof:
+            _prof_mark("ffn", self.layer_idx, x, t0)
         return h, ffn_pre, (x, h, ffn_post, ffn_comb)
 
 
@@ -887,13 +964,20 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             and self.layers[0].attn_hc.m1_fused_ok(h)
         )
         carry = None
+        prof = _LAYER_PROFILE and fused and h.shape[1] == 1
         for idx, layer in enumerate(self.layers):
             if layer.engram is not None and row_ids is not None:
+                if prof:
+                    import time
+
+                    t0 = time.perf_counter()
                 if carry is not None:
                     h, carry = hc_expand_m1(*carry), None
                 h = layer.engram(
                     h, row_ids[:, :, layer.engram_slot, :], engram_mask
                 )
+                if prof:
+                    _prof_mark("engram", idx, h, t0)
             caches = self._split_cache(idx, cache[idx], cache_list_types)
             if fused:
                 h, pre_mix, carry = layer.fused_step(
