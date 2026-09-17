@@ -9,6 +9,7 @@ it when a chunk reaches it.
 from __future__ import annotations
 
 import contextlib
+from typing import Any
 
 from gmlx.gen.prefill_decay import kv_depth
 
@@ -50,14 +51,14 @@ def arm_batch(batch) -> int | None:
     if getattr(batch, "draft_model", None) is not None:
         return None
     remaining = int(embeds.shape[1])
-    col = None
+    col: Any = None
     next_col = getattr(batch, "_next_apc_checkpoint_column", None)
     if callable(next_col):
         with contextlib.suppress(Exception):
             col = next_col()
     if col is not None:
-        done = int(getattr(batch, "_processed_prompt_columns", 0) or 0)
-        remaining = min(remaining, max(0, int(col) - done))
+        done: Any = getattr(batch, "_processed_prompt_columns", 0) or 0
+        remaining = min(remaining, max(0, int(col) - int(done)))
     return arm_prefill_tail(cache, remaining)
 
 

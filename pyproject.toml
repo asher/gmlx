@@ -173,6 +173,7 @@ markers = [
 # there is nothing to infer from.
 include = [
     "gmlx/cache/apc_manager.py",
+    "gmlx/gen/prefill_tail.py",
     "gmlx/load/modules.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
