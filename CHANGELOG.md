@@ -14,7 +14,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   because the GGUF embeds the V4 ones. Its two engram tables stream from
   SSD through the lookup-table tier while the experts stream through the
   arena, and the fit planner, the preload gate and the resident-bytes
-  bookkeeping all credit the tables as off-disk.
+  bookkeeping all credit the tables as off-disk. On an mlx-kquant that
+  carries them, its hyper-connection cycles, quantization round-trips,
+  indexer scoring and decode attention run as fused kernels, and prefill
+  attention scores each query block against only the rows it reaches.
 - DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
   image turns. Each image expands to a block of up to 1024 tokens in plain
   reading order that the language model attends to causally, so image turns
@@ -28,22 +31,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- DeepSeek-V4.1-Flash decode runs each hyper-connection cycle as two fused
-  kernels instead of the op-by-op Sinkhorn chain, which was most of the
-  dispatches in a decode step. Its window-KV and indexer quantization
-  round-trips run as one mlx-kquant kernel each, bit-identical to the op
-  chains they replace.
 - DeepSeek-V4 and V4.1 MoE blocks run the shared expert inside the two
   routed expert gathers, as the Hunyuan 3 blocks already did, on an
   mlx-kquant whose shared-expert fold takes the LimitedSwiGLU clamp.
-- DeepSeek-V4.1-Flash decode attention runs as one mlx-kquant kernel pair
-  over the window and the selected pool rows instead of the gather and the
-  compiled op chain, on an mlx-kquant that carries `sdpa_sparse_decode`.
-  The kernel keeps its softmax in fp32, so greedy trajectories can differ
-  from the chain's within bfloat16 rounding.
-- DeepSeek-V4.1-Flash prefill scores each block of queries against the
-  window rows it reaches and its own selected pool rows, through the same
-  kernel where present, instead of every query against the whole chunk.
 - A streamed decode starts with a warm arena: the prompt's most routed
   experts of each layer are copied from the prefill ring into the arena and
   wired while the prefill runs, so the first tokens no longer miss on every
@@ -57,6 +47,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A streamed model's MLX buffer cache defaults to the priced KV room
   instead of 4 GB, so a deep prefill reuses each layer's temporaries
   instead of populating fresh buffers every layer.
+- A streamed prefill widens its chunk by up to an eighth so a short last
+  chunk folds into the ones before it. Every chunk stages all the experts,
+  so a 16-token tail cost as much as a long chunk.
 
 ### Fixed
 
