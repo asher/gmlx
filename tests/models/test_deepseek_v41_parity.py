@@ -22,6 +22,11 @@ from gmlx.models.deepseek_v41.model import (
     _kv_qat,
 )
 
+# Tolerances here allow for f32 GEMM noise on tensor-core hardware, where
+# a batched matmul and a per-row reference of the same data disagree
+# around 1e-3 relative. The tests run production numerics and do not set
+# MLX_ENABLE_TF32=0.
+
 _TABLE_ROWS = 3 * 2 * 7
 
 
@@ -146,9 +151,9 @@ def test_hc_mixes_match_the_reference_sinkhorn(model):
     x = mx.random.normal((2, 5, 4, 32))
     pre, post, comb = (_np(v) for v in _hc_mixes(hc, x))
     r_pre, r_post, r_comb = _ref_hc_mixes(hc, x)
-    assert np.allclose(pre, r_pre, atol=1e-6)
-    assert np.allclose(post, r_post, atol=1e-6)
-    assert np.allclose(comb, r_comb, atol=1e-6)
+    assert np.allclose(pre, r_pre, atol=1e-3)
+    assert np.allclose(post, r_post, atol=1e-3)
+    assert np.allclose(comb, r_comb, atol=1e-3)
     # Sinkhorn leaves a doubly near-stochastic matrix, so a dropped
     # iteration or a transposed normalization shows here.
     assert np.allclose(r_comb.sum(-1), 1.0, atol=1e-3)
@@ -161,9 +166,9 @@ def test_collapse_and_expand_match_the_reference(model):
     pre, post, comb = _hc_mixes(hc, x)
     r_pre, r_post, r_comb = _ref_hc_mixes(hc, x)
     assert np.allclose(_np(_hc_collapse(x, pre)), _ref_hc_pre(x, r_pre),
-                       atol=1e-5)
+                       atol=2e-3)
     assert np.allclose(_np(hc_expand(y, x, post, comb)),
-                       _ref_hc_post(y, x, r_post, r_comb), atol=1e-5)
+                       _ref_hc_post(y, x, r_post, r_comb), atol=2e-3)
 
 
 @pytest.mark.skipif(mx.default_device() != mx.gpu,
@@ -194,8 +199,8 @@ def test_the_block_collapses_with_the_previous_sublayers_pre(model):
     y = layer.ffn(y, ids, None)
     want = _ref_hc_post(y, mid_mx, f_post, f_comb)
 
-    assert np.allclose(_np(got), want, atol=2e-3)
-    assert np.allclose(_np(got_pre), f_pre, atol=1e-5)
+    assert np.allclose(_np(got), want, atol=1e-2)
+    assert np.allclose(_np(got_pre), f_pre, atol=2e-3)
 
 
 # --- compressor -------------------------------------------------------------
@@ -217,7 +222,7 @@ def test_compressor_pools_a_ratio_two_group_like_the_reference(model):
     gate = gate[:, :usable].reshape(1, L // 2, 2, -1)
     pooled = (kv * _softmax(gate, 2)).sum(axis=2)
     want = _rms_norm(pooled, _np(comp.norm.weight), comp.norm.eps)
-    assert np.allclose(_np(got), want, atol=1e-4)
+    assert np.allclose(_np(got), want, atol=3e-3)
 
 
 def test_ratio_one_compressor_has_no_gate(model):
@@ -228,7 +233,7 @@ def test_ratio_one_compressor_has_no_gate(model):
     got, _ = comp(x, None, 0)
     want = _rms_norm(_np(x) @ _np(comp.wkv.weight).T,
                      _np(comp.norm.weight), comp.norm.eps)
-    assert np.allclose(_np(got), want, atol=1e-4)
+    assert np.allclose(_np(got), want, atol=2e-3)
 
 
 # --- indexer ----------------------------------------------------------------

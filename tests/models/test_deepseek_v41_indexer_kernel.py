@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from gmlx.models.deepseek_v4 import model as _v4
-from gmlx.models.deepseek_v41.model import Indexer, SharedStreams
+from gmlx.models.deepseek_v41.model import Indexer, SharedStreams, _indexer_qat
 
 pytestmark = pytest.mark.skipif(
     not mx.metal.is_available() or os.environ.get("KQUANT_FORCE_CPU") == "1"
@@ -42,6 +42,12 @@ class _Rope:
 
 def _np(a):
     return np.array(a.astype(mx.float32))
+
+
+def _keys(P):
+    """QAT-rounded fp16 keys, as make_keys stores them. The int8 arm packs
+    both operands to the FP4 grid, where a QAT row is a fixed point."""
+    return _indexer_qat(mx.random.normal((1, P, D))).astype(mx.float16)
 
 
 def _reference(idx, x, q_residual, index_k, pmask):
@@ -80,7 +86,7 @@ def test_kernel_picks_match_the_inline_path(indexer, monkeypatch, L, P):
     args, idx = indexer
     x = mx.random.normal((1, L, args.hidden_size))
     q_residual = mx.random.normal((1, L, args.q_lora_rank))
-    index_k = mx.random.normal((1, P, D))
+    index_k = _keys(P)
 
     monkeypatch.setitem(_v4._dsa_state, "indexer", True)
     got = np.array(idx(x, q_residual, _Rope(), index_k, None, 0, SharedStreams()))
@@ -98,7 +104,7 @@ def test_kernel_honors_the_pool_mask(indexer, monkeypatch, ratio, offset, block)
     L, P = 70, 1100
     x = mx.random.normal((1, L, args.hidden_size))
     q_residual = mx.random.normal((1, L, args.q_lora_rank))
-    index_k = mx.random.normal((1, P, D))
+    index_k = _keys(P)
     pmask = _v4._cacheless_pool_mask(P, L, offset, ratio)
     assert pmask is not None and int(pmask.sum(axis=-1).min()) >= K
     assert int(pmask.sum(axis=-1).max()) < P
