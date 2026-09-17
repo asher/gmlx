@@ -564,7 +564,9 @@ def _url_download(url: str, dest_path: str, *, retries: int | None = None,
     moves bytes resets the count, so one download survives many separate stalls
     (and, against a server that drops after every chunk, still ends -- each
     attempt starts further into the file). A failure that waiting cannot fix
-    (an unlisted 4xx, a full disk, a stale ``.part``) raises at once.
+    (an unlisted 4xx, a full disk, a stale ``.part``) raises at once. A ``400``
+    is the exception: a CDN that wants a bounded range answers that way, so the
+    remote length is probed once and the transfer repeats with an end offset.
     ``GMLX_PULL_RETRIES`` and ``GMLX_PULL_TIMEOUT`` set the defaults; 0 retries
     restores single-shot behaviour. Module-level seam: monkeypatched in tests."""
     if retries is None:
@@ -574,14 +576,24 @@ def _url_download(url: str, dest_path: str, *, retries: int | None = None,
     part = dest_path + ".part"
     fname = os.path.basename(dest_path)
     failures = 0
+    size = None
     while True:
         before = os.path.getsize(part) if os.path.exists(part) else 0
         try:
-            return _url_download_once(url, dest_path, timeout=timeout)
+            return _url_download_once(url, dest_path, timeout=timeout,
+                                      remote_total=size)
         except Exception as e:
             after = os.path.getsize(part) if os.path.exists(part) else 0
-            failures = 0 if after > before else failures + 1
             print(file=sys.stderr)           # close the unterminated progress line
+            if (size is None and isinstance(e, urllib.error.HTTPError)
+                    and e.code == 400):
+                # HF's xet CDN refuses an open-ended range and an unranged GET
+                # alike. Name the end offset and go again - once, and off the
+                # failure budget, since nothing was wrong with the transfer.
+                size = _remote_total(url, timeout=timeout)
+                if size is not None:
+                    continue
+            failures = 0 if after > before else failures + 1
             if retries <= 0 or failures > retries or not _retryable(e):
                 raise
             delay = _retry_after_s(e)
@@ -594,95 +606,142 @@ def _url_download(url: str, dest_path: str, *, retries: int | None = None,
             _pull_sleep(delay)
 
 
-def _url_download_once(url: str, dest_path: str, *, timeout: float) -> str:
+def _remote_total(url: str, *, timeout: float) -> int | None:
+    """The remote file's length from a one-byte range probe, or ``None`` when the
+    server will not say. Transfers ask for a bounded range, so the end offset has
+    to be known before one starts. Module-level seam: monkeypatched in tests."""
+    req = urllib.request.Request(
+        url, headers={"Range": "bytes=0-0", **remote._auth_headers(url)})
+    try:
+        with remote.http_open(req, timeout=timeout) as resp:
+            return remote._response_total_bytes(resp)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+# HF's xet CDN refuses a range that spans a whole very large file: on a 340 GiB
+# GGUF, 128 GiB was served and 256 GiB answered 400, which takes an unranged GET
+# and an open-ended ``bytes=N-`` with it. A transfer that knows the length walks
+# the file in windows well under that.
+_RANGE_WINDOW = 8 << 30
+
+
+def _url_download_once(url: str, dest_path: str, *, timeout: float,
+                       remote_total: int | None = None) -> str:
     """One transfer attempt for :func:`_url_download`.
 
-    Downloads to a sibling ``.part`` file, requesting a byte ``Range`` to continue
-    where a previous attempt left off (the server must honour it; a ``200`` answer
-    means it didn't, so we restart from byte 0). The ``.part`` is renamed into place
-    only on completion -- a failure leaves it behind so the next attempt resumes
-    rather than restarts. A finished ``dest_path`` short-circuits (idempotent
-    re-pull)."""
+    Downloads to a sibling ``.part`` file, continuing from the bytes already
+    there. With ``remote_total`` known the file is walked in ``_RANGE_WINDOW``
+    ranges (see that constant); without it a single request asks for the rest,
+    and a ``200`` answer means the server ignored the Range, so we restart from
+    byte 0. The ``.part`` is renamed into place only on completion -- a failure
+    leaves it behind so the next attempt resumes rather than restarts. A
+    finished ``dest_path`` short-circuits (idempotent re-pull)."""
     if os.path.exists(dest_path):
         return dest_path
     part = dest_path + ".part"
-    have = os.path.getsize(part) if os.path.exists(part) else 0
-    headers = dict(remote._auth_headers(url))
-    if have:
-        headers["Range"] = f"bytes={have}-"
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        resp = remote.http_open(req, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        if e.code == 416 and have > 0:
-            # 416 = our .part already covers the remote range. Only an exact
-            # size match proves completion; a stale .part larger than the
-            # remote file must not be promoted to a corrupt final download.
-            cr = (e.headers.get("Content-Range") or "").strip() if e.headers else ""
-            m = re.match(r"bytes \*/(\d+)$", cr)
-            if m and int(m.group(1)) == have:
-                os.replace(part, dest_path)
-                return dest_path
-            if m:
+    fname = os.path.basename(dest_path)
+    t0 = time.monotonic()
+    moved = 0
+    last_print = 0.0
+    clear = "\x1b[K" if sys.stderr.isatty() else ""
+    announced = False
+    total = remote_total
+
+    def show(written: int, total: int | None, done: bool) -> None:
+        remaining = (total - written) if total else None
+        stats = _transfer_stats(t0, moved, None if done else remaining)
+        if total:
+            pct = written * 100 // total
+            line = (f"  {fname}: {_human_gb(written, 2)} / "
+                    f"{_human_gb(total, 2)} ({pct}%) {stats}")
+        else:
+            line = f"  {fname}: {_human_gb(written, 2)} {stats}"
+        print("\r" + line.rstrip() + clear, end="", file=sys.stderr, flush=True)
+
+    while True:
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if remote_total is not None:
+            if have == remote_total:
+                break
+            if have > remote_total:
                 raise remote.RemoteError(
                     f"stale partial download: {part} has {have} bytes but the "
-                    f"remote file is {m.group(1)} - delete the .part and "
+                    f"remote file is {remote_total} - delete the .part and "
+                    f"re-pull")
+        headers = dict(remote._auth_headers(url))
+        window = None
+        if remote_total is not None:
+            window = min(_RANGE_WINDOW, remote_total - have)
+            headers["Range"] = f"bytes={have}-{have + window - 1}"
+        elif have:
+            headers["Range"] = f"bytes={have}-"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            resp = remote.http_open(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code == 416 and have > 0:
+                # 416 = our .part already covers the remote range. Only an exact
+                # size match proves completion; a stale .part larger than the
+                # remote file must not be promoted to a corrupt final download.
+                cr = ((e.headers.get("Content-Range") or "").strip()
+                      if e.headers else "")
+                m = re.match(r"bytes \*/(\d+)$", cr)
+                if m and int(m.group(1)) == have:
+                    os.replace(part, dest_path)
+                    return dest_path
+                if m:
+                    raise remote.RemoteError(
+                        f"stale partial download: {part} has {have} bytes but "
+                        f"the remote file is {m.group(1)} - delete the .part "
+                        f"and re-pull") from e
+                raise remote.RemoteError(
+                    f"range not satisfiable and no Content-Range to confirm "
+                    f"{part} ({have} bytes) is complete - delete the .part and "
                     f"re-pull") from e
-            raise remote.RemoteError(
-                f"range not satisfiable and no Content-Range to confirm "
-                f"{part} ({have} bytes) is complete - delete the .part and "
-                f"re-pull") from e
-        raise
-    with resp:
-        status = getattr(resp, "status", 200)
-        resumed = have > 0 and status == 206
-        total = _download_total(resp, have, resumed)
-        fname = os.path.basename(dest_path)
-        if resumed:
-            print(f"  resuming {fname} from {_human_gb(have, 2)}"
-                  + (f" / {_human_gb(total, 2)}" if total else ""),
-                  file=sys.stderr)
-        t0 = time.monotonic()
-        session_bytes = 0
-        last_print = 0.0
-        clear = "\x1b[K" if sys.stderr.isatty() else ""
-
-        def show(written: int, done: bool) -> None:
-            remaining = (total - written) if total else None
-            stats = _transfer_stats(t0, session_bytes,
-                                    None if done else remaining)
-            if total:
-                pct = written * 100 // total
-                line = (f"  {fname}: {_human_gb(written, 2)} / "
-                        f"{_human_gb(total, 2)} ({pct}%) {stats}")
-            else:
-                line = f"  {fname}: {_human_gb(written, 2)} {stats}"
-            print("\r" + line.rstrip() + clear, end="", file=sys.stderr,
-                  flush=True)
-
-        with open(part, "ab" if resumed else "wb") as f:
-            written = have if resumed else 0
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                written += len(chunk)
-                session_bytes += len(chunk)
-                now = time.monotonic()
-                if now - last_print >= 2.0:
-                    last_print = now
-                    show(written, False)
-            if total or written:
-                show(written, True)
-                print(file=sys.stderr)
-    if total and written != total:
+            raise
+        with resp:
+            status = getattr(resp, "status", 200)
+            ignored = status != 206
+            resumed = have > 0 and not ignored
+            total = remote_total or _download_total(resp, have, resumed)
+            if resumed and not announced:
+                announced = True
+                print(f"  resuming {fname} from {_human_gb(have, 2)}"
+                      + (f" / {_human_gb(total, 2)}" if total else ""),
+                      file=sys.stderr)
+            with open(part, "ab" if resumed else "wb") as f:
+                written = have if resumed else 0
+                got = 0
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    written += len(chunk)
+                    got += len(chunk)
+                    moved += len(chunk)
+                    now = time.monotonic()
+                    if now - last_print >= 2.0:
+                        last_print = now
+                        show(written, total, False)
         # A clean early close reads as EOF (read() returns b"" instead of
-        # raising), so an unchecked rename would publish a truncated file
-        # that the completed-download short-circuit then makes permanent.
-        raise remote.RemoteError(
-            f"connection closed early: got {written} of {total} bytes for "
-            f"{os.path.basename(dest_path)} - re-run to resume from the .part")
+        # raising), so an unchecked rename would publish a truncated file that
+        # the completed-download short-circuit then makes permanent.
+        short = (got != window if window is not None and not ignored
+                 else bool(total) and written != total)
+        if short:
+            if total or written:
+                show(written, total, True)
+                print(file=sys.stderr)
+            raise remote.RemoteError(
+                f"connection closed early: got {written} of {total} bytes for "
+                f"{fname} - re-run to resume from the .part")
+        if ignored or remote_total is None:
+            break
+    if moved:
+        show(os.path.getsize(part), total, True)
+        print(file=sys.stderr)
     os.replace(part, dest_path)
     return dest_path
 
