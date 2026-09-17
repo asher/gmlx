@@ -434,10 +434,12 @@ class Indexer(nn.Module):
         self.candidate_block_size = config.candidate_block_size
 
     def make_keys(self, latent: mx.array, pool_rope, pool_base) -> mx.array:
-        """Index keys for freshly pooled latents, rotated on the tail."""
+        """Index keys for freshly pooled latents, rotated on the tail.
+        Stored fp16: the kq scorers read fp16 operands (exact for the
+        FP4-grid rows), so the cache needs no cast per step."""
         k = self.k_norm(self.wk(latent))
         k = pool_rope(k[:, None], offset=pool_base).squeeze(1)
-        return _indexer_qat(k)
+        return _indexer_qat(k).astype(mx.float16)
 
     def __call__(self, x, q_residual, rope, index_k, pmask, offset, streams):
         B, L, _ = x.shape
@@ -533,9 +535,10 @@ def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
     GMLX_DSA_INDEXER=0)."""
     B, H, L, D = q.shape
     P = index_k.shape[1]
+    if L <= 4:
+        return _indexer_decode_scorer(q, index_k, weights, scale, offset, ratio)
     if (
-        L <= 4
-        or H not in (32, 64)
+        H not in (32, 64)
         or D != 128
         or k not in (512, 2048)
         or not mx.metal.is_available()
@@ -598,6 +601,46 @@ def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
                 )
             s = kq.dsa_indexer_scores(qb, keys, wb, **flags)
         return s[:, 0, :m, :P]
+
+    return score
+
+
+def _indexer_decode_scorer(q, index_k, weights, scale, offset, ratio):
+    """Decode-width scores through the fused kq kernel
+    (dsa_indexer_score_decode): the relu, scale and head sum run in one
+    dispatch and no [heads, L, P] score is materialized. The kernel hides
+    pooled row n from query row m once n >= (offset + m + 1) // ratio,
+    which is the caller's pool mask, and shows every row to a lone query;
+    so a step of several rows needs ``offset``. Returns
+    ``score(qs, qe) -> [B, qe - qs, P]`` float16, or None to keep the
+    inline fp32 path (other geometries, no Metal,
+    GMLX_DS41_INDEXER_DECODE=0)."""
+    B, H, L, D = q.shape
+    if (
+        H not in (4, 32, 64)
+        or D != 128
+        or (L > 1 and not isinstance(offset, int))
+        or os.environ.get("GMLX_DS41_INDEXER_DECODE", "1") == "0"
+        or not mx.metal.is_available()
+        or mx.default_device() != mx.Device(mx.gpu)
+        or not _v4._dsa_probe("indexer")
+    ):
+        return None
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "dsa_indexer_score_decode"):
+        return None
+    q16 = q.astype(mx.float16)
+    keys = index_k if index_k.dtype == mx.float16 else index_k.astype(mx.float16)
+    w16 = (weights * scale).astype(mx.float16)
+    base = offset if isinstance(offset, int) else 0
+    r = ratio if isinstance(ratio, int) and ratio >= 1 else 1
+
+    def score(qs, qe):
+        s = kq.dsa_indexer_score_decode(
+            q16[:, :, qs:qe], keys, w16[:, qs:qe], base + qs, r
+        )
+        return s[:, 0]
 
     return score
 
@@ -817,7 +860,7 @@ class DeepseekV41Attention(nn.Module):
             keys = (
                 self.indexer.make_keys(latent, self.pool_rope, pool_base)
                 if latent.shape[1] > 0
-                else mx.zeros((B, 0, self.index_head_dim), dtype=x.dtype)
+                else mx.zeros((B, 0, self.index_head_dim), dtype=mx.float16)
             )
             streams.index_k = (
                 idx_cache.update_and_fetch(keys) if idx_cache is not None else keys

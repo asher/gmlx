@@ -131,6 +131,73 @@ def test_packed_rows_are_a_fixed_point_of_the_int8_pack():
     assert mx.array_equal(back, rows.astype(mx.float32))
 
 
+def _count_decode_calls(monkeypatch):
+    kq = pytest.importorskip("mlx_kquant")
+    if not hasattr(kq, "dsa_indexer_score_decode"):
+        pytest.skip("kq without the decode scorer")
+    real = kq.dsa_indexer_score_decode
+    calls = []
+
+    def counted(q, keys, w, q_offset, ratio):
+        calls.append((q.shape[2], q_offset, ratio, keys.dtype))
+        return real(q, keys, w, q_offset, ratio)
+
+    monkeypatch.setattr(kq, "dsa_indexer_score_decode", counted)
+    return calls
+
+
+@pytest.mark.parametrize("L,offset,ratio", [(1, None, 2), (3, 1400, 2), (2, 600, 1)])
+def test_decode_widths_take_the_fused_scorer(indexer, monkeypatch, L, offset, ratio):
+    """One to four query rows score through dsa_indexer_score_decode: a
+    lone row with no pool mask (every row visible), several rows under
+    the pool mask, whose visibility the kernel derives from the offset."""
+    args, idx = indexer
+    P = 1100
+    x = mx.random.normal((1, L, args.hidden_size))
+    q_residual = mx.random.normal((1, L, args.q_lora_rank))
+    index_k = mx.random.normal((1, P, D)).astype(mx.float16)
+    pmask = None if offset is None else _v4._cacheless_pool_mask(P, L, offset, ratio)
+    streams = SharedStreams()
+    streams.ratio = ratio
+    calls = _count_decode_calls(monkeypatch)
+    monkeypatch.setitem(_v4._dsa_state, "indexer", True)
+    got = np.array(idx(x, q_residual, _Rope(), index_k, pmask, offset, streams))
+    assert calls == [(L, 0 if offset is None else offset, ratio, mx.float16)]
+    scores = _reference(idx, x, q_residual, index_k, pmask)
+    _check(got, scores)
+    if pmask is not None:
+        hidden = ~np.array(pmask)
+        for t in range(L):
+            assert not hidden[t, got[0, t]].any()
+
+
+def test_decode_scorer_stays_inline_when_off(indexer, monkeypatch):
+    args, idx = indexer
+    x = mx.random.normal((1, 1, args.hidden_size))
+    q_residual = mx.random.normal((1, 1, args.q_lora_rank))
+    index_k = mx.random.normal((1, 1100, D))
+    calls = _count_decode_calls(monkeypatch)
+    monkeypatch.setitem(_v4._dsa_state, "indexer", True)
+    monkeypatch.setenv("GMLX_DS41_INDEXER_DECODE", "0")
+    got = np.array(idx(x, q_residual, _Rope(), index_k, None, None, SharedStreams()))
+    assert calls == []
+    _check(got, _reference(idx, x, q_residual, index_k, None))
+    # several rows with no offset to derive the pool mask from: inline too
+    monkeypatch.delenv("GMLX_DS41_INDEXER_DECODE")
+    x3 = mx.random.normal((1, 3, args.hidden_size))
+    r3 = mx.random.normal((1, 3, args.q_lora_rank))
+    got = np.array(idx(x3, r3, _Rope(), index_k, None, None, SharedStreams()))
+    assert calls == []
+    _check(got, _reference(idx, x3, r3, index_k, None))
+
+
+def test_index_keys_are_stored_fp16(indexer):
+    args, idx = indexer
+    latent = mx.random.normal((1, 5, args.head_dim))
+    keys = idx.make_keys(latent, _Rope(), 0)
+    assert keys.dtype == mx.float16 and keys.shape == (1, 5, D)
+
+
 def test_inline_path_stays_when_the_kernel_is_off(indexer, monkeypatch):
     args, idx = indexer
     x = mx.random.normal((1, 70, args.hidden_size))

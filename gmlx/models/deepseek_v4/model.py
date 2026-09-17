@@ -1106,7 +1106,7 @@ _SPARSE_KERNEL_MAX_L = 4096
 # its own queries reach, so a narrow block wastes fewer masked rows and a
 # wide one makes fewer calls.
 _SPARSE_KERNEL_BLOCK = int(os.environ.get("GMLX_DS41_SPARSE_KERNEL_BLOCK", "64") or 0)
-_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None, "wide": None}
+_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None, "wide": None, "prefill": None}
 
 
 def _sparse_kernel_wide() -> bool:
@@ -1236,13 +1236,116 @@ def _sparse_kernel_attention(
     )
 
 
+def _sparse_prefill_probe() -> bool:
+    """Whether mlx-kquant's prefill kernel (sdpa_sparse_prefill) lands at
+    least as close to an fp32 reference as the chain on a small case."""
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "sdpa_sparse_prefill"):
+        return False
+    keys = mx.random.split(mx.random.key(11), 4)
+    L, S, D, W = 5, 8, 128, 3
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, S, D), key=keys[1]).astype(mx.bfloat16)
+    pooled = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    topk = mx.array(
+        [[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8], [2, 5, 8, 11, 0, 3],
+          [3, 6, 9, 1, 4, 7], [4, 7, 10, 2, 5, 8]]],
+        mx.uint32,
+    )
+    koff = S - L
+    rows = mx.arange(koff, S)[:, None]
+    cols = mx.arange(S)[None]
+    mask = (cols <= rows) & (cols > rows - W)
+    sparse_mask = mx.array([[[True] * 5 + [False]] * L])[:, None]
+    scale = D ** -0.5
+    got = _sparse_kernel_prefill(
+        q, kv, pooled, topk, mask, sparse_mask, scale, sinks, W
+    )
+    if got is None:
+        return False
+
+    def run(cast):
+        g = _sparse_topk_gather(cast(pooled), topk, L, D)
+        return _sparse_gathered_attention(
+            cast(q), cast(kv), g, mask, sparse_mask, scale, cast(sinks)
+        )
+
+    ref = run(lambda a: a.astype(mx.float32))
+    err_k = mx.abs(got.astype(mx.float32) - ref).max().item()
+    err_c = mx.abs(run(lambda a: a).astype(mx.float32) - ref).max().item()
+    return err_k <= max(err_c, 1e-2)
+
+
+def _sparse_prefill_ok() -> bool:
+    on = _SPARSE_KERNEL["prefill"]
+    if on is None:
+        on = False
+        if (
+            os.environ.get("GMLX_DS41_SPARSE_PREFILL", "1") != "0"
+            and mx.metal.is_available()
+            and mx.default_device() == mx.Device(mx.gpu)
+        ):
+            try:
+                on = _sparse_prefill_probe()
+            except Exception:  # noqa: BLE001 - any failure means the bands
+                on = False
+        _SPARSE_KERNEL["prefill"] = on
+    return on
+
+
+def _sparse_kernel_prefill(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int,
+) -> Optional[mx.array]:
+    """Every query in one call of the prefill kernel, which derives each
+    query's window rows from its position: query l of the L sits at row
+    S - L + l of ``local_kv`` and reads the ``window`` rows up to it. The
+    caller's ``local_mask`` must be that band (create_causal_mask with the
+    sliding window); only its shape is checked. None when the shapes or
+    masks fall outside what the kernel takes."""
+    B, _, L, D = q.shape
+    S = local_kv.shape[2]
+    if (
+        D not in _SPARSE_KERNEL_DIMS
+        or S < L
+        or q.dtype not in _SPARSE_KERNEL_DTYPES
+        or topk.dtype not in (mx.int32, mx.uint32)
+        or topk.shape != (B, L, topk.shape[-1])
+    ):
+        return None
+    if local_mask is not None and (
+        not isinstance(local_mask, mx.array)
+        or local_mask.dtype != mx.bool_
+        or local_mask.shape[-2:] != (L, S)
+    ):
+        return None
+    sel_mask = _sparse_kernel_mask(pooled_mask, L, topk.shape[-1])
+    if sel_mask is False:
+        return None
+    import mlx_kquant as kq
+
+    return kq.sdpa_sparse_prefill(
+        q, local_kv, pooled, topk, scale, window, sinks=sinks, sel_mask=sel_mask
+    )
+
+
 def _sparse_kernel_attention_banded(
     q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
     window: int, block: int,
 ) -> Optional[mx.array]:
-    """Prefill through the kernel, one query block per call over the
-    window rows that block reaches; None when the kernel declines the
-    first block (the caller then runs the chain)."""
+    """Prefill through the kernel: one call of the prefill kernel when
+    mlx-kquant carries it, else one decode-kernel call per query block
+    over the window rows that block reaches; None when the kernel
+    declines the first block (the caller then runs the chain)."""
+    if _sparse_prefill_ok():
+        out = _sparse_kernel_prefill(
+            q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+            window,
+        )
+        if out is not None:
+            return out
     outs = []
     for qs, qe, ks, ke in _query_bands(q.shape[2], local_kv.shape[2], window, block):
         lm = None if local_mask is None else local_mask[..., qs:qe, ks:ke]

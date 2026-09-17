@@ -16,8 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arena, and the fit planner, the preload gate and the resident-bytes
   bookkeeping all credit the tables as off-disk. On an mlx-kquant that
   carries them, its hyper-connection cycles, quantization round-trips,
-  indexer scoring and decode attention run as fused kernels, and prefill
-  attention scores each query block against only the rows it reaches.
+  indexer scoring and sparse attention run as fused kernels at prefill and
+  decode widths alike, and each prompt query reads only the rows it reaches.
   Once the prompt end is known, the layers past the last kv-source layer
   run only the prompt rows a later layer's window still reaches.
 - DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
