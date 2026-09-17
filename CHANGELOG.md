@@ -19,7 +19,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   indexer scoring and sparse attention run as fused kernels at prefill and
   decode widths alike, and each prompt query reads only the rows it reaches.
   Once the prompt end is known, the layers past the last kv-source layer
-  run only the prompt rows a later layer's window still reaches.
+  run only the prompt rows a later layer's window still reaches. The latent
+  pool rests in the FP4 form its quantization lands on, 3.6x smaller than
+  fp16 rows, and the sparse kernels read that form directly.
 - DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
   image turns. Each image expands to a block of up to 1024 tokens in plain
   reading order that the language model attends to causally, so image turns
