@@ -29,6 +29,7 @@ from .dtypes import activation_dtype, activation_dtype_name
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
+from gmlx.gen.prefill_tail import install_prefill_tail
 import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
@@ -1106,6 +1107,7 @@ def _install_and_load(
     # Inside the decay wrap (installed first): media blocks stay whole.
     from gmlx.gen.media_spans import install_span_aware_prompt_step
     install_span_aware_prompt_step()
+    install_prefill_tail()
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):
@@ -1590,6 +1592,7 @@ def load_model(
     # Inside the decay wrap (installed first): media blocks stay whole.
     from gmlx.gen.media_spans import install_span_aware_prompt_step
     install_span_aware_prompt_step()
+    install_prefill_tail()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):

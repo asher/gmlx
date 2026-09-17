@@ -38,6 +38,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DSA_INDEXER=0` | DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant GEMM and radix select. Same picks to fp16 rounding. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel on the packed FP4 codes. Bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL_BLOCK=N` | Queries per `sdpa_sparse_decode` call in a DeepSeek-V4.1 prefill, default `64`. `0` keeps prefill blocks on the op chain. |
+| `GMLX_DS41_PREFILL_TAIL=0` | Run every DeepSeek-V4.1 layer on every prompt row. By default the layers past the last kv-source layer skip rows no later window reaches. Same logits. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |

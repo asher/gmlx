@@ -502,6 +502,13 @@ def generate(
         else:
             arm_stack(prompt_cache, policy)
 
+    from gmlx.gen import prefill_tail
+
+    if prompt_cache is None and prefill_tail.tail_model(model):
+        # The tail arms on a cache gmlx owns; mlx-lm would build this one.
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     gen_kwargs = {
         "max_tokens": max_tokens,
         "sampler": sampler,
@@ -513,6 +520,12 @@ def generate(
     }
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
+        if prefill_tail.tail_model(model):
+            prefill_tail.arm_prefill_tail(
+                prompt_cache,
+                len(encode_prompt(tokenizer, prompt))
+                if isinstance(prompt, str) else len(prompt),
+            )
     # Module-attribute lookup so the monkeypatch seam
     # gmlx.stream.expert_streaming._resolve_prefill_step stays live for this path.
     step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)

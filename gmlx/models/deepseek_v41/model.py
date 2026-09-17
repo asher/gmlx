@@ -31,6 +31,7 @@ import mlx.nn as nn
 from mlx_lm.models.base import (
     BaseModelArgs,
     create_attention_mask,
+    create_causal_mask,
     scaled_dot_product_attention,
 )
 from mlx_lm.models.mla import MultiLinear
@@ -469,6 +470,9 @@ class Indexer(nn.Module):
             if self.uses_candidates and not source
             else None
         )
+        if given is not None and given.shape[1] != L:
+            # Prefill tail: this layer runs fewer rows than the source.
+            given = given[:, given.shape[1] - L:]
         # Query blocks: a full-length pass holds an [heads, L, P] score
         # per layer, square in the prompt for the ratio-1 layers.
         block = _v4._prefill_block()
@@ -826,7 +830,17 @@ class DeepseekV41Attention(nn.Module):
             pool_cache.update_and_fetch(latent) if pool_cache is not None else latent
         )
 
-    def __call__(self, x, mask, caches, offset, streams):
+    def publish(self, x, caches, offset, streams):
+        """The shared streams from ``x`` alone (a prefill-tail layer with
+        no query rows)."""
+        _, pool_cache, idx_cache = caches
+        self._publish(x, pool_cache, idx_cache, offset, streams, x.shape[1])
+
+    def __call__(self, x, mask, caches, offset, streams, n_prep=0, pub=None):
+        """Rows [0, n_prep) of ``x`` feed the window KV only; the rest are
+        queries. ``pub`` = (rows, offset) publishes the shared streams from
+        a wider span than ``x`` (prefill tail). None when there are no
+        query rows."""
         B, L, _ = x.shape
         local_cache, pool_cache, idx_cache = caches
         prof = _subprof_on(L)
@@ -835,12 +849,16 @@ class DeepseekV41Attention(nn.Module):
 
             t0 = time.perf_counter()
 
-        q_residual = self.q_norm(self.wq_a(x))
-        q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
-        q = q.transpose(0, 2, 1, 3)
-        q = self.rope(q, offset)
-        if prof:
-            t0 = _prof_mark("a.q", self.layer_idx, q, t0)
+        n_full = L - n_prep
+        q0 = offset + n_prep
+        xq = x[:, n_prep:] if n_prep else x
+        if n_full:
+            q_residual = self.q_norm(self.wq_a(xq))
+            q = self.wq_b(q_residual).reshape(B, n_full, self.n_heads, self.head_dim)
+            q = q.transpose(0, 2, 1, 3)
+            q = self.rope(q, q0)
+            if prof:
+                t0 = _prof_mark("a.q", self.layer_idx, q, t0)
 
         kv = self.kv_norm(self.wkv(x)).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
@@ -850,27 +868,36 @@ class DeepseekV41Attention(nn.Module):
         if prof:
             t0 = _prof_mark("a.kv", self.layer_idx, kv, t0)
 
+        if self.is_kv_source:
+            rows, base = pub if pub is not None else (x, offset)
+            self._publish(rows, pool_cache, idx_cache, base, streams, rows.shape[1])
+            if prof:
+                t0 = _prof_mark(
+                    "a.pub", self.layer_idx, (streams.pooled, streams.index_k), t0
+                )
+        if n_full == 0:
+            return None
+        if n_prep or (mask is None and n_full > 1):
+            mask = create_causal_mask(
+                n_full, kv.shape[2] - n_full,
+                window_size=self.config.sliding_window,
+            )
+
         sinks = self.attn_sink.astype(q.dtype)
         block = _v4._prefill_block()
         arrays = isinstance(kv, mx.array) and isinstance(mask, mx.array)
-        banded = 0 < block < L and arrays
+        banded = 0 < block < n_full and arrays
         if not self.compress_ratio:
             out = self._window_attention(
                 q, kv, mask, local_cache, sinks, banded, block
             )
             if prof:
                 t0 = _prof_mark("a.core", self.layer_idx, out, t0)
-            out = self._project(out, offset, B, L)
+            out = self._project(out, q0, B, n_full)
             if prof:
                 _prof_mark("a.out", self.layer_idx, out, t0)
             return out
 
-        if self.is_kv_source:
-            self._publish(x, pool_cache, idx_cache, offset, streams, L)
-            if prof:
-                t0 = _prof_mark(
-                    "a.pub", self.layer_idx, (streams.pooled, streams.index_k), t0
-                )
         pooled = streams.pooled
         plen = 0 if pooled is None else pooled.shape[1]
 
@@ -881,9 +908,9 @@ class DeepseekV41Attention(nn.Module):
         else:
             src = streams.pool_cache
             pmask = (
-                src.make_mask(L, offset)
+                src.make_mask(n_full, q0)
                 if src is not None
-                else _v4._cacheless_pool_mask(plen, L, offset, streams.ratio)
+                else _v4._cacheless_pool_mask(plen, n_full, q0, streams.ratio)
             )
             if plen <= self.index_topk:
                 # Every reachable position fits, so the gather would select
@@ -897,12 +924,15 @@ class DeepseekV41Attention(nn.Module):
             else:
                 if self.is_index_source:
                     streams.topk = self.indexer(
-                        x, q_residual, self.rope, streams.index_k, pmask,
-                        offset, streams,
+                        xq, q_residual, self.rope, streams.index_k, pmask,
+                        q0, streams,
                     )
                     if prof:
                         t0 = _prof_mark("a.idx", self.layer_idx, streams.topk, t0)
                 topk = streams.topk
+                if topk.shape[1] != n_full:
+                    # Prefill tail: fewer rows than the index source ran.
+                    topk = topk[:, topk.shape[1] - n_full:]
                 sparse_mask = None
                 if pmask is not None:
                     sparse_mask = mx.take_along_axis(
@@ -910,8 +940,10 @@ class DeepseekV41Attention(nn.Module):
                     )[:, None]
                 out = None
                 if _v4._sparse_kernel_ok():
-                    kblock = _v4._sparse_kernel_block() if arrays and L > 16 else 0
-                    if 0 < kblock < L:
+                    kblock = (
+                        _v4._sparse_kernel_block() if arrays and n_full > 16 else 0
+                    )
+                    if 0 < kblock < n_full:
                         out = _v4._sparse_kernel_attention_banded(
                             q, kv, pooled, topk, mask, sparse_mask, self.scale,
                             sinks, self.config.sliding_window, kblock,
@@ -924,7 +956,7 @@ class DeepseekV41Attention(nn.Module):
                 if out is not None:
                     pass
                 elif (
-                    L <= 4
+                    n_full <= 4
                     and _v4._COMPILE_SPARSE
                     and kv.shape[2] >= self.config.sliding_window
                 ):
@@ -932,7 +964,7 @@ class DeepseekV41Attention(nn.Module):
                     # compiled core traces once. The gather stays eager
                     # (it alone sees the growing pool).
                     gathered = _v4._sparse_topk_gather(
-                        pooled, topk, L, self.head_dim
+                        pooled, topk, n_full, self.head_dim
                     )
                     out = _v4._sparse_gathered_attention_c(
                         q, kv, gathered, mask, sparse_mask, self.scale, sinks
@@ -949,7 +981,7 @@ class DeepseekV41Attention(nn.Module):
                     )
         if prof:
             t0 = _prof_mark("a.core", self.layer_idx, out, t0)
-        out = self._project(out, offset, B, L)
+        out = self._project(out, q0, B, n_full)
         if prof:
             _prof_mark("a.out", self.layer_idx, out, t0)
         return out
@@ -1088,6 +1120,11 @@ if _LAYER_PROFILE:
     atexit.register(_prof_dump)
 
 
+def _prefill_tail_on() -> bool:
+    """GMLX_DS41_PREFILL_TAIL=0 runs every layer on every prompt row."""
+    return os.environ.get("GMLX_DS41_PREFILL_TAIL", "1") != "0"
+
+
 class DeepseekV41Block(nn.Module):
     """Attention and FFN between a collapse and an expand, with the
     collapse weights coming from the previous sublayer.
@@ -1183,6 +1220,63 @@ class DeepseekV41Block(nn.Module):
             _prof_mark("hc", self.layer_idx, h, t0)
         return h, ffn_pre
 
+    def _front(self, hc, norm, h, pre_in):
+        """One sublayer's hyper-connection front on the route the row
+        count picks: (x, pre, post, comb, fused). ``fused`` names the
+        expand that pairs with these mixes."""
+        if (
+            _hc_fused_route()
+            and h.dtype in (mx.float16, mx.bfloat16)
+            and hc.wide_fused_ok(h)
+        ):
+            mixes_raw, ssq = hc.front_wide(h)
+            x, pre, post, comb = hc.lag_collapse_m1(
+                h, mixes_raw, ssq, norm.weight, pre_in
+            )
+            return x, pre, post, comb, True
+        pre, post, comb = _hc_mixes(hc, h)
+        return norm(_hc_collapse(h, pre_in)), pre, post, comb, False
+
+    @staticmethod
+    def _expand(x, residual, post, comb, fused):
+        if fused:
+            return hc_expand_m1(x, residual, post, comb)
+        return hc_expand(x, residual, post, comb)
+
+    def tail_step(self, h, pre_mix, caches, offset, streams, input_ids,
+                  image_mask, n_pub, n_prep, publish):
+        """``__call__`` on a prefill tail. Rows [0, n_pub) of ``h`` only
+        feed the shared streams (``publish``), the next ``n_prep`` rows
+        only the window KV; the rest run in full. ``input_ids`` and
+        ``image_mask`` cover the full rows. Returns 0 rows when there
+        are none."""
+        x, attn_pre, attn_post, attn_comb, fused = self._front(
+            self.attn_hc, self.attn_norm, h, pre_mix
+        )
+        if x.shape[1] == n_pub:
+            if publish:
+                self.attn.publish(x, caches, offset, streams)
+            return h[:, :0], attn_pre[:, :0]
+        pub = (x, offset) if publish else None
+        if n_pub:
+            x = x[:, n_pub:]
+        x = self.attn(x, None, caches, offset + n_pub, streams, n_prep, pub)
+        if x is None:
+            return h[:, :0], attn_pre[:, :0]
+        a = n_pub + n_prep
+        if a:
+            h, attn_pre, attn_post, attn_comb = (
+                h[:, a:], attn_pre[:, a:], attn_post[:, a:], attn_comb[:, a:]
+            )
+        h = self._expand(x, h, attn_post, attn_comb, fused)
+
+        x, ffn_pre, ffn_post, ffn_comb, fused = self._front(
+            self.ffn_hc, self.ffn_norm, h, attn_pre
+        )
+        x = self.ffn(x, input_ids, image_mask)
+        h = self._expand(x, h, ffn_post, ffn_comb, fused)
+        return h, ffn_pre
+
     def fused_step(self, h, pre_mix, carry, mask, caches, offset, streams,
                    input_ids, image_mask=None):
         """``__call__`` on the fused M=1 route: two dispatches per
@@ -1254,6 +1348,40 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         if layer_idx in self.args.kv_source_layers:
             return members[0], members[1], members[2]
         return members[0], None, None
+
+    def _tail_plan(self, entry, offset, L, B, fused):
+        """(prompt end, first tail layer, window history) when this chunk
+        runs under an armed prompt end (``_gmlx_prefill_end`` on the first
+        cache entry), else None. A chunk that reaches the end clears the
+        arm. Layers past the last kv-source layer then run only the rows
+        the layers after them can still reach: the last layer needs the
+        last row, and each layer before it one window more.
+        (ds4 decoder suffix)"""
+        end = getattr(entry, "_gmlx_prefill_end", None)
+        if end is None:
+            return None
+        end = int(end)
+        if offset + L >= end:
+            entry._gmlx_prefill_end = None
+        hist = (self.args.sliding_window or 0) - 1
+        sources = self.args.kv_source_layers
+        if (
+            fused or B != 1 or hist <= 0 or not sources
+            or offset + L > end or end - 1 - hist <= offset
+            or not _prefill_tail_on()
+        ):
+            return None
+        return end, max(sources), hist
+
+    def _touch_window(self, local, B, dtype):
+        """A never-written tail window cache gets an empty state (the
+        generation loop evaluates every cache after a chunk). Its offset
+        counts the rows it holds, as the rotating cache expects."""
+        if local is not None and getattr(local, "keys", None) is None:
+            local.update_and_fetch(
+                mx.zeros((B, 1, 0, self.args.head_dim), dtype=dtype),
+                mx.zeros((B, 1, 0, 0)),
+            )
 
     def _history_slot(self, cache, cache_list_types):
         """The engram token history, held on the first engram layer."""
@@ -1329,8 +1457,13 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         prof = _LAYER_PROFILE and (
             (fused and h.shape[1] == 1) or (_PROFILE_WIDE and h.shape[1] > 1)
         )
+        L = h.shape[1]
+        tail = self._tail_plan(cache[0], offset, L, h.shape[0], fused)
+        n_layers = len(self.layers)
         for idx, layer in enumerate(self.layers):
-            if layer.engram is not None and row_ids is not None:
+            # Rows of h are the chunk's last h.shape[1] rows (prefill tail).
+            r0 = L - h.shape[1]
+            if layer.engram is not None and row_ids is not None and h.shape[1]:
                 if prof:
                     import time
 
@@ -1338,11 +1471,26 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
                 if carry is not None:
                     h, carry = hc_expand_m1(*carry), None
                 h = layer.engram(
-                    h, row_ids[:, :, layer.engram_slot, :], engram_mask
+                    h, row_ids[:, r0:, layer.engram_slot, :],
+                    engram_mask if engram_mask is None else engram_mask[:, r0:],
                 )
                 if prof:
                     _prof_mark("engram", idx, h, t0)
             caches = self._split_cache(idx, cache[idx], cache_list_types)
+            if tail is not None and idx >= tail[1]:
+                end, _, hist = tail
+                if h.shape[1]:
+                    f = end - 1 - hist * (n_layers - 1 - idx)
+                    lo = min(L, max(0, f - hist - offset))
+                    a = min(L, max(0, f - offset))
+                    h, pre_mix = layer.tail_step(
+                        h, pre_mix, caches, offset + r0, streams,
+                        inputs[:, a:],
+                        image_mask if image_mask is None else image_mask[:, a:],
+                        lo - r0, a - lo, idx in self.args.kv_source_layers,
+                    )
+                self._touch_window(caches[0], h.shape[0], h.dtype)
+                continue
             if fused:
                 h, pre_mix, carry = layer.fused_step(
                     h, pre_mix, carry, mask, caches, offset, streams,
@@ -1372,6 +1520,11 @@ class Model(nn.Module):
                  image_mask=None, **kwargs) -> mx.array:
         out = self.model(inputs, cache, input_embeddings=input_embeddings,
                          image_mask=image_mask)
+        if out.shape[1] == 0:
+            # A prefill-tail chunk with no row the last layer needs.
+            return mx.zeros(
+                (out.shape[0], 0, self.args.vocab_size), dtype=out.dtype
+            )
         if self.args.tie_word_embeddings:
             return self.model.embed_tokens.as_linear(out)
         return self.lm_head(out)
