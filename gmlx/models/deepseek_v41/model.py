@@ -447,15 +447,22 @@ class Indexer(nn.Module):
         q = rope(q, offset)
         q = _indexer_qat(q)
 
-        q = q.astype(mx.float32)
-        keys = index_k[:, None].swapaxes(-1, -2).astype(mx.float32)
-        weights = _v4._skinny_linear(self.weights_proj, x).astype(mx.float32) * (
+        weights = _v4._skinny_linear(self.weights_proj, x) * (
             self.n_heads ** -0.5
         )
-        weights = weights.swapaxes(-1, -2)[..., None]
+        scorer = _indexer_kernel_scorer(
+            q, index_k, weights, self.scale, k,
+            offset if pmask is not None else None, streams.ratio,
+        )
+        if scorer is None:
+            q = q.astype(mx.float32)
+            keys = index_k[:, None].swapaxes(-1, -2).astype(mx.float32)
+            weights = weights.astype(mx.float32).swapaxes(-1, -2)[..., None]
+            floor = mx.finfo(mx.float32).min
+        else:
+            floor = mx.finfo(mx.float16).min
         if pmask is not None and pmask.ndim == 2:
             pmask = pmask[None]
-        floor = mx.finfo(mx.float32).min
         source = self.is_candidate_source and self.candidate_block_size > 0
         given = (
             streams.candidates
@@ -469,9 +476,12 @@ class Indexer(nn.Module):
         tops, cands = [], []
         for qs in range(0, L, block):
             qe = min(L, qs + block)
-            scores = q[:, :, qs:qe] @ keys
-            scores = mx.maximum(scores, 0) * self.scale
-            scores = (scores * weights[:, :, qs:qe]).sum(axis=1)
+            if scorer is not None:
+                scores = scorer(qs, qe)
+            else:
+                scores = q[:, :, qs:qe] @ keys
+                scores = mx.maximum(scores, 0) * self.scale
+                scores = (scores * weights[:, :, qs:qe]).sum(axis=1)
             if pmask is not None:
                 scores = mx.where(pmask[:, qs:qe], scores, floor)
             if source:
@@ -483,7 +493,12 @@ class Indexer(nn.Module):
                 )
             elif given is not None:
                 scores = mx.where(given[:, qs:qe], scores, floor)
-            tops.append(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
+            if scorer is not None:
+                tops.append(_indexer_kernel_topk(scores, k))
+            else:
+                tops.append(
+                    mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+                )
         if source:
             streams.candidates = (
                 None if any(c is None for c in cands)
@@ -491,6 +506,104 @@ class Indexer(nn.Module):
                 else mx.concatenate(cands, axis=1)
             )
         return tops[0] if len(tops) == 1 else mx.concatenate(tops, axis=1)
+
+
+def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
+    """Prefill scores through the kq indexer GEMM (dsa_indexer_scores): the
+    relu, scale and head sum run in the kernel, so no [heads, L, P] score
+    is materialized. fp16 operands hold the FP4-grid q and k exactly; the
+    scale folds into the per-head weights. Keys pad once to the 64-row
+    tile, a query block pads per call.
+
+    ``offset`` (absolute position of query row 0) with the pool ``ratio``
+    arms the kernel's causal tile skip. The caller's mask hides pooled row
+    n from query row m once n >= (offset + m + 1) // ratio, and
+    (offset + qs + 1) // ratio - 1 + m never falls under that bound, so
+    the tiles past it hold only hidden scores and skip; the mask still
+    decides the exact set. Pass ``offset`` only under that mask.
+
+    On tensor-op hardware the int8 arm (dsa_indexer_scores_q) runs on the
+    packed FP4 codes, bit-identical to the fp16 GEMM on the same rows.
+    Returns ``score(qs, qe) -> [B, qe - qs, P]`` float16, or None to keep
+    the inline fp32 path (decode widths, other geometries, no Metal,
+    GMLX_DSA_INDEXER=0)."""
+    B, H, L, D = q.shape
+    P = index_k.shape[1]
+    if (
+        L <= 4
+        or H not in (32, 64)
+        or D != 128
+        or k not in (512, 2048)
+        or not mx.metal.is_available()
+        or mx.default_device() != mx.Device(mx.gpu)
+        or not _v4._dsa_probe("indexer")
+    ):
+        return None
+    import mlx_kquant as kq
+
+    causal = isinstance(offset, int) and isinstance(ratio, int) and ratio >= 1
+    q16 = q.astype(mx.float16)
+    w16 = (weights * scale).astype(mx.float16)
+    keys = index_k.astype(mx.float16)[:, None]
+    pad_n = (-P) % 64
+    if pad_n:
+        keys = mx.concatenate(
+            [keys, mx.zeros((B, 1, pad_n, D), dtype=mx.float16)], axis=2
+        )
+    packed = None
+    if _qat_enabled() and _v4._dsa_probe("indexer_q"):
+        try:
+            packed = (kq.dsa_indexer_qat_pack(q16), kq.dsa_indexer_qat_pack(keys))
+        except Exception as exc:  # noqa: BLE001 - permanent fallback
+            _v4._dsa_disable("indexer_q", exc)
+
+    def score(qs, qe):
+        m = qe - qs
+        pad_l = (-m) % 64
+        wb = w16[:, qs:qe]
+        if pad_l:
+            wb = mx.concatenate(
+                [wb, mx.zeros((B, pad_l, H), dtype=mx.float16)], axis=1
+            )
+        flags = (
+            dict(
+                causal=True,
+                skip_causal_future_store=True,
+                causal_q_offset=(offset + qs + 1) // ratio - 1,
+            )
+            if causal
+            else dict(causal=False)
+        )
+        if packed is not None:
+            (qc, qsc), (kc, ksc) = packed
+            qc, qsc = qc[:, :, qs:qe], qsc[:, :, qs:qe]
+            if pad_l:
+                qc = mx.concatenate(
+                    [qc, mx.zeros((B, H, pad_l, D), dtype=qc.dtype)], axis=2
+                )
+                qsc = mx.concatenate(
+                    [qsc, mx.zeros((B, H, pad_l, qsc.shape[-1]), dtype=qsc.dtype)],
+                    axis=2,
+                )
+            s = kq.dsa_indexer_scores_q(qc, qsc, kc, ksc, wb, **flags)
+        else:
+            qb = q16[:, :, qs:qe]
+            if pad_l:
+                qb = mx.concatenate(
+                    [qb, mx.zeros((B, H, pad_l, D), dtype=mx.float16)], axis=2
+                )
+            s = kq.dsa_indexer_scores(qb, keys, wb, **flags)
+        return s[:, 0, :m, :P]
+
+    return score
+
+
+def _indexer_kernel_topk(scores, k):
+    """Top-k over kernel scores [B, L, P] float16 through the kq radix
+    arg-select: the same index set as argpartition, order unspecified."""
+    import mlx_kquant as kq
+
+    return kq.dsa_topk_indices(scores[:, None], k, bucketed=True)[:, 0]
 
 
 def _select_candidate_blocks(scores, topk_blocks, block_size, floor):

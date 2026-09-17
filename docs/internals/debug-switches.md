@@ -35,6 +35,8 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DS41_QAT_FUSED=0` | DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | DeepSeek-V4.1 decode attention as the gather and compiled op chain instead of the mlx-kquant `sdpa_sparse_decode` kernel. The kernel keeps its softmax in fp32. |
 | `GMLX_DS4_PREFILL_BLOCK=N` | DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores, default `512`. `0` scores every query against the whole chunk. |
+| `GMLX_DSA_INDEXER=0` | DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant GEMM and radix select. Same picks to fp16 rounding. |
+| `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel on the packed FP4 codes. Bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL_BLOCK=N` | Queries per `sdpa_sparse_decode` call in a DeepSeek-V4.1 prefill, default `64`. `0` keeps prefill blocks on the op chain. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
