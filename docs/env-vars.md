@@ -104,6 +104,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_KVARN_BITS` | Split key and value widths for kvarn KV in `k6v5` form. Overrides the width `kv_bits` gives both. A value not of that form is ignored with a warning. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the estimated KV room with a flat reserve in GB. The fallback is `8` when the KV size cannot be computed from the header. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache again. Default off, since a ring pass reads each expert once. |
+| `GMLX_PREFILL_RING_SLOTS` | Prefill ring depth in layer slots, default `2`. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the decode arena. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware instead of by whole-layer staging, default `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the arena serves by token-splitting when its routed set exceeds the arena. Default `256`. `0` disables it. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure. By default it shrinks, keeping its most routed experts, then regrows when pressure clears. |

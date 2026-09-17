@@ -989,8 +989,9 @@ def install_expert_streaming(
             )
             loadlog.info(
                 "[stream] feeder prefill: expert stacks staged straight "
-                f"from GGUF through 2 x {feeder.slot_bytes / 1e9:.1f} GB "
-                f"GPU-visible ring slots{cov} (--no-prefill-feeder disables)"
+                f"from GGUF through {feeder.n_slots} x "
+                f"{feeder.slot_bytes / 1e9:.1f} GB GPU-visible ring "
+                f"slots{cov} (--no-prefill-feeder disables)"
             )
     if (
         streaming

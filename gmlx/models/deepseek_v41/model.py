@@ -1373,6 +1373,28 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             return None
         return end, max(sources), hist
 
+    def _limit_feeder_pass(self, tail, offset, L):
+        """Tell the prefill feeder the last layer whose experts this pass
+        uses, so it stages nothing for the layers the tail skips."""
+        feeder = None
+        for layer in self.layers:
+            feeder = getattr(
+                getattr(layer.ffn, "switch_mlp", None), "_kq_feeder", None
+            )
+            if feeder is not None:
+                break
+        if feeder is None or not hasattr(feeder, "limit_pass"):
+            return
+        last = None
+        if tail is not None:
+            end, first, hist = tail
+            n = len(self.layers)
+            last = first - 1
+            for idx in range(first, n):
+                if end - 1 - hist * (n - 1 - idx) < offset + L:
+                    last = idx
+        feeder.limit_pass(last)
+
     def _touch_window(self, local, B, dtype):
         """A never-written tail window cache gets an empty state (the
         generation loop evaluates every cache after a chunk). Its offset
@@ -1460,6 +1482,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         L = h.shape[1]
         tail = self._tail_plan(cache[0], offset, L, h.shape[0], fused)
         n_layers = len(self.layers)
+        self._limit_feeder_pass(tail, offset, L)
         for idx, layer in enumerate(self.layers):
             # Rows of h are the chunk's last h.shape[1] rows (prefill tail).
             r0 = L - h.shape[1]

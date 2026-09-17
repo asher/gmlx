@@ -331,11 +331,12 @@ def _prefill_ring_reason(offsets, left: int | None) -> str | None:
     is the user's budget and the ring is not judged against it."""
     if left is None or os.environ.get("GMLX_DECODE_ARENA_GB"):
         return None
-    from gmlx.stream.prefill_feeder import ring_bytes
+    from gmlx.stream.prefill_feeder import ring_bytes, ring_slots
 
     ring = ring_bytes(offsets)
     if ring <= left:
         return None
-    return (f"ring 2 x {ring / 2e9:.1f} GB exceeds the {left / 1e9:.1f} GB "
-            "left under the memory ceiling after the every-token weights "
-            "and the KV room")
+    n = ring_slots()
+    return (f"ring {n} x {ring / n / 1e9:.1f} GB exceeds the "
+            f"{left / 1e9:.1f} GB left under the memory ceiling after the "
+            "every-token weights and the KV room")

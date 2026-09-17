@@ -415,3 +415,35 @@ def test_seeding_off_leaves_arena_cold(monkeypatch, tmp_path):
     feeder.release_slots()
     dfeeder.ensure_wired()
     assert dfeeder._seeded == 0 and (dfeeder._owner[0] == -1).all()
+
+
+def test_ring_depth_from_env(monkeypatch, tmp_path):
+    """GMLX_PREFILL_RING_SLOTS deepens the ring: slots rotate over that
+    many, ring_bytes prices them all, a call stages n-1 layers ahead and
+    a pass limit stops staging past the last layer the pass uses."""
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    monkeypatch.setenv("GMLX_PREFILL_RING_SLOTS", "3")
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=5)
+    assert feeder.n_slots == 3
+    assert [feeder._slot_of[li] for li in range(5)] == [0, 1, 2, 0, 1]
+    (tmp_path / "one").mkdir()
+    offsets, _ = _make_fixture(tmp_path / "one", 1)
+    assert ring_bytes(offsets) == 3 * sum(r[2] for r in offsets[0])
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    assert set(feeder._ready) == {0, 1, 2}
+    feeder.limit_pass(3)
+    with feeder.prefill_call(modules[1][0], 1):
+        pass
+    assert set(feeder._ready) == {0, 1, 2, 3}
+    with feeder.prefill_call(modules[2][0], 2):
+        for e in range(4):
+            assert _slot_expert(feeder, 2, "gate", e) == _expert_bytes(2, "gate", e)
+    assert 4 not in feeder._ready
+    assert feeder._error is None
+    feeder.limit_pass(None)
+    monkeypatch.setenv("GMLX_PREFILL_RING_SLOTS", "x")
+    from gmlx.stream.prefill_feeder import ring_slots
+
+    assert ring_slots() == 2

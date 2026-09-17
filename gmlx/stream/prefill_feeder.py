@@ -59,8 +59,20 @@ _READ_WORKERS = 12
 _STAGE_TIMEOUT_S = 300.0
 
 
+def ring_slots() -> int:
+    """Ring depth in layer slots (GMLX_PREFILL_RING_SLOTS, default 2). Each
+    slot past two stages one more layer ahead: a layer whose compute is
+    shorter than its stage (a prefill tail) then finds its experts ready,
+    at one slot of arena room per layer of lookahead."""
+    try:
+        return max(2, int(os.environ.get("GMLX_PREFILL_RING_SLOTS", "2")))
+    except ValueError:
+        return 2
+
+
 class PrefillFeeder:
-    """Two-slot staged expert streaming; covered layers alternate slots."""
+    """Staged expert streaming through a ring of ``ring_slots()`` layer
+    slots; covered layers take slots in order."""
 
     def __init__(
         self,
@@ -136,13 +148,19 @@ class PrefillFeeder:
         # of its own geometry (mixed-codec quants - e.g. Q5_K_M's q6_k down
         # stacks on some layers - make per-kind shapes non-uniform).
         self._max_bytes = max_bytes
+        self.n_slots = ring_slots()
         self._alloc_slots()
         self.slot_bytes = sum(a.nbytes for a, _ in self._slots[0].values())
 
         # Ring slot by position in the ordered covered set, not absolute
         # layer parity: coverage gaps (e.g. interval-2 MoE layers) would
         # otherwise map consecutive covered layers to the same slot.
-        self._slot_of = {li: i % 2 for i, li in enumerate(sorted(self._layers))}
+        self._slot_of = {
+            li: i % self.n_slots for i, li in enumerate(sorted(self._layers))
+        }
+        # Last layer the current pass will call (a prefill tail skips the
+        # rest); staging past it would only be drained at the next pass.
+        self._pass_last: int | None = None
 
         self._stage_pool = ThreadPoolExecutor(max_workers=1)
         self._read_pool = ThreadPoolExecutor(max_workers=_READ_WORKERS)
@@ -176,7 +194,7 @@ class PrefillFeeder:
                 else kq.arena_alloc([n])
                 for k, n in self._max_bytes.items()
             }
-            for _ in (0, 1)
+            for _ in range(self.n_slots)
         ]
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
         # Wired like the arena, in the room the budget keeps for it. A
@@ -273,16 +291,24 @@ class PrefillFeeder:
         return self._read_pool.submit(read_range, fd, dest, off)
 
     def _kick(self, li: int) -> None:
-        if li in self._layers and li not in self._ready:
+        if (
+            li in self._layers and li not in self._ready
+            and (self._pass_last is None or li <= self._pass_last)
+        ):
             self._ready[li] = threading.Event()
             self._stage_pool.submit(self._stage, li)
+
+    def limit_pass(self, last_li: int | None) -> None:
+        """Stage nothing past ``last_li`` in the pass that starts next (or
+        the current one); None lifts the limit."""
+        self._pass_last = last_li
 
     # the per-call protocol
 
     def _drain_on_new_pass(self, li: int) -> None:
         if not self._slots:  # ring was released for decode; rebuild
             if self._lend_hook is not None:
-                self._lend_hook(2 * self.slot_bytes)
+                self._lend_hook(self.n_slots * self.slot_bytes)
             self._alloc_slots()
         if self._last_li is None or li <= self._last_li:
             # New prefill pass (next chunk or new request). In-flight staging
@@ -352,8 +378,9 @@ class PrefillFeeder:
         self._drain_on_new_pass(li)
         self._submit_seed()
         self._kick(li)
-        nxt = min((t for t in self._layers if t > li), default=None)
-        if nxt is not None:
+        # The slots of the next n_slots - 1 covered layers held layers
+        # before this one, whose compute the eval fence has proven done.
+        for nxt in sorted(t for t in self._layers if t > li)[:self.n_slots - 1]:
             self._kick(nxt)
         t0 = time.monotonic()
         ready = self._ready[li].wait(_STAGE_TIMEOUT_S)
@@ -429,8 +456,9 @@ class PrefillFeeder:
 
 
 def ring_bytes(offsets) -> int:
-    """A-priori size of the two ring slots: twice the largest layer's
-    expert stacks, per kind, over the layers the feeder would cover."""
+    """A-priori size of the ring: ``ring_slots()`` times the largest
+    layer's expert stacks, per kind, over the layers the feeder would
+    cover."""
     largest: dict[str, int] = {}
     for ranges in offsets.values():
         kinds = {r[4] for r in ranges}
@@ -438,7 +466,7 @@ def ring_bytes(offsets) -> int:
             continue
         for _, _, nbytes, _, kind in ranges:
             largest[kind] = max(largest.get(kind, 0), nbytes)
-    return 2 * sum(largest.values())
+    return ring_slots() * sum(largest.values())
 
 
 def maybe_make_prefill_feeder(offsets, modules) -> PrefillFeeder | None:
