@@ -37,8 +37,14 @@ from mlx_lm.models.base import (
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 
+import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.models.deepseek_v4 import model as _v4
-from gmlx.models.deepseek_v4.cache import PoolingCache, pool_arrays, pool_rows
+from gmlx.models.deepseek_v4.cache import (
+    BatchPoolingCache,
+    PoolingCache,
+    pool_arrays,
+    pool_rows,
+)
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     _hc_split_sinkhorn_ops,
@@ -858,6 +864,64 @@ def _latent_qat(x: mx.array) -> mx.array:
 
 
 # Attention.
+
+
+# Arch-default prefill chunk once the indexer profile is armed. A streamed
+# V4.1 reads its whole routed expert set once per chunk, so it takes the
+# loader's streaming step. An in-RAM model keeps V4's measured 4096.
+# GMLX_DS41_PREFILL_STEP overrides in either direction, and an explicit
+# PREFILL_STEP_SIZE (flag, config or env) wins over both.
+_DS41_BASE_STEP: Optional[int] = 4096
+_DS41_STREAM_BASE_STEP: Optional[int] = 8192
+
+
+def _ds41_base_step(model) -> Optional[int]:
+    env = os.environ.get("GMLX_DS41_PREFILL_STEP")
+    if env:
+        try:
+            n = int(env)
+        except ValueError:
+            return None
+        return n if n > 0 else None
+    from gmlx.stream.expert_streaming import moe_streaming_active
+
+    try:
+        streamed = bool(moe_streaming_active(model))
+    except Exception:
+        streamed = False
+    return _DS41_STREAM_BASE_STEP if streamed else _DS41_BASE_STEP
+
+
+# Score-transient profile for prefill_decay, on the V4 pattern. With the
+# indexer GEMM and the sparse attention kernel armed, a single-sequence
+# prefill never materializes the dense [heads, step, P] score, because the
+# relu, scale and head sum run inside dsa_indexer_scores. That kernel
+# returns fp16 and this prices fp32, so the fit test overstates the
+# transient by 2x. Layers past the candidate source carry compress ratio
+# 1, so the widest pool is the full depth and the divisor stays 1.
+# Quantized pools keep the profile, since prefill dequantizes pooled rows
+# on read and the per-layer copy is step-independent. Disarms on either
+# kernel off, a batched cache or a quantized local window, where the dense
+# transient model is authoritative again.
+_score_profile_composed = _prefill_decay.build_score_profile(
+    profile=lambda: _prefill_decay.ScoreTransientProfile(
+        heads=1, bytes_per_elem=4, depth_divisor=1),
+    kernels_armed=lambda: (_v4._dsa_probe("indexer")
+                           and _v4._sparse_kernel_ok()),
+    require_cache=PoolingCache,
+    disarm_cache=BatchPoolingCache,
+    allow_quantized_pools=True,
+)
+
+
+def _prefill_score_profile(model, prompt_cache):
+    prof = _score_profile_composed(model, prompt_cache)
+    if prof is None:
+        return None
+    return prof._replace(base_step=_ds41_base_step(model))
+
+
+_prefill_decay.register_score_profile("deepseek_v41", _prefill_score_profile)
 
 
 class DeepseekV41Attention(nn.Module):

@@ -32,6 +32,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `serve` prefills a streamed DeepSeek-V4.1 about twice as fast. It cut
+  the prompt into 2048-token chunks and re-read the whole expert set once
+  per chunk.
 - `pull` fetches a file in bounded range windows once it knows the remote
   length, so downloading or resuming a very large GGUF from Hugging Face's
   xet CDN no longer fails with HTTP 400.
