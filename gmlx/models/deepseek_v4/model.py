@@ -48,7 +48,11 @@ from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
-from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.cache import (
+    BatchPoolingCache,
+    PackedPool,
+    PoolingCache,
+)
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     HyperHead,
@@ -1106,7 +1110,9 @@ _SPARSE_KERNEL_MAX_L = 4096
 # its own queries reach, so a narrow block wastes fewer masked rows and a
 # wide one makes fewer calls.
 _SPARSE_KERNEL_BLOCK = int(os.environ.get("GMLX_DS41_SPARSE_KERNEL_BLOCK", "64") or 0)
-_SPARSE_KERNEL: Dict[str, Optional[bool]] = {"on": None, "wide": None, "prefill": None}
+_SPARSE_KERNEL: Dict[str, Optional[bool]] = {
+    "on": None, "wide": None, "prefill": None, "fp4": None,
+}
 
 
 def _sparse_kernel_wide() -> bool:
@@ -1191,6 +1197,65 @@ def _sparse_kernel_ok() -> bool:
     return on
 
 
+def _pool_fp4_probe() -> bool:
+    """Whether the sparse kernels take a latent_fp4_pack pool and answer
+    exactly as they do on the same rows unpacked."""
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "latent_fp4_pack"):
+        return False
+    keys = mx.random.split(mx.random.key(5), 4)
+    L, S, D, W = 3, 8, 128, 4
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, S, D), key=keys[1]).astype(mx.bfloat16)
+    raw = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    codes, scales = kq.latent_fp4_pack(raw)
+    pooled = kq.latent_fp4_unpack(codes, scales, mx.bfloat16)
+    topk = mx.array(
+        [[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8], [2, 5, 8, 11, 0, 3]]],
+        mx.uint32,
+    )
+    scale = D ** -0.5
+    # Packed call first: a kernel without the keyword refuses here.
+    got = kq.sdpa_sparse_decode(
+        q, kv, codes, topk, scale, sinks=sinks, pool_scales=scales
+    )
+    want = kq.sdpa_sparse_decode(q, kv, pooled, topk, scale, sinks=sinks)
+    if not mx.array_equal(got, want).item():
+        return False
+    if hasattr(kq, "sdpa_sparse_prefill"):
+        got = kq.sdpa_sparse_prefill(
+            q, kv, codes, topk, scale, W, sinks=sinks, pool_scales=scales
+        )
+        want = kq.sdpa_sparse_prefill(q, kv, pooled, topk, scale, W, sinks=sinks)
+        if not mx.array_equal(got, want).item():
+            return False
+    return True
+
+
+def _pool_fp4_ok() -> bool:
+    """Whether the latent pool can rest in the FP4 packed form the sparse
+    kernels read directly (GMLX_DS41_POOL_FP4=0 keeps fp16 rows)."""
+    on = _SPARSE_KERNEL["fp4"]
+    if on is None:
+        on = False
+        if os.environ.get("GMLX_DS41_POOL_FP4", "1") != "0" and _sparse_kernel_ok():
+            try:
+                on = _pool_fp4_probe()
+            except Exception:  # noqa: BLE001 - any refusal keeps fp16 rows
+                on = False
+        _SPARSE_KERNEL["fp4"] = on
+    return on
+
+
+def _pool_kernel_args(pooled):
+    """The kernel's pool operand and keyword for ``pooled``, packed or not."""
+    if isinstance(pooled, PackedPool):
+        return pooled.codes, {"pool_scales": pooled.scales}
+    return pooled, {}
+
+
 def _sparse_kernel_mask(mask, L: int, X: int) -> Optional[mx.array]:
     """A bool mask in the kernel's [L, X] / [B, L, X] form, or False when
     the mask is one the kernel cannot take."""
@@ -1230,9 +1295,10 @@ def _sparse_kernel_attention(
         return None
     import mlx_kquant as kq
 
+    pooled, pool_kw = _pool_kernel_args(pooled)
     return kq.sdpa_sparse_decode(
         q, local_kv, pooled, topk, scale,
-        sinks=sinks, win_mask=win_mask, sel_mask=sel_mask,
+        sinks=sinks, win_mask=win_mask, sel_mask=sel_mask, **pool_kw,
     )
 
 
@@ -1326,8 +1392,10 @@ def _sparse_kernel_prefill(
         return None
     import mlx_kquant as kq
 
+    pooled, pool_kw = _pool_kernel_args(pooled)
     return kq.sdpa_sparse_prefill(
-        q, local_kv, pooled, topk, scale, window, sinks=sinks, sel_mask=sel_mask
+        q, local_kv, pooled, topk, scale, window,
+        sinks=sinks, sel_mask=sel_mask, **pool_kw,
     )
 
 

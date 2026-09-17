@@ -119,6 +119,7 @@ def _reset(monkeypatch):
     monkeypatch.setitem(v4._SPARSE_KERNEL, "on", None)
     monkeypatch.setitem(v4._SPARSE_KERNEL, "wide", None)
     monkeypatch.setitem(v4._SPARSE_KERNEL, "prefill", None)
+    monkeypatch.setitem(v4._SPARSE_KERNEL, "fp4", None)
 
 
 def test_switch_off_keeps_the_chain(monkeypatch):

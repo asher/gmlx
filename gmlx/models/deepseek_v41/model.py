@@ -38,7 +38,7 @@ from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 
 from gmlx.models.deepseek_v4 import model as _v4
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import PoolingCache, pool_arrays, pool_rows
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     _hc_split_sinkhorn_ops,
@@ -916,7 +916,8 @@ class DeepseekV41Attention(nn.Module):
             self._publish(rows, pool_cache, idx_cache, base, streams, rows.shape[1])
             if prof:
                 t0 = _prof_mark(
-                    "a.pub", self.layer_idx, (streams.pooled, streams.index_k), t0
+                    "a.pub", self.layer_idx,
+                    (pool_arrays(streams.pooled), streams.index_k), t0,
                 )
         if n_full == 0:
             return None
@@ -958,7 +959,7 @@ class DeepseekV41Attention(nn.Module):
             if plen <= self.index_topk:
                 # Every reachable position fits, so the gather would select
                 # all of them; a masked dense pass is the same result.
-                full_kv = mx.concatenate([kv, pooled[:, None]], axis=2)
+                full_kv = mx.concatenate([kv, pool_rows(pooled)[:, None]], axis=2)
                 out = scaled_dot_product_attention(
                     q, full_kv, full_kv, cache=local_cache, scale=self.scale,
                     mask=_v4._extend_mask(mask, pmask, full_kv.shape[2]),
@@ -996,32 +997,33 @@ class DeepseekV41Attention(nn.Module):
                             q, kv, pooled, topk, mask, sparse_mask, self.scale,
                             sinks,
                         )
-                if out is not None:
-                    pass
-                elif (
-                    n_full <= 4
-                    and _v4._COMPILE_SPARSE
-                    and kv.shape[2] >= self.config.sliding_window
-                ):
-                    # Decode on a full window: steady shapes, so the
-                    # compiled core traces once. The gather stays eager
-                    # (it alone sees the growing pool).
-                    gathered = _v4._sparse_topk_gather(
-                        pooled, topk, n_full, self.head_dim
-                    )
-                    out = _v4._sparse_gathered_attention_c(
-                        q, kv, gathered, mask, sparse_mask, self.scale, sinks
-                    )
-                elif banded:
-                    out = _v4._sparse_pooled_attention_banded(
-                        q, kv, pooled, topk, mask, sparse_mask, self.scale,
-                        sinks, self.config.sliding_window, block,
-                    )
-                else:
-                    out = _v4._sparse_pooled_attention(
-                        q, kv, pooled, topk, mask, sparse_mask, self.scale,
-                        sinks,
-                    )
+                if out is None:
+                    # The chains read rows; a packed pool unpacks here.
+                    rows = pool_rows(pooled)
+                    if (
+                        n_full <= 4
+                        and _v4._COMPILE_SPARSE
+                        and kv.shape[2] >= self.config.sliding_window
+                    ):
+                        # Decode on a full window: steady shapes, so the
+                        # compiled core traces once. The gather stays eager
+                        # (it alone sees the growing pool).
+                        gathered = _v4._sparse_topk_gather(
+                            rows, topk, n_full, self.head_dim
+                        )
+                        out = _v4._sparse_gathered_attention_c(
+                            q, kv, gathered, mask, sparse_mask, self.scale, sinks
+                        )
+                    elif banded:
+                        out = _v4._sparse_pooled_attention_banded(
+                            q, kv, rows, topk, mask, sparse_mask, self.scale,
+                            sinks, self.config.sliding_window, block,
+                        )
+                    else:
+                        out = _v4._sparse_pooled_attention(
+                            q, kv, rows, topk, mask, sparse_mask, self.scale,
+                            sinks,
+                        )
         if prof:
             t0 = _prof_mark("a.core", self.layer_idx, out, t0)
         out = self._project(out, q0, B, n_full)
@@ -1611,10 +1613,15 @@ class Model(nn.Module):
             if idx in args.kv_source_layers:
                 ratio = args.compress_ratios[idx]
                 # The index pool opts out of --kv-bits packing: the score
-                # path reads it in full every step.
+                # path reads it in full every step. The latent pool rests
+                # in the FP4 form the QAT lands its rows on when the sparse
+                # kernels read it directly (exact, ~3.6x smaller).
+                pool = PoolingCache(ratio)
+                if _qat_enabled() and _v4._pool_fp4_ok():
+                    pool.pack_fp4()
                 idx_pool = PoolingCache(ratio)
                 idx_pool.quantizable = False
-                slots += [PoolingCache(ratio), idx_pool]
+                slots += [pool, idx_pool]
             if idx in first_engram:
                 slots.append(cmod.ArraysCache(1))
             caches.append(slots[0] if len(slots) == 1 else cmod.CacheList(*slots))
