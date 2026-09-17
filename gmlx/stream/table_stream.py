@@ -138,7 +138,7 @@ def _resolve(model, path: str):
 def resident_table_bytes(mod) -> int:
     """Bytes of ``mod``'s table that live in an array. A table past the
     device buffer ceiling is read from the GGUF and has no array, so it
-    weighs nothing here - its file size is on ``_kq_table_source``."""
+    weighs nothing here. Its file size is on ``_kq_table_source``."""
     w = getattr(mod, "weight", None)
     return 0 if w is None else int(w.nbytes)
 
@@ -169,7 +169,7 @@ def table_bytes(model) -> int:
     count what that total counts: ``expert_streaming`` goes negative and
     picks the wrong tier otherwise, ``budget._decode_arena_bytes`` clamps
     at 0 and silently zeroes the arena. ``plan.ModelPlan`` subtracts a
-    table figure too, but from a header-derived total that DOES count the
+    table figure too, but from a header-derived total that does count the
     file bytes, so that one is right to count them."""
     return sum(resident_table_bytes(m) for _, m in streamable_tables_for(model))
 

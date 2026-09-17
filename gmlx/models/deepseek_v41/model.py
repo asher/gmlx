@@ -14,9 +14,9 @@ The V4 skeleton with three changes, all derived from the reference
   compress ratio also read a pooled-KV stream and a top-k selection that
   a few source layers produce and the layers after them reuse.
 
-Everything else - the low-rank q/o projections, the sqrt-softplus MoE,
-the Sinkhorn mixing, the pooled cache - is imported from
-``gmlx.models.deepseek_v4``.
+Everything else is imported from ``gmlx.models.deepseek_v4``: the
+low-rank q/o projections, the sqrt-softplus MoE, the Sinkhorn mixing and
+the pooled cache.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def _rms(x: mx.array, eps: float) -> mx.array:
     return mx.fast.rms_norm(x, None, eps)
 
 
-# --- engram ----------------------------------------------------------------
+# Engram memory.
 
 
 class EngramHash(nn.Module):
@@ -336,7 +336,7 @@ class Engram(nn.Module):
 
 
 
-# --- shared compressed and index streams ------------------------------------
+# Shared compressed and index streams.
 
 
 class SharedStreams:
@@ -535,24 +535,24 @@ class Indexer(nn.Module):
 
 
 def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
-    """Prefill scores through the kq indexer GEMM (dsa_indexer_scores): the
+    """Prefill scores through the kq indexer GEMM, dsa_indexer_scores. The
     relu, scale and head sum run in the kernel, so no [heads, L, P] score
-    is materialized. fp16 operands hold the FP4-grid q and k exactly; the
-    scale folds into the per-head weights. Keys pad once to the 64-row
+    is materialized. fp16 operands hold the FP4-grid q and k exactly, and
+    the scale folds into the per-head weights. Keys pad once to the 64-row
     tile, a query block pads per call.
 
-    ``offset`` (absolute position of query row 0) with the pool ``ratio``
-    arms the kernel's causal tile skip. The caller's mask hides pooled row
-    n from query row m once n >= (offset + m + 1) // ratio, and
+    ``offset``, the absolute position of query row 0, with the pool
+    ``ratio`` arms the kernel's causal tile skip. The caller's mask hides
+    pooled row n from query row m once n >= (offset + m + 1) // ratio, and
     (offset + qs + 1) // ratio - 1 + m never falls under that bound, so
-    the tiles past it hold only hidden scores and skip; the mask still
-    decides the exact set. Pass ``offset`` only under that mask.
+    the tiles past it hold only hidden scores and skip. The mask still
+    decides the exact set, so pass ``offset`` only under that mask.
 
-    On tensor-op hardware the int8 arm (dsa_indexer_scores_q) runs on the
+    On tensor-op hardware the int8 arm, dsa_indexer_scores_q, runs on the
     packed FP4 codes, bit-identical to the fp16 GEMM on the same rows.
     Returns ``score(qs, qe) -> [B, qe - qs, P]`` float16, or None to keep
-    the inline fp32 path (decode widths, other geometries, no Metal,
-    GMLX_DSA_INDEXER=0)."""
+    the inline fp32 path: decode widths, other geometries, no Metal, or
+    GMLX_DSA_INDEXER=0."""
     B, H, L, D = q.shape
     P = index_k.shape[1]
     if k not in (512, 2048):
@@ -627,15 +627,15 @@ def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
 
 
 def _indexer_decode_scorer(q, index_k, weights, scale, offset, ratio):
-    """Decode-width scores through the fused kq kernel
-    (dsa_indexer_score_decode): the relu, scale and head sum run in one
+    """Decode-width scores through the fused kq kernel,
+    dsa_indexer_score_decode. The relu, scale and head sum run in one
     dispatch and no [heads, L, P] score is materialized. The kernel hides
     pooled row n from query row m once n >= (offset + m + 1) // ratio,
-    which is the caller's pool mask, and shows every row to a lone query;
+    which is the caller's pool mask, and shows every row to a lone query,
     so a step of several rows needs ``offset``. Returns
     ``score(qs, qe) -> [B, qe - qs, P]`` float16, or None to keep the
-    inline fp32 path (other geometries, no Metal,
-    GMLX_DS41_INDEXER_DECODE=0)."""
+    inline fp32 path: other geometries, no Metal, or
+    GMLX_DS41_INDEXER_DECODE=0."""
     B, H, L, D = q.shape
     if (
         H not in (4, 32, 64)
@@ -774,7 +774,7 @@ def _candidate_blocks(scores, topk_blocks, block_size, floor):
     return idx, valid, width, n_blocks
 
 
-# --- QAT round-trips --------------------------------------------------------
+# QAT round-trips.
 # V4.1 quantizes differently from V4: the window KV takes FP8 block-32 over
 # the whole post-RoPE row with no F16 round, the compressed latent takes FP4
 # in groups of 16 with an E4M3 scale, and the indexer takes FP4 block-32 with
@@ -790,7 +790,7 @@ def _qat_enabled() -> bool:
 # without the Hadamard), bit-identical to the compiled chains below and one
 # dispatch each in place of ~6. Probed once with a real eval so a kq without
 # the arguments, or a CPU default device, leaves the chains in charge;
-# GMLX_DS41_QAT_FUSED=0 keeps them off for A/Bs.
+# GMLX_DS41_QAT_FUSED=0 keeps them off.
 _QAT_FUSED: Dict[str, Optional[bool]] = {"kv": None, "indexer": None}
 
 
@@ -857,7 +857,7 @@ def _latent_qat(x: mx.array) -> mx.array:
     return mx.flatten(_latent_qat_core(v), -2).astype(orig)
 
 
-# --- attention --------------------------------------------------------------
+# Attention.
 
 
 class DeepseekV41Attention(nn.Module):
@@ -1137,7 +1137,7 @@ class DeepseekV41Attention(nn.Module):
         return self.wo_b(out)
 
 
-# --- block and model --------------------------------------------------------
+# Block and model.
 
 
 def _hc_mixes(hc: HyperConnection, x: mx.array):
@@ -1162,7 +1162,7 @@ def _hc_collapse(x: mx.array, pre: mx.array) -> mx.array:
 
 
 def _hc_fused_route() -> bool:
-    """GMLX_DS41_HC_FUSED=0 keeps the ops route at decode width, for A/Bs."""
+    """GMLX_DS41_HC_FUSED=0 keeps the ops route at decode width."""
     return os.environ.get("GMLX_DS41_HC_FUSED", "1") != "0"
 
 
@@ -1468,7 +1468,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
 
     def _split_cache(self, layer_idx: int, entry, cache_list_types):
         """(window, latent pool, index-key pool) for one layer. Only a
-        kv-source layer owns pools; every other layer has just its
+        kv-source layer owns pools; every other layer has only its
         window, and the pool members never move."""
         if entry is None:
             return None, None, None
@@ -1564,7 +1564,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         # Image tokens take no part in an n-gram and get no engram write.
         engram_mask = None if image_mask is None else ~image_mask
         if image_mask is not None:
-            # Image ids sit past the vocab: clamp before ANY gather
+            # Image ids sit past the vocab: clamp before every gather
             # (embedding, n-gram token map). The container supplies the
             # embeddings for those rows.
             inputs = mx.where(image_mask, mx.zeros_like(inputs), inputs)

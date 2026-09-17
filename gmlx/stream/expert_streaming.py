@@ -41,9 +41,8 @@ def _ph_li(ph, li, key, dt):
 
 
 # Submit a staged layer's expert gather as soon as it is built, so the GPU
-# runs it while the host builds the next layer's graph (measured -8 ms of
-# GPU wait per token). The next layer's router eval is still the fence
-# that orders it before any slot overwrite.
+# runs it while the host builds the next layer's graph. The next layer's
+# router eval is still the fence that orders it before any slot overwrite.
 _ASYNC_GATHER = env_bool("GMLX_DECODE_ASYNC_GATHER", True)
 
 
@@ -193,7 +192,7 @@ def _install_gpu_residency(model, moe_modules, *,
           "(GMLX_GPU_RESIDENT=0 disables)")
     if left_out:
         print(f"[stream] gpu-resident weights: {left_out} buffers "
-              f"({left_out_bytes / 1e9:.1f} GB) left out - the working set "
+              f"({left_out_bytes / 1e9:.1f} GB) left out, since the working set "
               f"has {room / 1e9:.1f} GB free of it")
 
 
@@ -1099,7 +1098,7 @@ def install_expert_streaming(
             from gmlx.stream.table_stream import streamed_table_array_ids
 
             tskip = streamed_table_array_ids(model)
-        # The pin is NOT a term here: it mlocks the same every-token
+        # The pin is not a term here: it mlocks the same every-token
         # arrays this inserts, and the arena already priced them (it is
         # sized as ceiling - non_expert - room - ring - floor), so
         # subtracting both would leave the unpinned remainder and

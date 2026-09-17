@@ -108,7 +108,7 @@ _FAMILY_NOTES = {
 _CAVEATS = {
     "deepseek2": "DeepSeek-V2, with softmax gating, is not supported.",
     "deepseek4": "Not a llama.cpp conversion. The parity reference is the ds4 engine.",
-    "deepseek41": "Both conversions, llama.cpp and ds4, whose engram tables are read from the GGUF. No MTP drafter: neither GGUF carries DSpark tensors.",
+    "deepseek41": "MTP is not yet implemented. The ds4 conversion's engram tables are read from the GGUF row by row.",
     "gemma2": "Pass hf_source for 27B. Output matches the reference only within the 4096 window.",
     "gemma3": "Pass hf_source for 27B.",
     "phi3": "Pass hf_source for the 128K long-context variants.",
@@ -225,8 +225,8 @@ _VENDORED_MLX_LM_MODULES = {
     # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
     # PoolingCache/BatchPoolingCache companions injected by ensure_registered.
     "deepseek_v4": "gmlx.models.deepseek_v4.model",
-    # llama.cpp PR #28696 (DeepSeek-V4.1-Flash); reuses the deepseek_v4
-    # hyper_connection and PoolingCache companions.
+    # DeepSeek-V4.1-Flash. Reuses the deepseek_v4 hyper_connection and
+    # PoolingCache companions.
     "deepseek_v41": "gmlx.models.deepseek_v41.model",
     # mlx-lm PR #1485 (Tencent Hy3, supersedes #1211).
     "hy_v3": "gmlx.models.hy_v3.model",

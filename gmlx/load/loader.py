@@ -178,7 +178,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         deepseek_v4_model.ensure_registered()
     if mt == "deepseek_v41":
-        # DeepSeek-V4.1-Flash (llama.cpp PR #28696 arch): the V4 skeleton
+        # DeepSeek-V4.1-Flash (the llama.cpp convert patch arch): the V4 skeleton
         # plus engram memory layers; registers deepseek_v4's companions too.
         import gmlx.models.deepseek_v41.model as deepseek_v41_model
         import gmlx.models.deepseek_v41.tools as deepseek_v41_tools

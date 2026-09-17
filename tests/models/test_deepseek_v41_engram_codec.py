@@ -50,7 +50,7 @@ def _ref_row(raw: np.ndarray) -> np.ndarray:
 def _clean_row(rng) -> np.ndarray:
     """A row the reference accepts: no NaN codes, and scales in the range
     the real tables use (the file samples at 119-120), so no product
-    overflows float32 - the reference rejects those too."""
+    overflows float32, which the reference rejects too."""
     raw = rng.integers(0, 256, size=ROW_BYTES, dtype=np.uint8)
     raw[:DIM][raw[:DIM] & 127 == 127] = 3
     raw[DIM:] = rng.integers(100, 140, size=ROW_BYTES - DIM, dtype=np.uint8)

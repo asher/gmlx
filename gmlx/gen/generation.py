@@ -911,7 +911,7 @@ def encode_prompt(tokenizer, prompt: str) -> list:
 
     mlx_lm.stream_generate's single-BOS rule. A chat template that emits
     its own BOS, on a GGUF whose ``add_bos_token`` is true, would
-    otherwise get a second one from the tokenizer's post-processor - the
+    otherwise get a second one from the tokenizer's post-processor. The
     ds4 DeepSeek-V4.1 conversion sets that flag where the llama.cpp one
     does not, and both ship the same template.
     """

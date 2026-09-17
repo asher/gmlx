@@ -244,7 +244,7 @@ def _unbuildable_normal_tokens(
     as atomic changes no other tokenization.
 
     Gated on ds4's JSON config blob, which llama.cpp does not write, because
-    an unreachable NORMAL token elsewhere can be deliberate dead vocab.
+    an unreachable NORMAL token elsewhere can be intended dead vocab.
     """
     if token_types is None or not raw_merges:
         return []

@@ -2183,10 +2183,9 @@ def dequantize_unattachable_leaves(model: nn.Module,
     forward; a codec'd raw leaf over ``max_bytes`` (f32 size) raises
     for the same reason - there is no loud downstream failure.
 
-    Every module is visited, not only the leaves: deepseek41's ``Engram``
-    holds its q/k gate weights as raw arrays beside two sub-modules, so a
-    leaves-only walk skipped them and the forward broadcast Q2_K wire
-    bytes against the residual streams.
+    Every module is visited, not only the leaves, because deepseek41's
+    ``Engram`` holds its q/k gate weights as raw arrays beside two
+    sub-modules.
 
     llama.cpp's quantize never codecs router gates, so its GGUFs never
     hit this path; so far only an antirez DeepSeek-V4-Flash dspark

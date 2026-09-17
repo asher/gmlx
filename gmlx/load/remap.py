@@ -1823,7 +1823,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.hc_head.scale", "passthrough"),
     ],
     "DEEPSEEK41": [
-        # DeepSeek-V4.1-Flash ('deepseek41', llama.cpp PR #28696). Same
+        # DeepSeek-V4.1-Flash ('deepseek41', the llama.cpp convert patch). Same
         # module paths as DEEPSEEK4 for everything the two share; V4.1 drops
         # the compressor ape, the indexer's private compressor, the hash-route
         # table and the final-collapse HyperHead, and adds the engram families

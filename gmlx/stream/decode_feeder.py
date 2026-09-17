@@ -98,10 +98,10 @@ _SETTLE_POLICIES = ("auto", "all", "routed")
 _SETTLE_DEFAULT = "auto"
 
 # Fast-disk recipe (GMLX_DECODE_FAST_DISK=auto|on|off). Both policies above
-# and the lookahead pool's disk priority turn on one question: does
-# speculation steal bandwidth demand misses wanted? With the arena seeded
-# from the prefill ring, a 5.7 GB/s M3 Max drive says no (measured +7%
-# decode on the fast recipe); M5 Max reads 14 GB/s. "auto" probes at
+# and the lookahead pool's disk priority depend on whether speculative
+# reads steal bandwidth from demand misses. With the arena seeded from the
+# prefill ring, a drive at _FAST_DISK_GBPS or more has bandwidth to spare
+# (docs/internals/streaming-measurements.md has the figures). "auto" probes at
 # load, takes the fast recipe above _FAST_DISK_GBPS, and demotes for good
 # after _FAST_DISK_DEMOTE_WINDOWS saturated duty windows. Pool threads keep
 # their start priority: Darwin sets disk policy per thread at thread start.
@@ -144,11 +144,10 @@ _MAX_WEDGES = 3
 # ~128 on a 32-layer one. GMLX_DECODE_DECAY_EVERY overrides.
 _DECAY_EVERY = 4096
 
-# Deliberately absent: a background seeder that pre-fills empty slots from
-# the drive. Rejected on a saturated drive (a seed read is a guess spending
-# bandwidth a targeted read wanted), then rebuilt and measured on a fast
-# one: 1295 slots seeded over 1000 tokens, 0.1 tok/s lost. Prestage claims
-# the empty slots first, on router evidence rather than a popularity guess.
+# No background seeder fills empty slots from the drive: a seed read is a
+# guess that spends bandwidth a demand read wanted, and on a fast drive it
+# gains nothing measurable. Prestage claims the empty slots first, on router
+# evidence rather than a popularity guess.
 #
 # Prefill seeding is different: every expert of a layer passes through the
 # prefill ring anyway, so the prompt's most-routed experts are copied from
@@ -625,10 +624,10 @@ class DecodeFeeder:
             (off_e + n + _PAGE - 1) & ~(_PAGE - 1),
             self._sizes[path])
         self._bytes_read += b - a
-        # Measured: a pread straight into the Metal-shared slot (aligned
-        # middle direct, edges via scratch) saved 7 ms/token of read wait
-        # but cost 18 ms/token of GPU time on the gathers running against
-        # the same buffer; the bounce copy stays.
+        # The read lands in a bounce buffer, not in the Metal-shared slot:
+        # a pread straight into the slot contends with the gathers running
+        # against the same buffer and costs more GPU time than it saves in
+        # read wait.
         pool = bounce if bounce is not None else self._bounce
         buf = pool.get()
         try:

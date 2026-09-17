@@ -1102,7 +1102,7 @@ def _sparse_pooled_attention_banded(
 # softmax in fp32, so it is not bit-identical to the chain; the first use
 # checks it against an fp32 reference and keeps it only when it lands at
 # least as close as the chain does. GMLX_DS41_SPARSE_KERNEL=0 keeps the
-# chain for A/Bs.
+# chain.
 _SPARSE_KERNEL_DIMS = (128, 256, 512)
 _SPARSE_KERNEL_DTYPES = (mx.float16, mx.bfloat16)
 _SPARSE_KERNEL_MAX_L = 4096

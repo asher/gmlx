@@ -121,7 +121,7 @@ FAMILIES: dict[str, dict] = {
         "base": {"sampling": {"temperature": 0.6, "top_p": 0.95}},
         "intents": {},
     },
-    # DeepSeek-V4.1-Flash model card, 2026-09: t=1.0, top_p 0.95. Thinking
+    # DeepSeek-V4.1-Flash model card: t=1.0, top_p 0.95. Thinking
     # is on by default; the reasoning intents map onto the template's
     # numeric effort budget (low 50, high 75, max 100).
     "deepseek41": {

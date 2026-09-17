@@ -169,8 +169,8 @@ def test_collapse_and_expand_match_the_reference(model):
 @pytest.mark.skipif(mx.default_device() != mx.gpu,
                     reason="the MoE router top-k kernel is Metal-only")
 def test_the_block_collapses_with_the_previous_sublayers_pre(model):
-    """V4.1 lags by one sublayer: attention collapses with the pre the
-    caller hands in, and the FFN with the pre attention just produced.
+    """V4.1 lags by one sublayer. Attention collapses with the pre the
+    caller hands in, and the FFN with the pre that attention produced.
     """
     layer = model.model.layers[0]          # ratio 0, owns no pool
     B, L = 1, 6

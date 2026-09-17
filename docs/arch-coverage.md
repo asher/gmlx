@@ -25,7 +25,7 @@ means none is known.
 |-----------|--------|---------|--------|--------|
 | `deepseek2` | deepseek | mlx-lm | loadable | DeepSeek-V2, with softmax gating, is not supported. |
 | `deepseek4` | deepseek | mlx-lm | loadable | Not a llama.cpp conversion. The parity reference is the ds4 engine. |
-| `deepseek41` | deepseek | mlx-lm | loadable | Both conversions, llama.cpp and ds4, whose engram tables are read from the GGUF. No MTP drafter: neither GGUF carries DSpark tensors. |
+| `deepseek41` | deepseek | mlx-lm | loadable | MTP is not yet implemented. The ds4 conversion's engram tables are read from the GGUF row by row. |
 | `diffusion-gemma` | gemma | mlx-vlm | loadable |  |
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |

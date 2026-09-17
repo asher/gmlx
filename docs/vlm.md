@@ -76,17 +76,17 @@ and the prompt cache keys on those blocks, so a conversation that repeats
 its earlier image turns verbatim hits the cache. Third, its text output is
 not token-for-token comparable with the text-only release.
 
-The V4.1 encoder is not a `clip.*` conversion: it declares its own
+The V4.1 encoder is not a `clip.*` conversion. It declares its own
 architecture and keeps the checkpoint's own tensor names, with the q, k
-and v rows fused and the gate and up rows fused. The loader splits them at
-load. The tower itself is the V4 tower with a larger token budget and no
+and v rows fused and the gate and up rows fused, and the loader splits them
+at load. The tower itself is the V4 tower with a larger token budget and no
 width cap.
 
 V4.1 image turns are ordinary text turns to the language model. Each image
-expands to a block of up to 1024 tokens laid out in plain reading order,
-the language model attends to it causally, and a block may be split across
-prefill chunks, so nothing special applies to `--kv-bits`, to chunking or
-to how many requests run at once.
+expands to a block of up to 1024 tokens in plain reading order, which the
+language model attends to causally and which may be split across prefill
+chunks. Nothing special applies to `--kv-bits`, to chunking or to how many
+requests run at once.
 
 ## Combining with other features
 

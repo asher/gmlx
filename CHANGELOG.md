@@ -8,74 +8,44 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- DeepSeek-V4.1-Flash (`deepseek41`) loads and generates: engram n-gram
-  memory layers, a hyper-connection collapse that lags one sublayer, and
-  CSA2 attention. gmlx ships the V4.1 chat template and DSML tool parser,
-  because the GGUF embeds the V4 ones. Its two engram tables stream from
-  SSD through the lookup-table tier while the experts stream through the
-  arena, and the fit planner, the preload gate and the resident-bytes
-  bookkeeping all credit the tables as off-disk. On an mlx-kquant that
-  carries them, its hyper-connection cycles, quantization round-trips,
-  indexer scoring and sparse attention run as fused kernels at prefill and
-  decode widths alike, and each prompt query reads only the rows it reaches.
-  Once the prompt end is known, the layers past the last kv-source layer
-  run only the prompt rows a later layer's window still reaches. The latent
-  pool rests in the FP4 form its quantization lands on, 3.6x smaller than
-  fp16 rows, and the sparse kernels read that form directly. At decode the
-  indexer layers past the candidate source score and select only the
-  candidate rows, so their cost stops growing with the context.
+- DeepSeek-V4.1-Flash (`deepseek41`) support added with engram offloading.
+  gmlx ships the V4.1 chat template and DSML tool as some GGUFs ship with
+  the 4.0 templates.
 - DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
-  image turns. Each image expands to a block of up to 1024 tokens in plain
-  reading order that the language model attends to causally, so image turns
-  chunk and cache like text.
-- The ds4 conversion of DeepSeek-V4.1-Flash loads alongside the llama.cpp
-  one. It spells its metadata differently and stores the engram tables as
-  raw fp8 rows, which are too large for one GPU buffer on a 128 GB Mac; a
-  table past that limit is read from the GGUF row by row instead. Its
-  sentinel tokens, which the conversion types as ordinary text, are made
-  atomic again so prompts tokenize as the model expects.
+  image turns.
+- The ds4 conversion of DeepSeek-V4.1-Flash loads as well. Its engram
+  tables exceed one GPU buffer on a 128 GB Mac, so they are read from the
+  GGUF row by row.
 
 ### Changed
 
-- DeepSeek-V4 and V4.1 MoE blocks run the shared expert inside the two
-  routed expert gathers, as the Hunyuan 3 blocks already did, on an
-  mlx-kquant whose shared-expert fold takes the LimitedSwiGLU clamp.
-- A streamed decode starts with a warm arena: the prompt's most routed
-  experts of each layer are copied from the prefill ring into the arena and
-  wired while the prefill runs, so the first tokens no longer miss on every
-  expert and the wiring pass leaves the first token. Each layer's expert
-  gather is submitted to the GPU as soon as it is built, and the fast-disk
-  recipe engages from 5 GB/s of measured drive bandwidth instead of 9.
-- A streamed model drops the expert stacks' GPU buffers once both feeders
-  serve them from the file. The Metal driver slows every command buffer
-  while a process's mapped total passes RAM, which a streamed model always
-  did; deep prefill and decode both gain.
-- A streamed model's MLX buffer cache defaults to the priced KV room
-  instead of 4 GB, so a deep prefill reuses each layer's temporaries
-  instead of populating fresh buffers every layer.
-- A streamed prefill widens its chunk by up to an eighth so a short last
-  chunk folds into the ones before it. Every chunk stages all the experts,
-  so a 16-token tail cost as much as a long chunk.
+- DeepSeek-V4 MoE blocks run the shared expert inside the routed expert
+  gathers on an mlx-kquant that carries the fold.
+- A streamed decode starts with the prompt's most routed experts already
+  in the arena, so the first tokens no longer miss on every expert. The
+  fast-disk recipe engages from 5 GB/s of measured drive bandwidth.
+- A streamed model unmaps the expert stacks from the GPU once the feeders
+  read them from the file. Deep prefill and decode both gain.
+- A streamed model's MLX buffer cache defaults to the KV room instead of
+  4 GB.
+- A streamed prefill folds a short last chunk into the ones before it.
 
 ### Fixed
 
 - `pull` fetches a file in bounded range windows once it knows the remote
   length, so downloading or resuming a very large GGUF from Hugging Face's
   xet CDN no longer fails with HTTP 400.
-- `--thinking on|off` now finds the switch a chat template really reads. It
-  was picked by substring, so a template that names a switch in its prose,
-  or derives one internally, got a variable it discards.
-- `--stream-cpu` now streams a declared lookup table instead of holding it
+- `--thinking on|off` sets the switch the chat template reads instead of
+  the first name that matches by substring.
+- `--stream-cpu` streams a declared lookup table instead of holding it
   resident.
-- The Metal residency set is capped at the working set the arena, the ring
-  and other live installs leave. An over-sized set is not honored anyway,
-  and a large enough one can panic the kernel.
-- A quantized tensor that lands on a raw array beside sub-modules is
-  dequantized at load instead of reaching the forward as wire bytes.
-- The bundled chat template is applied on the report-only, MTP and VLM
-  loads, not only the text load.
-- A streamed model logs when its decode arena is clamped by reclaimable
-  RAM rather than by the memory ceiling.
+- The Metal residency set is capped at the working set the arena and ring
+  leave. An oversized set can panic the kernel.
+- A quantized tensor stored beside sub-modules is dequantized at load.
+- The bundled chat template applies to the report-only, MTP and VLM loads
+  too.
+- A streamed model reports when reclaimable RAM, not the memory ceiling,
+  clamps its decode arena.
 - A stalled or dropped read no longer abandons a `pull`: the transfer
   retries with backoff from the bytes already on disk, tunable by
   `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.

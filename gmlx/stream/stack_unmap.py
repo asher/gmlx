@@ -2,11 +2,11 @@
 
 Every no-copy view of the GGUF is a Metal buffer, and the driver's work
 before each command buffer grows with the process's GPU-visible total
-once that total passes physical RAM: 50-130 ms per large command buffer
-on an M3 Max, untouched buffers included. A streamed model sits past RAM
-by construction - the stacks alone are over the wired budget, and the
-arena and the ring come on top. Both feeders read the stacks from the
-file, so after install the arrays only hold the mapping.
+once that total passes physical RAM, untouched buffers included. A
+streamed model sits past RAM by construction, since the stacks alone are
+over the wired budget and the arena and the ring come on top. Both
+feeders read the stacks from the file, so after install the arrays only
+hold the mapping.
 
 ``unmap_stacks`` swaps each covered stack for a one-row placeholder that
 keeps the shape and the byte count the feeders and the budget read. The

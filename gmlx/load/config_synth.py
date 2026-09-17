@@ -114,7 +114,7 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # round-trips. Model class vendored from mlx-lm PR #1192; the MTP layer
     # ships in a separate companion GGUF (arch deepseek4_mtp_support).
     "deepseek4": "deepseek_v4",
-    # DeepSeek-V4.1-Flash (llama.cpp PR #28696 convert patch): the V4
+    # DeepSeek-V4.1-Flash (the llama.cpp convert patch in arch_table): the V4
     # skeleton plus engram n-gram memory layers, a hyper-connection collapse
     # lagged by one sublayer, and compressed-KV / index streams shared from a
     # few source layers. Model class vendored in gmlx.models.deepseek_v41.
@@ -2859,8 +2859,8 @@ def _synth_deepseek_v4_core(meta, shapes, config: dict, arch: str) -> None:
 # deepseek41 (DeepSeek-V4.1-Flash)
 
 
-# The ds4 converter writes the reference config's own field names; llama.cpp
-# PR #28696 writes the GGUF spellings. Same model, same tensors bar three
+# The ds4 converter writes the reference config's own field names, and the
+# llama.cpp convert patch writes the GGUF spellings. Same model, same tensors bar three
 # engram names, so the dialect is translated here and one synth reads both.
 _DEEPSEEK41_DS4_KEYS = {
     "hidden_size": "embedding_length",

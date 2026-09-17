@@ -160,7 +160,7 @@ class Model(nn.Module):
         self.image_newline = mx.zeros((dim,))
         self.image_end = mx.zeros((dim,))
 
-    # --- image features -----------------------------------------------------
+    # Image features.
 
     def _image_features(self, pixel_values: mx.array, image_meta) -> mx.array:
         """Patches + per-image (n_vit_h, n_vit_w, n_llm_h, n_llm_w) ->
@@ -239,7 +239,7 @@ class Model(nn.Module):
         gathered = gathered.reshape(inputs_embeds.shape)
         return mx.where(positions[..., None], gathered, inputs_embeds)
 
-    # --- container plumbing -------------------------------------------------
+    # Container plumbing.
 
     _LM_PREFIX = "language_model."
 

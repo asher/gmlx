@@ -10,8 +10,8 @@ from the GGUF instead, which is what the reference runtime does too.
 
 The rows a step needs are tiny next to the table: 24 rows of 264 bytes
 per token per engram table. Reads bypass the page cache and round out to
-page boundaries, per the ``decode_feeder`` rules - a 264-byte row is
-never page-aligned, and an unaligned F_NOCACHE read can wedge in the
+page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
+is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
 
 ``GMLX_TABLE_MAX_BUFFER`` overrides the ceiling (bytes), for tests.
@@ -171,7 +171,7 @@ _PREAD_CACHE: dict[type, type] = {}
 def _pread_class(cls):
     """Per-instance ``__class__`` swap target: the row gather reads the
     GGUF instead of indexing a ``weight`` array, which this table has
-    none of. Counts as streamed - nothing of it is ever wired."""
+    none of. Counts as streamed, since nothing of it is ever wired."""
     sub = _PREAD_CACHE.get(cls)
     if sub is not None:
         return sub
