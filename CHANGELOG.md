@@ -21,7 +21,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Once the prompt end is known, the layers past the last kv-source layer
   run only the prompt rows a later layer's window still reaches. The latent
   pool rests in the FP4 form its quantization lands on, 3.6x smaller than
-  fp16 rows, and the sparse kernels read that form directly.
+  fp16 rows, and the sparse kernels read that form directly. At decode the
+  indexer layers past the candidate source score and select only the
+  candidate rows, so their cost stops growing with the context.
 - DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
   image turns. Each image expands to a block of up to 1024 tokens in plain
   reading order that the language model attends to causally, so image turns

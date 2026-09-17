@@ -475,6 +475,12 @@ class Indexer(nn.Module):
         if given is not None and given.shape[1] != L:
             # Prefill tail: this layer runs fewer rows than the source.
             given = given[:, given.shape[1] - L:]
+        # Decode width: the source publishes its candidates as a position
+        # list and the layers after it score and select only those rows,
+        # so their cost stops growing with the context.
+        listed = scorer is not None and L <= 4 and _indexer_cand_ok()
+        if given is not None and given.dtype != mx.bool_ and not listed:
+            given = _candidate_mask(given, P)
         # Query blocks: a full-length pass holds an [heads, L, P] score
         # per layer, square in the prompt for the ratio-1 layers.
         block = _v4._prefill_block()
@@ -482,25 +488,39 @@ class Indexer(nn.Module):
         tops, cands = [], []
         for qs in range(0, L, block):
             qe = min(L, qs + block)
-            if scorer is not None:
+            cb = None
+            if scorer is not None and given is not None and listed:
+                cb = given[:, qs:qe]
+                scores = scorer(qs, qe, cb)
+            elif scorer is not None:
                 scores = scorer(qs, qe)
             else:
                 scores = q[:, :, qs:qe] @ keys
                 scores = mx.maximum(scores, 0) * self.scale
                 scores = (scores * weights[:, :, qs:qe]).sum(axis=1)
             if pmask is not None:
-                scores = mx.where(pmask[:, qs:qe], scores, floor)
+                pm = pmask[:, qs:qe]
+                if cb is not None:
+                    pm = mx.take_along_axis(
+                        mx.broadcast_to(pm, (B,) + pm.shape[1:]),
+                        mx.maximum(cb, 0), axis=-1,
+                    )
+                scores = mx.where(pm, scores, floor)
             if source:
+                select = _candidate_positions if listed else _select_candidate_blocks
                 cands.append(
-                    _select_candidate_blocks(
+                    select(
                         scores, self.candidate_topk_blocks,
                         self.candidate_block_size, floor,
                     )
                 )
-            elif given is not None:
+            elif given is not None and cb is None:
                 scores = mx.where(given[:, qs:qe], scores, floor)
             if scorer is not None:
-                tops.append(_indexer_kernel_topk(scores, k))
+                top = _indexer_kernel_topk(scores, k)
+                if cb is not None:
+                    top = mx.take_along_axis(cb, top, axis=-1)
+                tops.append(top)
             else:
                 tops.append(
                     mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
@@ -535,12 +555,13 @@ def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
     GMLX_DSA_INDEXER=0)."""
     B, H, L, D = q.shape
     P = index_k.shape[1]
+    if k not in (512, 2048):
+        return None  # the radix select takes only these widths
     if L <= 4:
         return _indexer_decode_scorer(q, index_k, weights, scale, offset, ratio)
     if (
         H not in (32, 64)
         or D != 128
-        or k not in (512, 2048)
         or not mx.metal.is_available()
         or mx.default_device() != mx.Device(mx.gpu)
         or not _v4._dsa_probe("indexer")
@@ -636,13 +657,48 @@ def _indexer_decode_scorer(q, index_k, weights, scale, offset, ratio):
     base = offset if isinstance(offset, int) else 0
     r = ratio if isinstance(ratio, int) and ratio >= 1 else 1
 
-    def score(qs, qe):
+    def score(qs, qe, cand=None):
+        kw = {} if cand is None else {"cand": cand}
         s = kq.dsa_indexer_score_decode(
-            q16[:, :, qs:qe], keys, w16[:, qs:qe], base + qs, r
+            q16[:, :, qs:qe], keys, w16[:, qs:qe], base + qs, r, **kw
         )
         return s[:, 0]
 
     return score
+
+
+_INDEXER_CAND: Dict[str, Optional[bool]] = {"on": None}
+
+
+def _indexer_cand_ok() -> bool:
+    """Whether the kq decode scorer takes a candidate list and scores the
+    listed rows exactly as it scores them in place; probed once
+    (GMLX_DS41_INDEXER_CAND=0 keeps the masked full-width path)."""
+    on = _INDEXER_CAND["on"]
+    if on is None:
+        on = False
+        if os.environ.get("GMLX_DS41_INDEXER_CAND", "1") != "0":
+            try:
+                import mlx_kquant as kq
+
+                keys = mx.random.split(mx.random.key(9), 3)
+                P = 40
+                q = mx.random.normal((1, 64, 1, 128), key=keys[0]).astype(mx.float16)
+                k = mx.random.normal((1, P, 128), key=keys[1]).astype(mx.float16)
+                w = mx.random.normal((1, 1, 64), key=keys[2]).astype(mx.float16)
+                cand = mx.array([[[5, 0, 39, -1, 40, 7, 7, 12]]], mx.int32)
+                got = kq.dsa_indexer_score_decode(q, k, w, 0, 1, cand=cand)
+                full = kq.dsa_indexer_score_decode(q, k, w, 0, 1)
+                want = mx.where(
+                    (cand >= 0) & (cand < P),
+                    mx.take_along_axis(full[:, 0], mx.maximum(cand, 0), axis=-1),
+                    mx.finfo(mx.float16).min,
+                )
+                on = bool(mx.array_equal(got[:, 0], want).item())
+            except Exception:  # noqa: BLE001 - any refusal keeps the mask path
+                on = False
+        _INDEXER_CAND["on"] = on
+    return on
 
 
 def _indexer_kernel_topk(scores, k):
@@ -663,6 +719,40 @@ def _select_candidate_blocks(scores, topk_blocks, block_size, floor):
     block fits, which leaves the caller's scores untouched.
     (reference select_candidate_blocks)
     """
+    sel = _candidate_blocks(scores, topk_blocks, block_size, floor)
+    if sel is None:
+        return None
+    idx, valid, width, n_blocks = sel
+    keep = mx.put_along_axis(
+        mx.zeros(idx.shape[:-1] + (n_blocks,), dtype=mx.bool_), idx, valid, axis=-1
+    )
+    return mx.repeat(keep, block_size, axis=-1)[..., :width]
+
+
+def _candidate_positions(scores, topk_blocks, block_size, floor):
+    """The kept blocks of _select_candidate_blocks as a position list,
+    int32 [B, L, topk_blocks * block_size], -1 where a block is out of
+    reach or a position runs past the end. None when every block fits."""
+    sel = _candidate_blocks(scores, topk_blocks, block_size, floor)
+    if sel is None:
+        return None
+    idx, valid, width, _ = sel
+    pos = idx[..., None] * block_size + mx.arange(block_size)
+    pos = mx.where(valid[..., None] & (pos < width), pos, -1)
+    return mx.flatten(pos, -2).astype(mx.int32)
+
+
+def _candidate_mask(positions, width):
+    """A position list back as the bool [B, L, width] mask."""
+    # Every write is True and the -1 entries land in a spare slot, so
+    # duplicate indices cannot erase a kept position.
+    keep = mx.zeros(positions.shape[:-1] + (width + 1,), dtype=mx.bool_)
+    idx = mx.where(positions >= 0, positions, width)
+    ones = mx.ones(idx.shape, dtype=mx.bool_)
+    return mx.put_along_axis(keep, idx, ones, axis=-1)[..., :width]
+
+
+def _candidate_blocks(scores, topk_blocks, block_size, floor):
     width = scores.shape[-1]
     pad = (-width) % block_size
     if pad:
@@ -680,13 +770,8 @@ def _select_candidate_blocks(scores, topk_blocks, block_size, floor):
     pin = mx.arange(n_blocks) == (reach - 1)
     blocks = mx.where(pin, mx.finfo(blocks.dtype).max, blocks)
     idx = mx.argpartition(-blocks, kth=topk_blocks - 1, axis=-1)[..., :topk_blocks]
-    keep = mx.put_along_axis(
-        mx.zeros(blocks.shape, dtype=mx.bool_),
-        idx,
-        mx.take_along_axis(blocks, idx, axis=-1) > floor,
-        axis=-1,
-    )
-    return mx.repeat(keep, block_size, axis=-1)[..., :width]
+    valid = mx.take_along_axis(blocks, idx, axis=-1) > floor
+    return idx, valid, width, n_blocks
 
 
 # --- QAT round-trips --------------------------------------------------------

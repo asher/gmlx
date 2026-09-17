@@ -41,6 +41,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_DS41_SPARSE_PREFILL=0` | DeepSeek-V4.1 prefill attention as `sdpa_sparse_decode` query blocks instead of one `sdpa_sparse_prefill` call per layer. Same numerics. |
 | `GMLX_DS41_INDEXER_DECODE=0` | DeepSeek-V4.1 decode-width indexer scores on the inline fp32 op chain instead of the fused mlx-kquant kernel. Same picks to fp16 rounding. |
 | `GMLX_DS41_POOL_FP4=0` | Keep the DeepSeek-V4.1 latent pool as fp16 rows at rest instead of the FP4 codes and scales the sparse kernels read directly. Bit-identical. |
+| `GMLX_DS41_INDEXER_CAND=0` | DeepSeek-V4.1 decode indexer layers past the candidate source score every pooled row under a mask instead of only the listed candidate rows. Same picks. |
 | `GMLX_DS41_PREFILL_TAIL=0` | Run every DeepSeek-V4.1 layer on every prompt row. By default the layers past the last kv-source layer skip rows no later window reaches. Same logits. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
