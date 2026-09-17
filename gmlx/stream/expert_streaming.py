@@ -1278,6 +1278,22 @@ def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, boo
         mt, _STREAMING_PREFILL_STEP), True
 
 
+def merge_prefill_tail(step: int | None, n_tokens: int) -> int | None:
+    """Widen the chunk so a short last chunk folds into the ones before it.
+    A streamed prefill stages every expert once per chunk, so a 33-token
+    tail costs about what a 1000-token chunk does. Only a tail under
+    ``step / 8`` merges, so no chunk grows past 9/8 of ``step``.
+    ``n_tokens`` is what the loop chunks: the prompt less its last token.
+    GMLX_STREAM_PREFILL_TAIL_MERGE=0 keeps the step."""
+    if (not step or n_tokens <= step
+            or not env_bool("GMLX_STREAM_PREFILL_TAIL_MERGE", True)):
+        return step
+    n_full, tail = divmod(n_tokens, step)
+    if tail == 0 or tail > step // 8:
+        return step
+    return -(-n_tokens // n_full)
+
+
 def install_moe_experts_override(model, k: int) -> int:
     """Experiment, lossy: route every token to ``k`` experts instead of the
     trained top-k, on MoE blocks whose experts ``install_expert_streaming``

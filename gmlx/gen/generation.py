@@ -521,6 +521,14 @@ def generate(
             f"[prefill] streaming model: chunk size defaults to {step} "
             "(--prefill-step-size overrides)"
         )
+    if step is not None and expert_streaming.moe_streaming_active(model):
+        n_prompt = (len(encode_prompt(tokenizer, prompt))
+                    if isinstance(prompt, str) else len(prompt))
+        merged = expert_streaming.merge_prefill_tail(step, n_prompt - 1)
+        if merged != step and verbose:
+            print(f"[prefill] chunk widened to {merged} to fold in the "
+                  f"{(n_prompt - 1) % step}-token tail")
+        step = merged
     if step is not None:
         gen_kwargs["prefill_step_size"] = step
 

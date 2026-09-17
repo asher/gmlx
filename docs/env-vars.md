@@ -112,6 +112,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Default on, skipped with a printed reason above 60% of RAM. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights into the Metal residency set on streamed models. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after both feeders take a layer. By default they are dropped: a mapped total past RAM slows every command buffer. |
+| `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact. By default a tail under an eighth of the chunk folds into the chunks before it, as every chunk stages all experts. |
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, for measurement. `--stream-cpu` forces them too. |
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. Default: the device limit. A table past it is read from the GGUF row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads per file-backed lookup table. Default `32`; the random row reads scale with queue depth up to about there. |

@@ -627,6 +627,16 @@ def decayed_for_batch(batch) -> int | None:
     ticked = tick is not None and tick < step
     if ticked:
         step = tick
+    embeds = getattr(batch, "_inputs_embeds", None)
+    if step == base and embeds is not None:
+        from gmlx.stream.expert_streaming import (
+            merge_prefill_tail,
+            moe_streaming_active,
+        )
+
+        if moe_streaming_active(batch.model):
+            # The loop leaves the last prompt token to generate().
+            step = merge_prefill_tail(step, embeds.shape[1] - 1)
     global _LAST_STEP
     _LAST_STEP = step
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
