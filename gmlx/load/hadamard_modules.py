@@ -54,7 +54,14 @@ class _Fold:
         self.key = (target.width, target.block, id(signs), target.perm)
 
 
-def _kernel():
+# Block widths the kq kernel instantiates; any other width takes the
+# MLX-op form.
+_KERNEL_BLOCKS = frozenset({256, 512, 1024, 2048, 4096})
+
+
+def _kernel(block: int):
+    if block not in _KERNEL_BLOCKS:
+        return None
     if os.environ.get("GMLX_HADAMARD_KERNEL", "1") == "0":
         return None
     if mx.default_device() != mx.gpu:
@@ -78,13 +85,13 @@ def rotate(x: mx.array, fold: _Fold) -> mx.array:
         return x
     if os.environ.get("GMLX_HADAMARD_TRACE") == "1":
         _count += 1
+    kernel = _kernel(fold.block)
+    if kernel is not None:
+        return kernel(x, fold.signs, block=fold.block, perm=fold.perm)
     if fold.perm is not None:
         rep, nk, hd = fold.perm
         lead = x.shape[:-1]
         x = x.reshape(*lead, rep, nk, hd).swapaxes(-3, -2).reshape(*lead, -1)
-    kernel = _kernel()
-    if kernel is not None:
-        return kernel(x, fold.signs, block=fold.block)
     xf = x.astype(mx.float32)
     if fold.signs is not None:
         xf = xf * fold.signs
@@ -99,6 +106,12 @@ def rotate_inverse(rows: mx.array, fold: _Fold) -> mx.array:
         return rows
     if os.environ.get("GMLX_HADAMARD_TRACE") == "1":
         _count += 1
+    kernel = _kernel(fold.block)
+    if kernel is not None:
+        out = kernel(rows, None, block=fold.block)
+        if fold.signs is not None:
+            out = out * fold.signs.astype(rows.dtype)
+        return out
     xf = _blocked_transform(rows.astype(mx.float32), fold.block)
     if fold.signs is not None:
         xf = xf * fold.signs

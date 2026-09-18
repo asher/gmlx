@@ -355,6 +355,34 @@ def test_inverse_undoes_forward():
     np.testing.assert_allclose(got, ref, atol=1e-5)
 
 
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("perm", [None, (3, 16, 128)])
+def test_kernel_form_matches_ops_form(monkeypatch, perm, dtype):
+    """With mlx-kquant's hadamard_rotate installed, the kernel and the
+    MLX-op form agree to the output dtype's rounding, forward (with the
+    head permute) and inverse."""
+    if getattr(kq, "hadamard_rotate", None) is None:
+        pytest.skip("installed mlx-kquant has no hadamard_rotate")
+    if mx.default_device() != mx.gpu:
+        pytest.skip("kernel form runs on the GPU device only")
+    rng = np.random.default_rng(12)
+    width = 6144
+    target = FoldTarget(width=width, block=1024, signs=_signs(rng, width), perm=perm)
+    inv = FoldTarget(width=width, block=1024, signs=target.signs, inverse=True)
+    x = mx.array(rng.standard_normal((3, width)).astype(np.float32)).astype(dtype)
+    monkeypatch.setenv("GMLX_HADAMARD_KERNEL", "1")
+    k_fwd = rotate(x, _fold(target))
+    k_inv = rotate_inverse(x, _fold(inv))
+    monkeypatch.setenv("GMLX_HADAMARD_KERNEL", "0")
+    o_fwd = rotate(x, _fold(target))
+    o_inv = rotate_inverse(x, _fold(inv))
+    tol = 2e-2 if dtype == mx.bfloat16 else 3e-3
+    for k, o in ((k_fwd, o_fwd), (k_inv, o_inv)):
+        assert k.dtype == dtype
+        kf, of = np.array(k.astype(mx.float32)), np.array(o.astype(mx.float32))
+        assert np.abs(kf - of).max() / np.abs(of).max() < tol
+
+
 def test_rotation_switches(monkeypatch):
     rng = np.random.default_rng(5)
     target = FoldTarget(width=256, block=BLOCK, signs=_signs(rng, 256))
