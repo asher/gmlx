@@ -323,9 +323,13 @@ def _template_text(args) -> str:
         return ""
     try:
         from gmlx.load.headerscan import scan_gguf
+        from gmlx.load.tokenizer import bundled_chat_template_for_arch
 
-        t = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv.get(
-            "tokenizer.chat_template")
+        kv = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv
+        # A template gmlx ships for this arch replaces the embedded one at
+        # load, so it is the one whose switch spelling counts.
+        t = (bundled_chat_template_for_arch(kv.get("general.architecture"))
+             or kv.get("tokenizer.chat_template"))
     except Exception:
         return ""
     if t is None:

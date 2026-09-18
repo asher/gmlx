@@ -6,11 +6,52 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek-V4.1-Flash (`deepseek41`) support added with engram offloading.
+  gmlx ships the V4.1 chat template and DSML tool as some GGUFs ship with
+  the 4.0 templates.
+- DeepSeek-V4.1-Flash-Vision: pass the encoder GGUF with `--mmproj` to run
+  image turns.
+- The ds4 conversion of DeepSeek-V4.1-Flash loads as well. Its engram
+  tables exceed one GPU buffer on a 128 GB Mac, so they are read from the
+  GGUF row by row.
+
+### Changed
+
+- DeepSeek-V4 MoE blocks run the shared expert inside the routed expert
+  gathers on an mlx-kquant that carries the fold.
+- A streamed decode starts with the prompt's most routed experts already
+  in the arena, so the first tokens no longer miss on every expert. The
+  fast-disk recipe engages from 5 GB/s of measured drive bandwidth.
+- A streamed model unmaps the expert stacks from the GPU once the feeders
+  read them from the file. Deep prefill and decode both gain.
+- A streamed model's MLX buffer cache defaults to the KV room instead of
+  4 GB.
+- A streamed DeepSeek-V4.1 keeps its 8192-token prefill chunk past 180k
+  tokens. The indexer now retires each query block before building the
+  next, so the chunk no longer halves twice on the way to 384k.
+- A streamed prefill folds a short last chunk into the ones before it.
+
 ### Fixed
 
+- `serve` prefills a streamed DeepSeek-V4.1 about twice as fast. It cut
+  the prompt into 2048-token chunks and re-read the whole expert set once
+  per chunk.
 - `pull` fetches a file in bounded range windows once it knows the remote
   length, so downloading or resuming a very large GGUF from Hugging Face's
   xet CDN no longer fails with HTTP 400.
+- `--thinking on|off` sets the switch the chat template reads instead of
+  the first name that matches by substring.
+- `--stream-cpu` streams a declared lookup table instead of holding it
+  resident.
+- The Metal residency set is capped at the working set the arena and ring
+  leave. An oversized set can panic the kernel.
+- A quantized tensor stored beside sub-modules is dequantized at load.
+- The bundled chat template applies to the report-only, MTP and VLM loads
+  too.
+- A streamed model reports when reclaimable RAM, not the memory ceiling,
+  clamps its decode arena.
 - A stalled or dropped read no longer abandons a `pull`: the transfer
   retries with backoff from the bytes already on disk, tunable by
   `GMLX_PULL_RETRIES` and `GMLX_PULL_TIMEOUT`.

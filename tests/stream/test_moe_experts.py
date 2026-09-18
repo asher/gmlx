@@ -574,3 +574,20 @@ def test_kimi_k3_block_hooked_via_callback(monkeypatch):
     assert low.shape == (1, 5, 2)
     for t in range(low.shape[1]):
         assert len(set(low[0, t].tolist())) == 1  # collapsed to top-1
+
+
+def test_valid_expert_ids_replaces_out_of_range_rows(capsys):
+    from gmlx.stream.expert_streaming import _valid_expert_ids
+
+    mod = SimpleNamespace(gate_proj=SimpleNamespace(num_experts=8), _kq_li=3)
+    ok = mx.array(np.array([[1, 5, 7], [0, 2, 4]], dtype=np.uint32))
+    ids, out = _valid_expert_ids(mod, ok)
+    assert out is ok
+    assert ids.tolist() == [[1, 5, 7], [0, 2, 4]]
+
+    bad = mx.array(np.array([[1, 5, 7], [0xFFFFFFFF] * 3], dtype=np.uint32))
+    ids, out = _valid_expert_ids(mod, bad)
+    assert ids.tolist() == [[1, 5, 7], [0, 1, 2]]
+    assert out is not bad and out.dtype == mx.uint32
+    assert np.array(out).tolist() == ids.tolist()
+    assert "layer 3: router found no expert for 1 token(s)" in capsys.readouterr().err

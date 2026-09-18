@@ -39,6 +39,19 @@ def test_decay_tiers_with_depth(monkeypatch):
     assert seen[0] == 2048 and seen[-1] == 256
 
 
+def test_profile_rows_price_the_live_rows_not_the_chunk(monkeypatch):
+    _cap(monkeypatch, 6.0)
+    prof = pd.ScoreTransientProfile(heads=1, bytes_per_elem=4, rows=2048)
+    # 2048 x (384000 + 8192) x 4 = 3.2 GB fits where the chunk-wide price
+    # (12.8 GB) would have halved the step twice
+    assert pd.decayed_step(8192, 384_000, HEADS, profile=prof) == 8192
+    assert pd.score_transient_bytes.__name__ == "score_transient_bytes"
+    # once the live rows alone overflow, the step halves below them
+    assert pd.decayed_step(8192, 3_000_000, HEADS, profile=prof) == 256
+    assert pd.decayed_step(8192, 3_000_000, HEADS, profile=prof._replace(
+        rows=0)) == 256
+
+
 def test_floor_holds_at_extreme_depth(monkeypatch):
     _cap(monkeypatch, 0.5)
     assert pd.decayed_step(2048, 10_000_000, HEADS) == 256

@@ -581,6 +581,7 @@ VENDORED_MLX_VLM_MODULES = {
     # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
     # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
     # pin. Delete the module at the vendoring review.
+    "gmlx.models.deepseek_v41.tools": "mlx_vlm.tool_parsers.deepseek_v41",
     "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
     "gmlx.models.hy_v4.tools": "mlx_vlm.tool_parsers.hy_v4",
     "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",

@@ -7,6 +7,8 @@ stored packed), and the per-step maybe_quantize_kv_cache replacement must
 pack pools / skip rotating caches instead of raising the upstream
 NotImplementedError mid-generation."""
 
+import os
+
 import mlx.core as mx
 import pytest
 
@@ -17,6 +19,7 @@ from gmlx.cache.apc_pooling import (
 from gmlx.models.deepseek_v4.cache import PoolingCache
 
 D = 64
+MODES = ["fp16", "q8", "fp4"]
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -25,10 +28,28 @@ def _installed():
     install_safe_kv_quantization()
 
 
-def _pool(quantized=False, rows=9, remainder=2):
+def _fp4_available() -> bool:
+    if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
+        return False
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return False
+    return hasattr(kq, "latent_fp4_pack")
+
+
+def _mode_pool(mode, **kw):
+    if mode == "fp4" and not _fp4_available():
+        pytest.skip("latent_fp4_pack is a Metal kernel")
+    return _pool(quantized=mode == "q8", packed=mode == "fp4", **kw)
+
+
+def _pool(quantized=False, rows=9, remainder=2, packed=False):
     c = PoolingCache(4)
     if quantized:
         c.quantize_storage(group_size=32, bits=8)
+    if packed:
+        c.pack_fp4()
     if rows:
         c.update_and_fetch(mx.random.normal((1, rows, D)).astype(mx.float16))
     if remainder:
@@ -50,6 +71,7 @@ def _same_pool(a, b):
     assert a.remainder == b.remainder
     assert a.size() == b.size()
     assert a._qbits == b._qbits
+    assert a.is_packed == b.is_packed
     if a.remainder:
         assert mx.array_equal(
             a.buf_kv[:, : a.remainder], b.buf_kv[:, : b.remainder]
@@ -58,19 +80,19 @@ def _same_pool(a, b):
             a.buf_gate[:, : a.remainder], b.buf_gate[:, : b.remainder]
         )
     if a.size():
-        assert mx.array_equal(a.pooled, b.pooled)
+        assert mx.array_equal(a.pooled_rows, b.pooled_rows)
     assert (a._prev_kv is None) == (b._prev_kv is None)
     if a._prev_kv is not None:
         assert mx.array_equal(a._prev_kv, b._prev_kv)
         assert mx.array_equal(a._prev_gate, b._prev_gate)
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_clone_roundtrip(quantized):
+@pytest.mark.parametrize("mode", MODES)
+def test_clone_roundtrip(mode):
     from mlx_vlm import apc
 
     mx.random.seed(2)
-    src = _pool(quantized=quantized)
+    src = _mode_pool(mode)
     targets = []
     clone = apc._clone_cache_entry_for_apc(
         src, min_capacity_tokens=None, eval_targets=targets
@@ -78,7 +100,8 @@ def test_clone_roundtrip(quantized):
     if targets:
         mx.eval(*targets)
     _same_pool(src, clone)
-    assert clone.is_quantized == quantized  # packed entries stay packed
+    assert clone.is_quantized == (mode == "q8")  # packed entries stay packed
+    assert clone.is_packed == (mode == "fp4")
     # Decoupled: appending to the source must not leak into the clone.
     n = clone.size()
     src.update_and_fetch(mx.random.normal((1, 1, D)).astype(mx.float16))
@@ -298,14 +321,14 @@ def test_row_snapshot_v4_stack():
     _same_pool(stack[1].caches[1], snaps[1].caches[1])
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_disk_exact_roundtrip(tmp_path, quantized):
+@pytest.mark.parametrize("mode", MODES)
+def test_disk_exact_roundtrip(tmp_path, mode):
     from mlx_vlm import apc
 
     mx.random.seed(4)
     store = apc.DiskBlockStore(tmp_path, namespace="t")
     try:
-        src = _pool(quantized=quantized)
+        src = _mode_pool(mode)
         snapshot = apc._DiskExactCacheSnapshot(
             cache_hash=42,
             token_ids=(1, 2, 3),
@@ -319,7 +342,8 @@ def test_disk_exact_roundtrip(tmp_path, quantized):
         token_ids, _extra, caches = loaded
         assert token_ids == (1, 2, 3)
         _same_pool(src, caches[0])
-        assert caches[0].is_quantized == quantized
+        assert caches[0].is_quantized == (mode == "q8")
+        assert caches[0].is_packed == (mode == "fp4")
     finally:
         stop = getattr(store, "close", None) or getattr(store, "stop", None)
         if callable(stop):

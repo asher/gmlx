@@ -20,6 +20,7 @@ _ALLOWED = {
     "gmlx/talk/main.py",                   # VU-meter blocks, status glyphs
     "gmlx/assistant/memory.py",            # bullet char in list-marker-strip regex
     "gmlx/load/tokenizer.py",              # U+2581 / U+0120 tokenizer markers
+    "gmlx/models/deepseek_v41/tools.py",   # fullwidth DSML tag delimiters
     "gmlx/serve/tts.py",                   # speech-text sanitizer dash/fraction glyphs
     "tests/e2e/checks.py",                 # U+FFFD degeneration detection
     "tests/tui/test_chat.py",              # asserts chat status-line separators
@@ -30,6 +31,7 @@ _ALLOWED = {
     "tests/tui/test_render.py",            # asserts rendered rules; CJK width fixture
     "tests/serve/test_server_patches.py",  # multilingual tokenizer fixtures
     "tests/load/test_tokenizer.py",        # U+FFFD control-token / byte-level fixtures
+    "tests/models/test_deepseek_v41_chat.py",  # asserts DSML and DeepSeek role tokens
     "tests/serve/test_tts.py",             # multi-script sanitizer fixtures
     "tests/talk/test_talk_audio.py",       # asserts VU-meter block output
 }

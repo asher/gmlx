@@ -1061,7 +1061,7 @@ def test_slash_thinking_local_maps_template_spelling(capsys):
 
     # Kimi K2.x bare-thinking spelling
     state = ChatState(template_kwargs={},
-                      template_text="thinking is defined and thinking is false")
+                      template_text="{% if thinking is defined and thinking is false %}{% endif %}")
     _slash_thinking("/thinking", "off", state)
     assert state.template_kwargs == {"thinking": False}
     _slash_thinking("/thinking", "on", state)

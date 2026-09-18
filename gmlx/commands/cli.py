@@ -1197,9 +1197,13 @@ def _report_only(args) -> int:
     # Render the prompt the way generate would, so --report-only can preview a
     # --chat-template override without building the model.
     if not args.no_chat_template:
-        from gmlx.load.tokenizer import load_tokenizer_from_gguf
+        from gmlx.load.tokenizer import (
+            bundled_chat_template_for_arch,
+            load_tokenizer_from_gguf,
+        )
 
-        override = _resolve_chat_template(args.chat_template)
+        override = (_resolve_chat_template(args.chat_template)
+                    or bundled_chat_template_for_arch(arch))
         tok = load_tokenizer_from_gguf(meta, arch, chat_template_override=override)
         if tok.chat_template is not None:
             rendered = tok.apply_chat_template(
@@ -2250,6 +2254,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if rc is not None:
         return rc
     _ensure_stream_cb_caps(args)
+    if getattr(args, "stream_cpu", False):
+        # Before the load: the warm touch reads this to leave a streamable
+        # table untouched.
+        from gmlx.stream.table_stream import force_table_stream
+
+        force_table_stream()
     from gmlx.serve.cb_phase import install_cb_phase_steps
 
     # In-RAM placements: fine caps through each prefill, coarse from the

@@ -26,6 +26,47 @@ import mlx.core as mx
 from mlx_lm.models.cache import _BaseCache
 
 
+class PackedPool:
+    """Pool rows at rest in the mlx-kquant latent_fp4_pack form: codes
+    [B, P, D / 2] and scales [B, P, D / 16], both uint8. Rows on the V4.1
+    latent QAT grid pack exactly. The sparse attention kernels read this
+    form directly; ``rows()`` unpacks it for everything else."""
+
+    __slots__ = ("codes", "scales", "dtype")
+
+    def __init__(self, codes, scales, dtype=mx.float16):
+        self.codes = codes
+        self.scales = scales
+        self.dtype = dtype
+
+    @property
+    def shape(self):
+        B, P, C = self.codes.shape
+        return (B, P, C * 2)
+
+    @property
+    def nbytes(self):
+        return self.codes.nbytes + self.scales.nbytes
+
+    def rows(self):
+        import mlx_kquant as kq
+
+        return kq.latent_fp4_unpack(self.codes, self.scales, self.dtype)
+
+
+def pool_rows(pooled):
+    """``pooled`` as an array: a PackedPool unpacks, anything else passes."""
+    return pooled.rows() if isinstance(pooled, PackedPool) else pooled
+
+
+def pool_arrays(pooled):
+    """The arrays behind ``pooled`` (for mx.eval): a PackedPool's pair,
+    anything else as is."""
+    if isinstance(pooled, PackedPool):
+        return (pooled.codes, pooled.scales)
+    return pooled
+
+
 class PoolingCache(_BaseCache):
     """Cache for pooled (compressed) KV tokens with a remainder buffer.
 
@@ -64,6 +105,13 @@ class PoolingCache(_BaseCache):
         self._qbits = None
         self._qgroup = 64
 
+        # FP4 at-rest storage (pack_fp4): _pbuf holds a (codes, scales)
+        # pair in the latent_fp4_pack form and ``pooled`` returns a
+        # PackedPool the sparse kernels read as is. Exact for rows on the
+        # V4.1 latent QAT grid, so the fetch never dequantizes.
+        self._fp4 = False
+        self._fp4_dtype = mx.float16
+
         # Pooled rows live in a step-allocated buffer with a valid-length
         # watermark: appends write in place (donation keeps them O(rows
         # appended)), so window completions stop paying a full-pool copy
@@ -96,8 +144,9 @@ class PoolingCache(_BaseCache):
     def quantize_storage(self, group_size: int = 64, bits: int = 8):
         """Arm packed at-rest storage. Free on a fresh cache; with pooled
         rows already landed (serve's conversion-at-start hook) the existing
-        rows are packed in place. Idempotent once armed."""
-        if self._qbits is not None:
+        rows are packed in place. Idempotent once armed; an FP4 pool is
+        already smaller and exact, so it stays as it is."""
+        if self._qbits is not None or self._fp4:
             return
         self._qgroup = int(group_size)
         self._qbits = int(bits)
@@ -113,14 +162,43 @@ class PoolingCache(_BaseCache):
         else:
             self._pbuf = None
 
+    def pack_fp4(self, dtype=mx.float16):
+        """Arm FP4 at-rest storage; rows already landed are repacked.
+        ``dtype`` is what the rows unpack to. No-op under --kv-bits."""
+        if self._fp4 or self._qbits is not None:
+            return
+        rows = self.pooled
+        self._fp4 = True
+        self._fp4_dtype = dtype
+        self._pbuf = None
+        self._plen = 0
+        self._undo = None
+        if rows is not None:
+            self.append_pooled(rows)
+
     @property
     def is_quantized(self):
         return self._qbits is not None
 
     @property
+    def is_packed(self):
+        return self._fp4
+
+    @property
+    def pooled_rows(self):
+        """The pooled rows as an array whatever the storage mode."""
+        return pool_rows(self.pooled)
+
+    @property
     def pooled(self):
         if self._plen == 0:
             return None
+        if self._fp4:
+            codes, scales = self._pbuf
+            P = self._plen
+            if codes.shape[1] != P:
+                codes, scales = codes[:, :P], scales[:, :P]
+            return PackedPool(codes, scales, self._fp4_dtype)
         if self._qbits is not None:
             pk, sc, bi = self._pbuf
             B, P = pk.shape[0], self._plen
@@ -142,11 +220,12 @@ class PoolingCache(_BaseCache):
         if v is None:
             self._pbuf = None
             self._plen = 0
-        elif self._qbits is not None:
+        elif self._qbits is not None or self._fp4:
             self._pbuf = None
             self._plen = 0
             self.append_pooled(v)
         else:
+            v = pool_rows(v)
             self._pbuf = v
             self._plen = v.shape[1]
 
@@ -268,11 +347,16 @@ class PoolingCache(_BaseCache):
         self.append_pooled(px)
         return self.pooled
 
-    def append_pooled(self, px: mx.array):
+    def append_pooled(self, px):
         """Append pooled rows without the dense fetch. Sparse decode uses
         this directly, then reads back only its top-k rows via
         gather_pooled -- under quantized storage a full-pool dequantize per
-        step would otherwise erase the memory win's bandwidth side."""
+        step would otherwise erase the memory win's bandwidth side. Under
+        FP4 storage ``px`` may already be a PackedPool."""
+        if self._fp4:
+            self._append_fp4(px)
+            return
+        px = pool_rows(px)
         B, n, D = px.shape
         need = self._plen + n
         if self._qbits is not None and self._pbuf is None and (
@@ -330,12 +414,59 @@ class PoolingCache(_BaseCache):
             # the buffer through a rollback, so replay is a watermark move.
             self._undo = self._undo + (need,)
 
+    def _append_fp4(self, px):
+        if isinstance(px, PackedPool):
+            codes, scales = px.codes, px.scales
+        else:
+            import mlx_kquant as kq
+
+            if px.shape[-1] % 16:
+                raise ValueError(
+                    f"pooled rows ({px.shape[-1]}-wide) cannot pack to FP4 "
+                    "groups of 16"
+                )
+            self._fp4_dtype = px.dtype
+            codes, scales = kq.latent_fp4_pack(px)
+        B, n, _ = codes.shape
+        need = self._plen + n
+        cap = 0 if self._pbuf is None else self._pbuf[0].shape[1]
+        if need > cap:
+            step = self.POOL_STEP
+            grow = ((need - cap + step - 1) // step) * step
+            pads = tuple(
+                mx.zeros((B, grow, t.shape[-1]), dtype=mx.uint8)
+                for t in (codes, scales)
+            )
+            self._pbuf = (
+                pads
+                if self._pbuf is None
+                else tuple(
+                    mx.concatenate([b, p], axis=1) for b, p in zip(self._pbuf, pads)
+                )
+            )
+        for b, t in zip(self._pbuf, (codes, scales)):
+            b[:, self._plen : need] = t
+        self._plen = need
+        if self._undo is not None and len(self._undo) == 8:
+            self._undo = self._undo + (need,)
+
     def gather_pooled(self, topk: mx.array):
         """Dequantized gather of pooled rows by ``(B, L, K)`` indices,
         shaped ``(B, 1, L, K, D)`` to match _sparse_topk_gather."""
-        pk, sc, bi = self._pbuf
         B, L, K = topk.shape
         idx = topk.reshape(B, L * K)[..., None]
+        if self._fp4:
+            codes, scales = (
+                mx.take_along_axis(
+                    t[:, : self._plen],
+                    mx.broadcast_to(idx, (B, L * K, t.shape[-1])),
+                    axis=1,
+                )
+                for t in self._pbuf
+            )
+            rows = PackedPool(codes, scales, self._fp4_dtype).rows()
+            return rows.reshape(B, L, K, -1)[:, None]
+        pk, sc, bi = self._pbuf
         parts = [
             mx.take_along_axis(
                 t[:, : self._plen],
@@ -377,7 +508,7 @@ class PoolingCache(_BaseCache):
     def state(self):
         buf_kv = self.buf_kv[:, : self.remainder] if self.remainder > 0 else None
         buf_gate = self.buf_gate[:, : self.remainder] if self.remainder > 0 else None
-        return (buf_kv, buf_gate, self.pooled, self._prev_kv, self._prev_gate)
+        return (buf_kv, buf_gate, self.pooled_rows, self._prev_kv, self._prev_gate)
 
     @state.setter
     def state(self, v):
@@ -398,14 +529,19 @@ class PoolingCache(_BaseCache):
     @property
     def meta_state(self):
         # Bare ratio while lookback is on (the historical format, so
-        # pre-flag snapshots stay readable); (ratio, lookback) otherwise.
+        # pre-flag snapshots stay readable); (ratio, lookback) otherwise;
+        # a third entry names the FP4 unpack dtype when that storage is on.
+        if self._fp4:
+            return (self.ratio, self.lookback, str(self._fp4_dtype).split(".")[-1])
         return self.ratio if self.lookback else (self.ratio, self.lookback)
 
     @meta_state.setter
     def meta_state(self, v):
         if isinstance(v, (tuple, list)):
-            self.ratio, lb = v
+            self.ratio, lb = v[0], v[1]
             self.lookback = bool(lb) and self.ratio == 4
+            if len(v) > 2 and not self._fp4:
+                self.pack_fp4(getattr(mx, v[2]))
         else:
             self.ratio = v
             self.lookback = self.ratio == 4
@@ -416,6 +552,7 @@ class PoolingCache(_BaseCache):
         # construct before restoring rather than relying on setter order.
         if isinstance(meta_state, (tuple, list)):
             c = cls(meta_state[0], lookback=meta_state[1])
+            c.meta_state = meta_state
         else:
             c = cls(meta_state)
         c.state = state
@@ -541,6 +678,8 @@ class BatchPoolingCache(_BaseCache):
 
         self.pooled = None
         self._pool_lengths = [0] * batch_size
+        # Rows stay fp16 here; extract re-arms FP4 storage on the members.
+        self._fp4_dtype = None
 
         self._lengths = [2**31] * batch_size
         self._processed = [0] * batch_size
@@ -1046,6 +1185,8 @@ class BatchPoolingCache(_BaseCache):
         pl = self._pool_lengths[idx]
         r = self.remainder[idx]
 
+        if self._fp4_dtype is not None:
+            cache.pack_fp4(self._fp4_dtype)
         if self.pooled is not None and pl > 0:
             cache.pooled = mx.contiguous(self.pooled[idx : idx + 1, :pl])
 
@@ -1071,6 +1212,8 @@ class BatchPoolingCache(_BaseCache):
         ratio = caches[0].ratio
         batch_cache = cls(ratio, [0] * B,
                           lookback=getattr(caches[0], "lookback", True))
+        if all(getattr(c, "_fp4", False) for c in caches):
+            batch_cache._fp4_dtype = caches[0]._fp4_dtype
 
         # Check if all caches are empty
         if all(c.empty() for c in caches):
@@ -1080,13 +1223,13 @@ class BatchPoolingCache(_BaseCache):
         pool_sizes = [c.size() for c in caches]
         max_pool = max(pool_sizes)
         if max_pool > 0:
-            D = next(c.pooled.shape[2] for c in caches if c.pooled is not None)
-            dt = next(c.pooled.dtype for c in caches if c.pooled is not None)
+            rows = [c.pooled_rows for c in caches]
+            D = next(r.shape[2] for r in rows if r is not None)
+            dt = next(r.dtype for r in rows if r is not None)
             pooled = mx.zeros((B, max_pool, D), dtype=dt)
-            for i, c in enumerate(caches):
-                if c.pooled is not None:
-                    ps = c.pooled.shape[1]
-                    pooled[i, :ps] = c.pooled[0]
+            for i, r in enumerate(rows):
+                if r is not None:
+                    pooled[i, : r.shape[1]] = r[0]
             batch_cache.pooled = pooled
 
         batch_cache._pool_lengths = pool_sizes

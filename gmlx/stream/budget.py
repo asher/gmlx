@@ -306,11 +306,18 @@ def _decode_arena_bytes(
     avail = _available_ram_bytes()
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
-        arena = min(
-            arena,
-            avail - _ram_floor_bytes(ram or avail) - room - unpinned
-            - int(ring_bytes),
-        )
+        reclaimable = (avail - _ram_floor_bytes(ram or avail) - room
+                       - unpinned - int(ring_bytes))
+        if reclaimable < arena:
+            from gmlx.load import loadlog
+
+            loadlog.info(
+                f"[stream] arena clamped to reclaimable RAM: "
+                f"{max(0, reclaimable) / 1e9:.1f} GB, not the ceiling's "
+                f"{arena / 1e9:.1f} GB (reclaimable now {avail / 1e9:.1f} GB "
+                "of RAM; a co-resident workload or a cold page cache is the "
+                "usual cause)")
+        arena = min(arena, reclaimable)
     return min(max(0, arena), expert_bytes)
 
 
@@ -324,11 +331,12 @@ def _prefill_ring_reason(offsets, left: int | None) -> str | None:
     is the user's budget and the ring is not judged against it."""
     if left is None or os.environ.get("GMLX_DECODE_ARENA_GB"):
         return None
-    from gmlx.stream.prefill_feeder import ring_bytes
+    from gmlx.stream.prefill_feeder import ring_bytes, ring_slots
 
     ring = ring_bytes(offsets)
     if ring <= left:
         return None
-    return (f"ring 2 x {ring / 2e9:.1f} GB exceeds the {left / 1e9:.1f} GB "
-            "left under the memory ceiling after the every-token weights "
-            "and the KV room")
+    n = ring_slots()
+    return (f"ring {n} x {ring / n / 1e9:.1f} GB exceeds the "
+            f"{left / 1e9:.1f} GB left under the memory ceiling after the "
+            "every-token weights and the KV room")

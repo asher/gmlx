@@ -29,6 +29,7 @@ from .dtypes import activation_dtype, activation_dtype_name
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
+from gmlx.gen.prefill_tail import install_prefill_tail
 import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
@@ -176,6 +177,14 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
         deepseek_v4_model.ensure_registered()
+    if mt == "deepseek_v41":
+        # DeepSeek-V4.1-Flash (the llama.cpp convert patch arch): the V4 skeleton
+        # plus engram memory layers; registers deepseek_v4's companions too.
+        import gmlx.models.deepseek_v41.model as deepseek_v41_model
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_model.ensure_registered()
+        deepseek_v41_tools.ensure_registered()
     if mt == "hy_v3":
         # mlx-lm ships no hy_v3 module yet (PR #1485 unmerged); same vendored-
         # registration pattern as minimax_m3. The tool parser registers with
@@ -416,9 +425,35 @@ def _phase_dump():
         b, s = 1e3 * lap["build"] / n, 1e3 * lap["sync"] / n
         print(
             f"[phase] la split: build {b:.1f} | sync {s:.1f} | "
-            f"post {ms['la'] - b - s:.1f}",
+            f"post {ms['la'] - b - s:.1f} | ev wire "
+            f"{1e3 * ph.get('ev_wire', 0.0) / n:.2f}",
             flush=True,
         )
+    hist = ph.get("miss_hist")
+    if hist and env_bool("GMLX_DECODE_PHASE_LAYERS", False):
+        first = hist[0][0]
+        marks = [m for li, m in hist if li == first]
+        per_tok = [b - a for a, b in zip(marks[:-1], marks[1:])]
+        print(
+            "[phase] arena misses per token: "
+            + " ".join(str(m) for m in per_tok[:24])
+            + (" ..." if len(per_tok) > 24 else "")
+            + f" | last 8: {per_tok[-8:]}",
+            flush=True,
+        )
+    by_li = ph.get("by_li")
+    if by_li and env_bool("GMLX_DECODE_PHASE_LAYERS", False):
+        print("[phase] per layer ms/token: li ev la stage_wait stage_book")
+        for li in sorted(by_li):
+            d = by_li[li]
+            print(
+                f"[phase]   {li:3d} "
+                + " ".join(
+                    f"{1e3 * d.get(k, 0.0) / n:6.2f}"
+                    for k in ("ev", "la", "stage_wait", "stage_book")
+                ),
+                flush=True,
+            )
 
 
 if _PHASE is not None:
@@ -815,6 +850,16 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # keeps its norms and rope tables fp32 internally).
     "deepseek_v4_vl": ("_hc.", "hc_head.", ".attn_sink", ".ape",
                        ".e_score_correction_bias", ".gate.weight"),
+    # deepseek_v41: the same hyper-connection kernel and QAT-parity params
+    # as deepseek_v4, minus the compressor ape table (V4.1 has none), plus
+    # the engram gate weights, which the reference multiplies in fp32.
+    "deepseek_v41": ("_hc.", ".attn_sink", ".e_score_correction_bias",
+                     ".gate.weight", ".engram.q_weight", ".engram.k_weight"),
+    # deepseek_v41_vl: the same set under language_model.*; the ViT and
+    # aligner cast normally.
+    "deepseek_v41_vl": ("_hc.", ".attn_sink", ".e_score_correction_bias",
+                        ".gate.weight", ".engram.q_weight",
+                        ".engram.k_weight"),
     # hy_v3 routing is semantically fp32 (F32 wire; llama.cpp routes in fp32,
     # and the vendored class's cast_predicate exempts expert_bias): sigmoid
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips
@@ -961,6 +1006,7 @@ def _install_and_load(
     f16_keep: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
+    deferred_tables: dict | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -981,6 +1027,9 @@ def _install_and_load(
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
     their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
+
+    ``deferred_tables``: wire name -> file source for tables the wire load
+    skipped (past the device buffer ceiling); attached after the kquant swap.
 
     ``active_before``: active-memory baseline for the untracked-weights split.
     Callers that read wire bytes before installing must pass the pre-read
@@ -1038,6 +1087,15 @@ def _install_and_load(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     log(f"[install] replaced {n_replaced} leaves with kquant modules")
 
+    from gmlx.stream.table_pread import install_deferred_tables
+    attached = install_deferred_tables(model, deferred_tables or {})
+    if attached:
+        # These bytes are in no [stream] line: a file-backed table
+        # is in no budget total either.
+        gb = sum((deferred_tables or {})[n].nbytes for n in attached) / 1e9
+        log(f"[install] {len(attached)} table(s) read from the GGUF, "
+             f"{gb:.1f} GB: {', '.join(attached)}")
+
     if install_hd512_sdpa():
         log("[install] head_dim-512 fused SDPA active")
     if install_quantized_sdpa_mask_fix():
@@ -1049,6 +1107,7 @@ def _install_and_load(
     # Inside the decay wrap (installed first): media blocks stay whole.
     from gmlx.gen.media_spans import install_span_aware_prompt_step
     install_span_aware_prompt_step()
+    install_prefill_tail()
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):
@@ -1066,7 +1125,7 @@ def _install_and_load(
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
-        log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
+        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -1289,7 +1348,7 @@ def load_model(
     loadlog.stage("reading tensors")
     t0 = time.perf_counter()
     arrays, kquant_meta, _arch_meta, meta, tensor_shapes = load_gguf_wire_bytes(
-        gguf_path, zero_copy=zero_copy, shards=pf.shards
+        gguf_path, zero_copy=zero_copy, shards=pf.shards, arch=arch
     )
     _log(
         f"[gguf] {len(arrays)} arrays, {len(kquant_meta)} kquant "
@@ -1502,6 +1561,8 @@ def load_model(
 
     # 6. swap leaves with kquant equivalents.
     loadlog.stage("installing quantized weights")
+    from gmlx.stream.table_pread import oversize_tables
+    deferred = oversize_tables(pf.shards, arch)
     dequant = dequantize_unattachable_leaves(model, hf_weights, hf_kquant_meta)
     if dequant:
         _log(f"[install] dequantized {len(dequant)} raw-array leaves to f32: "
@@ -1510,6 +1571,15 @@ def load_model(
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
+
+    from gmlx.stream.table_pread import install_deferred_tables
+    attached = install_deferred_tables(model, deferred)
+    if attached:
+        # These bytes are in no [stream] line: a file-backed table
+        # is in no budget total either.
+        gb = sum((deferred)[n].nbytes for n in attached) / 1e9
+        _log(f"[install] {len(attached)} table(s) read from the GGUF, "
+              f"{gb:.1f} GB: {', '.join(attached)}")
 
     if install_hd512_sdpa():
         _log("[install] head_dim-512 fused SDPA active")
@@ -1522,6 +1592,7 @@ def load_model(
     # Inside the decay wrap (installed first): media blocks stay whole.
     from gmlx.gen.media_spans import install_span_aware_prompt_step
     install_span_aware_prompt_step()
+    install_prefill_tail()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):
@@ -1539,7 +1610,7 @@ def load_model(
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
-        _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
+        _log(f"[install] shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -1657,15 +1728,21 @@ def load_model(
     loadlog.stage("building tokenizer")
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from .tokenizer import load_tokenizer_from_gguf
+    from .tokenizer import bundled_chat_template, load_tokenizer_from_gguf
 
     template_override = _resolve_chat_template(chat_template)
+    if template_override is None:
+        template_override = bundled_chat_template(config.get("model_type"))
     # The override is threaded *into* the synthesizer so it's set on the fast
     # tokenizer before turn-end-EOS inference (multi-EOS detection must see the
     # override, not the GGUF template).
     raw_tokenizer = load_tokenizer_from_gguf(
         meta, arch, chat_template_override=template_override
     )
+    if config.get("model_type") == "deepseek_v41":
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_tools.install_message_normalizer(raw_tokenizer)
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
     _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)

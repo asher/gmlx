@@ -391,7 +391,9 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
 # processor emits a bounded block. deepseek_v4_vl: the block (lead pads,
 # START, grid rows, pads, END) is at most 384 tokens by construction; the
 # reference's safe_resize reserves the 3 lead pads inside that cap.
-_MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384}
+# deepseek_v41_vl: the whole block (START, grid rows, END) is inside the
+# 1024-token budget, so there is nothing to reserve.
+_MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384, "deepseek_v41_vl": 1024}
 
 
 def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,

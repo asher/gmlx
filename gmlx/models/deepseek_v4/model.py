@@ -48,7 +48,11 @@ from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
-from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.cache import (
+    BatchPoolingCache,
+    PackedPool,
+    PoolingCache,
+)
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     HyperHead,
@@ -1042,6 +1046,387 @@ def _sparse_gathered_attention(
 _sparse_gathered_attention_c = mx.compile(_sparse_gathered_attention)
 _COMPILE_SPARSE = os.environ.get("GMLX_COMPILE_SPARSE", "1") != "0"
 
+# Prefill query-block width. A full-length pass scores every query against
+# every key of the chunk, so its work and its score tensors grow with the
+# square of the prompt; each block scores only the keys its window reaches
+# and its own top-k rows. 0 keeps the full-length pass.
+_PREFILL_BLOCK = int(os.environ.get("GMLX_DS4_PREFILL_BLOCK", "512") or 0)
+
+
+def _prefill_block() -> int:
+    return max(0, _PREFILL_BLOCK)
+
+
+def _query_bands(L: int, S: int, window: int, block: int):
+    """(qs, qe, ks, ke) per query block over a key array of S rows whose
+    last L rows are this call's queries."""
+    koff = S - L
+    for qs in range(0, L, block):
+        qe = min(L, qs + block)
+        yield qs, qe, max(0, qs + koff - (window - 1)), qe + koff
+
+
+def _banded_window_attention(q, kv, mask, scale, sinks, window: int, block: int):
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], kv.shape[2], window, block):
+        band = kv[:, :, ks:ke]
+        m = None if mask is None else mask[..., qs:qe, ks:ke]
+        outs.append(
+            mx.fast.scaled_dot_product_attention(
+                q[:, :, qs:qe], band, band, scale=scale, mask=m, sinks=sinks
+            )
+        )
+    return mx.concatenate(outs, axis=2)
+
+
+def _sparse_pooled_attention_banded(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int, block: int,
+):
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], local_kv.shape[2], window, block):
+        lm = None if local_mask is None else local_mask[..., qs:qe, ks:ke]
+        pm = None if pooled_mask is None else pooled_mask[..., qs:qe, :]
+        outs.append(
+            _sparse_pooled_attention(
+                q[:, :, qs:qe], local_kv[:, :, ks:ke], pooled, topk[:, qs:qe],
+                lm, pm, scale, sinks,
+            )
+        )
+    return mx.concatenate(outs, axis=2)
+
+
+# Sparse decode attention kernel (mlx-kquant sdpa_sparse_decode): the window
+# and the index-listed pool rows in two dispatches in place of the gather
+# and the compiled chain above. It reads the same inputs but keeps the
+# softmax in fp32, so it is not bit-identical to the chain; the first use
+# checks it against an fp32 reference and keeps it only when it lands at
+# least as close as the chain does. GMLX_DS41_SPARSE_KERNEL=0 keeps the
+# chain.
+_SPARSE_KERNEL_DIMS = (128, 256, 512)
+_SPARSE_KERNEL_DTYPES = (mx.float16, mx.bfloat16)
+_SPARSE_KERNEL_MAX_L = 4096
+# Queries per kernel call at prefill: each block reads the window rows
+# its own queries reach, so a narrow block wastes fewer masked rows and a
+# wide one makes fewer calls.
+_SPARSE_KERNEL_BLOCK = int(os.environ.get("GMLX_DS41_SPARSE_KERNEL_BLOCK", "64") or 0)
+_SPARSE_KERNEL: Dict[str, Optional[bool]] = {
+    "on": None, "wide": None, "prefill": None, "fp4": None,
+}
+
+
+def _sparse_kernel_wide() -> bool:
+    """Whether the kernel takes more than 16 queries per call (earlier
+    mlx-kquant builds stop there); probed once, on first need."""
+    wide = _SPARSE_KERNEL["wide"]
+    if wide is None:
+        import mlx_kquant as kq
+
+        D = 128
+        try:
+            out = kq.sdpa_sparse_decode(
+                mx.zeros((1, 1, 17, D), mx.bfloat16),
+                mx.zeros((1, 1, 1, D), mx.bfloat16),
+                mx.zeros((1, 1, D), mx.bfloat16),
+                mx.zeros((1, 17, 1), mx.uint32),
+                1.0,
+            )
+            mx.eval(out)
+            wide = True
+        except Exception:  # noqa: BLE001 - any refusal means the old cap
+            wide = False
+        _SPARSE_KERNEL["wide"] = wide
+    return wide
+
+
+def _sparse_kernel_max_l() -> int:
+    return _SPARSE_KERNEL_MAX_L if _sparse_kernel_wide() else 16
+
+
+def _sparse_kernel_block() -> int:
+    return max(0, min(_SPARSE_KERNEL_BLOCK, _sparse_kernel_max_l()))
+
+
+def _sparse_kernel_probe() -> bool:
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "sdpa_sparse_decode"):
+        return False
+    keys = mx.random.split(mx.random.key(7), 4)
+    L, D = 2, 128
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, 8, D), key=keys[1]).astype(mx.bfloat16)
+    pooled = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    topk = mx.array([[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8]]], mx.uint32)
+    mask = mx.tril(mx.ones((L, 8), dtype=mx.bool_), k=6)
+    sparse_mask = mx.array([[[True] * 5 + [False]] * L])[:, None]
+    scale = D ** -0.5
+    got = _sparse_kernel_attention(
+        q, kv, pooled, topk, mask, sparse_mask, scale, sinks
+    )
+    if got is None:
+        return False
+
+    def run(cast):
+        g = _sparse_topk_gather(cast(pooled), topk, L, D)
+        return _sparse_gathered_attention(
+            cast(q), cast(kv), g, mask, sparse_mask, scale, cast(sinks)
+        )
+
+    ref = run(lambda a: a.astype(mx.float32))
+    err_k = mx.abs(got.astype(mx.float32) - ref).max().item()
+    err_c = mx.abs(run(lambda a: a).astype(mx.float32) - ref).max().item()
+    return err_k <= max(err_c, 1e-2)
+
+
+def _sparse_kernel_ok() -> bool:
+    on = _SPARSE_KERNEL["on"]
+    if on is None:
+        on = False
+        if (
+            os.environ.get("GMLX_DS41_SPARSE_KERNEL", "1") != "0"
+            and mx.metal.is_available()
+            and mx.default_device() == mx.Device(mx.gpu)
+        ):
+            try:
+                on = _sparse_kernel_probe()
+            except Exception:  # noqa: BLE001 - any failure means the chain
+                on = False
+        _SPARSE_KERNEL["on"] = on
+    return on
+
+
+def _pool_fp4_probe() -> bool:
+    """Whether the sparse kernels take a latent_fp4_pack pool and answer
+    exactly as they do on the same rows unpacked."""
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "latent_fp4_pack"):
+        return False
+    keys = mx.random.split(mx.random.key(5), 4)
+    L, S, D, W = 3, 8, 128, 4
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, S, D), key=keys[1]).astype(mx.bfloat16)
+    raw = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    codes, scales = kq.latent_fp4_pack(raw)
+    pooled = kq.latent_fp4_unpack(codes, scales, mx.bfloat16)
+    topk = mx.array(
+        [[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8], [2, 5, 8, 11, 0, 3]]],
+        mx.uint32,
+    )
+    scale = D ** -0.5
+    # Packed call first: a kernel without the keyword refuses here.
+    got = kq.sdpa_sparse_decode(
+        q, kv, codes, topk, scale, sinks=sinks, pool_scales=scales
+    )
+    want = kq.sdpa_sparse_decode(q, kv, pooled, topk, scale, sinks=sinks)
+    if not mx.array_equal(got, want).item():
+        return False
+    if hasattr(kq, "sdpa_sparse_prefill"):
+        got = kq.sdpa_sparse_prefill(
+            q, kv, codes, topk, scale, W, sinks=sinks, pool_scales=scales
+        )
+        want = kq.sdpa_sparse_prefill(q, kv, pooled, topk, scale, W, sinks=sinks)
+        if not mx.array_equal(got, want).item():
+            return False
+    return True
+
+
+def _pool_fp4_ok() -> bool:
+    """Whether the latent pool can rest in the FP4 packed form the sparse
+    kernels read directly (GMLX_DS41_POOL_FP4=0 keeps fp16 rows)."""
+    on = _SPARSE_KERNEL["fp4"]
+    if on is None:
+        on = False
+        if os.environ.get("GMLX_DS41_POOL_FP4", "1") != "0" and _sparse_kernel_ok():
+            try:
+                on = _pool_fp4_probe()
+            except Exception:  # noqa: BLE001 - any refusal keeps fp16 rows
+                on = False
+        _SPARSE_KERNEL["fp4"] = on
+    return on
+
+
+def _pool_kernel_args(pooled):
+    """The kernel's pool operand and keyword for ``pooled``, packed or not."""
+    if isinstance(pooled, PackedPool):
+        return pooled.codes, {"pool_scales": pooled.scales}
+    return pooled, {}
+
+
+def _sparse_kernel_mask(mask, L: int, X: int) -> Optional[mx.array]:
+    """A bool mask in the kernel's [L, X] / [B, L, X] form, or False when
+    the mask is one the kernel cannot take."""
+    if mask is None:
+        return None
+    if not isinstance(mask, mx.array) or mask.dtype != mx.bool_:
+        return False
+    if mask.size % (L * X) != 0:
+        return False
+    return mask.reshape(-1, L, X)
+
+
+def _sparse_kernel_attention(
+    q: mx.array,
+    local_kv: mx.array,
+    pooled: mx.array,
+    topk: mx.array,
+    local_mask: Optional[mx.array],
+    pooled_mask: Optional[mx.array],
+    scale: float,
+    sinks: Optional[mx.array],
+) -> Optional[mx.array]:
+    """The kernel's answer, or None when the shapes or masks fall outside
+    what it takes; the caller then runs the chain."""
+    B, _, L, D = q.shape
+    if (
+        D not in _SPARSE_KERNEL_DIMS
+        or (L > 16 and L > _sparse_kernel_max_l())
+        or q.dtype not in _SPARSE_KERNEL_DTYPES
+        or topk.dtype not in (mx.int32, mx.uint32)
+        or topk.shape != (B, L, topk.shape[-1])
+    ):
+        return None
+    win_mask = _sparse_kernel_mask(local_mask, L, local_kv.shape[2])
+    sel_mask = _sparse_kernel_mask(pooled_mask, L, topk.shape[-1])
+    if win_mask is False or sel_mask is False:
+        return None
+    import mlx_kquant as kq
+
+    pooled, pool_kw = _pool_kernel_args(pooled)
+    return kq.sdpa_sparse_decode(
+        q, local_kv, pooled, topk, scale,
+        sinks=sinks, win_mask=win_mask, sel_mask=sel_mask, **pool_kw,
+    )
+
+
+def _sparse_prefill_probe() -> bool:
+    """Whether mlx-kquant's prefill kernel (sdpa_sparse_prefill) lands at
+    least as close to an fp32 reference as the chain on a small case."""
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "sdpa_sparse_prefill"):
+        return False
+    keys = mx.random.split(mx.random.key(11), 4)
+    L, S, D, W = 5, 8, 128, 3
+    q = mx.random.normal((1, 4, L, D), key=keys[0]).astype(mx.bfloat16)
+    kv = mx.random.normal((1, 1, S, D), key=keys[1]).astype(mx.bfloat16)
+    pooled = mx.random.normal((1, 12, D), key=keys[2]).astype(mx.bfloat16)
+    sinks = mx.random.normal((4,), key=keys[3]).astype(mx.bfloat16)
+    topk = mx.array(
+        [[[0, 3, 5, 9, 11, 2], [1, 4, 6, 7, 10, 8], [2, 5, 8, 11, 0, 3],
+          [3, 6, 9, 1, 4, 7], [4, 7, 10, 2, 5, 8]]],
+        mx.uint32,
+    )
+    koff = S - L
+    rows = mx.arange(koff, S)[:, None]
+    cols = mx.arange(S)[None]
+    mask = (cols <= rows) & (cols > rows - W)
+    sparse_mask = mx.array([[[True] * 5 + [False]] * L])[:, None]
+    scale = D ** -0.5
+    got = _sparse_kernel_prefill(
+        q, kv, pooled, topk, mask, sparse_mask, scale, sinks, W
+    )
+    if got is None:
+        return False
+
+    def run(cast):
+        g = _sparse_topk_gather(cast(pooled), topk, L, D)
+        return _sparse_gathered_attention(
+            cast(q), cast(kv), g, mask, sparse_mask, scale, cast(sinks)
+        )
+
+    ref = run(lambda a: a.astype(mx.float32))
+    err_k = mx.abs(got.astype(mx.float32) - ref).max().item()
+    err_c = mx.abs(run(lambda a: a).astype(mx.float32) - ref).max().item()
+    return err_k <= max(err_c, 1e-2)
+
+
+def _sparse_prefill_ok() -> bool:
+    on = _SPARSE_KERNEL["prefill"]
+    if on is None:
+        on = False
+        if (
+            os.environ.get("GMLX_DS41_SPARSE_PREFILL", "1") != "0"
+            and mx.metal.is_available()
+            and mx.default_device() == mx.Device(mx.gpu)
+        ):
+            try:
+                on = _sparse_prefill_probe()
+            except Exception:  # noqa: BLE001 - any failure means the bands
+                on = False
+        _SPARSE_KERNEL["prefill"] = on
+    return on
+
+
+def _sparse_kernel_prefill(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int,
+) -> Optional[mx.array]:
+    """Every query in one call of the prefill kernel, which derives each
+    query's window rows from its position: query l of the L sits at row
+    S - L + l of ``local_kv`` and reads the ``window`` rows up to it. The
+    caller's ``local_mask`` must be that band (create_causal_mask with the
+    sliding window); only its shape is checked. None when the shapes or
+    masks fall outside what the kernel takes."""
+    B, _, L, D = q.shape
+    S = local_kv.shape[2]
+    if (
+        D not in _SPARSE_KERNEL_DIMS
+        or S < L
+        or q.dtype not in _SPARSE_KERNEL_DTYPES
+        or topk.dtype not in (mx.int32, mx.uint32)
+        or topk.shape != (B, L, topk.shape[-1])
+    ):
+        return None
+    if local_mask is not None and (
+        not isinstance(local_mask, mx.array)
+        or local_mask.dtype != mx.bool_
+        or local_mask.shape[-2:] != (L, S)
+    ):
+        return None
+    sel_mask = _sparse_kernel_mask(pooled_mask, L, topk.shape[-1])
+    if sel_mask is False:
+        return None
+    import mlx_kquant as kq
+
+    pooled, pool_kw = _pool_kernel_args(pooled)
+    return kq.sdpa_sparse_prefill(
+        q, local_kv, pooled, topk, scale, window,
+        sinks=sinks, sel_mask=sel_mask, **pool_kw,
+    )
+
+
+def _sparse_kernel_attention_banded(
+    q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+    window: int, block: int,
+) -> Optional[mx.array]:
+    """Prefill through the kernel: one call of the prefill kernel when
+    mlx-kquant carries it, else one decode-kernel call per query block
+    over the window rows that block reaches; None when the kernel
+    declines the first block (the caller then runs the chain)."""
+    if _sparse_prefill_ok():
+        out = _sparse_kernel_prefill(
+            q, local_kv, pooled, topk, local_mask, pooled_mask, scale, sinks,
+            window,
+        )
+        if out is not None:
+            return out
+    outs = []
+    for qs, qe, ks, ke in _query_bands(q.shape[2], local_kv.shape[2], window, block):
+        lm = None if local_mask is None else local_mask[..., qs:qe, ks:ke]
+        pm = None if pooled_mask is None else pooled_mask[..., qs:qe, :]
+        out = _sparse_kernel_attention(
+            q[:, :, qs:qe], local_kv[:, :, ks:ke], pooled, topk[:, qs:qe],
+            lm, pm, scale, sinks,
+        )
+        if out is None:
+            return None
+        outs.append(out)
+    return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
 
 def _dense_sinks_attention(q, kv, sinks, scale):
     return mx.fast.scaled_dot_product_attention(
@@ -1399,6 +1784,7 @@ class MoEGate(nn.Module):
                 and t * self.top_k < 64
                 and not self.training
                 and _kq_router_available()
+                and mx.default_device().type == mx.gpu  # kernel has no CPU arm
             ):
                 import mlx_kquant as kq
 
@@ -1476,20 +1862,31 @@ class DeepseekV4MoE(nn.Module):
             x = sum_gradients(self.sharding_group)(x)
 
         inds, scores = self.gate(x, input_ids, image_mask)
-        if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
-            # Fused arm folds the score-weighted sum into the down gather
-            # (one dispatch, no [..., k, H] intermediate); the wrapper
-            # applies the sum itself whenever the fused path is ineligible.
-            y = self.switch_mlp(x, inds, scores)
-        else:
-            y = self.switch_mlp(x, inds)
-            if y.ndim == scores.ndim + 1:
-                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
-        y = y + self.shared_experts(x)
+        y = self._routed(x, inds, scores)
+        y = self._with_shared(x, y, scores)
 
         if self.sharding_group is not None:
             y = mx.distributed.all_sum(y, group=self.sharding_group)
         return y
+
+    def _routed(self, x, inds, scores):
+        """The routed experts: the fused arm takes the scores and folds the
+        weighted sum into the down gather (one dispatch, no [..., k, H]
+        intermediate); it returns unmixed whenever that path is
+        ineligible."""
+        if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
+            return self.switch_mlp(x, inds, scores)
+        return self.switch_mlp(x, inds)
+
+    def _with_shared(self, x, y, scores):
+        """Add the shared expert exactly once: an unmixed return is mixed
+        here and gets it; a mixed return from a stamped shexp fold
+        (``_kq_shexp_mod``) already carries it."""
+        if y.ndim == scores.ndim + 1:
+            y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+        elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is not None:
+            return y
+        return y + self.shared_experts(x)
 
 
 class Compressor(nn.Module):

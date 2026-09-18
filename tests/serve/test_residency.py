@@ -905,6 +905,26 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     assert dense.footprint == 340 * GB
 
 
+def test_streaming_footprint_credits_streamable_tables(monkeypatch):
+    """deepseek41's engram tables serve from disk like the experts; pricing
+    them resident would evict every other model for room they never take."""
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    import gmlx.stream.plan as plan
+
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 190 * GB)
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 64 * GB)
+    monkeypatch.setattr(plan, "plan_path",
+                        lambda p: (SimpleNamespace(ring_bytes=10 * GB),
+                                   SimpleNamespace(arena_bytes=75 * GB,
+                                                   ring_fits=True)))
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "0")
+    every = 260 * GB - 190 * GB - 64 * GB
+    assert residency._streaming_footprint("a", 260 * GB) == every + 10 * GB
+
+
 def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
     """A build that fails after the stock load (a kv policy refusal)
     tears its model down and collects it before the next acquire gates on

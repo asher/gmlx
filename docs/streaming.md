@@ -189,6 +189,38 @@ Face with a header read for each shard:
     => streams, but no decode arena (0.0 GB left after the ring and the host floor), decode runs from the page cache; expect slow decode
 ```
 
+An architecture with streamable lookup tables gets a `streamed tables`
+figure between the two, and those bytes are out of the every-token total.
+DeepSeek-V4.1-Flash at Q2_K is 246 GiB of which 60 GiB is its two engram
+n-gram tables, so the every-token weights are 3 GiB, not 63 GiB. The same
+credit reaches the server's preload gate and its resident-bytes bookkeeping,
+so a streamed entry is not priced for room it never takes.
+
+### A table no single buffer can hold
+
+A GPU buffer cannot exceed the device's `max_buffer_length`, which grows
+with RAM and sits near 81 GiB on a 128 GB Mac. A tensor past that limit has
+no buffer at all, so neither a mapped view nor a copy of it exists. The ds4
+conversion of DeepSeek-V4.1-Flash stores each engram table as raw fp8
+bytes, 264 bytes per row and 101 GB per table, which is past the limit on a
+128 GB machine. The llama.cpp conversion stores the same tables at Q2_K, 84
+bytes per row, and stays under it.
+
+gmlx leaves such a table out of the weight load and reads its rows from
+the GGUF as the model asks for them, the way the reference runtime does.
+The reads bypass the page cache and the table is never resident, so it
+weighs nothing in the memory budget and does not appear in the
+`streamed tables` figure. The load names it instead:
+
+```
+[install] 2 table(s) read from the GGUF, 202.8 GB: blk.1.engram_embd.weight, blk.14.engram_embd.weight
+```
+
+Reading rows this way needs an mlx-kquant whose GGUF loader takes a skip
+list. gmlx names that in the error when it is missing, and no other model
+is affected. A build with no Metal device has no limit to compare against,
+so nothing is deferred and such a file fails in the loader.
+
 `gmlx validate --json` carries the same numbers under `stream`, and
 `gmlx doctor` adds a clause for each streamed entry to its memory row. A
 load prints the live budget as `[stream] memory budget:`, and because that
@@ -209,16 +241,25 @@ GLM-5.2, and `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
 | lookahead prestage | runs the next layer's router early and pre-reads its predicted misses while the current layer computes. It moves bytes only, never routing | `GMLX_DECODE_LOOKAHEAD=0`, and `=1` where the family default is off |
 | weight pin | locks the every-token weights in memory so the kernel cannot evict them between tokens on a machine at its free-page floor | `GMLX_PIN_WEIGHTS=0` |
 | GPU keep-warm | keeps GPU clocks high through the host and disk gaps between layers with a tiny heartbeat kernel | `GMLX_GPU_KEEPWARM=0` |
-| streamable lookup tables | on architectures with a large table in each layer that all tokens read a few rows of, streams the table before the experts | `GMLX_STREAM_PLE=0` |
+| streamable lookup tables | on architectures with a large table that every token reads a few rows of, streams the tables before the experts | `GMLX_STREAM_PLE=0` |
+| stack unmap | drops the expert stacks' Metal buffers once both feeders serve a layer from the file, so the file's bytes leave the GPU-mapped total | `GMLX_STREAM_UNMAP_STACKS=0` |
+| tail merge | widens the prefill chunk by up to an eighth so a short last chunk folds into the ones before it | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
 
 The prefill feeder stages only the experts the router chose on short prompts,
 which is the source of its time-to-first-token gain. Its ring reads bypass
 the page cache, since a pass reads each routed expert once and would otherwise
 evict the rest of the machine's page cache for pages it never reads again.
 
-The decode feeder's arena starts empty and converges within a few dozen
-tokens, which is why the first tokens of a session are slower. Under memory
-pressure from another model or a build it shrinks,
+The decode feeder's arena starts warm. Every expert of a layer passes
+through the prefill ring, so while the ring moves on to the next layer the
+prompt's most routed experts of that layer are copied from the ring slot
+into the arena and wired there, at memory speed and off the prefill's path.
+The first decode token then finds the arena as full as the prompt's routing
+can make it, with the wiring already done. A prefill too short for the ring
+leaves the arena empty, and decode converges within a few dozen tokens
+instead. `GMLX_DECODE_SEED=0` starts every decode empty.
+
+Under memory pressure from another model or a build the arena shrinks,
 keeping its most routed experts, and grows again when the pressure ends.
 Multi-token expert calls whose routed set exceeds the arena, such as the
 next chat turn's prefill, are split along the token axis and served from the

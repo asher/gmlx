@@ -24,7 +24,9 @@ real transient is far smaller (e.g. deepseek_v4's native DSA path peaks at
 the indexer's [1, step, S/ratio] fp32 block). Such models register a
 ScoreTransientProfile provider keyed by config.model_type; when the provider
 arms (kernels present, single sequence), the fit test sizes the true
-transient and the chunk stays full until that genuinely nears the cap. A
+transient and the chunk stays full until that genuinely nears the cap. An
+arch that evaluates its scores per query block sets rows, the live row
+count, and the fit prices min(step, rows) rows instead of the chunk. A
 profile may also carry an arch-default base step, honored only when no
 explicit PREFILL_STEP_SIZE is in force.
 
@@ -82,7 +84,7 @@ _FLAG = "_gmlx_prefill_decay"
 # key by generator if a multi-model serve ever shows chunk thrash.
 _LIVE_DECODE_ROWS = 0
 _CHUNK_COST: tuple[int, float] | None = None  # (step tokens, wall seconds)
-_LAST_STEP = 0
+_LAST_STEP: int = 0
 
 
 class ScoreTransientProfile(NamedTuple):
@@ -92,6 +94,7 @@ class ScoreTransientProfile(NamedTuple):
     bytes_per_elem: int = 4  # effective bytes per score element
     depth_divisor: int = 1  # transient key length = (depth + step) / divisor
     base_step: int | None = None  # arch-default chunk (None = stock base)
+    rows: int = 0  # live score rows under per-block evaluation (0 = the chunk)
 
 
 # model_type -> provider(model, prompt_cache) -> profile | None. A provider
@@ -211,7 +214,7 @@ def _cap_bytes() -> float:
     global _WS_CAP_BYTES
     if _WS_CAP_BYTES is None:
         try:
-            ws = mx.device_info()["max_recommended_working_set_size"]
+            ws = float(mx.device_info()["max_recommended_working_set_size"])
             _WS_CAP_BYTES = cap_bytes_for(ws)
         except Exception:
             _WS_CAP_BYTES = 4e9
@@ -300,12 +303,18 @@ def decayed_step(base: int, depth: int, heads: int,
         cap = _body_cap_bytes()
     if profile is not None:
         h, bpe, div = profile.heads, profile.bytes_per_elem, profile.depth_divisor
+        rows = profile.rows
     else:
-        h, bpe, div = heads, 2, 1
+        h, bpe, div, rows = heads, 2, 1, 0
     step = int(base)
-    while step > min_step and h * step * (depth + step) * bpe > cap * div:
+    while (step > min_step
+           and h * _live_rows(step, rows) * (depth + step) * bpe > cap * div):
         step //= 2
     return step
+
+
+def _live_rows(step: int, rows: int) -> int:
+    return min(step, rows) if rows else step
 
 
 def note_decode_pressure(rows: int) -> None:
@@ -322,7 +331,7 @@ def note_chunk_cost(seconds: float) -> None:
     corrects it."""
     global _CHUNK_COST
     if _LAST_STEP > 0 and seconds > 0.0:
-        _CHUNK_COST = (_LAST_STEP, float(seconds))
+        _CHUNK_COST = (int(_LAST_STEP), float(seconds))
 
 
 def _tick_step(base: int) -> int | None:
@@ -555,9 +564,10 @@ def score_transient_bytes(model, prompt_cache, depth: int) -> float:
     if profile is not None:
         h, bpe, div = (profile.heads, profile.bytes_per_elem,
                        profile.depth_divisor)
+        rows = profile.rows
     else:
-        h, bpe, div = heads, 2, 1
-    return h * step * (depth + step) * bpe / div
+        h, bpe, div, rows = heads, 2, 1, 0
+    return h * _live_rows(step, rows) * (depth + step) * bpe / div
 
 
 def _seed_cap_bytes() -> float:
@@ -624,11 +634,21 @@ def decayed_for_batch(batch) -> int | None:
     step = decayed_step(base, depth, score_heads(batch.model),
                         profile=profile)
     tick = _tick_step(base)
-    ticked = tick is not None and tick < step
-    if ticked:
-        step = tick
+    ticked = False
+    if tick is not None and tick < step:
+        step, ticked = tick, True
+    embeds = getattr(batch, "_inputs_embeds", None)
+    if step == base and embeds is not None:
+        from gmlx.stream.expert_streaming import (
+            merge_prefill_tail,
+            moe_streaming_active,
+        )
+
+        if moe_streaming_active(batch.model):
+            # The loop leaves the last prompt token to generate().
+            step = merge_prefill_tail(step, embeds.shape[1] - 1)
     global _LAST_STEP
-    _LAST_STEP = step
+    _LAST_STEP = int(step or 0)
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
         if profile is not None and "profile" not in _PROFILE_LOGGED:
             _PROFILE_LOGGED.add("profile")

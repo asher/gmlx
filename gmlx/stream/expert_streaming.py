@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 import time
 
 import mlx.core as mx
@@ -30,7 +31,20 @@ from gmlx.load.loader import (
 )
 
 from .budget import _decode_arena_bytes, _prefill_ring_reason, _ram_floor_bytes
+from .stack_unmap import stacks_remapped, unmap_stacks
 from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
+
+
+def _ph_li(ph, li, key, dt):
+    """Per-layer phase sums (GMLX_DECODE_PHASE_LAYERS=1 prints them)."""
+    d = ph.setdefault("by_li", {}).setdefault(li, {})
+    d[key] = d.get(key, 0.0) + dt
+
+
+# Submit a staged layer's expert gather as soon as it is built, so the GPU
+# runs it while the host builds the next layer's graph. The next layer's
+# router eval is still the fence that orders it before any slot overwrite.
+_ASYNC_GATHER = env_bool("GMLX_DECODE_ASYNC_GATHER", True)
 
 
 # MoE expert CPU offload (hybrid GPU+CPU inference)
@@ -119,7 +133,8 @@ def configure_stream_cpu(
 
 def _install_gpu_residency(model, moe_modules, *,
                            skip_ids=frozenset(),
-                           include_expert_stacks: bool = False) -> None:
+                           include_expert_stacks: bool = False,
+                           room: int | None = None) -> None:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
@@ -130,7 +145,17 @@ def _install_gpu_residency(model, moe_modules, *,
     tables (a residency insert wires the buffer as surely as a GPU op).
     ``include_expert_stacks``: table-only streaming keeps the experts
     resident, so the GB-scale-stack belt is lifted and they are wired
-    with everything else."""
+    with everything else.
+
+    ``room``: bytes of the working set the arena, the ring and other live
+    installs have not taken. This runs last, so it is the one step that
+    can push their sum past the set; a residency set larger than the
+    working set cannot be honored, buys nothing, and has been seen to
+    panic the kernel (IOGPUGroupMemory). The room is an estimate - the
+    arena is charged from its computed size, before the decode feeder
+    exists, so a run that builds no feeder caps tighter than it needs to.
+    That costs speed, never correctness, which is why this clamps instead
+    of raising."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
@@ -146,12 +171,17 @@ def _install_gpu_residency(model, moe_modules, *,
                     skip.add(id(w))
     inserted = []
     nbytes = 0
+    left_out = left_out_bytes = 0
     for _, a in tree_flatten(model.parameters()):
         if id(a) in skip:
             continue
         if (not include_expert_stacks
                 and a.ndim == 3 and a.nbytes > (1 << 30)):
             continue  # belt: any GB-scale stack is an expert container
+        if room is not None and nbytes + a.nbytes > room:
+            left_out += 1
+            left_out_bytes += a.nbytes
+            continue
         if kq.residency_insert(a):
             inserted.append(a)
             nbytes += a.nbytes
@@ -161,6 +191,78 @@ def _install_gpu_residency(model, moe_modules, *,
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
           "(GMLX_GPU_RESIDENT=0 disables)")
+    if left_out:
+        print(f"[stream] gpu-resident weights: {left_out} buffers "
+              f"({left_out_bytes / 1e9:.1f} GB) left out, since the working set "
+              f"has {room / 1e9:.1f} GB free of it")
+
+
+def _physical_ram() -> int:
+    ram = int(mx.device_info().get("memory_size", 0)) if mx.metal.is_available() else 0
+    if not ram:
+        ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    return ram
+
+
+def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
+    """MLX's allocator counts the file-backed weights as active memory,
+    which on a streamed model sits past its default gc limit; every cache
+    miss then purged the whole buffer cache and every temporary was a
+    fresh Metal allocation. Put the gc limit out of reach and let the
+    cache limit alone bound the pool. The pool defaults to the priced KV
+    room (``room_bytes``, already reserved under the ceiling): a pool
+    smaller than one layer's transient set allocates fresh buffers every
+    layer, and each pays page population. GMLX_STREAM_ALLOC_LIMITS=0
+    keeps the defaults; GMLX_STREAM_CACHE_GB sizes the pool."""
+    if not env_bool("GMLX_STREAM_ALLOC_LIMITS", True) or not mx.metal.is_available():
+        return
+    limit = int(tracked_bytes + 2 * _physical_ram())
+    env = os.environ.get("GMLX_STREAM_CACHE_GB", "")
+    if env:
+        cache = int(float(env) * 2**30)
+        how = "GMLX_STREAM_CACHE_GB"
+    elif room_bytes > 0:
+        cache = int(room_bytes)
+        how = "the KV room; GMLX_STREAM_CACHE_GB overrides"
+    else:
+        cache = 4 * 2**30
+        how = "GMLX_STREAM_CACHE_GB sizes it"
+    mx.set_memory_limit(limit)
+    mx.set_cache_limit(cache)
+    loadlog.info(
+        f"[stream] allocator: gc limit {limit / 1e9:.0f} GB, past the "
+        f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
+        f"({how}, GMLX_STREAM_ALLOC_LIMITS=0 keeps the MLX defaults)"
+    )
+
+
+_NO_EXPERT_LOGGED: set = set()
+
+
+def _valid_expert_ids(module, indices):
+    """Router ids as a host array, with out-of-range entries replaced in
+    both the host copy and the device array. The kq router kernel wrote
+    0xffffffff for a row whose logits were all NaN (fixed in mlx-kquant 0.4.11,
+    kept here for older builds), and the host slot tables and the gather
+    kernels index by expert id. Such a row routes to experts 0..k-1,
+    which is what argpartition picks on a NaN row."""
+    ids = np.array(indices)
+    n = _switch_num_experts(module)
+    if not n or ids.size == 0:
+        return ids, indices
+    bad = ids >= n
+    if not bad.any():
+        return ids, indices
+    li = getattr(module, "_kq_li", None)
+    if li not in _NO_EXPERT_LOGGED:
+        _NO_EXPERT_LOGGED.add(li)
+        rows = int(bad.reshape(-1, ids.shape[-1]).any(axis=-1).sum())
+        print(f"[stream] layer {li}: router found no expert for {rows} token(s)"
+              f" at width {ids.size // ids.shape[-1]} (NaN logits); routing"
+              f" them to experts 0..{ids.shape[-1] - 1}", file=sys.stderr)
+    fallback = np.broadcast_to(np.arange(ids.shape[-1], dtype=ids.dtype), ids.shape)
+    ids = np.where(bad, fallback, ids)
+    return ids, mx.array(ids)
 
 
 def install_expert_streaming(
@@ -218,80 +320,82 @@ def install_expert_streaming(
     # against the experts' every-MoE-layer surcharge. The table wrap runs
     # its row gather on a dedicated CPU stream so the buffer is never a
     # GPU-stream input (a single GPU reference would wire all of it).
-    # When the post-table estimate is still over budget, v1 falls back to
-    # expert streaming with the table resident: streaming both at once
-    # (compose) needs the hot-row arena and is not shipped.
+    # When the post-table estimate is still over budget, the experts
+    # stream too (compose). --stream-cpu streams the experts whatever the
+    # model size, so it always composes: leaving 60 GiB of deepseek41
+    # engram tables resident is the case the flag exists to avoid.
     table_offloaded = 0
-    if not force_stream:
-        from gmlx.stream.table_stream import (
-            install_table_streaming,
-            table_bytes,
-            table_stream_selected,
-        )
+    from gmlx.stream.table_stream import (
+        install_table_streaming,
+        table_bytes,
+        table_stream_selected,
+    )
 
-        compose = False
-        if table_stream_selected(model, total_bytes, budget):
-            post = total_bytes - table_bytes(model)
-            # Step 2 default: over budget even post-table streams both
-            # (compose). GMLX_STREAM_PLE_COMPOSE=0 keeps the table
-            # resident; the selection test already honors it in auto
-            # mode, so this only fires under GMLX_STREAM_PLE=1.
-            if budget is not None and post > budget:
-                if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
-                    compose = True
-                    table_offloaded, table_names = (
-                        install_table_streaming(model))
-                else:
-                    print(
-                        "[stream] table stays resident "
-                        "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
-                    )
+    compose = False
+    if table_stream_selected(model, total_bytes, budget, force_stream):
+        post = total_bytes - table_bytes(model)
+        # Step 2 default: over budget even post-table streams both
+        # (compose). --stream-cpu streams the experts unconditionally,
+        # so its tables always compose. GMLX_STREAM_PLE_COMPOSE=0
+        # keeps them resident; the selection test already honors it in
+        # auto mode, so that branch only fires under GMLX_STREAM_PLE=1
+        # or --stream-cpu.
+        if force_stream or (budget is not None and post > budget):
+            if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
+                compose = True
+                table_offloaded, table_names = (
+                    install_table_streaming(model))
             else:
-                table_offloaded, table_names = install_table_streaming(model)
-        if table_offloaded and compose:
-            loadlog.info(
-                f"[stream] compose: streamable table "
-                f"{'+'.join(table_names)} "
-                f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
-                "AND experts streamed"
-            )
-            key = getattr(model, "_kq_weights_key", None)
-            from gmlx.gen.prefill_decay import (
-                note_streamed_tracked_bytes,
-                untracked_weight_bytes_for,
-            )
-            tracked = max(
-                0.0, total_bytes - untracked_weight_bytes_for(key))
-            credit = min(float(table_offloaded), tracked)
-            if credit > 0:
-                note_streamed_tracked_bytes(
-                    credit, key, source="table", cap=tracked)
-            deduct_untracked_weights(table_offloaded, key)
-        elif table_offloaded:
-            # The selection test admits the table only when the remainder
-            # clears the budget (or streaming is forced on a fits model),
-            # so experts are resident from here on.
-            over_budget = False
-            base = ("" if budget is None
-                    else f" of {budget / 2**30:.1f} GiB budget")
-            loadlog.info(
-                f"[stream] streamable table {'+'.join(table_names)} "
-                f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
-                "the CPU stream; experts resident (post-deduction "
-                f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
-            )
-            key = getattr(model, "_kq_weights_key", None)
-            from gmlx.gen.prefill_decay import (
-                note_streamed_tracked_bytes,
-                untracked_weight_bytes_for,
-            )
-            tracked = max(
-                0.0, total_bytes - untracked_weight_bytes_for(key))
-            credit = min(float(table_offloaded), tracked)
-            if credit > 0:
-                note_streamed_tracked_bytes(
-                    credit, key, source="table", cap=tracked)
-            deduct_untracked_weights(table_offloaded, key)
+                print(
+                    "[stream] table stays resident "
+                    "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
+                )
+        else:
+            table_offloaded, table_names = install_table_streaming(model)
+    if table_offloaded and compose:
+        loadlog.info(
+            f"[stream] compose: streamable table "
+            f"{'+'.join(table_names)} "
+            f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
+            "AND experts streamed"
+        )
+        key = getattr(model, "_kq_weights_key", None)
+        from gmlx.gen.prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(
+            0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(table_offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(
+                credit, key, source="table", cap=tracked)
+        deduct_untracked_weights(table_offloaded, key)
+    elif table_offloaded:
+        # The selection test admits the table only when the remainder
+        # clears the budget (or streaming is forced on a fits model),
+        # so experts are resident from here on.
+        over_budget = False
+        base = ("" if budget is None
+                else f" of {budget / 2**30:.1f} GiB budget")
+        loadlog.info(
+            f"[stream] streamable table {'+'.join(table_names)} "
+            f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
+            "the CPU stream; experts resident (post-deduction "
+            f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
+        )
+        key = getattr(model, "_kq_weights_key", None)
+        from gmlx.gen.prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(
+            0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(table_offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(
+                credit, key, source="table", cap=tracked)
+        deduct_untracked_weights(table_offloaded, key)
 
     streaming = force_stream or over_budget
     prefetcher = None
@@ -487,7 +591,9 @@ def install_expert_streaming(
                         if ph is not None:
                             t_la = time.perf_counter()
                             la_pred = la.on_call(x_la, indices)
-                            ph["la"] += time.perf_counter() - t_la
+                            _dt = time.perf_counter() - t_la
+                            ph["la"] += _dt
+                            _ph_li(ph, self._kq_li, "la", _dt)
                         else:
                             la_pred = la.on_call(x_la, indices)
                     if (
@@ -509,6 +615,9 @@ def install_expert_streaming(
                         t0 = time.perf_counter() if ph is not None else 0.0
                         if n_tokens == 1:
                             dfr.ensure_wired()
+                        if ph is not None:
+                            ph["ev_wire"] = ph.get("ev_wire", 0.0) + (
+                                time.perf_counter() - t0)
                         # Miss-shed is decode-only: a single-token leaf of an
                         # arena token split is prefill work, and a shedding
                         # leaf would return a mixed rank-3 output next to a
@@ -529,8 +638,11 @@ def install_expert_streaming(
                         if ph is not None:
                             t1 = time.perf_counter()
                             ph["ev"] += t1 - t0
+                            _ph_li(ph, self._kq_li, "ev", t1 - t0)
                             wait0 = getattr(dfr, "_t_demand", 0.0)
-                        ids = np.array(indices)
+                            ph.setdefault("miss_hist", []).append(
+                                (self._kq_li, dfr._lookups - dfr._hits))
+                        ids, indices = _valid_expert_ids(self, indices)
                         shed_args = None
                         shed_mix = None
                         if sc_f32 is not None:
@@ -562,6 +674,9 @@ def install_expert_streaming(
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
                             ph["stage_wait"] += w
                             ph["stage_book"] += (t2 - t1) - w
+                            _ph_li(ph, self._kq_li, "stage_wait", w)
+                            _ph_li(ph, self._kq_li, "stage_book",
+                                   (t2 - t1) - w)
                         if la_pred:
                             # This layer's demand misses have joined
                             # (stage returned); the predicted layers'
@@ -601,6 +716,8 @@ def install_expert_streaming(
                                                 and y.ndim == x.ndim + 1):
                                             y = (y * shed_mix[..., None]).sum(
                                                 axis=-2)
+                                        if _ASYNC_GATHER and n_tokens == 1:
+                                            mx.async_eval(y)
                                 if ph is not None:
                                     ph["build"] += time.perf_counter() - t3
                                 return y
@@ -672,7 +789,7 @@ def install_expert_streaming(
                         # expert's bytes - rewrite the routing ids first.
                         mx.eval(indices)
                         indices = mx.array(dfr.redirect_dead(
-                            self._kq_li, np.array(indices)))
+                            self._kq_li, _valid_expert_ids(self, indices)[0]))
                     if (
                         fdr is not None
                         and not wedged
@@ -685,8 +802,10 @@ def install_expert_streaming(
                         # slices into the ring slot instead of the whole
                         # layer (see feeder.prefill_partial_call).
                         mx.eval(indices)
-                        ids = np.unique(np.array(indices)).tolist()
-                        with fdr.prefill_partial_call(self, self._kq_li, ids):
+                        ids, indices = _valid_expert_ids(self, indices)
+                        ids = np.unique(ids).tolist()
+                        with fdr.prefill_partial_call(
+                                self, self._kq_li, ids, routing=indices):
                             with mx.stream(mx.gpu):
                                 return super().__call__(
                                     x, indices, *args, **kwargs)
@@ -706,7 +825,7 @@ def install_expert_streaming(
                         # whole-layer advisory below): both sweep the full
                         # expert range, poisoned bytes included.
                         mx.eval(x)
-                        with fdr.prefill_call(self, self._kq_li):
+                        with fdr.prefill_call(self, self._kq_li, ids=indices):
                             with mx.stream(mx.gpu):
                                 return super().__call__(
                                     x, indices, *args, **kwargs)
@@ -736,16 +855,20 @@ def install_expert_streaming(
                         # demand-faulting 16 KB clusters from inside the
                         # gemv. GMLX_DECODE_PREFETCH=0 disables.
                         mx.eval(indices)
-                        pf.on_decode(
-                            self._kq_li,
-                            np.unique(np.array(indices)).tolist(),
-                        )
-                    if gpu_tokens > 0 and n_tokens >= gpu_tokens and not cpu_only:
-                        # Prefill regime: GEMM on the GPU stream, same
-                        # zero-copy buffers.
-                        return super().__call__(x, indices, *args, **kwargs)
-                    with mx.stream(mx.cpu):
-                        return super().__call__(x, indices, *args, **kwargs)
+                        ids, indices = _valid_expert_ids(self, indices)
+                        pf.on_decode(self._kq_li, np.unique(ids).tolist())
+                    # No feeder path: the stack's own file view, mapped
+                    # back for this call where the install dropped it.
+                    with stacks_remapped(self):
+                        if (gpu_tokens > 0 and n_tokens >= gpu_tokens
+                                and not cpu_only):
+                            # Prefill regime: GEMM on the GPU stream, same
+                            # zero-copy buffers.
+                            return super().__call__(
+                                x, indices, *args, **kwargs)
+                        with mx.stream(mx.cpu):
+                            return super().__call__(
+                                x, indices, *args, **kwargs)
 
             _CPUOffload.__name__ = cls.__name__ + "_CPUOffload"
             _CPU_OFFLOAD_CLASS_CACHE[cls] = sub = _CPUOffload
@@ -839,6 +962,7 @@ def install_expert_streaming(
     feeder = None
     dfeeder = None
     room = arena = None
+    arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
         from gmlx.stream.budget import kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
@@ -893,8 +1017,9 @@ def install_expert_streaming(
             )
             loadlog.info(
                 "[stream] feeder prefill: expert stacks staged straight "
-                f"from GGUF through 2 x {feeder.slot_bytes / 1e9:.1f} GB "
-                f"GPU-visible ring slots{cov} (--no-prefill-feeder disables)"
+                f"from GGUF through {feeder.n_slots} x "
+                f"{feeder.slot_bytes / 1e9:.1f} GB GPU-visible ring "
+                f"slots{cov} (--no-prefill-feeder disables)"
             )
     if (
         streaming
@@ -933,6 +1058,7 @@ def install_expert_streaming(
                 # the box has lost that room.
                 dfeeder._release_ring = feeder.release_slots
                 feeder._lend_hook = dfeeder.lend_for_ring
+                feeder._seed_hook = dfeeder.seed_from_ring
             wired = (
                 "fully wired at first decode"
                 if dfeeder._mlock_deferred
@@ -962,12 +1088,18 @@ def install_expert_streaming(
                 floor = _ram_floor_bytes(int(mx.device_info()["memory_size"]))
             except Exception:
                 floor = _ram_floor_bytes(None)
+            # Streamed tables are page-cache citizens like the experts, so
+            # they are out of the every-token term the arena is sized
+            # against (arena_kw carries the same figure).
+            tbytes = int(arena_kw.get("streamable_bytes", 0))
+            every = total_bytes - expert_bytes - tbytes
+            tables = f"tables {tbytes / 1e9:.1f} off-disk, " if tbytes else ""
             print(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
-                f"every-token {(total_bytes - expert_bytes) / 1e9:.1f} + "
+                f"every-token {every / 1e9:.1f} + "
                 f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
                 f"{ring / 1e9:.1f} + kv room {room.bytes / 1e9:.1f} "
-                f"({room_how}) + floor {floor / 1e9:.1f}; "
+                f"({room_how}) + floor {floor / 1e9:.1f}; {tables}"
                 "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
@@ -995,9 +1127,34 @@ def install_expert_streaming(
             from gmlx.stream.table_stream import streamed_table_array_ids
 
             tskip = streamed_table_array_ids(model)
+        # The pin is not a term here: it mlocks the same every-token
+        # arrays this inserts, and the arena already priced them (it is
+        # sized as ceiling - non_expert - room - ring - floor), so
+        # subtracting both would leave the unpinned remainder and
+        # disable the residency set rather than cap it.
         _install_gpu_residency(
             model, moe_modules, skip_ids=tskip,
-            include_expert_stacks=bool(table_offloaded) and not streaming)
+            include_expert_stacks=bool(table_offloaded) and not streaming,
+            room=(None if budget is None
+                  else max(0, budget - held_wired - int(arena or 0) - ring)))
+    if (
+        streaming and feeder is not None and dfeeder is not None
+        and env_bool("GMLX_STREAM_UNMAP_STACKS", True)
+    ):
+        # Both feeders read a covered layer's stacks from the file; the
+        # module's no-copy views only keep the mapping, and the driver's
+        # per-command-buffer work grows with the mapped total past RAM.
+        active0 = mx.get_active_memory()
+        n_un, b_un = unmap_stacks({
+            li: e for li, e in feeder._layers.items() if dfeeder.covers(li)})
+        if n_un:
+            freed = active0 - mx.get_active_memory()
+            loadlog.info(
+                f"[stream] expert stacks unmapped from the GPU on {n_un} "
+                f"layers ({b_un / 1e9:.1f} GB, {freed / 1e9:.1f} GB of "
+                "buffers freed): the feeders read them from the file "
+                "(GMLX_STREAM_UNMAP_STACKS=0 keeps the views)"
+            )
     if streaming and dfeeder is not None:
         import gmlx.stream.gpu_token as gpu_token
 
@@ -1079,6 +1236,8 @@ def install_expert_streaming(
                 f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
     if streaming:
+        _set_allocator_limits(
+            total_bytes, room.bytes if room is not None else 0)
         # The context line printed above and the feeder lines cover the
         # normal story; what remains is the fallback mechanics for
         # whatever the feeders don't handle.
@@ -1146,6 +1305,22 @@ def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, boo
         getattr(model, "args", None), "model_type", None)
     return _STREAMING_PREFILL_STEP_BY_MODEL_TYPE.get(
         mt, _STREAMING_PREFILL_STEP), True
+
+
+def merge_prefill_tail(step: int | None, n_tokens: int) -> int | None:
+    """Widen the chunk so a short last chunk folds into the ones before it.
+    A streamed prefill stages every expert once per chunk, so a 33-token
+    tail costs about what a 1000-token chunk does. Only a tail under
+    ``step / 8`` merges, so no chunk grows past 9/8 of ``step``.
+    ``n_tokens`` is what the loop chunks: the prompt less its last token.
+    GMLX_STREAM_PREFILL_TAIL_MERGE=0 keeps the step."""
+    if (not step or n_tokens <= step
+            or not env_bool("GMLX_STREAM_PREFILL_TAIL_MERGE", True)):
+        return step
+    n_full, tail = divmod(n_tokens, step)
+    if tail == 0 or tail > step // 8:
+        return step
+    return -(-n_tokens // n_full)
 
 
 def install_moe_experts_override(model, k: int) -> int:

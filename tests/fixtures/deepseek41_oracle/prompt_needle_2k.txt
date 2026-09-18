@@ -1,0 +1,55 @@
+<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+<｜User｜>Station Operations Handbook. Read every section before answering.
+
+Section 1. Subject: power distribution. The duty officer checks power distribution at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 1 is 1037. Keep the code in the shift book and do not read it over an open channel.
+
+Section 2. Subject: coolant flow. The duty officer checks coolant flow at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 2 is 1074. Keep the code in the shift book and do not read it over an open channel.
+
+Section 3. Subject: airlock cycling. The duty officer checks airlock cycling at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 3 is 1111. Keep the code in the shift book and do not read it over an open channel.
+
+Section 4. Subject: antenna alignment. The duty officer checks antenna alignment at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 4 is 1148. Keep the code in the shift book and do not read it over an open channel.
+
+Section 5. Subject: waste recycling. The duty officer checks waste recycling at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 5 is 1185. Keep the code in the shift book and do not read it over an open channel.
+
+Section 6. Subject: hull inspection. The duty officer checks hull inspection at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 6 is 1222. Keep the code in the shift book and do not read it over an open channel.
+
+Section 7. Subject: crew rotation. The duty officer checks crew rotation at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 7 is 1259. Keep the code in the shift book and do not read it over an open channel.
+
+Section 8. Subject: cargo manifest. The duty officer checks cargo manifest at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 8 is 1296. Keep the code in the shift book and do not read it over an open channel.
+
+Section 9. Subject: navigation fixes. The duty officer checks navigation fixes at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 9 is 1333. Keep the code in the shift book and do not read it over an open channel.
+
+Section 10. Subject: solar array trim. The duty officer checks solar array trim at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 10 is 1370. Keep the code in the shift book and do not read it over an open channel.
+
+Section 11. Subject: water reclamation. The duty officer checks water reclamation at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 11 is 1407. Keep the code in the shift book and do not read it over an open channel.
+
+Section 12. Subject: fire suppression. The duty officer checks fire suppression at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 12 is 1444. Keep the code in the shift book and do not read it over an open channel.
+
+Section 13. Subject: radiation shelter. The duty officer checks radiation shelter at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 13 is 1481. Keep the code in the shift book and do not read it over an open channel.
+
+Section 14. Subject: docking clamps. The duty officer checks docking clamps at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 14 is 1518. Keep the code in the shift book and do not read it over an open channel.
+
+Section 15. Subject: battery balance. The duty officer checks battery balance at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 15 is 1555. Keep the code in the shift book and do not read it over an open channel.
+
+Section 16. Subject: gyroscope trim. The duty officer checks gyroscope trim at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 16 is 1592. Keep the code in the shift book and do not read it over an open channel.
+
+Section 17. Subject: atmosphere mix. The duty officer checks atmosphere mix at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 17 is 1629. Keep the code in the shift book and do not read it over an open channel.
+
+Section 18. Subject: spare parts. The duty officer checks spare parts at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 18 is 1666. Keep the code in the shift book and do not read it over an open channel.
+
+Section 19. Subject: medical stock. The duty officer checks medical stock at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 19 is 1703. Keep the code in the shift book and do not read it over an open channel.
+
+Section 20. Subject: comms relay. The duty officer checks comms relay at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 20 is 1740. Keep the code in the shift book and do not read it over an open channel.
+
+Section 21. Subject: power distribution. The duty officer checks power distribution at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 21 is 1777. Keep the code in the shift book and do not read it over an open channel.
+
+Section 22. Subject: coolant flow. The duty officer checks coolant flow at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 22 is 1814. Keep the code in the shift book and do not read it over an open channel.
+
+Section 23. Subject: airlock cycling. The duty officer checks airlock cycling at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 23 is 1851. Keep the code in the shift book and do not read it over an open channel.
+
+Section 24. Subject: antenna alignment. The duty officer checks antenna alignment at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 24 is 1888. Keep the code in the shift book and do not read it over an open channel.
+
+Section 25. Subject: waste recycling. The duty officer checks waste recycling at the start of every shift and logs the reading in the shift book. If the reading is outside the normal band, the officer files a report and tells the section lead. The access code for Section 25 is 1925. Keep the code in the shift book and do not read it over an open channel.
+
+Question: what is the access code for Section 17? Answer with the number only.<｜Assistant｜><think>

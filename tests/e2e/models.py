@@ -74,6 +74,12 @@ _CANDIDATES = {
         "unsloth__GLM-5.3-Flash-GGUF/UD-Q2_K_XL/"
         "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
     ],
+    # DeepSeek-V4.1-Flash: 246 GB, and the only model whose engram tables
+    # stream alongside the experts.
+    "dsv41_flash_q2": [
+        "vcruz305__DeepSeek-V4.1-Flash-GGUF/"
+        "DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf",
+    ],
     # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
     # the block-expansion VLM path. Last vlm fallback, and the target of the
     # dsv4-vision scenarios when present.
@@ -83,6 +89,10 @@ _CANDIDATES = {
     ],
     "dsv4_vision_mmproj": [
         "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/mmproj-BF16.gguf",
+    ],
+    # The V4.1 encoder GGUF, which pairs with the text shards above.
+    "dsv41_flash_mmproj": [
+        "antirez__deepseek-v4.1-flash-gguf/DeepSeek-V4.1-Flash-Vision.gguf",
     ],
 }
 
@@ -111,6 +121,10 @@ _SOURCES = {
     "Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf",
     "glm53_flash_q2": "hf:unsloth/GLM-5.3-Flash-GGUF/UD-Q2_K_XL/"
     "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
+    "dsv41_flash_q2": "hf:vcruz305/DeepSeek-V4.1-Flash-GGUF/"
+    "DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf",
+    "dsv41_flash_mmproj": "hf:antirez/deepseek-v4.1-flash-gguf/"
+    "DeepSeek-V4.1-Flash-Vision.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -124,8 +138,10 @@ _JUDGE_PREFERENCE = ["gemma4_12b", "gemma4_e2b", "qwen3_0_6b_q8", "qwen3_0_6b_q4
 _ROLES = {
     "judged": [("gemma4_e2b",), ("gemma4_12b",), ("qwen3_0_6b_q8",)],
     "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj"),
-            ("dsv4_vision", "dsv4_vision_mmproj")],
+            ("dsv4_vision", "dsv4_vision_mmproj"),
+            ("dsv41_flash_q2", "dsv41_flash_mmproj")],
     "vlm_dsv4": [("dsv4_vision", "dsv4_vision_mmproj")],
+    "vlm_dsv41": [("dsv41_flash_q2", "dsv41_flash_mmproj")],
     "mtp_pair": [
         ("gemma4_e2b", "gemma4_e2b_assistant"),
         ("gemma4_12b", "gemma4_12b_assistant"),
@@ -135,7 +151,9 @@ _ROLES = {
     "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
     # Over-RAM MoE models. The stream tier keeps the first one the planner
     # says streams on this box (a model that fits in RAM never streams).
-    "streaming": [("kimi_k27_q2",), ("glm53_flash_q2",)],
+    "streaming": [("kimi_k27_q2",), ("glm53_flash_q2",), ("dsv41_flash_q2",)],
+    # Streamed n-gram tables on top of streamed experts; only V4.1 has them.
+    "streaming_tables": [("dsv41_flash_q2",)],
 }
 
 

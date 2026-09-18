@@ -606,6 +606,37 @@ _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
 # A bare `thinking` template variable (not preserve_thinking / enable_thinking).
 _BARE_THINKING_RE = re.compile(r"(?<![A-Za-z_])thinking(?![A-Za-z_])")
 
+_JINJA_TAG_RE = re.compile(r"\{\{.*?\}\}|\{%-?.*?-?%\}", re.S)
+
+
+def _jinja_code(template: str) -> str:
+    """``template`` with its literal prose dropped. A name that only appears
+    in prose is text the model reads, not a variable the template reads."""
+    return "\n".join(_JINJA_TAG_RE.findall(template))
+
+
+def _inputs(template: str) -> frozenset[str] | None:
+    """The variables ``template`` reads from its caller, or None when it
+    does not parse. A name the template sets before every use (V4.1 derives
+    its own ``thinking_mode`` from ``enable_thinking``) is not one of them,
+    so passing it would be a no-op."""
+    try:
+        import jinja2
+        from jinja2 import meta
+
+        return frozenset(meta.find_undeclared_variables(
+            jinja2.Environment().parse(template)))
+    except Exception:
+        return None
+
+
+def _reads(template: str, name: str) -> bool:
+    """True when ``template`` reads ``name`` as an input variable."""
+    names = _inputs(template)
+    if names is not None:
+        return name in names
+    return name in _jinja_code(template)
+
 
 # Templates that grade reasoning depth under a name of their own. The control
 # is spelled reasoning_effort throughout gmlx, so map it onto the template's
@@ -617,9 +648,9 @@ _EFFORT_ALIASES = ("reasoning_strength",)
 def _effort_variable(template: str) -> str:
     """The reasoning-depth variable ``template`` reads, defaulting to the
     canonical ``reasoning_effort``."""
-    if template and "reasoning_effort" not in template:
+    if template and not _reads(template, "reasoning_effort"):
         for alias in _EFFORT_ALIASES:
-            if alias in template:
+            if _reads(template, alias):
                 return alias
     return "reasoning_effort"
 
@@ -664,26 +695,26 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
         _warn(f"unrecognized thinking value {thinking!r} "
               "(expected on/off/adaptive) - ignored")
         return out
-    if "thinking_mode" in template:
+    if _reads(template, "thinking_mode"):
         out["thinking_mode"] = {"on": "enabled", "off": "disabled",
                                 "adaptive": "adaptive"}[mode]
     elif mode == "adaptive":
         _warn("adaptive is a MiniMax-style thinking_mode level; this model's "
               "chat template has no such variable - ignored")
-    elif "enable_thinking" in template or not template:
+    elif _reads(template, "enable_thinking") or not template:
         out["enable_thinking"] = mode == "on"
-    elif _BARE_THINKING_RE.search(template):
+    elif _BARE_THINKING_RE.search(_jinja_code(template)):
         # Kimi K2.x: a bare `thinking` variable gates the pre-filled
         # think-open (`thinking is defined and thinking is false` renders
         # the closed pair). The lookarounds skip preserve_thinking etc.
         out["thinking"] = mode == "on"
-    elif "no_think" in template and "reasoning_effort" in template:
+    elif "no_think" in template and _reads(template, "reasoning_effort"):
         out.setdefault("reasoning_effort",
                        "no_think" if mode == "off" else "high")
-    elif "reasoning_effort" in template:
+    elif _reads(template, "reasoning_effort"):
         _warn("this model has no thinking switch (reasoning always runs); "
               "use reasoning_effort low|medium|high to size it")
-    elif any(alias in template for alias in _EFFORT_ALIASES):
+    elif any(_reads(template, alias) for alias in _EFFORT_ALIASES):
         _warn("this model has no thinking switch (reasoning always runs); "
               "use reasoning_effort to size it")
     else:

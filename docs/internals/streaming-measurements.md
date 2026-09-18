@@ -163,6 +163,140 @@ nonfunctional program in one try. The usable range on this model at this
 quant is therefore 0.65 to 0.80, and where to sit within it depends on how
 much content fidelity the workload can lose.
 
+## DeepSeek-V4.1-Flash: two engram tables
+
+The engram tier is the first case of more than one streamable table, and of
+a table read 24 rows deep per token. The figures below come from the Q2_K
+file (7 shards, 246 GiB) on an M3 Max with 128 GB, gathering from the
+layer-1 table of 384,006,168 rows at 84 bytes, 30.04 GiB in all. A row of
+84 bytes does not divide a 16 KiB page, so a row can span two pages.
+
+| Case | Page cache | Result |
+|---|---|---|
+| decode, 24 rows, 200 steps | cold | 0.32 ms mean, 0.19 p50, 0.33 p90, 18.09 max |
+| decode, 24 rows, 200 steps | warm | 0.17 ms mean |
+| prefill, 4096 tokens, 98,304 rows | cold | 0.02 s, 5.8M rows/s |
+| the same with a thread-pool page touch issued ahead | cold | 6.35 s, of which 6.34 s is the touch |
+| the same as plain, with a concurrent F_NOCACHE reader at 15.8 GiB/s | cold | 0.02 s, 6.1M rows/s |
+
+The gather is not the bottleneck at either width, so the tier needs no
+prefill prefetch. Touching the pages ahead costs 300 times what it saves,
+because 98,304 rows reach 96,250 distinct pages and the touch pays a fault
+for each one that the gather would have paid anyway. Ring-bandwidth
+contention from another reader costs nothing measurable, so the tables and
+the expert ring need no I/O arbitration between them.
+
+The fit plan that follows from crediting both tables as off-disk:
+
+```text
+  streaming: every-token weights 3.2 GB, streamed tables 64.5 GB, routed experts 196.8 GB (40 layers, 384 experts, 6 per token), prefill ring 9.8 GB
+    this Mac: 128 GB RAM, ceiling 109.7 GB, KV room 11.6 GB at 32768 tokens, host floor 9.6 GB
+    => decode arena 75.5 GB (38% of the experts); a cold token reads about 3.1 GB of experts
+```
+
+Without the credit the planner prices the tables as every-token weights and
+the arena falls to 11 GB, a sixth of the experts.
+
+How the tables reach Metal decides whether that arena exists. mlx-kquant
+wraps a tensor's window of the mapped file in a Metal buffer. A window
+built as a 1-D array holds at most INT32_MAX elements, since `mx::Shape`
+dims are int32, and its dtype can widen only to a width that the row byte
+count divides. For 84-byte rows that width is 4 bytes and the 1-D ceiling
+is 8.6 GB, so a reader limited to 1-D windows copies each 30 GiB engram
+table into dirty, partly swapped Metal memory instead. `vmmap -summary`
+shows the two copies as 60.1 GB of `IOAccelerator`, the reclaimable-RAM
+snapshot at install reads about 45 GB and clamps the arena to 13 GB, and
+the governor then sheds it toward 3 GB.
+
+The reader gives the window a second dimension when no width fits, and the
+tensor becomes a whole-row slice of it. The GGUF data section is not
+page-aligned, so the window base also walks back page by page until it
+lands on a row boundary. One tensor per file, loaded alone, with a copied
+table and with a 2-D window:
+
+| | copied | 2-D window |
+|---|---|---|
+| Q2_K table, zero-copy views | 61 of 62 | 62 of 62 |
+| Q2_K table, `IOAccelerator` | 30.0 GB | 64 KB |
+| Q2_K table, resident mapped file | 30.0 GB | 528 KB |
+| q8_0 geometry, `IOAccelerator` | 17.7 GB | 64 KB |
+
+Gathered rows match `pread` at the first, the last and two interior rows in
+every case. The q8_0 row is a 19.0 GB tensor of 272-byte rows, the shape a
+q8_0 build of the same table carries. 272 divides by 8, so its 1-D ceiling
+is the widest one, 17.2 GB, and the tensor is still past it. A load line
+names the reclaimable-RAM clamp whenever it binds, and on this file with
+2-D windows it does not bind.
+
+What the machine then does, on the same M3 Max with 128 GB and
+`--stream-experts` at streaming defaults:
+
+| | 120 tokens, tables copied | 200 tokens, tables copied | 120 tokens, 2-D windows |
+|---|---|---|---|
+| decode | 2.03 tok/s | 2.07 tok/s | 5.97 tok/s |
+| prefill | 2.11 tok/s | 2.24 tok/s | 3.28 tok/s |
+| arena | 13 GB, shed to 3 | 13 GB, shed to 3 | 75.3 GB, no shed |
+| arena hit rate | 42.5% | 44.4% | n/a |
+| expert bytes read per token | 2.6 GB | 2.6 GB | n/a |
+| demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s | n/a |
+
+The per-token split at 120 tokens, from `GMLX_DECODE_PHASE_STATS=1`, with
+copied tables and then with 2-D windows:
+
+```text
+[phase] decode per-token ms over 120 tokens: total 495.6 | ev 3.8 la 237.8 stage_wait 210.0 stage_book 41.3 prestage 4.1 build 2.2 | resid -3.6
+[phase] la split: build 0.4 | sync 234.2 | post 3.2
+
+[phase] decode per-token ms over 120 tokens: total 176.2 | ev 5.8 la 117.3 stage_wait 33.1 stage_book 12.2 prestage 0.7 build 1.1 | resid 6.0
+[phase] la split: build 0.3 | sync 115.5 | post 1.5
+```
+
+A 75 GB arena takes the disk stalls from 210 ms per token to 33 ms. The GPU
+sync bucket also halves, because a decode that does not wait on the SSD keeps
+the GPU off its clock floor. The every-token graph is still about two thirds
+of the per-token time.
+
+### The every-token graph of one V4.1 block
+
+Measured by ablation on a real-width block (hidden 5120, 64 heads x 512,
+hc_mult 4, 8 float experts standing in for the 384 streamed ones), decode
+width, GPU at full clocks, with the hyper-connections on the ops route:
+
+| Component | ms per block | ms per token over 40 layers |
+|---|---|---|
+| MoE | 2.64 | n/a, the real one streams |
+| attention | 1.41 | 56 |
+| hyper-connection mixes, twice | 1.10 | 44 |
+| hyper-connection collapse, twice | 0.01 | 0.4 |
+
+The mixes figure is a launch cost, not a bandwidth cost. Each `fn` matrix
+is 24 x 20480 in f32, under 2 MB, and the 20 Sinkhorn iterations that
+follow are dozens of dispatches over 4 x 4 arrays. The loader dequantizes
+`fn` to f32, so this measurement carries over to the real model, while the
+attention and MoE figures are float stand-ins for Q2_K weights and
+overstate both.
+
+V4.1 collapses each sublayer with the previous sublayer's pre
+coefficients, so the V4 collapse kernel, which applies the coefficients it
+computes, does not fit as it stands. The fused route keeps the front on
+two dispatches per sublayer. At decode width the first dispatch reduces
+the stream and the mix dots, and from the second sublayer on it also
+applies the previous sublayer's pending expand. The second dispatch runs
+Sinkhorn, the lagged collapse and the sublayer norm. At prefill width the
+front is one GEMM, and the lag collapse and the expand are one kernel
+each. `GMLX_DS41_HC_FUSED=0` restores the ops route.
+
+The two routes on the ds4 file, `GMLX_DECODE_LAYER_PROFILE=2`, 48 greedy
+tokens after a 16K prompt, the profile's own syncs included:
+
+| Route | hyper-connections, ms per token | total ms per token | decode |
+|---|---|---|---|
+| ops | 93.6 | 250.1 | 4.58 tok/s |
+| fused | 19.4 | 162.6 | 6.85 tok/s |
+
+At 64K the fused route's hyper-connections cost 19.0 ms per token, so the
+term does not grow with depth.
+
 ## Certifying a setting
 
 Quality degrades in a consistent order as the settings become more
@@ -317,3 +451,17 @@ at its free-page minimum. Each token then re-faults the whole set, which
 saturates the SSD before the experts read a byte and shows as compute time
 rather than stall time. The symptom is a decode rate close to every-token
 bytes divided by SSD bandwidth, whatever the arena hit rate.
+
+## Decode feeder defaults
+
+The decode feeder's defaults rest on these measurements. All are from the
+M3 Max with 128 GB unless the row says otherwise, and each was an A/B on
+the setting alone.
+
+| Default | Measurement |
+|---|---|
+| gathers submitted off the main thread | 8 ms less GPU wait per token than submitting from the graph-building thread |
+| fast-disk recipe on `auto` | with the arena seeded from the prefill ring, a 5.7 GB/s drive gained 7% decode throughput on the fast recipe. An M5 Max drive reads 14 GB/s |
+| no background arena seeder | a seeder filling empty slots from a fast drive seeded 1295 slots over 1000 tokens and cost 0.1 tok/s |
+| demand reads land in a bounce buffer | a `pread` straight into the Metal-shared slot saved 7 ms per token of read wait and cost 18 ms per token of GPU time on the gathers |
+| expert stacks unmapped after install | with the GPU-visible total past physical RAM, each large command buffer paid 50 to 130 ms of driver time before it ran |

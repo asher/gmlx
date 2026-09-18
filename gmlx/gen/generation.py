@@ -502,6 +502,13 @@ def generate(
         else:
             arm_stack(prompt_cache, policy)
 
+    from gmlx.gen import prefill_tail
+
+    if prompt_cache is None and prefill_tail.tail_model(model):
+        # The tail arms on a cache gmlx owns; mlx-lm would build this one.
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     gen_kwargs = {
         "max_tokens": max_tokens,
         "sampler": sampler,
@@ -513,6 +520,12 @@ def generate(
     }
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
+        if prefill_tail.tail_model(model):
+            prefill_tail.arm_prefill_tail(
+                prompt_cache,
+                len(encode_prompt(tokenizer, prompt))
+                if isinstance(prompt, str) else len(prompt),
+            )
     # Module-attribute lookup so the monkeypatch seam
     # gmlx.stream.expert_streaming._resolve_prefill_step stays live for this path.
     step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
@@ -521,6 +534,14 @@ def generate(
             f"[prefill] streaming model: chunk size defaults to {step} "
             "(--prefill-step-size overrides)"
         )
+    if step is not None and expert_streaming.moe_streaming_active(model):
+        n_prompt = (len(encode_prompt(tokenizer, prompt))
+                    if isinstance(prompt, str) else len(prompt))
+        merged = expert_streaming.merge_prefill_tail(step, n_prompt - 1)
+        if merged != step and verbose:
+            print(f"[prefill] chunk widened to {merged} to fold in the "
+                  f"{(n_prompt - 1) % step}-token tail")
+        step = merged
     if step is not None:
         gen_kwargs["prefill_step_size"] = step
 
@@ -884,6 +905,21 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
 _MTP_FINISH_WHY = "on the stock MTP engine (run with --no-mtp to use it)"
 
 
+def encode_prompt(tokenizer, prompt: str) -> list:
+    """Encode a prompt, adding specials only when it does not already open
+    with the BOS string.
+
+    mlx_lm.stream_generate's single-BOS rule. A chat template that emits
+    its own BOS, on a GGUF whose ``add_bos_token`` is true, would
+    otherwise get a second one from the tokenizer's post-processor. The
+    ds4 DeepSeek-V4.1 conversion sets that flag where the llama.cpp one
+    does not, and both ship the same template.
+    """
+    bos = getattr(tokenizer, "bos_token", None)
+    return tokenizer.encode(
+        prompt, add_special_tokens=bos is None or not prompt.startswith(bos))
+
+
 def _with_mtp_finish_key_notice(fn, *args, **kwargs):
     """Run ``fn`` with the ^T finish-thinking target armed as "unsupported":
     mlx-vlm's stock MTP round exposes no forced-close seam, so the key
@@ -1016,13 +1052,7 @@ def _generate_speculative(
             **(template_kwargs or {}),
         )
     if isinstance(prompt, str):
-        # mlx_lm.stream_generate's single-BOS rule: don't add special tokens
-        # when the (chat-templated) prompt already starts with the BOS string,
-        # or the BOS post-processor would prepend a second one.
-        add_special = tokenizer.bos_token is None or not prompt.startswith(
-            tokenizer.bos_token
-        )
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=add_special)
+        prompt_ids = encode_prompt(tokenizer, prompt)
     else:
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)[None]
@@ -1179,10 +1209,7 @@ def generate_speculative_owned(
             **(template_kwargs or {}),
         )
     if isinstance(prompt, str):
-        add_special = tokenizer.bos_token is None or not prompt.startswith(
-            tokenizer.bos_token
-        )
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=add_special)
+        prompt_ids = encode_prompt(tokenizer, prompt)
     else:
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)
@@ -1390,10 +1417,7 @@ def _stream_generate_speculative_owned(
             prompt, thinking_start_token, thinking_end_token,
             tokenizer=tokenizer)
     if isinstance(prompt, str):
-        add_special = tokenizer.bos_token is None or not prompt.startswith(
-            tokenizer.bos_token
-        )
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=add_special)
+        prompt_ids = encode_prompt(tokenizer, prompt)
     else:
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)[None]
@@ -1546,13 +1570,7 @@ def _stream_generate_speculative(
     from mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):
-        # Single-BOS rule, identical to mlx_lm.stream_generate + generate_speculative:
-        # don't re-add specials when the templated turn already starts with the BOS
-        # string, or the post-processor prepends a second one.
-        add_special = tokenizer.bos_token is None or not prompt.startswith(
-            tokenizer.bos_token
-        )
-        prompt_ids = tokenizer.encode(prompt, add_special_tokens=add_special)
+        prompt_ids = encode_prompt(tokenizer, prompt)
     else:
         prompt_ids = prompt
     input_ids = mx.array(prompt_ids, dtype=mx.int32)[None]

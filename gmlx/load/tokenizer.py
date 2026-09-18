@@ -230,6 +230,36 @@ def _attach_vlm_token_attrs(fast, tokens: list[str]) -> None:
         fast.audio_token_id = id_of["<|audio|>"]
 
 
+def _unbuildable_normal_tokens(
+    meta, arch: str, tokens: list[str], token_types: list[int] | None,
+    raw_merges: list[str] | None,
+) -> list[str]:
+    """Sentinel tokens that a ds4-converted header leaves typed NORMAL.
+
+    ds4 types a token CONTROL only when the source ``added_tokens`` marks it
+    special, so the rest of the sentinel block (<|User|>, <|Assistant|>, the
+    fim and tool markers) stays NORMAL and its text splits into ordinary BPE
+    pieces. Recover them from the vocabulary: a multi-symbol token that no
+    merge builds is unreachable, so BPE can never emit it and registering it
+    as atomic changes no other tokenization.
+
+    Gated on ds4's JSON config blob, which llama.cpp does not write, because
+    an unreachable NORMAL token elsewhere can be intended dead vocab.
+    """
+    if token_types is None or not raw_merges:
+        return []
+    if _read_string(meta, f"{arch}.config") is None:
+        return []
+    built = {a + b for a, b in _parse_merges(raw_merges)}
+    out = [t for t, ty in zip(tokens, token_types)
+           if ty == 1 and len(t) > 1 and t not in built]
+    if out:
+        loadlog.verbose_print(
+            f"[tokenizer] {len(out)} unreachable NORMAL token(s) made atomic "
+            f"({', '.join(out[:3])} ...)")
+    return out
+
+
 def load_tokenizer_from_gguf(
     meta, arch: str, *, chat_template_override: str | None = None,
 ) -> PreTrainedTokenizerFast:
@@ -348,6 +378,11 @@ def load_tokenizer_from_gguf(
             elif ttype == 4 and tstr not in seen:
                 user_defined.append(tstr)
                 seen.add(tstr)
+    for tstr in _unbuildable_normal_tokens(meta, arch, tokens, token_types,
+                                           raw_merges):
+        if tstr not in seen:
+            user_defined.append(tstr)
+            seen.add(tstr)
     if special_tokens:
         tok.add_special_tokens([AddedToken(s, normalized=False, special=True)
                                 for s in special_tokens])
@@ -804,3 +839,31 @@ def _self_test_roundtrip(fast: PreTrainedTokenizerFast) -> None:
         if back != s:
             raise RuntimeError(
                 f"tokenizer round-trip failed: {s!r} -> {ids[:10]} -> {back!r}")
+
+
+# Model type -> package that ships the chat template gmlx applies when the
+# GGUF carries none of its own or the wrong one. deepseek_v41: converters
+# copy the V4 template, whose DSML tags lack the V4.1 leading space and
+# whose reasoning effort is a string, not the 1-100 budget.
+BUNDLED_CHAT_TEMPLATES: dict[str, str] = {
+    "deepseek_v41": "gmlx.models.deepseek_v41",
+}
+
+
+def bundled_chat_template(model_type: str | None) -> str | None:
+    """The template gmlx ships for ``model_type``, or None."""
+    package = BUNDLED_CHAT_TEMPLATES.get(model_type or "")
+    if package is None:
+        return None
+    from importlib.resources import files
+
+    return files(package).joinpath("chat_template.jinja").read_text(
+        encoding="utf-8")
+
+
+def bundled_chat_template_for_arch(arch: str | None) -> str | None:
+    """The same, addressed by GGUF architecture, for the paths that read a
+    header rather than a synthesized config."""
+    from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
+
+    return bundled_chat_template(GGUF_ARCH_TO_MODEL_TYPE.get(arch or ""))

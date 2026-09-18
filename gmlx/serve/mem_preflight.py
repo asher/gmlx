@@ -226,8 +226,12 @@ def stack_geometry(model, stack):
         members = list(members) if members is not None else [c]
         has_state = (state is not None
                      and any(isinstance(m, types["state"]) for m in members))
+        # The rotating window caps the layer whatever rides beside it, as
+        # long as nothing else there grows: a side cache holds no KV, and
+        # a recurrent state is priced on its own. A pool or a plain KV
+        # member does grow, so those layers keep the growing price.
         window = None
-        if kind == "window":
+        if not any(_classify(m, types) in ("kv", "pool") for m in members):
             for m in members:
                 if isinstance(m, types["window"]):
                     window = getattr(m, "max_size", None)

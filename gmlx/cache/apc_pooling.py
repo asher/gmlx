@@ -71,10 +71,12 @@ def install_pooling_apc_support() -> None:
         return stock_merge(entries, prefix_lens)
 
     def dtype_info(dtype):
-        # Packed pooled planes are uint32; the stock shard reader only
-        # decodes float dtypes.
+        # Packed pooled planes are uint32 (--kv-bits) or uint8 (FP4); the
+        # stock shard reader only decodes float dtypes.
         if dtype == "U32":
             return apc.np.dtype("<u4"), apc.mx.uint32, None
+        if dtype == "U8":
+            return apc.np.dtype("<u1"), apc.mx.uint8, None
         return stock_dtype_info(dtype)
 
     def clone_entry(c, *, min_capacity_tokens, eval_targets):
@@ -88,6 +90,8 @@ def install_pooling_apc_support() -> None:
         out.quantizable = c.quantizable
         out._qbits = c._qbits
         out._qgroup = c._qgroup
+        out._fp4 = c._fp4
+        out._fp4_dtype = c._fp4_dtype
         if c.buf_kv is not None and c.remainder > 0:
             # Full staging buffers (capacity == ratio rows) so the clone
             # satisfies accumulate_windows' invariants as-is.
@@ -136,6 +140,9 @@ def install_pooling_apc_support() -> None:
         metadata[f"{prefix}_qbits"] = str(int(c._qbits or 0))
         metadata[f"{prefix}_qgroup"] = str(int(c._qgroup))
         metadata[f"{prefix}_quantizable"] = "1" if c.quantizable else "0"
+        metadata[f"{prefix}_fp4"] = (
+            str(c._fp4_dtype).split(".")[-1] if c._fp4 else ""
+        )
         if c.buf_kv is not None and c.remainder > 0:
             arrays[f"{prefix}_rk"] = c.buf_kv[:, : c.remainder]
             arrays[f"{prefix}_rg"] = c.buf_gate[:, : c.remainder]
@@ -192,9 +199,15 @@ def install_pooling_apc_support() -> None:
             return None
         out = PoolingCache(ratio)
         out.quantizable = metadata.get(f"{prefix}_quantizable", "1") != "0"
+        fp4 = metadata.get(f"{prefix}_fp4", "")
         if qbits:
             out._qbits = qbits
             out._qgroup = qgroup
+        elif fp4:
+            try:
+                out.pack_fp4(getattr(apc.mx, fp4))
+            except AttributeError:
+                return None
         if remainder > 0:
             rk = tensor_entries.get(f"{prefix}_rk")
             rg = tensor_entries.get(f"{prefix}_rg")
@@ -211,9 +224,9 @@ def install_pooling_apc_support() -> None:
             out._undo = None
             eval_targets.extend([out.buf_kv, out.buf_gate])
         if plen > 0:
-            if qbits:
+            if qbits or fp4:
                 bufs = []
-                for name in ("pq", "ps", "pb"):
+                for name in ("pq", "ps", "pb") if qbits else ("pq", "ps"):
                     ent = tensor_entries.get(f"{prefix}_{name}")
                     if ent is None:
                         return None

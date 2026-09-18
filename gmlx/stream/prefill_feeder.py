@@ -29,8 +29,11 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 from contextlib import contextmanager
+
+import numpy as np
 
 from .feeder_common import (
     ATTRS,
@@ -56,8 +59,20 @@ _READ_WORKERS = 12
 _STAGE_TIMEOUT_S = 300.0
 
 
+def ring_slots() -> int:
+    """Ring depth in layer slots (GMLX_PREFILL_RING_SLOTS, default 2). Each
+    slot past two stages one more layer ahead: a layer whose compute is
+    shorter than its stage (a prefill tail) then finds its experts ready,
+    at one slot of arena room per layer of lookahead."""
+    try:
+        return max(2, int(os.environ.get("GMLX_PREFILL_RING_SLOTS", "2")))
+    except ValueError:
+        return 2
+
+
 class PrefillFeeder:
-    """Two-slot staged expert streaming; covered layers alternate slots."""
+    """Staged expert streaming through a ring of ``ring_slots()`` layer
+    slots; covered layers take slots in order."""
 
     def __init__(
         self,
@@ -133,13 +148,19 @@ class PrefillFeeder:
         # of its own geometry (mixed-codec quants - e.g. Q5_K_M's q6_k down
         # stacks on some layers - make per-kind shapes non-uniform).
         self._max_bytes = max_bytes
+        self.n_slots = ring_slots()
         self._alloc_slots()
         self.slot_bytes = sum(a.nbytes for a, _ in self._slots[0].values())
 
         # Ring slot by position in the ordered covered set, not absolute
         # layer parity: coverage gaps (e.g. interval-2 MoE layers) would
         # otherwise map consecutive covered layers to the same slot.
-        self._slot_of = {li: i % 2 for i, li in enumerate(sorted(self._layers))}
+        self._slot_of = {
+            li: i % self.n_slots for i, li in enumerate(sorted(self._layers))
+        }
+        # Last layer the current pass will call (a prefill tail skips the
+        # rest); staging past it would only be drained at the next pass.
+        self._pass_last: int | None = None
 
         self._stage_pool = ThreadPoolExecutor(max_workers=1)
         self._read_pool = ThreadPoolExecutor(max_workers=_READ_WORKERS)
@@ -151,6 +172,16 @@ class PrefillFeeder:
         # rebuild; it shrinks the arena only when the kernel has lost the
         # ring's room.
         self._lend_hook = None
+        # Set by the loader to DecodeFeeder.seed_from_ring: after a layer's
+        # compute, its slot's most-routed experts are copied into the
+        # decode arena before the slot is rewritten (see _submit_seed).
+        self._seed_hook = None
+        self._seed_ids: dict[int, object] = {}  # li -> routing ids of its pass
+        self._seed_present: dict[int, np.ndarray | None] = {}
+        self._seed_futs: dict[int, list] = {}  # parity -> copies to join
+        self._seed_prev: int | None = None
+        self._t_seed_wait = 0.0
+        self._t_ready_wait = 0.0  # compute blocked on a slot still staging
 
     def _alloc_slots(self) -> None:
         import mlx_kquant as kq
@@ -163,7 +194,7 @@ class PrefillFeeder:
                 else kq.arena_alloc([n])
                 for k, n in self._max_bytes.items()
             }
-            for _ in (0, 1)
+            for _ in range(self.n_slots)
         ]
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
         # Wired like the arena, in the room the budget keeps for it. A
@@ -177,6 +208,13 @@ class PrefillFeeder:
             self._locked = [
                 e for slot in self._slots for _, mv in slot.values()
                 if (e := lock_pages(mv)) is not None]
+            want = sum(len(mv) for slot in self._slots for _, mv in slot.values())
+            got = sum(n for _, n in self._locked)
+            if got < want:
+                print(
+                    f"[stream] feeder prefill: ring wired {got / 1e9:.1f} of "
+                    f"{want / 1e9:.1f} GB; unwired slots page out under "
+                    f"pressure and the GPU pays on every use")
 
     def release_slots(self) -> None:
         """Drop the ring (its physical pages with it) once decode starts;
@@ -186,6 +224,22 @@ class PrefillFeeder:
             return
         for ev in self._ready.values():  # a worker may still write a slot
             ev.wait(_STAGE_TIMEOUT_S)
+        self._submit_seed()
+        for futs in self._seed_futs.values():
+            futures_wait(futs)
+        self._seed_futs.clear()
+        self._seed_ids.clear()
+        self._seed_present.clear()
+        if self._t_seed_wait >= 0.05:
+            print(
+                f"[stream] feeder prefill: ring waited "
+                f"{self._t_seed_wait:.2f}s for arena seed copies")
+            self._t_seed_wait = 0.0
+        if self._t_ready_wait >= 0.05:
+            print(
+                f"[stream] feeder prefill: compute waited "
+                f"{self._t_ready_wait:.2f}s for slots still staging")
+            self._t_ready_wait = 0.0
         self._ready.clear()
         self._error = None
         self._last_li = None
@@ -209,6 +263,11 @@ class PrefillFeeder:
 
     def _stage(self, li: int) -> None:
         try:
+            seeds = self._seed_futs.pop(self._slot_of[li], None)
+            if seeds:  # the slot's last layer is still being copied out
+                t0 = time.monotonic()
+                futures_wait(seeds)
+                self._t_seed_wait += time.monotonic() - t0
             slot = self._slots[self._slot_of[li]]
             futs = []
             for kind, (_, path, off, nbytes) in self._layers[li].items():
@@ -232,16 +291,24 @@ class PrefillFeeder:
         return self._read_pool.submit(read_range, fd, dest, off)
 
     def _kick(self, li: int) -> None:
-        if li in self._layers and li not in self._ready:
+        if (
+            li in self._layers and li not in self._ready
+            and (self._pass_last is None or li <= self._pass_last)
+        ):
             self._ready[li] = threading.Event()
             self._stage_pool.submit(self._stage, li)
+
+    def limit_pass(self, last_li: int | None) -> None:
+        """Stage nothing past ``last_li`` in the pass that starts next (or
+        the current one); None lifts the limit."""
+        self._pass_last = last_li
 
     # the per-call protocol
 
     def _drain_on_new_pass(self, li: int) -> None:
         if not self._slots:  # ring was released for decode; rebuild
             if self._lend_hook is not None:
-                self._lend_hook(2 * self.slot_bytes)
+                self._lend_hook(self.n_slots * self.slot_bytes)
             self._alloc_slots()
         if self._last_li is None or li <= self._last_li:
             # New prefill pass (next chunk or new request). In-flight staging
@@ -268,25 +335,66 @@ class PrefillFeeder:
         with swapped_weights(entry, views):
             yield
 
+    def _submit_seed(self) -> None:
+        """Seed the decode arena from the last staged layer's slot. Called
+        once that layer's compute is done (the next call's eval fence, a
+        new pass, or the ring release) and before the slot is rewritten:
+        _stage joins the copies for the slot it targets."""
+        li, self._seed_prev = self._seed_prev, None
+        ids = self._seed_ids.pop(li, None)
+        present = self._seed_present.pop(li, None)
+        if li is None or ids is None or self._seed_hook is None \
+                or not self._slots:
+            return
+        entry = self._layers[li]
+        kind0 = next(iter(entry))
+        n_exp = getattr(entry[kind0][0], ATTRS[kind0]).weight.shape[0]
+        ids = np.asarray(np.array(ids))
+        # (batch, tokens, top-k): rows are tokens, whatever the batch dim.
+        n_tokens = max(1, ids.size // ids.shape[-1]) if ids.ndim >= 2 else 1
+        flat = ids.reshape(-1).astype(np.int64)
+        flat = flat[(flat >= 0) & (flat < n_exp)]
+        counts = np.bincount(flat, minlength=n_exp).astype(np.float64)
+        slot = self._slots[self._slot_of[li]]
+        mvs = {kind: slot[kind][1] for kind in entry}
+        futs = self._seed_hook(li, counts, n_tokens, mvs, present)
+        if futs:
+            self._seed_futs.setdefault(self._slot_of[li], []).extend(futs)
+
+    def _note_routing(self, li: int, ids, present) -> None:
+        if ids is None or self._seed_hook is None:
+            return
+        self._seed_ids[li] = ids
+        self._seed_present[li] = present
+        self._seed_prev = li
+
     @contextmanager
-    def prefill_call(self, module, li: int):
+    def prefill_call(self, module, li: int, ids=None):
         """Caller contract: ``mx.eval`` of this call's input has run (so the
         previous covered layer's compute is finished and its slot is free),
-        and the expert call happens inside the ``with`` body."""
+        and the expert call happens inside the ``with`` body. ``ids`` is
+        the call's routing (may be lazy): it seeds the decode arena once
+        this layer's compute has run."""
         self._drain_on_new_pass(li)
+        self._submit_seed()
         self._kick(li)
-        nxt = min((t for t in self._layers if t > li), default=None)
-        if nxt is not None:
+        # The slots of the next n_slots - 1 covered layers held layers
+        # before this one, whose compute the eval fence has proven done.
+        for nxt in sorted(t for t in self._layers if t > li)[:self.n_slots - 1]:
             self._kick(nxt)
-        if not self._ready[li].wait(_STAGE_TIMEOUT_S):
+        t0 = time.monotonic()
+        ready = self._ready[li].wait(_STAGE_TIMEOUT_S)
+        self._t_ready_wait += time.monotonic() - t0
+        if not ready:
             raise RuntimeError(f"[feeder] staging layer {li} timed out")
         if self._error is not None:
             raise RuntimeError(f"[feeder] staging failed: {self._error}")
         with self._swapped(li):
             yield
+        self._note_routing(li, ids, None)
 
     @contextmanager
-    def prefill_partial_call(self, module, li: int, ids):
+    def prefill_partial_call(self, module, li: int, ids, routing=None):
         """Router-aware partial staging for short-chunk passes: stage only
         the routed experts' slices into the parity slot, at their original
         expert indices (the gather reads nothing else from the slot, so the
@@ -298,9 +406,15 @@ class PrefillFeeder:
         both proves the previous layer's slot free and materialized ``ids``).
         """
         self._drain_on_new_pass(li)
+        self._submit_seed()
         entry = self._layers[li]
-        slot = self._slots[self._slot_of[li]]
+        parity = self._slot_of[li]
+        seeds = self._seed_futs.pop(parity, None)
+        if seeds:
+            futures_wait(seeds)
+        slot = self._slots[parity]
         futs = []
+        n_exp = 0
         for kind, (mod, path, off, nbytes) in entry.items():
             n_exp = getattr(mod, ATTRS[kind]).weight.shape[0]
             stride = nbytes // n_exp
@@ -315,6 +429,10 @@ class PrefillFeeder:
             f.result()
         with self._swapped(li):
             yield
+        if routing is not None:
+            present = np.zeros(n_exp, dtype=bool)
+            present[[e for e in ids if 0 <= e < n_exp]] = True
+            self._note_routing(li, routing, present)
 
     def close(self) -> None:
         pool = getattr(self, "_stage_pool", None)
@@ -338,8 +456,9 @@ class PrefillFeeder:
 
 
 def ring_bytes(offsets) -> int:
-    """A-priori size of the two ring slots: twice the largest layer's
-    expert stacks, per kind, over the layers the feeder would cover."""
+    """A-priori size of the ring: ``ring_slots()`` times the largest
+    layer's expert stacks, per kind, over the layers the feeder would
+    cover."""
     largest: dict[str, int] = {}
     for ranges in offsets.values():
         kinds = {r[4] for r in ranges}
@@ -347,7 +466,7 @@ def ring_bytes(offsets) -> int:
             continue
         for _, _, nbytes, _, kind in ranges:
             largest[kind] = max(largest.get(kind, 0), nbytes)
-    return 2 * sum(largest.values())
+    return ring_slots() * sum(largest.values())
 
 
 def maybe_make_prefill_feeder(offsets, modules) -> PrefillFeeder | None:

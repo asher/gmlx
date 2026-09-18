@@ -81,6 +81,8 @@ marked as read per tick or per chunk take effect on a running server.
 | `GMLX_MTP_PREEMPT=0` | Keep a speculating stream from converting to plain decode when a batch grows past the width cap. |
 | `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it drains. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`. Same as `--stream-fast-disk`. |
+| `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it from the prefill ring with the prompt's most routed experts. |
+| `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
 
 ## Runtime
 
@@ -92,6 +94,8 @@ explained in [streaming.md](streaming.md) and
 |----------|---------|
 | `GMLX_STREAM_GPU_TOKENS` | Expert calls with at least this many tokens run on the GPU stream during streamed prefill. Default `32`. `0` keeps all expert calls on the CPU. |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch on streamed models. By default, prefill-sized expert calls advise the kernel two layers ahead. |
+| `GMLX_STREAM_CACHE_GB` | MLX buffer cache a streamed model keeps, in GB. The default is the priced KV room, or `4` when no KV room is priced. |
+| `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default memory and cache limits on a streamed model. Every cache miss then purges the whole buffer cache. |
 | `GMLX_DECODE_ARENA_GB` | Decode arena size override in GB. The default is what the memory limit leaves after the every-token weights, KV room and prefill ring. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. No default. |
 | `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the host floor. |
@@ -100,6 +104,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_KVARN_BITS` | Split key and value widths for kvarn KV in `k6v5` form. Overrides the width `kv_bits` gives both. A value not of that form is ignored with a warning. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the estimated KV room with a flat reserve in GB. The fallback is `8` when the KV size cannot be computed from the header. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache again. Default off, since a ring pass reads each expert once. |
+| `GMLX_PREFILL_RING_SLOTS` | Prefill ring depth in layer slots, default `2`. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the decode arena. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware instead of by whole-layer staging, default `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the arena serves by token-splitting when its routed set exceeds the arena. Default `256`. `0` disables it. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure. By default it shrinks, keeping its most routed experts, then regrows when pressure clears. |
@@ -107,7 +112,11 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve added to the host floor, default `2.5`. Buffered read throughput drops sharply when the page cache has too little memory. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Default on, skipped with a printed reason above 60% of RAM. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights into the Metal residency set on streamed models. |
-| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the table to stream even when the model fits, for measurement. |
+| `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after both feeders take a layer. By default they are dropped once the feeders serve the layer from the file. |
+| `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact. By default a tail under an eighth of the chunk folds into the chunks before it. |
+| `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, for measurement. `--stream-cpu` forces them too. |
+| `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit. A table past it is read from the GGUF row by row. |
+| `GMLX_TABLE_PREAD_WORKERS` | Reader threads per file-backed lookup table, default `32`. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models. |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. Default `1`. `0` runs continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |
