@@ -242,7 +242,7 @@ _NO_EXPERT_LOGGED: set = set()
 def _valid_expert_ids(module, indices):
     """Router ids as a host array, with out-of-range entries replaced in
     both the host copy and the device array. The kq router kernel wrote
-    0xffffffff for a row whose logits were all NaN (fixed in mlx-kquant,
+    0xffffffff for a row whose logits were all NaN (fixed in mlx-kquant 0.4.11,
     kept here for older builds), and the host slot tables and the gather
     kernels index by expert id. Such a row routes to experts 0..k-1,
     which is what argpartition picks on a NaN row."""
