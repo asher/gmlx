@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-09-18
+
 ### Added
 
 - DeepSeek-V4.1-Flash (`deepseek41`) support added with engram offloading.
