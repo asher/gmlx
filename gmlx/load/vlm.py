@@ -45,6 +45,7 @@ from .loader import (
 from .mtp_target import _vlm_spec_language_model
 from gmlx.stream.table_pread import oversize_tables
 from .wire import load_gguf_wire_bytes, remap_arrays
+from .hadamard import hadamard_targets_for
 from .preflight import preflight
 from .transforms import coalesce_split_experts
 
@@ -3424,7 +3425,9 @@ def load_vlm_model(
                       f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before,
-                      deferred_tables=oversize_tables(pf.shards, llm_arch))
+                      deferred_tables=oversize_tables(pf.shards, llm_arch),
+                      hadamard=hadamard_targets_for(
+                          llm_meta, llm_arch, llm_shapes))
     materialize_module_arrays(model)
     if model_type == "qwen4_exp":
         from gmlx.models.qwen4_exp.model import prepare_runtime

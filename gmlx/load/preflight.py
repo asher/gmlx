@@ -120,8 +120,9 @@ class UnsupportedCodecError(Exception):
 
 
 class HadamardFoldError(Exception):
-    """A GGUF whose weights were stored under a Hadamard rotation this build
-    cannot undo at run time (``prism.hadamard.*`` header keys)."""
+    """A GGUF whose weights were stored under a Hadamard rotation
+    (``prism.hadamard.*`` header keys) that this loader does not apply for
+    its header version or architecture."""
 
 
 @dataclass(frozen=True)
@@ -174,11 +175,17 @@ def preflight(gguf_path: str, *, arch: str | None = None,
 
     if unsupported:
         raise UnsupportedCodecError(detected, unsupported)
-    if scan0.kv.get("prism.hadamard.version") is not None:
-        raise HadamardFoldError(
-            f"GGUF (arch={detected!r}) is Hadamard-folded (prism.hadamard "
-            f"v{scan0.kv['prism.hadamard.version']}); run-time fold support "
-            "is pending, so the weights cannot be used yet.")
+    fold_version = scan0.kv.get("prism.hadamard.version")
+    if fold_version is not None:
+        # The loader rotates every folded projection of these architectures
+        # at run time; any other file would run its weights unrotated.
+        from .hadamard import HADAMARD_ARCHES
+
+        if fold_version != 1 or detected not in HADAMARD_ARCHES:
+            raise HadamardFoldError(
+                f"GGUF (arch={detected!r}) is Hadamard-folded (prism.hadamard "
+                f"v{fold_version}); the run-time fold is supported for "
+                f"version 1 on {', '.join(sorted(HADAMARD_ARCHES))} only.")
 
     entry = _gate_arch(detected, hf_source=hf_source)
     return Preflight(arch=detected, entry=entry, shards=shards,

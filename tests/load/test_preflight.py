@@ -122,17 +122,21 @@ def test_fallback_codecs_pass(tmp_path, codec):
     assert pf.codec_histogram.get(codec) == 1
 
 
-def test_hadamard_folded_file_refused(tmp_path):
+def test_hadamard_folded_file_refused_outside_allowlist(tmp_path):
     """A prism.hadamard header means the stored weights expect a run-time
-    rotation of their input; until the loader applies it, preflight refuses
-    the file by name rather than running it unrotated."""
+    rotation of their input. The loader applies it for the architectures in
+    HADAMARD_ARCHES; any other arch, or another header version, is refused
+    by name rather than run unrotated."""
+    from gmlx.load.hadamard import HADAMARD_ARCHES
     from gmlx.load.preflight import HadamardFoldError
 
+    assert "llama" not in HADAMARD_ARCHES
     p = tmp_path / "folded.gguf"
     _mint_fallback(p, "PTQ1_0", kv={"prism.hadamard.version": 1})
     with pytest.raises(HadamardFoldError) as ei:
         preflight(str(p))
     assert "prism.hadamard v1" in str(ei.value)
+    assert "qwen35" in str(ei.value)
 
 
 def test_supported_codecs_pass(tmp_path):

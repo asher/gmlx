@@ -464,6 +464,11 @@ def _load_gemma4_assistant_drafter(
         f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
         f"{len(kquant_meta)} kquant"
     )
+    if meta.get("prism.hadamard.version") is not None:
+        # The ordered-embeddings rebuild below reads the raw table, which a
+        # fold would leave rotated.
+        raise NotImplementedError(
+            f"{draft_gguf_path}: Hadamard-folded drafter GGUFs are not supported")
 
     from gmlx.load.config_synth import synthesize_gemma4_assistant_config
 
@@ -1783,6 +1788,8 @@ def load_mtp_model(
     # the trunk weights, same as its plain-text load path. mlx-vlm targets
     # keep sanitize=False (seam 2: GGUF norms already raw).
     _mt = config_dict.get("model_type")
+    from gmlx.load.hadamard import hadamard_targets_for
+
     _install_and_load(
         model.language_model,
         hf_weights,
@@ -1794,6 +1801,7 @@ def load_mtp_model(
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
         source_key=weights_source_key(*pf.shards),
         active_before=active_before,
+        hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
     )
 
     # 2b. post-install arming: tiled-V + the fused gated-delta verify kernel

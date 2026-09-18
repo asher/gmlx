@@ -994,6 +994,18 @@ def _gemma4_target(model) -> bool:
             or "gemma4" in type(lm).__module__)
 
 
+def _install_hadamard(model, targets: dict | None, log) -> None:
+    """Swap the Hadamard-folded leaves after the kquant swap and record the
+    count. No-op for a file with no fold."""
+    if not targets:
+        return
+    from .hadamard_modules import install_hadamard_modules
+
+    n = install_hadamard_modules(model, targets)
+    loadlog.fact("hadamard", f"{n} folded modules, block {next(iter(targets.values())).block}")
+    log(f"[install] Hadamard rotation on {n} folded modules")
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -1007,6 +1019,7 @@ def _install_and_load(
     source_key: tuple | None = None,
     active_before: float | None = None,
     deferred_tables: dict | None = None,
+    hadamard: dict | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -1035,6 +1048,10 @@ def _install_and_load(
     Callers that read wire bytes before installing must pass the pre-read
     value; wire reads can grow active memory, and a post-read baseline makes
     those tracked bytes register as untracked on top of it.
+
+    ``hadamard``: module path -> ``FoldTarget`` for a Hadamard-folded GGUF
+    (``hadamard.hadamard_targets_for``); the named kquant leaves take their
+    rotating subclass right after the kquant swap.
     """
     loadlog.stage("loading weights")
     if active_before is None:
@@ -1086,6 +1103,7 @@ def _install_and_load(
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     log(f"[install] replaced {n_replaced} leaves with kquant modules")
+    _install_hadamard(model, hadamard, log)
 
     from gmlx.stream.table_pread import install_deferred_tables
     attached = install_deferred_tables(model, deferred_tables or {})
@@ -1432,6 +1450,10 @@ def load_model(
     loadlog.fact("codecs", Counter(hf_kquant_meta.values()))
     if loadlog.is_verbose():
         print_inventory(arch, kquant_meta, hf_kquant_meta, stats)
+    from .hadamard import hadamard_targets_for
+
+    hadamard_targets = hadamard_targets_for(
+        meta, arch, tensor_shapes, target_prefix=target_prefix)
 
     # 3. build unquantized model from synthesized (or supplied) config.
     loadlog.stage("building model")
@@ -1571,6 +1593,7 @@ def load_model(
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
+    _install_hadamard(model, hadamard_targets, _log)
 
     from gmlx.stream.table_pread import install_deferred_tables
     attached = install_deferred_tables(model, deferred)
