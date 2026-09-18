@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 import time
 
 import mlx.core as mx
@@ -233,6 +234,35 @@ def _set_allocator_limits(tracked_bytes: int, room_bytes: int = 0) -> None:
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
         f"({how}, GMLX_STREAM_ALLOC_LIMITS=0 keeps the MLX defaults)"
     )
+
+
+_NO_EXPERT_LOGGED: set = set()
+
+
+def _valid_expert_ids(module, indices):
+    """Router ids as a host array, with out-of-range entries replaced in
+    both the host copy and the device array. The kq router kernel wrote
+    0xffffffff for a row whose logits were all NaN (fixed in mlx-kquant,
+    kept here for older builds), and the host slot tables and the gather
+    kernels index by expert id. Such a row routes to experts 0..k-1,
+    which is what argpartition picks on a NaN row."""
+    ids = np.array(indices)
+    n = _switch_num_experts(module)
+    if not n or ids.size == 0:
+        return ids, indices
+    bad = ids >= n
+    if not bad.any():
+        return ids, indices
+    li = getattr(module, "_kq_li", None)
+    if li not in _NO_EXPERT_LOGGED:
+        _NO_EXPERT_LOGGED.add(li)
+        rows = int(bad.reshape(-1, ids.shape[-1]).any(axis=-1).sum())
+        print(f"[stream] layer {li}: router found no expert for {rows} token(s)"
+              f" at width {ids.size // ids.shape[-1]} (NaN logits); routing"
+              f" them to experts 0..{ids.shape[-1] - 1}", file=sys.stderr)
+    fallback = np.broadcast_to(np.arange(ids.shape[-1], dtype=ids.dtype), ids.shape)
+    ids = np.where(bad, fallback, ids)
+    return ids, mx.array(ids)
 
 
 def install_expert_streaming(
@@ -612,7 +642,7 @@ def install_expert_streaming(
                             wait0 = getattr(dfr, "_t_demand", 0.0)
                             ph.setdefault("miss_hist", []).append(
                                 (self._kq_li, dfr._lookups - dfr._hits))
-                        ids = np.array(indices)
+                        ids, indices = _valid_expert_ids(self, indices)
                         shed_args = None
                         shed_mix = None
                         if sc_f32 is not None:
@@ -759,7 +789,7 @@ def install_expert_streaming(
                         # expert's bytes - rewrite the routing ids first.
                         mx.eval(indices)
                         indices = mx.array(dfr.redirect_dead(
-                            self._kq_li, np.array(indices)))
+                            self._kq_li, _valid_expert_ids(self, indices)[0]))
                     if (
                         fdr is not None
                         and not wedged
@@ -772,7 +802,8 @@ def install_expert_streaming(
                         # slices into the ring slot instead of the whole
                         # layer (see feeder.prefill_partial_call).
                         mx.eval(indices)
-                        ids = np.unique(np.array(indices)).tolist()
+                        ids, indices = _valid_expert_ids(self, indices)
+                        ids = np.unique(ids).tolist()
                         with fdr.prefill_partial_call(
                                 self, self._kq_li, ids, routing=indices):
                             with mx.stream(mx.gpu):
@@ -824,10 +855,8 @@ def install_expert_streaming(
                         # demand-faulting 16 KB clusters from inside the
                         # gemv. GMLX_DECODE_PREFETCH=0 disables.
                         mx.eval(indices)
-                        pf.on_decode(
-                            self._kq_li,
-                            np.unique(np.array(indices)).tolist(),
-                        )
+                        ids, indices = _valid_expert_ids(self, indices)
+                        pf.on_decode(self._kq_li, np.unique(ids).tolist())
                     # No feeder path: the stack's own file view, mapped
                     # back for this call where the install dropped it.
                     with stacks_remapped(self):
