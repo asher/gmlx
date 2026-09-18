@@ -28,6 +28,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read them from the file. Deep prefill and decode both gain.
 - A streamed model's MLX buffer cache defaults to the KV room instead of
   4 GB.
+- A streamed DeepSeek-V4.1 keeps its 8192-token prefill chunk past 180k
+  tokens. The indexer now retires each query block before building the
+  next, so the chunk no longer halves twice on the way to 384k.
 - A streamed prefill folds a short last chunk into the ones before it.
 
 ### Fixed

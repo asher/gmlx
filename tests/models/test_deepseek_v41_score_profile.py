@@ -39,14 +39,32 @@ def test_registered_on_import():
 def test_armed_in_ram_profile(armed):
     prof = dsv41._prefill_score_profile(_resident(False), [_sparse_layer()])
     assert prof == pd.ScoreTransientProfile(
-        heads=1, bytes_per_elem=4, depth_divisor=1, base_step=4096)
+        heads=1, bytes_per_elem=4, depth_divisor=1, base_step=4096, rows=2048)
+
+
+def test_live_rows_follow_the_query_block(armed, monkeypatch):
+    monkeypatch.setattr(dsv4, "_PREFILL_BLOCK", 1024)
+    prof = dsv41._prefill_score_profile(_resident(False), [_sparse_layer()])
+    assert prof.rows == 4096
+    # a disabled block loop scores the whole chunk at once: rows = the chunk
+    monkeypatch.setattr(dsv4, "_PREFILL_BLOCK", 0)
+    prof = dsv41._prefill_score_profile(_resident(False), [_sparse_layer()])
+    assert prof.rows == 0
+
+
+def test_streamed_chunk_holds_through_the_trained_context(armed, monkeypatch):
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "6")
+    prof = dsv41._prefill_score_profile(_resident(True), [_sparse_layer()])
+    for depth in (180_224, 384_000, 700_000):
+        assert pd.decayed_step(prof.base_step, depth, 64, profile=prof) == 8192
 
 
 def test_streamed_model_takes_the_wider_base(armed):
     prof = dsv41._prefill_score_profile(_resident(True), [_sparse_layer()])
     assert prof.base_step == 8192
     # only the base step moves; the transient shape is residency-independent
-    assert (prof.heads, prof.bytes_per_elem, prof.depth_divisor) == (1, 4, 1)
+    assert (prof.heads, prof.bytes_per_elem, prof.depth_divisor, prof.rows) == (
+        1, 4, 1, 2048)
 
 
 def test_indexer_disarmed_returns_none(armed, monkeypatch):
@@ -120,13 +138,16 @@ def test_streamed_base_reaches_the_batch(armed, monkeypatch):
     assert pd.decayed_for_batch(_batch(67_000)) == 8192
 
 
-def test_deep_prompt_decays_the_streamed_base(armed, monkeypatch):
+def test_deep_prompt_keeps_the_streamed_base(armed, monkeypatch):
     monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "6.0")
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
-    # the guard: the transient at 8192 outgrows the cap past ~200k, so the
-    # chunk halves rather than the box running out of room
-    assert pd.decayed_for_batch(_batch(200_000)) == 4096
-    assert pd.decayed_for_batch(_batch(500_000)) == 2048
+    # the indexer retires its query blocks in turn, so the live rows are
+    # priced, not the chunk: 2048 x (depth + 8192) x 4 B fits 6 GB to ~724k
+    assert pd.decayed_for_batch(_batch(200_000)) == 8192
+    assert pd.decayed_for_batch(_batch(384_000)) == 8192
+    assert pd.decayed_for_batch(_batch(700_000)) == 8192
+    # past that the guard still halves rather than the box running out
+    assert pd.decayed_for_batch(_batch(1_000_000)) < 8192
 
 
 def test_explicit_step_stays_authoritative(armed, monkeypatch):

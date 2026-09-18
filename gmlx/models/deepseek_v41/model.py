@@ -470,8 +470,8 @@ class Indexer(nn.Module):
             floor = mx.finfo(mx.float32).min
         else:
             floor = mx.finfo(mx.float16).min
-        if pmask is not None and pmask.ndim == 2:
-            pmask = pmask[None]
+        if isinstance(pmask, mx.array):
+            pmask = _ArrayPoolMask(pmask)
         source = self.is_candidate_source and self.candidate_block_size > 0
         given = (
             streams.candidates
@@ -505,7 +505,7 @@ class Indexer(nn.Module):
                 scores = mx.maximum(scores, 0) * self.scale
                 scores = (scores * weights[:, :, qs:qe]).sum(axis=1)
             if pmask is not None:
-                pm = pmask[:, qs:qe]
+                pm = pmask.rows(qs, qe)
                 if cb is not None:
                     pm = mx.take_along_axis(
                         mx.broadcast_to(pm, (B,) + pm.shape[1:]),
@@ -531,6 +531,13 @@ class Indexer(nn.Module):
                 tops.append(
                     mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
                 )
+            if L > 4:
+                # Dispatch this block before the next is built. Left lazy,
+                # every block's [m, P] scores, their contiguous copies and
+                # masks stay allocated until the chunk evaluates, which at
+                # 8192 x 384k is 14 GB against 2.7 GB with the blocks
+                # retired in turn. The dispatch does not wait.
+                mx.async_eval(tops[-1], *cands[-1:])
         if source:
             streams.candidates = (
                 None if any(c is None for c in cands)
@@ -538,6 +545,65 @@ class Indexer(nn.Module):
                 else mx.concatenate(cands, axis=1)
             )
         return tops[0] if len(tops) == 1 else mx.concatenate(tops, axis=1)
+
+
+class _PoolMask:
+    """Pooled-row visibility for one sequence as a rule, not a tensor: query
+    row j at absolute position offset + j sees pooled row i iff
+    i < (offset + j + 1) // ratio, the PoolingCache.make_mask predicate.
+    The indexer asks for one query block at a time, so no [L, P] mask is
+    ever held for a whole chunk."""
+
+    def __init__(self, plen: int, L: int, offset: int, ratio: int):
+        self.plen, self.L, self.offset, self.ratio = plen, L, offset, ratio
+
+    def _bound(self, qs: int, qe: int) -> mx.array:
+        return mx.arange(self.offset + 1 + qs, self.offset + 1 + qe) // self.ratio
+
+    def rows(self, qs: int, qe: int) -> mx.array:
+        """[1, qe - qs, P] bool for query rows qs..qe."""
+        return (mx.arange(self.plen) < self._bound(qs, qe)[:, None])[None]
+
+    def full(self) -> mx.array:
+        """[L, P] bool, the make_mask form, for the dense small-pool path."""
+        return self.rows(0, self.L)[0]
+
+    def sparse(self, topk: mx.array) -> mx.array:
+        """[B, L, k] bool: the mask gathered at the selected pooled rows."""
+        return topk < self._bound(0, self.L)[None, :, None]
+
+
+class _ArrayPoolMask:
+    """The same interface over a materialized [B, L, P] mask, which is what a
+    batched pooling cache produces (per-row pool lengths and offsets)."""
+
+    def __init__(self, mask: mx.array):
+        self.mask = mask[None] if mask.ndim == 2 else mask
+
+    def rows(self, qs: int, qe: int) -> mx.array:
+        return self.mask[:, qs:qe]
+
+    def full(self) -> mx.array:
+        return self.mask
+
+    def sparse(self, topk: mx.array) -> mx.array:
+        return mx.take_along_axis(self.mask, topk, axis=2)
+
+
+def _pool_mask(src, plen: int, L: int, offset, ratio: int):
+    """The pooled-row mask for this call: None when every pooled row is
+    visible to every query, a rule for a single sequence, an array wrapper
+    for a batched cache."""
+    if src is None:
+        if plen == 0 or L == 1 or not isinstance(offset, int):
+            return None
+        return _PoolMask(plen, L, offset, ratio)
+    if isinstance(offset, int) and isinstance(src, PoolingCache):
+        if src._plen == 0 or L == 1:
+            return None
+        return _PoolMask(src._plen, L, offset, src.ratio)
+    m = src.make_mask(L, offset)
+    return None if m is None else _ArrayPoolMask(m)
 
 
 def _indexer_kernel_scorer(q, index_k, weights, scale, k, offset=None, ratio=0):
@@ -895,17 +961,20 @@ def _ds41_base_step(model) -> Optional[int]:
 # Score-transient profile for prefill_decay, on the V4 pattern. With the
 # indexer GEMM and the sparse attention kernel armed, a single-sequence
 # prefill never materializes the dense [heads, step, P] score, because the
-# relu, scale and head sum run inside dsa_indexer_scores. That kernel
-# returns fp16 and this prices fp32, so the fit test overstates the
-# transient by 2x. Layers past the candidate source carry compress ratio
-# 1, so the widest pool is the full depth and the divisor stays 1.
+# relu, scale and head sum run inside dsa_indexer_scores, and the indexer
+# retires its query blocks in turn, so the live rows are a few blocks of
+# fp16 scores with their copies and masks, not the chunk. Priced as four
+# blocks of fp32, which is about 1.2x what a chunk at 384k measures.
+# Layers past the candidate source carry compress ratio 1, so the widest
+# pool is the full depth and the divisor stays 1.
 # Quantized pools keep the profile, since prefill dequantizes pooled rows
 # on read and the per-layer copy is step-independent. Disarms on either
 # kernel off, a batched cache or a quantized local window, where the dense
 # transient model is authoritative again.
 _score_profile_composed = _prefill_decay.build_score_profile(
     profile=lambda: _prefill_decay.ScoreTransientProfile(
-        heads=1, bytes_per_elem=4, depth_divisor=1),
+        heads=1, bytes_per_elem=4, depth_divisor=1,
+        rows=4 * _v4._prefill_block()),
     kernels_armed=lambda: (_v4._dsa_probe("indexer")
                            and _v4._sparse_kernel_ok()),
     require_cache=PoolingCache,
@@ -1099,19 +1168,16 @@ class DeepseekV41Attention(nn.Module):
                 q, kv, mask, local_cache, sinks, banded, block
             )
         else:
-            src = streams.pool_cache
-            pmask = (
-                src.make_mask(n_full, q0)
-                if src is not None
-                else _v4._cacheless_pool_mask(plen, n_full, q0, streams.ratio)
-            )
+            pmask = _pool_mask(streams.pool_cache, plen, n_full, q0, streams.ratio)
             if plen <= self.index_topk:
                 # Every reachable position fits, so the gather would select
                 # all of them; a masked dense pass is the same result.
                 full_kv = mx.concatenate([kv, pool_rows(pooled)[:, None]], axis=2)
                 out = scaled_dot_product_attention(
                     q, full_kv, full_kv, cache=local_cache, scale=self.scale,
-                    mask=_v4._extend_mask(mask, pmask, full_kv.shape[2]),
+                    mask=_v4._extend_mask(
+                        mask, None if pmask is None else pmask.full(),
+                        full_kv.shape[2]),
                     sinks=sinks,
                 )
             else:
@@ -1128,9 +1194,7 @@ class DeepseekV41Attention(nn.Module):
                     topk = topk[:, topk.shape[1] - n_full:]
                 sparse_mask = None
                 if pmask is not None:
-                    sparse_mask = mx.take_along_axis(
-                        pmask[None] if pmask.ndim == 2 else pmask, topk, axis=2
-                    )[:, None]
+                    sparse_mask = pmask.sparse(topk)[:, None]
                 out = None
                 if _v4._sparse_kernel_ok():
                     kblock = (
