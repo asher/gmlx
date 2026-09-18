@@ -58,6 +58,8 @@ _QUANT_TRAILING = re.compile(
     r"(?:UD[-_])?"
     r"(?P<q>"
     r"STQ\d+(?:_[A-Za-z0-9]+)*"
+    r"|PTQ\d+(?:_[A-Za-z0-9]+)*"
+    r"|PQ\d+(?:_[A-Za-z0-9]+)*"
     r"|IQ\d+(?:_[A-Za-z0-9]+)*"
     r"|Q\d+(?:_[A-Za-z0-9]+)*"
     r"|BF16|FP16|F16|FP32|F32|MXFP4|NVFP4"

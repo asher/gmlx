@@ -191,6 +191,20 @@ def test_stq1_0_tag_collapses_to_same_id():
     assert a == b
 
 
+def test_quant_tag_prism_codecs():
+    # PTQ and PQ each need an alternative for the same reason as STQ.
+    assert disc.quant_tag("Ternary-Bonsai-2-27B-PTQ1_0.gguf") == "PTQ1_0"
+    assert disc.quant_tag("Ternary-Bonsai-2-27B-PQ2_0.gguf") == "PQ2_0"
+    assert disc.quant_tag("model-UD-PQ2_0.gguf") == "PQ2_0"
+
+
+def test_prism_tags_collapse_to_same_id():
+    a, _ = disc.derive_id("Ternary-Bonsai-2-27B-PTQ1_0.gguf")
+    b, _ = disc.derive_id("Ternary-Bonsai-2-27B-PQ2_0.gguf")
+    c, _ = disc.derive_id("Ternary-Bonsai-2-27B-Q6_K.gguf")
+    assert a == b == c
+
+
 def test_sharded_name_collapses_to_one_id():
     a, _ = disc.derive_id("BigModel-Q6_K-00001-of-00005.gguf")
     b, _ = disc.derive_id("BigModel-Q6_K.gguf")

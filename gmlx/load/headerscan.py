@@ -22,7 +22,13 @@ _MAGIC = b"GGUF"
 _DEFAULT_ALIGNMENT = 32
 
 # GGML type ids newer than the installed gguf-py: id -> (name, (block, type_size)).
-QUANT_TYPE_FALLBACK = {43: ("STQ1_0", (256, 42))}  # llama.cpp PR #22836
+QUANT_TYPE_FALLBACK = {
+    43: ("STQ1_0", (256, 42)),    # llama.cpp PR #22836
+    # PrismML/llama.cpp (branch prism, no upstream PR): PQ2_0 is commit
+    # 8bbb28b76, PTQ1_0 is e19819227. Private ids; they may move.
+    142: ("PQ2_0", (128, 34)),
+    143: ("PTQ1_0", (128, 28)),
+}
 
 # GGUF metadata value types -> struct code (fixed-size scalars only).
 _SCALAR = {
