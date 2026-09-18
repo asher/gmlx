@@ -39,8 +39,8 @@ the same sampler and the same chat prompts on both engines.
 | mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
 | llama.cpp | `b9967` |
 | Build overrides | models rebenched on newer releases list their own builds under Model provenance |
-| DeepSeek-V4-Flash reference | the dwarfstar ds4-server by antirez @ `b030961`, ignore-eos patched |
-| Dates | 2026-07-05 .. 2026-08-29 |
+| DeepSeek-V4 reference | the dwarfstar ds4-server by antirez, ignore-eos patched: `b030961` for DeepSeek-V4-Flash IQ2_XXS, `8db1d1d` for DeepSeek-V4.1-Flash Q2 |
+| Dates | 2026-07-05 .. 2026-09-18 |
 | Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
 | Speculative draft | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
@@ -80,6 +80,7 @@ one by one.
 | Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
+| DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
 | Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
@@ -300,12 +301,13 @@ one by one.
 | 110k | 31.7 (31-32.4) | 49.8 (46-55.4) | 1.57x | - | - | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) |
 | 200k | 25.3 (25.3-25.6) | 46.8 (44.9-49.7) | 1.85x | - | - | 1250 (1234.9-1275.6) | 210.8 (207-217.1) |
 
-## DeepSeek-V4-Flash (reference engine: ds4-server)
+## DeepSeek-V4 family (reference engine: ds4-server)
 
-This model's comparison engine is the dwarfstar ds4-server by
-antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
-llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
-gmlx / ds4-server.
+The comparison engine for these models is the dwarfstar ds4-server
+by antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
+llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path. Ratios below
+are gmlx / ds4-server. Each model's tested ds4-server commit is in
+its Model provenance row.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
@@ -326,3 +328,21 @@ gmlx / ds4-server.
 | 300k | 27.6 (27.5-27.7) | 18 (18-18.5) | 1.53x | 542.4 (540.8-542.8) | 315.8 (312.4-321.2) | 1.72x |
 | 384k | 24.9 (24.8-25) | 16.2 | 1.54x | 495.4 (493.8-496.9) | 275.9 (275.8-276.1) | 1.80x |
 | 500k | 22.6 (22.6-22.7) | 14.2 | 1.59x | 440.7 (438.9-442.5) | 236.9 (236.5-237.3) | 1.86x |
+
+### DeepSeek-V4.1-Flash Q2
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/deepseek-v4.1-flash-antirez-q2-panels-dark.svg">
+  <img src="assets/perf/per-model/deepseek-v4.1-flash-antirez-q2-panels.svg" alt="DeepSeek-V4.1-Flash Q2">
+</picture>
+
+| KV depth | gmlx decode | ds4-server decode | gmlx/ds4-server decode | gmlx prefill | ds4-server prefill | gmlx/ds4-server prefill |
+|---|--:|--:|--:|--:|--:|--:|
+| 512 | 20.8 (18.3-20.9) | 15.5 (15-16.1) | 1.34x | 53.3 (47.1-84.6) | 34.8 (30.4-59.2) | 1.53x |
+| 4.3k | 18.1 (17.6-19) | 15.1 (14.2-16.1) | 1.20x | 332.6 (322.8-354.5) | 113.9 (76-118.8) | 2.92x |
+| 17k | 18.6 (18.2-20.6) | 14.5 (14-16.1) | 1.28x | 611.4 (485.1-620.6) | 189.9 (176.5-335) | 3.22x |
+| 50k | 18.7 (17-20.5) | 14.7 (13.3-15.8) | 1.27x | 668.8 (662.9-685) | 507.5 (489.5-519) | 1.32x |
+| 67k | 19.2 (17.1-21) | 14.9 (14.5-15.6) | 1.29x | 719.7 (716.4-727.8) | 511 (483-548) | 1.41x |
+| 110k | 19.6 (18.9-20.5) | 14.8 (13.4-15.1) | 1.32x | 798.5 (759.8-835.1) | 626.8 (585.8-632) | 1.27x |
+| 200k | 18.7 (18.1-18.9) | 13.1 (12.9-13.4) | 1.43x | 807.9 (782.1-831.4) | 556.5 (536.1-564.9) | 1.45x |
+| 384k | 17.4 (12.9-18.2) | 12.2 (10.6-12.7) | 1.43x | 796.9 (790.7-807.7) | 612.5 (592.9-633.5) | 1.30x |
