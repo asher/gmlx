@@ -211,7 +211,8 @@ A family appears in the generated [coverage
 table](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md) only
 after token-parity certification against llama.cpp at 16k context, and the
 table names the caveats where an architecture has any. All 19 K-quant,
-legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair. Vision models load
+legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair and the ternary
+STQ1_0, PTQ1_0 and PQ2_0 types. Vision models load
 as a GGUF paired with its projector, as
 [vlm.md](https://github.com/asher/gmlx/blob/main/docs/vlm.md) describes, and
 [adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md)

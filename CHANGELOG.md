@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
+  GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
+  applied at run time. `validate` reports a folded file.
+
 ## [0.4.14] - 2026-09-18
 
 ### Added
