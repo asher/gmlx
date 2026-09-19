@@ -12,6 +12,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backward pass, so longer sequences fit in memory at some cost in time.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
+- `gmlx.distill`, the offline distillation library: a teacher cache of
+  top-K log-probs, cross-tokenizer alignment, a fused chunked head with
+  the bucketed sparse KL and ALM losses, the batch loader and the eval
+  helpers. The `gmlx distill` verbs are not in this release.
 
 ### Changed
 

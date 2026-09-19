@@ -906,7 +906,7 @@ def special_ids(tokenizer) -> set[int]:
     return out
 
 
-def _byte_decoder() -> dict[str, int]:
+def byte_decoder() -> dict[str, int]:
     """The GPT-2 byte-level BPE map from vocabulary character to byte:
     printable ASCII and two Latin-1 ranges map to themselves, the other
     bytes to code points from 256 up, in byte order."""
@@ -921,7 +921,7 @@ def _byte_decoder() -> dict[str, int]:
     return out
 
 
-def _is_bytelevel(tokenizer) -> bool:
+def is_bytelevel(tokenizer) -> bool:
     b = backend(tokenizer)
     dec = b.decoder
     if dec is not None and type(dec).__name__ == "ByteLevel":
@@ -957,8 +957,8 @@ def token_bytes(tokenizer, width: int | None = None) -> list[bytes | None]:
                   for tid, t in getattr(inner, "added_tokens_decoder", {}).items()
                   if not getattr(t, "special", False)}
     out: list[bytes | None] = [None] * width
-    bytelevel = _is_bytelevel(tokenizer)
-    bd = _byte_decoder() if bytelevel else None
+    bytelevel = is_bytelevel(tokenizer)
+    bd = byte_decoder() if bytelevel else None
     toks = inner.convert_ids_to_tokens(list(range(min(n, width))))
     for tid, tok in enumerate(toks):
         if tok is None or tid in special:

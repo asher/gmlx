@@ -80,12 +80,28 @@ def _bare_evals_under_except(path: Path) -> list[str]:
     return hits
 
 
+# Sites that predate the nested scan. Each is a bare eval under an
+# except-carrying try inside a subpackage; the list shrinks as they are
+# routed through the guard and never grows.
+PRE_EXISTING = {
+    "cache/kvarn_sdpa.py:173 mx.eval",
+    "cache/kvarn_sdpa.py:174 mx.eval",
+    "cache/kvarn_sdpa.py:241 mx.eval",
+    "models/deepseek_v4/model.py:1134 mx.eval",
+    "models/kda_fused.py:276 mx.eval",
+}
+
+
 def test_no_bare_eval_under_except_anywhere():
     offenders: list[str] = []
-    for p in sorted(GMLX_DIR.glob("*.py")):
+    for p in sorted(GMLX_DIR.rglob("*.py")):
         if p.name == "eval_guard.py":
             continue  # the guard owns the only sanctioned bare evals
-        offenders += _bare_evals_under_except(p)
+        rel = p.relative_to(GMLX_DIR).as_posix()
+        for hit in _bare_evals_under_except(p):
+            site = rel + hit[len(p.name):]
+            if site not in PRE_EXISTING:
+                offenders.append(site)
     assert not offenders, (
         "bare mx.eval/mx.async_eval under an except-carrying try; route "
         "through gmlx.eval_guard.guard instead:\n  " + "\n  ".join(offenders))

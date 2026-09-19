@@ -31,7 +31,10 @@ def lora_scale(rank: int, scale: float | None = None, alpha: float | None = None
     ``alpha = scale * rank``). Exactly one of the two must be given."""
     if (alpha is None) == (scale is None):
         raise ValueError("give exactly one of scale and alpha")
-    return float(alpha) / rank if alpha is not None else float(scale)
+    if alpha is not None:
+        return float(alpha) / rank
+    assert scale is not None
+    return float(scale)
 
 
 def _layer_list(model):

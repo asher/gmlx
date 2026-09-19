@@ -1,0 +1,488 @@
+"""Cross-tokenizer alignment: the tables built once per tokenizer pair, the
+group projection of a teacher top-K onto student groups at a shared
+boundary, and the tokenizer-only census that gates a pair."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+
+from gmlx.load.tokenizer import (
+    backend,
+    byte_decoder,
+    eos_ids,
+    hf_inner,
+    is_bytelevel,
+    special_ids,
+    token_bytes,
+    vocab_map_hash,
+    whitespace_start_mask,
+)
+
+from .constants import NEG_INF, TABLES_VERSION
+from .format import read_json, write_json_atomic
+from .tokens import bos_id, encode_with_byte_ends, identity_pair
+
+# ---------------------------------------------------------------------------
+# alignment tables and projection
+# ---------------------------------------------------------------------------
+
+def _inverse_byte_decoder() -> dict[int, str]:
+    return {b: ch for ch, b in byte_decoder().items()}
+
+
+def _has_dummy_prefix(tokenizer, tb: list[bytes | None]) -> bool:
+    ids = backend(tokenizer).encode("a", add_special_tokens=False).ids
+    cat = b"".join(tb[i] or b"" for i in ids)
+    return cat == b" a"
+
+
+def _first_token_of_bytes(tokenizer, tb: list[bytes | None], bytelevel: bool,
+                          byte_token_ids: dict[int, int], dummy_prefix: bool,
+                          b: bytes) -> int:
+    """First token id the tokenizer emits for the byte string b, with no
+    special tokens and no dummy prefix. The full pipeline runs when the
+    bytes decode and the tokenizer adds no dummy prefix; otherwise the BPE
+    model tokenizes the piece directly (byte-chars for byte-level, U+2581
+    for SPM), and a non-UTF-8 SPM fragment maps to the <0xNN> id of its
+    first byte. -1 when nothing can be emitted."""
+    if not b:
+        return -1
+    be = backend(tokenizer)
+    try:
+        s = b.decode("utf-8")
+    except UnicodeDecodeError:
+        s = None
+    if s is not None and not dummy_prefix:
+        ids = be.encode(s, add_special_tokens=False).ids
+        return int(ids[0]) if ids else -1
+    if bytelevel:
+        inv = _inverse_byte_decoder()
+        s2 = "".join(inv[x] for x in b)
+    else:
+        if s is None:
+            return int(byte_token_ids.get(b[0], -1))
+        s2 = s.replace(" ", "\u2581")
+    toks = be.model.tokenize(s2)
+    return int(toks[0].id) if toks else -1
+
+
+def _byte_token_ids(tokenizer, tb: list[bytes | None]) -> dict[int, int]:
+    """SPM <0xNN> ids by byte value (empty for byte-level vocabularies)."""
+    inner = hf_inner(tokenizer)
+    out: dict[int, int] = {}
+    toks = inner.convert_ids_to_tokens(list(range(len(inner))))
+    for tid, tok in enumerate(toks):
+        if tok and tok.startswith("<0x") and tok.endswith(">") and len(tok) == 6:
+            try:
+                out.setdefault(int(tok[3:5], 16), tid)
+            except ValueError:
+                pass
+    return out
+
+
+@dataclass
+class Tables:
+    """Cache-free projection tables for one (teacher, student) tokenizer pair."""
+    v1: np.ndarray            # [V_S] int32 teacher-first token of each student token
+    u1: np.ndarray            # [V_T] int32 student-first token of each teacher token
+    group_of: np.ndarray      # [V_S] int32 in [0, G)
+    target_g: np.ndarray      # [V_T] int32 group or -1
+    group_key: np.ndarray     # [G] int32 teacher id keying the group, -1 for the unmapped group
+    group_size: np.ndarray    # [G] int32
+    nonsingleton_ids: np.ndarray  # [N_ns] int32
+    bmask_S: np.ndarray       # [V_S] bool
+    own: np.ndarray           # [V_T] bool: a group keyed by v exists
+    roles: dict[str, Any]
+    teacher_hash: str
+    student_hash: str
+    V_T: int
+    V_S: int
+    identity: bool
+
+    @property
+    def G(self) -> int:
+        return int(self.group_size.shape[0])
+
+    def meta(self) -> dict:
+        return {"tables_version": TABLES_VERSION, "teacher_hash": self.teacher_hash,
+                "student_hash": self.student_hash, "V_T": self.V_T, "V_S": self.V_S,
+                "G": self.G, "N_ns": int(self.nonsingleton_ids.shape[0]),
+                "identity": self.identity, "roles": self.roles}
+
+
+def identity_tables(V: int, bmask: np.ndarray, teacher_hash: str, student_hash: str) -> Tables:
+    ar = np.arange(V, dtype=np.int32)
+    return Tables(v1=ar.copy(), u1=ar.copy(), group_of=ar.copy(), target_g=ar.copy(),
+                  group_key=ar.copy(), group_size=np.ones(V, dtype=np.int32),
+                  nonsingleton_ids=np.zeros(0, dtype=np.int32), bmask_S=bmask.astype(bool),
+                  own=np.ones(V, dtype=bool), roles={"identity": True},
+                  teacher_hash=teacher_hash, student_hash=student_hash, V_T=V, V_S=V,
+                  identity=True)
+
+
+def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
+                 V_S: int | None = None, teacher_tb=None, student_tb=None) -> Tables:
+    """Group projection tables from the two tokenizers alone.
+
+    Groups partition the student vocab by v1[u], the teacher-first token of
+    each student token's bytes. Specials map by role only (EOS set -> EOS,
+    BOS -> BOS, identical added tokens 1:1); every other special and every
+    hole sits in one unmapped group that no teacher token targets."""
+    ti, si = hf_inner(teacher_tok), hf_inner(student_tok)
+    V_T = V_T or len(ti)
+    V_S = V_S or len(si)
+    ttb = teacher_tb if teacher_tb is not None else token_bytes(teacher_tok, V_T)
+    stb = student_tb if student_tb is not None else token_bytes(student_tok, V_S)
+    th, sh = vocab_map_hash(ti), vocab_map_hash(si)
+    ident, _why = identity_pair(ti, si)
+    if ident and V_T == V_S:
+        return identity_tables(V_S, whitespace_start_mask(student_tok, V_S, stb), th, sh)
+
+    t_bytelevel, s_bytelevel = is_bytelevel(teacher_tok), is_bytelevel(student_tok)
+    t_byte_ids = {} if t_bytelevel else _byte_token_ids(teacher_tok, ttb)
+    s_byte_ids = {} if s_bytelevel else _byte_token_ids(student_tok, stb)
+    t_dummy, s_dummy = _has_dummy_prefix(teacher_tok, ttb), _has_dummy_prefix(student_tok, stb)
+
+    v1 = np.full(V_S, -1, dtype=np.int32)
+    memo: dict[bytes, int] = {}
+    for u in range(V_S):
+        b = stb[u]
+        if b is None:
+            continue
+        r = memo.get(b)
+        if r is None:
+            r = _first_token_of_bytes(teacher_tok, ttb, t_bytelevel, t_byte_ids, t_dummy, b)
+            memo[b] = r
+        v1[u] = r
+    u1 = np.full(V_T, -1, dtype=np.int32)
+    memo = {}
+    for v in range(V_T):
+        b = ttb[v]
+        if b is None:
+            continue
+        r = memo.get(b)
+        if r is None:
+            r = _first_token_of_bytes(student_tok, stb, s_bytelevel, s_byte_ids, s_dummy, b)
+            memo[b] = r
+        u1[v] = r
+
+    # Role map for specials.
+    roles: dict[str, Any] = {}
+    t_eos, s_eos = eos_ids(teacher_tok), eos_ids(student_tok)
+    t_bos, s_bos = bos_id(teacher_tok), bos_id(student_tok)
+    t_special = special_ids(teacher_tok)
+    t_str = {int(k): str(v) for k, v in getattr(ti, "added_tokens_decoder", {}).items()}
+    s_str = {str(v): int(k) for k, v in getattr(si, "added_tokens_decoder", {}).items()}
+    # Student specials get a pseudo teacher key so they form groups.
+    if s_eos and t_eos:
+        for u in s_eos:
+            if u < V_S:
+                v1[u] = t_eos[0]
+        roles["eos"] = {"teacher": t_eos, "student": s_eos}
+    if s_bos is not None and t_bos is not None and s_bos < V_S:
+        v1[s_bos] = t_bos
+        roles["bos"] = {"teacher": t_bos, "student": s_bos}
+    same_added = []
+    for v, s in t_str.items():
+        u = s_str.get(s)
+        if u is not None and v < V_T and u < V_S and v not in t_eos and v != t_bos:
+            v1[u] = v
+            same_added.append([v, u])
+    roles["identical_added"] = same_added
+
+    # Groups: distinct v1 keys plus one unmapped group (key -1) for
+    # student ids with v1 == -1 (specials without a role, holes).
+    keys, inverse = np.unique(v1, return_inverse=True)
+    group_key = keys.astype(np.int32)
+    group_of = inverse.astype(np.int32)
+    G = int(group_key.shape[0])
+    if group_key[0] != -1:
+        # ensure an unmapped group exists so no teacher token can target it
+        group_key = np.concatenate([np.array([-1], dtype=np.int32), group_key])
+        group_of = group_of + 1
+        G += 1
+    group_size = np.bincount(group_of, minlength=G).astype(np.int32)
+    nonsingleton_ids = np.nonzero(group_size[group_of] > 1)[0].astype(np.int32)
+
+    key_to_group = {int(k): g for g, k in enumerate(group_key) if k >= 0}
+    own = np.zeros(V_T, dtype=bool)
+    target_g = np.full(V_T, -1, dtype=np.int32)
+    for v in range(V_T):
+        g = key_to_group.get(v)
+        if g is not None:
+            target_g[v] = g
+            own[v] = True
+            continue
+        if v in t_special:
+            continue    # specials only by role (handled through key_to_group above)
+        u = int(u1[v])
+        if u >= 0:
+            target_g[v] = group_of[u]
+    for v in t_eos:
+        if v < V_T and v in key_to_group:
+            target_g[v] = key_to_group[v]
+            own[v] = True
+    bmask = whitespace_start_mask(student_tok, V_S, stb)
+    return Tables(v1=v1, u1=u1, group_of=group_of, target_g=target_g, group_key=group_key,
+                  group_size=group_size, nonsingleton_ids=nonsingleton_ids, bmask_S=bmask,
+                  own=own, roles=roles, teacher_hash=th, student_hash=sh, V_T=V_T, V_S=V_S,
+                  identity=False)
+
+
+def save_tables(dirpath: Path, t: Tables) -> None:
+    from safetensors.numpy import save_file
+    dirpath = Path(dirpath)
+    dirpath.mkdir(parents=True, exist_ok=True)
+    save_file({"v1": t.v1, "u1": t.u1, "group_of": t.group_of, "target_g": t.target_g,
+               "group_key": t.group_key, "group_size": t.group_size,
+               "nonsingleton_ids": t.nonsingleton_ids, "bmask_S": t.bmask_S,
+               "own": t.own}, str(dirpath / "tables.safetensors"))
+    write_json_atomic(dirpath / "tables.json", t.meta())
+
+
+def load_tables(dirpath: Path) -> Tables:
+    from safetensors.numpy import load_file
+    dirpath = Path(dirpath)
+    a = load_file(str(dirpath / "tables.safetensors"))
+    m = read_json(dirpath / "tables.json")
+    return Tables(v1=a["v1"], u1=a["u1"], group_of=a["group_of"], target_g=a["target_g"],
+                  group_key=a["group_key"], group_size=a["group_size"],
+                  nonsingleton_ids=a["nonsingleton_ids"], bmask_S=a["bmask_S"].astype(bool),
+                  own=a["own"].astype(bool), roles=m.get("roles", {}),
+                  teacher_hash=m["teacher_hash"], student_hash=m["student_hash"],
+                  V_T=m["V_T"], V_S=m["V_S"], identity=bool(m["identity"]))
+
+
+def ends_from_ids(ids: np.ndarray, tb: list[bytes | None], special: set[int]) -> np.ndarray:
+    ends = np.zeros(len(ids), dtype=np.int64)
+    pos = 0
+    for i, t in enumerate(ids):
+        if int(t) in special:
+            ends[i] = pos
+            continue
+        b = tb[int(t)]
+        if b is None:
+            raise ValueError(f"id {t} has no bytes")
+        pos += len(b)
+        ends[i] = pos
+    return ends
+
+
+@dataclass
+class Alignment:
+    t_pos: np.ndarray    # [J] teacher positions ending at each shared boundary (with a successor)
+    s_pos: np.ndarray    # [J] student positions likewise
+    ends: np.ndarray     # [J] byte offsets of the shared boundaries
+    n_teacher: int
+    n_student: int
+
+    @property
+    def J(self) -> int:
+        return int(self.t_pos.shape[0])
+
+
+def shared_boundaries(t_ends: np.ndarray, s_ends: np.ndarray) -> Alignment:
+    """Intersection of end offsets over tokens that have a successor.
+    Positions are token indices; BOS-style tokens with end 0 count only if
+    both sides have one. Duplicate end offsets (specials at 0) keep the last
+    token with that end."""
+    Lt, Ls = len(t_ends), len(s_ends)
+    t_cand = {int(e): i for i, e in enumerate(t_ends[:-1])}   # last wins
+    s_cand = {int(e): i for i, e in enumerate(s_ends[:-1])}
+    common = sorted(set(t_cand) & set(s_cand))
+    t_pos = np.array([t_cand[e] for e in common], dtype=np.int32)
+    s_pos = np.array([s_cand[e] for e in common], dtype=np.int32)
+    return Alignment(t_pos=t_pos, s_pos=s_pos, ends=np.array(common, dtype=np.int64),
+                     n_teacher=Lt, n_student=Ls)
+
+
+def align_row(teacher_ids: np.ndarray, student_ids: np.ndarray, text_bytes: bytes, *,
+              teacher_tb, student_tb, teacher_special: set[int], student_special: set[int],
+              teacher_ends: np.ndarray | None = None,
+              student_ends: np.ndarray | None = None) -> Alignment:
+    """Shared boundaries and chunk spans from two tokenizations of the same
+    bytes. Takes ids and bytes only; no cache row in its signature."""
+    te = teacher_ends if teacher_ends is not None else ends_from_ids(teacher_ids, teacher_tb, teacher_special)
+    se = student_ends if student_ends is not None else ends_from_ids(student_ids, student_tb, student_special)
+    if len(te) and te[-1] != len(text_bytes):
+        raise ValueError(f"teacher offsets end at {te[-1]}, text has {len(text_bytes)} bytes")
+    if len(se) and se[-1] != len(text_bytes):
+        raise ValueError(f"student offsets end at {se[-1]}, text has {len(text_bytes)} bytes")
+    return shared_boundaries(np.asarray(te), np.asarray(se))
+
+
+def project_topk(top_log_p: np.ndarray, top_idx: np.ndarray, tables: Tables,
+                 Kp: int | None = None) -> dict[str, np.ndarray]:
+    """Project [P, K] teacher top-K onto groups at P boundaries.
+
+    Duplicate groups are summed in the log domain by one argsort over the
+    P x K entries keyed by boundary * (G + 1) + gid and logaddexp.reduceat.
+    Returns gid [P, Kp] (sentinel G at pads), log_p [P, Kp] (-inf pads),
+    log_M [P], n_groups [P], and per-boundary mass fractions own, redirect,
+    singleton, dropped (all in [0, 1], relative to the captured mass M_K)."""
+    P, K = top_log_p.shape
+    G = tables.G
+    lp = top_log_p.astype(np.float64)
+    valid = (top_idx >= 0) & np.isfinite(lp)
+    idx = np.where(valid, top_idx, 0)
+    gid = np.where(valid, tables.target_g[idx], -1)
+    own = np.where(valid, tables.own[idx], False)
+    single = np.where(valid & (gid >= 0), tables.group_size[np.maximum(gid, 0)] == 1, False)
+    pw = np.exp(np.where(valid, lp, -np.inf))
+    MK = pw.sum(axis=1)
+    MKs = np.maximum(MK, 1e-300)
+    kept = valid & (gid >= 0)
+    dropped = (pw * (valid & ~kept)).sum(axis=1) / MKs
+    own_frac = (pw * (own & kept)).sum(axis=1) / MKs
+    redirect_frac = (pw * (~own & kept)).sum(axis=1) / MKs
+    single_frac = (pw * (single & kept)).sum(axis=1) / MKs
+
+    rows = np.repeat(np.arange(P), K)
+    g = gid.reshape(-1)
+    v = lp.reshape(-1)
+    m = kept.reshape(-1)
+    rows, g, v = rows[m], g[m], v[m]
+    key = rows.astype(np.int64) * (G + 1) + g
+    order = np.argsort(key, kind="stable")
+    key, v = key[order], v[order]
+    if key.size:
+        starts = np.concatenate([[0], np.nonzero(np.diff(key))[0] + 1])
+        sums = np.logaddexp.reduceat(v, starts)
+        skey = key[starts]
+    else:
+        starts = np.zeros(0, dtype=np.int64)
+        sums = np.zeros(0)
+        skey = np.zeros(0, dtype=np.int64)
+    srow = skey // (G + 1)
+    sg = (skey % (G + 1)).astype(np.int32)
+    n_groups = np.bincount(srow, minlength=P).astype(np.int32)
+    if Kp is None:
+        Kp = int(n_groups.max()) if P else 1
+    Kp = max(Kp, 1)
+    out_gid = np.full((P, Kp), G, dtype=np.int32)
+    out_lp = np.full((P, Kp), NEG_INF, dtype=np.float32)
+    # rank groups within a boundary by mass, descending, so a --kprime cap
+    # keeps the heaviest
+    if skey.size:
+        o2 = np.lexsort((-sums, srow))
+        srow2, sg2, sums2 = srow[o2], sg[o2], sums[o2]
+        first = np.concatenate([[0], np.nonzero(np.diff(srow2))[0] + 1]) if srow2.size else np.zeros(0, dtype=np.int64)
+        rank = np.arange(srow2.size) - np.repeat(first, np.diff(np.concatenate([first, [srow2.size]])))
+        keep = rank < Kp
+        out_gid[srow2[keep], rank[keep]] = sg2[keep]
+        out_lp[srow2[keep], rank[keep]] = sums2[keep].astype(np.float32)
+        capped_mass = np.zeros(P)
+        if np.any(~keep):
+            np.add.at(capped_mass, srow2[~keep], np.exp(sums2[~keep]))
+        dropped = dropped + capped_mass / MKs
+    with np.errstate(divide="ignore"):
+        log_M = np.log(np.exp(out_lp.astype(np.float64)).sum(axis=1)).astype(np.float32)
+    return {"gid": out_gid, "log_p": out_lp, "log_M": log_M, "n_groups": n_groups,
+            "own": own_frac.astype(np.float32), "redirect": redirect_frac.astype(np.float32),
+            "singleton": single_frac.astype(np.float32), "dropped": dropped.astype(np.float32),
+            "M_K": MK.astype(np.float32)}
+
+
+def tokenization_bias_check(proj: dict[str, np.ndarray], onpath_gid: np.ndarray,
+                            onpath_log_p: np.ndarray, onpath_in_topk: np.ndarray) -> tuple[float, float]:
+    """Tokenization-bias diagnostic over the boundaries whose teacher
+    on-path token is inside the cached top-K (elsewhere the mass sits in
+    the tail bucket and says nothing about the projection). Returns the
+    fraction of those boundaries where the projected mass on the student's
+    next-token group is at least the teacher's on-path probability, and
+    the covered fraction itself. Target >= 0.99 on the first.
+    The cache stores top-K log-probs in float16 and the on-path value in
+    float32, so the comparison is against the float16 rounding of the
+    on-path value with one float16 ulp of slack."""
+    gid, lp = proj["gid"], proj["log_p"]
+    hit = (gid == onpath_gid[:, None])
+    with np.errstate(invalid="ignore"):
+        m = np.where(hit, lp, NEG_INF).max(axis=1)
+    ref = onpath_log_p.astype(np.float16).astype(np.float32)
+    slack = np.abs(ref) * 2.0 ** -10 + 1e-6
+    ok = (m >= ref - slack) | (onpath_gid < 0)
+    cov = onpath_in_topk.astype(bool)
+    n_cov = int(cov.sum())
+    return (float(ok[cov].mean()) if n_cov else 1.0), (n_cov / len(ok) if len(ok) else 1.0)
+
+
+# ---------------------------------------------------------------------------
+# census (tokenizer only, no cache)
+# ---------------------------------------------------------------------------
+
+def census_pair(teacher_tok, student_tok, tables: Tables, texts: Iterable[str], *,
+                max_len: int = 512, max_chunk_len: int = 8,
+                teacher_tb=None, student_tb=None) -> dict:
+    """Frequency-weighted a and s over teacher token occurrences, shared
+    boundary fraction of student positions, redirected fraction, group
+    sizes, rows with < 2 boundaries, chunk-length histogram."""
+    ti = hf_inner(teacher_tok)
+    ttb = teacher_tb if teacher_tb is not None else token_bytes(teacher_tok, tables.V_T)
+    stb = student_tb if student_tb is not None else token_bytes(student_tok, tables.V_S)
+    t_spec = set(ti.all_special_ids)
+    n_tok = n_own = n_single = n_redirect = n_drop = 0
+    gs_sum = 0.0
+    gs_max = 0
+    s_positions = s_bnd = 0
+    rows = rows_lt2 = 0
+    chunk_hist: dict[int, int] = {}
+    flagged = 0
+    for text in texts:
+        tb_ = text.encode("utf-8")
+        t_ids, t_ends, f1 = encode_with_byte_ends(teacher_tok, tb_, ttb)
+        s_ids, s_ends, f2 = encode_with_byte_ends(student_tok, tb_, stb)
+        flagged += int(f1 or f2)
+        for v in t_ids:
+            v = int(v)
+            if v in t_spec:
+                continue
+            n_tok += 1
+            g = tables.target_g[v]
+            if g < 0:
+                n_drop += 1
+                continue
+            if tables.own[v]:
+                n_own += 1
+            else:
+                n_redirect += 1
+            sz = int(tables.group_size[g])
+            gs_sum += sz
+            gs_max = max(gs_max, sz)
+            if sz == 1:
+                n_single += 1
+        al = shared_boundaries(t_ends, s_ends)
+        rows += 1
+        s_positions += max(len(s_ids) - 1, 0)
+        s_bnd += al.J
+        if al.J < 2:
+            rows_lt2 += 1
+        for j in range(1, al.J):
+            ls = int(al.s_pos[j] - al.s_pos[j - 1])
+            lt = int(al.t_pos[j] - al.t_pos[j - 1])
+            key = max(ls, lt)
+            chunk_hist[key] = chunk_hist.get(key, 0) + 1
+    chunks = sum(chunk_hist.values())
+    kept = sum(c for k, c in chunk_hist.items() if k <= max_chunk_len)
+    return {
+        "teacher_tokens": n_tok,
+        "a_own_fraction": n_own / max(n_tok, 1),
+        "s_singleton_fraction": n_single / max(n_tok, 1),
+        "redirected_fraction": n_redirect / max(n_tok, 1),
+        "dropped_fraction": n_drop / max(n_tok, 1),
+        "mean_group_size": gs_sum / max(n_own + n_redirect, 1),
+        "max_group_size": gs_max,
+        "shared_boundary_fraction": s_bnd / max(s_positions, 1),
+        "rows": rows,
+        "rows_lt2_boundaries": rows_lt2,
+        "chunks": chunks,
+        "chunks_kept_fraction": kept / max(chunks, 1),
+        "chunk_length_histogram": {str(k): v for k, v in sorted(chunk_hist.items())},
+        "rows_offset_fallback": flagged,
+        "G": tables.G, "V_T": tables.V_T, "V_S": tables.V_S,
+        "N_ns": int(tables.nonsingleton_ids.shape[0]),
+    }
+
+

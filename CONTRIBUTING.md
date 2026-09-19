@@ -94,6 +94,7 @@ reason is not accepted in review. Tests are exempt.
   | `gmlx/serve/` | server, admission, batched decode, with HTTP patches in `serve/patches/` |
   | `gmlx/gen/` | generation loop, sampling profiles, benchmarks |
   | `gmlx/tune/` | training-time helpers: LoRA student setup, blocked attention, per-layer checkpointing |
+  | `gmlx/distill/` | offline distillation: teacher cache, cross-tokenizer alignment, fused head and losses, batch loader, eval |
   | `gmlx/commands/` | CLI verbs behind the `gmlx` umbrella |
   | `gmlx/tui/` | interactive chat terminal UI |
   | `gmlx/talk/` | voice client, audio I/O and hotkey |
@@ -111,7 +112,7 @@ A commit message is a single subject line with no body, in the form
 `type(scope): short lowercase summary`. The type is one of `feat`, `fix`,
 `perf`, `docs`, `test` and `chore`, plus `release` for a version bump. The
 scope in parentheses names the subsystem or model family the change is
-about, such as `stream`, `kv`, `server`, `cli` or `qwen4exp`, and is left
+about, such as `stream`, `kv`, `server`, `cli`, `distill` or `qwen4exp`, and is left
 out when the change has no single home, as in `docs: fix audit findings`.
 Subjects from the history include `feat(kvarn): KVarN variance-normalized
 KV cache`, `fix(tokenizer): drop <|end|> from the harmony stop set for
