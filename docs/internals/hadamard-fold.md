@@ -63,6 +63,20 @@ onto forwards that share q/k/v and gate/up. On the 27B this is 258
 rotations per decoded token instead of 402. The stock GDN prefill body
 still rotates `in_proj_qkv` and `in_proj_z` separately.
 
+## Precision
+
+A folded file runs at the activation dtype every other file gets, bf16
+on GPUs with native bf16. The rotation spreads each row's outliers
+evenly, so the rotated row has a small dynamic range and the mantissa is
+what limits precision on it. float16 keeps three more mantissa bits than
+bf16, and `GMLX_ACTIVATION_DTYPE=float16` tightens the teacher-forced
+logprob delta against the reference on the 27B from about 0.3 nats to
+about 0.04 at the same speed. The bf16 delta already sits inside gmlx's
+own prefill-versus-decode noise, and model-wide float16 carries an
+overflow risk in the residual stream at long context that has not been
+ruled out, so the default stays. Passing f32 activations changes nothing,
+because the kquant matmul's internal precision follows its output dtype.
+
 ## Refusal
 
 Preflight refuses a folded file whose header version is not 1 or whose
