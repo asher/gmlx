@@ -40,6 +40,7 @@ from mlx_vlm.models.qwen3_5 import language as _L
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool
+from gmlx.tune.attention import blocked_attention
 from gmlx.cache.kvarn_cache import KVarNView
 from .gdn import owned_gdn_active as owned_attn_active  # one switch
 from .owned import _qwen3_5_left_padding_info
@@ -930,6 +931,14 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
                     for i in range(L)
                 ],
                 axis=2,
+            )
+        elif (output is None and cache is None and self.training
+              and env_bool("GMLX_TRAIN_BLOCKED_ATTN", True)):
+            # Training: the query-block recompute keeps nothing quadratic
+            # in L on the gradient tape (MLX's own training path holds
+            # the full [B, H, L, L] softmax per layer).
+            output = blocked_attention(
+                queries, keys, values, scale=self.scale, mask=mask
             )
         elif output is None:
             output = _sdpa(

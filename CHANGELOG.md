@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Training attention (`gmlx train`, and every model whose attention runs
+  in training mode) recomputes query blocks in the backward instead of
+  keeping each layer's full softmax on the gradient tape. Peak memory of
+  the attention backward at 4096-token rows falls from 10.7 GB to 2.8 GB
+  on Qwen3.5-9B's attention shape. `GMLX_TRAIN_BLOCKED_ATTN=0` restores
+  MLX's own path.
+
 ## [0.4.14] - 2026-09-18
 
 ### Added

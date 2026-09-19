@@ -93,6 +93,7 @@ reason is not accepted in review. Tests are exempt.
   | `gmlx/stream/` | weight streaming and residency for over-RAM models |
   | `gmlx/serve/` | server, admission, batched decode, with HTTP patches in `serve/patches/` |
   | `gmlx/gen/` | generation loop, sampling profiles, benchmarks |
+  | `gmlx/tune/` | training-time helpers: LoRA student setup, blocked attention, per-layer checkpointing |
   | `gmlx/commands/` | CLI verbs behind the `gmlx` umbrella |
   | `gmlx/tui/` | interactive chat terminal UI |
   | `gmlx/talk/` | voice client, audio I/O and hotkey |
