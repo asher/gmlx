@@ -999,11 +999,15 @@ def _install_hadamard(model, targets: dict | None, log) -> None:
     count. No-op for a file with no fold."""
     if not targets:
         return
+    from gmlx.upstream.hadamard_share import install_hadamard_sharing
     from .hadamard_modules import install_hadamard_modules
 
     n = install_hadamard_modules(model, targets)
     loadlog.fact("hadamard", f"{n} folded modules, block {next(iter(targets.values())).block}")
     log(f"[install] Hadamard rotation on {n} folded modules")
+    n_shared = install_hadamard_sharing(model)
+    if n_shared:
+        log(f"[install] Hadamard rotation shared on {n_shared} attention/MLP blocks")
 
 
 def _install_and_load(

@@ -36,6 +36,7 @@ from gmlx.load.hadamard_modules import (
     rotate,
     rotate_inverse,
     rotation_count,
+    shared_linears,
 )
 from gmlx.load.modules import install_kquant_modules
 from mlx_kquant.nn import KQuantEmbedding, KQuantLinear
@@ -529,3 +530,93 @@ def test_lora_delta_uses_the_unrotated_input():
     # than the rotation does.
     assert np.abs(got - plain).max() < 0.1 * np.abs(got - rotated).max()
     np.testing.assert_allclose(got, plain, atol=0.5, rtol=5e-2)
+
+
+class _Group(nn.Module):
+    """Four projections over one input: two folded with the same signs,
+    one folded with a permute, one unquantized."""
+
+    def __init__(self, dims=256, out=64):
+        super().__init__()
+        self.a = nn.Linear(dims, out, bias=False)
+        self.b = nn.Linear(dims, out, bias=False)
+        self.c = nn.Linear(dims, out, bias=False)
+        self.plain = nn.Linear(dims, out, bias=False)
+
+
+def _group_tree(rng, *, fold=True, dims=256, out=64):
+    mx.random.seed(1)
+    model = _Group(dims, out)
+    weights = {"plain.weight": mx.random.normal((out, dims))}
+    for name in ("a", "b", "c"):
+        q, s = kq.quantize(mx.random.normal((out, dims)), "q8_0")
+        weights[f"{name}.weight"] = q.reshape(out, -1)
+        weights[f"{name}.scales"] = s
+    meta = {f"{n}.weight": "q8_0" for n in ("a", "b", "c")}
+    assert install_kquant_modules(model, meta) == 3
+    model.load_weights(list(weights.items()), strict=False)
+    mx.eval(model.parameters())
+    if fold:
+        signs = _signs(rng, dims)
+        targets = {
+            "a": FoldTarget(width=dims, block=BLOCK, signs=signs),
+            "b": FoldTarget(width=dims, block=BLOCK, signs=signs),
+            "c": FoldTarget(width=dims, block=BLOCK, signs=signs,
+                            perm=(2, 2, dims // 4)),
+        }
+        assert install_hadamard_modules(model, targets) == 3
+    x = mx.array(rng.standard_normal((2, 3, dims)).astype(np.float32))
+    return model, x.astype(mx.bfloat16)
+
+
+def _counted(monkeypatch, fn):
+    monkeypatch.setenv("GMLX_HADAMARD_TRACE", "1")
+    reset_rotation_count()
+    out = fn()
+    mx.eval(out)
+    return out, rotation_count()
+
+
+def test_shared_linears_rotates_once_for_a_shared_group(monkeypatch):
+    rng = np.random.default_rng(12)
+    model, x = _group_tree(rng)
+    mods = (model.a, model.b, model.plain)
+    want, n_each = _counted(monkeypatch, lambda: tuple(m(x) for m in mods))
+    got, n_shared = _counted(monkeypatch, lambda: shared_linears(mods, x))
+    assert n_each == 2 and n_shared == 1
+    for g, w in zip(got, want):
+        assert mx.array_equal(g, w)
+
+
+def test_shared_linears_leaves_permuted_and_single_members_alone(monkeypatch):
+    rng = np.random.default_rng(13)
+    model, x = _group_tree(rng)
+    mods = (model.a, model.c)
+    want = tuple(m(x) for m in mods)
+    got, n = _counted(monkeypatch, lambda: shared_linears(mods, x))
+    assert n == 2
+    for g, w in zip(got, want):
+        assert mx.array_equal(g, w)
+
+
+def test_shared_linears_without_folds_is_the_plain_call(monkeypatch):
+    rng = np.random.default_rng(14)
+    model, x = _group_tree(rng, fold=False)
+    mods = (model.a, model.b, model.plain)
+    got, n = _counted(monkeypatch, lambda: shared_linears(mods, x))
+    assert n == 0
+    for g, m in zip(got, mods):
+        assert mx.array_equal(g, m(x))
+
+
+def test_owned_verify_linears_shares_the_rotation(monkeypatch):
+    from gmlx.models.qwen35.verify_linear import verify_linears
+
+    rng = np.random.default_rng(15)
+    model, x = _group_tree(rng)
+    mods = (model.a, model.b, model.plain)
+    want = tuple(m(x) for m in mods)
+    got, n = _counted(monkeypatch, lambda: verify_linears(mods, x, False))
+    assert n == 1
+    for g, w in zip(got, want):
+        assert mx.array_equal(g, w)

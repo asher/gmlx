@@ -20,6 +20,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from gmlx.load.hadamard_modules import shared_linears
 from gmlx.upstream.gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
 
 __all__ = ["verify_linear", "verify_linears"]
@@ -717,6 +718,6 @@ def verify_linears(linears, x: mx.array, target_verify: bool):
         out = _decode_quantized_linears_fused(linears, x)
         if out is not None:
             return out
-        return tuple(linear(x) for linear in linears)
+        return shared_linears(linears, x)
 
     return tuple(verify_linear(linear, x, target_verify) for linear in linears)

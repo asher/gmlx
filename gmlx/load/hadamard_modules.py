@@ -143,6 +143,33 @@ def is_folded(module) -> bool:
     return getattr(module, "_hadamard", None) is not None
 
 
+def shared_linears(modules, x: mx.array) -> tuple:
+    """Call each module on ``x``, rotating once for the members that share
+    a fold (same width, block and signs, no permute). Members without a
+    fold, with a permute, or whose fold no other member shares are called
+    plainly. This is the sharing site for the projection groups that read
+    one activation: qkv+z, q+k+v and gate+up."""
+    folds = [getattr(m, "_hadamard", None) for m in modules]
+    if all(f is None for f in folds):
+        return tuple(m(x) for m in modules)
+    keys = [
+        f.key if f is not None and f.perm is None and not f.inverse else None
+        for f in folds
+    ]
+    rotated: dict = {}
+    outs = []
+    for m, f, key in zip(modules, folds, keys):
+        if key is None or keys.count(key) < 2:
+            outs.append(m(x))
+            continue
+        xr = rotated.get(key)
+        if xr is None:
+            xr = rotate(x, f)
+            rotated[key] = xr
+        outs.append(m(xr, pre_rotated=True))
+    return tuple(outs)
+
+
 def _match(path: str, targets: dict[str, FoldTarget]) -> str | None:
     for key in targets:
         if path == key or path.endswith("." + key):
