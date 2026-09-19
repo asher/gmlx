@@ -15,7 +15,10 @@ from __future__ import annotations
 import mlx.core as mx
 
 
-def _layer_list(model):
+def layer_list(model):
+    """The decoder layers of ``model``, looking under a language-model
+    wrapper and an inner ``model`` attribute as mlx-lm and mlx-vlm lay
+    them out. Empty when none are found."""
     for owner in (model, getattr(model, "language_model", None),
                   getattr(model, "model", None)):
         if owner is None:
@@ -34,7 +37,7 @@ def checkpoint_layers(model) -> int:
     ``model``. Returns the number of classes rewritten; a class already
     rewritten is left alone, so the call is idempotent."""
     n = 0
-    for layer in _layer_list(model):
+    for layer in layer_list(model):
         cls = type(layer)
         if getattr(cls.__call__, "_gmlx_checkpointed", False):
             continue

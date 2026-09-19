@@ -83,7 +83,10 @@ Train loss should fall steadily. With only 90 examples, stop around 150
 iterations, because training longer overfits, validation loss rises and
 greedy decoding can repeat. `--num-layers` and `--rank` trade capacity for
 memory, and the defaults of 8 layers at rank 8 are a reasonable starting
-point. The flag table is under [gmlx train](cli.md#gmlx-train).
+point. When a longer `--max-seq-length` runs out of memory,
+`--grad-checkpoint` recomputes each layer's activations in the backward
+pass instead of keeping them, at some cost in time. The flag table is under
+[gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
 

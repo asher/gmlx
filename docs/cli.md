@@ -837,6 +837,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--steps-per-eval N` | `200` | validation interval |
 | `--seed N` | `0` | RNG seed |
 | `--hf-source ID` | none | tokenizer and config fallback, rarely needed |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, which trades time for memory |
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.

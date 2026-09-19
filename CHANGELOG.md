@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx train --grad-checkpoint` recomputes each layer's activations in the
+  backward pass, so longer sequences fit in memory at some cost in time.
+- `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
+  from `gmlx` for tools that line up two tokenizers over the same text.
+
 ### Changed
 
 - Training attention (`gmlx train`, and every model whose attention runs

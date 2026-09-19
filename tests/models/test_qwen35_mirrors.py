@@ -98,6 +98,20 @@ def test_attention_call_mirror():
                 1,
             ),
             ("scaled_dot_product_attention(", "_sdpa(", 2),
+            (
+                # the training route inserted ahead of the plain dispatch
+                "    elif output is None:\n"
+                "        output = _sdpa(queries, keys, values, cache=cache, "
+                "scale=self.scale, mask=mask)",
+                "    elif output is None and cache is None and self.training "
+                "and env_bool('GMLX_TRAIN_BLOCKED_ATTN', True):\n"
+                "        output = blocked_attention(queries, keys, values, "
+                "scale=self.scale, mask=mask)\n"
+                "    elif output is None:\n"
+                "        output = _sdpa(queries, keys, values, cache=cache, "
+                "scale=self.scale, mask=mask)",
+                1,
+            ),
             ("_target_verify_linear(", "verify_linear(", 1),
         ],
         "Qwen3_5Attention.__call__",

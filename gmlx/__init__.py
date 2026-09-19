@@ -42,6 +42,10 @@ _EXPORTS = {
     # that needs tokenizer parity checks before deciding to load weights.
     "detect_arch": "load.remap",
     "load_tokenizer_from_gguf": "load.tokenizer",
+    # Vocabulary bytes for tools that line up two tokenizers over one text.
+    "token_bytes": "load.tokenizer",
+    "whitespace_start_mask": "load.tokenizer",
+    "vocab_map_hash": "load.tokenizer",
 }
 
 __all__ = list(_EXPORTS)
