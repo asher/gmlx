@@ -94,6 +94,7 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
                 stext, s_spans = render_row(tokenizer, meta["messages"], **row_render_args(meta.get("frame")))
             except ValueError:
                 continue
+            assert stb is not None
             s_ids, s_ends, _flag = encode_with_byte_ends(tokenizer, stext, stb, add_special_tokens=False)
             s_ids = s_ids.astype(np.int32)
             if len(s_ids) != n or not np.array_equal(s_ids, t_ids):
@@ -112,6 +113,7 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
             t_pos = s_pos = np.nonzero(valid)[0]
         elif t_pos.size == 0:
             continue
+        assert s_pos is not None
         if replay_layers is not None and ids is t_ids and ROUTES_FIELD in arrs:
             with pin_routes(model, arrs[ROUTES_FIELD], replay_layers):
                 out = model(mx.array(ids[None]))
@@ -488,7 +490,7 @@ def generate_guard() -> None:
     import mlx_lm.generate  # noqa: F401  (the package re-exports the function under the same name)
     g = sys.modules["mlx_lm.generate"]
     if "max_recommended_working_set_size" not in mx.device_info():
-        g.wired_limit = lambda *_a, **_k: contextlib.nullcontext()
+        setattr(g, "wired_limit", lambda *_a, **_k: contextlib.nullcontext())
 
 
 def score_gsm8k(model, tokenizer, items: list[dict], shots: list[dict], *, max_tokens: int = 384) -> list[dict]:
@@ -567,4 +569,4 @@ def _t_sf(t: float, dof: int) -> float:
     xs = np.linspace(t, hi, 200001)
     ys = np.array([f(u) for u in xs[::100]])
     xs2 = xs[::100]
-    return float(np.trapezoid(ys, xs2)) if hasattr(np, "trapezoid") else float(np.trapz(ys, xs2))
+    return float(np.trapezoid(ys, xs2))

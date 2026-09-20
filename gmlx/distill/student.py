@@ -66,7 +66,7 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
 
 def load_mlx_student(path: str, adapter_path: str | None = None):
     from mlx_lm import load
-    model, tokenizer = load(path, adapter_path=adapter_path)
+    model, tokenizer = load(path, adapter_path=adapter_path)[:2]
     cfg = read_json(Path(path) / "config.json")
     return model, cfg, tokenizer
 
