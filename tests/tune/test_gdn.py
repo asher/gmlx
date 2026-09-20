@@ -244,11 +244,15 @@ def test_chunk_follows_the_tiled_head_mapping(monkeypatch):
 def test_chunk_route_needs_exact_f32_matmul(monkeypatch, capsys):
     """Under TF32 the chunked rule diverges, so the training route falls
     back to the loop and says so once."""
-    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", None)
+    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", {})
     assert tg.f32_gemm_exact()          # the CPU device multiplies exactly
     a = mx.zeros((1, 4, 2))
     assert tg.chunked_gdn_active(a)
-    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", False)
+    # the answer is cached per device: another device's TF32 verdict does
+    # not reach this one
+    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", {"Device(gpu, 0)": False})
+    assert tg.chunked_gdn_active(a)
+    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", {str(mx.default_device()): False})
     monkeypatch.setattr(tg, "_TF32_WARNED", False)
     assert not tg.chunked_gdn_active(a)
     assert not tg.chunked_gdn_active(a)

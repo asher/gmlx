@@ -175,7 +175,7 @@ def gated_delta_update_chunked(q, k, v, a, b, A_log, dt_bias, state=None,
     return gated_delta_chunk(q, k, v, g, beta, state, mask, chunk=chunk)
 
 
-_F32_GEMM_EXACT: bool | None = None
+_F32_GEMM_EXACT: dict[str, bool] = {}   # per default device: a suite moves between devices
 _TF32_WARNED = False
 
 
@@ -185,15 +185,16 @@ def f32_gemm_exact() -> bool:
     precision on M5-class GPUs unless ``MLX_ENABLE_TF32=0`` is set before
     the first matmul, and the chunked rule feeds that rounding back
     through its state carry until the state diverges, so the training scan
-    measures the device once per process against a CPU product."""
-    global _F32_GEMM_EXACT
-    if _F32_GEMM_EXACT is None:
+    measures each device once against a CPU product."""
+    key = str(mx.default_device())
+    hit = _F32_GEMM_EXACT.get(key)
+    if hit is None:
         a = mx.random.normal((64, 64), key=mx.random.key(0))
         b = mx.random.normal((64, 64), key=mx.random.key(1))
         gpu = mx.matmul(a, b)
         cpu = mx.matmul(a, b, stream=mx.cpu)
-        _F32_GEMM_EXACT = float(mx.abs(gpu - cpu).max()) < 1e-3
-    return _F32_GEMM_EXACT
+        hit = _F32_GEMM_EXACT[key] = float(mx.abs(gpu - cpu).max()) < 1e-3
+    return hit
 
 
 def chunked_gdn_active(a: mx.array) -> bool:
