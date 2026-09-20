@@ -160,3 +160,32 @@ def test_apply_reads_head_counts_from_object_config(monkeypatch):
                         seen.update(n_head=n_head, n_head_kv=n_head_kv) or 0)
     adapter.apply_gguf_adapter(object(), _Cfg(), "ignored.gguf")
     assert (seen["n_head"], seen["n_head_kv"]) == (10, 5)
+
+
+class _Multimodal(nn.Module):
+    """A base shaped like the vlm runtime's models: the text stack under
+    ``language_model``, whose leaf paths the adapter remap targets."""
+    def __init__(self):
+        super().__init__()
+        self.language_model = _Tiny()
+
+
+def test_apply_enters_the_language_model_of_a_multimodal_base(monkeypatch):
+    a = mx.zeros((2, 4))
+    b = mx.zeros((4, 2))
+    plan = _plan({"q_proj": _lm("q_proj", a, b, 1.0)})
+    monkeypatch.setattr(adapter, "load_lora_adapter", lambda path, **kw: plan)
+    outer = _Multimodal()
+    assert adapter.apply_gguf_adapter(outer, {}, "ignored.gguf") == 1
+    assert isinstance(outer.language_model.q_proj, modules.LoRAKQuantLinear)
+
+
+def test_apply_keeps_the_outer_model_when_the_plan_names_the_prefix(monkeypatch):
+    a = mx.zeros((2, 4))
+    b = mx.zeros((4, 2))
+    path = "language_model.q_proj"
+    plan = _plan({path: _lm(path, a, b, 1.0)})
+    monkeypatch.setattr(adapter, "load_lora_adapter", lambda path, **kw: plan)
+    outer = _Multimodal()
+    assert adapter.apply_gguf_adapter(outer, {}, "ignored.gguf") == 1
+    assert isinstance(outer.language_model.q_proj, modules.LoRAKQuantLinear)

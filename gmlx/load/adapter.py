@@ -173,7 +173,8 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     number of modules installed.
 
     Applies to the *raw* mlx-lm model, whose leaf paths are the HF names the adapter's
-    GGUF-base-name remap targets. Head counts (for the llama-family q/k de-permute of
+    GGUF-base-name remap targets; a base that keeps its text stack under
+    ``language_model`` is entered there. Head counts (for the llama-family q/k de-permute of
     the adapter's ``B``) come from ``config`` (a synthesized dict or a config object,
     with a nested ``text_config`` fallback for multimodal-shaped configs); a
     qk_permute target without them raises in the installer. The adapter GGUF's own
@@ -190,8 +191,20 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
     plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
-    return install_lora_adapter(raw_model, plan, n_head=n_head, n_head_kv=n_head_kv,
-                                slot=slot)
+    return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
+                                n_head_kv=n_head_kv, slot=slot)
+
+
+def _text_root(model, plan):
+    """The module the plan's paths are relative to. A multimodal-shaped base
+    (the Qwen3.5 hybrids among them) keeps its text stack under
+    ``language_model`` while the GGUF name remap writes text paths without
+    that prefix, so the install descends into it unless the plan already
+    names it."""
+    inner = getattr(model, "language_model", None)
+    if inner is None or any(p.startswith("language_model.") for p in plan.modules):
+        return model
+    return inner
 
 
 def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,

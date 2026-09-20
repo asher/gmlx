@@ -37,6 +37,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since the chunked rule diverges under MLX's default TF32 rounding on
   M5-class GPUs; a process that keeps TF32 on takes the loop and says so.
 
+### Fixed
+
+- `gmlx serve --adapter` on a base whose text stack sits under
+  `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
+  every target reported as unmatched. The install now enters the text
+  stack, as train, distill and MTP serving already did.
+
 ## [0.4.14] - 2026-09-18
 
 ### Added
