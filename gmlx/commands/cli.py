@@ -2601,6 +2601,13 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             return server_main(
                 rest if verb == "serve" else [verb, *rest], prog=f"{prog} {verb}"
             )
+        if verb in ("train", "distill"):
+            # MLX multiplies float32 matrices at TF32 precision on M5-class
+            # GPUs by default; the chunked gated delta training scan needs
+            # exact float32 (gmlx.tune.gdn.f32_gemm_exact), and LoRA's
+            # float32 rank matmuls are small. setdefault keeps an explicit
+            # override in charge.
+            os.environ.setdefault("MLX_ENABLE_TF32", "0")
         if verb == "train":
             from .train import cmd_train
 

@@ -91,7 +91,8 @@ is a linear warmup into a cosine decay, and `last` and `best` checkpoints
 sit under `--ckpt-dir`, where `--resume` picks up at the exact iteration.
 The adapter targets the attention and MLP projections of every layer at
 rank 16. Training attention and the gated delta scan of hybrid models run
-on the memory-saving paths described in the [LoRA guide](lora.md), and
+on gmlx's own memory-saving paths, whose switches are listed in the
+[debug switches](internals/debug-switches.md) page, and
 `--grad-checkpoint` adds per-layer recomputation for long rows.
 
 The objective is a sparse KL over the projected top-K plus a tail bucket

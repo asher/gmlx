@@ -4,6 +4,8 @@ row length that is not a chunk multiple, and near-zero decays. Then the
 training wrapper and the owned Qwen3.5 forward's route to it. CPU."""
 from __future__ import annotations
 
+import math
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -237,3 +239,64 @@ def test_chunk_follows_the_tiled_head_mapping(monkeypatch):
     y_grouped, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16)
     mx.eval(y_grouped)
     assert np.allclose(np.array(grouped_ref), np.array(y_grouped), atol=2e-4, rtol=1e-3)
+
+
+def test_chunk_route_needs_exact_f32_matmul(monkeypatch, capsys):
+    """Under TF32 the chunked rule diverges, so the training route falls
+    back to the loop and says so once."""
+    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", None)
+    assert tg.f32_gemm_exact()          # the CPU device multiplies exactly
+    a = mx.zeros((1, 4, 2))
+    assert tg.chunked_gdn_active(a)
+    monkeypatch.setattr(tg, "_F32_GEMM_EXACT", False)
+    monkeypatch.setattr(tg, "_TF32_WARNED", False)
+    assert not tg.chunked_gdn_active(a)
+    assert not tg.chunked_gdn_active(a)
+    err = capsys.readouterr().err
+    assert err.count("MLX_ENABLE_TF32=0") == 1
+
+
+def _correlated_inputs(seed=1, corr=0.97, B=1, T=128, H=2, Dk=32, Dv=32):
+    """Unit keys that all point roughly the same way, high beta and slow
+    decay: within a 64-token chunk the powers of the WY matrix L reach 1e9
+    and cancel to an inverse whose entries never exceed 1, which float32
+    repeated squaring cannot represent."""
+    r = np.random.default_rng(seed)
+    base = r.standard_normal((B, 1, H, Dk))
+    k = corr * base + math.sqrt(1 - corr * corr) * r.standard_normal((B, T, H, Dk))
+    k = k / np.linalg.norm(k, axis=-1, keepdims=True)
+    q = r.standard_normal((B, T, H, Dk)) / math.sqrt(Dk)
+    v = r.standard_normal((B, T, H, Dv))
+    g = r.uniform(0.98, 1.0, (B, T, H))
+    beta = r.uniform(0.5, 0.98, (B, T, H))
+    return [mx.array(x.astype(np.float32)) for x in (q, k, v, g, beta)]
+
+
+def test_chunk_64_stays_exact_on_correlated_keys():
+    q, k, v, g, beta = _correlated_inputs()
+    y0, s0 = gd.gated_delta_ops(q, k, v, g, beta)
+    y1, s1 = tg.gated_delta_chunk(q, k, v, g, beta, chunk=64)
+    mx.eval(y0, s0, y1, s1)
+    assert np.allclose(np.array(y0), np.array(y1), atol=2e-4, rtol=1e-3)
+    assert np.allclose(np.array(s0), np.array(s1), atol=2e-4, rtol=1e-3)
+
+
+def test_tri_inverse_matches_float64_at_64():
+    """The blocked inverse against numpy's float64 inverse on a WY matrix
+    from correlated keys; plain squaring in float32 is off by hundreds."""
+    q, k, v, g, beta = _correlated_inputs()
+    C = 64
+    kk = np.array(k[0, :C, 0]).astype(np.float64)
+    bb = np.array(beta[0, :C, 0]).astype(np.float64)
+    lgc = np.cumsum(np.log(np.array(g[0, :C, 0]).astype(np.float64)))
+    tril = np.tril(np.ones((C, C), bool))
+    strict = np.tril(np.ones((C, C), bool), -1)
+    decay = np.where(tril, np.exp(np.where(tril, lgc[:, None] - lgc[None, :], 0.0)), 0.0)
+    L = -np.where(strict, ((kk * bb[:, None]) @ kk.T) * decay, 0.0)
+    M64 = np.linalg.inv(np.eye(C) - L)
+    L32 = mx.array(L.astype(np.float32))
+    M = np.array(tg._tri_inverse_from_strict_lower(L32, C)).astype(np.float64)
+    assert np.abs(M64).max() <= 1.0 + 1e-9
+    assert np.abs(M - M64).max() < 1e-4
+    squared = np.array(tg._tri_inverse_from_strict_lower(L32, C, base=C)).astype(np.float64)
+    assert np.abs(squared - M64).max() > 1.0

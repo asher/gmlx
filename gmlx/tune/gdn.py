@@ -30,6 +30,7 @@ mode. ``GMLX_TRAIN_GDN_CHUNK=0`` routes them to the loop instead.
 from __future__ import annotations
 
 import math
+import sys
 
 import mlx.core as mx
 
@@ -40,18 +41,31 @@ from gmlx.envflags import env_bool
 LOG_FLOOR = -80.0
 
 
-def _tri_inverse_from_strict_lower(L: mx.array, C: int) -> mx.array:
+def _tri_inverse_from_strict_lower(L: mx.array, C: int, base: int = 16) -> mx.array:
     """(I - L)^-1 for a strictly lower triangular L of size C on the last
-    two axes, by squaring: L is nilpotent, so the inverse is the finite
-    product (I + L)(I + L^2)(I + L^4)... with log2(C) factors."""
-    eye = mx.eye(C, dtype=L.dtype)
-    M = eye + L
-    P = L
-    steps = int(math.ceil(math.log2(C))) if C > 1 else 0
-    for _ in range(1, steps):
-        P = P @ P
-        M = M @ (eye + P)
-    return M
+    two axes. Blocks of ``base`` or fewer use the nilpotent expansion by
+    squaring, (I + L)(I + L^2)(I + L^4)... with log2(C) factors; larger
+    sizes split in half and combine the two diagonal inverses through the
+    off-diagonal block, M21 = M22 L21 M11. Squaring alone is exact in
+    float64 but not in float32 at C = 64: on real chunks the powers of L
+    reach 1e9 and cancel to an inverse whose entries never exceed 1, and
+    float32 keeps the cancellation error instead of the inverse."""
+    if C <= base:
+        eye = mx.eye(C, dtype=L.dtype)
+        M = eye + L
+        P = L
+        steps = int(math.ceil(math.log2(C))) if C > 1 else 0
+        for _ in range(1, steps):
+            P = P @ P
+            M = M @ (eye + P)
+        return M
+    h = C // 2
+    M11 = _tri_inverse_from_strict_lower(L[..., :h, :h], h, base)
+    M22 = _tri_inverse_from_strict_lower(L[..., h:, h:], C - h, base)
+    M21 = M22 @ L[..., h:, :h] @ M11
+    top = mx.concatenate([M11, mx.zeros(M11.shape[:-1] + (C - h,), dtype=L.dtype)], axis=-1)
+    bot = mx.concatenate([M21, M22], axis=-1)
+    return mx.concatenate([top, bot], axis=-2)
 
 
 def tiled_heads() -> bool:
@@ -161,10 +175,42 @@ def gated_delta_update_chunked(q, k, v, a, b, A_log, dt_bias, state=None,
     return gated_delta_chunk(q, k, v, g, beta, state, mask, chunk=chunk)
 
 
+_F32_GEMM_EXACT: bool | None = None
+_TF32_WARNED = False
+
+
+def f32_gemm_exact() -> bool:
+    """True when the default device multiplies float32 matrices at float32
+    precision. MLX runs float32 GEMM through the tensor cores at TF32
+    precision on M5-class GPUs unless ``MLX_ENABLE_TF32=0`` is set before
+    the first matmul, and the chunked rule feeds that rounding back
+    through its state carry until the state diverges, so the training scan
+    measures the device once per process against a CPU product."""
+    global _F32_GEMM_EXACT
+    if _F32_GEMM_EXACT is None:
+        a = mx.random.normal((64, 64), key=mx.random.key(0))
+        b = mx.random.normal((64, 64), key=mx.random.key(1))
+        gpu = mx.matmul(a, b)
+        cpu = mx.matmul(a, b, stream=mx.cpu)
+        _F32_GEMM_EXACT = float(mx.abs(gpu - cpu).max()) < 1e-3
+    return _F32_GEMM_EXACT
+
+
 def chunked_gdn_active(a: mx.array) -> bool:
-    """True when the training scan takes the chunked path: scalar gating
-    and the switch left on."""
-    return a.ndim == 3 and env_bool("GMLX_TRAIN_GDN_CHUNK", True)
+    """True when the training scan takes the chunked path: scalar gating,
+    the switch left on, and exact float32 matmul on the device. Under TF32
+    the scan falls back to the loop and says so once."""
+    global _TF32_WARNED
+    if a.ndim != 3 or not env_bool("GMLX_TRAIN_GDN_CHUNK", True):
+        return False
+    if f32_gemm_exact():
+        return True
+    if not _TF32_WARNED:
+        _TF32_WARNED = True
+        print("[tune] float32 matmul runs at TF32 precision on this device, so the gated delta "
+              "training scan takes mlx-lm's per-token loop; set MLX_ENABLE_TF32=0 before the "
+              "process starts for the chunked rule", file=sys.stderr, flush=True)
+    return False
 
 
 def training_gated_delta_update(q, k, v, a, b, A_log, dt_bias, state=None,

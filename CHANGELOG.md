@@ -32,6 +32,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-layer checkpoint instead of mlx-lm's per-token loop: 64 tokens per
   batched step instead of one, and the tape keeps the scan's inputs
   instead of a state per token. `GMLX_TRAIN_GDN_CHUNK=0` restores the loop.
+  `gmlx train` and `gmlx distill` also run float32 matmul at exact
+  precision (`MLX_ENABLE_TF32=0` unless the variable is already set),
+  since the chunked rule diverges under MLX's default TF32 rounding on
+  M5-class GPUs; a process that keeps TF32 on takes the loop and says so.
 
 ## [0.4.14] - 2026-09-18
 
