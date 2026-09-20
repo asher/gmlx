@@ -12,10 +12,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backward pass, so longer sequences fit in memory at some cost in time.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
-- `gmlx.distill`, the offline distillation library: a teacher cache of
-  top-K log-probs, cross-tokenizer alignment, a fused chunked head with
-  the bucketed sparse KL and ALM losses, the batch loader and the eval
-  helpers. The `gmlx distill` verbs are not in this release.
+- `gmlx distill`, offline distillation of a teacher GGUF into a student
+  adapter: `cache` stores the teacher's top-K log-probs over a corpus in
+  one pass, `align` maps the cache onto the student's tokenizer, `train`
+  fits a LoRA adapter on the K-quant student against it, and `eval` scores
+  the student before and after. The teacher and student may use different
+  tokenizers. The library is `gmlx.distill`, the guide docs/distill.md.
 
 ### Changed
 

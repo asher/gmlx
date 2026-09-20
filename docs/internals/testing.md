@@ -94,6 +94,7 @@ grading and model bootstrap, in
 | `run_stream_e2e.py` | a streamed model through load cycles, memory pressure and coresidency, with `memguard.py` run beside it |
 | `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | prompt-cache reuse across restarts and at depth, per tier |
 | `run_lora_e2e.py` | prep, train, serve base and adapter, assert the adapter changed the output style |
+| `run_distill_e2e.py` | cache a small teacher, align, train an adapter, eval before and after, assert the loss fell |
 | `run_chat_pty_e2e.py` | the chat client in a real pseudo-terminal |
 | `run_serve_harmony_e2e.py` | the response contract of a served gpt-oss model: no harmony channel markup in content, truncation inside analysis |
 | `run_serve_stress_e2e.py` | seeded concurrent chaos against one server: mid-stream aborts, tiny budgets, warm resends, growing sessions |

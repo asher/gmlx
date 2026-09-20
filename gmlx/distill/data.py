@@ -293,7 +293,7 @@ class ViewLoader:
     cache, a student tokenizer and a tables artifact."""
 
     def __init__(self, reader: CacheReader, student_tok, tables: Tables, *, knobs: dict,
-                 Kp: int, identity: bool, student_tb=None, view_dir: Path | None = None,
+                 Kp: int | None, identity: bool, student_tb=None, view_dir: Path | None = None,
                  teacher_tok=None):
         self.reader = reader
         self.student_tok = student_tok
@@ -349,6 +349,7 @@ class ViewLoader:
         views = [v for v in (self.compile(r) for r in rows) if v is not None]
         if not views:
             return None
+        assert self.Kp is not None, "ViewLoader.batch needs K' chosen"
         return collate(views, self.Kp, self.tables.G)
 
     # materialized views: one safetensors per cache shard, arrays keyed by slot

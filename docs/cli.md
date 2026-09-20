@@ -25,6 +25,7 @@ explain when to use it.
 | [`gmlx profiles`](#gmlx-profiles) | show the family sampling defaults and intents |
 | [`gmlx talk`](#gmlx-talk) | voice chat with a served model |
 | [`gmlx train`](#gmlx-train) | train a LoRA adapter on a GGUF base |
+| [`gmlx distill`](#gmlx-distill) | distill a teacher GGUF into a student adapter offline |
 | [`gmlx doctor`](#gmlx-doctor) | check the runtime, config, models and services |
 | [`gmlx completion`](#gmlx-completion) | print a shell completion script |
 
@@ -841,6 +842,162 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
+
+## gmlx distill
+
+Offline distillation in four actions. `cache` runs a teacher GGUF over a
+corpus once and stores its top-K log-probs per position, `align` maps that
+cache onto a student tokenizer and writes a view, `train` fits a LoRA
+adapter on a K-quant GGUF student against the view, and `eval` scores the
+student with and without the adapter. The teacher and the student may use
+different tokenizers. For the walkthrough, read [distill.md](distill.md).
+
+```sh
+gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --out cache/
+gmlx distill align --cache cache/ --student student-Q4_K_M.gguf --out view/
+gmlx distill train --view view/ --student student-Q4_K_M.gguf --adapter-out student-distill.gguf --iters 2000
+gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf --before \
+    --slice prose=heldout.txt --md eval.md --json eval.json
+```
+
+Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
+success and 2 when it refuses before loading a model. `cache` also exits 3
+when the memory probe fails twice and 4 when the validator rejects what
+was written, `align` exits 3 when the projection gate refuses the pair,
+and `cache --validate` exits 1 on a problem.
+
+### distill cache
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--teacher GGUF` | required | the teacher GGUF, sharded ok |
+| `--corpus PATH_OR_ID` | required | a jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]` |
+| `--out DIR` | required | the cache directory to write |
+| `--validate DIR` | none | validate an existing cache and exit, no teacher load |
+| `--top-k N` | `256` | log-probs kept per position |
+| `--max-len N` | `2048` | teacher tokens per window, including BOS |
+| `--max-disk-gb F` | none | refuse when the size estimate exceeds this |
+| `--cache-limit-gb F` | `8.0` | MLX buffer cache cap during the pass |
+| `--logits-cap-gb F` | `4.0` | memory cap that sizes the head sub-chunk |
+| `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-K |
+| `--rows-per-shard N` | `64` | rows per shard file |
+| `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
+| `--resume` | off | continue after the last verified shard |
+| `--max-rows N` | none | stop after this many rows |
+| `--max-tokens N` | none | stop after this many teacher tokens |
+| `--limit-docs N` | none | read at most this many documents |
+| `--text-key KEY` | `text` | text column of a jsonl or dataset row |
+| `--hf-split NAME` | `train` | dataset split for a Hugging Face id |
+| `--source TAG` | `human`, or `synthetic` with a generator sidecar | source tag written on every row |
+| `--frame KIND` | `none` | `none`, `continue`, `chat`, `reply` or `reply-think`: how rows are placed relative to the chat template |
+| `--per-turn` | off | with the chat or reply frame, one reply row per assistant turn |
+| `--student-messages-key KEY` | `student_messages` | corpus key of the student's own message list on reply rows |
+| `--frame-instruction TEXT` | `Continue the following text.` | user turn for the continue frame |
+| `--messages-key KEY` | `messages` | conversation column for the chat and reply frames |
+| `--close-final-windows` | off | with the continue frame, close the last window of a document with the turn-end marker |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file |
+| `--hf-source ID` | none | tokenizer and config fallback |
+| `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
+| `--no-wired-limit` | off | leave the wired limit where it is for a resident teacher |
+| `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
+| `--expert-bytes-gb F` | measured | expert bytes read per forward, for the read-traffic report |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill align
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--cache DIR` | required | the cache directory |
+| `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
+| `--out DIR` | required | the view directory to write |
+| `--tables DIR` | none | a tables artifact to reuse when its pair hashes match |
+| `--kprime N` | the maximum seen | cap on distinct groups kept per boundary |
+| `--materialize` | off | also write the batch tensors as view shards |
+| `--max-disk-gb F` | none | refuse to materialize past this size |
+| `--force` | off | keep a view the projection gate would refuse |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation |
+| `--seed N` | `1` | seed of the validation split |
+| `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
+| `--gamma F` | `0.001` | drop ALM chunks whose teacher boundary mass is below this |
+| `--tau-alm F` | `1.0` | temperature on the ALM term |
+| `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL |
+| `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill train
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--view DIR` | required | a view directory, repeatable to mix views over one tokenizer pair |
+| `--student GGUF` | required | the student GGUF, sharded ok |
+| `--adapter-out PATH` | required | where to write the GGUF adapter |
+| `--iters N` | required | training iterations |
+| `--lora-rank N` | `16` | LoRA rank |
+| `--lora-scale F` | `2.0` | LoRA multiplier as is |
+| `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
+| `--lora-dropout F` | `0.0` | LoRA dropout |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
+| `--lr F` | `1e-4` | peak learning rate |
+| `--batch-size N` | `8` | rows per step |
+| `--warmup F` | `0.05` | warmup as a fraction of the iterations, then cosine decay |
+| `--weight-decay F` | `0` | AdamW weight decay |
+| `--clip F` | `1.0` | gradient norm clip |
+| `--seed N` | `1` | data order and LoRA init |
+| `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
+| `--dk F` | `1` | weight of the bucketed KL term |
+| `--alm F` | `1`, `0` on an identity view | weight of the ALM term |
+| `--ce F` | `0` | weight of the cross-entropy term |
+| `--T-dk F` | the view's | override the view's T_dk |
+| `--tau-alm F` | the view's | override the view's tau_alm |
+| `--gamma F` | the view's | override the view's gamma |
+| `--chunk N` | `512` | positions per head chunk |
+| `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
+| `--resume` | off | continue from the last checkpoint |
+| `--save-every N` | `200` | checkpoint interval in steps |
+| `--val-every N` | `200` | validation interval in steps |
+| `--val-batches N` | `16` | validation batches per pass |
+| `--report-every N` | `10` | train-loss report interval |
+| `--report JSON` | none | write the run log here |
+| `--hf-source ID` | none | tokenizer and config fallback |
+| `--no-wired-limit` | off | leave the wired limit where it is |
+| `--cache-limit-gb F` | `8.0` | MLX buffer cache cap |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill eval
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--student GGUF` | required | the student GGUF |
+| `--adapter GGUF` | none | the GGUF adapter to apply |
+| `--md PATH` | required | the Markdown report to write |
+| `--json PATH` | required | the JSON report to write |
+| `--cache DIR` | none | cache whose corpus the slices are decontaminated against |
+| `--slice NAME=PATH` | none | a held-out text slice, repeatable |
+| `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
+| `--tasks-dir DIR` | `.` | directory of `arc_easy.jsonl`, `hellaswag.jsonl`, `gsm8k.jsonl` and `gsm8k_shots.jsonl` |
+| `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
+| `--task-limit N` | all | items per task |
+| `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
+| `--before` | off | also score with the adapter disabled in process |
+| `--chat-slice NAME=PATH` | none | a jsonl of conversations scored on their assistant spans, repeatable |
+| `--chat-sanity PATH` | none | a jsonl of chat prompts scored for template compliance and drift |
+| `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
+| `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score |
+| `--chat-max-len N` | `2048` | longest conversation scored |
+| `--chat-per-turn` | off | score every assistant turn as its own row |
+| `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
+| `--reply-think` | off | reply slices target the final turn's reasoning content |
+| `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against |
+| `--kld-rows N` | all | rows of the KL cache to score |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every render |
+| `--max-len N` | `512` | window length for bits per byte |
+| `--bpb-prefix TEXT` | none | text placed before every window, or `@KIND` for a frame prefix |
+| `--batch-size N` | `8` | windows per batch |
+| `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
+| `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |
+| `--hf-source ID` | none | tokenizer and config fallback |
+| `--cpu` | off | run on the CPU device, for smoke tests |
 
 ## gmlx doctor
 

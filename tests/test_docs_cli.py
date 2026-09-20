@@ -79,6 +79,9 @@ def _entry(verb):
     if verb == "completion":
         from gmlx.commands.completion import cmd_completion
         return cmd_completion, [], set()
+    if verb == "distill":
+        from gmlx.commands.distill import cmd_distill
+        return cmd_distill, ["cache"], set()
     from gmlx.commands import manage
     return getattr(manage, f"cmd_{verb}"), [], set()
 
@@ -138,6 +141,11 @@ def test_verb_flags_documented(verb, capture):
         for action in ("install", "uninstall", "status"):
             flags |= _long_options(capture(server.main, ["service", action]))
         flags -= serve_flags
+    elif verb == "distill":
+        from gmlx.commands.distill import HANDLERS, cmd_distill
+        flags = set()
+        for action in HANDLERS:
+            flags |= _long_options(capture(cmd_distill, [action]))
     else:
         fn, argv, subtract = _entry(verb)
         flags = _long_options(capture(fn, argv)) - subtract

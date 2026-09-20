@@ -13,3 +13,4 @@ How gmlx works internally, for contributors. Users start at
 | [upstream-upgrades.md](upstream-upgrades.md) | bumping the pinned mlx-vlm, mlx-lm and mlx versions |
 | [streaming-measurements.md](streaming-measurements.md) | the measurements behind the streaming guide's lossless and lossy settings tables |
 | [debug-switches.md](debug-switches.md) | environment variables for isolating defects |
+| [distill.md](distill.md) | the teacher pass memory arithmetic and the training head's live set |

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import sys
+from typing import Any
 
 GB = 1e9
 FORMAT_VERSION = 1
@@ -14,7 +15,7 @@ NEG_INF = float("-inf")
 SENTINEL_LOG_P = NEG_INF
 
 # Objective knobs; the experiment doc owns the values.
-DEFAULT_KNOBS = dict(
+DEFAULT_KNOBS: dict[str, Any] = dict(
     lambda_dk=1.0, lambda_alm=1.0, lambda_ce=0.0, w_mid=0.5, T_dk=1.0,
     tau_alm=1.0, gamma=1e-3, max_chunk_len=8, redirect_cut=0.5,
     loss_mode="bucketed",
