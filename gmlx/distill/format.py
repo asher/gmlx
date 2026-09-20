@@ -458,7 +458,7 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
                     problems.append(f"shard {i} row {b}: reply row with {len(spans)} spans")
                 st = r.get("student_messages")
                 if st is not None:
-                    if r.get("frame") != "reply":
+                    if r.get("frame") not in ("reply", "reply-think"):
                         problems.append(f"shard {i} row {b}: student_messages on a {r.get('frame')} row (reply only)")
                     if not same_reply(r["messages"], st):
                         problems.append(f"shard {i} row {b}: student_messages end on a different reply")

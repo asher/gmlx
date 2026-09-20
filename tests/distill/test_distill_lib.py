@@ -1373,6 +1373,10 @@ def test_validator_rejects_student_list_on_chat_rows_and_reply_mismatch(tmp_path
     bad = dict(rows[0], frame="chat")
     rows_path.write_text(json.dumps(bad) + "\n")
     assert any("reply only" in p for p in dl.validate_cache(tmp_path / "c", check_sha=False))
+    # a reply-think row is a reply row whose target starts earlier, so it keeps its student list
+    ok = dict(rows[0], frame="reply-think")
+    rows_path.write_text(json.dumps(ok) + "\n")
+    assert not any("reply only" in p for p in dl.validate_cache(tmp_path / "c", check_sha=False))
     bad = dict(rows[0], student_messages=[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a dog"}])
     rows_path.write_text(json.dumps(bad) + "\n")
     assert any("different reply" in p for p in dl.validate_cache(tmp_path / "c", check_sha=False))
