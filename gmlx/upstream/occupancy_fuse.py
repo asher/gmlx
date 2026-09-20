@@ -183,6 +183,11 @@ def _make_fused_attention(base_cls):
 
         def _kq_build_fused(self):
             projs = (self.q_proj, self.k_proj, self.v_proj)
+            if not _same_codec_kquant(projs):
+                # an adapter installed after load wraps the projections, and a
+                # fused wire would skip its delta: the stock path serves
+                object.__setattr__(self, "_kq_fuse_off", True)
+                return None
             D = self.head_dim
             if (
                 projs[0].weight.shape[0] != self.n_heads * D
@@ -249,6 +254,11 @@ def _make_fused_qwen35_attention(base_cls):
 
         def _kq_build_fused(self):
             projs = (self.q_proj, self.k_proj, self.v_proj)
+            if not _same_codec_kquant(projs):
+                # an adapter installed after load wraps the projections, and a
+                # fused wire would skip its delta: the stock path serves
+                object.__setattr__(self, "_kq_fuse_off", True)
+                return None
             qr = projs[0].weight.shape[0]
             kr = projs[1].weight.shape[0]
             # q carries queries + gate (2x per head); k/v rows must match
@@ -317,6 +327,11 @@ def _make_fused_mlp(base_cls):
 
         def _kq_build_fused(self):
             projs = (self.gate_proj, self.up_proj)
+            if not _same_codec_kquant(projs):
+                # an adapter installed after load wraps the projections, and a
+                # fused wire would skip its delta: the stock path serves
+                object.__setattr__(self, "_kq_fuse_off", True)
+                return None
             if projs[0].weight.shape != projs[1].weight.shape:
                 object.__setattr__(self, "_kq_fuse_off", True)
                 return None

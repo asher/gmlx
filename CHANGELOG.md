@@ -43,6 +43,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
   every target reported as unmatched. The install now enters the text
   stack, as train, distill and MTP serving already did.
+- The fused decode wires for gate and up and for q, k and v read the
+  projections' weights at the first fused step and failed with
+  `'LoRAKQuantLinear' object has no attribute 'weight'` once an adapter had
+  wrapped them. Adapted projections keep the stock path, which carries
+  the adapter's delta.
 
 ## [0.4.14] - 2026-09-18
 
