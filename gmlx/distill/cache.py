@@ -89,13 +89,14 @@ def measure_bytes_per_v(peak_bytes: float, baseline_bytes: float, step: int, V: 
     return (peak_bytes - baseline_bytes) / float(step * V)
 
 
-def probe_step(measured: float, budgeted: float, V: int, cap_gb: float,
-               floor: bool) -> tuple[int, float]:
+def probe_step(measured: float, budgeted: float, V: int, cap_gb: float) -> tuple[int, float]:
     """Assertion with an action: if measured > budgeted, the measured
     constant replaces the budgeted one and the step is re-derived against
-    the unchanged cap. Returns (step, constant in force)."""
+    the unchanged cap. Returns (step, constant in force). The constants
+    already include the floor field's bytes, so the cap is the only other
+    input."""
     if measured <= budgeted:
-        return head_step(V, cap_gb, budgeted, floor), budgeted
-    return head_step(V, cap_gb, measured, floor), measured
+        return head_step(V, cap_gb, budgeted), budgeted
+    return head_step(V, cap_gb, measured), measured
 
 

@@ -434,7 +434,7 @@ def run_cache(opts: CacheOptions) -> int:
                     peak = mx.get_peak_memory()
                     measured = _cache.measure_bytes_per_v(peak, baseline, e - s, V)
                     new_step, constant = _cache.probe_step(measured, plan["bytes_per_v"], V,
-                                                           opts.logits_cap_gb, opts.floor)
+                                                           opts.logits_cap_gb)
                     log(f"[cache] probe: measured {measured:.1f} B per V-element, budget "
                         f"{plan['bytes_per_v']}, step {step} -> {new_step}")
                     if new_step != step:

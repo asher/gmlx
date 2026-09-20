@@ -48,6 +48,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `'LoRAKQuantLinear' object has no attribute 'weight'` once an adapter had
   wrapped them. Adapted projections keep the stock path, which carries
   the adapter's delta.
+- `distill cache` crashed with `[logsumexp] Received empty array` on any
+  teacher whose head used more memory than the budgeted 16 bytes per
+  vocabulary element. The probe re-derived the head sub-chunk with its
+  floor flag in the step slot and came back with a step of zero.
 
 ## [0.4.14] - 2026-09-18
 

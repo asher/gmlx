@@ -1429,3 +1429,12 @@ def test_reply_think_rows_target_the_trace(tok_bl):
     tb = dl.token_bytes(tok)
     fit = dl.fit_reply(tok, conv, 4096, tb, reason_target=True)
     assert fit is not None and fit[4] == spans
+
+
+def test_probe_step_re_derives_an_integer_tier_when_the_measured_constant_exceeds_the_budget():
+    from gmlx.distill.cache import probe_step
+    # under budget: the budgeted step and constant stand
+    assert probe_step(14.0, 16.0, 151936, 4.0) == (1024, 16.0)
+    # over budget: the measured constant replaces it and the step halves to fit the unchanged cap
+    step, constant = probe_step(26.0, 16.0, 151936, 4.0)
+    assert constant == 26.0 and isinstance(step, int) and step == 512   # 4e9 / (151936 * 26) = 1012, the tier below it
