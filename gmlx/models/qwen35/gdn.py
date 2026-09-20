@@ -23,6 +23,7 @@ from mlx_vlm.models.qwen3_5 import language as _L
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.envflags import env_bool
 from gmlx.load.loadlog import verbose_print
+from gmlx.tune.gdn import training_gated_delta_update
 from .owned import _qwen3_5_advance_left_padding_info, _qwen3_5_advance_lengths_info
 from .verify_linear import verify_linear, verify_linears
 
@@ -67,7 +68,9 @@ def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
     substitutions: the scan goes to mlx-lm's gated_delta (tiled under
     the GGUF fixup) instead of the vlm module globals, the sink-shaped
     scan goes to the tiled state-capturing ops, and the memo advance
-    uses the owned copies.
+    uses the owned copies. A training forward with no cache takes the
+    chunked checkpointed scan in ``gmlx.tune.gdn`` ahead of the plain
+    dispatch.
     """
     from mlx_lm.models import gated_delta as _gd
 
@@ -140,6 +143,11 @@ def _owned_gdn_unfused(self, inputs, mask, cache, gdn_sink, target_verify):
         out, state, intermediate_states = _gdn_update_with_states_tiled(
             q, k, v, a, b, self.A_log, self.dt_bias, state, mask
         )
+    elif self.training and cache is None:
+        out, state = training_gated_delta_update(
+            q, k, v, a, b, self.A_log, self.dt_bias, state, mask
+        )
+        intermediate_states = None
     else:
         out, state = _gd.gated_delta_update(
             q,

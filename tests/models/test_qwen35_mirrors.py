@@ -173,8 +173,15 @@ def test_gdn_unfused_chain_mirror():
                 1,
             ),
             (
-                "out, state = gated_delta_update(",
-                "out, state = _gd.gated_delta_update(",
+                # the training route inserted ahead of the plain dispatch
+                "    else:\n"
+                "        out, state = gated_delta_update(",
+                "    elif self.training and cache is None:\n"
+                "        out, state = training_gated_delta_update(q, k, v, "
+                "a, b, self.A_log, self.dt_bias, state, mask)\n"
+                "        intermediate_states = None\n"
+                "    else:\n"
+                "        out, state = _gd.gated_delta_update(",
                 1,
             ),
             ("_target_verify_linear(", "verify_linear(", 1),

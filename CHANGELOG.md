@@ -25,6 +25,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the attention backward at 4096-token rows falls from 10.7 GB to 2.8 GB
   on Qwen3.5-9B's attention shape. `GMLX_TRAIN_BLOCKED_ATTN=0` restores
   MLX's own path.
+- The gated delta scan of a training forward (owned Qwen3.5, 3.6 and
+  Qwen4 experimental) runs the chunked rule from `gmlx.tune.gdn` inside a
+  per-layer checkpoint instead of mlx-lm's per-token loop: 64 tokens per
+  batched step instead of one, and the tape keeps the scan's inputs
+  instead of a state per token. `GMLX_TRAIN_GDN_CHUNK=0` restores the loop.
 
 ## [0.4.14] - 2026-09-18
 

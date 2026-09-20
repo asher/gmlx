@@ -50,6 +50,8 @@ from mlx_lm.models.base import (
 )
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
+
+from gmlx.tune.gdn import training_gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
@@ -597,10 +599,15 @@ class GatedDeltaNet(nn.Module):
         state = cache[1] if cache is not None else None
         if state is not None and state.shape[0] != B:
             state = None
-        out, state = gated_delta_update(
-            q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
-            use_kernel=not self.training,
-        )
+        if self.training and cache is None:
+            out, state = training_gated_delta_update(
+                q, k, v, a, b, self.A_log, self.dt_bias, state, mask
+            )
+        else:
+            out, state = gated_delta_update(
+                q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
+                use_kernel=not self.training,
+            )
         if cache is not None:
             cache[1] = state
             if hasattr(cache, "advance"):
