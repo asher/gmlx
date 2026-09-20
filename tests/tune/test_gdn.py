@@ -8,7 +8,9 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from mlx_lm.models.gated_delta import gated_delta_ops, gated_delta_update
+# the module attributes, not import-time bindings: gmlx rebinds them to the
+# tiled K->V head mapping once a qwen35-family GGUF has loaded in the process
+from mlx_lm.models import gated_delta as gd
 
 import gmlx.tune.gdn as tg
 
@@ -36,7 +38,7 @@ def _inputs(B=2, T=150, Hk=2, Hv=4, Dk=16, Dv=24, seed=0, tiny_decay=False):
 @pytest.mark.parametrize("T,chunk", [(150, 64), (64, 64), (200, 32), (5, 64)])
 def test_chunk_matches_scan_outputs_and_state(T, chunk):
     q, k, v, g, beta = _inputs(T=T)
-    y0, s0 = gated_delta_ops(q, k, v, g, beta)
+    y0, s0 = gd.gated_delta_ops(q, k, v, g, beta)
     y1, s1 = tg.gated_delta_chunk(q, k, v, g, beta, chunk=chunk)
     mx.eval(y0, s0, y1, s1)
     assert np.allclose(np.array(y0), np.array(y1), atol=2e-4, rtol=1e-3)
@@ -51,7 +53,7 @@ def test_chunk_with_mask_and_initial_state():
     mask = mx.array(mask)
     r = np.random.default_rng(9)
     state = mx.array(r.standard_normal((2, 4, 24, 16)).astype(np.float32) * 0.1)
-    y0, s0 = gated_delta_ops(q, k, v, g, beta, state, mask)
+    y0, s0 = gd.gated_delta_ops(q, k, v, g, beta, state, mask)
     y1, s1 = tg.gated_delta_chunk(q, k, v, g, beta, state, mask, chunk=32)
     mx.eval(y0, s0, y1, s1)
     m = np.array(mask)
@@ -62,7 +64,7 @@ def test_chunk_with_mask_and_initial_state():
 
 def test_chunk_tiny_decays_stay_finite_and_match():
     q, k, v, g, beta = _inputs(T=96, seed=5, tiny_decay=True)
-    y0, s0 = gated_delta_ops(q, k, v, g, beta)
+    y0, s0 = gd.gated_delta_ops(q, k, v, g, beta)
     y1, s1 = tg.gated_delta_chunk(q, k, v, g, beta, chunk=32)
     mx.eval(y0, s0, y1, s1)
     assert np.isfinite(np.array(y1)).all()
@@ -81,7 +83,7 @@ def test_chunk_gradients_match_scan():
     wm = w * mask[..., None, None]
 
     def loss_scan(q, k, v, g, beta):
-        y, s = gated_delta_ops(q, k, v, g, beta, None, mask)
+        y, s = gd.gated_delta_ops(q, k, v, g, beta, None, mask)
         return (y * wm).sum() + (s * s).sum() * 0.01
 
     def loss_chunk(q, k, v, g, beta):
@@ -110,7 +112,7 @@ def _update_inputs(T=40, seed=2):
 
 def test_update_wrapper_matches_gated_delta_update():
     q, k, v, a, b, A_log, dt_bias = _update_inputs()
-    y0, s0 = gated_delta_update(q, k, v, a, b, A_log, dt_bias, use_kernel=False)
+    y0, s0 = gd.gated_delta_update(q, k, v, a, b, A_log, dt_bias, use_kernel=False)
     y1, s1 = tg.gated_delta_update_chunked(q, k, v, a, b, A_log, dt_bias, chunk=16)
     mx.eval(y0, s0, y1, s1)
     assert np.allclose(np.array(y0), np.array(y1), atol=2e-4, rtol=1e-3)
@@ -126,7 +128,7 @@ def test_training_update_checkpointed_matches_loop_with_gradients():
     w = mx.array(r.standard_normal((2, 48, 4, 24)).astype(np.float32)) * mask[..., None, None]
 
     def loss_loop(q, k, v, a, b, A_log, dt_bias):
-        y, s = gated_delta_update(q, k, v, a, b, A_log, dt_bias, None, mask, use_kernel=False)
+        y, s = gd.gated_delta_update(q, k, v, a, b, A_log, dt_bias, None, mask, use_kernel=False)
         return (y * w).sum() + (s * s).sum() * 0.01
 
     def loss_train(q, k, v, a, b, A_log, dt_bias):
@@ -209,3 +211,29 @@ def test_owned_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatch):
     mx.eval(y_eval, y_train)
     assert calls == [1]
     assert np.allclose(np.array(y_eval), np.array(y_train), atol=2e-3, rtol=2e-3)
+
+
+def test_chunk_follows_the_tiled_head_mapping(monkeypatch):
+    """gmlx's loader switches mlx-lm's gated delta to the GGUF tiled K->V
+    head mapping for qwen35-family models; the chunked scan must pair
+    heads the same way or every value head reads the wrong key head."""
+    q, k, v, g, beta = _inputs(T=48, Hk=2, Hv=4, seed=21)
+    # both references expand the heads by hand, so the mapping is explicit
+    # whichever one the process's gated delta module carries
+    qg, kg = mx.repeat(q, 2, -2), mx.repeat(k, 2, -2)
+    grouped_ref, _ = gd.gated_delta_ops(qg, kg, v, g, beta)
+    qt, kt = mx.tile(q, [1, 1, 2, 1]), mx.tile(k, [1, 1, 2, 1])
+    tiled_ref, _ = gd.gated_delta_ops(qt, kt, v, g, beta)
+    mx.eval(grouped_ref, tiled_ref)
+    assert not np.allclose(np.array(grouped_ref), np.array(tiled_ref), atol=1e-3)
+    y_explicit, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16, tiled=True)
+    monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", True, raising=False)
+    assert tg.tiled_heads()
+    y_flag, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16)
+    mx.eval(y_explicit, y_flag)
+    assert np.allclose(np.array(tiled_ref), np.array(y_explicit), atol=2e-4, rtol=1e-3)
+    assert np.allclose(np.array(tiled_ref), np.array(y_flag), atol=2e-4, rtol=1e-3)
+    monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", False, raising=False)
+    y_grouped, _ = tg.gated_delta_chunk(q, k, v, g, beta, chunk=16)
+    mx.eval(y_grouped)
+    assert np.allclose(np.array(grouped_ref), np.array(y_grouped), atol=2e-4, rtol=1e-3)

@@ -183,6 +183,7 @@ include = [
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
+    "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
 ]
 typeCheckingMode = "standard"

@@ -54,22 +54,42 @@ def _tri_inverse_from_strict_lower(L: mx.array, C: int) -> mx.array:
     return M
 
 
+def tiled_heads() -> bool:
+    """True once gmlx has switched mlx-lm's gated delta module to the GGUF
+    tiled K->V head mapping, where value head ``hv`` reads key head
+    ``hv % Hk`` instead of ``hv // (Hv / Hk)``. Set by the loader for
+    qwen35-family GGUFs with asymmetric linear-attention heads, and read
+    here so the chunked scan pairs heads the way the inference path does."""
+    import sys
+    gd = sys.modules.get("mlx_lm.models.gated_delta")
+    return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
+
+
 def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array,
                       beta: mx.array, state: mx.array | None = None,
                       mask: mx.array | None = None,
-                      chunk: int = 64) -> tuple[mx.array, mx.array]:
+                      chunk: int = 64, tiled: bool | None = None) -> tuple[mx.array, mx.array]:
     """Chunked gated delta rule with ``gated_delta_ops``' shapes: q, k
     [B, T, Hk, Dk]; v [B, T, Hv, Dv]; g, beta [B, T, Hv] (g the decay
     factor); state [B, Hv, Dv, Dk] or None; mask [B, T] bool or None.
-    Returns y [B, T, Hv, Dv] in q's dtype and the final state in float32."""
+    Returns y [B, T, Hv, Dv] in q's dtype and the final state in float32.
+    ``tiled`` picks the K->V head mapping when Hv > Hk: grouped (value
+    head hv reads key head hv // r) or tiled (hv % Hk, the GGUF layout);
+    None follows ``tiled_heads``."""
     if g.ndim != 3:
         raise ValueError("gated_delta_chunk takes scalar gating g[B, T, Hv]")
     B, T, Hk, Dk = q.shape
     Hv, Dv = v.shape[-2:]
     out_dtype = q.dtype
     if (rep := Hv // Hk) > 1:
-        q = mx.repeat(q, rep, -2)
-        k = mx.repeat(k, rep, -2)
+        if tiled is None:
+            tiled = tiled_heads()
+        if tiled:
+            q = mx.tile(q, [1, 1, rep, 1])
+            k = mx.tile(k, [1, 1, rep, 1])
+        else:
+            q = mx.repeat(q, rep, -2)
+            k = mx.repeat(k, rep, -2)
     H = Hv
     q = q.astype(mx.float32)
     k = k.astype(mx.float32)
@@ -99,7 +119,7 @@ def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array,
     lg = lg.transpose(0, 2, 1).reshape(B, H, N, C)
     lg_cum = mx.cumsum(lg, axis=-1)                             # [B, H, N, C]
     # decay from position j to i inside the chunk, i >= j
-    tril = mx.tril(mx.ones((C, C), dtype=mx.bool_))
+    tril = mx.tril(mx.ones((C, C), dtype=mx.bool_), k=0)
     strict = mx.tril(mx.ones((C, C), dtype=mx.bool_), k=-1)
     diff = lg_cum[..., :, None] - lg_cum[..., None, :]          # [B, H, N, C, C]
     decay = mx.where(tril, mx.exp(mx.where(tril, diff, 0.0)), 0.0)
