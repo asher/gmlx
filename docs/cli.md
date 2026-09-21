@@ -845,15 +845,20 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-Offline distillation in four actions. `cache` runs a teacher GGUF over a
-corpus once and stores its top-K log-probs per position, `align` maps that
-cache onto a student tokenizer and writes a view, `train` fits a LoRA
-adapter on a K-quant GGUF student against the view, and `eval` scores the
-student with and without the adapter. The teacher and the student may use
-different tokenizers. For the walkthrough, read [distill.md](distill.md).
+Offline distillation in six actions. `gen` runs a teacher through
+`gmlx serve` over a prompt set and writes its replies as a corpus,
+`filter` drops the generated rows a student should not learn from,
+`cache` runs a teacher GGUF over a corpus once and stores its top-K
+log-probs per position, `align` maps that cache onto a student tokenizer
+and writes a view, `train` fits a LoRA adapter on a K-quant GGUF student
+against the view, and `eval` scores the student with and without the
+adapter. The teacher and the student may use different tokenizers. For
+the walkthrough, read [distill.md](distill.md).
 
 ```sh
-gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --out cache/
+gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
+gmlx distill filter --in replies.jsonl --out corpus.jsonl
+gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --frame reply --out cache/
 gmlx distill align --cache cache/ --student student-Q4_K_M.gguf --out view/
 gmlx distill train --view view/ --student student-Q4_K_M.gguf --adapter-out student-distill.gguf --iters 2000
 gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf --before \
@@ -861,10 +866,82 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 ```
 
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
-success and 2 when it refuses before loading a model. `cache` also exits 3
-when the memory probe fails twice and 4 when the validator rejects what
-was written, `align` exits 3 when the projection gate refuses the pair,
-and `cache --validate` exits 1 on a problem.
+success and 2 when it refuses before loading a model. `gen` exits 1 when
+some requests failed and their prompts remain to be rerun. `cache` also
+exits 3 when the memory probe fails twice and 4 when the validator
+rejects what was written, `align` exits 3 when the projection gate refuses
+the pair, and `cache --validate` exits 1 on a problem.
+
+### distill gen
+
+The prompt file holds one `{"id", "messages", "context"}` object per line
+whose messages end on a user turn. A row's context, or the file given by
+`--context`, goes in front of the last user turn for the teacher, and the
+row is written with the teacher's list under `messages` and the prompt as
+given under `student_messages`. Prompt ids already in the output are
+skipped, so a run resumes where it stopped.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--out PATH` | required | corpus jsonl to write, with `<out>.gen.json` beside it |
+| `--prompts PATH` | none | a jsonl of prompt rows ending on a user turn |
+| `--corpus PATH_OR_ID` | none | a text corpus to build continuation prompts from, instead of `--prompts` |
+| `--teacher GGUF` | none | teacher GGUF served for the run |
+| `--base-url URL` | none | a running server's `/v1` base, instead of serving `--teacher` |
+| `--host HOST` | `127.0.0.1` | bind host of the served teacher |
+| `--port N` | `8093` | port of the served teacher |
+| `--text-key KEY` | `text` | with `--corpus`, text column of a jsonl or dataset row |
+| `--hf-split NAME` | `train` | with `--corpus`, dataset split for a Hugging Face id |
+| `--prefix-chars N` | `1500` | with `--corpus`, document prefix quoted in the user turn, cut at a space |
+| `--min-chars N` | `2000` | with `--corpus`, skip documents shorter than this |
+| `--docs N` | all | with `--corpus`, prompts to build |
+| `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
+| `--chat-template-kwargs JSON` | none | passed to `gmlx serve --chat-template-config` for the teacher's render |
+| `--context FILE` | none | text the teacher reads for every prompt without its own context field |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
+| `--thinking` | off | reasoning on; the trace is kept as `reasoning_content` on the reply |
+| `--thinking-budget N` | none | with `--thinking`, cap the trace at N tokens per request; replies it cut are marked for `filter` |
+| `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the trace against the budget when `--base-url` is given |
+| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
+| `--startup-timeout S` | `900` | seconds to wait for the served teacher |
+| `--concurrency N` | `8` | requests in flight |
+| `--max-tokens N` | `1024` | reply budget per request |
+| `--temperature F` | `0.7` | sampling temperature |
+| `--top-p F` | `0.9` | nucleus sampling |
+| `--top-k N` | the server's | top-k cutoff |
+| `--min-p F` | the server's | minimum-probability cutoff |
+| `--seed N` | `1` | base seed; each request uses it plus the prompt index |
+| `--timeout S` | `1800` | per-request timeout |
+| `--report-every N` | `50` | progress line interval in replies |
+
+### distill filter
+
+Checks run in a fixed order and the first failure names the reason:
+`length` (the reply did not reach its end of turn), `budget` (the
+thinking budget cut the trace), `empty`, `marker` (a template marker
+leaked into the reply), `repeat`, `ascii`, `tokens` (over
+`--max-reply-tokens`), then `verify`. The verify command reads the
+surviving rows as jsonl on stdin and prints one line per row, `ok` or a
+reason word. `--context` rebuilds every kept row with the context on the
+teacher's side and the prompt as given under `student_messages`, which
+prepares an on-policy round from replies a student wrote without it.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order |
+| `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
+| `--report JSON` | none | write the kept and dropped counts here |
+| `--rejects PATH` | none | write one `{id, reason}` line per dropped row here |
+| `--min-tokens N` | `16` | drop replies with fewer whitespace tokens |
+| `--ngram N` | `8` | n-gram size of the repetition check |
+| `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
+| `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row |
+| `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
+| `--max-reply-tokens N` | off | drop replies longer than this many completion tokens |
+| `--keep-budget-hit` | off | keep replies whose thinking budget cut the trace |
+| `--verify CMD` | none | shell command that reads the survivors on stdin and prints `ok` or a reason per row |
+| `--context FILE` | none | put this text on the teacher's side of every kept row |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
 
 ### distill cache
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""End-to-end offline distillation on a small GGUF pair: cache, align, train,
-eval, as a user runs the four verbs.
+"""End-to-end offline distillation on a small GGUF pair: gen, filter, cache,
+align, train, eval, as a user runs the six verbs.
 
   1. prep a small text corpus (a bundled paragraph set, no network);
   2. ``gmlx distill cache`` a teacher GGUF over it at a small top-K;
@@ -8,7 +8,11 @@ eval, as a user runs the four verbs.
      two share a tokenizer, group projection otherwise);
   4. ``gmlx distill train`` a LoRA adapter on the student against the view;
   5. ``gmlx distill eval`` the student with ``--before``, and assert the
-     training loss fell and the eval wrote both reports.
+     training loss fell and the eval wrote both reports;
+  6. ``gmlx distill gen`` the teacher over continuation prompts through a
+     served copy of it, ``gmlx distill filter`` the replies, and cache the
+     result with the reply frame, asserting the manifest records the
+     generator.
 
 Every verb runs as a real subprocess through the console script. Not
 ``test_``-prefixed, so pytest skips it: it needs the GPU and two GGUFs. Run
@@ -79,6 +83,7 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="artifact dir (default: temp, removed)")
     ap.add_argument("--keep", action="store_true", help="keep artifacts on disk")
     ap.add_argument("--python", default=sys.executable, help="interpreter for the subprocesses")
+    ap.add_argument("--gen-port", type=int, default=8097, help="port the gen step serves the teacher on")
     a = ap.parse_args()
 
     reg = ModelRegistry(root=a.models_root)
@@ -131,6 +136,43 @@ def main() -> int:
         print(f"[e2e] bpb after {ev['after']['bpb']['heldout']['bpb']:.4f} "
               f"before {ev['before']['bpb']['heldout']['bpb']:.4f}; "
               f"kld after {ev['after']['kld']['mean_kld_nats']:.4f} before {ev['before']['kld']['mean_kld_nats']:.4f}")
+        # generation: the teacher continues each paragraph's opening through a served copy
+        prompts = Path(tmp) / "prompts.jsonl"
+        prompts.write_text("".join(json.dumps({"id": f"p{i}", "messages": [
+            {"role": "user", "content": "Continue the following text.\n\n" + p[:80]}]}) + "\n"
+            for i, p in enumerate(PARAGRAPHS[:6])))
+        replies, corpus_gen = Path(tmp) / "replies.jsonl", Path(tmp) / "corpus-gen.jsonl"
+        if _run([gmlx, "distill", "gen", "--teacher", teacher, "--prompts", str(prompts), "--out", str(replies),
+                 "--port", str(a.gen_port), "--max-tokens", "48", "--concurrency", "2",
+                 "--chat-template-kwargs", '{"enable_thinking": false}'], os.path.join(tmp, "gen.log")):
+            return 1
+        gen_rows = [json.loads(ln) for ln in replies.read_text().splitlines() if ln.strip()]
+        if len(gen_rows) != 6 or not all(r["messages"][-1]["role"] == "assistant" for r in gen_rows):
+            print(f"FAIL: gen wrote {len(gen_rows)} rows")
+            return 1
+        if _run([gmlx, "distill", "filter", "--in", str(replies), "--out", str(corpus_gen), "--min-tokens", "1",
+                 "--rejects", os.path.join(tmp, "rejects.jsonl")], os.path.join(tmp, "filter.log")):
+            return 1
+        side = json.loads((Path(tmp) / "corpus-gen.jsonl.gen.json").read_text())
+        kept = [json.loads(ln) for ln in corpus_gen.read_text().splitlines() if ln.strip()]
+        print(f"[e2e] gen {len(gen_rows)} replies, filter kept {len(kept)}, dropped {side['filter']['dropped']}")
+        if not kept:
+            print("FAIL: the filter kept no generated row")
+            return 1
+        cache_gen = os.path.join(tmp, "cache-gen")
+        if _run([gmlx, "distill", "cache", "--teacher", teacher, "--corpus", str(corpus_gen), "--out", cache_gen,
+                 "--frame", "reply", "--top-k", str(a.top_k), "--max-len", str(a.max_len), "--rows-per-shard", "16"],
+                os.path.join(tmp, "cache-gen.log")):
+            return 1
+        if _run([gmlx, "distill", "cache", "--validate", cache_gen], os.path.join(tmp, "validate-gen.log")):
+            return 1
+        man = json.loads((Path(cache_gen) / "manifest.json").read_text())
+        block = (man.get("gmlx_distill") or {}).get("generator")
+        if not block or block.get("served_model_id") is None or block.get("filter_version") is None:
+            print(f"FAIL: the generated cache's manifest carries no generator block: {block}")
+            return 1
+        print(f"[e2e] generated cache: {man.get('num_samples')} rows, generator {block['model']} "
+              f"filter {block['filter_version']}")
         print("PASS")
         rc = 0
     finally:

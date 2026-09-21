@@ -42,7 +42,7 @@ _VERB_DESC = {
     "profiles": "show per-family sampling defaults + @intents",
     "doctor": "check the runtime, config, models, and services",
     "train": "finetune a LoRA adapter on a GGUF base",
-    "distill": "offline distillation: cache, align, train, eval",
+    "distill": "offline distillation: gen, filter, cache, align, train, eval",
     "completion": "print a shell completion script",
 }
 
@@ -51,7 +51,7 @@ _MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
 # Verbs whose first positional is a path / remote ref (no config lookup).
 _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
-_DISTILL_ACTIONS = ("cache", "align", "train", "eval")
+_DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval")
 
 
 def _canon(verb: str) -> str:

@@ -13,11 +13,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
 - `gmlx distill`, offline distillation of a teacher GGUF into a student
-  adapter: `cache` stores the teacher's top-K log-probs over a corpus in
-  one pass, `align` maps the cache onto the student's tokenizer, `train`
-  fits a LoRA adapter on the K-quant student against it, and `eval` scores
-  the student before and after. The teacher and student may use different
-  tokenizers. The library is `gmlx.distill`, the guide docs/distill.md.
+  adapter: `gen` runs the teacher through `gmlx serve` over a prompt set
+  and writes its replies as a corpus, `filter` drops the rows a student
+  should not learn from, `cache` stores the teacher's top-K log-probs over
+  a corpus in one pass, `align` maps the cache onto the student's
+  tokenizer, `train` fits a LoRA adapter on the K-quant student against
+  it, and `eval` scores the student before and after. The teacher and
+  student may use different tokenizers. The library is `gmlx.distill`,
+  the guide docs/distill.md.
 
 ### Changed
 
