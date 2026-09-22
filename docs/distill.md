@@ -264,9 +264,9 @@ the cosine between the mapped state and the teacher's sketch, or the
 squared distance between the two unit vectors with `--hs-loss mse`. The
 map lives in the checkpoint directory and never in the adapter. Every
 view's cache must carry a hidden block from `cache --hidden` of the same
-width, and the pass refuses otherwise. The logit terms carry the result
-on their own, so leave the term off unless a run of your own shows a
-gain from it.
+width, and the pass refuses otherwise. On the recipe in this guide the
+term changed neither the logit terms during training nor the served
+pass rates, which is why it is off.
 
 The settings that held on a 9B student at Q6_K are rank 128 with alpha
 64, a peak rate of 5e-5, batch 3 and two epochs, with `--dk 1 --alm 1
