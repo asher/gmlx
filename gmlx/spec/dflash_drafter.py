@@ -908,7 +908,8 @@ class DSparkDFlashDrafter(DFlashDrafter):
         rows, confs = self.chain(h[0], self._logits(h)[0], block[0, 0])
         if confs is not None:
             keep = 0
-            for c in confs.tolist():
+            values: Any = confs.tolist()
+            for c in values:
                 if c < self._confidence_tau:
                     break
                 keep += 1
