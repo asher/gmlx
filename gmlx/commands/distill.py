@@ -1,7 +1,6 @@
-"""``gmlx distill``: offline distillation in six steps plus one
-diagnostic. ``gen`` runs a
-teacher through ``gmlx serve`` over a prompt set and writes its replies as
-a corpus, ``filter`` drops the rows a student should not learn from,
+"""``gmlx distill``: offline distillation in six steps plus one check.
+``gen`` runs a teacher through ``gmlx serve`` over a prompt set and writes
+its replies as a corpus, ``filter`` drops the rows a student should not learn from,
 ``cache`` runs the teacher once over a corpus and stores its top-k
 log-probabilities, ``align`` maps that cache onto a student tokenizer, ``train``
 fits a LoRA adapter on a K-quant GGUF student against the view, and
@@ -13,15 +12,24 @@ from __future__ import annotations
 import argparse
 import sys
 
+
+class _Parser(argparse.ArgumentParser):
+    """argparse errors printed as refusals, in the actions' own format."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"[{self.prog.split()[-1]}] refuse: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
 _ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _ACTION_DESC = {
     "gen": "run a teacher over a prompt set through gmlx serve and write a corpus",
     "filter": "drop generated rows a student should not learn from",
-    "cache": "run a teacher over a corpus and store its most likely next tokens with their probabilities",
+    "cache": "run a teacher over a corpus and store its most likely next tokens and their log-probabilities",
     "align": "map a cache onto a student tokenizer and write a view",
     "train": "train a LoRA adapter on a GGUF student against a view",
     "eval": "score a student, with and without its adapter, on held-out data",
-    "census": "measure how much a context moves the teacher between two caches of the same replies",
+    "census": "check how much a context moves the teacher between two caches of the same replies",
 }
 
 
@@ -39,10 +47,10 @@ def _print_help(prog: str) -> None:
 def _gen_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.gen import DEFAULT_CONTEXT_FORMAT
     from gmlx.distill.teacher import CONTINUE_INSTRUCTION
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
-        description="Run a teacher to its own end of turn over a prompt set through gmlx serve, with "
-                    "request fan-out, and write the replies as a conversation corpus with a generator "
+        description="Run a teacher to its own end of turn over a prompt set through gmlx serve, several "
+                    "requests at a time, and write the replies as a conversation corpus with a generator "
                     "sidecar. The run resumes, since prompt ids already in --out are skipped.")
     p.add_argument("--out", required=True, metavar="PATH", help="Corpus jsonl to write, with <out>.gen.json beside it.")
     src = p.add_mutually_exclusive_group()
@@ -50,7 +58,9 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                      help="A jsonl of {id, messages, context?} rows whose messages end on a user turn.")
     src.add_argument("--corpus", metavar="PATH|ID",
                      help="A text corpus (jsonl, directory or Hugging Face id) to build continuation prompts from.")
-    p.add_argument("--teacher", metavar="GGUF", help="Teacher GGUF to serve for the run.")
+    p.add_argument("--teacher", "--model", dest="teacher", metavar="GGUF",
+                   help="GGUF to serve for the run, the teacher or, for a measurement, the student. "
+                        "--model is the same flag.")
     p.add_argument("--base-url", default=None, metavar="URL",
                    help="A running server's /v1 base to use instead of serving --teacher.")
     p.add_argument("--host", default="127.0.0.1", help="Bind host of the served teacher (default 127.0.0.1).")
@@ -66,7 +76,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="With --corpus: the user turn placed before the document prefix "
                         "(default 'Continue the following text.').")
     p.add_argument("--chat-template-kwargs", default=None, metavar="JSON",
-                   help="Passed to gmlx serve --chat-template-config: the teacher's render settings.")
+                   help="The teacher's render settings, passed to gmlx serve --chat-template-config.")
     p.add_argument("--context", default=None, metavar="FILE",
                    help="Text the teacher reads for every prompt without its own context field. The "
                         "student's list is written without it.")
@@ -99,7 +109,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
 
 def _filter_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.gen import DEFAULT_CONTEXT_FORMAT
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
         description="Drop generated rows a student should not learn from, in a fixed order of checks, "
                     "and stamp the filter version into the corpus sidecar. Optionally run a task-specific "
@@ -110,10 +120,11 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, metavar="PATH", help="Filtered corpus to write, with <out>.gen.json beside it.")
     p.add_argument("--report", default=None, metavar="JSON", help="Write the kept and dropped counts here.")
     p.add_argument("--rejects", default=None, metavar="PATH",
-                   help="Write one {id, reason} line per dropped row here.")
-    p.add_argument("--min-tokens", type=int, default=16,
+                   help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
+    p.add_argument("--min-words", "--min-tokens", dest="min_tokens", type=int, default=16,
                    help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
-                        "trace not counted (default 16). Set 1 when a right answer can be a few words.")
+                        "trace not counted (default 16). Set 1 when a right answer can be a few words. "
+                        "--min-tokens is the same flag.")
     p.add_argument("--ngram", type=int, default=8, help="N-gram size of the repetition check (default 8).")
     p.add_argument("--max-repeat", type=float, default=0.2,
                    help="Drop replies whose repeated n-grams exceed this fraction (default 0.2).")
@@ -127,7 +138,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
                    help="Keep replies whose thinking budget cut the reasoning trace (dropped by default).")
     p.add_argument("--verify", default=None, metavar="CMD",
                    help="Shell command that reads the surviving rows as jsonl on stdin and prints one line "
-                        "per row: ok, or a reason word to drop it.")
+                        "per row, ok or a reason word to drop it.")
     p.add_argument("--context", default=None, metavar="FILE",
                    help="Put this text on the teacher's side of every kept row, keeping the prompt as "
                         "given under student_messages.")
@@ -139,7 +150,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
 
 def _cache_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.teacher import CONTINUE_INSTRUCTION, FRAME_CHOICES
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
         description="Run a teacher GGUF over a corpus once and store, per position, its top-k "
                     "log-probabilities and the side fields a student of any tokenizer needs. Sizes in decimal GB.")
@@ -215,10 +226,10 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
 
 def _align_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.constants import DEFAULT_KNOBS
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
-        description="Map a cache onto a student tokenizer in one CPU pass: tables for the tokenizer pair, "
-                    "the alignment statistics, the train and validation row index, and optionally the "
+        description="Map a cache onto a student tokenizer in one CPU pass. Writes tables for the tokenizer "
+                    "pair, the alignment statistics, the train and validation row index, and optionally the "
                     "materialized batch tensors.")
     p.add_argument("--cache", required=True, metavar="DIR", help="Cache directory from `distill cache`.")
     p.add_argument("--student", required=True, metavar="GGUF|DIR",
@@ -255,7 +266,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
 
 def _train_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.constants import DEFAULT_KNOBS
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
         description="Train a LoRA adapter on a K-quant GGUF student against one or more views and write "
                     "it as a GGUF adapter. The loop is gmlx's own: seeded batch order, resume by exact "
@@ -281,8 +292,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
     p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
-                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term with no tail bucket, the "
-                        "form of the offline top-k distillation paper. renorm: softmax over the support only.")
+                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term alone, no tail bucket. renorm: softmax over the support only.")
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
     p.add_argument("--alm", type=float, default=DEFAULT_KNOBS["lambda_alm"],
@@ -314,7 +324,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
 
 
 def _eval_parser(prog: str) -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
         description="Score a GGUF student, with and without its adapter in one process: bits per byte on "
                     "held-out slices, sparse KL against a same-tokenizer cache, downstream tasks from "
@@ -324,7 +334,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--md", required=True, metavar="PATH", help="Markdown report to write.")
     p.add_argument("--json", required=True, metavar="PATH", help="JSON report to write.")
     p.add_argument("--cache", default=None, metavar="DIR",
-                   help="Cache whose corpus the slices are decontaminated against.")
+                   help="Cache whose corpus the slices are checked against for overlap.")
     p.add_argument("--slice", action="append", default=[], metavar="NAME=PATH",
                    help="A held-out text slice, repeatable.")
     p.add_argument("--teacher-bpb", default=None, metavar="JSON", help="Teacher bits per byte per slice.")
@@ -343,13 +353,14 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                         "template compliance and drift, how far the replies moved from an earlier report's.")
     p.add_argument("--chat-max-tokens", type=int, default=256, help="Reply budget for the chat sanity set (default 256).")
     p.add_argument("--chat-refs", default=None, metavar="JSON",
-                   help="An earlier eval report whose replies anchor the drift score.")
+                   help="An earlier eval report whose replies anchor the drift score. Ignored with --before, "
+                        "which anchors on the adapter-off replies.")
     p.add_argument("--chat-max-len", type=int, default=2048, help="Longest conversation scored (default 2048).")
     p.add_argument("--chat-per-turn", action="store_true", help="Score every assistant turn as its own row.")
     p.add_argument("--reply-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of conversations scored on the final reply, repeatable.")
     p.add_argument("--reply-think", action="store_true",
-                   help="Reply slices target the final turn's reasoning trace.")
+                   help="Reply slices target the final turn from its reasoning trace onward.")
     p.add_argument("--reply-positions", default=None, metavar="JSON",
                    help="A distill census JSON whose high_delta map restricts every reply slice to the "
                         "high-delta positions.")
@@ -371,7 +382,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
 
 
 def _census_parser(prog: str) -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog=prog,
         description="Measure how much a context the student never sees moves the teacher, from two or "
                     "more reply caches (distill cache --frame reply or reply-think) of the same prompts: one cut "

@@ -1,6 +1,6 @@
 """The view compiler driver: one pass over a cache with the student
-tokenizer that writes the tables, the census and the row index, and the
-materialized batch tensors on request. ``run_align`` is what
+tokenizer that writes the tables, the alignment statistics and the row
+index, and the materialized batch tensors on request. ``run_align`` is what
 ``gmlx distill align`` calls."""
 from __future__ import annotations
 
@@ -121,6 +121,12 @@ def run_align(opts: AlignOptions) -> int:
     if not (cache / "manifest.json").is_file():
         log(f"[align] refuse: no manifest.json in {cache}, run gmlx distill cache first")
         return 2
+    if not Path(opts.student).expanduser().exists():
+        log(f"[align] refuse: no student at {opts.student}")
+        return 2
+    if opts.tables and not (Path(opts.tables) / "tables.json").is_file():
+        log(f"[align] refuse: no tables.json in {opts.tables}")
+        return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
     reader = CacheReader(cache)
@@ -212,7 +218,7 @@ def run_align(opts: AlignOptions) -> int:
         "V_T": V_T, "V_S": V_S, "tables_version": TABLES_VERSION, "identity": identity,
         "K": reader.K, "Kp": int(Kp), "knobs": knobs, "student": opts.student,
         "student_render_kwargs": student_kw, "student_render_failures": loader.render_failures,
-        "census": {
+        "alignment": {
             "rows": n, "rows_kept": len(index), "rows_dropped_lt2": loader.dropped,
             "a_own_mass_fraction": {"mean": a, "p05": float(np.percentile(stats["own"], 5)) if stats["own"] else 1.0},
             "redirected_mass_fraction": red,
@@ -233,8 +239,8 @@ def run_align(opts: AlignOptions) -> int:
         "index": index,
     }
     log(f"[align] {len(index)} rows kept, {loader.dropped} dropped, kprime={Kp}, a={a:.3f} s={s:.3f} "
-        f"redirect={red:.3f} bias_ok={view['census']['tokenization_bias_ok']:.4f} "
-        f"(on-path in top-K {view['census']['onpath_in_topk_fraction']:.3f}); "
+        f"redirect={red:.3f} bias_ok={view['alignment']['tokenization_bias_ok']:.4f} "
+        f"(on-path in top-K {view['alignment']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
     if not identity and a < REFUSE_A and not opts.force:
         # refused before the write, so no view is left for train to accept

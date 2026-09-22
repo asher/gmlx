@@ -105,7 +105,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
         log(f"[eval] {name}: reply bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
-            f"{r['rows']} rows{' at the positions the document moved' if positions is not None else ''}, "
+            f"{r['rows']} rows{' at the high-delta positions' if positions is not None else ''}, "
             f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
     if opts.kld_cache:
         t0 = time.perf_counter()

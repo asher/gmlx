@@ -243,7 +243,7 @@ def run_train(opts: TrainOptions) -> int:
     wd = opts.weight_decay if opts.weight_decay is not None else (0.01 if opts.full else 0.0)
     opt = optim.AdamW(learning_rate=make_schedule(opts.lr, opts.iters, opts.warmup), weight_decay=wd)
     log(f"[train] {kind} student, {'full fine-tune' if opts.full else f'LoRA {n_adapted} modules'}, "
-        f"{trainable_count(model) / 1e6:.2f}M trainable, same_tokenizer={view['identity']}, knobs={knobs}")
+        f"{trainable_count(model) / 1e6:.2f}M trainable, path={'identity' if view['identity'] else 'general'}, knobs={knobs}")
 
     G, Kp = tables.G, max(int(v["Kp"]) for v in views)
     readers = [_data.CacheReader(Path(v["cache_dir"])) for v in views]

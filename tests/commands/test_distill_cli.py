@@ -104,3 +104,41 @@ def test_train_refuses_a_non_gguf_student(tmp_path, capsys):
                     str(tmp_path / "a.gguf"), "--iters", "1"])
     assert rc == 2
     assert "GGUF" in capsys.readouterr().err
+
+
+def test_argparse_errors_print_as_refusals():
+    rc, out = _run(["distill", "gen", "--no-such-flag"])
+    assert rc == 2
+    assert "usage: gmlx distill gen" in out and "[gen] refuse:" in out
+
+
+def test_flag_aliases_share_a_destination():
+    from gmlx.commands.distill import _filter_parser, _gen_parser
+    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-words", "1"]).min_tokens == 1
+    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-tokens", "2"]).min_tokens == 2
+    assert _gen_parser("gmlx distill gen").parse_args(["--out", "o", "--model", "s.gguf"]).teacher == "s.gguf"
+
+
+def test_gen_refuses_a_missing_model(tmp_path, capsys):
+    from gmlx.commands.distill import cmd_gen
+    prompts = tmp_path / "p.jsonl"
+    prompts.write_text('{"id": "a", "messages": [{"role": "user", "content": "hi"}]}\n')
+    rc = cmd_gen(["--teacher", str(tmp_path / "none.gguf"), "--prompts", str(prompts),
+                  "--out", str(tmp_path / "o.jsonl")])
+    assert rc == 2
+    assert "[gen] refuse: no model at" in capsys.readouterr().err
+
+
+def test_align_refuses_missing_student_and_tables(tmp_path, capsys):
+    from gmlx.commands.distill import cmd_align
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text("{}")
+    rc = cmd_align(["--cache", str(cache), "--student", str(tmp_path / "none.gguf"), "--out", str(tmp_path / "v")])
+    assert rc == 2 and "[align] refuse: no student at" in capsys.readouterr().err
+    student = tmp_path / "s.gguf"
+    student.write_bytes(b"")
+    rc = cmd_align(["--cache", str(cache), "--student", str(student), "--out", str(tmp_path / "v"),
+                    "--tables", str(tmp_path / "no-tables")])
+    assert rc == 2 and "[align] refuse: no tables.json in" in capsys.readouterr().err
+    assert not (tmp_path / "v").exists()

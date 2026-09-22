@@ -845,20 +845,20 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-`gmlx distill` runs offline distillation in six actions plus one
-measurement. The teacher and the student may use different tokenizers,
+`gmlx distill` runs offline distillation in six actions plus one check.
+The teacher and the student may use different tokenizers,
 and the walkthrough is [distill.md](distill.md).
 
 - `gen` runs a teacher through `gmlx serve` over a prompt set and writes
   its replies as a corpus.
 - `filter` drops the generated rows a student should not learn from.
-- `cache` runs a teacher GGUF over a corpus once and stores its top-k
-  log-probabilities per position.
+- `cache` runs a teacher GGUF over a corpus once and stores its most
+  likely next tokens and their log-probabilities at every position.
 - `align` maps that cache onto a student tokenizer and writes a view, the
   positions and values the student trains to match.
 - `train` fits a LoRA adapter on a K-quant GGUF student against the view.
 - `eval` scores the student with and without the adapter.
-- `census` measures, from two reply caches of the same prompts, how much
+- `census` checks, from two reply caches of the same prompts, how much
   a context the student never sees, the document in the guide, moves the
   teacher.
 
@@ -898,7 +898,7 @@ so a run resumes where it stopped.
 | `--out PATH` | required | corpus jsonl to write, with `<out>.gen.json` beside it |
 | `--prompts PATH` | none | a jsonl of prompt rows ending on a user turn |
 | `--corpus PATH_OR_ID` | none | a text corpus to build continuation prompts from, instead of `--prompts` |
-| `--teacher GGUF` | none | teacher GGUF served for the run |
+| `--teacher GGUF` | none | GGUF served for the run, the teacher or, for a measurement, the student. `--model` is the same flag |
 | `--base-url URL` | none | a running server's `/v1` base, instead of serving `--teacher` |
 | `--host HOST` | `127.0.0.1` | bind host of the served teacher |
 | `--port N` | `8093` | port of the served teacher |
@@ -944,8 +944,8 @@ carries `student_messages`, since that row was generated with a context.
 | `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order |
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
-| `--rejects PATH` | none | write one `{id, reason}` line per dropped row here |
-| `--min-tokens N` | `16` | drop replies whose answer has fewer whitespace-separated words, the reasoning trace not counted |
+| `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
+| `--min-words N` | `16` | drop replies whose answer has fewer whitespace-separated words, the reasoning trace not counted. `--min-tokens` is the same flag |
 | `--ngram N` | `8` | n-gram size of the repetition check |
 | `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
 | `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row |
@@ -1083,7 +1083,7 @@ examples shown before each question.
 | `--adapter GGUF` | none | the GGUF adapter to apply |
 | `--md PATH` | required | the Markdown report to write |
 | `--json PATH` | required | the JSON report to write |
-| `--cache DIR` | none | cache whose corpus the slices are checked against for overlap (decontamination) |
+| `--cache DIR` | none | cache whose corpus the slices are checked against for overlap |
 | `--slice NAME=PATH` | none | a held-out text slice, repeatable |
 | `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
 | `--tasks-dir DIR` | `.` | directory of the four task files |
@@ -1094,7 +1094,7 @@ examples shown before each question.
 | `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, repeatable |
 | `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies |
 | `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
-| `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score |
+| `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score. Ignored with `--before`, which anchors on the adapter-off replies |
 | `--chat-max-len N` | `2048` | longest conversation scored |
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
@@ -1115,7 +1115,8 @@ examples shown before each question.
 
 Pairs the reply rows of a cache made without a context with the same
 rows in one or more caches made with a context. It writes the on-path
-delta (the gain at the token the teacher wrote), the coarsened KL between
+delta, how much more likely the context makes each token the teacher
+wrote, the coarsened KL between
 the stored top-k distributions and, with several contexts, the residual no
 training recovers. Runs on the CPU. Exits 2 when a cache has no manifest
 or no rows pair.

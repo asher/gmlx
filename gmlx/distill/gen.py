@@ -336,6 +336,9 @@ def run_gen(opts: GenOptions) -> int:
     if not opts.prompts and not opts.corpus:
         print("[gen] refuse: --prompts or --corpus is required", file=sys.stderr)
         return 2
+    if opts.teacher and not opts.base_url and not Path(opts.teacher).expanduser().exists():
+        print(f"[gen] refuse: no model at {opts.teacher}", file=sys.stderr)
+        return 2
     if not opts.teacher and not opts.base_url:
         print("[gen] refuse: --teacher or --base-url is required", file=sys.stderr)
         return 2
