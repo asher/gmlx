@@ -19,13 +19,14 @@ from dataclasses import dataclass
 from .arch_table import ArchEntry
 from .arch_table import gate as _gate_arch
 
-# The 22 codecs the kq.* kernels implement (GGML type names).
+# The 24 codecs the kq.* kernels implement (GGML type names).
 SUPPORTED_QUANT_TYPES = frozenset({
     "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
     "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
     "IQ4_NL", "IQ4_XS", "IQ3_S", "IQ3_XXS",
     "IQ2_XXS", "IQ2_XS", "IQ2_S",
     "IQ1_S", "IQ1_M", "STQ1_0",
+    "PQ2_0", "PTQ1_0",
     "MXFP4", "NVFP4",
 })
 # Micro-scaling float codecs that additionally have MLX-native packed kernels.
@@ -114,8 +115,14 @@ class UnsupportedCodecError(Exception):
             f"GGUF (arch={arch!r}) uses codecs this build can't load - "
             f"unsupported tensor types: {listing} ({n} tensors). "
             "Supported codecs: q2_k-q6_k, q4_0/q4_1/q5_0/q5_1/q8_0, the "
-            "iq1/iq2/iq3/iq4 families, stq1_0, and mxfp4/nvfp4. Re-quantize "
-            "to a supported codec (e.g. Q4_K_M / Q5_K_M / Q6_K).")
+            "iq1/iq2/iq3/iq4 families, stq1_0, pq2_0/ptq1_0, and mxfp4/nvfp4. "
+            "Re-quantize to a supported codec (e.g. Q4_K_M / Q5_K_M / Q6_K).")
+
+
+class HadamardFoldError(Exception):
+    """A GGUF whose weights were stored under a Hadamard rotation
+    (``prism.hadamard.*`` header keys) that this loader does not apply for
+    its header version or architecture."""
 
 
 @dataclass(frozen=True)
@@ -168,6 +175,17 @@ def preflight(gguf_path: str, *, arch: str | None = None,
 
     if unsupported:
         raise UnsupportedCodecError(detected, unsupported)
+    fold_version = scan0.kv.get("prism.hadamard.version")
+    if fold_version is not None:
+        # The loader rotates every folded projection of these architectures
+        # at run time; any other file would run its weights unrotated.
+        from .hadamard import HADAMARD_ARCHES
+
+        if fold_version != 1 or detected not in HADAMARD_ARCHES:
+            raise HadamardFoldError(
+                f"GGUF (arch={detected!r}) is Hadamard-folded (prism.hadamard "
+                f"v{fold_version}); the run-time fold is supported for "
+                f"version 1 on {', '.join(sorted(HADAMARD_ARCHES))} only.")
 
     entry = _gate_arch(detected, hf_source=hf_source)
     return Preflight(arch=detected, entry=entry, shards=shards,

@@ -1730,7 +1730,10 @@ class LoRAKQuantLinear(nn.Module):
     def __call__(self, x, *args, **kwargs):
         if (_KQ_LORA_EPILOGUE and not args and not kwargs
                 and x.dtype in (mx.float16, mx.bfloat16)
-                and isinstance(self.base, KQuantLinear)):
+                and isinstance(self.base, KQuantLinear)
+                # A folded base rotates x before its matmul; the delta
+                # multiplies the unrotated x, so it stays outside the op.
+                and getattr(self.base, "_hadamard", None) is None):
             # In-op epilogue: the delta rides the base matmul's primitive
             # (zero extra graph ops); the row factor goes in as f32 rows.
             a_t, b_t = self._tables(x.dtype)

@@ -30,6 +30,8 @@ _GGUF_SCALAR_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1,
                      10: 8, 11: 8, 12: 8}
 _GGUF_STRING = 8
 _GGUF_ARRAY = 9
+# Unsigned scalar value types -> struct format, for the few KVs read by value.
+_GGUF_UINT_FMT = {0: "<B", 2: "<H", 4: "<I", 10: "<Q"}
 
 
 class RemoteError(RuntimeError):
@@ -106,12 +108,14 @@ class _Reader:
             raise RemoteError(f"unsupported GGUF value type {vtype}")
 
 
-def _parse_header(buf: bytes) -> tuple[str | None, str | None, list]:
+def _parse_header(buf: bytes) -> tuple[str | None, str | None, list, int | None]:
     """Parse magic + KV + tensor-info table from ``buf``. Returns
-    ``(arch, gguf_type, [(name, ggml_type_int), ...])``. Raises
+    ``(arch, gguf_type, [(name, ggml_type_int), ...], hadamard)``. Raises
     :class:`_NeedMore` if the buffer ends before the tensor-info table does.
     ``gguf_type`` is ``general.type`` ("adapter" for LoRA adapter GGUFs, which
-    otherwise carry their base model's arch and would grade as loadable)."""
+    otherwise carry their base model's arch and would grade as loadable);
+    ``hadamard`` is ``prism.hadamard.version`` when the weights were stored
+    under a Hadamard rotation."""
     r = _Reader(buf)
     if r.raw(4) != b"GGUF":
         raise RemoteError("not a GGUF file (bad magic)")
@@ -125,6 +129,7 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list]:
 
     arch: str | None = None
     gguf_type: str | None = None
+    hadamard: int | None = None
     for _ in range(n_kv):
         key = r.string()
         vtype = r.u32()
@@ -132,6 +137,9 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list]:
             arch = r.string().decode("utf-8", "replace")
         elif key == b"general.type" and vtype == _GGUF_STRING:
             gguf_type = r.string().decode("utf-8", "replace")
+        elif key == b"prism.hadamard.version" and vtype in _GGUF_UINT_FMT:
+            hadamard = struct.unpack(
+                _GGUF_UINT_FMT[vtype], r.raw(_GGUF_SCALAR_SIZE[vtype]))[0]
         else:
             r.skip_value(vtype)
 
@@ -144,7 +152,7 @@ def _parse_header(buf: bytes) -> tuple[str | None, str | None, list]:
         ttype = r.u32()
         r.u64()                                  # data offset (ignored)
         tensors.append((name, ttype))
-    return arch, gguf_type, tensors
+    return arch, gguf_type, tensors, hadamard
 
 
 def _type_name(ttype: int) -> str:
@@ -165,6 +173,7 @@ class HeaderReport:
     n_tensors: int = 0
     gguf_type: str | None = None                      # general.type ("adapter", ...)
     total_bytes: int | None = None                    # full file size, when known
+    hadamard: int | None = None                       # prism.hadamard.version
 
     @property
     def loadable_codecs(self) -> bool:
@@ -173,7 +182,7 @@ class HeaderReport:
 
 def classify_header(buf: bytes) -> HeaderReport:
     """Build a codec report from a header prefix (re-raises :class:`_NeedMore`)."""
-    arch, gguf_type, tensors = _parse_header(buf)
+    arch, gguf_type, tensors, hadamard = _parse_header(buf)
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
     for _name, ttype in tensors:
@@ -182,7 +191,8 @@ def classify_header(buf: bytes) -> HeaderReport:
         if (tn not in SUPPORTED_QUANT_TYPES and tn not in NATIVE_TYPES
                 and tn not in NATIVE_FP_TYPES):
             unsup[tn] = unsup.get(tn, 0) + 1
-    return HeaderReport(arch, hist, unsup, len(tensors), gguf_type)
+    return HeaderReport(arch, hist, unsup, len(tensors), gguf_type,
+                        hadamard=hadamard)
 
 
 def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
@@ -194,6 +204,7 @@ def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
     goes unknown if any shard's is - a partial sum would understate the set."""
     arch: str | None = None
     gguf_type: str | None = None
+    hadamard: int | None = None
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
     n = 0
@@ -203,6 +214,8 @@ def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
             arch = r.arch
         if gguf_type is None and r.gguf_type:
             gguf_type = r.gguf_type
+        if hadamard is None and r.hadamard is not None:
+            hadamard = r.hadamard
         for k, v in r.histogram.items():
             hist[k] = hist.get(k, 0) + v
         for k, v in r.unsupported.items():
@@ -210,7 +223,7 @@ def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
         n += r.n_tensors
         if total is not None:
             total = None if r.total_bytes is None else total + r.total_bytes
-    return HeaderReport(arch, hist, unsup, n, gguf_type, total)
+    return HeaderReport(arch, hist, unsup, n, gguf_type, total, hadamard)
 
 
 # Ref parsing + HTTP range read

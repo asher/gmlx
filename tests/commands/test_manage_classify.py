@@ -6,6 +6,7 @@ these tests pin the old report shape plus the STQ1_0 case the rewrite is for.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from gguf import GGUFWriter, GGMLQuantizationType as GT
 from gguf.constants import GGML_QUANT_SIZES
 
@@ -82,33 +83,48 @@ def test_classify_local_multi_shard(tmp_path):
     assert rep.n_tensors == 4
 
 
-def test_classify_local_stq1_0_via_fallback(tmp_path):
-    """A type-43 file classifies: GGUFReader rejects the id, headerscan's
-    fallback names it."""
+def _mint_fallback(path, codec_name, kv=None):
+    """A file whose only weight uses a type id newer than the installed
+    gguf-py (GGUFReader rejects it; headerscan's fallback names it)."""
     (type_id, (name, (wpb, tsize))), = [
-        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == "STQ1_0"
+        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == codec_name
     ]
 
-    class _Stq:
+    class _Sentinel:
         def __int__(self):
             return type_id
 
         def __index__(self):
             return type_id
 
-    _Stq.name, _Stq.value = name, type_id
-    sentinel = _Stq()
+    _Sentinel.name, _Sentinel.value = name, type_id
+    sentinel = _Sentinel()
     GGML_QUANT_SIZES[sentinel] = (wpb, tsize)
     try:
-        p = tmp_path / "stq1_0.gguf"
-        w = GGUFWriter(str(p), "llama")
+        w = GGUFWriter(str(path), "llama")
+        for key, value in (kv or {}).items():
+            w.add_uint32(key, value)
         w.add_tensor("blk.0.attn_q.weight",
                      np.zeros((4, (256 // wpb) * tsize), dtype=np.uint8),
                      raw_dtype=sentinel)
         _finish(w)
     finally:
         del GGML_QUANT_SIZES[sentinel]
+
+
+@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0"])
+def test_classify_local_fallback_codecs(tmp_path, codec):
+    p = tmp_path / f"{codec.lower()}.gguf"
+    _mint_fallback(p, codec)
     rep = _classify_local(str(p))
-    assert rep.histogram == {"STQ1_0": 1}
+    assert rep.histogram == {codec: 1}
     assert rep.unsupported == {}
     assert rep.loadable_codecs is True
+    assert rep.hadamard is None
+
+
+def test_classify_local_reports_hadamard_fold(tmp_path):
+    p = tmp_path / "folded.gguf"
+    _mint_fallback(p, "PTQ1_0", kv={"prism.hadamard.version": 1})
+    rep = _classify_local(str(p))
+    assert rep.hadamard == 1

@@ -315,6 +315,10 @@ def install_table_streaming(model) -> tuple[int, list[str]]:
     offloaded = 0
     names: list[str] = []
     for tier, mod in streamable_tables_for(model):
+        if getattr(mod, "_hadamard", None) is not None:
+            raise NotImplementedError(
+                f"{tier.gguf_name}: table streaming re-implements the gather "
+                f"and would drop the Hadamard un-rotation of its rows")
         if not getattr(mod, "_kq_table_streamed", False):
             mod.__class__ = _wrapped_class(
                 mod.__class__, hasattr(mod, "kquant_type"))

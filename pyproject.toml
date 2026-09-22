@@ -31,7 +31,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.11,<0.5",
+    "mlx-kquant>=0.4.12,<0.5",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
@@ -185,6 +185,7 @@ include = [
     "gmlx/spec/mtp_drafter.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
+    "gmlx/upstream/hadamard_share.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"

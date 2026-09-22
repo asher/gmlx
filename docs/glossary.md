@@ -61,6 +61,13 @@ share one key and value head. Fewer KV heads mean a smaller KV cache per
 token, so a GQA model of a given size holds a longer context than one with
 a KV head for every query head.
 
+Hadamard fold. A way of storing quantized weights after a fixed rotation
+of their input dimension, so that outliers are spread across each row
+before quantization. The model rotates each activation the same way at
+run time. `gmlx validate` prints `Hadamard-folded` for such a file, and
+[hadamard-fold.md](internals/hadamard-fold.md) describes how gmlx runs
+one.
+
 Hugging Face. The site the open-model ecosystem publishes on. References of
 the form `hf:org/repo/file.gguf` in these docs point there. `gmlx pull`
 downloads them.

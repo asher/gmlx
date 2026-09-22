@@ -81,37 +81,62 @@ def test_iq_codecs_now_pass(tmp_path):
         assert pf.codec_histogram.get(gt.name) == 1
 
 
-def test_stq1_0_passes_via_fallback(tmp_path):
-    """STQ1_0 (type 43, newer than the installed gguf-py) must resolve through
-    headerscan's QUANT_TYPE_FALLBACK and pass preflight. Minted with a sentinel
-    dtype because gguf-py's enum has no member for it."""
+def _mint_fallback(path, codec_name, kv=None):
+    """A GGUF whose only weight declares a codec newer than the installed
+    gguf-py (STQ1_0, PQ2_0, PTQ1_0): the type id comes from headerscan's
+    QUANT_TYPE_FALLBACK and the writer takes a sentinel dtype because
+    gguf-py's enum has no member for it."""
     from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
 
     (type_id, (name, (wpb, tsize))), = [
-        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == "STQ1_0"
+        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == codec_name
     ]
 
-    class _Stq:
+    class _Sentinel:
         def __int__(self):
             return type_id
 
         def __index__(self):
             return type_id
 
-    _Stq.name, _Stq.value = name, type_id
-    sentinel = _Stq()
+    _Sentinel.name, _Sentinel.value = name, type_id
+    sentinel = _Sentinel()
     GGML_QUANT_SIZES[sentinel] = (wpb, tsize)
     try:
-        p = tmp_path / "stq1_0.gguf"
-        w = GGUFWriter(str(p), "llama")
+        w = GGUFWriter(str(path), "llama")
+        for key, value in (kv or {}).items():
+            w.add_uint32(key, value)
         w.add_tensor("blk.0.attn_q.weight",
                      np.zeros((4, (256 // wpb) * tsize), dtype=np.uint8),
                      raw_dtype=sentinel)
         _finish(w)
     finally:
         del GGML_QUANT_SIZES[sentinel]
+
+
+@pytest.mark.parametrize("codec", ["STQ1_0", "PQ2_0", "PTQ1_0"])
+def test_fallback_codecs_pass(tmp_path, codec):
+    p = tmp_path / f"{codec.lower()}.gguf"
+    _mint_fallback(p, codec)
     pf = preflight(str(p))                          # must not raise
-    assert pf.codec_histogram.get("STQ1_0") == 1
+    assert pf.codec_histogram.get(codec) == 1
+
+
+def test_hadamard_folded_file_refused_outside_allowlist(tmp_path):
+    """A prism.hadamard header means the stored weights expect a run-time
+    rotation of their input. The loader applies it for the architectures in
+    HADAMARD_ARCHES; any other arch, or another header version, is refused
+    by name rather than run unrotated."""
+    from gmlx.load.hadamard import HADAMARD_ARCHES
+    from gmlx.load.preflight import HadamardFoldError
+
+    assert "llama" not in HADAMARD_ARCHES
+    p = tmp_path / "folded.gguf"
+    _mint_fallback(p, "PTQ1_0", kv={"prism.hadamard.version": 1})
+    with pytest.raises(HadamardFoldError) as ei:
+        preflight(str(p))
+    assert "prism.hadamard v1" in str(ei.value)
+    assert "qwen35" in str(ei.value)
 
 
 def test_supported_codecs_pass(tmp_path):

@@ -70,6 +70,7 @@ def _classify_local(path: str, *, arch: str | None = None) -> remote.HeaderRepor
 def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.HeaderReport:
     detected = arch
     gguf_type = None
+    hadamard = None
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
     for i, hs in enumerate(scans):
@@ -80,6 +81,7 @@ def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.Header
                                  "- can't detect arch")
             v = hs.kv.get("general.type")
             gguf_type = v if v is None or isinstance(v, str) else str(v)
+            hadamard = hs.kv.get("prism.hadamard.version")
         for t in hs.tensors:
             tn = t.type_name
             hist[tn] = hist.get(tn, 0) + 1
@@ -87,7 +89,7 @@ def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.Header
                     and tn not in NATIVE_FP_TYPES):
                 unsup[tn] = unsup.get(tn, 0) + 1
     return remote.HeaderReport(detected, hist, unsup, sum(hist.values()),
-                               gguf_type)
+                               gguf_type, hadamard=hadamard)
 
 
 def _arch_status(arch: str | None, *, hf_source: str | None = None):
@@ -254,6 +256,8 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "codecs": dict(sorted(report.histogram.items())),
         "unsupported_codecs": dict(sorted(report.unsupported.items())),
         "codecs_loadable": report.loadable_codecs,
+        # prism.hadamard.version when the weights are stored rotated.
+        "hadamard": report.hadamard,
         # The streaming plan (every-token weights, experts, this Mac's
         # arena and verdict) for a MoE file; None for a dense one.
         "stream": (_stream_plan(scans)
@@ -308,6 +312,8 @@ def _print_report(v: dict) -> None:
     for name, n in v["codecs"].items():
         mark = "   <- no kernel" if name in v["unsupported_codecs"] else ""
         print(f"    {name:<8} x{n}{mark}")
+    if v.get("hadamard") is not None:
+        print(f"  weights: Hadamard-folded (prism.hadamard v{v['hadamard']})")
     if v["loadable"]:
         print("  => loadable")
     elif v.get("mmproj") and v["codecs_loadable"]:

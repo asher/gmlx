@@ -75,6 +75,10 @@ def _splitk_min_b() -> int:
 def _same_codec_kquant(projs) -> bool:
     if not all(isinstance(p, KQuantLinear) for p in projs):
         return False
+    # A Hadamard-folded projection rotates its input inside __call__; the
+    # fused wire would bypass that rotation.
+    if any(getattr(p, "_hadamard", None) is not None for p in projs):
+        return False
     if any("bias" in p for p in projs):
         return False
     return len({p.kquant_type for p in projs}) == 1
