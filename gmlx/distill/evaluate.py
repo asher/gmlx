@@ -169,13 +169,13 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
             b = before.get("chat_bpb", {}).get(name, {}).get("bpb")
             md.append(f"| {name} | {a['bpb']:.4f} | {_fmt(b)} | {_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
     if reply_slices:
-        md += ["", "| reply slice | bpb after | bpb before | nats/token after | se | rows |",
-               "|---|---|---|---|---|---|"]
+        md += ["", "| reply slice | bpb after | bpb before | nats/token after | nats/token before | se | rows |",
+               "|---|---|---|---|---|---|---|"]
         for name in reply_slices:
             a = report["after"]["reply_bpb"][name]
-            b = before.get("reply_bpb", {}).get(name, {}).get("bpb")
-            md.append(f"| {name} | {a['bpb']:.4f} | {_fmt(b)} | {a['nll_per_token']:.4f} | "
-                      f"{_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
+            b = before.get("reply_bpb", {}).get(name, {})
+            md.append(f"| {name} | {a['bpb']:.4f} | {_fmt(b.get('bpb'))} | {a['nll_per_token']:.4f} | "
+                      f"{_fmt(b.get('nll_per_token'))} | {_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
     if report["after"]["tasks"]:
         md += ["", "| task | acc after | acc before | n |", "|---|---|---|---|"]
         for t in report["after"]["tasks"]:
@@ -214,6 +214,10 @@ def run_eval(opts: EvalOptions) -> int:
     except ValueError as e:
         log(f"[eval] refuse: {e}")
         return 2
+    for name, path in [*slice_specs, *chat_specs, *reply_specs]:
+        if not Path(path).expanduser().is_file():
+            log(f"[eval] refuse: slice {name}: no file at {path}")
+            return 2
     slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
               for name, path in slice_specs}
     report: dict = {"student": opts.student, "adapter": opts.adapter, "slices": {}, "decontam": {},

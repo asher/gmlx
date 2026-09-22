@@ -1456,3 +1456,19 @@ def test_probe_step_re_derives_an_integer_tier_when_the_measured_constant_exceed
     # over budget: the measured constant replaces it and the step halves to fit the unchanged cap
     step, constant = probe_step(26.0, 16.0, 151936, 4.0)
     assert constant == 26.0 and isinstance(step, int) and step == 512   # 4e9 / (151936 * 26) = 1012, the tier below it
+
+
+def test_align_refusal_leaves_no_view(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """A refused pair writes no view.json, so ``train`` has nothing to
+    accept, and ``--force`` is what keeps the view."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    monkeypatch.setattr(_view, "REFUSE_A", 1.01)
+    opts = dict(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"), out=str(tmp_path / "view"))
+    assert _view.run_align(_view.AlignOptions(**opts)) == 3
+    assert not (tmp_path / "view" / "view.json").exists()
+    assert _view.run_align(_view.AlignOptions(**opts, force=True)) == 0
+    assert (tmp_path / "view" / "view.json").exists()

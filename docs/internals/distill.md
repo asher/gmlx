@@ -103,8 +103,8 @@ same-tokenizer student reached 0.882 and 0.925 on the same slices.
 The adapter answered the single-table questions and failed the joins on
 column names the schema does not have, so the projection carried the
 shape of the replies and only part of the document. The alignment
-statistics for the pair read an own-group fraction of 0.83 and a
-shared-boundary
-fraction of 0.47, which is where the tokenizations diverge. At the
+statistics for the pair read an own-group fraction of 0.83, a
+singleton fraction of 0.20 and a shared-boundary fraction of 0.47, which
+is where the tokenizations diverge. At the
 positions the document moved the student's nats per token fell from
 8.21 to 0.80.

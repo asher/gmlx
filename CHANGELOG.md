@@ -13,8 +13,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sequences fit in memory at some cost in time.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
-- `gmlx distill` distills a teacher GGUF into a student LoRA adapter
-  offline, across tokenizers if needed. Guide in docs/distill.md.
+- `gmlx distill` trains a LoRA adapter for a small GGUF on a larger
+  GGUF's outputs, so the small model learns a document or a behavior
+  without it in the prompt. The guide is docs/distill.md.
 - `gmlx.stream.moe_routes` records a forward's expert ids per layer and
   replays them in a later forward over the same positions.
 - `GMLX_BATCH_INVARIANT=1` makes a row's logits the same at any batch
@@ -28,7 +29,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delta scan, 64 tokens per step instead of one. `GMLX_TRAIN_GDN_CHUNK=0`
   restores the loop.
 - `gmlx train` and `gmlx distill` run float32 matmul at exact precision
-  unless `MLX_ENABLE_TF32` is already set, and say so when TF32 stays on.
+  unless `MLX_ENABLE_TF32` is already set. A gated-delta model trained
+  with TF32 left on says so once.
 - `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
   blocks, which were reported as unsupported before.
 

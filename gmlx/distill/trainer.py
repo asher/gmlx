@@ -165,6 +165,10 @@ def run_train(opts: TrainOptions) -> int:
         log("[train] refuse: at least one --view is required")
         return 2
     view_dirs = [Path(v) for v in opts.views]
+    for d in view_dirs:
+        if not (d / "view.json").is_file():
+            log(f"[train] refuse: no view.json under {d}, run distill align first")
+            return 2
     views = [read_json(d / "view.json") for d in view_dirs]
     for d, v in zip(view_dirs, views):
         if manifest_sha256(Path(v["cache_dir"])) != v["cache_manifest_sha256"]:

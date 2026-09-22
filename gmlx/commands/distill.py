@@ -55,8 +55,8 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="A running server's /v1 base to use instead of serving --teacher.")
     p.add_argument("--host", default="127.0.0.1", help="Bind host of the served teacher (default 127.0.0.1).")
     p.add_argument("--port", type=int, default=8093, help="Port of the served teacher (default 8093).")
-    p.add_argument("--text-key", default="text", help="With --corpus: text column of a jsonl or dataset row.")
-    p.add_argument("--hf-split", default="train", help="With --corpus: dataset split for a Hugging Face id.")
+    p.add_argument("--text-key", default="text", help="With --corpus: text column of a jsonl or dataset row (default text).")
+    p.add_argument("--hf-split", default="train", help="With --corpus: dataset split for a Hugging Face id (default train).")
     p.add_argument("--prefix-chars", type=int, default=1500,
                    help="With --corpus: document prefix quoted in the user turn (default 1500).")
     p.add_argument("--min-chars", type=int, default=2000,
@@ -103,7 +103,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
         prog=prog,
         description="Drop generated rows a student should not learn from, in a fixed order of checks, "
                     "and stamp the filter version into the corpus sidecar. Optionally run a task-specific "
-                    "verify command over the survivors, or put a context the replier never saw on the "
+                    "verify command over the survivors, or put a context the model that wrote the replies never saw on the "
                     "teacher's side of every kept row.")
     p.add_argument("--in", dest="inputs", action="append", required=True, metavar="PATH",
                    help="Generated corpus jsonl, repeatable and concatenated in order.")
@@ -112,7 +112,8 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--rejects", default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here.")
     p.add_argument("--min-tokens", type=int, default=16,
-                   help="Drop replies with fewer whitespace tokens than this (default 16).")
+                   help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
+                        "trace not counted (default 16). Set 1 when a right answer can be a few words.")
     p.add_argument("--ngram", type=int, default=8, help="N-gram size of the repetition check (default 8).")
     p.add_argument("--max-repeat", type=float, default=0.2,
                    help="Drop replies whose repeated n-grams exceed this fraction (default 0.2).")
@@ -121,7 +122,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--max-non-ascii", type=float, default=None,
                    help="Drop replies whose non-ASCII character fraction exceeds this (default off).")
     p.add_argument("--max-reply-tokens", type=int, default=None,
-                   help="Drop replies longer than this many completion tokens (default off).")
+                   help="Drop replies longer than this many tokens, reasoning trace included (default off).")
     p.add_argument("--keep-budget-hit", action="store_true",
                    help="Keep replies whose thinking budget cut the reasoning trace (dropped by default).")
     p.add_argument("--verify", default=None, metavar="CMD",
@@ -174,7 +175,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="none: raw text rows. continue: each window as a model turn behind "
                         "--frame-instruction. chat: rows are conversations, targets on every assistant "
                         "turn. reply: targets on the final assistant turn only. reply-think: a reply row "
-                        "whose target starts at the final turn's reasoning content.")
+                        "whose target starts at the final turn's reasoning trace.")
     p.add_argument("--per-turn", action="store_true",
                    help="With --frame chat or reply: one reply row per assistant turn with the history "
                         "before it.")
@@ -258,7 +259,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
         prog=prog,
         description="Train a LoRA adapter on a K-quant GGUF student against one or more views and write "
                     "it as a GGUF adapter. The loop is gmlx's own: seeded batch order, resume by exact "
-                    "iteration, last and best checkpoints.")
+                    "step, last and best checkpoints.")
     p.add_argument("--view", action="append", default=[], required=True, metavar="DIR",
                    help="View directory from `distill align`, repeatable to mix views over one tokenizer pair.")
     p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
@@ -338,8 +339,8 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--chat-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of {messages} conversations scored on their assistant turns, repeatable.")
     p.add_argument("--chat-sanity", default=None, metavar="PATH",
-                   help="A jsonl of {id, messages, kind} chat prompts scored for template compliance and drift, "
-                        "how far the replies moved from an earlier report's.")
+                   help="A jsonl of {id, messages, kind} chat prompts, kind being task or refuse, scored for "
+                        "template compliance and drift, how far the replies moved from an earlier report's.")
     p.add_argument("--chat-max-tokens", type=int, default=256, help="Reply budget for the chat sanity set (default 256).")
     p.add_argument("--chat-refs", default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score.")
@@ -348,7 +349,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--reply-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of conversations scored on the final reply, repeatable.")
     p.add_argument("--reply-think", action="store_true",
-                   help="Reply slices target the final turn's reasoning content.")
+                   help="Reply slices target the final turn's reasoning trace.")
     p.add_argument("--reply-positions", default=None, metavar="JSON",
                    help="A distill census JSON whose high_delta map restricts every reply slice to the "
                         "positions the context moved.")
@@ -373,7 +374,7 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
         description="Measure how much a context the student never sees moves the teacher, from two or "
-                    "more reply caches (distill cache --frame reply) of the same prompts: one cut "
+                    "more reply caches (distill cache --frame reply or reply-think) of the same prompts: one cut "
                     "without the context and one per context. Writes a JSON whose high_delta map "
                     "distill eval --reply-positions reads, and a Markdown summary. CPU only.")
     p.add_argument("--without", required=True, metavar="DIR", help="Cache of the prompts without any context.")
@@ -382,7 +383,7 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, metavar="JSON", help="Census JSON to write.")
     p.add_argument("--md", default=None, metavar="PATH", help="Markdown summary to write.")
     p.add_argument("--corpus", default=None, metavar="JSONL",
-                   help="The prompts jsonl the caches were made from, so high_delta is keyed by row id.")
+                   help="The corpus jsonl the caches were made from, so high_delta is keyed by row id.")
     p.add_argument("--delta-threshold", type=float, default=1.0,
                    help="Nats gained at the token the teacher wrote that make a position high-delta (default 1.0).")
     p.add_argument("--pair-by", choices=("line", "doc"), default="line",
@@ -426,7 +427,7 @@ def cmd_cache(argv: list[str], prog: str = "gmlx distill cache") -> int:
 
         from gmlx.distill.format import validate_cache
         problems = validate_cache(Path(args.validate))
-        print("valid" if not problems else "\n".join("[cache] validate: " + x for x in problems))
+        print("[cache] valid" if not problems else "\n".join("[cache] validate: " + x for x in problems))
         return 0 if not problems else 1
     if not (args.teacher and args.corpus and args.out):
         print("[cache] refuse: --teacher, --corpus and --out are required, or --validate DIR", file=sys.stderr)

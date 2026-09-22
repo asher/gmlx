@@ -88,10 +88,14 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
     built from a text corpus. ``messages`` is the teacher's list with any
     context applied; ``student_messages`` is the prompt as given and is
     present only when a context was applied."""
+    if opts.context and not Path(opts.context).expanduser().is_file():
+        raise ValueError(f"no context file at {opts.context}")
     shared = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
     rows: list[dict] = []
     if opts.prompts:
         path = Path(opts.prompts).expanduser()
+        if not path.is_file():
+            raise ValueError(f"no prompts file at {path}")
         for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
             if not line.strip():
                 continue
@@ -434,7 +438,7 @@ def run_gen(opts: GenOptions) -> int:
             f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {n_err} failed, sidecar {side}")
         return 0 if n_err == 0 else 1
     except ServerError as e:
-        print(f"[gen] refuse: {e}", file=sys.stderr)
+        print(f"[gen] error: {e}", file=sys.stderr)
         return 2
     finally:
         stop_server(opts, proc)

@@ -252,7 +252,7 @@ def run_census(opts: CensusOptions) -> int:
         f"paired by {opts.pair_by}")
     s = census(base, ctx, delta_threshold=opts.delta_threshold, id_of=id_of, max_rows=opts.max_rows)
     if s["rows"] == 0:
-        print("[census] refuse: no reply rows pair across the caches (same prompts, --frame reply, "
+        print("[census] refuse: no reply rows pair across the caches (same prompts, --frame reply or reply-think, "
               "matching reply bytes)", file=sys.stderr)
         return 2
     summary = {"caches": {"without": str(caches[0]), "with": [str(c) for c in caches[1:]]},

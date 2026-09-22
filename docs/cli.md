@@ -873,23 +873,25 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 ```
 
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
-success and 2 when it refuses an input or a setting. A missing required
-flag also exits 2, with argparse's usage message, and so does `filter`
-when its `--verify` command fails. `gen` exits 1 when
-some requests failed and their prompts remain to be rerun. `cache` also
-exits 3 when the memory probe fails twice or a `--routes` recording does
-not match the rows it was taken over, and 4 when the validator fails on
-what was written. `align` exits 3 when the own-group check refuses the
-pair, and `cache --validate` exits 1 on a problem.
+success. A refused input or setting exits 2, and so does a missing
+required flag, with argparse's usage message, a missing input file, and
+`filter` when its `--verify` command fails. `gen` exits 1 when some
+requests failed and their prompts remain to be rerun, and 2 when its
+server fails to start. `align` exits 3 when the own-group check refuses
+the pair, and writes no view. `cache` exits 3 when its memory probe
+misses twice or a `--routes` recording does not match its rows, and 4
+when the validator fails on what it wrote. `cache --validate` exits 1 on
+a problem.
 
 ### distill gen
 
 The prompt file holds one `{"id", "messages", "context"}` object per line
 whose messages end on a user turn. A row's context, or the file given by
-`--context`, goes in front of the last user turn for the teacher, and the
-row is written with the teacher's list under `messages` and the prompt as
-given under `student_messages`. Prompt ids already in the output are
-skipped, so a run resumes where it stopped.
+`--context`, goes in front of the last user turn for the teacher. A row
+that took a context is written with the teacher's list under `messages`
+and the prompt as given under `student_messages`, and a row without one
+carries `messages` alone. Prompt ids already in the output are skipped,
+so a run resumes where it stopped.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -929,12 +931,13 @@ skipped, so a run resumes where it stopped.
 Checks run in a fixed order and the first failure names the reason,
 one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
 `tokens` and `verify`, each defined in
-[Round one](distill.md#round-one-the-teacher-writes-the-corpus) of the
+[Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
 guide. The verify command reads the surviving rows as jsonl on stdin and
 prints one line per row, `ok` or a reason word. `--context` rebuilds
 every kept row with the context on the teacher's side and the prompt as
 given under `student_messages`, which prepares a second round from
-replies a student wrote without it.
+replies a student wrote without it. It refuses a row that already
+carries `student_messages`, since that row was generated with a context.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -942,12 +945,12 @@ replies a student wrote without it.
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
 | `--rejects PATH` | none | write one `{id, reason}` line per dropped row here |
-| `--min-tokens N` | `16` | drop replies with fewer whitespace tokens |
+| `--min-tokens N` | `16` | drop replies whose answer has fewer whitespace-separated words, the reasoning trace not counted |
 | `--ngram N` | `8` | n-gram size of the repetition check |
 | `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
 | `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row |
 | `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
-| `--max-reply-tokens N` | off | drop replies longer than this many completion tokens |
+| `--max-reply-tokens N` | off | drop replies longer than this many tokens, reasoning trace included |
 | `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
 | `--verify CMD` | none | shell command that reads the survivors on stdin and prints `ok` or a reason per row |
 | `--context FILE` | none | put this text on the teacher's side of every kept row |
@@ -956,6 +959,9 @@ replies a student wrote without it.
 ### distill cache
 
 The flags of the teacher pass, in the order `--help` prints them.
+`--messages-key` picks which list of a row the teacher reads, and
+`--student-messages-key` only names the list the student's render reads
+later, in `align` and `eval`.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -978,7 +984,7 @@ The flags of the teacher pass, in the order `--help` prints them.
 | `--text-key KEY` | `text` | text column of a jsonl or dataset row |
 | `--hf-split NAME` | `train` | dataset split for a Hugging Face id |
 | `--source TAG` | `human`, or `synthetic` with a generator sidecar | source tag written on every row |
-| `--frame KIND` | `none` | `none`, `continue`, `chat`, `reply` or `reply-think`: how rows are placed relative to the chat template |
+| `--frame KIND` | `none` | `none`, `continue`, `chat`, `reply` or `reply-think`: where the targets sit in the chat template, `reply-think` from the final turn's reasoning trace on |
 | `--per-turn` | off | with the chat or reply frame, one reply row per assistant turn |
 | `--student-messages-key KEY` | `student_messages` | corpus key of the student's own message list on reply rows |
 | `--frame-instruction TEXT` | `Continue the following text.` | user turn for the continue frame |
@@ -1066,10 +1072,10 @@ Training flags, in the order `--help` prints them.
 ### distill eval
 
 Evaluation flags, in the order `--help` prints them. Task files are
-jsonl: `arc_easy.jsonl` and `hellaswag.jsonl` hold `{id, query, choices,
-gold}` rows, `gsm8k.jsonl` holds `{id, question, answer}` rows, and
-`gsm8k_shots.jsonl` holds the worked examples shown before each
-question.
+jsonl files. `arc_easy.jsonl` and `hellaswag.jsonl` hold
+`{id, query, choices, gold}` rows, `gsm8k.jsonl` holds
+`{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the worked
+examples shown before each question.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1086,13 +1092,13 @@ question.
 | `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
 | `--before` | off | also score with the adapter disabled in process |
 | `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, repeatable |
-| `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts scored for template compliance and drift, how far the replies moved from an earlier report's |
+| `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies |
 | `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
 | `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score |
 | `--chat-max-len N` | `2048` | longest conversation scored |
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
-| `--reply-think` | off | reply slices target the final turn's reasoning content |
+| `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
 | `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the positions the context moved |
 | `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against |
 | `--kld-rows N` | all | rows of the KL cache to score |
@@ -1120,7 +1126,7 @@ or no rows pair.
 | `--with DIR` | required | cache with a context, repeatable |
 | `--out JSON` | required | the census JSON to write |
 | `--md PATH` | none | Markdown summary to write |
-| `--corpus JSONL` | none | the prompts jsonl the caches were made from, so `high_delta` is keyed by row id |
+| `--corpus JSONL` | none | the corpus jsonl the caches were made from, so `high_delta` is keyed by row id |
 | `--delta-threshold F` | `1.0` | nats gained at the token the teacher wrote that make a position high-delta |
 | `--pair-by MODE` | `line` | pair rows across caches by corpus `line` or by the full `doc` id |
 | `--max-rows N` | all | paired rows to measure |

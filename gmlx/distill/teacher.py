@@ -443,7 +443,7 @@ def run_cache(opts: CacheOptions) -> int:
             if recorder is not None and routing is not None:
                 routes_blt = _format.take_routes_blt(recorder)
                 if routes_blt.shape[:2] != inputs.shape:
-                    log(f"[cache] refuse: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
+                    log(f"[cache] error: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
                     return 3
                 if routing["k"] is None:
                     routing["k"] = int(routes_blt.shape[-1])

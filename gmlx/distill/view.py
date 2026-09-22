@@ -229,18 +229,18 @@ def run_align(opts: AlignOptions) -> int:
         },
         "index": index,
     }
-    write_json_atomic(out / "view.json", view)
     log(f"[align] {len(index)} rows kept, {loader.dropped} dropped, K'={Kp}, a={a:.3f} s={s:.3f} "
         f"redirect={red:.3f} bias_ok={view['census']['tokenization_bias_ok']:.4f} "
         f"(on-path in top-K {view['census']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
-    if not identity:
-        if a < REFUSE_A and not opts.force:
-            log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}, the tokenizers diverge too far. "
-                f"Pick a student from the teacher's family, or pass --force and expect a weaker result")
-            return 3
-        if a < WARN_A or s < WARN_S:
-            log(f"[align] warn: own-group fraction a={a:.3f} (< {WARN_A}) or shared-boundary fraction s={s:.3f} (< {WARN_S})")
+    if not identity and a < REFUSE_A and not opts.force:
+        # refused before the write, so no view is left for train to accept
+        log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}, the tokenizers diverge too far. "
+            f"Pick a student from the teacher's family, or pass --force and expect a weaker result")
+        return 3
+    write_json_atomic(out / "view.json", view)
+    if not identity and (a < WARN_A or s < WARN_S):
+        log(f"[align] warn: own-group fraction a={a:.3f} (< {WARN_A}) or singleton fraction s={s:.3f} (< {WARN_S})")
     if opts.materialize:
         loader2 = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=int(Kp), identity=identity)
         t1 = time.perf_counter()

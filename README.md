@@ -168,11 +168,11 @@ base can serve several adapters at once, which
 [lora.md](https://github.com/asher/gmlx/blob/main/docs/lora.md) walks through
 end to end.
 
-`distill` trains a small GGUF on a larger one's outputs, position by
-position, without running both at once. The teacher is cached to disk in one pass,
-the cache is aligned to the student's tokenizer, and the student's adapter
-is trained against it, as
-[distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md) shows.
+`distill` teaches a small GGUF what a larger one knows, a document or a
+behavior, by training an adapter on the larger model's outputs without
+running the two at once.
+[distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md)
+walks through it.
 
 ## Performance
 
