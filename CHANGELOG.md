@@ -18,7 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The Qwen3.5-family speculative verify runs the gated-delta scan on a kernel
   that spreads each head across the GPU, with the gated output norm as its
-  own dispatch.
+  own dispatch. The scan records each position's state update instead of
+  storing every state, and the next step replays the accepted ones.
 
 ## [0.4.14] - 2026-09-18
 

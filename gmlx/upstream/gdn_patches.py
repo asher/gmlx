@@ -14,6 +14,7 @@ import mlx.nn as nn
 import atexit
 import sys
 from functools import lru_cache
+from typing import NamedTuple
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
@@ -308,7 +309,7 @@ def _patch_qwen3next_split_gdn(model) -> None:
 # ~1e-7 on the state) rather than bit-identical to the stock bf16-intermediate
 # path, so greedy output can differ from stock only at near-ties.
 
-_GDN_FUSED_DECODE_SRC = r"""
+_GDN_FUSED_DECODE_TEMPLATE = r"""
     constexpr int n_per_t = Dk / 32;
     constexpr int key_dim = Hk * Dk;
     constexpr int value_dim = Hv * Dv;
@@ -360,6 +361,7 @@ _GDN_FUSED_DECODE_SRC = r"""
         auto o_state = state_out + ((uint)(n * Dv + dv)) * Dk;
         float state[n_per_t];
         for (int i = 0; i < n_per_t; ++i) state[i] = (float)i_state[n_per_t * lane + i];
+/*REPLAY*/
         int vch = 2 * key_dim + hv_idx * Dv + dv;
         float va = 0.0f;
         for (int w = 0; w < K_size; ++w)
@@ -396,6 +398,25 @@ _GDN_FUSED_DECODE_SRC = r"""
     }
 """
 
+# The decode step after a verify round whose state is still a pending
+# replay (see set_gdn_replay): each state row first replays the R recorded
+# positions, the same float ops the verify scan ran.
+_GDN_DECODE_REPLAY = r"""
+        for (int p = 0; p < (int)R; ++p) {
+            uint rb = (b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
+            float gp = rg[rb];
+            float dp = rd[rb * Dv + dv];
+            for (int i = 0; i < n_per_t; ++i) {
+                state[i] *= gp;
+                state[i] += rk[rb * Dk + n_per_t * lane + i] * dp;
+            }
+        }
+"""
+
+_GDN_FUSED_DECODE_SRC = _GDN_FUSED_DECODE_TEMPLATE.replace("/*REPLAY*/\n", "")
+_GDN_FUSED_DECODE_REPLAY_SRC = _GDN_FUSED_DECODE_TEMPLATE.replace(
+    "/*REPLAY*/\n", _GDN_DECODE_REPLAY)
+
 _gdn_fused_decode_kernel = (
     mx.fast.metal_kernel(
         name="gmlx_gated_delta_fused_decode",
@@ -412,6 +433,31 @@ _gdn_fused_decode_kernel = (
         ],
         output_names=["y", "state_out"],
         source=_GDN_FUSED_DECODE_SRC,
+    )
+    if mx.metal.is_available()
+    else None
+)
+
+_gdn_fused_decode_replay_kernel = (
+    mx.fast.metal_kernel(
+        name="gmlx_gated_delta_fused_decode_replay",
+        input_names=[
+            "conv_input",
+            "conv_weight",
+            "a",
+            "b",
+            "A_log",
+            "dt_bias",
+            "state_in",
+            "z",
+            "norm_weight",
+            "rd",
+            "rk",
+            "rg",
+            "R",
+        ],
+        output_names=["y", "state_out"],
+        source=_GDN_FUSED_DECODE_REPLAY_SRC,
     )
     if mx.metal.is_available()
     else None
@@ -492,8 +538,13 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     conv_weight = cw[1]
 
     state = cache[1]
+    kernel, replay = _gdn_fused_decode_kernel, []
+    pend = take_gdn_replay(cache) if cache is not None else None
+    if pend is not None:
+        state, records, steps = pend
+        kernel, replay = _gdn_fused_decode_replay_kernel, [*records, steps]
     tiled = int(self.num_k_heads != self.num_v_heads)
-    y, state = _gdn_fused_decode_kernel(
+    y, state = kernel(
         inputs=[
             conv_input,
             conv_weight,
@@ -504,6 +555,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
             state,
             z,
             self.norm.weight,
+            *replay,
         ],
         template=[
             ("InT", conv_input.dtype),
@@ -677,20 +729,31 @@ def _gdn_try_cat_ba(gdn) -> bool:
 # speculative-verify forward, in two dispatches. The scan kernel runs the
 # serial per-position chain (depthwise causal conv, silu, q/k rms-norm,
 # recurrent scan) for RPS state rows per simdgroup and emits the pre-norm
-# outputs, the final state and the per-position states the rejection
-# rollback indexes into. Its threadgroups never synchronize, so one head
-# spreads over Dv / (SGS * RPS) of them and a layer over every core, where
-# the one-threadgroup-per-head form left most of the GPU idle. The gate
-# kernel then applies the gated output norm per (position, head) row.
+# outputs plus what the rejection rollback needs. Its threadgroups never
+# synchronize, so one head spreads over Dv / (SGS * RPS) of them and a layer
+# over every core, where the one-threadgroup-per-head form left most of the
+# GPU idle. The gate kernel then applies the gated output norm per
+# (position, head) row.
+#
+# The scan has two forms. The states form writes the final state and the
+# state after every position but the last, which the rollback indexes. The
+# records form (B=1) writes, per position, the three values a step adds to
+# the state: the decay g, the scaled key and the delta row. A state is then
+# its start state plus a replay of the first R records, and the next kernel
+# to read the state replays them in registers before its own first step
+# (set_gdn_replay). That drops the per-position state store, 7 full states
+# per layer at S=8 (22 MB on the 27B), for about 0.4 MB of records.
 #
 # Same fp32-accurate (not bit-identical) recurrence as the decode kernel;
-# greedy verify output can differ from the stock path only at near-ties.
+# greedy verify output can differ from the stock path only at near-ties. A
+# replay runs the scan's own float ops in the same order, so a replayed
+# state equals the stored one bit for bit.
 
 _GDN_VERIFY_SGS = 4
 _GDN_VERIFY_RPS = 4
 _GDN_VERIFY_ROWS = _GDN_VERIFY_SGS * _GDN_VERIFY_RPS
 
-_GDN_VERIFY_SCAN_SRC = r"""
+_GDN_VERIFY_SCAN_TEMPLATE = r"""
     constexpr int n_per_t = Dk / 32;
     constexpr int key_dim = Hk * Dk;
     constexpr int value_dim = Hv * Dv;
@@ -721,7 +784,7 @@ _GDN_VERIFY_SCAN_SRC = r"""
         auto i_state = state_in + ((uint)(n * Dv + row0 + r)) * Dk;
         for (int i = 0; i < n_per_t; ++i) st[r][i] = (float)i_state[n_per_t * lane + i];
     }
-
+/*PROLOGUE*/
     for (uint t = 0; t < Tn; ++t) {
         // ba packs the b then a projections per position ([B, T, 2, Hv]):
         // one combined gemv upstream instead of two tiny dispatches.
@@ -752,7 +815,7 @@ _GDN_VERIFY_SCAN_SRC = r"""
         float qscale = inv_scale * inv_scale * rsqrt(qsq / (float)Dk + 1e-6f);
         float kscale = inv_scale * rsqrt(ksq / (float)Dk + 1e-6f);
         for (int i = 0; i < n_per_t; ++i) { qn[i] *= qscale; kn[i] *= kscale; }
-
+/*STEP*/
         for (int r = 0; r < RPS; ++r) {
             int dv = row0 + r;
             int vch = 2 * key_dim + hv_idx * Dv + dv;
@@ -768,17 +831,99 @@ _GDN_VERIFY_SCAN_SRC = r"""
             float out = 0.0f;
             for (int i = 0; i < n_per_t; ++i) { st[r][i] += kn[i] * delta; out += st[r][i] * qn[i]; }
             out = simd_sum(out);
-            // Rollback targets are positions 0..Tn-2 only (the state after
-            // all Tn positions is state_out and rollback never fires on
-            // full accept), so the last position is not recorded.
+/*ROW*/
+            if (lane == 0) pre[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = out;
+        }
+    }
+/*EPILOGUE*/
+"""
+
+# States form. Rollback targets are positions 0..Tn-2 only (the state after
+# all Tn positions is state_out and rollback never fires on full accept),
+# so the last position is not recorded.
+_GDN_VERIFY_STATES_ROW = r"""
             if (t + 1 < Tn) {
                 auto states_t = states + ((((uint)b_idx * (Tn - 1) + t) * Hv + hv_idx) * Dv + dv) * Dk;
                 for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[r][i];
             }
-            if (lane == 0) pre[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = out;
+"""
+_GDN_VERIFY_STATES_EPILOGUE = r"""
+    for (int r = 0; r < RPS; ++r) {
+        auto o_state = state_out + ((uint)(n * Dv + row0 + r)) * Dk;
+        for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * lane + i] = (StT)st[r][i];
+    }
+"""
+
+# Records form. The replay loop is shared with the replay-only kernel below.
+_GDN_REPLAY_ROWS = r"""
+    for (int p = 0; p < (int)R; ++p) {
+        uint rb = ((uint)b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
+        float gp = rg[rb];
+        float kp[n_per_t];
+        for (int i = 0; i < n_per_t; ++i) kp[i] = rk[rb * Dk + n_per_t * lane + i];
+        for (int r = 0; r < RPS; ++r) {
+            float dp = rd[rb * Dv + row0 + r];
+            for (int i = 0; i < n_per_t; ++i) { st[r][i] *= gp; st[r][i] += kp[i] * dp; }
         }
     }
+"""
+# A kernel that replayed pending records starts from a state no buffer
+# holds, so it stores that state as the base of its own records.
+_GDN_VERIFY_REC_PROLOGUE = _GDN_REPLAY_ROWS + r"""
+    if (R > 0) {
+        for (int r = 0; r < RPS; ++r) {
+            auto s_state = start + ((uint)(n * Dv + row0 + r)) * Dk;
+            for (int i = 0; i < n_per_t; ++i) s_state[n_per_t * lane + i] = (StT)st[r][i];
+        }
+    }
+"""
+_GDN_VERIFY_REC_STEP = r"""
+        if (part == 0 && sgl == 0) {
+            uint rt = ((uint)b_idx * Tn + t) * Hv + hv_idx;
+            for (int i = 0; i < n_per_t; ++i) kstore[rt * Dk + n_per_t * lane + i] = kn[i];
+            if (lane == 0) gstore[rt] = g;
+        }
+"""
+_GDN_VERIFY_REC_ROW = r"""
+            if (lane == 0) dstore[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = delta;
+"""
 
+
+def _verify_scan_src(prologue="", step="", row="", epilogue=""):
+    return (_GDN_VERIFY_SCAN_TEMPLATE
+            .replace("/*PROLOGUE*/\n", prologue)
+            .replace("/*STEP*/\n", step)
+            .replace("/*ROW*/\n", row)
+            .replace("/*EPILOGUE*/\n", epilogue))
+
+
+_GDN_VERIFY_SCAN_SRC = _verify_scan_src(
+    row=_GDN_VERIFY_STATES_ROW, epilogue=_GDN_VERIFY_STATES_EPILOGUE)
+_GDN_VERIFY_REC_SRC = _verify_scan_src(
+    prologue=_GDN_VERIFY_REC_PROLOGUE, step=_GDN_VERIFY_REC_STEP,
+    row=_GDN_VERIFY_REC_ROW)
+
+# Materializes a pending replay for a reader that is not a fused kernel:
+# the start state plus R records, one thread tile per verify-scan tile.
+_GDN_REPLAY_SRC = r"""
+    constexpr int n_per_t = Dk / 32;
+    constexpr int rows_per_tg = SGS * RPS;
+    constexpr int NTG = Dv / rows_per_tg;
+    uint lane = thread_position_in_threadgroup.x;
+    uint sgl  = thread_position_in_threadgroup.y;
+    uint tgz  = threadgroup_position_in_grid.z;
+    uint part = tgz % NTG;
+    uint n    = tgz / NTG;
+    uint b_idx = n / Hv;
+    uint hv_idx = n % Hv;
+    int row0 = (int)(part * rows_per_tg + sgl * RPS);
+
+    float st[RPS][n_per_t];
+    for (int r = 0; r < RPS; ++r) {
+        auto i_state = state_in + ((uint)(n * Dv + row0 + r)) * Dk;
+        for (int i = 0; i < n_per_t; ++i) st[r][i] = (float)i_state[n_per_t * lane + i];
+    }
+""" + _GDN_REPLAY_ROWS + r"""
     for (int r = 0; r < RPS; ++r) {
         auto o_state = state_out + ((uint)(n * Dv + row0 + r)) * Dk;
         for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * lane + i] = (StT)st[r][i];
@@ -825,6 +970,40 @@ _gdn_fused_verify_kernel = (
     else None
 )
 
+_gdn_verify_rec_kernel = (
+    mx.fast.metal_kernel(
+        name="gmlx_gated_delta_verify_scan_rec",
+        input_names=[
+            "conv_input",
+            "conv_weight",
+            "ba",
+            "A_log",
+            "dt_bias",
+            "state_in",
+            "T",
+            "rd",
+            "rk",
+            "rg",
+            "R",
+        ],
+        output_names=["pre", "start", "dstore", "kstore", "gstore"],
+        source=_GDN_VERIFY_REC_SRC,
+    )
+    if mx.metal.is_available()
+    else None
+)
+
+_gdn_replay_kernel = (
+    mx.fast.metal_kernel(
+        name="gmlx_gated_delta_replay",
+        input_names=["state_in", "rd", "rk", "rg", "R"],
+        output_names=["state_out"],
+        source=_GDN_REPLAY_SRC,
+    )
+    if mx.metal.is_available()
+    else None
+)
+
 _gdn_verify_gate_kernel = (
     mx.fast.metal_kernel(
         name="gmlx_gated_delta_verify_gate",
@@ -835,6 +1014,68 @@ _gdn_verify_gate_kernel = (
     if mx.metal.is_available()
     else None
 )
+
+class GdnRecords(NamedTuple):
+    """What a records-form verify leaves in the sink for the rollback: the
+    state before the round and the per-position (delta, key, g) records."""
+
+    base: mx.array
+    records: tuple
+
+
+_NO_RECORDS: list = []
+
+
+def _no_records() -> tuple:
+    """Placeholder records for a kernel called with R=0, which reads none."""
+    if not _NO_RECORDS:
+        z = (mx.zeros((1, 1, 1, 1)), mx.zeros((1, 1, 1, 1)), mx.zeros((1, 1, 1)))
+        mx.eval(z)
+        _NO_RECORDS.append(z)
+    return _NO_RECORDS[0]
+
+
+def gdn_replay_state(base: mx.array, records: tuple, steps: int) -> mx.array:
+    """The recurrent state after the first ``steps`` recorded positions,
+    replayed onto ``base``. Lazy: a fused kernel that takes the replay
+    itself leaves this array unevaluated."""
+    B, Hv, Dv, Dk = base.shape
+    SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
+    (state,) = _gdn_replay_kernel(
+        inputs=[base, *records, steps],
+        template=[("StT", base.dtype), ("Dk", Dk), ("Dv", Dv), ("Hv", Hv),
+                  ("SGS", SGS), ("RPS", RPS)],
+        grid=(32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS)),
+        threadgroup=(32, SGS, 1),
+        output_shapes=[base.shape],
+        output_dtypes=[base.dtype],
+    )
+    return state
+
+
+def set_gdn_replay(cache, base: mx.array, records: tuple, steps: int) -> None:
+    """Leave ``cache``'s recurrent state as ``base`` plus a replay of
+    ``steps`` records. ``cache[1]`` becomes the lazy replay, so any reader
+    gets the right state, and the fused kernels take the pending replay
+    into their own prologue instead (take_gdn_replay)."""
+    state = gdn_replay_state(base, records, steps)
+    cache[1] = state
+    cache._gdn_replay = (state, base, records, steps)
+
+
+def take_gdn_replay(cache):
+    """``(base, records, steps)`` when ``cache[1]`` is still the replay
+    set_gdn_replay left, else None. Clears the pending record either way.
+    A writer that replaces ``cache[1]`` voids the record by identity; one
+    that updated the array in place would not, and none does."""
+    pend = getattr(cache, "_gdn_replay", None)
+    if pend is None:
+        return None
+    cache._gdn_replay = None
+    if pend[0] is not cache[1]:
+        return None
+    return pend[1], pend[2], pend[3]
+
 
 # Dense (bf16/f16) lm_head verify projection. mx.matmul runs the F16 head at
 # ~68% of peak for verify widths M=2-8 (tuned for M=1 GEMV and large-M GEMM, not
@@ -974,11 +1215,15 @@ def _gdn_fused_verify_call(
     return _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink)
 
 
-def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
+def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False):
     """Fused multi-position verify forward, shared by the class patch
     (stock fallback loads) and the owned GatedDeltaNet class. Callers
     guarantee the route conditions: sink set, S>1, kernel available,
-    Dv%16==0, Dk%32==0."""
+    Dv%16==0, Dk%32==0.
+
+    ``records`` runs the records form of the scan at B=1: the sink carries
+    a GdnRecords and the cache a pending replay of all S positions, so the
+    caller's rollback must know GdnRecords (the owned qwen3.5 one does)."""
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
 
@@ -1054,42 +1299,74 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
     conv_weight = cw[1]
 
     SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
+    Hv, Dk = self.num_v_heads, self.head_k_dim
     tiled = int(self.num_k_heads != self.num_v_heads)
-    pre, new_state, inter = _gdn_fused_verify_kernel(
-        inputs=[
-            conv_input,
-            conv_weight,
-            ba,
-            self.A_log,
-            self.dt_bias,
-            state,
-            S,
-        ],
-        template=[
-            ("InT", conv_input.dtype),
-            ("StT", state.dtype),
-            ("Dk", self.head_k_dim),
-            ("Dv", Dv),
-            ("Hk", self.num_k_heads),
-            ("Hv", self.num_v_heads),
-            ("K_size", self.conv_kernel_size),
-            ("SGS", SGS),
-            ("RPS", RPS),
-            ("TILED", tiled),
-            ("CONV_BF16", 1),
-        ],
-        grid=(32, SGS, B * self.num_v_heads * (Dv // _GDN_VERIFY_ROWS)),
-        threadgroup=(32, SGS, 1),
-        output_shapes=[
-            (B, S, self.num_v_heads, Dv),
-            state.shape,
-            # Per-position rollback states for positions 0..S-2; position
-            # S-1 would duplicate state_out and no rollback path reads it
-            # (every engine call site guards accepted < bs - 1).
-            (B, S - 1, self.num_v_heads, Dv, self.head_k_dim),
-        ],
-        output_dtypes=[mx.float32, state.dtype, state.dtype],
-    )
+    template = [
+        ("InT", conv_input.dtype),
+        ("StT", state.dtype),
+        ("Dk", Dk),
+        ("Dv", Dv),
+        ("Hk", self.num_k_heads),
+        ("Hv", Hv),
+        ("K_size", self.conv_kernel_size),
+        ("SGS", SGS),
+        ("RPS", RPS),
+        ("TILED", tiled),
+        ("CONV_BF16", 1),
+    ]
+    grid = (32, SGS, B * Hv * (Dv // _GDN_VERIFY_ROWS))
+    records = records and B == 1 and _gdn_verify_rec_kernel is not None
+    if records:
+        pend = take_gdn_replay(cache) if cache is not None else None
+        base, replay, steps = pend if pend is not None else (state, _no_records(), 0)
+        pre, start, rd, rk, rg = _gdn_verify_rec_kernel(
+            inputs=[conv_input, conv_weight, ba, self.A_log, self.dt_bias, base, S,
+                    *replay, steps],
+            template=template,
+            grid=grid,
+            threadgroup=(32, SGS, 1),
+            output_shapes=[
+                (B, S, Hv, Dv),
+                # Written only after a replay; else the base is the start.
+                base.shape if steps else (1,),
+                (B, S, Hv, Dv),
+                (B, S, Hv, Dk),
+                (B, S, Hv),
+            ],
+            output_dtypes=[mx.float32, base.dtype, mx.float32, mx.float32,
+                           mx.float32],
+        )
+        rollback = GdnRecords(start if steps else base, (rd, rk, rg))
+        if cache is not None:
+            # Full accept; the rollback shortens the replay on a rejection.
+            set_gdn_replay(cache, rollback.base, rollback.records, S)
+    else:
+        pre, new_state, rollback = _gdn_fused_verify_kernel(
+            inputs=[
+                conv_input,
+                conv_weight,
+                ba,
+                self.A_log,
+                self.dt_bias,
+                state,
+                S,
+            ],
+            template=template,
+            grid=grid,
+            threadgroup=(32, SGS, 1),
+            output_shapes=[
+                (B, S, Hv, Dv),
+                state.shape,
+                # Per-position rollback states for positions 0..S-2;
+                # position S-1 would duplicate state_out and no rollback
+                # path reads it (every engine call site guards accepted <
+                # bs - 1).
+                (B, S - 1, Hv, Dv, Dk),
+            ],
+            output_dtypes=[mx.float32, state.dtype, state.dtype],
+        )
+        if cache is not None:
+            cache[1] = new_state
     nrows = B * S * self.num_v_heads
     (y,) = _gdn_verify_gate_kernel(
         inputs=[pre, z, self.norm.weight, nrows],
@@ -1106,7 +1383,6 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
     )
 
     if cache is not None:
-        cache[1] = new_state
         if hasattr(cache, "advance"):
             cache.advance(S)
             from gmlx.models.qwen35.owned import (
@@ -1118,9 +1394,10 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             _qwen3_5_advance_lengths_info(cache, S)
 
     if gdn_sink is not None:
-        # The rejection rollback indexes the per-position intermediate states and
-        # the conv input directly (snapshot rollback); the q/k/v entries are only
-        # read by the no-intermediate-states fallback, which this path never hits.
+        # The rejection rollback indexes the per-position intermediate states
+        # (or replays the records) and slices the conv input; the q/k/v
+        # entries are only read by the no-intermediate-states fallback, which
+        # this path never hits.
         gdn_sink.append(
             (
                 None,
@@ -1134,7 +1411,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
                 mask,
                 conv_input,
                 self.conv_kernel_size,
-                inter,
+                rollback,
             )
         )
 

@@ -23,7 +23,11 @@ from mlx_vlm.models.qwen3_5 import language as _L
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.envflags import env_bool
 from gmlx.load.loadlog import verbose_print
-from .owned import _qwen3_5_advance_left_padding_info, _qwen3_5_advance_lengths_info
+from .owned import (
+    GdnReplayRollback,
+    _qwen3_5_advance_left_padding_info,
+    _qwen3_5_advance_lengths_info,
+)
 from .verify_linear import verify_linear, verify_linears
 
 
@@ -228,7 +232,8 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_verify_body(
-                self, inputs, mask, cache, gdn_sink
+                self, inputs, mask, cache, gdn_sink,
+                records=getattr(self, "_gdn_records", False),
             )
         return _owned_gdn_unfused(
             self, inputs, mask, cache, gdn_sink, target_verify
@@ -246,11 +251,16 @@ def prepare_gdn(model) -> int:
     fused = env_bool("GMLX_FUSED_GDN", True)
     cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
     lm = getattr(model, "language_model", model)
+    # The records form of the verify needs the rollback that replays them;
+    # a stock-built tree rebound here keeps the stock rollback.
+    records = (fused and isinstance(lm, GdnReplayRollback)
+               and env_bool("GMLX_GDN_REPLAY", True))
     n = 0
     n_ba = 0
     for m in lm.modules():
         if isinstance(m, OwnedQwen3_5GatedDeltaNet):
             m._gdn_owned_fused = fused
+            m._gdn_records = records
             n += 1
             if fused and cat_ba and getattr(m, "_gdn_ba_weight", None) is None:
                 if _gp._gdn_try_cat_ba(m):
