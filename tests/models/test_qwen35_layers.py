@@ -22,7 +22,6 @@ from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5_moe import language as _ML
 from mlx_vlm.models.qwen3_5_moe.config import TextConfig as MoeTextConfig
 from mlx_vlm.models.qwen3_5_moe.language import LanguageModel as MoeStock
-from mlx_vlm.models import activations as _A
 
 import gmlx.models.qwen35.layers as qwen35_layers
 import gmlx.models.qwen35.owned as qwen35_owned
@@ -58,7 +57,6 @@ def _norm(fn):
 def test_copies_match_upstream_source():
     block_cls, layer_cls = qwen35_layers.moe_layer_classes()
     for owned, upstream, name in (
-        (qwen35_layers.swiglu, _A.swiglu, "swiglu"),
         (
             qwen35_layers._target_verify_switch_glu,
             _ML._target_verify_switch_glu,

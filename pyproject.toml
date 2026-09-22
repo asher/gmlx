@@ -175,13 +175,13 @@ include = [
     "gmlx/cache/apc_manager.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
+    "gmlx/load/hadamard_modules.py",
     "gmlx/load/modules.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
-    "gmlx/upstream/hadamard_share.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"

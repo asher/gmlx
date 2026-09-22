@@ -99,6 +99,12 @@ def test_attention_call_mirror():
             ),
             ("scaled_dot_product_attention(", "_sdpa(", 2),
             ("_target_verify_linear(", "verify_linear(", 1),
+            (
+                "output * mx.sigmoid(gate)",
+                "glu_rotate(output, gate, fold_of(self.o_proj), "
+                "activation='sigmoid')",
+                1,
+            ),
         ],
         "Qwen3_5Attention.__call__",
     )
@@ -111,6 +117,11 @@ def test_mlp_call_mirror():
         [
             ("_target_verify_linears(", "verify_linears(", 1),
             ("_target_verify_linear(", "verify_linear(", 1),
+            (
+                "swiglu(gate, up)",
+                "glu_rotate(up, gate, fold_of(self.down_proj))",
+                1,
+            ),
         ],
         "Qwen3_5MLP.__call__",
     )

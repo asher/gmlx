@@ -1,7 +1,9 @@
 """hadamard_share: the swapped qwen3_next attention and MLP forwards
 mirror the stock bodies with the projection group routed through
-``shared_linears``, rotate once per group, and match the per-module
-form bit for bit."""
+``shared_linears`` and the gated activation through ``glu_rotate``, and
+rotate once per group. With the down and output projections unfolded they
+match the per-module form bit for bit. A folded down projection takes the
+fused activation and matches to bf16 rounding."""
 
 from __future__ import annotations
 
@@ -73,6 +75,12 @@ def test_attention_forward_mirrors_upstream():
             ),
             ("\n    keys, values = (self.k_proj(x), self.v_proj(x))", "", 1),
             ("scaled_dot_product_attention(", "_sdpa_of(base_cls)(", 1),
+            (
+                "self.o_proj(output * mx.sigmoid(gate))",
+                "self.o_proj(glu_rotate(output, gate, fold_of(self.o_proj), "
+                "activation='sigmoid'))",
+                1,
+            ),
         ],
     )
     assert _norm(sub.__call__) == expected
@@ -86,7 +94,8 @@ def test_mlp_forward_mirrors_upstream():
             (
                 "return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))",
                 "gate, up = shared_linears((self.gate_proj, self.up_proj), x)\n"
-                "    return self.down_proj(swiglu(gate, up))",
+                "    return self.down_proj(glu_rotate(up, gate, "
+                "fold_of(self.down_proj)))",
                 1,
             ),
         ],
@@ -197,3 +206,40 @@ def test_second_install_is_idempotent(attr):
     cls = type(getattr(model, attr))
     assert hs.install_hadamard_sharing(model) == 0
     assert type(getattr(model, attr)) is cls
+
+
+def test_fused_glu_feeds_a_folded_down_projection(monkeypatch):
+    if getattr(kq, "glu_hadamard", None) is None:
+        pytest.skip("installed mlx-kquant has no glu_hadamard")
+    if mx.default_device() != mx.gpu:
+        pytest.skip("the fused form runs on the GPU device only")
+    rng = np.random.default_rng(24)
+    mx.random.seed(3)
+    model = _Layer()
+    _quantize(model, ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"])
+    inter = _args().intermediate_size
+    hidden = FoldTarget(width=HIDDEN, block=BLOCK,
+                        signs=rng.choice(np.array([-1, 1], dtype=np.int8), HIDDEN))
+    targets = {
+        "mlp.gate_proj": hidden,
+        "mlp.up_proj": hidden,
+        "mlp.down_proj": FoldTarget(
+            width=inter, block=256,
+            signs=rng.choice(np.array([-1, 1], dtype=np.int8), inter)),
+    }
+    assert install_hadamard_modules(model, targets) == 3
+    x = mx.array(rng.standard_normal((2, 3, HIDDEN)).astype(np.float32)).astype(
+        mx.bfloat16)
+    want, n_each = _counted(monkeypatch, lambda: model.mlp(x))
+    assert hs.install_hadamard_sharing(model) == 1
+    calls = []
+    real = kq.glu_hadamard
+    monkeypatch.setattr(
+        kq, "glu_hadamard", lambda *a, **k: calls.append(1) or real(*a, **k))
+    got, n_fused = _counted(monkeypatch, lambda: model.mlp(x))
+    assert len(calls) == 1
+    # Per module: gate, up and down rotate. Swapped: one shared rotation and
+    # the fused activation, whose row the down projection takes as offered.
+    assert (n_each, n_fused) == (3, 2)
+    gf, wf = (np.array(a.astype(mx.float32)) for a in (got, want))
+    assert np.abs(gf - wf).max() <= 3e-2 * np.abs(wf).max()

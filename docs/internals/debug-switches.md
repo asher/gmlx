@@ -19,6 +19,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Same numerics to one rounding. Set this first when debugging a folded file. |
+| `GMLX_HADAMARD_FUSE=0` | Rotate a folded down or output projection's input as its own dispatch instead of inside the swiglu or output gate kernel. Same numerics to bf16 rounding. |
 | `GMLX_HADAMARD_TRACE=1` | Count rotations per forward on a Hadamard-folded file, read back through `hadamard_modules.rotation_count`. |
 | `GMLX_HADAMARD_ROTATE=0` | Skip the Hadamard-fold rotation entirely. The model produces garbage. A benchmark under it measures the rotation's whole cost. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |

@@ -63,6 +63,15 @@ onto forwards that share q/k/v and gate/up. On the 27B this is 258
 rotations per decoded token instead of 402. The stock GDN prefill body
 still rotates `in_proj_qkv` and `in_proj_z` separately.
 
+The down and output projections read a gated activation, the swiglu and
+the attention output gate. Where the installed mlx-kquant has
+`glu_hadamard`, `glu_rotate` computes the activation and its rotation in
+one kernel and offers the rotated row, and the projection's own rotation
+returns that row without a dispatch. The offer matches the array object
+and the fold, so any other row still rotates. The stock forwards and the
+owned tree both route the activation through `glu_rotate`, which covers
+80 of the 258 rotations on the 27B.
+
 ## Precision
 
 A folded file runs at the activation dtype every other file gets, bf16
@@ -89,5 +98,6 @@ fold target raises at resolution for the same reason.
 
 ## Switches
 
-`GMLX_HADAMARD_KERNEL`, `GMLX_HADAMARD_TRACE` and `GMLX_HADAMARD_ROTATE`
-are documented in [debug-switches.md](debug-switches.md).
+`GMLX_HADAMARD_KERNEL`, `GMLX_HADAMARD_FUSE`, `GMLX_HADAMARD_TRACE` and
+`GMLX_HADAMARD_ROTATE` are documented in
+[debug-switches.md](debug-switches.md).

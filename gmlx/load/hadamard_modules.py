@@ -8,7 +8,13 @@ call the projection directly. The rotation itself is one of two forms:
 the default device, else MLX ops (an f32 upcast, the sign multiply and
 ``mx.hadamard_transform`` per block), which is also the CPU path.
 
+Where a gated activation produces a projection's input, ``glu_rotate``
+runs the activation and the rotation as one kq kernel and offers the
+result, so the projection's own ``rotate`` call returns it without a
+dispatch.
+
 Switches: ``GMLX_HADAMARD_KERNEL=0`` forces the MLX-op form,
+``GMLX_HADAMARD_FUSE=0`` keeps the kernel but turns the fused form off,
 ``GMLX_HADAMARD_TRACE=1`` counts rotations (``rotation_count``), and
 ``GMLX_HADAMARD_ROTATE=0`` skips the rotation entirely, which makes the
 model produce garbage and measures the rotation's price.
@@ -17,12 +23,14 @@ model produce garbage and measures the rotation's price.
 from __future__ import annotations
 
 import os
+import threading
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from mlx_kquant.codec_geometry import bytes_per_row
 from mlx_kquant.nn import KQuantEmbedding, KQuantLinear
+from mlx_lm.models.activations import swiglu
 
 from .hadamard import FoldTarget
 
@@ -77,14 +85,40 @@ def _blocked_transform(xf: mx.array, block: int) -> mx.array:
     return y.reshape(*lead, -1)
 
 
-def rotate(x: mx.array, fold: _Fold) -> mx.array:
-    """The forward fold of a projection input: permute, sign, transform.
-    Returns ``x.dtype``."""
+# The last rotation a fused op produced: (source row, fold key, rotated
+# row). One slot per thread, replaced by the next offer.
+_offer = threading.local()
+
+
+def offer_rotation(x: mx.array, fold: _Fold, rotated: mx.array) -> None:
+    """Record that ``rotated`` is ``rotate(x, fold)``, so the next rotation
+    of this ``x`` object under a fold with the same key returns it."""
+    _offer.item = (x, fold.key, rotated)
+
+
+def _offered(x: mx.array, fold: _Fold) -> mx.array | None:
+    item = getattr(_offer, "item", None)
+    if item is not None and item[0] is x and item[1] == fold.key:
+        return item[2]
+    return None
+
+
+def _trace() -> None:
     global _count
-    if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
-        return x
     if os.environ.get("GMLX_HADAMARD_TRACE") == "1":
         _count += 1
+
+
+def rotate(x: mx.array, fold: _Fold) -> mx.array:
+    """The forward fold of a projection input: permute, sign, transform.
+    Returns ``x.dtype``. A rotation a fused op already offered for this
+    ``x`` costs nothing."""
+    if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
+        return x
+    offered = _offered(x, fold)
+    if offered is not None:
+        return offered
+    _trace()
     kernel = _kernel(fold.block)
     if kernel is not None:
         return kernel(x, fold.signs, block=fold.block, perm=fold.perm)
@@ -101,11 +135,9 @@ def rotate(x: mx.array, fold: _Fold) -> mx.array:
 def rotate_inverse(rows: mx.array, fold: _Fold) -> mx.array:
     """The embedding un-rotation: transform, then sign. Returns
     ``rows.dtype``."""
-    global _count
     if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
         return rows
-    if os.environ.get("GMLX_HADAMARD_TRACE") == "1":
-        _count += 1
+    _trace()
     kernel = _kernel(fold.block)
     if kernel is not None:
         out = kernel(rows, None, block=fold.block)
@@ -118,9 +150,47 @@ def rotate_inverse(rows: mx.array, fold: _Fold) -> mx.array:
     return xf.astype(rows.dtype)
 
 
+def _fused(fold: _Fold, name: str):
+    """kq's fused op ``name`` for this fold, or None where the rotation is
+    skipped, takes the MLX-op form, has a permute, or the fused form is
+    off."""
+    if fold.perm is not None or fold.inverse:
+        return None
+    if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
+        return None
+    if os.environ.get("GMLX_HADAMARD_FUSE", "1") == "0":
+        return None
+    if _kernel(fold.block) is None:
+        return None
+    import mlx_kquant as kq
+    return getattr(kq, name, None)
+
+
+def glu_rotate(x: mx.array, gate: mx.array, fold: _Fold | None, *,
+               activation: str = "silu") -> mx.array:
+    """``act(gate) * x`` (silu: swiglu; sigmoid: an output gate) for the
+    folded projection whose fold is ``fold``. Fused, the result is the
+    rotated row, offered as its own rotation; unfused, the plain
+    product."""
+    if fold is None or (op := _fused(fold, "glu_hadamard")) is None:
+        if activation == "silu":
+            return swiglu(gate, x)
+        return x * mx.sigmoid(gate)
+    _trace()
+    y = op(x, gate, fold.signs, block=fold.block, activation=activation)
+    offer_rotation(y, fold, y)
+    return y
+
+
+def fold_of(module) -> _Fold | None:
+    return getattr(module, "_hadamard", None)
+
+
 class HadamardKQuantLinear(KQuantLinear):
     """A folded projection: rotates its input unless the caller already
     did (``pre_rotated=True``, the shared-rotation sites)."""
+
+    _hadamard: _Fold
 
     def __call__(self, x, lora=None, *, pre_rotated=False):
         if not pre_rotated:
@@ -131,6 +201,8 @@ class HadamardKQuantLinear(KQuantLinear):
 class HadamardKQuantEmbedding(KQuantEmbedding):
     """A folded embedding table: un-rotates the gathered rows, and rotates
     the input of the tied-head projection."""
+
+    _hadamard: _Fold
 
     def __call__(self, x):
         return rotate_inverse(super().__call__(x), self._hadamard)
@@ -159,7 +231,7 @@ def shared_linears(modules, x: mx.array) -> tuple:
     rotated: dict = {}
     outs = []
     for m, f, key in zip(modules, folds, keys):
-        if key is None or keys.count(key) < 2:
+        if f is None or key is None or keys.count(key) < 2:
             outs.append(m(x))
             continue
         xr = rotated.get(key)
@@ -219,7 +291,7 @@ def install_hadamard_modules(model: nn.Module,
                 f"Hadamard-folded weight at {path!r}: row width "
                 f"{int(m.weight.shape[-1])} bytes, expected {expected} for "
                 f"input width {t.width} ({m.kquant_type})")
-        m.__class__ = wrapped
+        m.__class__ = wrapped  # pyright: ignore[reportAttributeAccessIssue]
         object.__setattr__(m, "_hadamard", _Fold(t, signs_for(t)))
         matched.add(key)
         n += 1
