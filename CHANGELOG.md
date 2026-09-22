@@ -35,6 +35,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   position beside its logits, and `distill eval --kld-cache` replays them
   so the sparse KL against the teacher's own cache measures elementwise
   noise only.
+- `gmlx distill cache --hidden` stores a seeded random sketch of the
+  teacher's final hidden state per position, and `distill train --hs W`
+  adds a hidden-state term that fits a learned map from the student's
+  final hidden state to the sketch at every shared boundary. Off unless
+  both flags are given.
 
 ### Changed
 

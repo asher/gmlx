@@ -200,6 +200,11 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--routes", action="store_true",
                    help="MoE teachers: store every layer's top-k expert ids per position (the routes field, "
                         "uint8 up to 256 experts) and a routing block in the manifest, for replay by eval.")
+    p.add_argument("--hidden", action="store_true",
+                   help="Also store a seeded random sketch of the teacher's final hidden state per position "
+                        "(the hidden field, float16), for train --hs.")
+    p.add_argument("--hidden-dim", type=int, default=256, help="Width of the hidden sketch (default 256).")
+    p.add_argument("--hidden-seed", type=int, default=1, help="Seed of the sketch matrix (default 1).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 
@@ -283,6 +288,11 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--tau-alm", type=float, default=None, help="Override the view's tau_alm.")
     p.add_argument("--gamma", type=float, default=None, help="Override the view's gamma.")
     p.add_argument("--chunk", type=int, default=512, help="Positions per head chunk (default 512).")
+    p.add_argument("--hs", type=float, default=0.0,
+                   help="Weight of the hidden-state term, a learned linear map from the student's final "
+                        "hidden state to the cache's sketch at every boundary (default 0, off).")
+    p.add_argument("--hs-loss", choices=("cosine", "mse"), default="cosine",
+                   help="cosine: 1 - cosine similarity; mse: squared error on unit vectors (default cosine).")
     p.add_argument("--ckpt-dir", default=None, metavar="DIR",
                    help="Checkpoint directory (default ./ckpt beside the adapter).")
     p.add_argument("--resume", action="store_true", help="Continue from the last checkpoint.")

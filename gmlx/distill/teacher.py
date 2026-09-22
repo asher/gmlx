@@ -24,6 +24,7 @@ from . import cache as _cache
 from . import corpus as _corpus
 from . import format as _format
 from . import frames as _frames
+from . import hidden as _hidden
 from . import student as _student
 from . import tokens as _tokens
 from .constants import GB, log
@@ -67,6 +68,9 @@ class CacheOptions:
     stream_experts: bool = False
     expert_bytes_gb: float | None = None
     routes: bool = False
+    hidden: bool = False
+    hidden_dim: int = 256
+    hidden_seed: int = 1
     extra: dict = field(default_factory=dict)
 
 
@@ -320,7 +324,8 @@ def run_cache(opts: CacheOptions) -> int:
     if generator:
         log(f"[cache] generator sidecar: {generator.get('model')} filter_version "
             f"{generator.get('filter_version')} ({generator_id})")
-    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor)
+    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor,
+                                       hidden_bytes=2 * opts.hidden_dim if opts.hidden else 0.0)
     log(f"[cache] {len(rows)} rows, {n_tokens} tokens, estimate {est / GB:.2f} GB "
         f"({flagged} rows on the offsets fallback)")
     if opts.frame != "none":
@@ -353,6 +358,8 @@ def run_cache(opts: CacheOptions) -> int:
     cfg = config.get("text_config", config) if isinstance(config, dict) else config
     head = teacher_head(model)
     V = head.V
+    hidden_blk = None
+    R_hidden = None   # the sketch matrix, built from the first trunk chunk's width
     recorder, routing = None, None
     if opts.routes:
         recorder, why = _format.install_route_recording(getattr(model, "language_model", model))
@@ -423,6 +430,15 @@ def run_cache(opts: CacheOptions) -> int:
             mx.eval(hidden)
             trunk_wall += time.perf_counter() - tt
             trunk_forwards += 1
+            hidden_sk = None
+            if opts.hidden:
+                if R_hidden is None:
+                    d_model = int(hidden.shape[-1])
+                    R_hidden = mx.array(_hidden.projection_matrix(d_model, opts.hidden_dim, opts.hidden_seed))
+                    hidden_blk = _hidden.hidden_block(d_model, opts.hidden_dim, opts.hidden_seed)
+                    log(f"[cache] hidden: final state {d_model} -> {opts.hidden_dim} dims, "
+                        f"seed {opts.hidden_seed}, float16")
+                hidden_sk = _hidden.sketch(hidden, R_hidden)
             routes_blt = None
             if recorder is not None and routing is not None:
                 routes_blt = _format.take_routes_blt(recorder)
@@ -500,6 +516,8 @@ def run_cache(opts: CacheOptions) -> int:
                 rr["token_end_byte"] = r[4]
                 if routes_blt is not None:
                     rr[_format.ROUTES_FIELD] = routes_blt[j, :m]
+                if hidden_sk is not None:
+                    rr[_format.HIDDEN_FIELD] = hidden_sk[j, :m]
                 reduced.append((r, rr))
                 off += m
         packed = _format.pack_shard([rr for _, rr in reduced], [r[5] for r, _ in reduced], opts.top_k, opts.floor)
@@ -539,6 +557,7 @@ def run_cache(opts: CacheOptions) -> int:
             "generator": generator,
             "mlx_kld_compatible": opts.frame == "none",
             "routing": routing,
+            "hidden": hidden_blk,
             "frame": None if opts.frame == "none" else {
                 "kind": opts.frame,
                 "instruction": opts.frame_instruction if opts.frame == "continue" else None,

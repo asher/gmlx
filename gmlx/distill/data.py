@@ -15,6 +15,7 @@ from gmlx.load.tokenizer import hf_inner, token_bytes
 from .align import Tables, project_topk, shared_boundaries, tokenization_bias_check
 from .constants import GB, NEG_INF
 from .format import (
+    HIDDEN_FIELD,
     ROUTES_FIELD,
     load_shard,
     read_json,
@@ -45,6 +46,7 @@ class RowView:
     chunk_teacher_ll: np.ndarray   # [Nc]
     chunk_teacher_log_bm: np.ndarray  # [Nc]
     stats: dict = field(default_factory=dict)
+    hidden_target: np.ndarray | None = None   # [J, dim] f16 sketch at the boundaries' teacher positions
 
 
 def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.ndarray,
@@ -73,9 +75,11 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
         lp = np.where(gid < tables.G, lp, NEG_INF).astype(np.float32)
         with np.errstate(divide="ignore"):
             log_M = np.log(np.exp(lp.astype(np.float64)).sum(axis=1)).astype(np.float32)
+        hid = cache_row.get(HIDDEN_FIELD)
         return RowView(student_ids=student_ids.astype(np.int32), compute_mask=compute_mask,
                        bnd_pos=pos, bnd_weight=np.ones(J, dtype=np.float32),
                        target_gid=gid, target_log_p=lp, log_M=log_M,
+                       hidden_target=None if hid is None else hid[pos].astype(np.float16),
                        chunk_start=np.zeros(0, np.int32), chunk_end=np.zeros(0, np.int32),
                        chunk_teacher_ll=np.zeros(0, np.float32),
                        chunk_teacher_log_bm=np.zeros(0, np.float32),
@@ -122,9 +126,11 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
         ce.append(s1 - 1)
         tll.append(float(onp[t0:t1].sum()))
         tbm.append(float(lbm[t1]))
+    hid = cache_row.get(HIDDEN_FIELD)
     return RowView(student_ids=student_ids.astype(np.int32), compute_mask=compute_mask,
                    bnd_pos=al.s_pos.astype(np.int32), bnd_weight=w,
                    target_gid=proj["gid"], target_log_p=proj["log_p"], log_M=proj["log_M"],
+                   hidden_target=None if hid is None else hid[al.t_pos].astype(np.float16),
                    chunk_start=np.array(cs, dtype=np.int32), chunk_end=np.array(ce, dtype=np.int32),
                    chunk_teacher_ll=np.array(tll, dtype=np.float32),
                    chunk_teacher_log_bm=np.array(tbm, dtype=np.float32),
@@ -178,7 +184,11 @@ def collate(rows: list[RowView], Kp: int, G: int, pad_to: int = 32) -> dict[str,
     is_bnd[bnd_positions] = True
     other = np.nonzero(compute_mask.reshape(-1) & ~is_bnd)[0].astype(np.int32)
     positions = np.concatenate([bnd_positions, other])
+    hidden = None
+    if rows and all(r.hidden_target is not None for r in rows):
+        hidden = np.concatenate([r.hidden_target for r in rows]).astype(np.float16)
     return {
+        **({"hidden_target": hidden} if hidden is not None else {}),
         "student_ids": student_ids, "compute_mask": compute_mask,
         "positions": positions, "n_bnd": np.int32(len(bnd_positions)),
         "bnd_weight": np.concatenate(bnd_w).astype(np.float32) if bnd_w else np.zeros(0, np.float32),
@@ -285,6 +295,8 @@ class CacheReader:
                                               "top_k_log_softmax", "top_k_indices")}
         if ROUTES_FIELD in sh:
             arrs[ROUTES_FIELD] = sh[ROUTES_FIELD][slot, :n]
+        if HIDDEN_FIELD in sh:
+            arrs[HIDDEN_FIELD] = sh[HIDDEN_FIELD][slot, :n]
         return arrs, sh["_texts"][slot], self.rows_meta[r]
 
 
@@ -372,8 +384,10 @@ class ViewLoader:
                     continue
                 for name in ("student_ids", "compute_mask", "bnd_pos", "bnd_weight", "target_gid",
                              "target_log_p", "log_M", "chunk_start", "chunk_end", "chunk_teacher_ll",
-                             "chunk_teacher_log_bm"):
-                    arrays[f"r{slot}.{name}"] = np.ascontiguousarray(getattr(rv, name))
+                             "chunk_teacher_log_bm", "hidden_target"):
+                    v = getattr(rv, name)
+                    if v is not None:
+                        arrays[f"r{slot}.{name}"] = np.ascontiguousarray(v)
             data = save(arrays)
             total += len(data)
             if max_disk_gb is not None and total > max_disk_gb * GB:
@@ -405,6 +419,7 @@ class ViewLoader:
                        bnd_pos=g("bnd_pos"), bnd_weight=g("bnd_weight"), target_gid=g("target_gid"),
                        target_log_p=g("target_log_p"), log_M=g("log_M"), chunk_start=g("chunk_start"),
                        chunk_end=g("chunk_end"), chunk_teacher_ll=g("chunk_teacher_ll"),
-                       chunk_teacher_log_bm=g("chunk_teacher_log_bm"))
+                       chunk_teacher_log_bm=g("chunk_teacher_log_bm"),
+                       hidden_target=sh.get(f"r{slot}.hidden_target"))
 
 

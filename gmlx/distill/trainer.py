@@ -19,6 +19,7 @@ from gmlx.tune.lora import LORA_KEYS, lora_scale, prepare_lora_student
 from . import align as _align
 from . import data as _data
 from . import frames as _frames
+from . import hidden as _hidden
 from . import loss as _loss
 from . import student as _student
 from .constants import DEFAULT_KNOBS, GB, log
@@ -53,6 +54,8 @@ class TrainOptions:
     tau_alm: float | None = None
     gamma: float | None = None
     chunk: int = 512
+    hs: float = 0.0
+    hs_loss: str = "cosine"
     ckpt_dir: str | None = None
     resume: bool = False
     save_every: int = 200
@@ -147,7 +150,7 @@ def run_train(opts: TrainOptions) -> int:
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
-    from mlx.utils import tree_flatten
+    from mlx.utils import tree_flatten, tree_map
 
     if opts.lora_scale is not None and opts.lora_alpha is not None:
         log("[train] refuse: --lora-scale and --lora-alpha are two conventions for one multiplier; give one")
@@ -235,6 +238,22 @@ def run_train(opts: TrainOptions) -> int:
 
     G, Kp = tables.G, max(int(v["Kp"]) for v in views)
     readers = [_data.CacheReader(Path(v["cache_dir"])) for v in views]
+    hidden_dim = None
+    if opts.hs:
+        if opts.hs_loss not in _hidden.HS_MODES:
+            log(f"[train] refuse: --hs-loss must be one of {', '.join(_hidden.HS_MODES)}")
+            return 2
+        blocks = [(rd.manifest.get("gmlx_distill") or {}).get("hidden") for rd in readers]
+        for d, blk in zip(view_dirs, blocks):
+            if not blk:
+                log(f"[train] refuse: --hs needs a cache with a hidden block (cache --hidden); {d} has none")
+                return 2
+        dims = {int(b["dim"]) for b in blocks}
+        if len(dims) != 1:
+            log(f"[train] refuse: the views' hidden sketches differ in width {sorted(dims)}")
+            return 2
+        hidden_dim = dims.pop()
+        log(f"[train] hidden-state term: weight {opts.hs}, {opts.hs_loss} loss on a {hidden_dim}-dim sketch")
     loaders = [_data.ViewLoader(rd, tokenizer, tables, knobs=knobs, Kp=Kp, identity=bool(v["identity"]),
                                 view_dir=d if any(d.glob("view-*.safetensors")) else None)
                for rd, v, d in zip(readers, views, view_dirs)]
@@ -252,6 +271,19 @@ def run_train(opts: TrainOptions) -> int:
         return _data.collate(rvs, Kp, G) if rvs else None
 
     group_of = None if view["identity"] else mx.array(tables.group_of)
+    hs_state: dict = {"head": None}
+
+    def hs_head_for(d_student: int) -> _hidden.HsHead:
+        """The learned map, created at the student's width on first use
+        and restored from the last checkpoint on a resume."""
+        if hs_state["head"] is None:
+            assert hidden_dim is not None
+            hh = _hidden.HsHead(d_student, hidden_dim, opts.seed,
+                                make_schedule(opts.lr, opts.iters, opts.warmup), weight_decay=0.0)
+            if opts.resume and hh.load(ckpt_dir / "last"):
+                log("[train] hidden-state map restored from the last checkpoint")
+            hs_state["head"] = hh
+        return hs_state["head"]
     log_bmask = log_bmask_from(tables.bmask_S)
 
     def head_stage(batch):
@@ -265,6 +297,17 @@ def run_train(opts: TrainOptions) -> int:
         loss, aux, dh, dparams = _loss.head_pass(hg, batch, head, group_of=group_of, G=G, Kp=Kp,
                                                  log_bmask=log_bmask, knobs=knobs, B=B, Tm1=T - 1, C=opts.chunk,
                                                  head_trainable=bool(opts.full))
+        n_bnd = int(batch["n_bnd"])
+        if opts.hs and n_bnd > 0 and "hidden_target" in batch:
+            hh = hs_head_for(int(hg.shape[-1]))
+            hs_val, dh_b, dW = _hidden.hs_pass(hg[:n_bnd], batch["hidden_target"], hh, opts.hs_loss)
+            dh = mx.concatenate([dh[:n_bnd] + opts.hs * dh_b.astype(dh.dtype), dh[n_bnd:]], axis=0)
+            loss = loss + opts.hs * hs_val
+            mx.eval(loss, dh)
+            aux["hs"] = hs_val
+            aux["_hs_grads"] = tree_map(lambda g: opts.hs * g, dW)
+        else:
+            aux["hs"] = mx.zeros((), dtype=mx.float32)
         return loss, aux, batch["positions"], dh, dparams
 
     def trunk_loss(mdl, batch):
@@ -325,12 +368,15 @@ def run_train(opts: TrainOptions) -> int:
             grads, _norm = optim.clip_grad_norm(grads, opts.clip)
         opt.update(model, grads)
         mx.eval(model.trainable_parameters(), opt.state, loss)
+        if "_hs_grads" in aux:
+            hs_state["head"].update(aux.pop("_hs_grads"))
         step_walls.append(time.perf_counter() - ts0)
         state["iteration"] = it_idx + 1
         state["tokens"] += int(aux["ntoks"])
         if (it_idx + 1) % opts.report_every == 0:
             rec = {"it": it_idx + 1, "loss": float(loss), "dk": float(aux["dk"]), "alm": float(aux["alm"]),
-                   "ce": float(aux["ce"]), "floored": int(aux["floored"]), "tokens": state["tokens"],
+                   "ce": float(aux["ce"]), "hs": float(aux["hs"]), "floored": int(aux["floored"]),
+                   "tokens": state["tokens"],
                    "lr": float(opt.learning_rate), "wall_s": time.perf_counter() - t0,
                    "peak_gb": mx.get_peak_memory() / GB,
                    "active_gb": mx.get_active_memory() / GB, "cache_gb": mx.get_cache_memory() / GB,
@@ -338,7 +384,8 @@ def run_train(opts: TrainOptions) -> int:
                    "load_ms": 1e3 * float(np.median(load_walls[-opts.report_every:]))}
             log_rows.append(rec)
             log(f"[train] it {rec['it']} loss {rec['loss']:.4f} dk {rec['dk']:.4f} alm {rec['alm']:.4f} "
-                f"ce {rec['ce']:.4f} floored {rec['floored']} lr {rec['lr']:.2e} "
+                f"ce {rec['ce']:.4f}" + (f" hs {rec['hs']:.4f}" if opts.hs else "") + " "
+                f"floored {rec['floored']} lr {rec['lr']:.2e} "
                 f"{rec['tokens'] / max(rec['wall_s'], 1e-9):.0f} tok/s step {rec['step_ms']:.0f} ms "
                 f"load {rec['load_ms']:.0f} ms peak {rec['peak_gb']:.1f} GB "
                 f"active {rec['active_gb']:.1f} cache {rec['cache_gb']:.1f}")
@@ -350,9 +397,13 @@ def run_train(opts: TrainOptions) -> int:
                 state["best_val"] = v
                 save_checkpoint(ckpt_dir, "best", model, opt, state, student_kind=kind, full=opts.full,
                                 base_cfg=base_cfg, tokenizer=tokenizer)
+                if hs_state["head"] is not None:
+                    hs_state["head"].save(ckpt_dir / "best")
         if (it_idx + 1) % opts.save_every == 0 or it_idx + 1 == opts.iters:
             save_checkpoint(ckpt_dir, "last", model, opt, state, student_kind=kind, full=opts.full,
                             base_cfg=base_cfg, tokenizer=tokenizer)
+            if hs_state["head"] is not None:
+                hs_state["head"].save(ckpt_dir / "last")
     restore_attn()
     log(f"[train] done: {state['iteration']} iterations, {state['tokens']} tokens, {skipped} skipped, "
         f"{time.perf_counter() - t0:.0f}s")

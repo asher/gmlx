@@ -981,6 +981,9 @@ prepares an on-policy round from replies a student wrote without it.
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
 | `--expert-bytes-gb F` | measured | expert bytes read per forward, for the read-traffic report |
 | `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval` |
+| `--hidden` | off | also store a seeded random sketch of the teacher's final hidden state per position, for `train --hs` |
+| `--hidden-dim N` | `256` | width of the hidden sketch |
+| `--hidden-seed N` | `1` | seed of the sketch matrix |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill align
@@ -1032,6 +1035,8 @@ prepares an on-policy round from replies a student wrote without it.
 | `--tau-alm F` | the view's | override the view's tau_alm |
 | `--gamma F` | the view's | override the view's gamma |
 | `--chunk N` | `512` | positions per head chunk |
+| `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
+| `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
 | `--resume` | off | continue from the last checkpoint |
 | `--save-every N` | `200` | checkpoint interval in steps |

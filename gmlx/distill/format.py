@@ -30,12 +30,13 @@ ROW_KEYS = ("row_id", "doc_id", "window", "n_tokens", "source",
 
 
 def bytes_per_position(K: int, floor: bool = False, text_bytes: float = 4.4,
-                       routes_bytes: float = 0.0) -> float:
-    return 6 * K + 22 + (4 if floor else 0) + text_bytes + routes_bytes
+                       routes_bytes: float = 0.0, hidden_bytes: float = 0.0) -> float:
+    return 6 * K + 22 + (4 if floor else 0) + text_bytes + routes_bytes + hidden_bytes
 
 
-def estimate_cache_bytes(n_tokens: int, K: int, floor: bool = False, routes_bytes: float = 0.0) -> float:
-    return n_tokens * bytes_per_position(K, floor, routes_bytes=routes_bytes)
+def estimate_cache_bytes(n_tokens: int, K: int, floor: bool = False, routes_bytes: float = 0.0,
+                         hidden_bytes: float = 0.0) -> float:
+    return n_tokens * bytes_per_position(K, floor, routes_bytes=routes_bytes, hidden_bytes=hidden_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,7 @@ def estimate_cache_bytes(n_tokens: int, K: int, floor: bool = False, routes_byte
 # ---------------------------------------------------------------------------
 
 ROUTES_FIELD = "routes"
+HIDDEN_FIELD = "hidden"   # [B, L, dim] float16 sketch of the teacher's final hidden state
 
 
 def routes_dtype(n_experts: int):
@@ -206,10 +208,15 @@ def pack_shard(rows: list[dict[str, np.ndarray]], texts: list[bytes], K: int,
     if ROUTES_FIELD in rows[0]:
         r0 = rows[0][ROUTES_FIELD]
         out[ROUTES_FIELD] = np.zeros((B, L) + r0.shape[1:], dtype=r0.dtype)
+    if HIDDEN_FIELD in rows[0]:
+        h0 = rows[0][HIDDEN_FIELD]
+        out[HIDDEN_FIELD] = np.zeros((B, L, h0.shape[-1]), dtype=np.float16)
     for b, r in enumerate(rows):
         n = int(r["token_ids"].shape[0])
         if ROUTES_FIELD in out:
             out[ROUTES_FIELD][b, :n] = r[ROUTES_FIELD]
+        if HIDDEN_FIELD in out:
+            out[HIDDEN_FIELD][b, :n] = r[HIDDEN_FIELD]
         out["top_k_log_softmax"][b, :n] = r["top_k_log_softmax"]
         out["top_k_indices"][b, :n] = r["top_k_indices"]
         out["token_ids"][b, :n] = r["token_ids"]
@@ -377,6 +384,7 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
     K = manifest["top_k"]
     n_batches = manifest["num_batches"]
     routing = gd.get("routing")
+    hidden_blk = gd.get("hidden")
     for i in range(n_batches):
         sp = cache_dir / f"batch-{i:05d}.safetensors"
         rp = cache_dir / f"rows-{i:05d}.jsonl"
@@ -431,6 +439,17 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
                     problems.append(f"shard {i}: routes repeat an expert within a position")
         elif ROUTES_FIELD in sh:
             problems.append(f"shard {i}: routes field present without a routing block in the manifest")
+        if hidden_blk:
+            hv = sh.get(HIDDEN_FIELD)
+            want_h = (B, L, int(hidden_blk["dim"]))
+            if hv is None:
+                problems.append(f"shard {i}: hidden field missing with a hidden block in the manifest")
+            elif hv.shape != want_h:
+                problems.append(f"shard {i}: hidden shape {hv.shape} != {want_h}")
+            elif not np.all(np.isfinite(hv[am].astype(np.float32))):
+                problems.append(f"shard {i}: hidden not finite where attention_mask")
+        elif HIDDEN_FIELD in sh:
+            problems.append(f"shard {i}: hidden field present without a hidden block in the manifest")
         texts = shard_texts(sh)
         for b in range(B):
             n = int(am[b].sum())

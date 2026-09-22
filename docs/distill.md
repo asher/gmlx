@@ -182,6 +182,15 @@ itself, so the measured KL is the quantization noise of the weights and
 not a different routing of the same tokens. The pass refuses the flag on
 a dense teacher and on a MoE block it cannot hook, and names the reason.
 
+`--hidden` stores a sketch of the teacher's final hidden state at every
+position beside the logits, for the hidden-state term of `train --hs`.
+The sketch is the state projected through a random matrix of
+`--hidden-dim` columns drawn from `--hidden-seed`, stored as float16,
+so a 256-wide sketch adds 512 bytes per position to the 1.56 KB of a
+K=256 cache. The manifest records the width, the seed and the teacher's
+hidden size, and a second cache of the same teacher with the same seed
+reproduces the same sketch.
+
 ## Align the cache to the student
 
 ```sh
@@ -243,6 +252,17 @@ mass outside it drifts. On a cross-tokenizer pair a chunk-likelihood term
 matches the probability of whole words between the two tokenizations.
 `--dk`, `--alm` and `--ce` weight the three terms, and the adapter is a
 GGUF that `run`, `chat` and `serve` attach with `--adapter`.
+
+`--hs W` adds a hidden-state term, off by default. A linear map from the
+student's final hidden state to the cache's sketch is trained beside the
+adapter, and at every shared boundary the loss adds `W` times one minus
+the cosine between the mapped state and the teacher's sketch, or the
+squared distance between the two unit vectors with `--hs-loss mse`. The
+map lives in the checkpoint directory and never in the adapter. Every
+view's cache must carry a hidden block from `cache --hidden` of the same
+width, and the pass refuses otherwise. The logit terms carry the result
+on their own, so leave the term off unless a run of your own shows a
+gain from it.
 
 The settings that held on a 9B student at Q6_K are rank 128 with alpha
 64, a peak rate of 5e-5, batch 3 and two epochs, with `--dk 1 --alm 1
@@ -422,6 +442,8 @@ plain top-K distillation with nothing projected.
 - Recorded routes are replayed by `eval --kld-cache` on the cache's own
   teacher. `train` does not replay them, so a MoE student trained from a
   MoE teacher of the same family learns from the teacher's outputs alone.
+- The hidden-state term reads the teacher's final hidden state only. No
+  intermediate layer is stored, and the sketch is fixed at cache time.
 - Task files for `eval` are read from disk. Nothing is downloaded.
 - One cache serves any student, but a view is bound to its cache and its
   tokenizer pair, and `train` refuses a view whose cache changed.
