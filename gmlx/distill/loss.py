@@ -21,7 +21,7 @@ from .head import HeadSpec, chunked_head, chunked_head_vjp
 def kl_bern(log_a, log_b):
     """KL(Bern(a) || Bern(b)) from log a, log b in f32. Both logs are
     clamped to [LOG_FLOOR, -1e-7] so a -inf boundary mass on either side
-    stays finite (N5 floor) with zero gradient below the floor."""
+    stays finite at the f32 min-normal floor with zero gradient below it."""
     import mlx.core as mx
     lo = mx.array(LOG_FLOOR, dtype=mx.float32)
     hi = mx.array(-1e-7, dtype=mx.float32)
@@ -36,10 +36,11 @@ def bucketed_kl(target_log_p, log_M, Q_slot, weight, *, mode: str = "bucketed",
     """Weighted mean over boundaries of the bucketed sparse KL.
 
     target_log_p [Nb, Kp] (-inf pads), log_M [Nb], Q_slot [Nb, Kp + 1]
-    linear (slot Kp the exact tail), weight [Nb]. Underflow rule N5:
-    log Q = log(max(Q, 2^-126)); a floored slot is finite with zero
-    gradient and is counted. Pads contribute zero by mx.where. Modes:
-    bucketed (KL_bern(M||Q_S) + M KL(p~||q~)), paper (head term only),
+    linear (slot Kp the exact tail), weight [Nb]. Underflow rule:
+    log Q = log(max(Q, 2^-126)), the f32 min-normal floor. A floored slot
+    is finite with zero gradient and is counted. Pads contribute zero by mx.where. Modes:
+    bucketed (KL_bern(M||Q_S) + M KL(p~||q~)), paper (the top-K term with
+    no tail bucket),
     renorm (support-only softmax on both sides). T_dk tempers the
     conditional factor over group masses (both sides) when != 1.
     Returns (loss, aux) with aux["floored"] the floored-slot count."""

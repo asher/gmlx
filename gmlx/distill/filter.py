@@ -153,7 +153,7 @@ def run_filter(opts: FilterOptions) -> int:
     inputs = [Path(p).expanduser() for p in opts.inputs]
     for p in inputs:
         if not p.is_file():
-            print(f"distill filter: no such file: {p}", file=sys.stderr)
+            print(f"[filter] refuse: no such file: {p}", file=sys.stderr)
             return 2
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -173,7 +173,7 @@ def run_filter(opts: FilterOptions) -> int:
         try:
             verdicts = run_verify(opts.verify, survivors)
         except RuntimeError as e:
-            print(f"distill filter: {e}", file=sys.stderr)
+            print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
         kept_rows = []
         for row, v in zip(survivors, verdicts):
@@ -187,7 +187,7 @@ def run_filter(opts: FilterOptions) -> int:
         try:
             survivors = [recontext_row(r, context, opts.context_format) for r in survivors]
         except ValueError as e:
-            print(f"distill filter: {e}", file=sys.stderr)
+            print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
     with open(out, "w", encoding="utf-8") as ofh:
         for row in survivors:

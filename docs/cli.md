@@ -854,7 +854,7 @@ and writes a view, `train` fits a LoRA adapter on a K-quant GGUF student
 against the view, and `eval` scores the student with and without the
 adapter. `census` measures, from two reply caches of the same prompts,
 how much a context the student never sees moves the teacher. The teacher
-and the student may use different tokenizers. For the walkthrough, read
+and the student may use different tokenizers. The walkthrough is
 [distill.md](distill.md).
 
 ```sh
@@ -868,11 +868,12 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 ```
 
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
-success and 2 when it refuses before loading a model. `gen` exits 1 when
+success and 2 when it refuses an input or a setting. `gen` exits 1 when
 some requests failed and their prompts remain to be rerun. `cache` also
-exits 3 when the memory probe fails twice and 4 when the validator
-rejects what was written, `align` exits 3 when the projection gate refuses
-the pair, and `cache --validate` exits 1 on a problem.
+exits 3 when the memory probe fails twice or the recorded routes do not
+match the chunk, and 4 when the validator rejects what was written.
+`align` exits 3 when the projection gate refuses the pair, and
+`cache --validate` exits 1 on a problem.
 
 ### distill gen
 
@@ -901,8 +902,8 @@ skipped, so a run resumes where it stopped.
 | `--chat-template-kwargs JSON` | none | passed to `gmlx serve --chat-template-config` for the teacher's render |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
-| `--thinking` | off | reasoning on; the trace is kept as `reasoning_content` on the reply |
-| `--thinking-budget N` | none | with `--thinking`, cap the trace at N tokens per request; replies it cut are marked for `filter` |
+| `--thinking` | off | reasoning on, with the trace kept as `reasoning_content` on the reply |
+| `--thinking-budget N` | none | with `--thinking`, cap the trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the trace against the budget when `--base-url` is given |
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
@@ -912,21 +913,21 @@ skipped, so a run resumes where it stopped.
 | `--top-p F` | `0.9` | nucleus sampling |
 | `--top-k N` | the server's | top-k cutoff |
 | `--min-p F` | the server's | minimum-probability cutoff |
-| `--seed N` | `1` | base seed; each request uses it plus the prompt index |
+| `--seed N` | `1` | base seed, and each request uses it plus the prompt index |
 | `--timeout S` | `1800` | per-request timeout |
 | `--report-every N` | `50` | progress line interval in replies |
 
 ### distill filter
 
-Checks run in a fixed order and the first failure names the reason:
-`length` (the reply did not reach its end of turn), `budget` (the
-thinking budget cut the trace), `empty`, `marker` (a template marker
-leaked into the reply), `repeat`, `ascii`, `tokens` (over
-`--max-reply-tokens`), then `verify`. The verify command reads the
-surviving rows as jsonl on stdin and prints one line per row, `ok` or a
-reason word. `--context` rebuilds every kept row with the context on the
-teacher's side and the prompt as given under `student_messages`, which
-prepares an on-policy round from replies a student wrote without it.
+Checks run in a fixed order and the first failure names the reason,
+one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
+`tokens` and `verify`, defined in
+[Round one](distill.md#round-one-the-teacher-writes-the-corpus) of the
+guide. The verify command reads the surviving rows as jsonl on stdin and
+prints one line per row, `ok` or a reason word. `--context` rebuilds
+every kept row with the context on the teacher's side and the prompt as
+given under `student_messages`, which prepares a second round from
+replies a student wrote without it.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -946,6 +947,8 @@ prepares an on-policy round from replies a student wrote without it.
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
 
 ### distill cache
+
+The flags of the teacher pass, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -988,6 +991,8 @@ prepares an on-policy round from replies a student wrote without it.
 
 ### distill align
 
+The flags of the alignment pass, in the order `--help` prints them.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--cache DIR` | required | the cache directory |
@@ -1009,6 +1014,8 @@ prepares an on-policy round from replies a student wrote without it.
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill train
+
+The flags of the training loop, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1050,6 +1057,8 @@ prepares an on-policy round from replies a student wrote without it.
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill eval
+
+The flags of the evaluation, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

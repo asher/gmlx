@@ -178,8 +178,7 @@ infers the model's turn-ending tokens from the template it ends up with, so
 an override changes which tokens stop generation as well.
 
 Three helpers read a tokenizer's vocabulary as bytes, for tools that line
-up two tokenizers over the same text, such as the distillation view
-compiler. They take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
+up two tokenizers over the same text, such as `gmlx distill align`. They take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
 
 ```python
 from gmlx import token_bytes, whitespace_start_mask, vocab_map_hash
@@ -190,7 +189,7 @@ key = vocab_map_hash(tokenizer)                # 16 hex digits over the id-to-to
 ```
 
 `token_bytes(tokenizer, width=None)` returns the byte string of every id
-below `width`, which defaults to the vocabulary size; specials and unfilled
+below `width`, which defaults to the vocabulary size. Specials and unfilled
 ids are `None`. ByteLevel vocabularies go through the GPT-2 byte decoder,
 and SentencePiece vocabularies map the U+2581 marker to a space and
 `<0xNN>` pieces to that byte. `whitespace_start_mask(tokenizer, width,

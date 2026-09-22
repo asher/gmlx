@@ -12,16 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backward pass, so longer sequences fit in memory at some cost in time.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
-- `gmlx distill`, offline distillation of a teacher GGUF into a student
-  adapter: `gen` runs the teacher through `gmlx serve` over a prompt set
-  and writes its replies as a corpus, `filter` drops the rows a student
-  should not learn from, `cache` stores the teacher's top-K log-probs over
-  a corpus in one pass, `align` maps the cache onto the student's
-  tokenizer, `train` fits a LoRA adapter on the K-quant student against
-  it, `eval` scores the student before and after, and `census` measures
-  how much a context the student never sees moves the teacher, from two
-  caches of the same replies. The teacher and student may use different
-  tokenizers. The library is `gmlx.distill`, the guide docs/distill.md.
+- `gmlx distill` distills a teacher GGUF into a student LoRA adapter
+  offline, across tokenizers if needed. Guide in docs/distill.md.
 - MoE route record and replay (`gmlx.stream.moe_routes`): a forward's
   per-layer expert ids can be captured and fed back so a later forward
   over the same positions selects the same experts with live mixing
@@ -29,8 +21,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kimi-k3 and DeepSeek-shaped gate families, resident or streamed.
 - `GMLX_BATCH_INVARIANT=1` runs the small float projections (expert
   router, gated-delta gates) on a kernel whose result does not depend on
-  the row count, so a row's logits are the same at any batch size. About
-  one percent of prefill on a 35B MoE; off by default.
+  the row count, so a row's logits are the same at any batch size. It
+  costs about one percent of prefill on a 35B MoE and is off by default.
 - `gmlx distill cache --routes` stores a MoE teacher's expert ids per
   position beside its logits, and `distill eval --kld-cache` replays them
   so the sparse KL against the teacher's own cache measures elementwise
@@ -43,45 +35,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Training attention (`gmlx train`, and every model whose attention runs
-  in training mode) recomputes query blocks in the backward instead of
+- Training attention recomputes query blocks in the backward instead of
   keeping each layer's full softmax on the gradient tape. Peak memory of
   the attention backward at 4096-token rows falls from 10.7 GB to 2.8 GB
-  on Qwen3.5-9B's attention shape. `GMLX_TRAIN_BLOCKED_ATTN=0` restores
-  MLX's own path.
-- The gated delta scan of a training forward (owned Qwen3.5, 3.6 and
-  Qwen4 experimental) runs the chunked rule from `gmlx.tune.gdn` inside a
-  per-layer checkpoint instead of mlx-lm's per-token loop: 64 tokens per
-  batched step instead of one, and the tape keeps the scan's inputs
-  instead of a state per token. `GMLX_TRAIN_GDN_CHUNK=0` restores the loop.
-  `gmlx train` and `gmlx distill` also run float32 matmul at exact
-  precision (`MLX_ENABLE_TF32=0` unless the variable is already set),
-  since the chunked rule diverges under MLX's default TF32 rounding on
-  M5-class GPUs; a process that keeps TF32 on takes the loop and says so.
+  on Qwen3.5-9B. `GMLX_TRAIN_BLOCKED_ATTN=0` restores MLX's own path.
+- Training on Qwen3.5, 3.6 and Qwen4 experimental runs a chunked gated
+  delta scan, 64 tokens per step instead of one. `GMLX_TRAIN_GDN_CHUNK=0`
+  restores the loop.
+- `gmlx train` and `gmlx distill` run float32 matmul at exact precision
+  unless `MLX_ENABLE_TF32` is already set, since the chunked scan diverges
+  under TF32 rounding. A process that keeps TF32 on takes the loop and
+  says so.
 - `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
   blocks, which were reported as unsupported before.
 
 ### Fixed
 
-- `gmlx distill align --tables DIR` on a pair whose hashes matched the
-  artifact wrote a view without its own tables, so `train` and `eval` on
-  that view stopped with a missing tables.safetensors. The view now
-  carries a copy.
 - A test run or a long session could stop dead inside the expert
   streaming feeders: their finalizers joined the staging pools, and a
   collection that ran while a new thread was starting deadlocked on the
   interpreter's thread-shutdown lock. The finalizers no longer wait.
-- `gmlx distill train` and `gmlx train` on a text-only Qwen3.5 or Qwen3.6
-  GGUF ran the gated delta scan as mlx-lm's per-token loop with every
-  state on the gradient tape, so a 9B student ran out of memory at the
-  first step on rows near 1000 tokens. The training forward now takes
-  the checkpointed chunked scan the vision-capable forward already used.
-- The same per-token loop under training reached Qwen3-Next through
-  mlx-lm's class and Kimi-K3 and GLM-5-Next through their owned forwards,
-  with the GLM-5-Next chunk kernels carrying no gradient. All three now
-  take a checkpointed scan under training: the chunked rule for
-  Qwen3-Next, the loop inside a checkpoint for the per-key-channel decay
-  of the other two. Untested on a real run.
+- `gmlx train` on a text-only Qwen3.5 or Qwen3.6 GGUF kept every state
+  of the gated delta scan on the gradient tape, so a 9B model ran out of
+  memory at the first step on rows near 1000 tokens.
+- `gmlx train` on Qwen3-Next, Kimi-K3 and GLM-5-Next ran the same
+  per-token scan on the tape, and the GLM-5-Next chunk kernels carried no
+  gradient. All three now take a checkpointed scan under training.
 - `gmlx serve --adapter` on a base whose text stack sits under
   `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
   every target reported as unmatched. The install now enters the text
@@ -91,10 +70,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `'LoRAKQuantLinear' object has no attribute 'weight'` once an adapter had
   wrapped them. Adapted projections keep the stock path, which carries
   the adapter's delta.
-- `distill cache` crashed with `[logsumexp] Received empty array` on any
-  teacher whose head used more memory than the budgeted 16 bytes per
-  vocabulary element. The probe re-derived the head sub-chunk with its
-  floor flag in the step slot and came back with a step of zero.
 - The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
   GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
   applied at run time. `validate` reports a folded file.

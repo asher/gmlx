@@ -208,9 +208,9 @@ def chunked_gdn_active(a: mx.array) -> bool:
         return True
     if not _TF32_WARNED:
         _TF32_WARNED = True
-        print("[tune] float32 matmul runs at TF32 precision on this device, so the gated delta "
-              "training scan takes mlx-lm's per-token loop; set MLX_ENABLE_TF32=0 before the "
-              "process starts for the chunked rule", file=sys.stderr, flush=True)
+        print("[tune] float32 matmul runs at TF32 precision, so the gated delta training scan "
+              "takes mlx-lm's per-token loop. Set MLX_ENABLE_TF32=0 before the process starts "
+              "for the chunked rule.", file=sys.stderr, flush=True)
     return False
 
 

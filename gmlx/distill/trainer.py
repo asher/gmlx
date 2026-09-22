@@ -159,7 +159,7 @@ def run_train(opts: TrainOptions) -> int:
                        scale=(2.0 if opts.lora_scale is None else opts.lora_scale) if opts.lora_alpha is None else None,
                        alpha=opts.lora_alpha)
     if opts.seed == 0:
-        log("[train] seed 0: the iterator seeds unconditionally, so it is a valid seed here")
+        log("[train] seed 0 accepted")
     if not opts.views:
         log("[train] refuse: at least one --view is required")
         return 2
@@ -229,7 +229,7 @@ def run_train(opts: TrainOptions) -> int:
     if opts.grad_checkpoint:
         log(f"[train] per-layer checkpointing on {checkpoint_layers(model)} layer classes")
     restore_attn = install_training_attention(model)
-    log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} stock attention seams patched")
+    log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} attention modules patched")
     gdn_install = install_training_gdn(model)
     if gdn_install.count:
         log(f"[train] checkpointed gated delta training scan on {gdn_install.count} mlx-lm layers")

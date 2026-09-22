@@ -10,11 +10,11 @@ from typing import Any
 GB = 1e9
 FORMAT_VERSION = 1
 TABLES_VERSION = 1
-LOG_FLOOR = math.log(2.0 ** -126)   # f32 min normal; the N5 underflow floor
+LOG_FLOOR = math.log(2.0 ** -126)   # the f32 min-normal underflow floor
 NEG_INF = float("-inf")
 SENTINEL_LOG_P = NEG_INF
 
-# Objective knobs; the experiment doc owns the values.
+# Loss defaults. The CLI flags override them per run.
 DEFAULT_KNOBS: dict[str, Any] = dict(
     lambda_dk=1.0, lambda_alm=1.0, lambda_ce=0.0, w_mid=0.5, T_dk=1.0,
     tau_alm=1.0, gamma=1e-3, max_chunk_len=8, redirect_cut=0.5,

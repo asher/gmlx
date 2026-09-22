@@ -588,11 +588,11 @@ def run_cache(opts: CacheOptions) -> int:
                             "active_gb": mx.get_active_memory() / GB},
             "captured_mass_histogram": {"edges": edges[:-1] + [1.0], "counts": hist,
                                         "mean": float(captured.mean()) if captured.size else None},
-            "serves": "any student tokenizer; --top-k 128 is the same-tokenizer economy",
+            "serves": "any student tokenizer",
         })
     problems = _format.validate_cache(out)
     if problems:
         log("[cache] validator: " + "; ".join(problems[:10]))
         return 4
-    log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator green")
+    log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

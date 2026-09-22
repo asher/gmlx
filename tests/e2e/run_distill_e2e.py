@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end offline distillation on a small GGUF pair: gen, filter, cache,
-align, train, eval, as a user runs the six verbs.
+align, train, eval, as a user runs the actions.
 
   1. prep a small text corpus (a bundled paragraph set, no network);
   2. ``gmlx distill cache`` a teacher GGUF over it at a small top-K;
@@ -14,7 +14,7 @@ align, train, eval, as a user runs the six verbs.
      result with the reply frame, asserting the manifest records the
      generator.
 
-Every verb runs as a real subprocess through the console script. Not
+Every action runs as a real subprocess through the console script. Not
 ``test_``-prefixed, so pytest skips it: it needs the GPU and two GGUFs. Run
 it with the project interpreter::
 

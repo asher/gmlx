@@ -1,8 +1,8 @@
 """Offline distillation: a student-agnostic teacher cache of top-K
 log-probs, cross-tokenizer alignment by group projection, a fused
 chunked head with the bucketed sparse KL and ALM losses, the batch
-loader and the evaluation helpers. The CLI verbs and the user guide
-follow in a later change. Every GB is decimal (1e9 bytes).
+loader and the evaluation helpers. The CLI is ``gmlx distill`` and the
+user guide is docs/distill.md. Every GB is decimal (1e9 bytes).
 
 The modules are imported here so one namespace carries the library.
 """

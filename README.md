@@ -169,7 +169,7 @@ base can serve several adapters at once, which
 end to end.
 
 `distill` trains a small GGUF on a larger one's next-token distributions
-without running both at once: the teacher is cached to disk in one pass,
+without running both at once. The teacher is cached to disk in one pass,
 the cache is aligned to the student's tokenizer, and the student's adapter
 is trained against it, as
 [distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md) shows.

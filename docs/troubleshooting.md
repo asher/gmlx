@@ -24,6 +24,7 @@ and names the fix for anything it flags.
 | a request gets 403 hf_access_disabled | [Requests fail with 403 hf_access_disabled](#requests-fail-with-403-hf_access_disabled) |
 | Hugging Face answers 401 or 403 | [A gated or private repo will not download](#a-gated-or-private-repo-will-not-download) |
 | the machine swaps or the server exits | [Memory pressure, swapping, or a server that exits](#memory-pressure-swapping-or-a-server-that-exits) |
+| a distill step drops rows, refuses, or the adapter learns nothing | [A distill step fails or the adapter learns nothing](#a-distill-step-fails-or-the-adapter-learns-nothing) |
 | you need the logs and the resolved config | [Where the logs are](#where-the-logs-are) |
 | you need to find or remove what gmlx wrote | [Where files are on disk](#where-files-are-on-disk) |
 
@@ -198,6 +199,17 @@ over-budget MoE model use `--stream-cpu`, or `--stream-experts` for
 long-context work with a quantized KV cache, as [streaming.md](streaming.md)
 describes. On a multi-model server, lower `--budget-gb` or `--max-models` so
 that residency stays under the limit.
+
+## A distill step fails or the adapter learns nothing
+
+`gmlx distill filter` drops most rows, `align` warns or refuses, the
+census effect is small, `train` runs out of memory, or the served
+adapter scores near zero.
+
+Each of those has its own cause and fix under
+[When something goes wrong](distill.md#when-something-goes-wrong) in the
+distillation guide. The exit codes of every action are under
+[gmlx distill](cli.md#gmlx-distill).
 
 ## Where the logs are
 

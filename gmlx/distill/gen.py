@@ -326,26 +326,26 @@ def run_gen(opts: GenOptions) -> int:
     some failed (the rows that succeeded are written and a rerun picks up
     the rest), 2 on a refusal before any request."""
     if not opts.prompts and not opts.corpus:
-        print("distill gen: --prompts or --corpus is required", file=sys.stderr)
+        print("[gen] refuse: --prompts or --corpus is required", file=sys.stderr)
         return 2
     if not opts.teacher and not opts.base_url:
-        print("distill gen: --teacher or --base-url is required", file=sys.stderr)
+        print("[gen] refuse: --teacher or --base-url is required", file=sys.stderr)
         return 2
     if opts.thinking_budget and not opts.thinking:
-        print("distill gen: --thinking-budget needs --thinking", file=sys.stderr)
+        print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
         return 2
     tokenizer = None
     if opts.thinking_budget:
         tok_path = opts.tokenizer or opts.teacher
         if not tok_path:
-            print("distill gen: --thinking-budget with --base-url needs --tokenizer to count the trace",
+            print("[gen] refuse: --thinking-budget with --base-url needs --tokenizer to count the trace",
                   file=sys.stderr)
             return 2
         from .tokens import load_tokenizer
         try:
             tokenizer = load_tokenizer(tok_path)
         except (FileNotFoundError, OSError, ValueError) as e:
-            print(f"distill gen: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
+            print(f"[gen] refuse: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
             return 2
     opts.chat_template_kwargs = _template_kwargs(opts)
     out = Path(opts.out).expanduser()
@@ -353,7 +353,7 @@ def run_gen(opts: GenOptions) -> int:
     try:
         rows = prompt_rows(opts)
     except ValueError as e:
-        print(f"distill gen: {e}", file=sys.stderr)
+        print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
     done = _done_ids(out)
@@ -434,7 +434,7 @@ def run_gen(opts: GenOptions) -> int:
             f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {n_err} failed, sidecar {side}")
         return 0 if n_err == 0 else 1
     except ServerError as e:
-        print(f"distill gen: {e}", file=sys.stderr)
+        print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     finally:
         stop_server(opts, proc)

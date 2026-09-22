@@ -242,7 +242,7 @@ def run_census(opts: CensusOptions) -> int:
     caches = [Path(opts.without).expanduser()] + [Path(c).expanduser() for c in opts.with_]
     for c in caches:
         if not (c / "manifest.json").is_file():
-            print(f"distill census: no manifest in {c}", file=sys.stderr)
+            print(f"[census] refuse: no manifest in {c}", file=sys.stderr)
             return 2
     base = reply_rows(caches[0], opts.pair_by)
     ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]
@@ -251,7 +251,7 @@ def run_census(opts: CensusOptions) -> int:
         f"paired by {opts.pair_by}")
     s = census(base, ctx, delta_threshold=opts.delta_threshold, id_of=id_of, max_rows=opts.max_rows)
     if s["rows"] == 0:
-        print("distill census: no reply rows pair across the caches (same prompts, --frame reply, "
+        print("[census] refuse: no reply rows pair across the caches (same prompts, --frame reply, "
               "matching reply bytes)", file=sys.stderr)
         return 2
     summary = {"caches": {"without": str(caches[0]), "with": [str(c) for c in caches[1:]]},

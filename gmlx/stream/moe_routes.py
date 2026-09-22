@@ -22,7 +22,7 @@ replay would misalign every layer after the gap.
 
 Position bookkeeping is the caller's: set ``RouteReplay.offset`` to the
 first position of each chunk before its forward (``advance`` moves it by
-the tokens just consumed), and keep the batch row count of the replayed
+the tokens consumed in that step), and keep the batch row count of the replayed
 forward equal to the recorded one.
 """
 
