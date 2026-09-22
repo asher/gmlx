@@ -20,8 +20,9 @@ at most one full-width temporary is live beyond the log-softmax. That is 14
 bytes per V-element, budgeted as 16 without `--floor` and 20 with it.
 
 `step` is the largest halving tier of 4096 positions with `step * V *
-bytes` under `--logits-cap-gb`, from `gmlx.gen.prefill_plan`. The first sub-chunk of
-every pass runs after a peak-memory reset, and the measured bytes per
+bytes` under `--logits-cap-gb`, from `gmlx.gen.prefill_plan`. The first
+sub-chunk of every pass runs after a peak-memory reset, and the measured
+bytes per
 V-element replace the budget when they exceed it. The step is then
 re-derived against the unchanged cap and a second sub-chunk confirms the
 peak fits. A second miss refuses the pass with the measured constant in
@@ -93,15 +94,17 @@ them at full weight already.
 ## The cross-tokenizer result
 
 Aligning the same schema cache onto gemma-4-12b-it at Q6_K, a student
-from another tokenizer family, trained with the guide's settings and
-served with thinking off, reached 0.296 on the held-out
+from another tokenizer family, gave an adapter trained with the guide's
+settings and served with thinking off. It reached 0.296 on the held-out
 questions against 0.930 with the schema pasted into its prompt, about a
 third of the gap, and 0.050 on the families never trained on. The
 same-tokenizer student reached 0.882 and 0.925 on the same slices.
 
 The adapter answered the single-table questions and failed the joins on
 column names the schema does not have, so the projection carried the
-shape of the replies and only part of the document. The census over the
-pair read an own-group fraction of 0.83 and a shared-boundary
+shape of the replies and only part of the document. The alignment
+statistics for the pair read an own-group fraction of 0.83 and a
+shared-boundary
 fraction of 0.47, which is where the tokenizations diverge. At the
-census positions the student's nats per token fell from 8.21 to 0.80.
+positions the document moved the student's nats per token fell from
+8.21 to 0.80.

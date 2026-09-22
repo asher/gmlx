@@ -226,8 +226,9 @@ def report_markdown(opts: CensusOptions, s: dict) -> str:
              f"| positions above {opts.delta_threshold} nats | {s['high_delta_fraction']} |",
              f"| top-1 moved | {s['top1_moved_fraction']} |",
              f"| residual across contexts (nats) | {s['residual_kl_nats']} |",
-             f"| teacher nats on high-delta positions, without / with | {hd['nll_nats_without']:.1f} / "
-             f"{hd['nll_nats_with']:.1f} over {hd['bytes']} bytes |", ""]
+             f"| teacher nats per token on high-delta positions, without / with | "
+             f"{hd['nll_nats_without'] / max(hd['positions'], 1):.2f} / "
+             f"{hd['nll_nats_with'] / max(hd['positions'], 1):.2f} over {hd['positions']} positions |", ""]
     if hist:
         lines.append("Delta histogram (nats): " + ", ".join(
             f"{HIST_BINS[i]}..{HIST_BINS[i + 1]}: {c}" for i, c in enumerate(hist)))
@@ -264,5 +265,6 @@ def run_census(opts: CensusOptions) -> int:
         md.parent.mkdir(parents=True, exist_ok=True)
         md.write_text(report_markdown(opts, s), encoding="utf-8")
     log(f"[census] effect {s['distillable_effect_kl_nats']} nats, delta {s['mean_onpath_delta_nats']}, "
-        f"high-delta fraction {s['high_delta_fraction']}, residual {s['residual_kl_nats']}; wrote {out}")
+        f"high-delta fraction {s['high_delta_fraction']}, residual {s['residual_kl_nats']}")
+    log(f"[census] wrote {out}")
     return 0

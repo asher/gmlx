@@ -859,7 +859,8 @@ the student may use different tokenizers, and the walkthrough is
 - `train` fits a LoRA adapter on a K-quant GGUF student against the view.
 - `eval` scores the student with and without the adapter.
 - `census` measures, from two reply caches of the same prompts, how much
-  a context the student never sees moves the teacher.
+  a context the student never sees, the document in the guide, moves the
+  teacher.
 
 ```sh
 gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
@@ -873,7 +874,8 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
 success and 2 when it refuses an input or a setting. A missing required
-flag also exits 2, with argparse's usage message. `gen` exits 1 when
+flag also exits 2, with argparse's usage message, and so does `filter`
+when its `--verify` command fails. `gen` exits 1 when
 some requests failed and their prompts remain to be rerun. `cache` also
 exits 3 when the memory probe fails twice or a `--routes` recording does
 not match the rows it was taken over, and 4 when the validator fails on
@@ -907,7 +909,7 @@ skipped, so a run resumes where it stopped.
 | `--chat-template-kwargs JSON` | none | passed to `gmlx serve --chat-template-config` for the teacher's render |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
-| `--thinking` | off | reasoning on, with the reasoning trace kept as `reasoning_content` on the reply |
+| `--thinking` | off | thinking on, with the reasoning trace kept as `reasoning_content` on the reply |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
@@ -1027,7 +1029,7 @@ Training flags, in the order `--help` prints them.
 | `--view DIR` | required | a view directory, repeatable to mix views over one tokenizer pair |
 | `--student GGUF` | required | the student GGUF, sharded ok |
 | `--adapter-out PATH` | required | where to write the GGUF adapter |
-| `--iters N` | required | training iterations |
+| `--iters N` | required | training steps |
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier as is |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
@@ -1035,7 +1037,7 @@ Training flags, in the order `--help` prints them.
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
-| `--warmup F` | `0.05` | warmup as a fraction of the iterations, then cosine decay |
+| `--warmup F` | `0.05` | warmup as a fraction of the steps, then cosine decay |
 | `--weight-decay F` | `0` | AdamW weight decay |
 | `--clip F` | `1.0` | gradient norm clip |
 | `--seed N` | `1` | data order and LoRA init |
@@ -1063,7 +1065,11 @@ Training flags, in the order `--help` prints them.
 
 ### distill eval
 
-Evaluation flags, in the order `--help` prints them.
+Evaluation flags, in the order `--help` prints them. Task files are
+jsonl: `arc_easy.jsonl` and `hellaswag.jsonl` hold `{id, query, choices,
+gold}` rows, `gsm8k.jsonl` holds `{id, question, answer}` rows, and
+`gsm8k_shots.jsonl` holds the worked examples shown before each
+question.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1074,7 +1080,7 @@ Evaluation flags, in the order `--help` prints them.
 | `--cache DIR` | none | cache whose corpus the slices are checked against for overlap (decontamination) |
 | `--slice NAME=PATH` | none | a held-out text slice, repeatable |
 | `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
-| `--tasks-dir DIR` | `.` | directory of `arc_easy.jsonl` and `hellaswag.jsonl` (`{id, query, choices, gold}` rows), `gsm8k.jsonl` (`{id, question, answer}`) and `gsm8k_shots.jsonl` |
+| `--tasks-dir DIR` | `.` | directory of the four task files |
 | `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
 | `--task-limit N` | all | items per task |
 | `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |

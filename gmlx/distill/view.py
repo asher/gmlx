@@ -62,7 +62,7 @@ def student_width(path: str) -> int | None:
                 return _tokens.logits_width_from_gguf(str(ggufs[0]))
             return _tokens.logits_width_from_mlx_dir(str(p))
     except (OSError, ValueError, KeyError) as e:
-        log(f"[align] student width not read: {e}")
+        log(f"[align] warn: student width not read: {e}")
     return None
 
 
@@ -236,10 +236,8 @@ def run_align(opts: AlignOptions) -> int:
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
     if not identity:
         if a < REFUSE_A and not opts.force:
-            log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}. The projection "
-                f"redirects {red:.3f} of the mass, mean group size over the student vocab "
-                f"{float(tables.group_size[tables.group_of].mean()):.2f}, "
-                f"M_K {view['census']['captured_mass_M_K_mean']}. Pass --force to keep the view")
+            log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}, the tokenizers diverge too far. "
+                f"Pick a student from the teacher's family, or pass --force and expect a weaker result")
             return 3
         if a < WARN_A or s < WARN_S:
             log(f"[align] warn: own-group fraction a={a:.3f} (< {WARN_A}) or shared-boundary fraction s={s:.3f} (< {WARN_S})")

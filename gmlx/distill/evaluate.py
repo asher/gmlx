@@ -105,7 +105,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
         log(f"[eval] {name}: reply bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
-            f"{r['rows']} rows{' at the census positions' if positions is not None else ''}, "
+            f"{r['rows']} rows{' at the positions the document moved' if positions is not None else ''}, "
             f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
     if opts.kld_cache:
         t0 = time.perf_counter()
@@ -262,7 +262,7 @@ def run_eval(opts: EvalOptions) -> int:
     if opts.reply_positions:
         positions = read_json(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
         report["reply_positions"] = opts.reply_positions
-        log(f"[eval] reply slices restricted to the census positions of {len(positions)} rows")
+        log(f"[eval] reply slices restricted to the positions the census found in {len(positions)} rows")
     report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions)
     if opts.before and opts.adapter:
         with adapter_disabled(model):

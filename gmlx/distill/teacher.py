@@ -306,7 +306,7 @@ def run_cache(opts: CacheOptions) -> int:
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
         if not _frames.has_chat_template(tokenizer):
-            log("[cache] teacher has no chat template, framed rows use the plain render "
+            log("[cache] warn: teacher has no chat template, framed rows use the plain render "
                 "(contents separated by blank lines)")
         log(f"[cache] frame {opts.frame}: render kwargs {render_kw or '{}'}, turn-end markers "
             f"{_frames.assistant_tails(tokenizer)!r}")
@@ -387,7 +387,7 @@ def run_cache(opts: CacheOptions) -> int:
         try:
             mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
         except Exception as e:  # noqa: BLE001
-            log(f"[cache] wired limit not set: {e}")
+            log(f"[cache] warn: wired limit not set: {e}")
     # shard rows pad to a per-shard length, so freed buffers of many sizes
     # would otherwise accumulate in MLX's cache up to the memory limit
     mx.set_cache_limit(int(opts.cache_limit_gb * GB))
@@ -592,7 +592,9 @@ def run_cache(opts: CacheOptions) -> int:
         })
     problems = _format.validate_cache(out)
     if problems:
-        log("[cache] validator failed: " + ", ".join(problems[:10]))
+        for x in problems[:10]:
+            log("[cache] validate: " + x)
+        log(f"[cache] validator failed with {len(problems)} problems")
         return 4
     log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

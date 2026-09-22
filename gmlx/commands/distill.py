@@ -63,16 +63,18 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="With --corpus: skip documents shorter than this (default 2000).")
     p.add_argument("--docs", type=int, default=0, help="With --corpus: prompts to build (default all).")
     p.add_argument("--instruction", default=CONTINUE_INSTRUCTION,
-                   help="With --corpus: the user turn placed before the document prefix.")
+                   help="With --corpus: the user turn placed before the document prefix "
+                        "(default 'Continue the following text.').")
     p.add_argument("--chat-template-kwargs", default=None, metavar="JSON",
                    help="Passed to gmlx serve --chat-template-config: the teacher's render settings.")
     p.add_argument("--context", default=None, metavar="FILE",
                    help="Text the teacher reads for every prompt without its own context field. The "
                         "student's list is written without it.")
     p.add_argument("--context-format", default=DEFAULT_CONTEXT_FORMAT,
-                   help="How the context and the last user turn combine for the teacher.")
+                   help="How the context and the last user turn combine for the teacher "
+                        "(default '{context}\\n\\n{prompt}').")
     p.add_argument("--thinking", action="store_true",
-                   help="Turn the teacher's reasoning on. The reasoning trace is kept as reasoning_content on the reply.")
+                   help="Turn the teacher's thinking on. The reasoning trace is kept as reasoning_content on the reply.")
     p.add_argument("--thinking-budget", type=int, default=None,
                    help="With --thinking, cap the reasoning trace at this many tokens per request. The trace is "
                         "counted with the teacher's tokenizer to mark the replies it cut.")
@@ -129,7 +131,8 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
                    help="Put this text on the teacher's side of every kept row, keeping the prompt as "
                         "given under student_messages.")
     p.add_argument("--context-format", default=DEFAULT_CONTEXT_FORMAT,
-                   help="How the context and the last user turn combine for the teacher.")
+                   help="How the context and the last user turn combine for the teacher "
+                        "(default '{context}\\n\\n{prompt}').")
     return p
 
 
@@ -179,7 +182,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Corpus key of the student's own message list on reply rows "
                         "(default student_messages).")
     p.add_argument("--frame-instruction", default=CONTINUE_INSTRUCTION,
-                   help="User turn for --frame continue.")
+                   help="User turn for --frame continue (default 'Continue the following text.').")
     p.add_argument("--messages-key", default="messages",
                    help="Conversation column for the chat and reply frames (default messages).")
     p.add_argument("--close-final-windows", action="store_true",
@@ -214,7 +217,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
         description="Map a cache onto a student tokenizer in one CPU pass: tables for the tokenizer pair, "
-                    "the projection census, the train and validation row index, and optionally the "
+                    "the alignment statistics, the train and validation row index, and optionally the "
                     "materialized batch tensors.")
     p.add_argument("--cache", required=True, metavar="DIR", help="Cache directory from `distill cache`.")
     p.add_argument("--student", required=True, metavar="GGUF|DIR",
@@ -260,7 +263,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="View directory from `distill align`, repeatable to mix views over one tokenizer pair.")
     p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
     p.add_argument("--adapter-out", required=True, metavar="PATH", help="Output path for the .gguf adapter.")
-    p.add_argument("--iters", type=int, required=True, help="Training iterations.")
+    p.add_argument("--iters", type=int, required=True, help="Training steps.")
     p.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (default 16).")
     p.add_argument("--lora-scale", type=float, default=None,
                    help="LoRA multiplier as is (default 2.0 unless --lora-alpha is given).")
@@ -272,7 +275,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate (default 1e-4).")
     p.add_argument("--batch-size", type=int, default=8, help="Rows per step (default 8).")
     p.add_argument("--warmup", type=float, default=0.05,
-                   help="Warmup as a fraction of the iterations, then cosine decay (default 0.05).")
+                   help="Warmup as a fraction of the steps, then cosine decay (default 0.05).")
     p.add_argument("--weight-decay", type=float, default=None, help="AdamW weight decay (default 0 for LoRA).")
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
     p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")

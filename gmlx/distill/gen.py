@@ -217,7 +217,7 @@ def stop_server(opts: GenOptions, proc) -> None:
     try:
         lifecycle.stop(opts.host, opts.port)
     except Exception as e:  # noqa: BLE001 - the process is killed below in any case
-        log(f"[gen] gmlx stop failed ({e}), terminating the server process")
+        log(f"[gen] warn: gmlx stop failed ({e}), terminating the server process")
     if proc.poll() is None:
         try:
             proc.terminate()
@@ -385,7 +385,7 @@ def run_gen(opts: GenOptions) -> int:
                 except Exception as e:  # noqa: BLE001 - one bad request never ends the run
                     with lock:
                         n_err += 1
-                    log(f"[gen] request failed: {type(e).__name__}: {e}")
+                    log(f"[gen] warn: request failed: {type(e).__name__}: {e}")
                     continue
                 row = reply_row(r, c, opts.seed + i)
                 with lock:

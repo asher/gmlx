@@ -210,7 +210,7 @@ def run_train(opts: TrainOptions) -> int:
         try:
             mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
         except (KeyError, RuntimeError, ValueError) as e:
-            log(f"[train] wired limit not set: {e}")
+            log(f"[train] warn: wired limit not set: {e}")
     # the batch shapes vary every step, so freed buffers of many sizes would
     # otherwise accumulate in MLX's cache up to the memory limit
     mx.set_cache_limit(int(opts.cache_limit_gb * GB))
@@ -415,7 +415,7 @@ def run_train(opts: TrainOptions) -> int:
             if hs_state["head"] is not None:
                 hs_state["head"].save(ckpt_dir / "last")
     restore_attn()
-    log(f"[train] done: {state['iteration']} iterations, {state['tokens']} tokens, {skipped} skipped, "
+    log(f"[train] done: {state['iteration']} steps, {state['tokens']} tokens, {skipped} skipped, "
         f"{time.perf_counter() - t0:.0f}s")
     if not opts.full and kind == "gguf" and opts.adapter_out:
         from gmlx.load.preflight import preflight
