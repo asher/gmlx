@@ -281,7 +281,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
     p.add_argument("--alm", type=float, default=DEFAULT_KNOBS["lambda_alm"],
-                   help="Weight of the ALM term, 0 on an identity view (default 1).")
+                   help="Weight of the ALM term, 0 on a same-tokenizer view (default 1).")
     p.add_argument("--ce", type=float, default=DEFAULT_KNOBS["lambda_ce"],
                    help="Weight of the cross-entropy term (default 0).")
     p.add_argument("--T-dk", type=float, default=None, help="Override the view's T_dk.")
@@ -400,12 +400,6 @@ def _cpu(args) -> None:
 def cmd_gen(argv: list[str], prog: str = "gmlx distill gen") -> int:
     p = _gen_parser(prog)
     args = p.parse_args(argv)
-    if not (args.prompts or args.corpus):
-        p.error("--prompts or --corpus is required")
-    if not (args.teacher or args.base_url):
-        p.error("--teacher or --base-url is required")
-    if args.thinking_budget and not args.thinking:
-        p.error("--thinking-budget needs --thinking")
     from gmlx.distill.gen import GenOptions, run_gen
     fields = {k: v for k, v in vars(args).items() if k in GenOptions.__dataclass_fields__}
     return run_gen(GenOptions(**fields))
@@ -448,13 +442,7 @@ def cmd_train(argv: list[str], prog: str = "gmlx distill train") -> int:
     p = _train_parser(prog)
     args = p.parse_args(argv)
     _cpu(args)
-    if args.lora_scale is not None and args.lora_alpha is not None:
-        p.error("--lora-scale and --lora-alpha are two conventions for one multiplier, give one")
-    from gmlx.distill.trainer import TrainOptions, is_gguf, run_train
-    if not is_gguf(args.student):
-        print(f"{prog}: --student must be a GGUF file or a directory of GGUF shards: {args.student}",
-              file=sys.stderr)
-        return 2
+    from gmlx.distill.trainer import TrainOptions, run_train
     fields = {k: v for k, v in vars(args).items() if k in TrainOptions.__dataclass_fields__}
     fields["views"] = args.view
     return run_train(TrainOptions(**fields))

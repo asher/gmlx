@@ -225,7 +225,7 @@ def run_eval(opts: EvalOptions) -> int:
             report["decontam"][name] = f
             if f > opts.decontam_threshold:
                 contaminated.add(name)
-                log(f"[eval] {name}: {f:.4f} of 64-byte windows in the cached corpus; bpb gate void")
+                log(f"[eval] {name}: {f:.4f} of 64-byte windows in the cached corpus, bpb gate void")
             else:
                 log(f"[eval] {name}: decontam fraction {f:.5f}")
     tasks: dict = {}
@@ -245,7 +245,7 @@ def run_eval(opts: EvalOptions) -> int:
     if (opts.chat_sanity or chat_specs) and not _frames.has_chat_template(tokenizer):
         # a checkpoint without its template renders every conversation as
         # plain text, and the chat numbers then measure another prompt format
-        log(f"[eval] refuse: {opts.student} carries no chat template; drop --chat-sanity and --chat-slice")
+        log(f"[eval] refuse: {opts.student} carries no chat template, drop --chat-sanity and --chat-slice")
         return 2
     inherit = None
     if opts.kld_cache:

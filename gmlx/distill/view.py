@@ -79,7 +79,7 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
             if tables_dir.resolve() != out_dir.resolve():
                 _align.save_tables(out_dir, t)
             return t
-        log(f"[align] tables at {tables_dir} are for another pair; rebuilding")
+        log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
     t0 = time.perf_counter()
     t = _align.build_tables(teacher_tok, student_tok, V_T=V_T, V_S=V_S)
     log(f"[align] tables built in {time.perf_counter() - t0:.1f}s: G={t.G} "
@@ -142,7 +142,7 @@ def run_align(opts: AlignOptions) -> int:
     same_vocab = ident and V_S >= V_T
     identity = same_vocab
     if ident and V_S < V_T:
-        log(f"[align] identity maps but student head is narrower ({V_S} < {V_T}); general path")
+        log(f"[align] identity maps but student head is narrower ({V_S} < {V_T}), general path")
     if identity and frame:
         # the identity path forwards the cached render, so the student's own
         # template must produce the same tokens; otherwise the general path
@@ -151,9 +151,9 @@ def run_align(opts: AlignOptions) -> int:
         log(f"[align] framed cache ({frame['kind']}): student render {'matches' if same else 'differs'} ({why_f})")
         identity = same
     elif identity and prefixed:
-        log("[align] prefixed rows without a frame block; general path")
+        log("[align] prefixed rows without a frame block, general path")
         identity = False
-    log(f"[align] identity={identity} ({why}); V_T={V_T} V_S={V_S}")
+    log(f"[align] same_tokenizer={identity} ({why}), V_T={V_T} V_S={V_S}")
     # an identical vocabulary keeps the identity tables even on the general
     # path (group_of is the identity, so the projection is exact)
     if same_vocab:
@@ -230,19 +230,19 @@ def run_align(opts: AlignOptions) -> int:
         "index": index,
     }
     write_json_atomic(out / "view.json", view)
-    log(f"[align] {len(index)} rows kept, {loader.dropped} dropped; K'={Kp}; a={a:.3f} s={s:.3f} "
+    log(f"[align] {len(index)} rows kept, {loader.dropped} dropped, K'={Kp}, a={a:.3f} s={s:.3f} "
         f"redirect={red:.3f} bias_ok={view['census']['tokenization_bias_ok']:.4f} "
         f"(on-path in top-K {view['census']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
     if not identity:
         if a < REFUSE_A and not opts.force:
-            log(f"[align] refuse: mean own-group mass fraction a={a:.3f} < {REFUSE_A}; the projection "
+            log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}. The projection "
                 f"redirects {red:.3f} of the mass, mean group size over the student vocab "
                 f"{float(tables.group_size[tables.group_of].mean()):.2f}, "
-                f"M_K {view['census']['captured_mass_M_K_mean']}; pass --force to keep the view")
+                f"M_K {view['census']['captured_mass_M_K_mean']}. Pass --force to keep the view")
             return 3
         if a < WARN_A or s < WARN_S:
-            log(f"[align] warn: a={a:.3f} (< {WARN_A}) or s={s:.3f} (< {WARN_S})")
+            log(f"[align] warn: own-group fraction a={a:.3f} (< {WARN_A}) or shared-boundary fraction s={s:.3f} (< {WARN_S})")
     if opts.materialize:
         loader2 = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=int(Kp), identity=identity)
         t1 = time.perf_counter()

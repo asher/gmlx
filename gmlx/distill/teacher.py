@@ -306,7 +306,7 @@ def run_cache(opts: CacheOptions) -> int:
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
         if not _frames.has_chat_template(tokenizer):
-            log("[cache] teacher has no chat template; framed rows use the plain render "
+            log("[cache] teacher has no chat template, framed rows use the plain render "
                 "(contents separated by blank lines)")
         log(f"[cache] frame {opts.frame}: render kwargs {render_kw or '{}'}, turn-end markers "
             f"{_frames.assistant_tails(tokenizer)!r}")
@@ -345,10 +345,10 @@ def run_cache(opts: CacheOptions) -> int:
     writer = _format.ShardWriter(out, opts.top_k, opts.floor, opts.max_disk_gb)
     done = writer.verified_shards() if opts.resume else 0
     if not opts.resume and writer.n_done:
-        log(f"[cache] {out} already has {writer.n_done} shards; pass --resume or a fresh --out")
+        log(f"[cache] refuse: {out} already has {writer.n_done} shards, pass --resume or a fresh --out")
         return 2
     shards = [rows[i:i + opts.rows_per_shard] for i in range(0, len(rows), opts.rows_per_shard)]
-    log(f"[cache] {len(shards)} shards of {opts.rows_per_shard} rows; {done} verified already")
+    log(f"[cache] {len(shards)} shards of {opts.rows_per_shard} rows, {done} verified already")
 
     try:
         model, config, arch, streaming, offloaded = load_teacher(opts)
@@ -592,7 +592,7 @@ def run_cache(opts: CacheOptions) -> int:
         })
     problems = _format.validate_cache(out)
     if problems:
-        log("[cache] validator: " + "; ".join(problems[:10]))
+        log("[cache] validator failed: " + ", ".join(problems[:10]))
         return 4
     log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

@@ -153,7 +153,10 @@ def run_train(opts: TrainOptions) -> int:
     from mlx.utils import tree_flatten, tree_map
 
     if opts.lora_scale is not None and opts.lora_alpha is not None:
-        log("[train] refuse: --lora-scale and --lora-alpha are two conventions for one multiplier; give one")
+        log("[train] refuse: --lora-scale and --lora-alpha are two conventions for one multiplier, give one")
+        return 2
+    if not is_gguf(opts.student):
+        log(f"[train] refuse: --student must be a GGUF file or a directory of GGUF shards: {opts.student}")
         return 2
     scale = lora_scale(opts.lora_rank,
                        scale=(2.0 if opts.lora_scale is None else opts.lora_scale) if opts.lora_alpha is None else None,
@@ -238,7 +241,7 @@ def run_train(opts: TrainOptions) -> int:
     wd = opts.weight_decay if opts.weight_decay is not None else (0.01 if opts.full else 0.0)
     opt = optim.AdamW(learning_rate=make_schedule(opts.lr, opts.iters, opts.warmup), weight_decay=wd)
     log(f"[train] {kind} student, {'full fine-tune' if opts.full else f'LoRA {n_adapted} modules'}, "
-        f"{trainable_count(model) / 1e6:.2f}M trainable, identity={view['identity']}, knobs={knobs}")
+        f"{trainable_count(model) / 1e6:.2f}M trainable, same_tokenizer={view['identity']}, knobs={knobs}")
 
     G, Kp = tables.G, max(int(v["Kp"]) for v in views)
     readers = [_data.CacheReader(Path(v["cache_dir"])) for v in views]
@@ -250,7 +253,7 @@ def run_train(opts: TrainOptions) -> int:
         blocks = [(rd.manifest.get("gmlx_distill") or {}).get("hidden") for rd in readers]
         for d, blk in zip(view_dirs, blocks):
             if not blk:
-                log(f"[train] refuse: --hs needs a cache with a hidden block (cache --hidden); {d} has none")
+                log(f"[train] refuse: --hs needs a cache with a hidden block (cache --hidden), {d} has none")
                 return 2
         dims = {int(b["dim"]) for b in blocks}
         if len(dims) != 1:
@@ -267,6 +270,9 @@ def run_train(opts: TrainOptions) -> int:
     if len(views) > 1:
         counts = [sum(1 for vi, _ in train_rows if vi == i) for i in range(len(views))]
         log(f"[train] {len(views)} views mixed: train rows {counts} from {[str(d) for d in view_dirs]}")
+    if len(train_rows) < opts.batch_size:
+        log(f"[train] refuse: {len(train_rows)} train rows, fewer than --batch-size {opts.batch_size}")
+        return 2
     it = _data.BatchIterator([lengths[r] for r in train_rows], opts.batch_size, opts.seed)
 
     def batch_rows(pairs):
@@ -396,7 +402,9 @@ def run_train(opts: TrainOptions) -> int:
         if (it_idx + 1) % opts.val_every == 0 or it_idx + 1 == opts.iters:
             v = validate()
             log_rows.append({"it": it_idx + 1, "val": v})
-            log(f"[train] it {it_idx + 1} val {v:.4f} (best {state['best_val']})")
+            best = state['best_val']
+            log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
+                else f"[train] it {it_idx + 1} val {v:.4f}")
             if state["best_val"] is None or v < state["best_val"]:
                 state["best_val"] = v
                 save_checkpoint(ckpt_dir, "best", model, opt, state, student_kind=kind, full=opts.full,

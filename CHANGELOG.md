@@ -14,24 +14,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from `gmlx` for tools that line up two tokenizers over the same text.
 - `gmlx distill` distills a teacher GGUF into a student LoRA adapter
   offline, across tokenizers if needed. Guide in docs/distill.md.
-- MoE route record and replay (`gmlx.stream.moe_routes`): a forward's
-  per-layer expert ids can be captured and fed back so a later forward
-  over the same positions selects the same experts with live mixing
-  weights. Covers the qwen3, qwen3-next, minimax, gpt-oss, hunyuan,
-  kimi-k3 and DeepSeek-shaped gate families, resident or streamed.
-- `GMLX_BATCH_INVARIANT=1` runs the small float projections (expert
-  router, gated-delta gates) on a kernel whose result does not depend on
-  the row count, so a row's logits are the same at any batch size. It
-  costs about one percent of prefill on a 35B MoE and is off by default.
-- `gmlx distill cache --routes` stores a MoE teacher's expert ids per
-  position beside its logits, and `distill eval --kld-cache` replays them
-  so the sparse KL against the teacher's own cache measures elementwise
-  noise only.
-- `gmlx distill cache --hidden` stores a seeded random sketch of the
-  teacher's final hidden state per position, and `distill train --hs W`
-  adds a hidden-state term that fits a learned map from the student's
-  final hidden state to the sketch at every shared boundary. Off unless
-  both flags are given.
+- `gmlx.stream.moe_routes` records a forward's expert ids per layer and
+  replays them in a later forward over the same positions.
+- `GMLX_BATCH_INVARIANT=1` makes a row's logits the same at any batch
+  size, at about one percent of prefill on a 35B MoE. Off by default.
 
 ### Changed
 

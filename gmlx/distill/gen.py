@@ -217,7 +217,7 @@ def stop_server(opts: GenOptions, proc) -> None:
     try:
         lifecycle.stop(opts.host, opts.port)
     except Exception as e:  # noqa: BLE001 - the process is killed below in any case
-        log(f"[gen] gmlx stop failed ({e}); terminating the server process")
+        log(f"[gen] gmlx stop failed ({e}), terminating the server process")
     if proc.poll() is None:
         try:
             proc.terminate()

@@ -845,17 +845,20 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-Offline distillation in six actions plus one diagnostic. `gen` runs a
-teacher through `gmlx serve` over a prompt set and writes its replies as
-a corpus, `filter` drops the generated rows a student should not learn
-from, `cache` runs a teacher GGUF over a corpus once and stores its top-K
-log-probs per position, `align` maps that cache onto a student tokenizer
-and writes a view, `train` fits a LoRA adapter on a K-quant GGUF student
-against the view, and `eval` scores the student with and without the
-adapter. `census` measures, from two reply caches of the same prompts,
-how much a context the student never sees moves the teacher. The teacher
-and the student may use different tokenizers. The walkthrough is
+Offline distillation in six actions plus one diagnostic. The teacher and
+the student may use different tokenizers, and the walkthrough is
 [distill.md](distill.md).
+
+- `gen` runs a teacher through `gmlx serve` over a prompt set and writes
+  its replies as a corpus.
+- `filter` drops the generated rows a student should not learn from.
+- `cache` runs a teacher GGUF over a corpus once and stores its top-K
+  log-probs per position.
+- `align` maps that cache onto a student tokenizer and writes a view.
+- `train` fits a LoRA adapter on a K-quant GGUF student against the view.
+- `eval` scores the student with and without the adapter.
+- `census` measures, from two reply caches of the same prompts, how much
+  a context the student never sees moves the teacher.
 
 ```sh
 gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
@@ -911,7 +914,7 @@ skipped, so a run resumes where it stopped.
 | `--max-tokens N` | `1024` | reply budget per request |
 | `--temperature F` | `0.7` | sampling temperature |
 | `--top-p F` | `0.9` | nucleus sampling |
-| `--top-k N` | the server's | top-k cutoff |
+| `--top-k N` | the server's | sampler top-k cutoff |
 | `--min-p F` | the server's | minimum-probability cutoff |
 | `--seed N` | `1` | base seed, and each request uses it plus the prompt index |
 | `--timeout S` | `1800` | per-request timeout |
@@ -921,7 +924,7 @@ skipped, so a run resumes where it stopped.
 
 Checks run in a fixed order and the first failure names the reason,
 one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
-`tokens` and `verify`, defined in
+`tokens` and `verify`, each defined in
 [Round one](distill.md#round-one-the-teacher-writes-the-corpus) of the
 guide. The verify command reads the surviving rows as jsonl on stdin and
 prints one line per row, `ok` or a reason word. `--context` rebuilds
@@ -991,7 +994,7 @@ The flags of the teacher pass, in the order `--help` prints them.
 
 ### distill align
 
-The flags of the alignment pass, in the order `--help` prints them.
+Alignment flags, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1015,7 +1018,7 @@ The flags of the alignment pass, in the order `--help` prints them.
 
 ### distill train
 
-The flags of the training loop, in the order `--help` prints them.
+Training flags, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1036,7 +1039,7 @@ The flags of the training loop, in the order `--help` prints them.
 | `--seed N` | `1` | data order and LoRA init |
 | `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
 | `--dk F` | `1` | weight of the bucketed KL term |
-| `--alm F` | `1`, `0` on an identity view | weight of the ALM term |
+| `--alm F` | `1`, `0` on a same-tokenizer view | weight of the ALM term |
 | `--ce F` | `0` | weight of the cross-entropy term |
 | `--T-dk F` | the view's | override the view's T_dk |
 | `--tau-alm F` | the view's | override the view's tau_alm |
@@ -1058,7 +1061,7 @@ The flags of the training loop, in the order `--help` prints them.
 
 ### distill eval
 
-The flags of the evaluation, in the order `--help` prints them.
+Evaluation flags, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1066,7 +1069,7 @@ The flags of the evaluation, in the order `--help` prints them.
 | `--adapter GGUF` | none | the GGUF adapter to apply |
 | `--md PATH` | required | the Markdown report to write |
 | `--json PATH` | required | the JSON report to write |
-| `--cache DIR` | none | cache whose corpus the slices are decontaminated against |
+| `--cache DIR` | none | cache whose corpus the slices are checked against for overlap (decontamination) |
 | `--slice NAME=PATH` | none | a held-out text slice, repeatable |
 | `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
 | `--tasks-dir DIR` | `.` | directory of `arc_easy.jsonl`, `hellaswag.jsonl`, `gsm8k.jsonl` and `gsm8k_shots.jsonl` |
@@ -1097,10 +1100,11 @@ The flags of the evaluation, in the order `--help` prints them.
 ### distill census
 
 Pairs the reply rows of a cache cut without a context with the same rows
-in one or more caches cut with a context, and writes the on-path delta,
-the coarsened KL between the stored top-K distributions and, with several
-contexts, the residual no training recovers. Runs on the CPU. Exits 2
-when a cache has no manifest or no rows pair.
+in one or more caches cut with a context. It writes the on-path delta
+(the gain at the token the teacher wrote), the coarsened KL between the
+stored top-K distributions and, with several contexts, the residual no
+training recovers. Runs on the CPU. Exits 2 when a cache has no manifest
+or no rows pair.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

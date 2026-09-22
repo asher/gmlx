@@ -15,8 +15,8 @@ runs over those states in sub-chunks of `step` positions, and each
 sub-chunk materializes a `[step, V]` logits array with V the teacher's
 vocabulary width. The reduction per sub-chunk is a float32 log-softmax, a
 full-width index from the top-K selection, and one temporary at a time
-for the tail mass and the boundary mass, evaluated as separate steps so at
-most one full-width temporary is live beyond the log-softmax. That is 14
+for the tail mass and the boundary mass. Those run as separate steps, so
+at most one full-width temporary is live beyond the log-softmax. That is 14
 bytes per V-element, budgeted as 16 without `--floor` and 20 with it.
 
 `step` is the largest halving tier of 4096 positions with `step * V *
@@ -44,8 +44,8 @@ compute positions in chunks of `--chunk` positions inside a checkpoint,
 with the head parameters threaded explicitly. A boundary chunk holds the
 float32 logits, the softmax, one logsumexp temporary, the slot map over
 the projected groups and the gather of every student token's slot, then
-the cotangent in the backward: 24 bytes per position and vocabulary
-element on a cross-tokenizer pair and 16 on an identity pair. A chunk with
+the cotangent in the backward. That is 24 bytes per position and
+vocabulary element on a cross-tokenizer pair and 16 on an identity pair. A chunk with
 no boundaries holds 12. At the default 512 positions and a 262144-token
 student vocabulary that is 3.2 GB, which `--chunk` scales linearly.
 
@@ -85,17 +85,17 @@ to the positions the census found.
 
 There is no per-token weighting in the loss. The tokens that decide a
 tool call, the call's opener and closer, the key names and the tool
-name, are the most certain positions of a reply and sit at rank 1 in the
-cache with the whole mass, so a student trained on the cache sees them
-at full weight already.
+name, are the most certain positions of a reply. They sit at rank 1 in
+the cache with the whole mass, so a student trained on the cache sees
+them at full weight already.
 
 ## The cross-tokenizer result
 
-The same schema cache aligned onto gemma-4-12b-it at Q6_K, a student
-from another tokenizer family, trained with the recipe's settings and
-served with thinking off, reached 0.296 on the held-out questions
-against 0.930 with the schema pasted into its prompt, about a third of
-the gap, and 0.050 on the families never trained on. The same-tokenizer
+The same schema cache was aligned onto gemma-4-12b-it at Q6_K, a
+student from another tokenizer family, trained with the recipe's
+settings and served with thinking off. It reached 0.296 on the held-out
+questions against 0.930 with the schema pasted into its prompt, about a
+third of the gap, and 0.050 on the families never trained on. The same-tokenizer
 student reached 0.882 and 0.925 on the same slices.
 
 The adapter answered the single-table questions and failed the joins on
