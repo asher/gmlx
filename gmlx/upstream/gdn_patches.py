@@ -17,6 +17,7 @@ from functools import lru_cache
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
+from gmlx.load.hadamard_modules import is_folded, shared_linears
 from .patching import ClassPatch
 
 
@@ -434,17 +435,18 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     Dv = self.head_v_dim
     SG = gdn_sg(B)
 
-    qkv = self.in_proj_qkv(inputs)
     zba_w = getattr(self, "_gdn_zba_weight", None)
     if zba_w is not None:
+        qkv = self.in_proj_qkv(inputs)
         zba = inputs @ zba_w.T
         vd, hv = self.value_dim, self.num_v_heads
         z = zba[..., :vd].reshape(B, S, hv, Dv)
         b = zba[..., vd:vd + hv]
         a = zba[..., vd + hv:]
     else:
-        z = self.in_proj_z(inputs).reshape(
-            B, S, self.num_v_heads, self.head_v_dim)
+        # One rotation feeds both projections on a Hadamard-folded file.
+        qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
+        z = z.reshape(B, S, self.num_v_heads, self.head_v_dim)
         ba_w = getattr(self, "_gdn_ba_weight", None)
         if ba_w is not None:
             # One [2*Hv, K] matvec for the two tiny decay/gate rows. At
@@ -967,8 +969,11 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
 
-    mixed_qkv = self.in_proj_qkv(inputs)
-    z = _bf16_verify_linear(self.in_proj_z, inputs)
+    if is_folded(self.in_proj_z):
+        mixed_qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
+    else:
+        mixed_qkv = self.in_proj_qkv(inputs)
+        z = _bf16_verify_linear(self.in_proj_z, inputs)
     # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
     # ~2x the combined one at these sizes, so run them as one [2 * Hv]
     # gemv against the concatenated weight (row-independent, bit-exact).

@@ -15,6 +15,7 @@ and names the fix for anything it flags.
 | the command is not found in a new terminal | [gmlx: command not found in a new terminal](#gmlx-command-not-found-in-a-new-terminal) |
 | a download stopped or the disk filled | [A download was interrupted or the disk filled](#a-download-was-interrupted-or-the-disk-filled) |
 | a load or validate names an unsupported codec | [A file refuses to load with an unsupported codec](#a-file-refuses-to-load-with-an-unsupported-codec) |
+| a load says the file is Hadamard-folded | [A Hadamard-folded file refuses to load](#a-hadamard-folded-file-refuses-to-load) |
 | a configured model is not listed | [A configured model is missing from /v1/models](#a-configured-model-is-missing-from-v1models) |
 | transcription or talk complains about ffmpeg | [Whisper fails because ffmpeg is not found](#whisper-fails-because-ffmpeg-is-not-found) |
 | talk never receives mic input | [The mic never works in talk](#the-mic-never-works-in-talk) |
@@ -80,14 +81,30 @@ such as a network drop or a Hugging Face error, is also safe to re-run.
 `validate`, `pull`, or a load fails and names a tensor codec.
 
 The file uses a tensor type with no kernel. The K-quant, legacy and IQ
-families all have kernels, as does the structured-ternary `STQ1_0`, so this
-is rare, and the usual culprits are the plain ternary `TQ1_0` and `TQ2_0`
-types. The refusal names the unsupported codec and what is supported.
+families all have kernels, as do the ternary `STQ1_0`, `PTQ1_0` and
+`PQ2_0` types, so this is rare, and the usual culprits are the plain
+ternary `TQ1_0` and `TQ2_0` types. The refusal names the unsupported codec
+and what is supported.
 
 Pick a different quant from the same repo. `gmlx validate hf:<org>/<repo>`
 lists the variants so you can choose without downloading. A uniform K-quant
 file is the best choice when you have one, since it also
 [decodes fastest](performance.md#choosing-a-quant-for-speed).
+
+## A Hadamard-folded file refuses to load
+
+A load fails with `is Hadamard-folded` and names the architecture.
+
+The file stores its weights under a rotation that gmlx applies at run
+time for the architectures it has certified, Qwen3.5-family text models
+first. A folded file of another architecture, or a newer fold version, is
+refused before any tensor is read rather than run unrotated. `gmlx
+validate` prints `weights: Hadamard-folded` for such a file, so you can
+tell before downloading.
+
+Pick an unfolded quant of the same model, or a folded one of a supported
+architecture. [hadamard-fold.md](internals/hadamard-fold.md) has the
+contract if you are adding an architecture.
 
 ## A configured model is missing from /v1/models
 

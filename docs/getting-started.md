@@ -135,8 +135,9 @@ gmlx validate hf:unsloth/Qwen3.6-27B-GGUF          # lists every quant with a fi
 gmlx pull hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q6_K.gguf --to ~/models
 ```
 
-`validate` downloads only the header, a few megabytes, and names the codec
-when a file cannot load. `pull` resumes an interrupted download and, once a
+`validate` downloads only the header, a few megabytes, names the codec
+when a file cannot load, and flags a file whose weights are stored under a
+[Hadamard fold](glossary.md). `pull` resumes an interrupted download and, once a
 config exists, writes to your model directory and registers the file, so
 `--to` is only for this pre-config stage. Gated repositories need
 `HF_TOKEN`, as

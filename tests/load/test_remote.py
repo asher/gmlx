@@ -30,8 +30,10 @@ def _weight(codec):
     return quants.quantize(s, codec)
 
 
-def _mint_bytes(path, *, arch="llama", codec=GT.Q4_0) -> bytes:
+def _mint_bytes(path, *, arch="llama", codec=GT.Q4_0, kv=None) -> bytes:
     w = GGUFWriter(str(path), arch)
+    for key, value in (kv or {}).items():
+        w.add_uint32(key, value)
     w.add_tensor("plain.f32", np.zeros((4, 16), dtype=np.float32), raw_dtype=GT.F32)
     w.add_tensor("blk.0.attn_q.weight", _weight(codec), raw_dtype=codec)
     w.write_header_to_file()
@@ -206,9 +208,10 @@ def test_http_open_opener_wires_the_handler():
 # header parser + classify
 def test_parse_header(tmp_path):
     buf = _mint_bytes(tmp_path / "m.gguf", arch="llama")
-    arch, gguf_type, tensors = remote._parse_header(buf)
+    arch, gguf_type, tensors, hadamard = remote._parse_header(buf)
     assert arch == "llama"
     assert gguf_type is None                      # plain model: no general.type
+    assert hadamard is None
     names = {n for n, _ in tensors}
     assert names == {"plain.f32", "blk.0.attn_q.weight"}
 
@@ -231,11 +234,23 @@ def test_classify_header_unsupported(tmp_path):
     assert rep.loadable_codecs is False
 
 
+def test_classify_header_reads_hadamard_version(tmp_path):
+    # prism.hadamard.version rides the report so validate can name the fold;
+    # a plain file reports None.
+    buf = _mint_bytes(tmp_path / "folded.gguf", kv={"prism.hadamard.version": 1})
+    assert remote.classify_header(buf).hadamard == 1
+    plain = _mint_bytes(tmp_path / "plain.gguf")
+    assert remote.classify_header(plain).hadamard is None
+
+
 def test_type_name_fallback():
     # gguf-py names what it knows; QUANT_TYPE_FALLBACK covers newer ids
-    # (STQ1_0=43); anything else keeps the labeled-unknown form.
+    # (STQ1_0=43, PQ2_0=142, PTQ1_0=143); anything else keeps the
+    # labeled-unknown form.
     assert remote._type_name(int(GT.Q4_0)) == "Q4_0"
     assert remote._type_name(43) == "STQ1_0"
+    assert remote._type_name(142) == "PQ2_0"
+    assert remote._type_name(143) == "PTQ1_0"
     assert remote._type_name(9999) == "TYPE_9999"
 
 
