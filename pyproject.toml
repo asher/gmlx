@@ -181,6 +181,7 @@ include = [
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
+    "gmlx/upstream/hadamard_share.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
