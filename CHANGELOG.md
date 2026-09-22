@@ -63,6 +63,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx distill align --tables DIR` on a pair whose hashes matched the
+  artifact wrote a view without its own tables, so `train` and `eval` on
+  that view stopped with a missing tables.safetensors. The view now
+  carries a copy.
 - A test run or a long session could stop dead inside the expert
   streaming feeders: their finalizers joined the staging pools, and a
   collection that ran while a new thread was starting deadlocked on the

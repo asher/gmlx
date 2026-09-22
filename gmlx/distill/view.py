@@ -69,12 +69,15 @@ def student_width(path: str) -> int | None:
 def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path, *,
                V_T: int | None, V_S: int | None) -> _align.Tables:
     """An existing tables artifact when its pair hashes match, else a fresh
-    build saved under out_dir."""
+    build. Either way the tables are saved under out_dir, since ``train``
+    and ``eval`` read them from the view."""
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
         t = _align.load_tables(tables_dir)
         if t.teacher_hash == th and t.student_hash == sh:
             log(f"[align] tables from {tables_dir} (pair hashes match)")
+            if tables_dir.resolve() != out_dir.resolve():
+                _align.save_tables(out_dir, t)
             return t
         log(f"[align] tables at {tables_dir} are for another pair; rebuilding")
     t0 = time.perf_counter()

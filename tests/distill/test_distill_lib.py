@@ -162,6 +162,24 @@ def test_tables_partition(tok_bl, tok_spm):
         assert np.array_equal(t2.target_g, t.target_g) and t2.G == t.G
 
 
+def test_reused_tables_are_saved_into_the_view(tmp_path, tok_bl, tok_spm):
+    """``align --tables DIR`` on a matching pair leaves a copy of the tables
+    in the view, since ``train`` and ``eval`` read them from there."""
+    from gmlx.distill.view import get_tables
+
+    t = dl.build_tables(tok_bl, tok_spm)
+    dl.save_tables(tmp_path / "census", t)
+    got = get_tables(tok_bl, tok_spm, tmp_path / "census", tmp_path / "view", V_T=None, V_S=None)
+    assert got.teacher_hash == t.teacher_hash and got.student_hash == t.student_hash
+    assert (tmp_path / "view" / "tables.json").exists() and (tmp_path / "view" / "tables.safetensors").exists()
+    t2 = dl.load_tables(tmp_path / "view")
+    assert np.array_equal(t2.target_g, t.target_g) and t2.G == t.G
+    # a mismatched artifact is rebuilt and saved too
+    dl.save_tables(tmp_path / "other", dl.identity_tables(t.V_T, np.zeros(t.V_T, bool), "aaaa", "bbbb"))
+    get_tables(tok_bl, tok_spm, tmp_path / "other", tmp_path / "view2", V_T=None, V_S=None)
+    assert dl.load_tables(tmp_path / "view2").teacher_hash == t.teacher_hash
+
+
 def test_identity_tables(tok_bl):
     t = dl.build_tables(tok_bl, tok_bl)
     assert t.identity and t.G == t.V_S
