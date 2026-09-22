@@ -172,7 +172,11 @@ merges teacher tokens into groups at each boundary, so a wider K keeps
 more of the teacher's mass in play after merging. The manifest records
 the captured-mass histogram, the fraction of the teacher's probability
 the top-K holds per position, which says how much the tail bucket
-carries.
+carries. The tokens that decide a tool call, the call's opener and
+closer, the key names and the tool name, are the most certain positions
+of a reply and sit at rank 1 in the cache with the whole mass, so a
+student trained on the cache sees them at full weight and no per-token
+weighting exists.
 
 `--routes` stores, for a MoE teacher, the expert ids every layer chose
 at every position beside the logits, one byte per expert slot up to 256
