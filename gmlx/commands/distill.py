@@ -2,8 +2,8 @@
 diagnostic. ``gen`` runs a
 teacher through ``gmlx serve`` over a prompt set and writes its replies as
 a corpus, ``filter`` drops the rows a student should not learn from,
-``cache`` runs the teacher once over a corpus and stores its top-K
-log-probs, ``align`` maps that cache onto a student tokenizer, ``train``
+``cache`` runs the teacher once over a corpus and stores its top-k
+log-probabilities, ``align`` maps that cache onto a student tokenizer, ``train``
 fits a LoRA adapter on a K-quant GGUF student against the view, and
 ``eval`` scores the student before and after. ``census`` measures, from
 two caches of the same replies, how much a context moves the teacher.
@@ -17,7 +17,7 @@ _ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _ACTION_DESC = {
     "gen": "run a teacher over a prompt set through gmlx serve and write a corpus",
     "filter": "drop generated rows a student should not learn from",
-    "cache": "run a teacher over a corpus and store its top-K log-probs",
+    "cache": "run a teacher over a corpus and store its top-k log-probabilities",
     "align": "map a cache onto a student tokenizer and write a view",
     "train": "train a LoRA adapter on a GGUF student against a view",
     "eval": "score a student, with and without its adapter, on held-out data",
@@ -72,20 +72,20 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--context-format", default=DEFAULT_CONTEXT_FORMAT,
                    help="How the context and the last user turn combine for the teacher.")
     p.add_argument("--thinking", action="store_true",
-                   help="Turn the teacher's reasoning on. The trace is kept as reasoning_content on the reply.")
+                   help="Turn the teacher's reasoning on. The reasoning trace is kept as reasoning_content on the reply.")
     p.add_argument("--thinking-budget", type=int, default=None,
-                   help="With --thinking, cap the trace at this many tokens per request. The trace is counted "
-                        "with the teacher's tokenizer to mark the replies it cut.")
+                   help="With --thinking, cap the reasoning trace at this many tokens per request. The trace is "
+                        "counted with the teacher's tokenizer to mark the replies it cut.")
     p.add_argument("--tokenizer", default=None, metavar="GGUF|DIR",
-                   help="Tokenizer for the trace count with --base-url (default: read from --teacher).")
+                   help="Tokenizer for the reasoning trace count with --base-url (default: read from --teacher).")
     p.add_argument("--serve-arg", action="append", default=[], metavar="ARG",
                    help="Extra gmlx serve argument, repeatable.")
     p.add_argument("--startup-timeout", type=float, default=900.0,
                    help="Seconds to wait for the served teacher (default 900).")
     p.add_argument("--concurrency", type=int, default=8, help="Requests in flight (default 8).")
-    p.add_argument("--max-tokens", type=int, default=1024, help="Reply budget per request (default 1024).")
+    p.add_argument("--max-tokens", type=int, default=1024, help="Reply budget per request, not counting the reasoning trace (default 1024).")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
-    p.add_argument("--top-p", type=float, default=0.9, help="Nucleus sampling (default 0.9).")
+    p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
     p.add_argument("--min-p", type=float, default=None, help="Minimum-probability cutoff (default the server's).")
     p.add_argument("--seed", type=int, default=1,
@@ -121,7 +121,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--max-reply-tokens", type=int, default=None,
                    help="Drop replies longer than this many completion tokens (default off).")
     p.add_argument("--keep-budget-hit", action="store_true",
-                   help="Keep replies whose thinking budget cut the trace (dropped by default).")
+                   help="Keep replies whose thinking budget cut the reasoning trace (dropped by default).")
     p.add_argument("--verify", default=None, metavar="CMD",
                    help="Shell command that reads the surviving rows as jsonl on stdin and prints one line "
                         "per row: ok, or a reason word to drop it.")
@@ -137,17 +137,17 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.teacher import CONTINUE_INSTRUCTION, FRAME_CHOICES
     p = argparse.ArgumentParser(
         prog=prog,
-        description="Run a teacher GGUF over a corpus once and store, per position, its top-K "
-                    "log-probs and the side fields a student of any tokenizer needs. Sizes in decimal GB.")
+        description="Run a teacher GGUF over a corpus once and store, per position, its top-k "
+                    "log-probabilities and the side fields a student of any tokenizer needs. Sizes in decimal GB.")
     p.add_argument("--teacher", metavar="GGUF", help="Teacher GGUF (sharded ok).")
     p.add_argument("--corpus", metavar="PATH|ID",
                    help="A jsonl file, a directory of text files, or a Hugging Face dataset id "
                         "(id[@config], which needs the datasets package).")
     p.add_argument("--out", metavar="DIR", help="Cache directory to write.")
     p.add_argument("--validate", metavar="DIR", help="Validate an existing cache and exit.")
-    p.add_argument("--top-k", type=int, default=256, help="Log-probs kept per position (default 256).")
+    p.add_argument("--top-k", type=int, default=256, help="Log-probabilities kept per position (default 256).")
     p.add_argument("--max-len", type=int, default=2048,
-                   help="Teacher tokens per window including BOS (default 2048).")
+                   help="Teacher tokens per window including the start token (default 2048).")
     p.add_argument("--max-disk-gb", type=float, default=None,
                    help="Refuse when the size estimate exceeds this (default none).")
     p.add_argument("--cache-limit-gb", type=float, default=8.0,
@@ -155,10 +155,10 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--logits-cap-gb", type=float, default=4.0,
                    help="Memory cap that sizes the head sub-chunk (default 4).")
     p.add_argument("--floor", action="store_true",
-                   help="Also store floor_kld, the KL against the f16-rounded top-K.")
+                   help="Also store floor_kld, the KL against the f16-rounded top-k.")
     p.add_argument("--rows-per-shard", type=int, default=64, help="Rows per shard file (default 64).")
     p.add_argument("--trunk", type=int, default=None,
-                   help="Trunk chunk in tokens (default 512 resident, 8192 streaming).")
+                   help="Trunk chunk in tokens (default 512 for a teacher that fits in memory, 8192 streaming).")
     p.add_argument("--resume", action="store_true", help="Continue after the last verified shard.")
     p.add_argument("--max-rows", type=int, default=None, help="Stop after this many rows.")
     p.add_argument("--max-tokens", type=int, default=None, help="Stop after this many teacher tokens.")
@@ -192,7 +192,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Run a streaming teacher without the prefill feeder (every expert byte is "
                         "then read through the page cache).")
     p.add_argument("--no-wired-limit", action="store_true",
-                   help="Leave the wired limit where it is for a resident teacher.")
+                   help="Leave the wired limit where it is for a teacher that fits in memory.")
     p.add_argument("--stream-experts", action="store_true",
                    help="Force expert streaming on a MoE teacher that would fit in memory.")
     p.add_argument("--expert-bytes-gb", type=float, default=None,
@@ -221,21 +221,22 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
                    help="Student GGUF, or an MLX checkpoint directory for its tokenizer.")
     p.add_argument("--out", required=True, metavar="DIR", help="View directory to write.")
     p.add_argument("--tables", default=None, metavar="DIR",
-                   help="A tables artifact to reuse when its pair hashes match.")
+                   help="An earlier view's tables.safetensors to reuse when the tokenizer pair matches.")
     p.add_argument("--kprime", type=int, default=None,
-                   help="Cap on distinct groups kept per boundary (default: the maximum seen).")
+                   help="Cap on distinct student-token groups kept per boundary (default: the maximum seen).")
     p.add_argument("--materialize", action="store_true",
                    help="Also write the batch tensors as view shards, for a pair whose loader is slow.")
     p.add_argument("--max-disk-gb", type=float, default=None,
                    help="Refuse to materialize past this size (default none).")
-    p.add_argument("--force", action="store_true", help="Keep a view the projection gate would refuse.")
+    p.add_argument("--force", action="store_true", help="Keep a view the own-group check would refuse.")
     p.add_argument("--val-fraction", type=float, default=0.02,
                    help="Fraction of rows held for validation (default 0.02).")
     p.add_argument("--seed", type=int, default=1, help="Seed of the validation split (default 1).")
     p.add_argument("--w-mid", type=float, default=DEFAULT_KNOBS["w_mid"],
                    help="Weight of an intra-word shared boundary (default 0.5).")
     p.add_argument("--gamma", type=float, default=DEFAULT_KNOBS["gamma"],
-                   help="Drop ALM chunks whose teacher boundary mass is below this (default 0.001).")
+                   help="Drop chunks of the ALM term, the cross-tokenizer chunk term, whose teacher boundary mass "
+                        "is below this (default 0.001).")
     p.add_argument("--tau-alm", type=float, default=DEFAULT_KNOBS["tau_alm"],
                    help="Temperature on the ALM term (default 1.0).")
     p.add_argument("--T-dk", type=float, default=DEFAULT_KNOBS["T_dk"],
@@ -276,7 +277,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
     p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
-                   help="bucketed: sparse KL with the tail bucket. paper: the top-K term with no tail bucket. "
+                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term with no tail bucket. "
                         "renorm: softmax over the support only.")
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
@@ -332,9 +333,10 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--before", action="store_true",
                    help="Also score with the adapter disabled in process.")
     p.add_argument("--chat-slice", action="append", default=[], metavar="NAME=PATH",
-                   help="A jsonl of conversations scored on their assistant spans, repeatable.")
+                   help="A jsonl of {messages} conversations scored on their assistant turns, repeatable.")
     p.add_argument("--chat-sanity", default=None, metavar="PATH",
-                   help="A jsonl of chat prompts scored for template compliance and drift.")
+                   help="A jsonl of {id, messages, kind} chat prompts scored for template compliance and drift, "
+                        "how far the replies moved from an earlier report's.")
     p.add_argument("--chat-max-tokens", type=int, default=256, help="Reply budget for the chat sanity set (default 256).")
     p.add_argument("--chat-refs", default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score.")
@@ -377,9 +379,9 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, metavar="JSON", help="Census JSON to write.")
     p.add_argument("--md", default=None, metavar="PATH", help="Markdown summary to write.")
     p.add_argument("--corpus", default=None, metavar="JSONL",
-                   help="The prompts jsonl the caches were cut from, so high_delta is keyed by row id.")
+                   help="The prompts jsonl the caches were made from, so high_delta is keyed by row id.")
     p.add_argument("--delta-threshold", type=float, default=1.0,
-                   help="Nats of on-path gain that make a position high-delta (default 1.0).")
+                   help="Nats gained at the token the teacher wrote that make a position high-delta (default 1.0).")
     p.add_argument("--pair-by", choices=("line", "doc"), default="line",
                    help="Pair rows across caches by corpus line (default) or by the full doc_id.")
     p.add_argument("--max-rows", type=int, default=None, help="Paired rows to measure (default all).")
@@ -421,10 +423,11 @@ def cmd_cache(argv: list[str], prog: str = "gmlx distill cache") -> int:
 
         from gmlx.distill.format import validate_cache
         problems = validate_cache(Path(args.validate))
-        print("valid" if not problems else "\n".join(problems))
+        print("valid" if not problems else "\n".join("[cache] validate: " + x for x in problems))
         return 0 if not problems else 1
     if not (args.teacher and args.corpus and args.out):
-        p.error("--teacher, --corpus and --out are required (or --validate DIR)")
+        print("[cache] refuse: --teacher, --corpus and --out are required, or --validate DIR", file=sys.stderr)
+        return 2
     from gmlx.distill.teacher import CacheOptions, run_cache
     fields = {k: v for k, v in vars(args).items() if k in CacheOptions.__dataclass_fields__}
     return run_cache(CacheOptions(**fields))

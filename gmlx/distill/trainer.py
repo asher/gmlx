@@ -161,8 +161,6 @@ def run_train(opts: TrainOptions) -> int:
     scale = lora_scale(opts.lora_rank,
                        scale=(2.0 if opts.lora_scale is None else opts.lora_scale) if opts.lora_alpha is None else None,
                        alpha=opts.lora_alpha)
-    if opts.seed == 0:
-        log("[train] seed 0 accepted")
     if not opts.views:
         log("[train] refuse: at least one --view is required")
         return 2

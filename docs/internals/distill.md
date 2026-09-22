@@ -14,7 +14,7 @@ batch axis, and keeps the hidden states, which are small. The head then
 runs over those states in sub-chunks of `step` positions, and each
 sub-chunk materializes a `[step, V]` logits array with V the teacher's
 vocabulary width. The reduction per sub-chunk is a float32 log-softmax, a
-full-width index from the top-K selection, and one temporary at a time
+full-width index from the top-k selection, and one temporary at a time
 for the tail mass and the boundary mass. Those run as separate steps, so
 at most one full-width temporary is live beyond the log-softmax. That is 14
 bytes per V-element, budgeted as 16 without `--floor` and 20 with it.
@@ -45,11 +45,12 @@ with the head parameters threaded explicitly. A boundary chunk holds the
 float32 logits, the softmax, one logsumexp temporary, the slot map over
 the projected groups and the gather of every student token's slot, then
 the cotangent in the backward. That is 24 bytes per position and
-vocabulary element on a cross-tokenizer pair and 16 on an identity pair. A chunk with
-no boundaries holds 12. At the default 512 positions and a 262144-token
-student vocabulary that is 3.2 GB, which `--chunk` scales linearly.
+vocabulary element on a cross-tokenizer pair and 16 on a same-tokenizer
+pair. A chunk with no boundaries holds 12. At the default 512 positions
+and a 262144-token student vocabulary that is 3.2 GB, which `--chunk`
+scales linearly.
 
-The head never runs inside the trunk's gradient transform. The trunk
+No head pass runs inside the trunk's gradient transform. The trunk
 forward is evaluated first, the head pass computes the loss and the
 cotangents of the gathered hidden states outside any transform, and a
 surrogate loss carries those cotangents back through the trunk. MLX keeps
@@ -58,12 +59,12 @@ head inside the trunk's transform would pin every chunk's logits at once.
 
 ## Why the defaults are what they are
 
-The guide's recipe settings come from a schema task on a Qwen3.6-27B
+The guide's settings come from a schema task on a Qwen3.6-27B
 teacher at Q8 and a Qwen3.5-9B student at Q6_K, measured by the served
 pass rate on held-out questions. Each figure below is one served sample
 of one adapter. Serving the same adapter again moves a pass rate by
 three or four items in a hundred, so differences of that size between
-arms are sampling.
+adapters are sampling.
 
 Compositional training rows, which join two question families in one
 prompt, raised the pass rate on families never trained on from 0.633 to
@@ -91,16 +92,16 @@ them at full weight already.
 
 ## The cross-tokenizer result
 
-The same schema cache was aligned onto gemma-4-12b-it at Q6_K, a
-student from another tokenizer family, trained with the recipe's
-settings and served with thinking off. It reached 0.296 on the held-out
+Aligning the same schema cache onto gemma-4-12b-it at Q6_K, a student
+from another tokenizer family, trained with the guide's settings and
+served with thinking off, reached 0.296 on the held-out
 questions against 0.930 with the schema pasted into its prompt, about a
-third of the gap, and 0.050 on the families never trained on. The same-tokenizer
-student reached 0.882 and 0.925 on the same slices.
+third of the gap, and 0.050 on the families never trained on. The
+same-tokenizer student reached 0.882 and 0.925 on the same slices.
 
 The adapter answered the single-table questions and failed the joins on
 column names the schema does not have, so the projection carried the
 shape of the replies and only part of the document. The census over the
-pair read an own-group mass fraction of 0.83 and a shared-boundary
+pair read an own-group fraction of 0.83 and a shared-boundary
 fraction of 0.47, which is where the tokenizations diverge. At the
 census positions the student's nats per token fell from 8.21 to 0.80.

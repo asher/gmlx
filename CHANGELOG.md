@@ -8,8 +8,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `gmlx train --grad-checkpoint` recomputes each layer's activations in the
-  backward pass, so longer sequences fit in memory at some cost in time.
+- `gmlx train` and `gmlx distill train` take `--grad-checkpoint`, which
+  recomputes each layer's activations in the backward pass, so longer
+  sequences fit in memory at some cost in time.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
 - `gmlx distill` distills a teacher GGUF into a student LoRA adapter
@@ -21,26 +22,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Training attention recomputes query blocks in the backward instead of
-  keeping each layer's full softmax on the gradient tape. Peak memory of
-  the attention backward at 4096-token rows falls from 10.7 GB to 2.8 GB
-  on Qwen3.5-9B. `GMLX_TRAIN_BLOCKED_ATTN=0` restores MLX's own path.
+- Training attention at 4096-token rows peaks at 2.8 GB instead of
+  10.7 GB on Qwen3.5-9B. `GMLX_TRAIN_BLOCKED_ATTN=0` restores MLX's path.
 - Training on Qwen3.5, 3.6 and Qwen4 experimental runs a chunked gated
   delta scan, 64 tokens per step instead of one. `GMLX_TRAIN_GDN_CHUNK=0`
   restores the loop.
 - `gmlx train` and `gmlx distill` run float32 matmul at exact precision
-  unless `MLX_ENABLE_TF32` is already set, since the chunked scan diverges
-  under TF32 rounding. A process that keeps TF32 on takes the loop and
-  says so.
+  unless `MLX_ENABLE_TF32` is already set, and say so when TF32 stays on.
 - `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
   blocks, which were reported as unsupported before.
 
 ### Fixed
 
-- A test run or a long session could stop dead inside the expert
-  streaming feeders: their finalizers joined the staging pools, and a
-  collection that ran while a new thread was starting deadlocked on the
-  interpreter's thread-shutdown lock. The finalizers no longer wait.
+- A test run or a long session could stop dead when an expert streaming
+  feeder was garbage-collected while a thread was starting.
 - `gmlx train` on a text-only Qwen3.5 or Qwen3.6 GGUF kept every state
   of the gated delta scan on the gradient tape, so a 9B model ran out of
   memory at the first step on rows near 1000 tokens.
@@ -49,13 +44,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gradient. All three now take a checkpointed scan under training.
 - `gmlx serve --adapter` on a base whose text stack sits under
   `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
-  every target reported as unmatched. The install now enters the text
-  stack, as train, distill and MTP serving already did.
-- The fused decode wires for gate and up and for q, k and v read the
-  projections' weights at the first fused step and failed with
-  `'LoRAKQuantLinear' object has no attribute 'weight'` once an adapter had
-  wrapped them. Adapted projections keep the stock path, which carries
-  the adapter's delta.
+  every target reported as unmatched.
+- Serving with an adapter failed at the first decode step with
+  `'LoRAKQuantLinear' object has no attribute 'weight'` on models with
+  fused gate-up or q-k-v projections.
 - The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
   GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
   applied at run time. `validate` reports a folded file.

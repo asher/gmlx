@@ -845,16 +845,17 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-Offline distillation in six actions plus one diagnostic. The teacher and
+Offline distillation in six actions plus one measurement. The teacher and
 the student may use different tokenizers, and the walkthrough is
 [distill.md](distill.md).
 
 - `gen` runs a teacher through `gmlx serve` over a prompt set and writes
   its replies as a corpus.
 - `filter` drops the generated rows a student should not learn from.
-- `cache` runs a teacher GGUF over a corpus once and stores its top-K
-  log-probs per position.
-- `align` maps that cache onto a student tokenizer and writes a view.
+- `cache` runs a teacher GGUF over a corpus once and stores its top-k
+  log-probabilities per position.
+- `align` maps that cache onto a student tokenizer and writes a view, the
+  positions and values the student trains to match.
 - `train` fits a LoRA adapter on a K-quant GGUF student against the view.
 - `eval` scores the student with and without the adapter.
 - `census` measures, from two reply caches of the same prompts, how much
@@ -871,12 +872,13 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 ```
 
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
-success and 2 when it refuses an input or a setting. `gen` exits 1 when
+success and 2 when it refuses an input or a setting. A missing required
+flag also exits 2, with argparse's usage message. `gen` exits 1 when
 some requests failed and their prompts remain to be rerun. `cache` also
-exits 3 when the memory probe fails twice or the recorded routes do not
-match the chunk, and 4 when the validator rejects what was written.
-`align` exits 3 when the projection gate refuses the pair, and
-`cache --validate` exits 1 on a problem.
+exits 3 when the memory probe fails twice or a `--routes` recording does
+not match the rows it was taken over, and 4 when the validator fails on
+what was written. `align` exits 3 when the own-group check refuses the
+pair, and `cache --validate` exits 1 on a problem.
 
 ### distill gen
 
@@ -905,15 +907,15 @@ skipped, so a run resumes where it stopped.
 | `--chat-template-kwargs JSON` | none | passed to `gmlx serve --chat-template-config` for the teacher's render |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
-| `--thinking` | off | reasoning on, with the trace kept as `reasoning_content` on the reply |
-| `--thinking-budget N` | none | with `--thinking`, cap the trace at N tokens per request, and mark the replies it cut for `filter` |
-| `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the trace against the budget when `--base-url` is given |
+| `--thinking` | off | reasoning on, with the reasoning trace kept as `reasoning_content` on the reply |
+| `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
+| `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
-| `--max-tokens N` | `1024` | reply budget per request |
+| `--max-tokens N` | `1024` | reply budget per request, not counting the reasoning trace |
 | `--temperature F` | `0.7` | sampling temperature |
-| `--top-p F` | `0.9` | nucleus sampling |
+| `--top-p F` | `0.9` | keep the most likely tokens whose probabilities add to this |
 | `--top-k N` | the server's | sampler top-k cutoff |
 | `--min-p F` | the server's | minimum-probability cutoff |
 | `--seed N` | `1` | base seed, and each request uses it plus the prompt index |
@@ -944,7 +946,7 @@ replies a student wrote without it.
 | `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row |
 | `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
 | `--max-reply-tokens N` | off | drop replies longer than this many completion tokens |
-| `--keep-budget-hit` | off | keep replies whose thinking budget cut the trace |
+| `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
 | `--verify CMD` | none | shell command that reads the survivors on stdin and prints `ok` or a reason per row |
 | `--context FILE` | none | put this text on the teacher's side of every kept row |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
@@ -959,12 +961,12 @@ The flags of the teacher pass, in the order `--help` prints them.
 | `--corpus PATH_OR_ID` | required | a jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]` |
 | `--out DIR` | required | the cache directory to write |
 | `--validate DIR` | none | validate an existing cache and exit, no teacher load |
-| `--top-k N` | `256` | log-probs kept per position |
-| `--max-len N` | `2048` | teacher tokens per window, including BOS |
+| `--top-k N` | `256` | log-probabilities kept per position |
+| `--max-len N` | `2048` | teacher tokens per window, including the start token |
 | `--max-disk-gb F` | none | refuse when the size estimate exceeds this |
 | `--cache-limit-gb F` | `8.0` | MLX buffer cache cap during the pass |
 | `--logits-cap-gb F` | `4.0` | memory cap that sizes the head sub-chunk |
-| `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-K |
+| `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
 | `--resume` | off | continue after the last verified shard |
@@ -983,7 +985,7 @@ The flags of the teacher pass, in the order `--help` prints them.
 | `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file |
 | `--hf-source ID` | none | tokenizer and config fallback |
 | `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
-| `--no-wired-limit` | off | leave the wired limit where it is for a resident teacher |
+| `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
 | `--expert-bytes-gb F` | measured | expert bytes read per forward, for the read-traffic report |
 | `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval` |
@@ -1001,15 +1003,15 @@ Alignment flags, in the order `--help` prints them.
 | `--cache DIR` | required | the cache directory |
 | `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
 | `--out DIR` | required | the view directory to write |
-| `--tables DIR` | none | a tables artifact to reuse when its pair hashes match |
-| `--kprime N` | the maximum seen | cap on distinct groups kept per boundary |
+| `--tables DIR` | none | an earlier view's `tables.safetensors` to reuse when the tokenizer pair matches |
+| `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary |
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
-| `--force` | off | keep a view the projection gate would refuse |
+| `--force` | off | keep a view the own-group check would refuse |
 | `--val-fraction F` | `0.02` | fraction of rows held for validation |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
-| `--gamma F` | `0.001` | drop ALM chunks whose teacher boundary mass is below this |
+| `--gamma F` | `0.001` | drop chunks of the ALM term, the cross-tokenizer chunk term, whose teacher boundary mass is below this |
 | `--tau-alm F` | `1.0` | temperature on the ALM term |
 | `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL |
 | `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side |
@@ -1072,13 +1074,13 @@ Evaluation flags, in the order `--help` prints them.
 | `--cache DIR` | none | cache whose corpus the slices are checked against for overlap (decontamination) |
 | `--slice NAME=PATH` | none | a held-out text slice, repeatable |
 | `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
-| `--tasks-dir DIR` | `.` | directory of `arc_easy.jsonl`, `hellaswag.jsonl`, `gsm8k.jsonl` and `gsm8k_shots.jsonl` |
+| `--tasks-dir DIR` | `.` | directory of `arc_easy.jsonl` and `hellaswag.jsonl` (`{id, query, choices, gold}` rows), `gsm8k.jsonl` (`{id, question, answer}`) and `gsm8k_shots.jsonl` |
 | `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
 | `--task-limit N` | all | items per task |
 | `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
 | `--before` | off | also score with the adapter disabled in process |
-| `--chat-slice NAME=PATH` | none | a jsonl of conversations scored on their assistant spans, repeatable |
-| `--chat-sanity PATH` | none | a jsonl of chat prompts scored for template compliance and drift |
+| `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, repeatable |
+| `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts scored for template compliance and drift, how far the replies moved from an earlier report's |
 | `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
 | `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score |
 | `--chat-max-len N` | `2048` | longest conversation scored |
@@ -1099,10 +1101,10 @@ Evaluation flags, in the order `--help` prints them.
 
 ### distill census
 
-Pairs the reply rows of a cache cut without a context with the same rows
-in one or more caches cut with a context. It writes the on-path delta
-(the gain at the token the teacher wrote), the coarsened KL between the
-stored top-K distributions and, with several contexts, the residual no
+Pairs the reply rows of a cache made without a context with the same
+rows in one or more caches made with a context. It writes the on-path
+delta (the gain at the token the teacher wrote), the coarsened KL between
+the stored top-k distributions and, with several contexts, the residual no
 training recovers. Runs on the CPU. Exits 2 when a cache has no manifest
 or no rows pair.
 
@@ -1112,8 +1114,8 @@ or no rows pair.
 | `--with DIR` | required | cache with a context, repeatable |
 | `--out JSON` | required | the census JSON to write |
 | `--md PATH` | none | Markdown summary to write |
-| `--corpus JSONL` | none | the prompts jsonl the caches were cut from, so `high_delta` is keyed by row id |
-| `--delta-threshold F` | `1.0` | nats of on-path gain that make a position high-delta |
+| `--corpus JSONL` | none | the prompts jsonl the caches were made from, so `high_delta` is keyed by row id |
+| `--delta-threshold F` | `1.0` | nats gained at the token the teacher wrote that make a position high-delta |
 | `--pair-by MODE` | `line` | pair rows across caches by corpus `line` or by the full `doc` id |
 | `--max-rows N` | all | paired rows to measure |
 

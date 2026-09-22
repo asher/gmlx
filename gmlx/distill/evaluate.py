@@ -93,7 +93,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                  batch_tokens=opts.batch_size * opts.max_len, per_turn=opts.chat_per_turn)
         r["wall_s"] = time.perf_counter() - t0
         res["chat_bpb"][name] = r
-        log(f"[eval] {name}: assistant-span bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
+        log(f"[eval] {name}: assistant-turn bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
             f"{r['rows']} {'turns' if opts.chat_per_turn else 'conversations'}, {r['dropped']} dropped "
             f"({r['wall_s']:.0f}s)")
     for name, rows in (reply_slices or {}).items():

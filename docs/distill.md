@@ -5,16 +5,16 @@ larger one knows, without the larger one running at inference. It walks
 the `gmlx distill` actions through one worked task, says what each step
 costs, and explains the numbers the reports print.
 
-You give it a document, a list of questions about it, a large GGUF that
-reads the document, called the teacher, and a small GGUF that never sees it,
-called the student. You get a LoRA adapter, a small GGUF of extra weights
-laid over the student, which you attach with `--adapter`. The student then
-answers the questions without the document in its prompt.
+You give it a document and a list of questions about it. A large GGUF,
+the teacher, reads the document. A small GGUF, the student, never sees it.
+You get a LoRA adapter, a small GGUF of extra weights laid over the
+student, which you attach with `--adapter`. The student then answers the
+questions without the document in its prompt.
 
 On the worked task the adapter gets 0.88 of the held-out questions right,
-against 0.95 with the document pasted into every prompt, and costs nothing
-per request. The same steps train a student on plain text, or on a
-behavior such as answering in a fixed format.
+against 0.95 with the document pasted into every prompt, and puts no
+document into any request. The same steps train a student on plain text,
+or on a behavior such as answering in a fixed format.
 
 - [Before you start](#before-you-start)
 - [Write the inputs](#write-the-inputs)
@@ -43,12 +43,12 @@ from another family still works, through the mapping described under
 same result.
 
 The pipeline runs the teacher on its own, once, and never loads the
-teacher and the student together. Memory is set by the larger of the two:
-the teacher during `gen` and `cache`, the student during `train`. A 27B
+teacher and the student together. Memory is set by the larger of the two,
+the teacher during `gen` and `cache` and the student during `train`. A 27B
 teacher at Q8 and a 9B student at Q6_K fit a 64 GB machine in every step.
 The figures are in [What each step costs](#what-each-step-costs).
 
-Six actions do the work and one checks an input. Every flag of every
+Six actions do the work and one measures an input. Every flag of every
 action is listed under [gmlx distill](cli.md#gmlx-distill) in the CLI
 reference.
 
@@ -68,8 +68,8 @@ The worked task is a database schema. The teacher reads the schema and
 answers questions with SQL, the student must answer the same questions
 with no schema in its prompt, and a query counts as right when it runs
 against the database and returns the reference rows. Any document with a
-checkable task fits the same steps: an API reference with tests, a style
-guide with a linter, a rulebook with a judge.
+checkable task fits the same steps, such as an API reference with tests, a
+style guide with a linter, or a rulebook with a judge.
 
 Only the teacher reads the document, one text file, `schema.md` below.
 The worked one is about 3400 bytes. The database, `freight.sqlite` below,
@@ -135,8 +135,21 @@ records each reason word in its report and in the rejects file.
 Before spending hours on training, measure whether the document changes
 what the teacher says. The check generates the teacher's replies to the
 held-out prompts with the document in view, then caches those exact
-replies twice: once as written, and once with the document removed from
-the prompt. `census` compares the two caches:
+replies twice, once as written and once with the document removed from
+the prompt.
+
+`--context`, the flags' word for the document, puts it into the last user
+turn on the teacher's side only. Each reply row then carries two message
+lists, `messages` with the document and `student_messages` without it.
+The first `cache` reads `messages`, the second reads the bare list
+through `--messages-key student_messages`, and `census` compares what the
+teacher thought of the same replies with and without the document.
+
+`--frame` says where in a row the targets are, and `reply-think` puts
+them at the final turn from its reasoning onward. The other `cache` flags
+are the ones [Round one](#round-one-the-teacher-writes-the-corpus)
+explains. The replies are cached as written, budget hits included, since
+the census wants every position the document moved:
 
 ```sh
 gmlx distill gen --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --prompts prompts-heldout.jsonl \
@@ -151,14 +164,9 @@ gmlx distill census --without cache-heldout-bare/ --with cache-heldout-ctx/ \
     --corpus heldout-ctx.jsonl --out census.json --md census.md
 ```
 
-`--context`, the flags' word for the document, puts it into the last user
-turn on the teacher's side only. Each reply row then carries two message
-lists, `messages` with the document and `student_messages` without it,
-and the second `cache` reads the bare list.
-
-Two rows of the census report decide. The `distillable effect` row is how
-far the document moves the teacher's next-token choices, averaged over
-every position of the replies, in nats (defined under
+Two rows of the census report decide. The row that starts `distillable
+effect` is how far the document moves the teacher's next-token choices,
+averaged over every position of the replies, in nats (defined under
 [Read the numbers](#read-the-numbers)). The `positions above 1.0 nats`
 row is the share of positions it moves by more than one nat, the
 high-delta positions. An effect under about 0.05 nats, or a share under
@@ -184,23 +192,27 @@ gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus r1-corpus.json
     --frame reply-think --frame-kwargs '{"enable_thinking": true}' --top-k 256 --max-len 2560
 gmlx distill align --cache cache-r1/ --student Qwen3.5-9B-Q6_K.gguf --out view-r1/
 gmlx distill train --view view-r1/ --student Qwen3.5-9B-Q6_K.gguf --adapter-out r1.gguf \
-    --iters 302 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5
+    --iters 302 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5 --ckpt-dir ckpt-r1/
 ```
 
 `gen` serves the teacher on a local port, sends `--concurrency` requests
 at a time, and stops the server when it is done. The server's own output
 goes to `r1-replies.jsonl.server.log`, and the run's settings go to
 `r1-replies.jsonl.gen.json`, a sidecar that `filter` and `cache` read.
+A run that stops part way resumes when rerun, since prompt ids already in
+the output are skipped.
+
 `--thinking` turns the teacher's reasoning on, so each reply carries its
 reasoning under `reasoning_content` and the student learns the reasoning
 as well as the answer. `--thinking-budget` caps the reasoning at 1000
-tokens and `--max-tokens` gives 320 more for the answer. A run that stops
-part way resumes when rerun, since prompt ids already in the output are
-skipped. `--temperature` and `--top-p` are the sampling settings, and
-0.6 with 0.95 gives varied replies that stay on task.
+tokens and `--max-tokens` gives 320 more for the answer. `--temperature`
+and `--top-p` are the sampling settings, and 0.6 with 0.95 gives varied
+replies that stay on task.
 
 A teacher without a reasoning mode runs without `--thinking`, and the
-caches below then take `--frame reply` instead of `reply-think`.
+caches below then take `--frame reply` instead of `reply-think`. Pair a
+reasoning teacher with a student that has a reasoning mode of its own,
+or run the teacher without `--thinking`.
 
 `filter` runs its checks in a fixed order and names the first one a row
 fails, with one reason word per dropped row:
@@ -208,7 +220,8 @@ fails, with one reason word per dropped row:
 - `length`, the reply did not reach its end of turn.
 - `budget`, the reasoning hit `--thinking-budget`.
 - `empty`, the reply has fewer than `--min-tokens` words.
-- `marker`, a template marker leaked into the reply.
+- `marker`, a marker of the chat template, the fixed text a model wraps
+  around each turn, leaked into the reply.
 - `repeat`, lines or phrases repeat.
 - `ascii`, too many non-ASCII characters, only with `--max-non-ascii`.
 - `tokens`, the reply is over `--max-reply-tokens`.
@@ -217,28 +230,34 @@ fails, with one reason word per dropped row:
 
 A reply whose reasoning hit the budget is unfinished, so expect to lose
 about a third of the replies at a 1000-token budget, and write more
-prompts than the rows you need. The report file has the kept and dropped
-counts.
+prompts than the rows you need. `--max-reply-tokens` counts the reasoning
+and the answer together. The two budgets allow 1320 tokens, and the cap of
+1180 drops the replies whose reasoning came close to its limit without
+hitting it. The report file has the kept and dropped counts.
 
 `cache` runs the teacher over the kept replies. `--frame reply-think`
 tells it the rows are conversations and the target starts at the final
-turn's reasoning. A frame says where in a row the targets are.
-`--frame-kwargs` sets the same thinking switch `gen` used, so the teacher
-reads the conversation the way it wrote it. `--max-len` is the longest
-row in teacher tokens, and 2560 holds a 1180-token reply behind a
-prompt. `--top-k` is how many next-token candidates are stored per
-position, and 256 is the default.
+turn's reasoning. `--frame-kwargs` sets the same thinking switch `gen`
+used, so the teacher reads the conversation the way it wrote it.
+`enable_thinking` is the variable the Qwen chat template reads for its
+reasoning switch, the one `gmlx serve --thinking on` sets. Another
+family's template may name it differently, and `gmlx serve --help` under
+`--thinking` says which. `--max-len` is the longest row in teacher
+tokens, and 2560 holds a 1180-token reply behind a prompt. `--top-k` is
+how many next-token candidates are stored per position, and 256 is the
+default.
 
 `align` runs on the CPU with the two tokenizers only and writes the view
-into `view-r1/`. On a same-family pair it records that the tokenizers
+into `view-r1/`. On a same-tokenizer pair it records that the tokenizers
 match and finishes in seconds.
 
 `train` reads the view, fits the adapter on the quantized student, and
 writes the adapter GGUF. `--iters` counts steps of `--batch-size` rows
 each, and two passes over the rows is enough for a generated corpus.
 `--lora-rank` is the adapter's capacity, `--lora-alpha` its scale, and
-`--lr` the peak learning rate, how far each step moves the adapter. The
-values above are the ones that worked on the 9B student, and
+`--lr` the peak learning rate, how far each step moves the adapter.
+`--ckpt-dir` is where the run keeps its checkpoints, `./ckpt` by default.
+The values above are the ones that worked on the 9B student, and
 [Advanced settings](#advanced-settings) says what each one changes. If
 the loss printed every ten steps has not fallen by the fortieth step,
 stop the run and check the inputs.
@@ -254,11 +273,14 @@ gmlx serve Qwen3.5-9B-Q6_K.gguf --adapter r1.gguf --thinking on
 ```
 
 A student trained with `--frame reply-think` learned to reason before
-answering, so serve it with thinking on, which `--thinking on` forces
-and the Qwen template does by default. The server registers the adapted
-model under an id derived from the file name, `qwen3.5-9b` here, and
-the bare base as `<id>-base`. Both are listed by
-`curl localhost:8080/v1/models`, and a request names one of them:
+answering, so serve it with thinking on. The Qwen template turns it on by
+default, and `--thinking on` makes sure. The switch holds for every
+request, and a request can override it with a `chat_template_kwargs`
+object, listed under [parameter support](api.md#parameter-support). The
+server registers the adapted model under an id derived from the file
+name, `qwen3.5-9b` here, and the bare base as `<id>-base`. Both are
+listed by `curl localhost:8080/v1/models`, and a request names one of
+them:
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/chat/completions -d '{
@@ -283,11 +305,12 @@ gmlx distill filter --in heldout-r1.jsonl --out heldout-r1-ok.jsonl \
     --verify "./check-sql.py freight.sqlite" --report heldout-r1.json
 ```
 
-`gen` calls the model it serves `--teacher` whoever it is, and here it is
-the student with its adapter. `--serve-arg` passes an argument through to
+The `--teacher` flag names whatever model `gen` serves, here the student
+with its adapter. `--serve-arg` passes an argument through to
 `gmlx serve`, and two of them attach the adapter. Requests go to the
-adapted model, which the server lists first. The kept count in the report
-over the row count is the pass rate. Run the same two commands on the
+adapted model, which the server lists first. The pass rate is `kept`
+divided by `kept` plus the sum of the `dropped` counts in the report.
+Run the same two commands on the
 untouched student, without the serve arguments, for the before figure,
 and on `prompts-untrained.jsonl` for the third pass rate.
 
@@ -307,7 +330,8 @@ scores the teacher's held-out replies from the census check on the bare
 prompt under `student_messages`, so the document is not in view.
 `--reply-think` includes their reasoning, and `--reply-positions` keeps
 only the positions the document moved. `--chat-max-len` is the longest
-row scored, reply slices included.
+row scored, reply slices included, and 1536 covers a 1320-token reply
+behind a bare prompt.
 [Read the numbers](#read-the-numbers) explains the report.
 
 ## Round two, the student writes and the teacher scores
@@ -329,7 +353,8 @@ gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus r2-corpus.json
     --frame reply-think --frame-kwargs '{"enable_thinking": true}' --top-k 256 --max-len 2560
 gmlx distill align --cache cache-r2/ --student Qwen3.5-9B-Q6_K.gguf --out view-r2/ --tables view-r1/
 gmlx distill train --view view-r1/ --view view-r2/ --student Qwen3.5-9B-Q6_K.gguf \
-    --adapter-out r2.gguf --iters 678 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5
+    --adapter-out r2.gguf --iters 678 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5 \
+    --ckpt-dir ckpt-r2/
 ```
 
 `filter --context` rebuilds every kept row with the document in the
@@ -338,14 +363,16 @@ then holds what the teacher thinks of the student's own words with the
 document in view, while the student trains on the prompt alone.
 `align --tables` reuses the tokenizer-pair tables, `tables.safetensors`,
 from round one. `train` takes both views and starts from the base
-weights, not from the first adapter, so `--iters` doubles with the rows.
-Measure `r2.gguf` the same way as round one.
+weights, not from the first adapter, so `--iters` doubles with the rows
+(two passes over the rows, as in round one). `--ckpt-dir` keeps the two
+rounds' checkpoints apart, since both would write to `./ckpt` without
+it. Measure `r2.gguf` the same way as round one.
 
 ## What each step costs
 
-The figures below are from the worked task on an M5 Max: a 27B teacher
-at Q8, a 9B student at Q6_K, 615 training questions plus 264 combined
-ones, and two rounds. The whole run took about 11 GPU hours.
+The figures below are from the worked task on an M5 Max, with a 27B
+teacher at Q8, a 9B student at Q6_K, 615 training questions plus 264
+combined ones, and two rounds. The whole run took about 11 GPU hours.
 
 | Step | Memory | Time | Disk |
 |---|---|---|---|
@@ -355,8 +382,9 @@ ones, and two rounds. The whole run took about 11 GPU hours.
 | `train` | 50.7 GB peak on the 9B student | 9.3 s per step of 3 rows, so 678 steps in 1.75 h | two checkpoints under `--ckpt-dir` |
 | `eval` | the student | minutes per slice, longer with the adapter attached | two report files |
 
-A cache is 6 x K + 22 bytes per position plus the text, so a corpus of
-600 rows near 1300 tokens takes about 1.2 GB at the default K.
+A cache is 6 x K + 22 bytes per position plus the text, with K the
+`--top-k` value, so a corpus of 600 rows near 1300 tokens takes about
+1.2 GB at the default K.
 `--max-disk-gb` refuses a cache whose estimate exceeds it, and every size
 flag counts decimal GB. When a run is over, the caches, the checkpoint
 directories, the server logs and the sidecars can all go. The views, the
@@ -368,7 +396,8 @@ fit, each at some cost in time. A teacher that does not fit is a different
 problem: pick a smaller quantization of it, or stream a MoE teacher's
 experts from disk, which `cache` does on its own for a MoE model larger
 than memory. `gen` alone can also use a teacher served elsewhere through
-`--base-url`.
+`--base-url`. A teacher that fits nowhere local cannot be cached, as
+[Limitations](#limitations) says.
 
 The document's length is bounded by the teacher's context window during
 `gen` and by `--max-len` during `cache`, since the document sits in the
@@ -399,19 +428,29 @@ Four numbers cover everything the reports print:
 [train] it 300 val 0.0744 (best 0.0752)
 ```
 
-`loss` should fall through the first third of the run and then flatten.
-`dk` and `alm` are its two parts, `ce` is a third term that is measured
-but not trained on unless `--ce` is set, and `floored` counts positions
-whose probability was clamped at the smallest representable value. `val`
-is the loss on rows held out of training, and `best` is the lowest so
-far. A validation loss that rises while the training loss keeps falling
-means the adapter is memorizing the rows, and fewer iterations or a lower
-rank fix it. `peak` is the memory high-water mark in GB and `step` the
-wall time per step.
+The fields of the train line:
+
+- `loss` should fall through the first third of the run and then flatten.
+- `dk` and `alm` are its two parts.
+- `ce` is a third term that is measured but not trained on unless `--ce`
+  is set.
+- `floored` counts positions whose probability was clamped at the
+  smallest representable value.
+- `lr` is the learning rate at that step.
+- `tok/s`, `step` and `load` are the throughput, the wall time per step
+  and the time spent reading the batch.
+- `peak`, `active` and `cache` are memory in GB, the high-water mark, the
+  arrays in use and MLX's buffer cache.
+
+`val` is the loss on rows held out of training, and `best` is the lowest
+of the earlier validations, so a `val` below it is a new best. A
+validation loss that rises while the training loss keeps falling means
+the adapter is memorizing the rows, and fewer iterations or a lower rank
+fix it.
 
 `eval` writes a Markdown report with one table per kind of measurement,
-each row a slice, one held-out file. The reply table is the one the
-recipe reads:
+each row a slice, one held-out file. The reply table is the one this
+guide reads:
 
 | reply slice | bpb after | bpb before | nats/token after | se | rows |
 |---|---|---|---|---|---|
@@ -419,9 +458,9 @@ recipe reads:
 
 `after` is with the adapter and `before` without it, filled in by
 `--before`. With `--reply-positions` the rows are scored at the census
-positions only, and the log line says so. The scale for nats per token
-is the teacher's own figure at the same positions, which the census
-report lists with and without the document. `se` is the standard error
+positions only, and the log line says so. Judge the nats per token
+figure against the teacher's own at the same positions, in the census
+report's last row. `se` is the standard error
 over rows, and two adapters whose figures differ by less than two of it
 cannot be told apart.
 
@@ -430,8 +469,8 @@ slice table adds a `decontam` column, the share of a slice's 64-byte
 windows found in the training corpus, and a slice over one percent has
 its `gate` marked void because it was trained on. The task table gives
 accuracy on the local task files, the chat sanity table the rate of
-well-formed replies, and the KL table the distance from the teacher's
-stored choices in nats.
+well-formed replies, and the KL table the distance between the student's
+next-token distribution and the teacher's stored one, in nats.
 
 ## What to expect
 
@@ -447,10 +486,11 @@ The untouched student with the schema pasted into its prompt scores
 0.946 on the held-out questions, so the adapter reaches most of what
 pasting the document gives. At the positions the census found, the
 student's nats per token fell from 4.41 to 0.70, against the teacher's
-0.41 with the schema in view. The chat sanity rate stayed at 1.00, a math
-task moved within its noise, and bits per byte on a code conversation
-set stayed level, so an adapter trained this way keeps the student's
-general behavior.
+0.41 with the schema in view. Whether the student's general behavior
+survived is measured by the `eval` flags that score a chat prompt set, a
+conversation set and local task files, `--chat-sanity`, `--chat-slice`
+and `--tasks` under [distill eval](cli.md#distill-eval). On the worked
+task none of those moved outside its noise.
 
 A student from another tokenizer family on the same task reached about
 a third of the same-tokenizer gap. Measure it on your own document
@@ -478,8 +518,9 @@ gmlx distill eval --student Qwen3-0.6B-Q4_K_M.gguf --adapter smoke.gguf --before
 ```
 
 A directory of text files works in place of the jsonl, one row per file,
-and `--slice` takes plain text. The run passes when `train` reports a falling loss and `eval` writes both
-reports.
+and `--slice` takes plain text. The slice is the training text on
+purpose, so the after figure must beat the before one. The run passes
+when `train` reports a falling loss and `eval` writes both reports.
 
 ## Train on plain text or a behavior instead
 
@@ -504,6 +545,9 @@ Rows are cut into windows of at most `--max-len` teacher tokens at word
 boundaries, and without a `--frame` they are cached as plain text. An
 instruct teacher sees its own template with `--frame continue`, which
 places each window in a model turn behind a fixed `--frame-instruction`.
+Size the corpus by the validation line. A `val` that stops falling while
+`loss` keeps falling wants more text, and a `val` still falling at the
+last step wants more iterations.
 
 `eval --cache` checks each slice against the corpus so a slice the
 student trained on is marked, and a same-tokenizer `--kld-cache` reports
@@ -548,7 +592,7 @@ scores low, and no adapter will fix that.
 `--grad-checkpoint`, or cache with a shorter `--max-len` so the rows are
 shorter.
 
-`train` refuses the view. The cache it was built from changed, or the
+A refused view means the cache it was built from changed, or the
 tokenizer tables do not match the student, so rerun `align`. A refusal
 naming fewer train rows than `--batch-size` means the corpus is too
 small for that batch.
@@ -604,17 +648,20 @@ The training loss is a sparse KL over the top-k plus a tail bucket for
 the mass outside it, so the student is never asked to put all of its
 probability on the top-k. `--dk` weights that term, printed as `dk` in
 the train line. `--alm` weights the chunk term of a cross-tokenizer pair,
-printed as `alm`. `--ce` weights a plain cross-entropy on the teacher's
-tokens, printed as `ce` and left at 0. `--loss paper` is the top-k term
-with no tail bucket, and `--loss renorm` renormalizes both sides over
-the top-k.
+ALM in the flags, printed as `alm`. `--ce` weights a plain cross-entropy
+on the teacher's tokens, printed as `ce` and left at 0. `--loss paper`
+is the top-k term with no tail bucket, and `--loss renorm` renormalizes
+both sides over the top-k.
 
 `--lora-rank` sets the adapter's width, 128 on the 9B student, and
-`--lora-alpha` its scale as alpha over rank. `--lr` is the peak rate of
-a warmup into cosine decay, `--seed` fixes the batch order and the
-adapter's initialization, and `--resume` restarts at the exact iteration
-from `--ckpt-dir`. `--view` repeats to train on several views over one
-tokenizer pair.
+`--lora-alpha` its scale as alpha over rank. `--lr` is the peak learning
+rate. The rate rises over the first `--warmup` fraction of the steps and
+then falls along a cosine curve to zero. Those are the only measured
+values, so on a student of another size start from them and change one
+at a time, judged by the validation loss. `--seed` fixes the batch order
+and the adapter's initialization, and `--resume` restarts at the exact
+iteration from `--ckpt-dir`. `--view` repeats to train on several views
+over one tokenizer pair.
 
 `--iters` follows from the training row count. An epoch is the train
 rows of every view divided by `--batch-size`, rounded up, and two epochs
@@ -633,7 +680,8 @@ Memory and the measurements behind these defaults are on the
 - The student is a K-quant GGUF with a LoRA adapter. Full-parameter
   training and MLX checkpoints are library features without an action.
 - A remote teacher can write the corpus through `gen --base-url`, and
-  the trace count then needs `--tokenizer`. It cannot be cached, since
+  counting its reasoning against `--thinking-budget` then needs
+  `--tokenizer`. It cannot be cached, since
   `cache` runs the teacher's forward pass itself and needs a local GGUF.
 - Recorded routes are replayed by `eval --kld-cache` on the cache's own
   teacher. `train` does not replay them, so a MoE student trained from a
