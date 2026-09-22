@@ -416,7 +416,22 @@ the teacher's 0.41 with the schema in view. The chat compliance rate
 stayed at 1.00, GSM8K moved within its noise on 100 items, and bits per
 byte on a code conversation set stayed level, so a rank 128 adapter
 trained this way keeps the student's general behavior. Both rounds with
-their evaluations took about 11 GPU hours on an M5 Max.
+their evaluations took about 11 GPU hours on an M5 Max. Each pass rate
+in the table is one served sample of one adapter, and serving the same
+adapter again moves a rate by three or four items in a hundred, so read
+differences of that size between rows as sampling.
+
+Those figures are for a teacher and a student on one tokenizer. The
+same cache aligned onto gemma-4-12b-it, a student from another
+tokenizer family, with the same settings reached 0.296 on the held-out
+questions against 0.930 with the schema pasted into its prompt, about a
+third of the gap, and 0.050 on the families never trained on. That
+adapter answered the single-table questions and failed the joins on
+column names the schema does not have, so the projection carried the
+shape of the replies and only part of the document. Plan for a
+cross-tokenizer pair to reach a fraction of what the same-tokenizer
+case reaches, and measure it on your own document before relying on
+it.
 
 ## Different tokenizers
 
@@ -434,7 +449,9 @@ Between shared boundaries the student is trained on the likelihood of the
 whole chunk of bytes, matched to the teacher's likelihood of the same
 chunk, which is the ALM term. The census in `view.json` says how much of
 the corpus this covers for a pair, and the same-tokenizer case reduces to
-plain top-K distillation with nothing projected.
+plain top-K distillation with nothing projected. The measured
+cross-tokenizer result on the recipe above is in [What to
+expect](#what-to-expect).
 
 ## Limitations
 
