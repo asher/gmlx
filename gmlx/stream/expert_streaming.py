@@ -893,6 +893,9 @@ def install_expert_streaming(
             if streaming:
                 m._kq_cpu_only = True
                 object.__setattr__(m, "_kq_li", li)
+                # A streamed stack is read from its slot per call; a
+                # resident gate+up concat copy would defeat that.
+                object.__setattr__(m, "_kq_gate_up_pending", False)
                 if gpu_ok:
                     moe_modules.setdefault(li, []).append(m)
                 if prefetcher is not None:

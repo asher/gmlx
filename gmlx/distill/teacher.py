@@ -66,6 +66,7 @@ class CacheOptions:
     no_wired_limit: bool = False
     stream_experts: bool = False
     expert_bytes_gb: float | None = None
+    routes: bool = False
     extra: dict = field(default_factory=dict)
 
 
@@ -352,6 +353,22 @@ def run_cache(opts: CacheOptions) -> int:
     cfg = config.get("text_config", config) if isinstance(config, dict) else config
     head = teacher_head(model)
     V = head.V
+    recorder, routing = None, None
+    if opts.routes:
+        recorder, why = _format.install_route_recording(getattr(model, "language_model", model))
+        if recorder is None:
+            log(f"[cache] refuse: --routes: {why}")
+            return 2
+        n_experts = next((int(cfg[k]) for k in ("num_experts", "n_routed_experts", "num_local_experts",
+                                                  "moe_num_experts") if isinstance(cfg, dict) and cfg.get(k)), None)
+        if n_experts is None:
+            log("[cache] refuse: --routes: expert count not in the config (num_experts, n_routed_experts, "
+                "num_local_experts, moe_num_experts)")
+            return 2
+        routing = {"moe_layers": list(recorder.layers), "k": None, "n_experts": n_experts,
+                   "dtype": np.dtype(_format.routes_dtype(n_experts)).name, "layout": "[B, L, n_moe, k]",
+                   "path": "streaming" if streaming else "resident", "seam": "gmlx.stream.moe_routes"}
+        log(f"[cache] routes: {len(recorder.layers)} MoE layers, {n_experts} experts, {routing['dtype']}")
     feeder = getattr(model, "_kq_feeder", None) if streaming else None
     if streaming:
         log(f"[cache] streaming teacher: feeder installed={feeder is not None} "
@@ -406,6 +423,21 @@ def run_cache(opts: CacheOptions) -> int:
             mx.eval(hidden)
             trunk_wall += time.perf_counter() - tt
             trunk_forwards += 1
+            routes_blt = None
+            if recorder is not None and routing is not None:
+                routes_blt = _format.take_routes_blt(recorder)
+                if routes_blt.shape[:2] != inputs.shape:
+                    log(f"[cache] refuse: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
+                    return 3
+                if routing["k"] is None:
+                    routing["k"] = int(routes_blt.shape[-1])
+                    per_pos = routes_blt.shape[2] * routing["k"] * np.dtype(routes_blt.dtype).itemsize
+                    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, routes_bytes=per_pos)
+                    log(f"[cache] routes: k={routing['k']}, estimate with routes {est / GB:.2f} GB")
+                    if opts.max_disk_gb is not None and est > opts.max_disk_gb * GB:
+                        log(f"[cache] refuse: estimate with routes exceeds --max-disk-gb {opts.max_disk_gb}")
+                        return 2
+                routes_blt = routes_blt.astype(_format.routes_dtype(routing["n_experts"]))
             if streaming and E_bytes:
                 reads_bytes += E_bytes
             # flatten valid positions
@@ -466,6 +498,8 @@ def run_cache(opts: CacheOptions) -> int:
                 rr["onpath_mask"] = valid[off:off + m]
                 rr["token_ids"] = r[3]
                 rr["token_end_byte"] = r[4]
+                if routes_blt is not None:
+                    rr[_format.ROUTES_FIELD] = routes_blt[j, :m]
                 reduced.append((r, rr))
                 off += m
         packed = _format.pack_shard([rr for _, rr in reduced], [r[5] for r, _ in reduced], opts.top_k, opts.floor)
@@ -504,7 +538,7 @@ def run_cache(opts: CacheOptions) -> int:
             "corpus_sha256": corpus_sha,
             "generator": generator,
             "mlx_kld_compatible": opts.frame == "none",
-            "routing": None,
+            "routing": routing,
             "frame": None if opts.frame == "none" else {
                 "kind": opts.frame,
                 "instruction": opts.frame_instruction if opts.frame == "continue" else None,

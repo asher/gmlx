@@ -202,6 +202,7 @@ def swapped_weights(entry: dict, views: dict, slot_owner=None):
     expert whose weights the slot holds. ``None`` (the prefill ring stages
     the whole stack in expert order) leaves the ids as they are."""
     saved = []
+    marked = []
     try:
         for kind, (mod, *_) in entry.items():
             proj = getattr(mod, ATTRS[kind])
@@ -209,9 +210,18 @@ def swapped_weights(entry: dict, views: dict, slot_owner=None):
             proj.weight = views[kind]
             for lo in _expert_loras(proj):
                 lo.owner = slot_owner
+            if not getattr(mod, "_kq_weights_swapped", False):
+                # The sorted-prefill gate+up concat (modules.py) is a copy
+                # of the resident wire bytes in expert order; under a swap
+                # the bound weights are a slot's bytes and the ids are slot
+                # ids, so the block must gather from what is bound.
+                object.__setattr__(mod, "_kq_weights_swapped", True)
+                marked.append(mod)
         yield
     finally:
         for proj, w in saved:
             proj.weight = w
             for lo in _expert_loras(proj):
                 lo.owner = None
+        for mod in marked:
+            object.__setattr__(mod, "_kq_weights_swapped", False)

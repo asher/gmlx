@@ -31,6 +31,7 @@ from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
 from gmlx.gen.prefill_tail import install_prefill_tail
 import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
+from .invariant_linear import install_batch_invariant_linears
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
 from gmlx.upstream.qkv_fuse import install_fused_qkv
@@ -260,18 +261,22 @@ def _patch_hunyuan_norm_topk(model) -> None:
         def __call__(self, x):
             gates = mx.softmax(self.gate(x), axis=-1, precise=True)
             k = self.top_k
+
+            def weights_at(inds):
+                scores = mx.take_along_axis(gates, inds, axis=-1)
+                return scores / scores.sum(axis=-1, keepdims=True)
+
             inds = mx.stop_gradient(
                 mx.argpartition(-gates, kth=k - 1, axis=-1)[..., :k]
             )
-            scores = mx.take_along_axis(gates, inds, axis=-1)
-            scores = scores / scores.sum(axis=-1, keepdims=True)
-            if (
-                getattr(self, "_kq_expert_mass", None) is not None
-                or getattr(self, "_kq_expert_probe", None) is not None
-            ):
+            scores = weights_at(inds)
+            from gmlx.stream.moe_experts import expert_controls_active
+
+            if expert_controls_active(self):
                 from gmlx.stream.moe_experts import _apply_expert_controls
 
-                inds, scores = _apply_expert_controls(self, inds, scores)
+                inds, scores = _apply_expert_controls(
+                    self, inds, scores, weights_at)
             y = self.switch_mlp(x, inds)
             y = (y * scores[..., None].astype(mx.float32)).sum(axis=-2).astype(y.dtype)
             if self.use_shared_mlp:
@@ -1123,6 +1128,9 @@ def _install_and_load(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         log(f"[install] shared-expert fold on {n_shexp} MoE layers")
@@ -1608,6 +1616,9 @@ def load_model(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        _log(f"[install] batch-invariant kernel on {n_inv} small float projections")
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         _log(f"[install] shared-expert fold on {n_shexp} MoE layers")

@@ -980,6 +980,7 @@ prepares an on-policy round from replies a student wrote without it.
 | `--no-wired-limit` | off | leave the wired limit where it is for a resident teacher |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
 | `--expert-bytes-gb F` | measured | expert bytes read per forward, for the read-traffic report |
+| `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval` |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill align

@@ -197,6 +197,9 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Force expert streaming on a MoE teacher that would fit in memory.")
     p.add_argument("--expert-bytes-gb", type=float, default=None,
                    help="Expert bytes read per forward, for the read-traffic report of a streaming teacher.")
+    p.add_argument("--routes", action="store_true",
+                   help="MoE teachers: store every layer's top-k expert ids per position (the routes field, "
+                        "uint8 up to 256 experts) and a routing block in the manifest, for replay by eval.")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 

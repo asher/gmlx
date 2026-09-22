@@ -174,6 +174,14 @@ the captured-mass histogram, the fraction of the teacher's probability
 the top-K holds per position, which says how much the tail bucket
 carries.
 
+`--routes` stores, for a MoE teacher, the expert ids every layer chose
+at every position beside the logits, one byte per expert slot up to 256
+experts. A later forward over the same rows can then select the same
+experts, which `eval --kld-cache` does when the student is the teacher
+itself, so the measured KL is the quantization noise of the weights and
+not a different routing of the same tokens. The pass refuses the flag on
+a dense teacher and on a MoE block it cannot hook, and names the reason.
+
 ## Align the cache to the student
 
 ```sh
@@ -411,9 +419,9 @@ plain top-K distillation with nothing projected.
 - A remote teacher can write the corpus through `gen --base-url`, and
   the trace count then needs `--tokenizer`. It cannot be cached: `cache`
   runs the teacher's forward pass itself and needs a local GGUF.
-- The teacher's routing decisions are not recorded, so a MoE student
-  trained from a MoE teacher of the same family learns from the teacher's
-  outputs alone.
+- Recorded routes are replayed by `eval --kld-cache` on the cache's own
+  teacher. `train` does not replay them, so a MoE student trained from a
+  MoE teacher of the same family learns from the teacher's outputs alone.
 - Task files for `eval` are read from disk. Nothing is downloaded.
 - One cache serves any student, but a view is bound to its cache and its
   tokenizer pair, and `train` refuses a view whose cache changed.

@@ -22,6 +22,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how much a context the student never sees moves the teacher, from two
   caches of the same replies. The teacher and student may use different
   tokenizers. The library is `gmlx.distill`, the guide docs/distill.md.
+- MoE route record and replay (`gmlx.stream.moe_routes`): a forward's
+  per-layer expert ids can be captured and fed back so a later forward
+  over the same positions selects the same experts with live mixing
+  weights. Covers the qwen3, qwen3-next, minimax, gpt-oss, hunyuan,
+  kimi-k3 and DeepSeek-shaped gate families, resident or streamed.
+- `GMLX_BATCH_INVARIANT=1` runs the small float projections (expert
+  router, gated-delta gates) on a kernel whose result does not depend on
+  the row count, so a row's logits are the same at any batch size. About
+  one percent of prefill on a 35B MoE; off by default.
+- `gmlx distill cache --routes` stores a MoE teacher's expert ids per
+  position beside its logits, and `distill eval --kld-cache` replays them
+  so the sparse KL against the teacher's own cache measures elementwise
+  noise only.
 
 ### Changed
 
@@ -40,6 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   precision (`MLX_ENABLE_TF32=0` unless the variable is already set),
   since the chunked rule diverges under MLX's default TF32 rounding on
   M5-class GPUs; a process that keeps TF32 on takes the loop and says so.
+- `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
+  blocks, which were reported as unsupported before.
 
 ### Fixed
 
@@ -111,6 +126,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Streaming decode with the lookahead prestage no longer crashes on a
   model whose router scores are bfloat16 ("'bfloat16' is not a valid
   PEP 3118 buffer format string").
+- Streamed MoE experts could return wrong values at layers whose gate+up
+  concat had been built, since the copy is expert-ordered while the
+  decode arena binds slot bytes and slot ids. Feeder-swapped calls now
+  gather from the bound bytes, and streamed stacks never build the copy.
 
 ## [0.4.13] - 2026-09-12
 

@@ -191,19 +191,26 @@ class KimiK3MoE(nn.Module):
         scores = scores + self.e_score_correction_bias
 
         k = self.args.num_experts_per_tok
-        inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
-        weights = mx.take_along_axis(orig_scores, inds, axis=-1)
-        if k > 1 and self.args.moe_renormalize:
-            weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
-        weights = (weights * self.args.routed_scaling_factor).astype(x.dtype)
 
-        # Expert-controls seam (probe / expert-mass): moe_experts targets
-        # this block directly rather than swapping the forward.
-        if (getattr(self, "_kq_expert_probe", None) is not None
-                or getattr(self, "_kq_expert_mass", None) is not None):
+        def weights_at(inds):
+            w = mx.take_along_axis(orig_scores, inds, axis=-1)
+            if k > 1 and self.args.moe_renormalize:
+                w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
+            return (w * self.args.routed_scaling_factor).astype(x.dtype)
+
+        inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+        weights = weights_at(inds)
+
+        # Expert-controls seam (probe / expert-mass / route record and
+        # replay): moe_experts targets this block directly rather than
+        # swapping the forward.
+        from gmlx.stream.moe_experts import expert_controls_active
+
+        if expert_controls_active(self):
             from gmlx.stream.moe_experts import _apply_expert_controls
 
-            inds, weights = _apply_expert_controls(self, inds, weights)
+            inds, weights = _apply_expert_controls(
+                self, inds, weights, weights_at)
 
         if getattr(self.switch_mlp, "_kq_lookahead", None) is not None:
             # Latent MoE: the wrapped expert container sees routed_down's
