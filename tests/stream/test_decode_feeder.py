@@ -1809,3 +1809,32 @@ def test_prefill_ring_reason(monkeypatch, tmp_path):
     assert _prefill_ring_reason(offsets, None) is None
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "1")
     assert _prefill_ring_reason(offsets, 0) is None
+
+
+def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
+    """A join from ``__del__`` deadlocks when the collection runs inside a
+    thread's bootstrap, so the finalizer shuts the pools down without
+    waiting while an explicit close still waits."""
+    import concurrent.futures
+
+    waits = []
+    orig = concurrent.futures.ThreadPoolExecutor.shutdown
+
+    def spy(self, wait=True, **kw):
+        waits.append(wait)
+        return orig(self, wait=wait, **kw)
+
+    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", spy)
+    def with_pools():  # the seed pools exist only once seeding has run
+        feeder, _ = _make_feeder(monkeypatch, tmp_path)
+        feeder._seed_pool = concurrent.futures.ThreadPoolExecutor(1)
+        feeder._seed_copy_pool = concurrent.futures.ThreadPoolExecutor(1)
+        return feeder
+
+    collected = with_pools()
+    collected.__del__()
+    assert waits and all(w is False for w in waits)
+    waits.clear()
+    closed = with_pools()  # both stay bound: no GC here
+    closed.close()
+    assert waits and all(w is True for w in waits)

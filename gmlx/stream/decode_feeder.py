@@ -1751,14 +1751,19 @@ class DecodeFeeder:
                              slot_owner=lambda: self._owner[li]):
             yield
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
+        """``wait=False`` is the finalizer's form: a join from ``__del__``
+        deadlocks when the collection runs inside a thread's bootstrap,
+        which holds ``threading._shutdown_locks_lock`` that the join of a
+        finished thread takes again. Nothing in flight references the
+        feeder once it is collectable, so the pools drain on their own."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
         for pool in (getattr(self, "_seed_pool", None),
                      getattr(self, "_seed_copy_pool", None)):
             if pool is not None:
-                pool.shutdown(wait=True)
+                pool.shutdown(wait=wait)
         if getattr(self, "_gpu_resident", False):
             import mlx_kquant as kq
 
@@ -1873,7 +1878,7 @@ class DecodeFeeder:
 
     def __del__(self):
         try:
-            self.close()
+            self.close(wait=False)
         except BaseException:  # noqa: BLE001, S110 - incl. ^C during interpreter exit
             pass
 

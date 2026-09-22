@@ -63,6 +63,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A test run or a long session could stop dead inside the expert
+  streaming feeders: their finalizers joined the staging pools, and a
+  collection that ran while a new thread was starting deadlocked on the
+  interpreter's thread-shutdown lock. The finalizers no longer wait.
 - `gmlx distill train` and `gmlx train` on a text-only Qwen3.5 or Qwen3.6
   GGUF ran the gated delta scan as mlx-lm's per-token loop with every
   state on the gradient tape, so a 9B student ran out of memory at the

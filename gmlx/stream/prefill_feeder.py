@@ -434,13 +434,15 @@ class PrefillFeeder:
             present[[e for e in ids if 0 <= e < n_exp]] = True
             self._note_routing(li, routing, present)
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
+        """``wait=False`` is the finalizer's form: see
+        ``DecodeFeeder.close``."""
         pool = getattr(self, "_stage_pool", None)
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=wait)
         pool = getattr(self, "_read_pool", None)
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=wait)
         fds, self._fds = self._fds, {}
         for fd in fds.values():
             try:
@@ -450,7 +452,7 @@ class PrefillFeeder:
 
     def __del__(self):
         try:
-            self.close()
+            self.close(wait=False)
         except Exception:  # noqa: S110 - GC-time cleanup must never raise
             pass
 

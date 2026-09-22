@@ -447,3 +447,24 @@ def test_ring_depth_from_env(monkeypatch, tmp_path):
     from gmlx.stream.prefill_feeder import ring_slots
 
     assert ring_slots() == 2
+
+
+def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
+    """Same contract as the decode feeder: ``__del__`` never joins."""
+    import concurrent.futures
+
+    waits = []
+    orig = concurrent.futures.ThreadPoolExecutor.shutdown
+
+    def spy(self, wait=True, **kw):
+        waits.append(wait)
+        return orig(self, wait=wait, **kw)
+
+    monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", spy)
+    collected, _ = _make_prefill_feeder(monkeypatch, tmp_path)
+    collected.__del__()
+    assert waits and all(w is False for w in waits)
+    waits.clear()
+    closed, _ = _make_prefill_feeder(monkeypatch, tmp_path)  # both stay bound: no GC here
+    closed.close()
+    assert waits and all(w is True for w in waits)
