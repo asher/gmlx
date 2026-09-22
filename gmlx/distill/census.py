@@ -223,7 +223,7 @@ def report_markdown(opts: CensusOptions, s: dict) -> str:
              f"| reply positions compared | {s['positions']} |",
              f"| distillable effect, mean coarsened KL (nats) | {s['distillable_effect_kl_nats']} |",
              f"| mean on-path delta (nats) | {s['mean_onpath_delta_nats']} |",
-             f"| positions above {opts.delta_threshold} nats | {s['high_delta_fraction']} |",
+             f"| high-delta positions (above {opts.delta_threshold} nats) | {s['high_delta_fraction']} |",
              f"| top-1 moved | {s['top1_moved_fraction']} |",
              f"| residual across contexts (nats) | {s['residual_kl_nats']} |",
              f"| teacher nats per token on high-delta positions, without / with | "
@@ -247,6 +247,9 @@ def run_census(opts: CensusOptions) -> int:
             return 2
     base = reply_rows(caches[0], opts.pair_by)
     ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]
+    if opts.corpus and not Path(opts.corpus).expanduser().is_file():
+        print(f"[census] refuse: no corpus at {opts.corpus}", file=sys.stderr)
+        return 2
     id_of = corpus_ids(Path(opts.corpus).expanduser(), opts.pair_by) if opts.corpus else {}
     log(f"[census] {len(base[1])} reply rows without, {[len(r) for _x, r in ctx]} with, "
         f"paired by {opts.pair_by}")

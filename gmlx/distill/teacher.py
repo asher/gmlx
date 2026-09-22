@@ -296,6 +296,13 @@ def run_cache(opts: CacheOptions) -> int:
 
     out = Path(opts.out)
     t0 = time.perf_counter()
+    if not Path(opts.teacher).expanduser().exists():
+        log(f"[cache] refuse: no teacher at {opts.teacher}")
+        return 2
+    c = opts.corpus
+    if (c.endswith((".jsonl", ".txt")) or c.startswith((".", "/", "~"))) and not Path(c).expanduser().exists():
+        log(f"[cache] refuse: no corpus at {c}")
+        return 2
     teacher_is_gguf = Path(opts.teacher).is_file() and opts.teacher.endswith(".gguf")
     log(f"[cache] tokenizer from {opts.teacher}" + (" (header only)" if teacher_is_gguf else ""))
     if opts.stream_experts and not teacher_is_gguf:
@@ -443,7 +450,7 @@ def run_cache(opts: CacheOptions) -> int:
             if recorder is not None and routing is not None:
                 routes_blt = _format.take_routes_blt(recorder)
                 if routes_blt.shape[:2] != inputs.shape:
-                    log(f"[cache] error: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
+                    log(f"[cache] refuse: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
                     return 3
                 if routing["k"] is None:
                     routing["k"] = int(routes_blt.shape[-1])
@@ -594,7 +601,7 @@ def run_cache(opts: CacheOptions) -> int:
     if problems:
         for x in problems[:10]:
             log("[cache] validate: " + x)
-        log(f"[cache] validator failed with {len(problems)} problems")
+        log(f"[cache] error: validator failed with {len(problems)} problems")
         return 4
     log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

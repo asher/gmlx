@@ -17,7 +17,7 @@ _ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _ACTION_DESC = {
     "gen": "run a teacher over a prompt set through gmlx serve and write a corpus",
     "filter": "drop generated rows a student should not learn from",
-    "cache": "run a teacher over a corpus and store its top-k log-probabilities",
+    "cache": "run a teacher over a corpus and store its most likely next tokens with their probabilities",
     "align": "map a cache onto a student tokenizer and write a view",
     "train": "train a LoRA adapter on a GGUF student against a view",
     "eval": "score a student, with and without its adapter, on held-out data",
@@ -32,7 +32,7 @@ def _print_help(prog: str) -> None:
     for a in _ACTIONS:
         lines.append(f"  {a:<8} {_ACTION_DESC[a]}")
     lines += ["", f"run `{prog} <action> --help` for an action's options.",
-              "every size flag is in decimal GB (1e9 bytes)."]
+              "Every size flag is in decimal GB (1e9 bytes)."]
     print("\n".join(lines))
 
 
@@ -85,7 +85,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--startup-timeout", type=float, default=900.0,
                    help="Seconds to wait for the served teacher (default 900).")
     p.add_argument("--concurrency", type=int, default=8, help="Requests in flight (default 8).")
-    p.add_argument("--max-tokens", type=int, default=1024, help="Reply budget per request, not counting the reasoning trace (default 1024).")
+    p.add_argument("--max-tokens", type=int, default=1024, help="Answer budget per request, the reasoning trace not counted (default 1024).")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
     p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
@@ -191,7 +191,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                         "template's turn-end marker, which becomes a target.")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every teacher render, as a JSON object or a file.")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Tokenizer and config fallback.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--no-require-feeder", dest="require_feeder", action="store_false",
                    help="Run a streaming teacher without the prefill feeder (every expert byte is "
                         "then read through the page cache).")
@@ -267,7 +267,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--iters", type=int, required=True, help="Training steps.")
     p.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (default 16).")
     p.add_argument("--lora-scale", type=float, default=None,
-                   help="LoRA multiplier as is (default 2.0 unless --lora-alpha is given).")
+                   help="LoRA multiplier applied directly (default 2.0 unless --lora-alpha is given).")
     p.add_argument("--lora-alpha", type=float, default=None,
                    help="LoRA multiplier as alpha / rank. Give this or --lora-scale, not both.")
     p.add_argument("--lora-dropout", type=float, default=0.0, help="LoRA dropout (default 0.0).")
@@ -281,12 +281,12 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
     p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
-                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term with no tail bucket. "
-                        "renorm: softmax over the support only.")
+                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term with no tail bucket, the "
+                        "form of the offline top-k distillation paper. renorm: softmax over the support only.")
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
     p.add_argument("--alm", type=float, default=DEFAULT_KNOBS["lambda_alm"],
-                   help="Weight of the ALM term, 0 on a same-tokenizer view (default 1).")
+                   help="Weight of the ALM term, 0 when align took the identity path (default 1).")
     p.add_argument("--ce", type=float, default=DEFAULT_KNOBS["lambda_ce"],
                    help="Weight of the cross-entropy term (default 0).")
     p.add_argument("--T-dk", type=float, default=None, help="Override the view's T_dk.")
@@ -306,7 +306,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--val-batches", type=int, default=16, help="Validation batches per pass (default 16).")
     p.add_argument("--report-every", type=int, default=10, help="Train-loss report interval (default 10).")
     p.add_argument("--report", default=None, metavar="JSON", help="Write the run log here.")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Tokenizer and config fallback.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--no-wired-limit", action="store_true", help="Leave the wired limit where it is.")
     p.add_argument("--cache-limit-gb", type=float, default=8.0, help="MLX buffer cache cap (default 8).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
@@ -352,7 +352,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="Reply slices target the final turn's reasoning trace.")
     p.add_argument("--reply-positions", default=None, metavar="JSON",
                    help="A distill census JSON whose high_delta map restricts every reply slice to the "
-                        "positions the context moved.")
+                        "high-delta positions.")
     p.add_argument("--kld-cache", default=None, metavar="DIR",
                    help="Same-tokenizer cache to score sparse KL against.")
     p.add_argument("--kld-rows", type=int, default=None, help="Rows of the KL cache to score (default all).")
@@ -365,7 +365,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--cache-limit-gb", type=float, default=4.0, help="MLX buffer cache cap (default 4).")
     p.add_argument("--decontam-threshold", type=float, default=0.01,
                    help="Slice window fraction found in the corpus above which its gate is void (default 0.01).")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Tokenizer and config fallback.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 
@@ -427,7 +427,10 @@ def cmd_cache(argv: list[str], prog: str = "gmlx distill cache") -> int:
 
         from gmlx.distill.format import validate_cache
         problems = validate_cache(Path(args.validate))
-        print("[cache] valid" if not problems else "\n".join("[cache] validate: " + x for x in problems))
+        if problems:
+            print("\n".join("[cache] validate: " + x for x in problems), file=sys.stderr)
+        else:
+            print("[cache] valid")
         return 0 if not problems else 1
     if not (args.teacher and args.corpus and args.out):
         print("[cache] refuse: --teacher, --corpus and --out are required, or --validate DIR", file=sys.stderr)

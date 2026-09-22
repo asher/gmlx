@@ -115,9 +115,12 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
 
 
 def run_align(opts: AlignOptions) -> int:
-    """Returns 0 on a written view, 3 when the projection gate refuses the
-    pair (``force`` keeps the view)."""
+    """Returns 0 on a written view, 2 when the cache is missing, 3 when the
+    projection gate refuses the pair (``force`` keeps the view)."""
     cache = Path(opts.cache)
+    if not (cache / "manifest.json").is_file():
+        log(f"[align] refuse: no manifest.json in {cache}, run gmlx distill cache first")
+        return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
     reader = CacheReader(cache)
@@ -153,7 +156,7 @@ def run_align(opts: AlignOptions) -> int:
     elif identity and prefixed:
         log("[align] prefixed rows without a frame block, general path")
         identity = False
-    log(f"[align] same_tokenizer={identity} ({why}), V_T={V_T} V_S={V_S}")
+    log(f"[align] path={'identity' if identity else 'general'} ({why}), V_T={V_T} V_S={V_S}")
     # an identical vocabulary keeps the identity tables even on the general
     # path (group_of is the identity, so the projection is exact)
     if same_vocab:
@@ -229,7 +232,7 @@ def run_align(opts: AlignOptions) -> int:
         },
         "index": index,
     }
-    log(f"[align] {len(index)} rows kept, {loader.dropped} dropped, K'={Kp}, a={a:.3f} s={s:.3f} "
+    log(f"[align] {len(index)} rows kept, {loader.dropped} dropped, kprime={Kp}, a={a:.3f} s={s:.3f} "
         f"redirect={red:.3f} bias_ok={view['census']['tokenization_bias_ok']:.4f} "
         f"(on-path in top-K {view['census']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")

@@ -218,6 +218,18 @@ def run_eval(opts: EvalOptions) -> int:
         if not Path(path).expanduser().is_file():
             log(f"[eval] refuse: slice {name}: no file at {path}")
             return 2
+    task_files = []
+    if opts.tasks:
+        td = Path(opts.tasks_dir or ".")
+        names = [t.strip() for t in opts.tasks.split(",") if t.strip()]
+        task_files = [td / f"{t}.jsonl" for t in names] + ([td / "gsm8k_shots.jsonl"] if "gsm8k" in names else [])
+    for label, path in [("--student", opts.student), ("--adapter", opts.adapter), ("--cache", opts.cache),
+                        ("--reply-positions", opts.reply_positions), ("--chat-sanity", opts.chat_sanity),
+                        ("--chat-refs", opts.chat_refs), ("--teacher-bpb", opts.teacher_bpb),
+                        ("--kld-cache", opts.kld_cache)] + [("--tasks", str(f)) for f in task_files]:
+        if path and not Path(path).expanduser().exists():
+            log(f"[eval] refuse: {label}: nothing at {path}")
+            return 2
     slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
               for name, path in slice_specs}
     report: dict = {"student": opts.student, "adapter": opts.adapter, "slices": {}, "decontam": {},
@@ -229,7 +241,7 @@ def run_eval(opts: EvalOptions) -> int:
             report["decontam"][name] = f
             if f > opts.decontam_threshold:
                 contaminated.add(name)
-                log(f"[eval] {name}: {f:.4f} of 64-byte windows in the cached corpus, bpb gate void")
+                log(f"[eval] warn: {name}: {f:.4f} of 64-byte windows in the cached corpus, bpb gate void")
             else:
                 log(f"[eval] {name}: decontam fraction {f:.5f}")
     tasks: dict = {}
@@ -266,7 +278,7 @@ def run_eval(opts: EvalOptions) -> int:
     if opts.reply_positions:
         positions = read_json(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
         report["reply_positions"] = opts.reply_positions
-        log(f"[eval] reply slices restricted to the positions the census found in {len(positions)} rows")
+        log(f"[eval] reply slices restricted to the high-delta positions of {len(positions)} rows")
     report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions)
     if opts.before and opts.adapter:
         with adapter_disabled(model):

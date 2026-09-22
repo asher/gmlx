@@ -67,8 +67,8 @@ of one adapter. Serving the same adapter again moves a pass rate by
 three or four items in a hundred, so differences of that size between
 adapters are sampling.
 
-Compositional training rows, which join two question families in one
-prompt, raised the pass rate on families never trained on from 0.633 to
+Combined training rows, which join two kinds of question in one
+prompt, raised the pass rate on kinds never trained on from 0.633 to
 0.917. Rows that described the schema in prose instead of querying it
 lowered that rate. The second round, in which the student writes the
 replies and the teacher is cached over its verified ones with the schema
@@ -97,11 +97,11 @@ Aligning the same schema cache onto gemma-4-12b-it at Q6_K, a student
 from another tokenizer family, gave an adapter trained with the guide's
 settings and served with thinking off. It reached 0.296 on the held-out
 questions against 0.930 with the schema pasted into its prompt, about a
-third of the gap, and 0.050 on the families never trained on. The
+third of the gap, and 0.050 on the kinds never trained on. The
 same-tokenizer student reached 0.882 and 0.925 on the same slices.
 
 The adapter answered the single-table questions and failed the joins on
-column names the schema does not have, so the projection carried the
+column names the schema does not have, so the alignment carried the
 shape of the replies and only part of the document. The alignment
 statistics for the pair read an own-group fraction of 0.83, a
 singleton fraction of 0.20 and a shared-boundary fraction of 0.47, which

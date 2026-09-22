@@ -155,6 +155,9 @@ def run_filter(opts: FilterOptions) -> int:
         if not p.is_file():
             print(f"[filter] refuse: no such file: {p}", file=sys.stderr)
             return 2
+    if opts.context and not Path(opts.context).expanduser().is_file():
+        print(f"[filter] refuse: no such file: {opts.context}", file=sys.stderr)
+        return 2
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None

@@ -845,9 +845,9 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-Offline distillation in six actions plus one measurement. The teacher and
-the student may use different tokenizers, and the walkthrough is
-[distill.md](distill.md).
+`gmlx distill` runs offline distillation in six actions plus one
+measurement. The teacher and the student may use different tokenizers,
+and the walkthrough is [distill.md](distill.md).
 
 - `gen` runs a teacher through `gmlx serve` over a prompt set and writes
   its replies as a corpus.
@@ -917,7 +917,7 @@ so a run resumes where it stopped.
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
-| `--max-tokens N` | `1024` | reply budget per request, not counting the reasoning trace |
+| `--max-tokens N` | `1024` | answer budget per request, the reasoning trace not counted |
 | `--temperature F` | `0.7` | sampling temperature |
 | `--top-p F` | `0.9` | keep the most likely tokens whose probabilities add to this |
 | `--top-k N` | the server's | sampler top-k cutoff |
@@ -965,9 +965,9 @@ later, in `align` and `eval`.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--teacher GGUF` | required | the teacher GGUF, sharded ok |
-| `--corpus PATH_OR_ID` | required | a jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]` |
-| `--out DIR` | required | the cache directory to write |
+| `--teacher GGUF` | required unless `--validate` | the teacher GGUF, sharded ok |
+| `--corpus PATH_OR_ID` | required unless `--validate` | a jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]` |
+| `--out DIR` | required unless `--validate` | the cache directory to write |
 | `--validate DIR` | none | validate an existing cache and exit, no teacher load |
 | `--top-k N` | `256` | log-probabilities kept per position |
 | `--max-len N` | `2048` | teacher tokens per window, including the start token |
@@ -991,7 +991,7 @@ later, in `align` and `eval`.
 | `--messages-key KEY` | `messages` | conversation column for the chat and reply frames |
 | `--close-final-windows` | off | with the continue frame, close the last window of a document with the turn-end marker |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file |
-| `--hf-source ID` | none | tokenizer and config fallback |
+| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
 | `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
 | `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
@@ -1037,7 +1037,7 @@ Training flags, in the order `--help` prints them.
 | `--adapter-out PATH` | required | where to write the GGUF adapter |
 | `--iters N` | required | training steps |
 | `--lora-rank N` | `16` | LoRA rank |
-| `--lora-scale F` | `2.0` | LoRA multiplier as is |
+| `--lora-scale F` | `2.0` | LoRA multiplier applied directly |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
 | `--lora-dropout F` | `0.0` | LoRA dropout |
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
@@ -1049,7 +1049,7 @@ Training flags, in the order `--help` prints them.
 | `--seed N` | `1` | data order and LoRA init |
 | `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
 | `--dk F` | `1` | weight of the bucketed KL term |
-| `--alm F` | `1`, `0` on a same-tokenizer view | weight of the ALM term |
+| `--alm F` | `1`, `0` when `align` took the identity path | weight of the ALM term |
 | `--ce F` | `0` | weight of the cross-entropy term |
 | `--T-dk F` | the view's | override the view's T_dk |
 | `--tau-alm F` | the view's | override the view's tau_alm |
@@ -1064,7 +1064,7 @@ Training flags, in the order `--help` prints them.
 | `--val-batches N` | `16` | validation batches per pass |
 | `--report-every N` | `10` | train-loss report interval |
 | `--report JSON` | none | write the run log here |
-| `--hf-source ID` | none | tokenizer and config fallback |
+| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
 | `--no-wired-limit` | off | leave the wired limit where it is |
 | `--cache-limit-gb F` | `8.0` | MLX buffer cache cap |
 | `--cpu` | off | run on the CPU device, for smoke tests |
@@ -1099,7 +1099,7 @@ examples shown before each question.
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
-| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the positions the context moved |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions |
 | `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
@@ -1108,7 +1108,7 @@ examples shown before each question.
 | `--batch-size N` | `8` | windows per batch |
 | `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
 | `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |
-| `--hf-source ID` | none | tokenizer and config fallback |
+| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill census

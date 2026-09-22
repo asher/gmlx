@@ -145,6 +145,10 @@ def prompt_set_sha256(rows: list[dict]) -> str:
 # server
 # ---------------------------------------------------------------------------
 
+class PortInUse(RuntimeError):
+    """The port has a listener already, a refusal rather than a failure."""
+
+
 class ServerError(RuntimeError):
     pass
 
@@ -179,7 +183,7 @@ def spawn_server(opts: GenOptions, log_path: Path):
     would answer the requests as the teacher."""
     from gmlx.serve import lifecycle
     if port_listening(opts.host, opts.port):
-        raise ServerError(f"port {opts.port} already has a listener; stop it (gmlx stop --port {opts.port}) "
+        raise PortInUse(f"port {opts.port} already has a listener; stop it (gmlx stop --port {opts.port}) "
                           "or pass another --port")
     serve_args = [opts.teacher]
     if opts.chat_template_kwargs:
@@ -187,7 +191,7 @@ def spawn_server(opts: GenOptions, log_path: Path):
     serve_args += list(opts.serve_arg)
     spawned = lifecycle.start_background_nowait(serve_args, host=opts.host, port=opts.port, log=str(log_path))
     if spawned is None:
-        raise ServerError(f"a server already holds {opts.host}:{opts.port}; pass --base-url to use it "
+        raise PortInUse(f"a server already holds {opts.host}:{opts.port}; pass --base-url to use it "
                           "or --port for a free one")
     proc, _ = spawned
     return proc
@@ -437,6 +441,9 @@ def run_gen(opts: GenOptions) -> int:
         log(f"[gen] done: {n_ok} replies, {gen_tokens} tokens, {gen_tokens / max(el, 1e-9):.0f} tok/s aggregate, "
             f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {n_err} failed, sidecar {side}")
         return 0 if n_err == 0 else 1
+    except PortInUse as e:
+        print(f"[gen] refuse: {e}", file=sys.stderr)
+        return 2
     except ServerError as e:
         print(f"[gen] error: {e}", file=sys.stderr)
         return 2

@@ -167,7 +167,7 @@ def run_train(opts: TrainOptions) -> int:
     view_dirs = [Path(v) for v in opts.views]
     for d in view_dirs:
         if not (d / "view.json").is_file():
-            log(f"[train] refuse: no view.json under {d}, run distill align first")
+            log(f"[train] refuse: no view.json under {d}, run gmlx distill align first")
             return 2
     views = [read_json(d / "view.json") for d in view_dirs]
     for d, v in zip(view_dirs, views):
