@@ -11,6 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
   GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
   applied at run time. `validate` reports a folded file.
+- DSpark drafters on the DFlash backbone, such as the community Ternary
+  Bonsai 2 drafters, load with `--draft-gguf` against Qwen3.5-family targets.
 
 ### Changed
 

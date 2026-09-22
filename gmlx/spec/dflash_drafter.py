@@ -24,6 +24,15 @@ DFlash 2 adds a grouped dynamic causal convolution around every attention
 and MLP sublayer of the draft path and a candidate selector that walks a path
 through the top-k candidates of each block position.
 
+DSpark on the DFlash backbone (the Ternary Bonsai drafters) keeps the plain
+layers and adds two heads over the draft rows: a rank-``markov_rank`` bigram
+head that biases each row's logits with ``markov_w2(markov_w1[prev])``,
+chained through the block by the row picks, and a confidence head
+``sigmoid(conf_proj([row; markov_w1[prev]]))`` that can cut the block to its
+confident prefix. The anchor row drafts too, so a block of ``rows`` rows
+proposes ``rows`` tokens. A drafter trained with log-SNR conditioning adds a
+per-row noise-level embedding to the token embedding before the layers.
+
 Sliding layers keep a temporal ring of ``sliding_window - 1`` context rows
 (plus rollback slack) and mask the block the way the reference does: a block
 row at ring offset ``q`` sees context key ``k`` only while ``q - k <
@@ -56,6 +65,7 @@ from mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
 from mlx_vlm.models.rope_utils import initialize_rope
 
 from .drafter_protocol import DraftStash, native_block_size
+from gmlx.envflags import env_float
 
 _LAYER_TYPES = ("full_attention", "sliding_attention")
 # Rollback slack rows the temporal ring keeps beyond its window.
@@ -97,6 +107,13 @@ class DFlashConfig:
     conv_group_size: int = 0
     selector_rank: int = 0
     selector_top_k: int = 0
+    # DSpark heads on the DFlash backbone; markov_rank == 0 means none.
+    markov_rank: int = 0
+    confidence_head: bool = False
+    # (min, max) log-SNR of a drafter trained with noise-level conditioning.
+    log_snr_range: Optional[tuple] = None
+    # The anchor row proposes a token as well (llama.cpp's default).
+    sample_from_anchor: bool = True
 
     def __post_init__(self):
         n = int(self.num_hidden_layers)
@@ -116,6 +133,10 @@ class DFlashConfig:
     @property
     def is_dflash2(self) -> bool:
         return int(self.selector_top_k) > 0
+
+    @property
+    def is_dspark(self) -> bool:
+        return int(self.markov_rank) > 0
 
 
 def block_attention_mask(ctx_len: int, block: int, window: Optional[int],
@@ -142,6 +163,21 @@ def block_attention_mask(ctx_len: int, block: int, window: Optional[int],
     if window is not None:
         in_ctx = in_ctx & (q - k < window)
     return in_block | in_ctx
+
+
+_LOG_SNR_FEATURES = 128
+
+
+def log_snr_features(rows: int) -> mx.array:
+    """Sinusoidal noise-level features ``[rows, 128]`` for one draft block.
+    The anchor row sits at the trained maximum log-SNR and every masked row
+    at the minimum, so the normalized level is 1000 for the anchor and 0
+    elsewhere whatever the range, before the ``10000^(-i/64)`` frequencies."""
+    half = _LOG_SNR_FEATURES // 2
+    level = mx.array([1000.0] + [0.0] * (rows - 1), dtype=mx.float32)
+    freq = mx.exp(-mx.log(mx.array(10000.0)) * mx.arange(half) / half)
+    angle = level[:, None] * freq[None, :]
+    return mx.concatenate([mx.sin(angle), mx.cos(angle)], axis=-1)
 
 
 class GroupedDynamicConv(nn.Module):
@@ -763,3 +799,120 @@ class DFlashCaptureHooks(_CaptureBase):
 
     def speculative_argmax_from_hidden(self, hidden: mx.array):
         return super().speculative_argmax_from_hidden(self._dflash_trunk(hidden))
+
+
+
+class DSparkDFlashDrafter(DFlashDrafter):
+    """DFlash backbone with the DSpark bigram and confidence heads."""
+
+    kind_label = "dspark"
+
+    def __init__(self, config: DFlashConfig):
+        super().__init__(config)
+        if not config.is_dspark:
+            raise ValueError("DSparkDFlashDrafter needs markov_rank > 0")
+        hidden = int(config.hidden_size)
+        rank = int(config.markov_rank)
+        self.markov_w1 = nn.Embedding(config.vocab_size, rank)
+        self.markov_w2 = nn.Linear(rank, config.vocab_size, bias=False)
+        if config.confidence_head:
+            self.conf_proj = nn.Linear(hidden + rank, 1, bias=True)
+        if config.log_snr_range is not None:
+            self.log_snr_fc1 = nn.Linear(_LOG_SNR_FEATURES, hidden, bias=True)
+            self.log_snr_fc2 = nn.Linear(hidden, hidden, bias=True)
+        # Confidence below this cuts the block; 0 keeps every row.
+        self._confidence_tau = env_float("GMLX_DSPARK_CONF", 0.0)
+        # Outside the parameter tree: a per-block-size memo of the
+        # noise-level embedding, which is constant for the model.
+        object.__setattr__(self, "_snr_embed", {})
+
+    def _rows(self, block_size: int) -> int:
+        return int(block_size) - 1 if self.config.sample_from_anchor else int(block_size)
+
+    def _block_tokens(self, last_bonus, block_size: int, token_dtype) -> mx.array:
+        if block_size > self._native_block_size:
+            raise RuntimeError(
+                f"{type(self).__name__} drafts at most "
+                f"{self._native_block_size - 1} token(s)/round; got "
+                f"block_size={block_size} - cap_at_configured_depth should "
+                "have clamped it")
+        if not self._cache:
+            raise RuntimeError("reset(target_model) must run before draft_block()")
+        mask_id = int(self.config.mask_token_id)
+        bonus = (int(last_bonus) if isinstance(last_bonus, int)
+                 else int(last_bonus.reshape(-1)[0].item()))
+        rows = self._rows(block_size)
+        return mx.array([[bonus] + [mask_id] * (rows - 1)], dtype=token_dtype)
+
+    def _log_snr_embed(self, rows: int, dtype) -> mx.array:
+        cached = self._snr_embed.get(rows)
+        if cached is None or cached.dtype != dtype:
+            feat = log_snr_features(rows)
+            cached = self.log_snr_fc2(nn.silu(self.log_snr_fc1(feat))).astype(dtype)
+            self._snr_embed[rows] = cached
+        return cached
+
+    def _embed_input_tokens(self, tokens: mx.array) -> mx.array:
+        h = super()._embed_input_tokens(tokens)
+        if self.config.log_snr_range is not None:
+            h = h + self._log_snr_embed(int(tokens.shape[1]), h.dtype)[None]
+        return h
+
+    def chain(self, hidden: mx.array, logits: mx.array, anchor: mx.array):
+        """Bias every row of one block by its predecessor's pick.
+
+        ``hidden`` [R, H] are the normed draft rows, ``logits`` [R, V] their
+        head outputs, ``anchor`` the token the block starts from. Row i's
+        predecessor is the anchor for i == 0 and the argmax of row i-1's
+        biased logits after that. Returns ``(rows [R, V] float32, confs [R]
+        or None)``; the mask token is excluded from every row.
+        """
+        vocab = int(self.config.vocab_size)
+        mask = mx.zeros((vocab,), dtype=mx.float32)
+        mask = mask.at[int(self.config.mask_token_id)].add(float("-inf"))
+        conf_on = self.config.confidence_head and self._confidence_tau > 0.0
+        prev = anchor.reshape(1)
+        rows, confs = [], []
+        for i in range(int(logits.shape[0])):
+            m = self.markov_w1(prev)                                    # [1, R]
+            bias = self.markov_w2(m)[0].astype(mx.float32)
+            row = logits[i].astype(mx.float32) + bias + mask
+            rows.append(row)
+            if conf_on:
+                feat = mx.concatenate(
+                    [hidden[i : i + 1].astype(mx.float32), m.astype(mx.float32)],
+                    axis=-1)
+                confs.append(mx.sigmoid(self.conf_proj(feat))[0, 0])
+            prev = mx.argmax(row).reshape(1)
+        return mx.stack(rows), (mx.stack(confs) if conf_on else None)
+
+    def draft_block(
+        self,
+        last_bonus,
+        hidden: mx.array,
+        cache,
+        block_size: int,
+        sampler,
+        token_dtype: mx.Dtype = mx.int32,
+        greedy: bool = False,
+        stash: Optional[DraftStash] = None,
+    ) -> mx.array:
+        """One round: the block's rows through the layers, then the bigram
+        chain over every row (the anchor row included) and, with a confidence
+        threshold set, a cut to the confident prefix of at least one row."""
+        del hidden, cache
+        block = self._block_tokens(last_bonus, block_size, token_dtype)
+        h = self._draft_hidden(block)
+        if not self.config.sample_from_anchor:
+            h = h[:, 1:]
+        rows, confs = self.chain(h[0], self._logits(h)[0], block[0, 0])
+        if confs is not None:
+            keep = 0
+            for c in confs.tolist():
+                if c < self._confidence_tau:
+                    break
+                keep += 1
+            rows = rows[:max(1, keep)]
+        toks, _ = draw_rows(rows, None, vocab=int(self.config.vocab_size),
+                            greedy=greedy, sampler=sampler, stash=stash)
+        return toks[None]
