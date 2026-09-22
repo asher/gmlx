@@ -127,6 +127,11 @@ def run_align(opts: AlignOptions) -> int:
     if opts.tables and not (Path(opts.tables) / "tables.json").is_file():
         log(f"[align] refuse: no tables.json in {opts.tables}")
         return 2
+    try:
+        _frames.parse_render_kwargs(opts.frame_kwargs)
+    except ValueError as e:
+        log(f"[align] refuse: --frame-kwargs is not a JSON object: {e}")
+        return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
     reader = CacheReader(cache)

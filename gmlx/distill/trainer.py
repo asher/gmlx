@@ -350,7 +350,7 @@ def run_train(opts: TrainOptions) -> int:
              "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}}
     if opts.resume and (ckpt_dir / "last").exists():
         state = load_checkpoint(ckpt_dir, "last", model, opt)
-        log(f"[train] resumed at iteration {state['iteration']}")
+        log(f"[train] resumed at step {state['iteration']}")
     est_ckpt = 2 * trainable_count(model) * 4 * 3
     if free_bytes(ckpt_dir) < 2 * est_ckpt:
         log(f"[train] refuse: free space under two checkpoints ({free_bytes(ckpt_dir) / GB:.2f} GB)")

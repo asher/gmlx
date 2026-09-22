@@ -342,6 +342,13 @@ def run_gen(opts: GenOptions) -> int:
     if not opts.teacher and not opts.base_url:
         print("[gen] refuse: --teacher or --base-url is required", file=sys.stderr)
         return 2
+    if opts.chat_template_kwargs:
+        try:
+            if not isinstance(json.loads(opts.chat_template_kwargs), dict):
+                raise ValueError("not an object")
+        except ValueError as e:
+            print(f"[gen] refuse: --chat-template-kwargs is not a JSON object: {e}", file=sys.stderr)
+            return 2
     if opts.thinking_budget and not opts.thinking:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
         return 2

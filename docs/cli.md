@@ -845,8 +845,8 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-`gmlx distill` runs offline distillation in six actions plus one check.
-The teacher and the student may use different tokenizers,
+`gmlx distill` trains a small GGUF on a larger one's outputs in six
+actions plus one check. The teacher and the student may use different tokenizers,
 and the walkthrough is [distill.md](distill.md).
 
 - `gen` runs a teacher through `gmlx serve` over a prompt set and writes
@@ -858,7 +858,7 @@ and the walkthrough is [distill.md](distill.md).
   positions and values the student trains to match.
 - `train` fits a LoRA adapter on a K-quant GGUF student against the view.
 - `eval` scores the student with and without the adapter.
-- `census` checks, from two reply caches of the same prompts, how much
+- `census` checks, from two reply caches of the same replies, how much
   a context the student never sees, the document in the guide, moves the
   teacher.
 
@@ -1019,8 +1019,8 @@ Alignment flags, in the order `--help` prints them.
 | `--val-fraction F` | `0.02` | fraction of rows held for validation |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
-| `--gamma F` | `0.001` | drop chunks of the ALM term, the cross-tokenizer chunk term, whose teacher boundary mass is below this |
-| `--tau-alm F` | `1.0` | temperature on the ALM term |
+| `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this |
+| `--tau-alm F` | `1.0` | temperature on the chunk term (ALM) |
 | `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL |
 | `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view |
@@ -1049,7 +1049,7 @@ Training flags, in the order `--help` prints them.
 | `--seed N` | `1` | data order and LoRA init |
 | `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
 | `--dk F` | `1` | weight of the bucketed KL term |
-| `--alm F` | `1`, `0` when `align` took the identity path | weight of the ALM term |
+| `--alm F` | `1`, `0` when `align` took the identity path | weight of the chunk term (ALM) |
 | `--ce F` | `0` | weight of the cross-entropy term |
 | `--T-dk F` | the view's | override the view's T_dk |
 | `--tau-alm F` | the view's | override the view's tau_alm |
@@ -1114,12 +1114,12 @@ examples shown before each question.
 ### distill census
 
 Pairs the reply rows of a cache made without a context with the same
-rows in one or more caches made with a context. It writes the on-path
-delta, how much more likely the context makes each token the teacher
-wrote, the coarsened KL between
-the stored top-k distributions and, with several contexts, the residual no
-training recovers. Runs on the CPU. Exits 2 when a cache has no manifest
-or no rows pair.
+rows in one or more caches made with one. It reports how much more
+likely the context makes each token the teacher wrote, the distance
+between the two stored top-k distributions with everything outside the
+top-k pooled, and, with several contexts, the part no single adapter can
+learn. Runs on the CPU. Exits 2 when a cache has no manifest or no rows
+pair.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

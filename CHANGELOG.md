@@ -8,12 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `gmlx train` and `gmlx distill train` take `--grad-checkpoint`, which
-  recomputes activations in the backward pass so longer rows fit in memory.
+- `gmlx train` takes `--grad-checkpoint`, which recomputes activations in
+  the backward pass so longer rows fit in memory.
 - `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
   from `gmlx` for tools that line up two tokenizers over the same text.
 - `gmlx distill` trains a LoRA adapter for a small GGUF on a larger GGUF's
-  outputs, so it learns a document or a behavior without it in the prompt.
+  outputs, so the small model answers from a document without it in the prompt.
 - `gmlx.stream.moe_routes` records a forward's expert ids per layer and
   replays them in a later forward over the same positions.
 - `GMLX_BATCH_INVARIANT=1` makes a row's logits the same at any batch
@@ -27,7 +27,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delta scan, 64 tokens per step instead of one. `GMLX_TRAIN_GDN_CHUNK=0`
   restores the loop.
 - `gmlx train` and `gmlx distill` run float32 matmul at exact precision
-  unless `MLX_ENABLE_TF32` is set. A gated-delta model under TF32 says so once.
+  unless `MLX_ENABLE_TF32` is set. Training a Qwen3.5 or Qwen3.6 model with
+  TF32 left on prints a notice once.
 - `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
   blocks, which were reported as unsupported before.
 

@@ -211,6 +211,7 @@ def run_eval(opts: EvalOptions) -> int:
         slice_specs = _named(opts.slices)
         chat_specs = _named(opts.chat_slices)
         reply_specs = _named(opts.reply_slices)
+        _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
         log(f"[eval] refuse: {e}")
         return 2

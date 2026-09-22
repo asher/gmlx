@@ -296,6 +296,11 @@ def run_cache(opts: CacheOptions) -> int:
 
     out = Path(opts.out)
     t0 = time.perf_counter()
+    try:
+        _frames.parse_render_kwargs(opts.frame_kwargs)
+    except ValueError as e:
+        log(f"[cache] refuse: --frame-kwargs is not a JSON object: {e}")
+        return 2
     if not Path(opts.teacher).expanduser().exists():
         log(f"[cache] refuse: no teacher at {opts.teacher}")
         return 2

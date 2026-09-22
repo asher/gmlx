@@ -142,3 +142,27 @@ def test_align_refuses_missing_student_and_tables(tmp_path, capsys):
                     "--tables", str(tmp_path / "no-tables")])
     assert rc == 2 and "[align] refuse: no tables.json in" in capsys.readouterr().err
     assert not (tmp_path / "v").exists()
+
+
+def test_bad_render_kwargs_refuse(tmp_path, capsys):
+    from gmlx.commands.distill import cmd_align, cmd_cache, cmd_eval, cmd_gen
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text("{}")
+    student = tmp_path / "s.gguf"
+    student.write_bytes(b"")
+    bad = '{"enable_thinking": True}'
+    rc = cmd_cache(["--teacher", str(student), "--corpus", str(tmp_path / "c.jsonl"), "--out", str(tmp_path / "o"),
+                    "--frame-kwargs", bad])
+    assert rc == 2 and "[cache] refuse: --frame-kwargs" in capsys.readouterr().err
+    rc = cmd_align(["--cache", str(cache), "--student", str(student), "--out", str(tmp_path / "v"),
+                    "--frame-kwargs", bad])
+    assert rc == 2 and "[align] refuse: --frame-kwargs" in capsys.readouterr().err
+    rc = cmd_eval(["--student", str(student), "--md", str(tmp_path / "r.md"), "--json", str(tmp_path / "r.json"),
+                   "--frame-kwargs", bad])
+    assert rc == 2 and "[eval] refuse:" in capsys.readouterr().err
+    prompts = tmp_path / "p.jsonl"
+    prompts.write_text('{"id": "a", "messages": [{"role": "user", "content": "hi"}]}\n')
+    rc = cmd_gen(["--teacher", str(student), "--prompts", str(prompts), "--out", str(tmp_path / "g.jsonl"),
+                  "--chat-template-kwargs", bad])
+    assert rc == 2 and "[gen] refuse: --chat-template-kwargs" in capsys.readouterr().err

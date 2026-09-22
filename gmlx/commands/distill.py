@@ -121,7 +121,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--report", default=None, metavar="JSON", help="Write the kept and dropped counts here.")
     p.add_argument("--rejects", default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
-    p.add_argument("--min-words", "--min-tokens", dest="min_tokens", type=int, default=16,
+    p.add_argument("--min-words", "--min-tokens", dest="min_tokens", type=int, default=16, metavar="N",
                    help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
                         "trace not counted (default 16). Set 1 when a right answer can be a few words. "
                         "--min-tokens is the same flag.")
@@ -250,10 +250,10 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--w-mid", type=float, default=DEFAULT_KNOBS["w_mid"],
                    help="Weight of an intra-word shared boundary (default 0.5).")
     p.add_argument("--gamma", type=float, default=DEFAULT_KNOBS["gamma"],
-                   help="Drop chunks of the ALM term, the cross-tokenizer chunk term, whose teacher boundary mass "
-                        "is below this (default 0.001).")
+                   help="Drop chunks of the chunk term (ALM) whose teacher boundary mass is below this "
+                        "(default 0.001).")
     p.add_argument("--tau-alm", type=float, default=DEFAULT_KNOBS["tau_alm"],
-                   help="Temperature on the ALM term (default 1.0).")
+                   help="Temperature on the chunk term (ALM) (default 1.0).")
     p.add_argument("--T-dk", type=float, default=DEFAULT_KNOBS["T_dk"],
                    help="Temperature on the conditional factor of the bucketed KL (default 1.0).")
     p.add_argument("--max-chunk-len", type=int, default=DEFAULT_KNOBS["max_chunk_len"],
@@ -292,11 +292,11 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
     p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
-                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term alone, no tail bucket. renorm: softmax over the support only.")
+                   help="bucketed: sparse KL with the tail bucket. paper: the top-k term alone, no tail bucket. renorm: both distributions rescaled to sum to one over the top-k.")
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
     p.add_argument("--alm", type=float, default=DEFAULT_KNOBS["lambda_alm"],
-                   help="Weight of the ALM term, 0 when align took the identity path (default 1).")
+                   help="Weight of the chunk term (ALM), 0 when align took the identity path (default 1).")
     p.add_argument("--ce", type=float, default=DEFAULT_KNOBS["lambda_ce"],
                    help="Weight of the cross-entropy term (default 0).")
     p.add_argument("--T-dk", type=float, default=None, help="Override the view's T_dk.")
@@ -385,8 +385,8 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
     p = _Parser(
         prog=prog,
         description="Measure how much a context the student never sees moves the teacher, from two or "
-                    "more reply caches (distill cache --frame reply or reply-think) of the same prompts: one cut "
-                    "without the context and one per context. Writes a JSON whose high_delta map "
+                    "more reply caches (distill cache --frame reply or reply-think) of the same replies, one "
+                    "made without the context and one per context. Writes a JSON whose high_delta map "
                     "distill eval --reply-positions reads, and a Markdown summary. CPU only.")
     p.add_argument("--without", required=True, metavar="DIR", help="Cache of the prompts without any context.")
     p.add_argument("--with", dest="with_", action="append", required=True, metavar="DIR",
