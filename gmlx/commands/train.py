@@ -50,6 +50,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from gmlx.load.loader import load_model
     from gmlx.load.preflight import preflight
     from gmlx.tune.attention import install_training_attention
+    from gmlx.tune.gdn import install_training_gdn
 
     mx.random.seed(seed)
     patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
@@ -68,7 +69,9 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
         chat_feature="messages", prompt_feature="prompt",
         completion_feature="completion", text_feature="text",
         mask_prompt=False)
-    train_set, val_set, _ = load_dataset(ds_args, tokenizer)
+    # mlx-lm types the tokenizer as PreTrainedTokenizer; its wrapper is what
+    # load_dataset reads at runtime
+    train_set, val_set, _ = load_dataset(ds_args, tokenizer)  # pyright: ignore[reportArgumentType]
 
     model.train()
     opt = optim.Adam(learning_rate=learning_rate)
@@ -76,6 +79,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     # (steps_per_save only governs the *periodic* ones) - point it at a scratch dir
     # so the only artifact left on disk is our GGUF, written below.
     restore_attention = install_training_attention(model)
+    install_training_gdn(model)   # text-only qwen35: the chunked scan under training
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(

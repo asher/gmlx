@@ -236,3 +236,77 @@ def training_gated_delta_update(q, k, v, a, b, A_log, dt_bias, state=None,
         return fn(q, k, v, a, b, A_log, dt_bias, state)
     fn = mx.checkpoint(scan)
     return fn(q, k, v, a, b, A_log, dt_bias, state, mask)
+
+
+# ---------------------------------------------------------------------------
+# the text-only Qwen3.5 layer: mlx-lm's GatedDeltaNet has no training route
+# ---------------------------------------------------------------------------
+
+_TEXT_GDN_PATCH = None
+
+
+class TrainingGdnInstall:
+    """What ``install_training_gdn`` returns: the number of text-only
+    gated delta layers in the model the dispatch now covers."""
+
+    def __init__(self, count: int):
+        self.count = count
+
+
+def _text_gdn_training_call(self, inputs, mask=None):
+    """mlx-lm's text-only ``GatedDeltaNet.__call__`` for a training forward
+    with no cache, the scan sent through ``training_gated_delta_update``.
+    The stock forward passes ``use_kernel=not self.training`` and so runs
+    the per-token loop with every recurrent state on the gradient tape."""
+    import mlx.nn as nn
+    B, S, _ = inputs.shape
+    qkv = self.in_proj_qkv(inputs)
+    z = self.in_proj_z(inputs).reshape(B, S, self.num_v_heads, self.head_v_dim)
+    b = self.in_proj_b(inputs)
+    a = self.in_proj_a(inputs)
+    conv_state = mx.zeros((B, self.conv_kernel_size - 1, self.conv_dim), dtype=inputs.dtype)
+    if mask is not None:
+        qkv = mx.where(mask[..., None], qkv, 0)
+    conv_out = nn.silu(self.conv1d(mx.concatenate([conv_state, qkv], axis=1)))
+    q, k, v = [
+        t.reshape(B, S, h, d)
+        for t, h, d in zip(
+            mx.split(conv_out, [self.key_dim, 2 * self.key_dim], -1),
+            [self.num_k_heads, self.num_k_heads, self.num_v_heads],
+            [self.head_k_dim, self.head_k_dim, self.head_v_dim],
+        )
+    ]
+    inv_scale = k.shape[-1] ** -0.5
+    q = (inv_scale ** 2) * mx.fast.rms_norm(q, None, 1e-6)
+    k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+    out, _state = training_gated_delta_update(q, k, v, a, b, self.A_log, self.dt_bias, None, mask)
+    out = self.norm(out, z)
+    return self.out_proj(out.reshape(B, S, -1))
+
+
+def _text_gdn_call(self, inputs, mask=None, cache=None):
+    if self.training and cache is None and getattr(self, "sharding_group", None) is None:
+        return _text_gdn_training_call(self, inputs, mask)
+    assert _TEXT_GDN_PATCH is not None
+    return _TEXT_GDN_PATCH.stock(self, inputs, mask, cache)
+
+
+def install_training_gdn(model) -> TrainingGdnInstall:
+    """Route a training forward with no cache of mlx-lm's text-only
+    ``GatedDeltaNet`` (the class a Qwen3.5 or Qwen3.6 text GGUF loads) to
+    ``training_gated_delta_update``, the checkpointed chunked scan the
+    owned vision-capable forward already takes. Installed once per
+    process at the class, behind the fused decode dispatch when that is
+    already in place, and inert outside training mode, so inference loads
+    in the same process are untouched. Returns the count of such layers
+    in ``model``."""
+    global _TEXT_GDN_PATCH
+    try:
+        from mlx_lm.models.qwen3_5 import GatedDeltaNet
+    except ImportError:
+        return TrainingGdnInstall(0)
+    from gmlx.upstream.patching import ClassPatch
+    if _TEXT_GDN_PATCH is None:
+        _TEXT_GDN_PATCH = ClassPatch()
+    _TEXT_GDN_PATCH.install(GatedDeltaNet, "__call__", _text_gdn_call)
+    return TrainingGdnInstall(sum(1 for m in model.modules() if isinstance(m, GatedDeltaNet)))

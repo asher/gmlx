@@ -225,10 +225,14 @@ def run_train(opts: TrainOptions) -> int:
                                          keys=LORA_KEYS)
     from gmlx.tune.attention import install_training_attention
     from gmlx.tune.checkpoint import checkpoint_layers
+    from gmlx.tune.gdn import install_training_gdn
     if opts.grad_checkpoint:
         log(f"[train] per-layer checkpointing on {checkpoint_layers(model)} layer classes")
     restore_attn = install_training_attention(model)
     log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} stock attention seams patched")
+    gdn_install = install_training_gdn(model)
+    if gdn_install.count:
+        log(f"[train] chunked gated delta training scan on {gdn_install.count} text-only layers")
     model.train()
     head = head_spec_from_model(inner)
     wd = opts.weight_decay if opts.weight_decay is not None else (0.01 if opts.full else 0.0)

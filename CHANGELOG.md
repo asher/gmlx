@@ -63,6 +63,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx distill train` and `gmlx train` on a text-only Qwen3.5 or Qwen3.6
+  GGUF ran the gated delta scan as mlx-lm's per-token loop with every
+  state on the gradient tape, so a 9B student ran out of memory at the
+  first step on rows near 1000 tokens. The training forward now takes
+  the checkpointed chunked scan the vision-capable forward already used.
 - `gmlx serve --adapter` on a base whose text stack sits under
   `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
   every target reported as unmatched. The install now enters the text

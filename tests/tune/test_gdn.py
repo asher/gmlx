@@ -304,3 +304,51 @@ def test_tri_inverse_matches_float64_at_64():
     assert np.abs(M - M64).max() < 1e-4
     squared = np.array(tg._tri_inverse_from_strict_lower(L32, C, base=C)).astype(np.float64)
     assert np.abs(squared - M64).max() > 1.0
+
+
+def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatch):
+    """A Qwen3.5 text GGUF loads mlx-lm's own GatedDeltaNet, whose stock
+    forward runs the per-token loop under training; the install sends a
+    training forward with no cache through the checkpointed chunked scan
+    and leaves eval and cached forwards on the stock path."""
+    from mlx_lm.models.qwen3_5 import GatedDeltaNet, TextModelArgs
+
+    args = TextModelArgs(model_type="qwen3_5", hidden_size=64, linear_num_value_heads=4,
+                         linear_num_key_heads=2, linear_key_head_dim=32, linear_value_head_dim=32,
+                         linear_conv_kernel_dim=4)
+    mx.random.seed(5)
+    mod = GatedDeltaNet(args)
+    mx.eval(mod.parameters())
+    x = mx.random.normal((2, 37, 64))
+    mod.eval()
+    y_eval = mod(x)
+    handle = tg.install_training_gdn(mod)
+    assert handle.count == 1
+    assert tg.install_training_gdn(mod).count == 1
+    calls = []
+    orig = tg.training_gated_delta_update
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(tg, "training_gated_delta_update", spy)
+    assert np.allclose(np.array(mod(x)), np.array(y_eval))
+    assert calls == []
+    mod.train()
+    y_train = mod(x)
+    mx.eval(y_eval, y_train)
+    assert calls == [1]
+    assert np.allclose(np.array(y_eval), np.array(y_train), atol=2e-3, rtol=2e-3)
+    # the gradient of a training forward flows through the route
+    w = mx.random.normal(y_train.shape)
+    grads = mx.grad(lambda m: (m(x) * w).sum())(mod)
+    mx.eval(grads)
+    assert calls == [1, 1]
+    assert float(mx.abs(grads["in_proj_qkv"]["weight"]).max()) > 0
+    # a cached forward stays on the stock path even in training mode
+    from mlx_lm.models.cache import ArraysCache
+    cache = ArraysCache(size=2)
+    y_c = mod(x, cache=cache)
+    mx.eval(y_c)
+    assert calls == [1, 1]
