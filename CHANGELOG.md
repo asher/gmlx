@@ -12,6 +12,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
   applied at run time. `validate` reports a folded file.
 
+### Changed
+
+- The Qwen3.5-family speculative verify runs the gated-delta scan on a kernel
+  that spreads each head across the GPU, with the gated output norm as its
+  own dispatch.
+
 ## [0.4.14] - 2026-09-18
 
 ### Added

@@ -28,7 +28,7 @@ def gpu_active() -> bool:
 
 @lru_cache(maxsize=None)
 def gdn_sg(B: int) -> int:
-    """Simdgroups per (batch, head) tile of the fused GDN kernels.
+    """Simdgroups per (batch, head) tile of the fused GDN decode kernel.
 
     ``mx.fast.metal_kernel`` emits no ``max_total_threads_per_threadgroup``
     launch bound, so the compiled pipeline's thread ceiling is register-
@@ -674,36 +674,41 @@ def _gdn_try_cat_ba(gdn) -> bool:
 
 
 # The multi-position (S>1) analog of the decode kernel above, for the MTP
-# speculative-verify forward. The same serial chain - depthwise causal conv ->
-# silu -> q/k rms-norm -> recurrent scan -> gated output norm - runs once per
-# verify position, with the scan additionally emitting the per-position
-# intermediate states the rejection rollback indexes into. Fusing the whole
-# per-position chain into one kernel collapses the launches the same way; the
-# win is again launch-latency-bound and so materialises on MoE targets, whose
-# cheap per-token expert matmuls leave the chain exposed. It is *larger* than the
-# decode win because at S>1 the chain runs per position while the verify's
-# expert matmuls stay small, so the chain is a bigger fraction of the round.
+# speculative-verify forward, in two dispatches. The scan kernel runs the
+# serial per-position chain (depthwise causal conv, silu, q/k rms-norm,
+# recurrent scan) for RPS state rows per simdgroup and emits the pre-norm
+# outputs, the final state and the per-position states the rejection
+# rollback indexes into. Its threadgroups never synchronize, so one head
+# spreads over Dv / (SGS * RPS) of them and a layer over every core, where
+# the one-threadgroup-per-head form left most of the GPU idle. The gate
+# kernel then applies the gated output norm per (position, head) row.
 #
-# Same fp32-accurate (not bit-identical) recurrence as the decode kernel; greedy
-# verify output can differ from the stock path only at near-ties.
+# Same fp32-accurate (not bit-identical) recurrence as the decode kernel;
+# greedy verify output can differ from the stock path only at near-ties.
 
-_GDN_FUSED_VERIFY_SRC = r"""
+_GDN_VERIFY_SGS = 4
+_GDN_VERIFY_RPS = 4
+_GDN_VERIFY_ROWS = _GDN_VERIFY_SGS * _GDN_VERIFY_RPS
+
+_GDN_VERIFY_SCAN_SRC = r"""
     constexpr int n_per_t = Dk / 32;
     constexpr int key_dim = Hk * Dk;
     constexpr int value_dim = Hv * Dv;
     constexpr int conv_dim = 2 * key_dim + value_dim;
-    constexpr int n_dv = Dv / SG;
+    constexpr int rows_per_tg = SGS * RPS;
+    constexpr int NTG = Dv / rows_per_tg;
     const float inv_scale = rsqrt((float)Dk);
 
     uint lane = thread_position_in_threadgroup.x;
-    uint sg   = thread_position_in_threadgroup.y;
-    uint n    = thread_position_in_grid.z;
+    uint sgl  = thread_position_in_threadgroup.y;
+    uint tgz  = threadgroup_position_in_grid.z;
+    uint part = tgz % NTG;
+    uint n    = tgz / NTG;
     uint b_idx = n / Hv;
     uint hv_idx = n % Hv;
     uint hk_idx = TILED ? (hv_idx % Hk) : (hv_idx / (Hv / Hk));
     uint Tn = (uint)T;
-
-    threadgroup float sumsq_sh[SG];
+    int row0 = (int)(part * rows_per_tg + sgl * RPS);
 
     float A = exp((float)A_log[hv_idx]);
     float dtb = (float)dt_bias[hv_idx];
@@ -711,11 +716,10 @@ _GDN_FUSED_VERIFY_SRC = r"""
     uint Tin = Tn + (K_size - 1);
     auto ci_b = conv_input + (uint)b_idx * Tin * conv_dim;
 
-    float st[n_dv][n_per_t];
-    for (int td = 0; td < n_dv; ++td) {
-        int dv = sg * n_dv + td;
-        auto i_state = state_in + ((uint)(n * Dv + dv)) * Dk;
-        for (int i = 0; i < n_per_t; ++i) st[td][i] = (float)i_state[n_per_t * lane + i];
+    float st[RPS][n_per_t];
+    for (int r = 0; r < RPS; ++r) {
+        auto i_state = state_in + ((uint)(n * Dv + row0 + r)) * Dk;
+        for (int i = 0; i < n_per_t; ++i) st[r][i] = (float)i_state[n_per_t * lane + i];
     }
 
     for (uint t = 0; t < Tn; ++t) {
@@ -749,10 +753,8 @@ _GDN_FUSED_VERIFY_SRC = r"""
         float kscale = inv_scale * rsqrt(ksq / (float)Dk + 1e-6f);
         for (int i = 0; i < n_per_t; ++i) { qn[i] *= qscale; kn[i] *= kscale; }
 
-        float out_t[n_dv];
-        float my_sumsq = 0.0f;
-        for (int td = 0; td < n_dv; ++td) {
-            int dv = sg * n_dv + td;
+        for (int r = 0; r < RPS; ++r) {
+            int dv = row0 + r;
             int vch = 2 * key_dim + hv_idx * Dv + dv;
             float va = 0.0f;
             for (int w = 0; w < K_size; ++w)
@@ -760,51 +762,53 @@ _GDN_FUSED_VERIFY_SRC = r"""
             if (CONV_BF16) va = (float)(InT)va;
             float v_val = va * (1.0f / (1.0f + exp(-va)));
             float kv_mem = 0.0f;
-            for (int i = 0; i < n_per_t; ++i) { st[td][i] *= g; kv_mem += st[td][i] * kn[i]; }
+            for (int i = 0; i < n_per_t; ++i) { st[r][i] *= g; kv_mem += st[r][i] * kn[i]; }
             kv_mem = simd_sum(kv_mem);
             float delta = (v_val - kv_mem) * beta;
             float out = 0.0f;
-            for (int i = 0; i < n_per_t; ++i) { st[td][i] += kn[i] * delta; out += st[td][i] * qn[i]; }
+            for (int i = 0; i < n_per_t; ++i) { st[r][i] += kn[i] * delta; out += st[r][i] * qn[i]; }
             out = simd_sum(out);
             // Rollback targets are positions 0..Tn-2 only (the state after
             // all Tn positions is state_out and rollback never fires on
             // full accept), so the last position is not recorded.
             if (t + 1 < Tn) {
                 auto states_t = states + ((((uint)b_idx * (Tn - 1) + t) * Hv + hv_idx) * Dv + dv) * Dk;
-                for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[td][i];
+                for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[r][i];
             }
-            out_t[td] = out;
-            if (lane == 0) my_sumsq += out * out;
+            if (lane == 0) pre[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = out;
         }
-
-        if (lane == 0) sumsq_sh[sg] = my_sumsq;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        float tot = 0.0f;
-        for (int s = 0; s < SG; ++s) tot += sumsq_sh[s];
-        float rms_denom = rsqrt(tot / (float)Dv + 1e-6f);
-        if (lane == 0) {
-            for (int td = 0; td < n_dv; ++td) {
-                int dv = sg * n_dv + td;
-                float xn = out_t[td] * rms_denom * (float)norm_weight[dv];
-                float zv = (float)z[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv];
-                float sig = 1.0f / (1.0f + exp(-zv));
-                float gate = GATE_SIGMOID ? sig : zv * sig;
-                y[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = (InT)(gate * xn);
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    for (int td = 0; td < n_dv; ++td) {
-        int dv = sg * n_dv + td;
-        auto o_state = state_out + ((uint)(n * Dv + dv)) * Dk;
-        for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * lane + i] = (StT)st[td][i];
+    for (int r = 0; r < RPS; ++r) {
+        auto o_state = state_out + ((uint)(n * Dv + row0 + r)) * Dk;
+        for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * lane + i] = (StT)st[r][i];
+    }
+"""
+
+_GDN_VERIFY_GATE_SRC = r"""
+    constexpr int n_per_t = Dv / 32;
+    uint lane = thread_position_in_threadgroup.x;
+    uint row = thread_position_in_grid.y;
+    if (row >= (uint)nrows) return;
+    auto prow = pre + (size_t)row * Dv + n_per_t * lane;
+    auto zrow = z + (size_t)row * Dv + n_per_t * lane;
+    float v[n_per_t];
+    float ss = 0.0f;
+    for (int i = 0; i < n_per_t; ++i) { v[i] = prow[i]; ss += v[i] * v[i]; }
+    ss = simd_sum(ss);
+    float rms_denom = rsqrt(ss / (float)Dv + 1e-6f);
+    for (int i = 0; i < n_per_t; ++i) {
+        float xn = v[i] * rms_denom * (float)norm_weight[n_per_t * lane + i];
+        float zv = (float)zrow[i];
+        float sig = 1.0f / (1.0f + exp(-zv));
+        float gate = GATE_SIGMOID ? sig : zv * sig;
+        y[(size_t)row * Dv + n_per_t * lane + i] = (InT)(gate * xn);
     }
 """
 
 _gdn_fused_verify_kernel = (
     mx.fast.metal_kernel(
-        name="gmlx_gated_delta_fused_verify",
+        name="gmlx_gated_delta_verify_scan",
         input_names=[
             "conv_input",
             "conv_weight",
@@ -812,12 +816,21 @@ _gdn_fused_verify_kernel = (
             "A_log",
             "dt_bias",
             "state_in",
-            "z",
-            "norm_weight",
             "T",
         ],
-        output_names=["y", "state_out", "states"],
-        source=_GDN_FUSED_VERIFY_SRC,
+        output_names=["pre", "state_out", "states"],
+        source=_GDN_VERIFY_SCAN_SRC,
+    )
+    if mx.metal.is_available()
+    else None
+)
+
+_gdn_verify_gate_kernel = (
+    mx.fast.metal_kernel(
+        name="gmlx_gated_delta_verify_gate",
+        input_names=["pre", "z", "norm_weight", "nrows"],
+        output_names=["y"],
+        source=_GDN_VERIFY_GATE_SRC,
     )
     if mx.metal.is_available()
     else None
@@ -947,7 +960,7 @@ def _gdn_fused_verify_call(
         or gdn_sink is None
         or S <= 1
         or _gdn_fused_verify_kernel is None
-        or Dv % gdn_sg(B) != 0
+        or Dv % _GDN_VERIFY_ROWS != 0
         or self.head_k_dim % 32 != 0
     ):
         if _ROUTE_DEBUG:
@@ -1040,9 +1053,9 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         self._gdn_verify_conv_weight = cw
     conv_weight = cw[1]
 
-    SG = gdn_sg(B)
+    SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
     tiled = int(self.num_k_heads != self.num_v_heads)
-    y, new_state, inter = _gdn_fused_verify_kernel(
+    pre, new_state, inter = _gdn_fused_verify_kernel(
         inputs=[
             conv_input,
             conv_weight,
@@ -1050,8 +1063,6 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             self.A_log,
             self.dt_bias,
             state,
-            z,
-            self.norm.weight,
             S,
         ],
         template=[
@@ -1062,14 +1073,13 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             ("Hk", self.num_k_heads),
             ("Hv", self.num_v_heads),
             ("K_size", self.conv_kernel_size),
-            ("SG", SG),
+            ("SGS", SGS),
+            ("RPS", RPS),
             ("TILED", tiled),
             ("CONV_BF16", 1),
-            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
-            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
         ],
-        grid=(32, SG, B * self.num_v_heads),
-        threadgroup=(32, SG, 1),
+        grid=(32, SGS, B * self.num_v_heads * (Dv // _GDN_VERIFY_ROWS)),
+        threadgroup=(32, SGS, 1),
         output_shapes=[
             (B, S, self.num_v_heads, Dv),
             state.shape,
@@ -1078,7 +1088,21 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             # (every engine call site guards accepted < bs - 1).
             (B, S - 1, self.num_v_heads, Dv, self.head_k_dim),
         ],
-        output_dtypes=[conv_input.dtype, state.dtype, state.dtype],
+        output_dtypes=[mx.float32, state.dtype, state.dtype],
+    )
+    nrows = B * S * self.num_v_heads
+    (y,) = _gdn_verify_gate_kernel(
+        inputs=[pre, z, self.norm.weight, nrows],
+        template=[
+            ("InT", conv_input.dtype),
+            ("Dv", Dv),
+            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
+        ],
+        grid=(32, nrows, 1),
+        threadgroup=(32, 8, 1),
+        output_shapes=[(B, S, self.num_v_heads, Dv)],
+        output_dtypes=[conv_input.dtype],
     )
 
     if cache is not None:

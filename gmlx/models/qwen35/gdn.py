@@ -224,7 +224,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and gdn_sink is not None
             and S > 1
             and _gp._gdn_fused_verify_kernel is not None
-            and Dv % _gp.gdn_sg(B) == 0
+            and Dv % _gp._GDN_VERIFY_ROWS == 0
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_verify_body(
