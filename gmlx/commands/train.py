@@ -79,7 +79,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     # (steps_per_save only governs the *periodic* ones) - point it at a scratch dir
     # so the only artifact left on disk is our GGUF, written below.
     restore_attention = install_training_attention(model)
-    install_training_gdn(model)   # text-only qwen35: the chunked scan under training
+    install_training_gdn(model)   # mlx-lm gated delta layers: the checkpointed scan under training
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(

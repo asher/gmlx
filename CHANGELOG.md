@@ -68,6 +68,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state on the gradient tape, so a 9B student ran out of memory at the
   first step on rows near 1000 tokens. The training forward now takes
   the checkpointed chunked scan the vision-capable forward already used.
+- The same per-token loop under training reached Qwen3-Next through
+  mlx-lm's class and Kimi-K3 and GLM-5-Next through their owned forwards,
+  with the GLM-5-Next chunk kernels carrying no gradient. All three now
+  take a checkpointed scan under training: the chunked rule for
+  Qwen3-Next, the loop inside a checkpoint for the per-key-channel decay
+  of the other two. Untested on a real run.
 - `gmlx serve --adapter` on a base whose text stack sits under
   `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
   every target reported as unmatched. The install now enters the text

@@ -352,3 +352,161 @@ def test_text_only_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatc
     y_c = mod(x, cache=cache)
     mx.eval(y_c)
     assert calls == [1, 1]
+
+
+def _qwen3next_args():
+    from mlx_lm.models.qwen3_next import ModelArgs
+    return ModelArgs(
+        model_type="qwen3_next", hidden_size=64, num_hidden_layers=4, intermediate_size=128,
+        num_attention_heads=4, linear_num_value_heads=4, linear_num_key_heads=2,
+        linear_key_head_dim=32, linear_value_head_dim=32, linear_conv_kernel_dim=4,
+        num_experts=4, num_experts_per_tok=2, decoder_sparse_step=1,
+        shared_expert_intermediate_size=32, mlp_only_layers=[], moe_intermediate_size=32,
+        rms_norm_eps=1e-6, vocab_size=128, num_key_value_heads=2, rope_theta=10000.0,
+        partial_rotary_factor=0.25, max_position_embeddings=2048, head_dim=32)
+
+
+def _owned_test_module(name):
+    """tests/models/<name>.py, for its tiny ModelArgs helper."""
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "models" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_owned_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _spy(monkeypatch, module, name):
+    calls = []
+    orig = getattr(module, name)
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(module, name, spy)
+    return calls
+
+
+def _check_training_route(mod, x, calls, first_param):
+    """Eval output, training output through the route, a gradient, and a
+    cached forward in training mode that stays off the route."""
+    mod.eval()
+    y_eval = mod(x)
+    mx.eval(y_eval)
+    assert calls == []
+    mod.train()
+    y_train = mod(x)
+    mx.eval(y_train)
+    assert calls == [1]
+    assert np.allclose(np.array(y_eval), np.array(y_train), atol=2e-3, rtol=2e-3)
+    w = mx.random.normal(y_train.shape)
+    grads = mx.grad(lambda m: (m(x) * w).sum())(mod)
+    mx.eval(grads)
+    assert calls == [1, 1]
+    g = grads
+    for key in first_param:
+        g = g[key]
+    assert float(mx.abs(g).max()) > 0
+    return y_eval
+
+
+def test_qwen3next_training_forward_routes_to_the_checkpointed_scan(monkeypatch):
+    """A Qwen3-Next GGUF loads mlx-lm's Qwen3NextGatedDeltaNet, whose stock
+    forward runs the per-token loop under training; the install sends a
+    training forward with no cache through the checkpointed scan."""
+    from mlx_lm.models.cache import ArraysCache
+    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+
+    mx.random.seed(6)
+    mod = Qwen3NextGatedDeltaNet(_qwen3next_args())
+    mx.eval(mod.parameters())
+    x = mx.random.normal((2, 37, 64))
+    assert tg.install_training_gdn(mod).count == 1
+    assert tg.install_training_gdn(mod).count == 1
+    calls = _spy(monkeypatch, tg, "training_gated_delta_update")
+    _check_training_route(mod, x, calls, ("in_proj_qkvz", "weight"))
+    cache = ArraysCache(size=2)
+    y_c = mod(x, cache=cache)
+    mx.eval(y_c)
+    assert calls == [1, 1]
+
+
+def test_qwen3next_split_layout_training_forward_routes_to_the_checkpointed_scan(monkeypatch):
+    """The split GGUF wire layout swaps each layer's class for a subclass
+    with its own forward; the install patches that class too."""
+    import mlx.nn as nn
+    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+
+    from gmlx.upstream.gdn_patches import _patch_qwen3next_split_gdn
+
+    class Box(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gdn = Qwen3NextGatedDeltaNet(_qwen3next_args())
+
+        def __call__(self, x, mask=None, cache=None):
+            return self.gdn(x, mask, cache)
+
+    mx.random.seed(7)
+    box = Box()
+    _patch_qwen3next_split_gdn(box)
+    assert type(box.gdn) is not Qwen3NextGatedDeltaNet
+    mx.eval(box.parameters())
+    x = mx.random.normal((2, 29, 64))
+    assert tg.install_training_gdn(box).count == 1
+    calls = _spy(monkeypatch, tg, "training_gated_delta_update")
+    _check_training_route(box, x, calls, ("gdn", "in_proj_qkv", "weight"))
+
+
+def test_kimi_k3_training_forward_takes_the_checkpointed_loop(monkeypatch):
+    """Per-key-channel decay: the owned Kimi-K3 forward routes a training
+    forward with no cache through the checkpointed loop."""
+    import gmlx.models.kimi_k3 as k3
+    _tiny_args = _owned_test_module("test_kimi_k3")._tiny_args
+
+    mx.random.seed(8)
+    mod = k3.KimiK3DeltaAttention(_tiny_args())
+    mx.eval(mod.parameters())
+    x = mx.random.normal((2, 23, 64))
+    calls = _spy(monkeypatch, k3, "training_gated_delta_ops")
+    _check_training_route(mod, x, calls, ("q_proj", "weight"))
+
+
+def test_glm5_next_training_forward_takes_the_checkpointed_loop(monkeypatch):
+    """Same route for the owned GLM-5-Next forward, whose eval path on the
+    GPU would take the NAX chunk kernels that carry no gradient."""
+    import gmlx.models.glm5_next.model as g5
+    _tiny_args = _owned_test_module("test_glm5_next")._tiny_args
+
+    mx.random.seed(9)
+    mod = g5.Glm5NextDeltaAttention(_tiny_args())
+    mx.eval(mod.parameters())
+    x = mx.random.normal((2, 23, 64))
+    calls = _spy(monkeypatch, g5, "training_gated_delta_ops")
+    _check_training_route(mod, x, calls, ("q_proj", "weight"))
+
+
+def test_training_gated_delta_ops_matches_the_loop_with_gradients():
+    """The checkpointed loop on per-channel gate values matches mlx-lm's
+    loop in outputs, state and gradients."""
+    q, k, v, g, beta = _inputs(T=40, Hk=4, Hv=4)
+    g = mx.broadcast_to(g[..., None], g.shape + (q.shape[-1],)) * mx.random.uniform(0.9, 1.0, g.shape + (q.shape[-1],))
+    mask = mx.ones((2, 40), dtype=mx.bool_)
+    mask[1, 33:] = False
+
+    def loss_ref(q, k, v, g, beta):
+        y, s = gd.gated_delta_ops(q, k, v, g, beta, None, mask)
+        return (y * y).sum() + (s * s).sum()
+
+    def loss_ck(q, k, v, g, beta):
+        y, s = tg.training_gated_delta_ops(q, k, v, g, beta, None, mask)
+        return (y * y).sum() + (s * s).sum()
+
+    lr, gr = mx.value_and_grad(loss_ref, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+    lc, gc = mx.value_and_grad(loss_ck, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+    mx.eval(lr, gr, lc, gc)
+    assert np.allclose(float(lr), float(lc), rtol=1e-5)
+    for a, b in zip(gr, gc):
+        assert np.allclose(np.array(a), np.array(b), atol=1e-5, rtol=1e-4)

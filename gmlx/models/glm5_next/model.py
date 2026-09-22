@@ -77,6 +77,7 @@ from gmlx.models.deepseek_v4.model import (
 )
 from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb, _kda_decay_lb_log
+from gmlx.tune.gdn import training_gated_delta_ops
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
@@ -1253,7 +1254,12 @@ class Glm5NextDeltaAttention(nn.Module):
                 out = mx.where(mask[..., None, None], out, mx.array(0, out.dtype))
         else:
             g = _kda_decay_lb(self.a_folded, a_raw, dt, self.gate_lower_bound)
-            if on_gpu:
+            if self.training and cache is None:
+                # per-key-channel decay: the checkpointed loop, not the
+                # chunked rule
+                out, ssm_state = training_gated_delta_ops(
+                    q, k, v, g, beta, ssm_state, mask)
+            elif on_gpu:
                 out, ssm_state = gated_delta_kernel(
                     q, k, v, g, beta, ssm_state, mask)
             else:

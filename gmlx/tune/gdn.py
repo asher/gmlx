@@ -238,6 +238,26 @@ def training_gated_delta_update(q, k, v, a, b, A_log, dt_bias, state=None,
     return fn(q, k, v, a, b, A_log, dt_bias, state, mask)
 
 
+def training_gated_delta_ops(q, k, v, g, beta, state=None, mask=None):
+    """The gated delta scan on gate values for a forward under gradient
+    tracing, with the arguments of mlx-lm's ``gated_delta_ops``: the
+    per-token loop inside ``mx.checkpoint``, so the tape keeps the scan's
+    inputs and recomputes the states in the backward. This is the route
+    for per-key-channel decay (``g`` of shape [B, T, H, Dk]), which the
+    chunked rule does not cover; ``training_gated_delta_update`` is the
+    route for scalar gating."""
+    from mlx_lm.models.gated_delta import gated_delta_ops
+
+    if state is None:
+        state = mx.zeros((q.shape[0], v.shape[-2], v.shape[-1], q.shape[-1]),
+                         dtype=mx.float32)
+    if mask is None:
+        fn = mx.checkpoint(lambda q, k, v, g, b, s: gated_delta_ops(q, k, v, g, b, s, None))
+        return fn(q, k, v, g, beta, state)
+    fn = mx.checkpoint(gated_delta_ops)
+    return fn(q, k, v, g, beta, state, mask)
+
+
 # ---------------------------------------------------------------------------
 # the text-only Qwen3.5 layer: mlx-lm's GatedDeltaNet has no training route
 # ---------------------------------------------------------------------------
@@ -291,22 +311,93 @@ def _text_gdn_call(self, inputs, mask=None, cache=None):
     return _TEXT_GDN_PATCH.stock(self, inputs, mask, cache)
 
 
+def _qwen3next_gdn_training_call(self, inputs, mask=None):
+    """mlx-lm's ``Qwen3NextGatedDeltaNet.__call__`` for a training forward
+    with no cache, the scan sent through ``training_gated_delta_update``.
+    Covers both projection layouts: the stock fused ``in_proj_qkvz`` and
+    the split ``in_proj_qkv`` / ``in_proj_z`` pair gmlx installs for the
+    split GGUF wire layout."""
+    import mlx.nn as nn
+    B, S, _ = inputs.shape
+    if hasattr(self, "in_proj_qkv"):
+        mixed_qkv = self.in_proj_qkv(inputs)
+        z = self.in_proj_z(inputs).reshape(B, S, -1, self.head_v_dim)
+        mixed_ba = self.in_proj_ba(inputs).reshape(B, S, self.num_k_heads, -1)
+        b, a = mx.split(mixed_ba, [self.num_v_heads // self.num_k_heads], axis=-1)
+        b = b.reshape(B, S, self.num_v_heads)
+        a = a.reshape(B, S, self.num_v_heads)
+    else:
+        q, k, v, z, b, a = self.fix_query_key_value_ordering(
+            self.in_proj_qkvz(inputs), self.in_proj_ba(inputs))
+        mixed_qkv = mx.concatenate(
+            [q.reshape(B, S, -1), k.reshape(B, S, -1), v.reshape(B, S, -1)], axis=-1)
+    conv_state = mx.zeros((B, self.conv_kernel_size - 1, self.conv_dim), dtype=inputs.dtype)
+    if mask is not None:
+        mixed_qkv = mx.where(mask[..., None], mixed_qkv, 0)
+    conv_out = nn.silu(self.conv1d(mx.concatenate([conv_state, mixed_qkv], axis=1)))
+    q, k, v = [
+        t.reshape(B, S, h, d)
+        for t, h, d in zip(
+            mx.split(conv_out, [self.key_dim, 2 * self.key_dim], -1),
+            [self.num_k_heads, self.num_k_heads, self.num_v_heads],
+            [self.head_k_dim, self.head_k_dim, self.head_v_dim],
+        )
+    ]
+    inv_scale = k.shape[-1] ** -0.5
+    q = (inv_scale ** 2) * mx.fast.rms_norm(q, None, 1e-6)
+    k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+    out, _state = training_gated_delta_update(q, k, v, a, b, self.A_log, self.dt_bias, None, mask)
+    out = self.norm(out, z)
+    return self.out_proj(out.reshape(B, S, -1))
+
+
+# one ClassPatch per patched class: mlx-lm's Qwen3NextGatedDeltaNet and every
+# split-layout subclass the loader swaps in, which carries its own __call__
+_QWEN3NEXT_PATCHES: dict = {}
+
+
+def _qwen3next_gdn_call(self, inputs, mask=None, cache=None):
+    if self.training and cache is None:
+        return _qwen3next_gdn_training_call(self, inputs, mask)
+    for cls in type(self).__mro__:
+        patch = _QWEN3NEXT_PATCHES.get(cls)
+        if patch is not None:
+            return patch.stock(self, inputs, mask, cache)
+    raise AssertionError("qwen3next training dispatch installed on an unpatched class")
+
+
 def install_training_gdn(model) -> TrainingGdnInstall:
-    """Route a training forward with no cache of mlx-lm's text-only
-    ``GatedDeltaNet`` (the class a Qwen3.5 or Qwen3.6 text GGUF loads) to
-    ``training_gated_delta_update``, the checkpointed chunked scan the
-    owned vision-capable forward already takes. Installed once per
-    process at the class, behind the fused decode dispatch when that is
-    already in place, and inert outside training mode, so inference loads
-    in the same process are untouched. Returns the count of such layers
-    in ``model``."""
+    """Route a training forward with no cache of mlx-lm's gated delta
+    layers to the checkpointed scan the owned forwards already take:
+    ``GatedDeltaNet`` (the class a Qwen3.5 or Qwen3.6 text GGUF loads) and
+    ``Qwen3NextGatedDeltaNet`` (Qwen3-Next), whose stock forwards run the
+    per-token loop with every recurrent state on the gradient tape.
+    Installed once per process at the class, behind the fused decode
+    dispatch when that is already in place, and inert outside training
+    mode, so inference loads in the same process are untouched. Returns
+    the count of such layers in ``model``."""
     global _TEXT_GDN_PATCH
+    from gmlx.upstream.patching import ClassPatch
+    count = 0
     try:
         from mlx_lm.models.qwen3_5 import GatedDeltaNet
     except ImportError:
-        return TrainingGdnInstall(0)
-    from gmlx.upstream.patching import ClassPatch
-    if _TEXT_GDN_PATCH is None:
-        _TEXT_GDN_PATCH = ClassPatch()
-    _TEXT_GDN_PATCH.install(GatedDeltaNet, "__call__", _text_gdn_call)
-    return TrainingGdnInstall(sum(1 for m in model.modules() if isinstance(m, GatedDeltaNet)))
+        GatedDeltaNet = None
+    if GatedDeltaNet is not None:
+        if _TEXT_GDN_PATCH is None:
+            _TEXT_GDN_PATCH = ClassPatch()
+        _TEXT_GDN_PATCH.install(GatedDeltaNet, "__call__", _text_gdn_call)
+        count += sum(1 for m in model.modules() if isinstance(m, GatedDeltaNet))
+    try:
+        from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+    except ImportError:
+        return TrainingGdnInstall(count)
+    layers = [m for m in model.modules() if isinstance(m, Qwen3NextGatedDeltaNet)]
+    classes = [Qwen3NextGatedDeltaNet]
+    for m in layers:
+        cls = type(m)
+        if cls not in classes and "__call__" in vars(cls):
+            classes.append(cls)
+    for cls in classes:
+        _QWEN3NEXT_PATCHES.setdefault(cls, ClassPatch()).install(cls, "__call__", _qwen3next_gdn_call)
+    return TrainingGdnInstall(count + len(layers))

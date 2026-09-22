@@ -47,6 +47,8 @@ from mlx_lm.models.base import (
 )
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
+
+from gmlx.tune.gdn import training_gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
@@ -468,7 +470,10 @@ class KimiK3DeltaAttention(nn.Module):
                 (B, self.num_heads, self.head_dim, self.head_dim),
                 dtype=mx.float32)
 
-        if self._can_kernel and mx.default_device() == mx.gpu and not self.training:
+        if self.training and cache is None:
+            # per-key-channel decay: the checkpointed loop, not the chunked rule
+            out, ssm_state = training_gated_delta_ops(q, k, v, g, beta, ssm_state, mask)
+        elif self._can_kernel and mx.default_device() == mx.gpu:
             out, ssm_state = gated_delta_kernel(q, k, v, g, beta, ssm_state, mask)
         else:
             out, ssm_state = gated_delta_ops(q, k, v, g, beta, ssm_state, mask)
