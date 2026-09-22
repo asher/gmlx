@@ -1,17 +1,19 @@
-"""``gmlx distill``: offline distillation in six steps. ``gen`` runs a
+"""``gmlx distill``: offline distillation in six steps plus one
+diagnostic. ``gen`` runs a
 teacher through ``gmlx serve`` over a prompt set and writes its replies as
 a corpus, ``filter`` drops the rows a student should not learn from,
 ``cache`` runs the teacher once over a corpus and stores its top-K
 log-probs, ``align`` maps that cache onto a student tokenizer, ``train``
 fits a LoRA adapter on a K-quant GGUF student against the view, and
-``eval`` scores the student before and after. The library behind each
-verb is ``gmlx.distill``."""
+``eval`` scores the student before and after. ``census`` measures, from
+two caches of the same replies, how much a context moves the teacher.
+The library behind each verb is ``gmlx.distill``."""
 from __future__ import annotations
 
 import argparse
 import sys
 
-_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval")
+_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 _ACTION_DESC = {
     "gen": "run a teacher over a prompt set through gmlx serve and write a corpus",
     "filter": "drop generated rows a student should not learn from",
@@ -19,6 +21,7 @@ _ACTION_DESC = {
     "align": "map a cache onto a student tokenizer and write a view",
     "train": "train a LoRA adapter on a GGUF student against a view",
     "eval": "score a student, with and without its adapter, on held-out data",
+    "census": "measure how much a context moves the teacher between two caches of the same replies",
 }
 
 
@@ -327,6 +330,9 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="A jsonl of conversations scored on the final reply; repeatable.")
     p.add_argument("--reply-think", action="store_true",
                    help="Reply slices target the final turn's reasoning content.")
+    p.add_argument("--reply-positions", default=None, metavar="JSON",
+                   help="A distill census JSON whose high_delta map restricts every reply slice to the "
+                        "positions the context moved.")
     p.add_argument("--kld-cache", default=None, metavar="DIR",
                    help="Same-tokenizer cache to score sparse KL against.")
     p.add_argument("--kld-rows", type=int, default=None, help="Rows of the KL cache to score (default all).")
@@ -344,7 +350,30 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     return p
 
 
+def _census_parser(prog: str) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=prog,
+        description="Measure how much a context the student never sees moves the teacher, from two or "
+                    "more reply caches (distill cache --frame reply) of the same prompts: one cut "
+                    "without the context and one per context. Writes a JSON whose high_delta map "
+                    "distill eval --reply-positions reads, and a Markdown summary. CPU only.")
+    p.add_argument("--without", required=True, metavar="DIR", help="Cache of the prompts without any context.")
+    p.add_argument("--with", dest="with_", action="append", required=True, metavar="DIR",
+                   help="Cache with a context; repeatable.")
+    p.add_argument("--out", required=True, metavar="JSON", help="Census JSON to write.")
+    p.add_argument("--md", default=None, metavar="PATH", help="Markdown summary to write.")
+    p.add_argument("--corpus", default=None, metavar="JSONL",
+                   help="The prompts jsonl the caches were cut from, so high_delta is keyed by row id.")
+    p.add_argument("--delta-threshold", type=float, default=1.0,
+                   help="Nats of on-path gain that make a position high-delta (default 1.0).")
+    p.add_argument("--pair-by", choices=("line", "doc"), default="line",
+                   help="Pair rows across caches by corpus line (default) or by the full doc_id.")
+    p.add_argument("--max-rows", type=int, default=None, help="Paired rows to measure (default all).")
+    return p
+
+
 PARSERS = {"gen": _gen_parser, "filter": _filter_parser, "cache": _cache_parser, "align": _align_parser,
+           "census": _census_parser,
            "train": _train_parser, "eval": _eval_parser}
 
 
@@ -428,8 +457,14 @@ def cmd_eval(argv: list[str], prog: str = "gmlx distill eval") -> int:
     return run_eval(EvalOptions(**fields))
 
 
+def cmd_census(argv: list[str], prog: str = "gmlx distill census") -> int:
+    args = _census_parser(prog).parse_args(argv)
+    from gmlx.distill.census import CensusOptions, run_census
+    return run_census(CensusOptions(**vars(args)))
+
+
 HANDLERS = {"gen": cmd_gen, "filter": cmd_filter, "cache": cmd_cache, "align": cmd_align, "train": cmd_train,
-            "eval": cmd_eval}
+            "eval": cmd_eval, "census": cmd_census}
 
 
 def cmd_distill(argv: list[str], prog: str = "gmlx distill") -> int:

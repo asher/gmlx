@@ -18,9 +18,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   should not learn from, `cache` stores the teacher's top-K log-probs over
   a corpus in one pass, `align` maps the cache onto the student's
   tokenizer, `train` fits a LoRA adapter on the K-quant student against
-  it, and `eval` scores the student before and after. The teacher and
-  student may use different tokenizers. The library is `gmlx.distill`,
-  the guide docs/distill.md.
+  it, `eval` scores the student before and after, and `census` measures
+  how much a context the student never sees moves the teacher, from two
+  caches of the same replies. The teacher and student may use different
+  tokenizers. The library is `gmlx.distill`, the guide docs/distill.md.
 
 ### Changed
 

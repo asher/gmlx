@@ -845,15 +845,17 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-Offline distillation in six actions. `gen` runs a teacher through
-`gmlx serve` over a prompt set and writes its replies as a corpus,
-`filter` drops the generated rows a student should not learn from,
-`cache` runs a teacher GGUF over a corpus once and stores its top-K
+Offline distillation in six actions plus one diagnostic. `gen` runs a
+teacher through `gmlx serve` over a prompt set and writes its replies as
+a corpus, `filter` drops the generated rows a student should not learn
+from, `cache` runs a teacher GGUF over a corpus once and stores its top-K
 log-probs per position, `align` maps that cache onto a student tokenizer
 and writes a view, `train` fits a LoRA adapter on a K-quant GGUF student
 against the view, and `eval` scores the student with and without the
-adapter. The teacher and the student may use different tokenizers. For
-the walkthrough, read [distill.md](distill.md).
+adapter. `census` measures, from two reply caches of the same prompts,
+how much a context the student never sees moves the teacher. The teacher
+and the student may use different tokenizers. For the walkthrough, read
+[distill.md](distill.md).
 
 ```sh
 gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
@@ -1065,6 +1067,7 @@ prepares an on-policy round from replies a student wrote without it.
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn's reasoning content |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the positions the context moved |
 | `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
@@ -1075,6 +1078,25 @@ prepares an on-policy round from replies a student wrote without it.
 | `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |
 | `--hf-source ID` | none | tokenizer and config fallback |
 | `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill census
+
+Pairs the reply rows of a cache cut without a context with the same rows
+in one or more caches cut with a context, and writes the on-path delta,
+the coarsened KL between the stored top-K distributions and, with several
+contexts, the residual no training recovers. Runs on the CPU. Exits 2
+when a cache has no manifest or no rows pair.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--without DIR` | required | cache of the prompts without any context |
+| `--with DIR` | required | cache with a context, repeatable |
+| `--out JSON` | required | the census JSON to write |
+| `--md PATH` | none | Markdown summary to write |
+| `--corpus JSONL` | none | the prompts jsonl the caches were cut from, so `high_delta` is keyed by row id |
+| `--delta-threshold F` | `1.0` | nats of on-path gain that make a position high-delta |
+| `--pair-by MODE` | `line` | pair rows across caches by corpus `line` or by the full `doc` id |
+| `--max-rows N` | all | paired rows to measure |
 
 ## gmlx doctor
 

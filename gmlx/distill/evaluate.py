@@ -46,6 +46,7 @@ class EvalOptions:
     chat_per_turn: bool = False
     reply_slices: list[str] = field(default_factory=list)
     reply_think: bool = False
+    reply_positions: str | None = None
     kld_cache: str | None = None
     kld_rows: int | None = None
     frame_kwargs: str | None = None
@@ -79,8 +80,11 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
 
 
 def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: dict,
-            chat_slices: dict | None = None, reply_slices: dict | None = None) -> dict:
-    """Every instrument on the loaded weights as they are."""
+            chat_slices: dict | None = None, reply_slices: dict | None = None,
+            positions: dict | None = None) -> dict:
+    """Every instrument on the loaded weights as they are. ``positions``,
+    a census high_delta map, restricts every reply slice to the byte
+    ranges it names."""
     res: dict = {"bpb": {}, "tasks": {}, "chat_bpb": {}, "reply_bpb": {}}
     for name, convs in (chat_slices or {}).items():
         t0 = time.perf_counter()
@@ -96,12 +100,13 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         t0 = time.perf_counter()
         model.eval()
         r = _eval.reply_slice_nll(model, tokenizer, rows, max_len=opts.chat_max_len,
-                                  batch_tokens=opts.batch_size * opts.max_len, positions=None,
+                                  batch_tokens=opts.batch_size * opts.max_len, positions=positions,
                                   reason_target=opts.reply_think)
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
         log(f"[eval] {name}: reply bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
-            f"{r['rows']} rows, {r['dropped']} dropped ({r['wall_s']:.0f}s)")
+            f"{r['rows']} rows{' at the census positions' if positions is not None else ''}, "
+            f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
     if opts.kld_cache:
         t0 = time.perf_counter()
         model.eval()
@@ -253,10 +258,16 @@ def run_eval(opts: EvalOptions) -> int:
                           Path(path).expanduser().read_text(encoding="utf-8").splitlines() if line.strip()]
                    for name, path in chat_specs}
     reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
-    report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices)
+    positions = None
+    if opts.reply_positions:
+        positions = read_json(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
+        report["reply_positions"] = opts.reply_positions
+        log(f"[eval] reply slices restricted to the census positions of {len(positions)} rows")
+    report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions)
     if opts.before and opts.adapter:
         with adapter_disabled(model):
-            report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices)
+            report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices,
+                                       positions)
     if opts.chat_sanity:
         items = read_jsonl(Path(opts.chat_sanity))
         refs = None
