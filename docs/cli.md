@@ -993,7 +993,7 @@ dropped, counted in the `[cache] frame` line.
 | `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
-| `--resume` | off | continue after the last verified shard, refused when the corpus, teacher, template or row options changed. A finished cache is validated, not rewritten |
+| `--resume` | off | continue after the last verified shard, refused when the corpus, teacher, template, HF source or row options changed. A finished cache is validated, not redone |
 | `--max-rows N` | none | stop after this many rows |
 | `--max-tokens N` | none | stop after this many teacher tokens |
 | `--limit-docs N` | none | read at most this many documents |
@@ -1007,7 +1007,7 @@ dropped, counted in the `[cache] frame` line.
 | `--messages-key KEY` | `messages` | conversation column for the chat and reply frames |
 | `--close-final-windows` | off | with the continue frame, close the last window of a document with the turn-end marker |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file |
-| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
 | `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
 | `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
@@ -1074,13 +1074,13 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory. A fresh run refuses one that holds an earlier run's checkpoints |
-| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or views, student, LoRA, batch, seed, steps, val batches, lr, warmup, knobs, clip, decay or hs changed |
+| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or views, student, HF source, LoRA, batch, seed, steps, val, lr, warmup, knobs, clip, decay or hs changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |
 | `--report-every N` | `10` | train-loss report interval |
 | `--report JSON` | none | write the run log here |
-| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
 | `--no-wired-limit` | off | leave the wired limit where it is |
 | `--cache-limit-gb F` | `8.0` | MLX buffer cache cap |
 | `--cpu` | off | run on the CPU device, for smoke tests |
@@ -1124,7 +1124,7 @@ examples shown before each question.
 | `--batch-size N` | `8` | windows per batch |
 | `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
 | `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |
-| `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill census

@@ -1608,6 +1608,28 @@ def test_cache_resume_refuses_other_inputs(tmp_path, tok_bl, capsys):
                                  top_k=8, max_len=64, rows_per_shard=2, resume=True)
     assert _teacher.run_cache(opts) == 2
     assert "other inputs than the first run" in capsys.readouterr().err
+    # the config source is one of the inputs, and a record that predates
+    # the key compares it as unset
+    teacher = _tiny_mlx_teacher(tmp_path / "mlx-teacher", tok_bl)
+    real = tmp_path / "real"
+    base = dict(teacher=str(teacher), corpus=str(corpus), out=str(real), top_k=8, max_len=64, rows_per_shard=2)
+    orig = _teacher._format.ShardWriter.write
+
+    def stop(self, i, *aa, **kk):
+        if i == 1:
+            raise OSError("disk gone")
+        return orig(self, i, *aa, **kk)
+    _teacher._format.ShardWriter.write = stop
+    try:
+        assert _teacher.run_cache(_teacher.CacheOptions(**base)) == 2
+    finally:
+        _teacher._format.ShardWriter.write = orig
+    rc = _teacher.run_cache(_teacher.CacheOptions(resume=True, hf_source="org/other", **base))
+    assert rc == 2 and "hf_source None -> 'org/other'" in capsys.readouterr().err
+    prog = dl.read_json(real / "progress.json")
+    del prog["run"]["hf_source"]
+    dl.write_json_atomic(real / "progress.json", prog)
+    assert _teacher.run_cache(_teacher.CacheOptions(resume=True, **base)) == 0
 
 
 def test_checkpoint_replace_is_crash_safe(tmp_path):
@@ -2376,6 +2398,13 @@ def test_train_resume_refuses_other_settings_and_scores_a_fixed_val_sample(tmp_p
     assert rc == 2 and "other settings than the run that wrote the checkpoint" in err and "batch_size" in err
     rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, seed=2, resume=True)))
     assert rc == 2 and "seed" in capsys.readouterr().err
+    # the config source changes the model the checkpoint's factors fit
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, hf_source="org/other", resume=True)))
+    assert rc == 2 and "hf_source None -> 'org/other'" in capsys.readouterr().err
+    # a checkpoint written before a fingerprint key existed still resumes
+    state = json.loads((ck / "last" / "state.json").read_text())
+    del state["run"]["hf_source"]
+    (ck / "last" / "state.json").write_text(json.dumps(state))
     assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
     assert "resumed at step 2" in capsys.readouterr().err
 
@@ -6526,16 +6555,56 @@ def test_corpus_readers_name_a_line_that_is_not_json(tmp_path):
         list(_corpus.iter_conversations(str(tmp_path / "m.jsonl")))
 
 
-def test_header_tokenizer_carries_the_bundled_template_of_its_arch(gguf_index, monkeypatch):
-    """The header-only tokenizer align reads installs the same template
-    the model loader bundles for the architecture, so align and train
-    record one student identity."""
+def _tiny_gguf_tokenizer_file(path: Path) -> Path:
+    """A header-only GGUF (arch qwen2, one zero tensor) carrying the
+    byte-level test vocabulary of tests/load/test_tokenizer.py."""
+    from gguf import GGUFWriter
+
+    from tests.load.test_tokenizer import _bytelevel_meta
+
+    meta = _bytelevel_meta()
+    w = GGUFWriter(str(path), "qwen2")
+    w.add_bool("tokenizer.ggml.add_bos_token", True)
+    w.add_string("tokenizer.ggml.model", meta["tokenizer.ggml.model"])
+    w.add_string("tokenizer.ggml.pre", meta["tokenizer.ggml.pre"])
+    w.add_array("tokenizer.ggml.tokens", meta["tokenizer.ggml.tokens"])
+    w.add_array("tokenizer.ggml.merges", meta["tokenizer.ggml.merges"])
+    w.add_array("tokenizer.ggml.token_type", meta["tokenizer.ggml.token_type"])
+    w.add_uint32("tokenizer.ggml.bos_token_id", 0)
+    w.add_uint32("tokenizer.ggml.eos_token_id", 1)
+    w.add_uint32("tokenizer.ggml.padding_token_id", 2)
+    w.add_tensor("token_embd.weight", np.zeros((len(meta["tokenizer.ggml.tokens"]), 8), dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return path
+
+
+def test_header_tokenizer_carries_the_bundled_template_and_transforms_of_its_arch(tmp_path, monkeypatch):
+    """The header-only tokenizer align, census, gen and eval read installs
+    the template the model loader bundles for the architecture and the
+    same per-model transforms, so a row renders alike here and in serve
+    and align and train record one student identity."""
+    import gmlx.load.config_synth as _cs
     import gmlx.load.tokenizer as _lt
     from gmlx.distill import tokens as _tokens
-    from tests.conftest import require_arch
 
-    path = require_arch(gguf_index, "qwen3")
-    plain = _tokens.tokenizer_from_gguf(path).chat_template
+    path = _tiny_gguf_tokenizer_file(tmp_path / "tok.gguf")
+    plain = _tokens.tokenizer_from_gguf(str(path))
+    assert plain.chat_template != "{{ messages }} bundled"
+    assert not getattr(plain.apply_chat_template, "_ds41_normalized", False)
     monkeypatch.setattr(_lt, "bundled_chat_template_for_arch", lambda arch: "{{ messages }} bundled")
-    assert _tokens.tokenizer_from_gguf(path).chat_template == "{{ messages }} bundled"
-    assert plain != "{{ messages }} bundled"
+    assert _tokens.tokenizer_from_gguf(str(path)).chat_template == "{{ messages }} bundled"
+    # the deepseek_v41 normalizer parses string tool arguments before the
+    # template sees them, on this path as in the loader
+    tpl = "{{ messages[0]['tool_calls'][0]['function']['arguments'] is mapping }}"
+    monkeypatch.setattr(_lt, "bundled_chat_template_for_arch", lambda arch: tpl)
+    monkeypatch.setitem(_cs.GGUF_ARCH_TO_MODEL_TYPE, "qwen2", "deepseek_v41")
+    tok = _tokens.tokenizer_from_gguf(str(path))
+    assert tok.apply_chat_template._ds41_normalized
+    msgs = [{"role": "assistant", "content": "", "tool_calls": [
+        {"type": "function", "function": {"name": "w", "arguments": "{\"city\": \"Paris\"}"}}]}]
+    assert tok.apply_chat_template(msgs, tokenize=False) == "True"
+    monkeypatch.setitem(_cs.GGUF_ARCH_TO_MODEL_TYPE, "qwen2", "qwen2")
+    assert _tokens.tokenizer_from_gguf(str(path)).apply_chat_template(msgs, tokenize=False) == "False"

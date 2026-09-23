@@ -865,6 +865,16 @@ def bundled_chat_template(model_type: str | None) -> str | None:
         encoding="utf-8")
 
 
+def finish_gguf_tokenizer(raw, model_type: str | None) -> None:
+    """The per-model transforms a synthesized tokenizer needs after its
+    template is set. The model loader and the header-only readers both
+    call it, so a tokenizer built either way renders the same text."""
+    if model_type == "deepseek_v41":
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_tools.install_message_normalizer(raw)
+
+
 def bundled_chat_template_for_arch(arch: str | None) -> str | None:
     """The same, addressed by GGUF architecture, for the paths that read a
     header rather than a synthesized config."""

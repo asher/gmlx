@@ -1766,7 +1766,7 @@ def load_model(
     loadlog.stage("building tokenizer")
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from .tokenizer import bundled_chat_template, load_tokenizer_from_gguf
+    from .tokenizer import bundled_chat_template, finish_gguf_tokenizer, load_tokenizer_from_gguf
 
     template_override = _resolve_chat_template(chat_template)
     if template_override is None:
@@ -1777,10 +1777,7 @@ def load_model(
     raw_tokenizer = load_tokenizer_from_gguf(
         meta, arch, chat_template_override=template_override
     )
-    if config.get("model_type") == "deepseek_v41":
-        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
-
-        deepseek_v41_tools.install_message_normalizer(raw_tokenizer)
+    finish_gguf_tokenizer(raw_tokenizer, config.get("model_type"))
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
     _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)

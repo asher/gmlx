@@ -138,8 +138,8 @@ def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale
     the step count, the validation sample size, the learning-rate
     settings, the loss knobs, the gradient clip, the weight decay, the
     LoRA rank, multiplier, keys and
-    dropout, the hidden-state term and the student by size and leading
-    bytes."""
+    dropout, the hidden-state term, the student by size and leading
+    bytes, and the config source."""
     ident = teacher_identity(opts.student)
     return {"views": [view_fingerprint(v) for v in views],
             "batch_size": int(opts.batch_size), "seed": int(opts.seed), "iters": int(opts.iters),
@@ -148,7 +148,7 @@ def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale
             "clip": float(opts.clip),
             "weight_decay": None if opts.weight_decay is None else float(opts.weight_decay),
             "lora_rank": int(opts.lora_rank), "lora_scale": float(scale), "lora_keys": list(LORA_KEYS),
-            "lora_dropout": float(opts.lora_dropout), "hs": float(opts.hs),
+            "lora_dropout": float(opts.lora_dropout), "hs": float(opts.hs), "hf_source": opts.hf_source,
             "hs_loss": opts.hs_loss if opts.hs else None,
             "student": {"size": ident["size"], "sha256_head": ident["sha256_head"]}}
 
@@ -312,7 +312,7 @@ def run_train(opts: TrainOptions) -> int:
                 (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S, bool(view["identity"])):
             log(f"[train] refuse: {d} is over another tokenizer pair than {view_dir}")
             return 2
-        if not _align.same_roles(t2.roles, tables.roles):
+        if t2.roles != tables.roles:
             # every loader groups with view 0's tables; a view whose
             # specials map by other roles would train on its rows regrouped
             log(f"[train] refuse: {d} maps the student's specials by other roles than {view_dir}, align it again")
@@ -365,12 +365,13 @@ def run_train(opts: TrainOptions) -> int:
             log(f"[train] refuse: --resume and no checkpoint under {ckpt_dir}/last (--ckpt-dir names it)")
             return 2
         prev = read_json(last / "state.json").get("run")
-        if prev is not None and prev != run:
+        # a key this build added compares as None against an older record
+        if prev is not None and any(prev.get(k) != run[k] for k in run):
             diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
             log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
                 "a resume repeats the views, batch size, seed, step count, validation sample size, learning "
                 "rate, warmup, loss knobs, gradient clip, weight decay, LoRA rank, multiplier, keys and "
-                "dropout, hidden-state term and student")
+                "dropout, hidden-state term, student and HF source")
             return 2
     if opts.adapter_out:
         from gmlx.tune.lora import probe_writable

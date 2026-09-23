@@ -212,7 +212,8 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                         "template's turn-end marker, which becomes a target.")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every teacher render, as a JSON object or a file.")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. "
+                        "The tokenizer always comes from the GGUF.")
     p.add_argument("--no-require-feeder", dest="require_feeder", action="store_false",
                    help="Run a streaming teacher without the prefill feeder (every expert byte is "
                         "then read through the page cache).")
@@ -331,7 +332,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--val-batches", type=_positive_int, default=16, help="Validation batches per pass (default 16).")
     p.add_argument("--report-every", type=_positive_int, default=10, help="Train-loss report interval (default 10).")
     p.add_argument("--report", type=_path, default=None, metavar="JSON", help="Write the run log here.")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. "
+                        "The tokenizer always comes from the GGUF.")
     p.add_argument("--no-wired-limit", action="store_true", help="Leave the wired limit where it is.")
     p.add_argument("--cache-limit-gb", type=_nonneg_float, default=8.0, help="MLX buffer cache cap (default 8).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
@@ -393,7 +395,8 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--cache-limit-gb", type=_nonneg_float, default=4.0, help="MLX buffer cache cap (default 4).")
     p.add_argument("--decontam-threshold", type=_fraction, default=0.01,
                    help="Slice window fraction found in the corpus above which its gate is void (default 0.01).")
-    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
+    p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. "
+                        "The tokenizer always comes from the GGUF.")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 

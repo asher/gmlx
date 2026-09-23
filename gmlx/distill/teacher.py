@@ -370,8 +370,10 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
     and row options, the corpus's generator sidecar, the teacher by size
     and leading bytes (its path may be spelled another way), its
     vocabulary and, when rows are framed, its chat template (a directory
-    checkpoint keeps both outside the hashed files), the hidden sketch and
-    the render kwargs. Any difference refuses the resume."""
+    checkpoint keeps both outside the hashed files), the config source,
+    the hidden sketch and the render kwargs. Any difference refuses the
+    resume. A key this build added compares as None against a record
+    that predates it."""
     template = _frames.template_text(tokenizer) if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
             "generator_id": generator_id,
@@ -379,7 +381,7 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "template_sha256": hashlib.sha256(template.encode()).hexdigest() if opts.frame != "none" else None,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
             "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
-            "hidden": bool(opts.hidden),
+            "hidden": bool(opts.hidden), "hf_source": opts.hf_source,
             "teacher": {k: v for k, v in teacher_identity(opts.teacher).items() if k != "path"},
             "hidden_dim": opts.hidden_dim if opts.hidden else None,
             "hidden_seed": opts.hidden_seed if opts.hidden else None,
@@ -577,7 +579,7 @@ def run_cache(opts: CacheOptions) -> int:
     run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer, source=source,
                           generator_id=generator_id)
     prev = writer.progress.get("run")
-    if opts.resume and prev is not None and prev != run:
+    if opts.resume and prev is not None and any(prev.get(k) != run[k] for k in run):
         diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
         log(f"[cache] refuse: --resume with other inputs than the first run ({diff}), use a fresh --out")
         return 2
