@@ -106,12 +106,14 @@ class BatchInvariantLinear(nn.Linear):
     A float32 weight takes a bf16 or f16 input promoted to float32, the
     stock promotion, so the routers the loader keeps in float32 run the
     kernel too. A non-float weight, a float input narrower than a bf16
-    or f16 weight, or a module in training mode (the kernel carries no
-    gradient) falls through to the stock forward."""
+    or f16 weight, a module in training mode (the kernel carries no
+    gradient) or a default device other than the GPU (the kernel is
+    Metal) falls through to the stock forward."""
 
     def __call__(self, x):
         w = self.weight
-        if self.training or w.ndim != 2 or w.dtype not in _FLOAT or x.dtype not in _FLOAT:
+        if self.training or w.ndim != 2 or w.dtype not in _FLOAT or x.dtype not in _FLOAT \
+                or mx.default_device() != mx.gpu:
             return super().__call__(x)
         if w.dtype == mx.float32 and x.dtype != mx.float32:
             x = x.astype(mx.float32)

@@ -3,6 +3,8 @@ same result at any batch size, matches an fp64 reference as closely as
 stock, and the install swaps only plain float Linears under the width."""
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
@@ -10,8 +12,10 @@ import pytest
 
 from gmlx.load import invariant_linear as il
 
-if not mx.metal.is_available():
-    pytest.skip("Metal kernels need a GPU", allow_module_level=True)
+if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
+    # the kernels are Metal and the CI runners' paravirtual GPU is not a
+    # dependable place to compile them; FORCE_CPU keeps them off it
+    pytest.skip("Metal kernels need a real GPU and a GPU default device", allow_module_level=True)
 
 
 def _rows(rng, m, k, dtype):
