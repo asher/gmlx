@@ -278,7 +278,8 @@ def _manifest_aside(out: Path, problems: list[str]) -> int:
         log("[cache] validate: " + x)
     bad = out / "manifest.invalid.json"
     os.replace(out / "manifest.json", bad)
-    log(f"[cache] error: validator failed with {len(problems)} problems, manifest moved to {bad}")
+    log(f"[cache] error: validator failed with {len(problems)} problems, manifest moved to {bad}; "
+        "a resume rewrites the manifest, a problem inside a shard needs a fresh --out")
     return 4
 
 
@@ -319,8 +320,9 @@ def teacher_identity(path: str) -> dict:
         h.update(f"{j}:{n}:".encode())
         with open(f, "rb") as fh:
             h.update(fh.read(IDENTITY_HEAD_BYTES))
-            if n > IDENTITY_HEAD_BYTES + IDENTITY_BLOCK_BYTES:
-                starts = np.linspace(IDENTITY_HEAD_BYTES, n - IDENTITY_BLOCK_BYTES, IDENTITY_BLOCKS)
+            if n > IDENTITY_HEAD_BYTES:
+                starts = np.linspace(IDENTITY_HEAD_BYTES, max(n - IDENTITY_BLOCK_BYTES, IDENTITY_HEAD_BYTES),
+                                     IDENTITY_BLOCKS)
                 for off in sorted(set(int(x) for x in starts)):
                     fh.seek(off)
                     h.update(fh.read(IDENTITY_BLOCK_BYTES))
@@ -340,12 +342,18 @@ def head_logits(head: HeadSpec, h):
     return z if z.dtype == mx.float16 else z.astype(mx.bfloat16)
 
 
-def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw) -> dict:
+def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw,
+                    tokenizer=None) -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
     and row options, the teacher by size and leading bytes (its path may
-    be spelled another way), the hidden sketch and, when rows are framed,
-    the render kwargs. Any difference refuses the resume."""
+    be spelled another way), its vocabulary and, when rows are framed, its
+    chat template (a directory checkpoint keeps both outside the hashed
+    files), the hidden sketch and the render kwargs. Any difference
+    refuses the resume."""
+    template = (getattr(hf_inner(tokenizer), "chat_template", "") or "") if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens,
+            "tokenizer_hash": vocab_map_hash(tokenizer) if tokenizer is not None else None,
+            "template_sha256": hashlib.sha256(template.encode()).hexdigest() if opts.frame != "none" else None,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
             "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
             "hidden": bool(opts.hidden),
@@ -448,8 +456,8 @@ def load_teacher(opts: CacheOptions):
 def run_cache(opts: CacheOptions) -> int:
     """The pass. Returns 0 on a validated cache, 2 on a refusal before the
     teacher runs or on a shard the writer could not put down, 3 when the
-    memory probe fails twice, 4 when the validator finds a problem in
-    what was written."""
+    memory probe fails twice or the recorded routes do not match the
+    chunk, 4 when the validator finds a problem in what was written."""
     import mlx.core as mx
 
     out = Path(opts.out)
@@ -531,7 +539,7 @@ def run_cache(opts: CacheOptions) -> int:
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
     # must continue the same run
-    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw)
+    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer)
     prev = writer.progress.get("run")
     if opts.resume and prev is not None and prev != run:
         diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
@@ -543,7 +551,8 @@ def run_cache(opts: CacheOptions) -> int:
     if opts.resume and done == len(shards) and (out / "manifest.json").is_file():
         # a rewritten manifest would change the hash every view carries,
         # so a finished cache is validated as it stands and left alone
-        problems = _format.validate_cache(out)
+        # every shard's hash was checked a moment ago, the contents remain
+        problems = _format.validate_cache(out, check_sha=False)
         if problems:
             return _manifest_aside(out, problems)
         log(f"[cache] nothing to do: all {done} shards verified, the manifest is present and the validator passed")
@@ -764,7 +773,8 @@ def run_cache(opts: CacheOptions) -> int:
         captured.append(np.exp(np.where(valid, lp, -np.inf)).sum(axis=-1))
     captured = np.concatenate(captured) if captured else np.zeros(0)
     edges = [0, 0.5, 0.8, 0.9, 0.95, 0.99, 0.999, 1.0001]
-    hist = np.histogram(captured, bins=edges)[0].tolist() if captured.size else []
+    # float16 log-probs can sum past 1, and the top bin would drop them
+    hist = np.histogram(np.minimum(captured, 1.0), bins=edges)[0].tolist() if captured.size else []
     wall_total = time.perf_counter() - t0
     template = getattr(hf_inner(tokenizer), "chat_template", "") or ""
     teacher_abs = str(Path(opts.teacher).expanduser().absolute())
@@ -820,5 +830,7 @@ def run_cache(opts: CacheOptions) -> int:
     problems = _format.validate_cache(out)
     if problems:
         return _manifest_aside(out, problems)
+    if (out / "manifest.invalid.json").exists():
+        (out / "manifest.invalid.json").unlink()
     log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

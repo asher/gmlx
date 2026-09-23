@@ -165,6 +165,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     high_trace: dict[str, list] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
+    no_positions = 0
     for key, window in order:
         arrs0, text0, meta0 = base_reader.row(base_rows[(key, window)])
         doc_id = str(meta0["doc_id"])
@@ -191,6 +192,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
             shared &= set(k1)
         rel = sorted(shared)
         if not rel:
+            no_positions += 1
             continue
         ends0 = arrs0["token_end_byte"].astype(np.int64)
         row_delta, row_kl, row_res, row_top1 = [], [], [], []
@@ -240,7 +242,8 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     hist = np.histogram(deltas, bins=HIST_BINS)[0].tolist() if deltas.size else []
     frame = ((base_reader.manifest.get("gmlx_distill") or {}).get("frame") or {}).get("kind")
     return {
-        "rows": len(per_row), "rows_mismatched": mismatch, "positions": int(deltas.size),
+        "rows": len(per_row), "rows_mismatched": mismatch, "rows_without_positions": no_positions,
+        "positions": int(deltas.size),
         "delta_threshold": delta_threshold, "frame": frame,
         "distillable_effect_kl_nats": float(np.mean(kl_all)) if kl_all else None,
         "mean_onpath_delta_nats": float(deltas.mean()) if deltas.size else None,
@@ -259,7 +262,8 @@ def report_markdown(opts: CensusOptions, s: dict) -> str:
     lines = ["# Context-delta census", "",
              f"Caches: without `{opts.without}`, with {', '.join(f'`{c}`' for c in opts.with_)}.", "",
              "| measure | value |", "|---|---|",
-             f"| paired reply rows | {s['rows']} ({s['rows_mismatched']} reply mismatches skipped) |",
+             f"| paired reply rows | {s['rows']} ({s['rows_mismatched']} reply mismatches skipped, "
+             f"{s.get('rows_without_positions', 0)} pairs with no shared position) |",
              f"| reply positions compared | {s['positions']} |",
              f"| distillable effect, mean coarsened KL (nats) | {s['distillable_effect_kl_nats']} |",
              f"| mean on-path delta (nats) | {s['mean_onpath_delta_nats']} |",

@@ -324,7 +324,10 @@ def test_filter_reasons_in_order_and_the_sidecar(tmp_path):
     out2 = tmp_path / "ok2.jsonl"
     assert flt.run_filter(flt.FilterOptions(inputs=[str(out)], out=str(out2), keep_budget_hit=True)) == 0
     assert [r["id"] for r in _rows(out2)] == ["b2"]
-    assert json.loads((tmp_path / "ok2.jsonl.gen.json").read_text())["filter_version"] == "2+2"
+    side2 = json.loads((tmp_path / "ok2.jsonl.gen.json").read_text())
+    assert side2["filter_version"] == "3+3"
+    assert [p["params"]["max_reply_tokens"] for p in side2["filter_history"]] == [1180]
+    assert side2["filter"]["params"]["max_trace_repeat"] == 0.5
 
 
 def test_filter_runs_the_verify_command_over_the_survivors(tmp_path):
@@ -1186,3 +1189,95 @@ def test_trace_repeat_threshold_is_its_own_flag():
     assert flt.reason(_row("a", GOOD, reasoning=trace),
                       flt.FilterOptions(inputs=[], out="o.jsonl", max_trace_repeat=0.2)) == "repeat"
     assert flt.reason(_row("b", trace), flt.FilterOptions(inputs=[], out="o.jsonl")) == "repeat"
+
+
+
+def test_cjk_units_split_ideographs_and_kana_only_and_leave_hangul_and_code_alone():
+    """Ideographs and kana split per character; code, Hangul and punctuation
+    stay whitespace tokens, so an unspaced Chinese answer with inline
+    code is not empty and a dashed rule line is not a loop."""
+    opts = flt.FilterOptions(inputs=[], out="o.jsonl")
+    cjk_code = ("\u8fd9\u662f\u4e00\u4e2a\u4f8b\u5b50\uff0c\u8bf7\u770b\u4ee3\u7801 `x = foo(bar)` "
+                "\u7136\u540e\u8fd0\u884c `python run.py --fast` \u5c31\u53ef\u4ee5\u4e86\u3002")
+    assert flt.word_count(cjk_code) >= 20
+    assert flt.reason(_row("a", cjk_code), opts) is None
+    rule = "\u7b2c\u4e00\u6b65\u5b8c\u6210\u3002\n" + "-" * 40 + "\n" + "".join(
+        chr(0x4E00 + 3 * i) for i in range(40))
+    assert flt.repeat_fraction(rule, 8) == 0.0
+    assert flt.reason(_row("b", rule), opts) is None
+    hangul = " ".join(f"\ud55c\uae00{i}" for i in range(20))
+    assert flt.word_count(hangul) == 20
+    assert flt.word_count("a b c") == 3 and flt.word_count("\u4eca\u5929 \u5929\u6c14") == 4
+    loop = "\u4eca\u5929\u5929\u6c14\u5f88\u597d" * 12
+    assert flt.repeat_fraction(loop, 8) > 0.5 and flt.reason(_row("c", loop), opts) == "repeat"
+
+
+def test_filter_sidecar_records_every_pass_and_refuses_inputs_filtered_differently(tmp_path, capsys):
+    """The sidecar becomes the cache manifest's generator block, so it
+    records the trace threshold, keeps each earlier pass under
+    filter_history, and never joins an input filtered under one version
+    with one filtered under another or not at all."""
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({"gen_version": "3", "model": "m"}))
+    first = tmp_path / "first.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(first), max_trace_repeat=0.3)) == 0
+    side = json.loads((tmp_path / "first.jsonl.gen.json").read_text())
+    assert side["filter_version"] == flt.FILTER_VERSION == "3"
+    assert side["filter"]["params"]["max_trace_repeat"] == 0.3 and "filter_history" not in side
+    second = tmp_path / "second.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(first)], out=str(second), max_trace_repeat=0.4)) == 0
+    side2 = json.loads((tmp_path / "second.jsonl.gen.json").read_text())
+    assert side2["filter_version"] == "3+3" and side2["filter"]["params"]["max_trace_repeat"] == 0.4
+    assert [p["params"]["max_trace_repeat"] for p in side2["filter_history"]] == [0.3]
+    b = tmp_path / "b.jsonl"
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    (tmp_path / "b.jsonl.gen.json").write_text(json.dumps({"gen_version": "3", "model": "m"}))
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(first), str(b)], out=str(tmp_path / "j.jsonl"))) == 2
+    err = capsys.readouterr().err
+    assert f"[filter] refuse: {b} was filtered differently than {first}" in err
+    assert not (tmp_path / "j.jsonl").exists()
+
+
+def test_filter_and_gen_refuse_a_torn_sidecar_with_exit_2(tmp_path, stub_server, capsys):
+    """Exit 1 is reserved for requests that failed and can be rerun; a
+    sidecar that is not a JSON object is a refusal."""
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    (tmp_path / "a.jsonl.gen.json").write_text("{\"gen_version\": ")
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(tmp_path / "o.jsonl"))) == 2
+    assert f"[filter] refuse: {a}.gen.json is not a JSON object" in capsys.readouterr().err
+    (tmp_path / "a.jsonl.gen.json").write_text("[1, 2]")
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(tmp_path / "o.jsonl"))) == 2
+    assert f"[filter] refuse: {a}.gen.json is not a JSON object" in capsys.readouterr().err
+    p = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=p, base_url=stub_server)) == 0
+    side = tmp_path / "corpus.jsonl.gen.json"
+    side.write_text("{\"gen_version\": ")
+    capsys.readouterr()
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=p, base_url=stub_server)) == 2
+    assert f"[gen] refuse: {side} is not a JSON object" in capsys.readouterr().err
+
+
+def test_gen_refuses_a_prompt_source_that_cannot_be_read_with_exit_2(tmp_path, stub_server, capsys, monkeypatch):
+    """A Hugging Face id that does not exist raises an OSError subclass
+    from the datasets library; that is a refusal, not a failed request."""
+    def boom(opts):
+        raise FileNotFoundError("Dataset 'data/texts' doesn't exist on the Hub")
+
+    monkeypatch.setattr(gen, "prompt_rows", boom)
+    rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), corpus="data/texts", base_url=stub_server))
+    assert rc == 2 and "[gen] refuse: Dataset 'data/texts' doesn't exist" in capsys.readouterr().err
+
+
+def test_filter_refuses_a_corpus_without_gen_blocks(tmp_path, capsys):
+    """Rows without a gen block would all drop as length and the filter
+    would write an empty corpus with exit 0."""
+    a = tmp_path / "a.jsonl"
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": GOOD}]}]
+    a.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "o.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 2
+    assert f"[filter] refuse: no row of {a} carries a gen block" in capsys.readouterr().err
+    assert not out.exists()

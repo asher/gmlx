@@ -505,7 +505,8 @@ def run_train(opts: TrainOptions) -> int:
             hg = _loss.gather_positions(hidden, batch["positions"])
             loss, aux, dh, dparams = _loss.head_pass(hg, batch, head, group_of=group_of, G=G, Kp=Kp,
                                                      log_bmask=log_bmask, knobs=knobs, B=B, Tm1=T - 1, C=opts.chunk,
-                                                     head_trainable=False, want_grad=want_grad)
+                                                     head_trainable=False, want_grad=want_grad,
+                                                     detach_inputs=False)
             n_bnd = int(batch["n_bnd"])
             if opts.hs and n_bnd > 0 and "hidden_target" in batch:
                 hh = hs_head_for(int(hg.shape[-1]))
@@ -558,9 +559,12 @@ def run_train(opts: TrainOptions) -> int:
         if opts.resume and opts.hs and hs_state["head"] is None:
             # restored now, so a checkpoint written before the next boundary
             # batch still carries the map
-            hcfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
-            if isinstance(hcfg, dict) and hcfg.get("hidden_size"):
-                hs_head_for(int(hcfg["hidden_size"]))
+            width = _hidden.hs_head_width(ckpt_dir / "last")
+            if width is None:
+                hcfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
+                width = int(hcfg["hidden_size"]) if isinstance(hcfg, dict) and hcfg.get("hidden_size") else None
+            if width is not None:
+                hs_head_for(width)
         est_ckpt = 2 * trainable_count(model) * 4 * 3
         if free_bytes(ckpt_dir) < 2 * est_ckpt:
             log(f"[train] refuse: free space under two checkpoints ({free_bytes(ckpt_dir) / GB:.2f} GB)")

@@ -207,7 +207,7 @@ def gather_positions(hidden_btd, positions):
 
 def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log_bmask, knobs: dict,
               B: int, Tm1: int, C: int = 512, head_trainable: bool = True, params_static=None,
-              want_grad: bool = True):
+              want_grad: bool = True, detach_inputs: bool = True):
     """The head half of a training step, run outside any function
     transformation: forward chunk by chunk over the gathered hidden states
     hg [N, d], the small loss in the head's outputs and its gradient, then
@@ -217,7 +217,9 @@ def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log
     evaluated before the next, so the live set is one chunk's logits,
     softmax and cotangent plus the slot map. want_grad False stops after
     the loss (validation): dh and dparams are None and no chunk runs
-    backward.
+    backward. detach_inputs False skips the host round trip that detaches
+    hg from an enclosing transform, for a caller outside any transform
+    (the trainer), where the trip would hold a second copy of the gather.
 
     Call it outside mx.value_and_grad: inside a transform every array a
     chunk creates stays referenced until the outer eval, and the pass
@@ -242,7 +244,7 @@ def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log
                                            mx.zeros((0,), dtype=mx.float32), batch, knobs=knobs, B=B, Tm1=Tm1)
         mx.eval(loss, *aux.values())
         return loss, aux, (mx.zeros(hg.shape, dtype=mx.float32) if want_grad else None), None
-    hg_d = detached(hg)
+    hg_d = detached(hg) if detach_inputs else mx.stop_gradient(hg)
     if params_static is not None:
         params_d = params_static
     else:

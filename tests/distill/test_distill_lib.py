@@ -5226,7 +5226,8 @@ def test_align_checks_every_framed_row_from_the_token_ids_alone(tmp_path, tok_bl
     corpus = tmp_path / "c.jsonl"
     corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
         {"role": "user", "content": f"the cat {i}" + (" " if i == 4 else "")},
-        {"role": "assistant", "content": "the cat is the cat 123 " * (1 + i % 3)}]}) + "\n" for i in range(10)),
+        {"role": "assistant", "content": " ".join(["the cat is the cat 123"] * (1 + i % 3))}]}) + "\n"
+        for i in range(10)),
         encoding="utf-8")
     cache = tmp_path / "cache"
     assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
@@ -5244,6 +5245,10 @@ def test_align_checks_every_framed_row_from_the_token_ids_alone(tmp_path, tok_bl
         tok.chat_template = _TEMPLATE_B.replace("{{ m['content'] }}", "{{ m['content'] | trim }}")
         same, why = _view.same_render(reader, tok, "reply", n_check=None)
         assert not same and "student tokens vs" in why
+        # the trailing space is the only difference, so the sample of eight
+        # rows (which skips the middle) passes and the per-row check fails
+        differ = [r for r in range(10) if reader.rows_meta[r]["doc_id"].endswith(":4")]
+        assert len(differ) == 1 and why.startswith(f"row {differ[0]}: ")
     student = _tiny_mlx_teacher(tmp_path / "student", tok)
     capsys.readouterr()
     rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "view")))
@@ -5271,13 +5276,17 @@ def test_cache_moves_a_rejected_manifest_aside_and_validates_a_finished_resume(t
     opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
                                  rows_per_shard=2)
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(_teacher._format, "validate_cache", lambda d: ["forced problem"])
+        mp.setattr(_teacher._format, "validate_cache", lambda d, **kw: ["forced problem"])
         assert _teacher.run_cache(opts) == 4
     err = capsys.readouterr().err
     assert "[cache] validate: forced problem" in err and "manifest moved to" in err
+    assert "a resume rewrites the manifest" in err
     assert not (out / "manifest.json").exists() and (out / "manifest.invalid.json").is_file()
+    assert dl.validate_cache(out) == ["manifest.json missing, manifest.invalid.json holds the one the validator "
+                                      "rejected (a resume rewrites it, a bad shard needs a fresh --out)"]
     assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
     assert (out / "manifest.json").is_file() and dl.validate_cache(out) == []
+    assert not (out / "manifest.invalid.json").exists()
     man = json.loads((out / "manifest.json").read_text())
     man["top_k"] = 7
     (out / "manifest.json").write_text(json.dumps(man))
@@ -5286,6 +5295,21 @@ def test_cache_moves_a_rejected_manifest_aside_and_validates_a_finished_resume(t
     err = capsys.readouterr().err
     assert "nothing to do" not in err and "top-K shapes inconsistent" in err
     assert not (out / "manifest.json").exists() and (out / "manifest.invalid.json").is_file()
+    with pytest.MonkeyPatch.context() as mp:
+        # every shard was verified by hash a moment earlier; the finished
+        # resume validates the contents alone
+        seen = {}
+
+        def spy(d, check_sha=True):
+            seen["check_sha"] = check_sha
+            return dl.validate_cache(d, check_sha=check_sha)
+
+        mp.setattr(_teacher._format, "validate_cache", spy)
+        assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+        assert (out / "manifest.json").is_file()
+        assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+        assert seen == {"check_sha": False}
+        assert "[cache] nothing to do" in capsys.readouterr().err
 
 
 def test_rows_sidecar_is_hashed_and_a_changed_one_fails_verification(tmp_path, tok_bl):
@@ -5395,3 +5419,231 @@ def test_get_tables_rebuilds_an_older_version_without_reading_its_arrays(tmp_pat
     monkeypatch.setattr(_view._align, "load_tables", never)
     t = _view.get_tables(tok_bl, tok_spm, old, tmp_path / "out", V_T=None, V_S=None)
     assert (tmp_path / "out" / "tables.json").is_file() and t.teacher_hash == vocab_map_hash(tok_bl)
+
+
+
+def _spm_prefix_tokenizer(pieces, merges):
+    """An SPM-like tokenizer with a dummy prefix (Llama-2, Mistral): every
+    text segment starts with U+2581, so token byte lengths overshoot the
+    text by one byte per segment."""
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+    vocab = {"<pad>": 0, "<eos>": 1, "<bos>": 2}
+    for i in range(256):
+        vocab[f"<0x{i:02X}>"] = len(vocab)
+    for p in pieces:
+        if p not in vocab:
+            vocab[p] = len(vocab)
+    for a, b in merges:
+        for piece in (a, b, a + b):
+            if piece not in vocab:
+                vocab[piece] = len(vocab)
+    tok = Tokenizer(models.BPE(vocab=vocab, merges=merges, byte_fallback=True, unk_token=None))
+    tok.pre_tokenizer = pre_tokenizers.Metaspace(replacement="\u2581", prepend_scheme="first")
+    tok.decoder = decoders.Sequence([decoders.Metaspace(replacement="\u2581", prepend_scheme="first"),
+                                     decoders.ByteFallback()])
+    return PreTrainedTokenizerFast(tokenizer_object=tok, eos_token="<eos>", bos_token="<bos>", pad_token="<pad>")
+
+
+def test_byte_ends_of_a_dummy_prefix_tokenizer_stay_on_the_fast_path_and_split_byte_fallback(tmp_path):
+    """A dummy-prefix tokenizer adds a space the text does not hold, so
+    the byte sum used to overshoot and every row fell to the offsets
+    fallback, where the pieces of one byte-fallback character shared an
+    end offset and the validator rejected the cache after the whole
+    pass. The prefix is zero width on the fast path, and the fallback
+    gives each piece of a shared span its own byte."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import tokens as _tokens
+
+    pieces = ["\u2581", "t", "h", "e", "a", "c", "\u2581t", "\u2581th", "\u2581the", "\u2581a", "\u2581c",
+              "\u2581ca", "\u2581cat"]
+    merges = [("\u2581", "t"), ("\u2581t", "h"), ("\u2581th", "e"), ("\u2581", "a"), ("\u2581", "c"),
+              ("\u2581c", "a"), ("\u2581ca", "t")]
+    tok = _spm_prefix_tokenizer(pieces, merges)
+    tb = dl.token_bytes(tok)
+    text = "the \u20ac a"
+    ids, ends, flagged = dl.encode_with_byte_ends(tok, text.encode("utf-8"), tb, add_special_tokens=False)
+    assert tok.convert_ids_to_tokens(ids.tolist()) == ["\u2581the", "\u2581", "<0xE2>", "<0x82>", "<0xAC>", "\u2581a"]
+    assert not flagged and ends.tolist() == [3, 4, 5, 6, 7, 9]
+    # the fallback on the same row: the three byte pieces share the char
+    # span (4, 5) and take one byte each
+    got = _tokens.offsets_to_byte_ends([(0, 3), (3, 4), (4, 5), (4, 5), (4, 5), (5, 7)], text, ids, tb)
+    assert got.tolist() == [3, 4, 5, 6, 7, 9]
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": f"the cat {i} \u20ac a cat"}) + "\n" for i in range(3)),
+                      encoding="utf-8")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8,
+                                                    max_len=64)) == 0
+    assert dl.validate_cache(out) == [] and (out / "manifest.json").is_file()
+
+
+def test_align_takes_the_general_path_when_the_bos_policies_differ(tmp_path, tok_bl, capsys):
+    """The identity path forwards the cached ids as they are, so a student
+    that adds a BOS the teacher never wrote would train without the BOS
+    it gets at inference; the pair goes to the general path instead."""
+    from tokenizers import processors
+
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import tokens as _tokens
+    from gmlx.distill import view as _view
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_text_corpus(tmp_path / "c.jsonl")),
+                                                    out=str(cache), top_k=8, max_len=64)) == 0
+    bos_tok = _bytelevel_tokenizer(_BL_MERGES)
+    bos_tok.backend_tokenizer.post_processor = processors.TemplateProcessing(
+        single="<bos> $A", special_tokens=[("<bos>", bos_tok.bos_token_id)])
+    assert _tokens.adds_bos(bos_tok) and not _tokens.adds_bos(tok_bl)
+    student = _tiny_mlx_teacher(tmp_path / "student", bos_tok)
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "view")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "[align] BOS policies differ (teacher adds none, student adds one), general path" in err
+    assert json.loads((tmp_path / "view" / "view.json").read_text())["identity"] is False
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "view2")))
+    assert rc == 0 and json.loads((tmp_path / "view2" / "view.json").read_text())["identity"] is True
+
+
+def test_align_refuses_a_teacher_tokenizer_that_differs_from_the_manifest(tmp_path, tok_bl, capsys):
+    """The cache names its teacher by path; a file replaced by another
+    revision under that path would build the tables over the wrong
+    vocabulary, so align compares the vocab hash the manifest recorded."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import view as _view
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_text_corpus(tmp_path / "c.jsonl")),
+                                                    out=str(cache), top_k=8, max_len=64)) == 0
+    man = json.loads((cache / "manifest.json").read_text())
+    man["tokenizer_hash"] = "0" * 12
+    (cache / "manifest.json").write_text(json.dumps(man))
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "view")))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[align] refuse: the tokenizer at" in err and "vocab hash" in err
+
+
+def test_cache_resume_refuses_a_changed_chat_template_or_vocabulary(tmp_path, tok_bl, capsys):
+    """A framed resume must render as the first run did; a template edit
+    in the teacher directory (which the weight hash never sees) changes
+    the fingerprint."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_B)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
+        {"role": "user", "content": f"the cat {i}"},
+        {"role": "assistant", "content": "the cat is the cat 123"}]}) + "\n" for i in range(4)), encoding="utf-8")
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=256,
+                                 rows_per_shard=2, frame="reply")
+    assert _teacher.run_cache(opts) == 0
+    run = json.loads((out / "progress.json").read_text())["run"]
+    assert len(run["template_sha256"]) == 64 and len(run["tokenizer_hash"]) > 0
+    (out / "batch-00001.safetensors").unlink()
+    (out / "manifest.json").unlink()
+    (teacher / "chat_template.jinja").write_text(_TEMPLATE_A, encoding="utf-8")
+    capsys.readouterr()
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 2
+    err = capsys.readouterr().err
+    assert "[cache] refuse: --resume with other inputs" in err and "template_sha256" in err
+
+
+def test_partial_route_recording_is_refused(monkeypatch):
+    """A recorder hooked on some MoE layers would write a routes field the
+    replay refuses (its layer list differs from the model's), and eval
+    would then score without replay; the recording refuses instead."""
+    pytest.importorskip("gmlx.stream.moe_routes")
+    from types import SimpleNamespace
+
+    import mlx.nn as nn
+    from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
+
+    import gmlx.stream.moe_routes as _mr
+
+    args = SimpleNamespace(hidden_size=16, moe_intermediate_size=32, num_experts=8, num_experts_per_tok=4,
+                           norm_topk_prob=True)
+
+    class _Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = Qwen3MoeSparseMoeBlock(args)
+
+    class _Shell:
+        pass
+
+    model = _Shell()
+    model.layers = [_Layer(), _Layer()]
+    rec, why = dl.install_route_recording(model)
+    assert rec is not None and list(rec.layers) == [0, 1], why
+    from gmlx.stream.moe_routes import clear_moe_route_controls
+    clear_moe_route_controls(model)
+    monkeypatch.setattr(_mr, "moe_layers", lambda m: [0, 1, 2])
+    rec, why = dl.install_route_recording(model)
+    assert rec is None and why == "route recording unsupported on MoE layers [2]"
+    clear_moe_route_controls(model)
+
+
+def test_head_pass_can_skip_the_host_round_trip_and_an_f16_head_is_cast_once():
+    """The trainer runs the head pass outside any transform, so the
+    hidden gather needs no host round trip to be detached; an f16 head
+    reuses its bf16 copy instead of casting on every step."""
+    from gmlx.distill import loss as _loss
+
+    V_T, V_S, d, K = 10, 12, 8, 3
+    tables = dl.identity_tables(V_S, np.zeros(V_S, bool), "t", "s", V_T=V_T)
+    rng = np.random.default_rng(0)
+    W = mx.array(rng.standard_normal((V_S, d)).astype(np.float32))
+    head = dl.linear_head(W)
+    T = 6
+    ids = np.arange(1, T + 1, dtype=np.int32)
+    row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
+           "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
+           "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
+                        teacher_special=set(), student_special=set(), identity=True)
+    b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
+    h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
+    hg = _loss.gather_positions(h, b["positions"])
+    kw = dict(group_of=None, G=tables.G, Kp=K, log_bmask=dl.log_bmask_from(tables.bmask_S),
+              knobs=dict(KNOBS, lambda_alm=0.0), B=1, Tm1=31, head_trainable=False)
+    loss, _aux, dh, _dp = _loss.head_pass(hg, b, head, **kw)
+    loss2, _aux2, dh2, _dp2 = _loss.head_pass(hg, b, head, detach_inputs=False, **kw)
+    assert float(loss2) == pytest.approx(float(loss))
+    assert np.allclose(np.array(dh2), np.array(dh), atol=1e-6)
+
+    import mlx.nn as nn
+
+    from gmlx.distill import head as _head
+
+    class _Mod(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = W.astype(mx.float16)
+
+    mod = _Mod()
+    head16 = _head.HeadSpec(fn=head.fn, params={"weight": mod.weight}, softcap=None, V=V_S,
+                            weight=_head.head_weight_fn(mod))
+    w1 = head16.dense_weight(head16.params)
+    w2 = head16.dense_weight(head16.params)
+    assert w1.dtype == mx.bfloat16 and w1 is w2
+
+
+def test_hs_resume_reads_the_map_width_from_the_checkpoint(tmp_path, tok_bl, monkeypatch):
+    """A student config without hidden_size (a bare text_config) restored
+    the hidden-state map only at the next boundary batch, so a checkpoint
+    written before it lost the map; the width comes from the saved map."""
+    from gmlx.distill import hidden as _hidden
+
+    d = tmp_path / "last"
+    d.mkdir()
+    hh = _hidden.HsHead(6, 4, 1, lambda s: 1e-3, weight_decay=0.0)
+    hh.save(d)
+    assert _hidden.hs_head_width(d) == 6
+    assert _hidden.hs_head_width(tmp_path / "none") is None

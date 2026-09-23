@@ -83,6 +83,18 @@ def apply_context(messages: list[dict], context: str, fmt: str = DEFAULT_CONTEXT
     return teacher
 
 
+def _read_side(side: Path) -> dict:
+    """The sidecar as a dict, or a ValueError naming the file when it is
+    not a JSON object (a torn write)."""
+    try:
+        obj = json.loads(side.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{side} is not a JSON object ({e})") from None
+    if not isinstance(obj, dict):
+        raise ValueError(f"{side} is not a JSON object")
+    return obj
+
+
 def prompt_rows(opts: GenOptions) -> list[dict]:
     """``[{id, messages, student_messages?, ...}]`` from the prompt file or
     built from a text corpus. ``messages`` is the teacher's list with any
@@ -543,16 +555,23 @@ def run_gen(opts: GenOptions) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
         rows = prompt_rows(opts)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
+        # a missing prompt file, or a Hugging Face id the datasets library
+        # cannot find (an OSError subclass)
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
     with_context = any(r.get("student_messages") for r in rows)
     side = out.with_suffix(out.suffix + ".gen.json")
-    # the settings check comes before the torn-line cut, so a refused
-    # resume leaves the file as it found it
+    # the settings check comes before the torn-line cut; the prompt and
+    # server checks below run after it, and the cut only drops a torn
+    # last line
     if out.exists() and out.stat().st_size > 0 and side.exists():
-        conflict = resume_conflict(json.loads(side.read_text(encoding="utf-8")), opts, with_context=with_context)
+        try:
+            conflict = resume_conflict(_read_side(side), opts, with_context=with_context)
+        except ValueError as e:
+            print(f"[gen] refuse: {e}", file=sys.stderr)
+            return 2
         if conflict:
             print(f"[gen] refuse: {out} was generated with other settings ({conflict}), pass a fresh --out",
                   file=sys.stderr)
@@ -579,7 +598,11 @@ def run_gen(opts: GenOptions) -> int:
         model_id = wait_ready(base_url, proc, opts.startup_timeout)
         log(f"[gen] server ready: model {model_id}")
         if done and side.exists():
-            prev_id = json.loads(side.read_text(encoding="utf-8")).get("served_model_id")
+            try:
+                prev_id = _read_side(side).get("served_model_id")
+            except ValueError as e:
+                print(f"[gen] refuse: {e}", file=sys.stderr)
+                return 2
             if prev_id not in (None, model_id):
                 print(f"[gen] refuse: the server now serves {model_id}, the {len(done)} replies in {out} came "
                       f"from {prev_id}, pass a fresh --out", file=sys.stderr)
@@ -650,6 +673,9 @@ def run_gen(opts: GenOptions) -> int:
                 # an interrupt: the queued requests are cancelled first,
                 # then the server stops so the requests in flight fail fast
                 ex.shutdown(wait=False, cancel_futures=True)
+                if opts.base_url:
+                    log(f"[gen] interrupted, waiting for the requests in flight on {opts.base_url} "
+                        f"(up to --timeout {opts.timeout}s each)")
                 stop_server(opts, proc)
                 proc = None
                 raise
@@ -672,7 +698,10 @@ def run_gen(opts: GenOptions) -> int:
             # tok_s_aggregate is this run's rate
             "run": {**row_totals(out), "failed": n_err, "wall_s": el, "tok_s_aggregate": gen_tokens / max(el, 1e-9),
                     "concurrency": opts.concurrency}}
-        prev = json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
+        try:
+            prev = _read_side(side) if side.exists() else None
+        except ValueError:
+            prev = None     # this run's settings were already written over it
         # a resume already matched the settings; prompts added since the
         # last run change the prompt set but not what the wall time counts
         if prev and isinstance(prev.get("run"), dict):

@@ -203,6 +203,7 @@ def encode_with_byte_ends(tokenizer, text_bytes: bytes,
     ends = np.zeros(len(ids), dtype=np.uint32)
     pos = 0
     ok = True
+    seg_start = True
     for i, tid in enumerate(ids):
         if tid in special:
             # a special rendered as text (a chat frame) spans its own bytes;
@@ -211,8 +212,14 @@ def encode_with_byte_ends(tokenizer, text_bytes: bytes,
             if sb and text_bytes[pos:pos + len(sb)] == sb:
                 pos += len(sb)
             ends[i] = pos
+            seg_start = True
             continue
         bb = tb[tid] if tid < len(tb) else None
+        if bb is not None and seg_start and bb.startswith(b" ") and text_bytes[pos:pos + 1] != b" ":
+            # a dummy prefix (Llama-2, Mistral SPM): the tokenizer prepends
+            # a space the text does not hold, zero width here
+            bb = bb[1:]
+        seg_start = False
         if bb is None:
             # a control token outside all_special_ids (gemma-4's <|turn>,
             # Qwen's <|im_start|>) rendered as text spans its literal bytes
@@ -227,7 +234,14 @@ def encode_with_byte_ends(tokenizer, text_bytes: bytes,
         ends[i] = pos
     if ok and pos == len(text_bytes):
         return ids, ends, False
-    # Fallback: char offsets -> byte offsets.
+    return ids, offsets_to_byte_ends(enc.offsets, text, ids, tb), True
+
+
+def offsets_to_byte_ends(offsets, text: str, ids, tb: list[bytes | None]) -> np.ndarray:
+    """End byte offsets from the backend's char offsets: each end through a
+    char-to-byte prefix table, and the pieces of one char span (the byte
+    fallback of a multibyte character) spread over the span one token's
+    bytes at a time, so ends stay strictly increasing."""
     char_to_byte = np.zeros(len(text) + 1, dtype=np.int64)
     acc = 0
     for ci, ch in enumerate(text):
@@ -235,13 +249,30 @@ def encode_with_byte_ends(tokenizer, text_bytes: bytes,
         acc += len(ch.encode("utf-8"))
     char_to_byte[len(text)] = acc
     ends = np.zeros(len(ids), dtype=np.uint32)
-    for i, (s, e) in enumerate(enc.offsets):
-        ends[i] = char_to_byte[e] if e <= len(text) else acc
+    i = 0
+    n = len(ids)
+    while i < n:
+        s, e = offsets[i]
+        j = i + 1
+        while j < n and tuple(offsets[j]) == (s, e):
+            j += 1
+        span_end = int(char_to_byte[e]) if e <= len(text) else acc
+        if j - i == 1:
+            ends[i] = span_end
+        else:
+            at = int(char_to_byte[s]) if s <= len(text) else acc
+            for k in range(i, j - 1):
+                tid = int(ids[k])
+                bb = tb[tid] if tid < len(tb) else None
+                at = min(at + max(len(bb) if bb is not None else 1, 1), span_end)
+                ends[k] = at
+            ends[j - 1] = span_end
+        i = j
     # Specials at the start carry end 0; monotone repair for any offset the
     # backend reports as (0, 0) mid-row.
     for i in range(1, len(ends)):
         if ends[i] < ends[i - 1]:
             ends[i] = ends[i - 1]
-    return ids, ends, True
+    return ends
 
 

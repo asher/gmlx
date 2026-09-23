@@ -33,15 +33,16 @@ class HeadSpec:
 
     def dense_weight(self, params=None):
         """W [V, d] for the closed-form backward (dz @ W). A float weight in
-        params wins (trainable heads read the live tree), an f16 one cast
-        to bf16 on every call since the softmax cotangents underflow f16;
+        params wins (trainable heads read the live tree); an f16 one is
+        read as the module's cached bf16 copy when the spec has one, else
+        cast on the call, since the softmax cotangents underflow f16;
         quantized heads dequantize once and cache."""
         if params is not None and isinstance(params, dict) and "weight" in params:
             w = params["weight"]
             if w.dtype in (_MX().float32, _MX().bfloat16):
                 return w
             if w.dtype == _MX().float16:
-                return w.astype(_MX().bfloat16)
+                return self.weight() if self.weight is not None else w.astype(_MX().bfloat16)
         if self.weight is not None:
             return self.weight()
         return self.params["weight"]

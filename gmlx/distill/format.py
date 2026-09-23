@@ -55,12 +55,17 @@ def install_route_recording(model):
     ``model``, or (None, why) when gmlx lacks the seam or the model has no
     supported MoE block."""
     try:
-        from gmlx.stream.moe_routes import install_moe_route_record
+        from gmlx.stream import moe_routes as _mr
     except ImportError:
         return None, "gmlx has no stream.moe_routes (route record and replay seam)"
-    rec = install_moe_route_record(model)
+    rec = _mr.install_moe_route_record(model)
     if not rec.layers:
         return None, "no supported MoE block found (dense model, or an unsupported router)"
+    missing = sorted(set(_mr.moe_layers(model)) - set(rec.layers))
+    if missing:
+        # a routes field over some layers would fail the replay's layer
+        # check and eval would score without replay
+        return None, f"route recording unsupported on MoE layers {missing}"
     return rec, ""
 
 
@@ -388,6 +393,9 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
     problems: list[str] = []
     mp = cache_dir / "manifest.json"
     if not mp.exists():
+        if (cache_dir / "manifest.invalid.json").exists():
+            return ["manifest.json missing, manifest.invalid.json holds the one the validator rejected "
+                    "(a resume rewrites it, a bad shard needs a fresh --out)"]
         return ["manifest.json missing (pass incomplete)"]
     manifest = read_json(mp)
     gd = manifest.get("gmlx_distill", {})

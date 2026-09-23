@@ -210,6 +210,15 @@ def run_align(opts: AlignOptions) -> int:
     except (OSError, KeyError, ValueError) as e:
         log(f"[align] refuse: cannot load the student tokenizer at {opts.student}: {e}")
         return 2
+    want = manifest.get("tokenizer_hash")
+    have = vocab_map_hash(teacher_tok)
+    if want and have != want:
+        # the cached ids index the vocabulary the pass wrote with, and a
+        # tokenizer with another map would project them wrong
+        src = cache / "tokenizer" if (cache / "tokenizer").exists() else manifest.get("teacher_path")
+        log(f"[align] refuse: the tokenizer at {src} has another vocab hash than the cache recorded "
+            f"({have[:12]} vs {str(want)[:12]}), the teacher tokenizer changed since the cache was written")
+        return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
     # a view directory is rewritten whole: shards of an earlier align over
@@ -236,6 +245,14 @@ def run_align(opts: AlignOptions) -> int:
     identity = same_vocab
     if ident and V_S < V_T:
         log(f"[align] identity maps but student head is narrower ({V_S} < {V_T}), general path")
+    t_bos, s_bos = _tokens.adds_bos(teacher_tok), _tokens.adds_bos(student_tok)
+    if identity and (t_bos != s_bos or (s_bos and _tokens.bos_id(teacher_tok) != _tokens.bos_id(student_tok))):
+        # the identity path forwards the cached ids as they are, so the
+        # student would train without the BOS it gets at inference (or
+        # with one the teacher wrote and it never adds)
+        log(f"[align] BOS policies differ (teacher adds {'one' if t_bos else 'none'}, student adds "
+            f"{'one' if s_bos else 'none'}), general path")
+        identity = False
     if identity and frame:
         # the identity path forwards the cached render, so the student's own
         # template must produce the same tokens on every row; otherwise the

@@ -6,8 +6,8 @@ Checks run in a fixed order and the first failure names the reason:
 
     length   the reply did not reach its end of turn (finish_reason is not stop)
     budget   the thinking budget cut the trace (the gen block says so)
-    empty    the answer has fewer than min_words whitespace-separated words
-             (characters, when the text is mostly CJK)
+    empty    the answer has fewer than min_words units, a unit being a
+             whitespace-separated word or one ideograph or kana character
     marker   a template marker string leaked into the reply or its trace
     repeat   repeated n-grams cover more than max_repeat of the reply or
              max_trace_repeat of the trace, or one line with a letter or
@@ -26,6 +26,7 @@ teacher then scores those replies with the context in its prompt."""
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -38,7 +39,7 @@ from .corpus import message_list
 from .format import write_json_atomic
 from .gen import DEFAULT_CONTEXT_FORMAT, apply_context, context_format_error
 
-FILTER_VERSION = "2"
+FILTER_VERSION = "3"
 MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<start_of_turn>", "<end_of_turn>", "<turn|>",
            "<|eot_id|>", "<|start_header_id|>", "<|channel|>", "<|message|>", "<|return|>", "<|user|>",
            "<|assistant|>", "<think>", "</think>")
@@ -66,15 +67,19 @@ class FilterOptions:
     context_format: str = DEFAULT_CONTEXT_FORMAT
 
 
+# whitespace and CJK punctuation separate units; ideographs and kana are
+# written without spaces, so each character is a unit of its own, while
+# Hangul, Latin, digits and code keep their whitespace tokens
+_SEP = re.compile("[\\s\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+_CJK = re.compile("([\u2e80-\u2fdf\u3040-\u30ff\u3100-\u312f\u31a0-\u31ff\u3400-\u4dbf\u4e00-\u9fff"
+                  "\uf900-\ufaff\U00020000-\U0003ffff])")
+
+
 def _units(text: str) -> list[str]:
-    """Whitespace tokens, or the non-space characters when at least half
-    of them are CJK (U+2E80 and up, scripts written without spaces), so
-    the word count and the repeat check see units of one size either
-    way."""
-    chars = [ch for ch in text if not ch.isspace()]
-    if chars and 2 * sum(1 for ch in chars if ord(ch) >= 0x2E80) >= len(chars):
-        return chars
-    return text.split()
+    """The units the word count and the repeat check run over: whitespace
+    tokens, split further into single characters inside ideograph and
+    kana runs."""
+    return [p for tok in _SEP.split(text) for p in _CJK.split(tok) if p]
 
 
 def word_count(text: str) -> int:
@@ -82,8 +87,8 @@ def word_count(text: str) -> int:
 
 
 def repeat_fraction(text: str, n: int) -> float:
-    """Fraction of the text's n-grams (over whitespace tokens, or over
-    characters for CJK text) that repeat an earlier n-gram."""
+    """Fraction of the text's n-grams over its units (see _units) that
+    repeat an earlier n-gram."""
     toks = _units(text)
     if len(toks) < n + 1:
         return 0.0
@@ -196,14 +201,18 @@ _GEN_KEYS = ("model", "served_model_id", "sampling", "seed", "chat_template_kwar
 
 
 def _read_sidecar(path: Path) -> dict | None:
+    """The input's sidecar, None when it has none, or a ValueError when the
+    file is not a JSON object."""
     side = path.with_suffix(path.suffix + ".gen.json")
-    return json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
-
-
-def _gen_settings(side: dict) -> dict:
-    """The generator settings every row of a file shares, which two inputs
-    must agree on before their rows are joined under one sidecar."""
-    return {k: side.get(k) for k in _GEN_KEYS}
+    if not side.exists():
+        return None
+    try:
+        obj = json.loads(side.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{side} is not a JSON object ({e})") from None
+    if not isinstance(obj, dict):
+        raise ValueError(f"{side} is not a JSON object")
+    return obj
 
 
 def _settings_diff(a: dict, b: dict) -> list[str]:
@@ -216,15 +225,20 @@ def _settings_diff(a: dict, b: dict) -> list[str]:
 
 def run_filter(opts: FilterOptions) -> int:
     """Filter the inputs in order into ``out`` with its sidecar. Returns 0,
-    or 2 when an input is missing, the inputs were generated with other
-    settings than each other, a row cannot take the context, or the
-    verify command fails."""
+    or 2 when an input is missing or its sidecar unreadable, the inputs
+    were generated with other settings than each other or filtered
+    differently, no row carries a gen block, a row cannot take the
+    context, or the verify command fails."""
     inputs = [Path(p).expanduser() for p in opts.inputs]
     for p in inputs:
         if not p.is_file():
             print(f"[filter] refuse: no such file: {p}", file=sys.stderr)
             return 2
-    sides = [_read_sidecar(p) for p in inputs]
+    try:
+        sides = [_read_sidecar(p) for p in inputs]
+    except ValueError as e:
+        print(f"[filter] refuse: {e}", file=sys.stderr)
+        return 2
     first_i = next((i for i, s in enumerate(sides) if s is not None), None)
     first = sides[first_i] if first_i is not None else None
     first_path = inputs[first_i] if first_i is not None else None
@@ -233,6 +247,12 @@ def run_filter(opts: FilterOptions) -> int:
             diff = ", ".join(_settings_diff(s, first))
             print(f"[filter] refuse: {p} was generated with other settings than {first_path} ({diff}), "
                   "filter each file on its own", file=sys.stderr)
+            return 2
+        if s is not None and first is not None and s.get("filter_version") != first.get("filter_version"):
+            # the output sidecar records one filter history for every row
+            print(f"[filter] refuse: {p} was filtered differently than {first_path} "
+                  f"({s.get('filter_version')!r} vs {first.get('filter_version')!r}), filter the unfiltered "
+                  "inputs first or join unfiltered files", file=sys.stderr)
             return 2
     for p, s in zip(inputs, sides):
         if s is None and first is not None:
@@ -261,6 +281,11 @@ def run_filter(opts: FilterOptions) -> int:
             rows = _read_rows(p)
         except ValueError as e:
             print(f"[filter] refuse: {e}", file=sys.stderr)
+            return 2
+        if not any(isinstance(row.get("gen"), dict) for row in rows):
+            # every row would drop as length and the output would be empty
+            print(f"[filter] refuse: no row of {p} carries a gen block, this is not a generated corpus",
+                  file=sys.stderr)
             return 2
         for row in rows:
             rid = row.get("id")
@@ -318,8 +343,12 @@ def run_filter(opts: FilterOptions) -> int:
     sidecar: dict = dict(first) if first is not None else {"gen_version": None}
     prev = sidecar.get("filter_version")
     sidecar["filter_version"] = f"{prev}+{FILTER_VERSION}" if prev else FILTER_VERSION
-    params = {k: getattr(opts, k) for k in ("min_words", "ngram", "max_repeat", "max_line_repeats",
-                                            "max_non_ascii", "max_reply_tokens", "keep_budget_hit")}
+    params = {k: getattr(opts, k) for k in ("min_words", "ngram", "max_repeat", "max_trace_repeat",
+                                            "max_line_repeats", "max_non_ascii", "max_reply_tokens",
+                                            "keep_budget_hit")}
+    if isinstance(sidecar.get("filter"), dict):
+        # every earlier pass stays on record, oldest first
+        sidecar["filter_history"] = [*(sidecar.get("filter_history") or []), sidecar["filter"]]
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "inputs": [str(p) for p in inputs]}
     if opts.context is not None:

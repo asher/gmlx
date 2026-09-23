@@ -954,12 +954,12 @@ carries `student_messages`, since that row was generated with a context.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the sidecars disagree or two rows share an id |
+| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the sidecars disagree, the inputs were filtered differently or two rows share an id |
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
 | `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
-| `--min-words N` | `16` | drop replies whose answer has fewer words (characters, for CJK text), trace not counted. `--min-tokens` is the same flag |
-| `--ngram N` | `8` | n-gram size of the repetition check |
+| `--min-words N` | `16` | drop replies whose answer has fewer units, a unit being a word or one ideograph or kana character, trace not counted. `--min-tokens` is the same flag |
+| `--ngram N` | `8` | n-gram size of the repetition check, in the units of `--min-words` |
 | `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
 | `--max-trace-repeat F` | `0.5` | drop replies whose reasoning trace's repeated n-grams exceed this fraction |
 | `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row, lines without a letter or digit skipped |
@@ -993,7 +993,7 @@ dropped, counted in the `[cache] frame` line.
 | `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
-| `--resume` | off | continue after the last verified shard, refused when the corpus, the teacher or the row options changed; a finished cache exits 0 untouched |
+| `--resume` | off | continue after the last verified shard, refused when the corpus, teacher, template or row options changed. A finished cache is validated, not rewritten |
 | `--max-rows N` | none | stop after this many rows |
 | `--max-tokens N` | none | stop after this many teacher tokens |
 | `--limit-docs N` | none | read at most this many documents |

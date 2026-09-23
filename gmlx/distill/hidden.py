@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -77,7 +78,11 @@ class HsHead:
         import mlx.core as mx
         from mlx.utils import tree_flatten
         mx.save_safetensors(str(d / "hs_head.safetensors"), dict(tree_flatten(self.module.parameters())))
-        mx.save_safetensors(str(d / "hs_optimizer.safetensors"), dict(tree_flatten(self.opt.state)))
+        # a map that never trained holds its learning rate as a float
+        state: dict[str, mx.array] = {}
+        for k, v in tree_flatten(self.opt.state):
+            state[k] = v if isinstance(v, mx.array) else mx.array(float(v))
+        mx.save_safetensors(str(d / "hs_optimizer.safetensors"), state)
         for name in ("hs_head.safetensors", "hs_optimizer.safetensors"):
             with open(d / name, "rb") as fh:
                 os.fsync(fh.fileno())
@@ -95,6 +100,20 @@ class HsHead:
         assert isinstance(ostate, dict)
         self.opt.state = tree_unflatten(list(ostate.items()))
         return True
+
+
+def hs_head_width(d) -> int | None:
+    """The student width of the map saved under ``d``, or None when no map
+    is saved there, so a resume restores the map at the right width
+    before the first boundary batch."""
+    import mlx.core as mx
+    p = Path(d) / "hs_head.safetensors"
+    if not p.exists():
+        return None
+    params = mx.load(str(p))
+    assert isinstance(params, dict)
+    w = params.get("weight")
+    return int(w.shape[1]) if w is not None and w.ndim == 2 else None
 
 
 def hs_loss(pred, target, mode: str):

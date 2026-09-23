@@ -106,3 +106,22 @@ def test_probe_writable(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x")
     assert probe_writable(str(blocker / "adapter.gguf")) is not None
+
+
+
+def test_prepare_leaves_expert_stacks_out_of_the_adapter():
+    """mlx-lm wraps a switch (expert) layer in LoRA factors that are never
+    trained or exported here; the wrapper comes off again so the fused
+    expert paths stay and no gather runs for nothing."""
+    from mlx_lm.models.switch_layers import SwitchLinear
+    from mlx_lm.tuner.lora import LoRASwitchLinear
+
+    model = _model(layers=2)
+    model.layers[0].mlp.gate_proj = SwitchLinear(32, 64, 2)
+    n = prepare_lora_student(model, rank=2, scale=1.0, keys=["mlp.gate_proj", "self_attn.q_proj"])
+    assert n == 3
+    assert isinstance(model.layers[0].mlp.gate_proj, SwitchLinear)
+    assert isinstance(model.layers[1].mlp.gate_proj, LoRALinear)
+    assert not any(isinstance(m, LoRASwitchLinear) for _k, m in model.named_modules())
+    names = [k for k, _ in tree_flatten(model.trainable_parameters())]
+    assert len(names) == 2 * n and not any("layers.0.mlp" in k for k in names)

@@ -97,7 +97,8 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--startup-timeout", type=float, default=900.0,
                    help="Seconds to wait for the served teacher (default 900).")
     p.add_argument("--concurrency", type=_positive_int, default=8, help="Requests in flight (default 8).")
-    p.add_argument("--max-tokens", type=int, default=1024, help="Answer budget per request, the reasoning trace not counted (default 1024).")
+    p.add_argument("--max-tokens", type=_positive_int, default=1024,
+                   help="Answer budget per request, the reasoning trace not counted (default 1024).")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
     p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
@@ -124,20 +125,21 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--rejects", type=_path, default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
     p.add_argument("--min-words", "--min-tokens", dest="min_words", type=int, default=16, metavar="N",
-                   help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
-                        "trace not counted (default 16). Set 1 when a right answer can be a few words. "
-                        "--min-tokens is the same flag.")
-    p.add_argument("--ngram", type=_positive_int, default=8, help="N-gram size of the repetition check (default 8).")
-    p.add_argument("--max-repeat", type=float, default=0.2,
+                   help="Drop replies whose answer has fewer units than this, a unit being a whitespace-separated "
+                        "word or one ideograph or kana character, the reasoning trace not counted (default 16). "
+                        "Set 1 when a right answer can be a few words. --min-tokens is the same flag.")
+    p.add_argument("--ngram", type=_positive_int, default=8,
+                   help="N-gram size of the repetition check, in the same units as --min-words (default 8).")
+    p.add_argument("--max-repeat", type=_fraction, default=0.2,
                    help="Drop replies whose repeated n-grams exceed this fraction (default 0.2).")
-    p.add_argument("--max-trace-repeat", type=float, default=0.5,
+    p.add_argument("--max-trace-repeat", type=_fraction, default=0.5,
                    help="Drop replies whose reasoning trace's repeated n-grams exceed this fraction "
                         "(default 0.5).")
     p.add_argument("--max-line-repeats", type=_positive_int, default=2,
                    help="Drop replies with a line repeated more than this many times in a row (default 2).")
-    p.add_argument("--max-non-ascii", type=float, default=None,
+    p.add_argument("--max-non-ascii", type=_fraction, default=None,
                    help="Drop replies whose non-ASCII character fraction exceeds this (default off).")
-    p.add_argument("--max-reply-tokens", type=int, default=None,
+    p.add_argument("--max-reply-tokens", type=_positive_int, default=None,
                    help="Drop replies longer than this many tokens, reasoning trace included (default off).")
     p.add_argument("--keep-budget-hit", action="store_true",
                    help="Keep replies whose thinking budget cut the reasoning trace (dropped by default).")
@@ -431,6 +433,16 @@ def _positive_float(text: str) -> float:
     if not x > 0:
         raise argparse.ArgumentTypeError(f"a positive number is required, got {text}")
     return x
+
+
+def _fraction(text: str) -> float:
+    try:
+        v = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a fraction between 0 and 1 is required, got {text!r}") from None
+    if not 0.0 <= v <= 1.0:
+        raise argparse.ArgumentTypeError(f"a fraction between 0 and 1 is required, got {text!r}")
+    return v
 
 
 def _positive_int(text: str) -> int:

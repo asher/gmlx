@@ -430,7 +430,8 @@ fails, with one reason word per dropped row:
 
 - `length`, the reply did not reach its end of turn.
 - `budget`, the reasoning trace hit `--thinking-budget`.
-- `empty`, the answer has fewer than `--min-words` words.
+- `empty`, the answer has fewer than `--min-words` units, a unit being a
+  word or one ideograph or kana character.
 - `marker`, a marker of the chat template leaked into the reply or its
   reasoning trace.
 - `repeat`, lines or phrases repeat in the reply or its reasoning trace,
@@ -710,9 +711,10 @@ A cache is 6 x K + 22 bytes per position plus the text, with K the
 1.2 GB at the default K. `--max-disk-gb` refuses a cache whose estimate
 exceeds it, and every size flag counts decimal GB.
 
-When a run is over, the caches, the checkpoint directories, the server
-logs and the sidecars can all go. The views, the adapter and the reports
-are what you keep.
+When a run is over, the checkpoint directories, the server logs and the
+sidecars can go. A view reads its cache on every `train`, so the cache
+stays as long as the view is in use. The adapter and the reports are
+what you keep.
 
 The adapter file holds the last step of the run. `best`, the checkpoint
 with the lowest validation loss, also stays under `--ckpt-dir`. No
@@ -796,8 +798,9 @@ fields.
   expected for any run with a document, and `alm` is nonzero there.
 - `ce` is a third term that is measured but not trained on unless `--ce`
   is set.
-- `floored` counts positions whose probability was clamped at the
-  smallest representable value.
+- `floored` counts support slots (a group of student tokens at one
+  position, or its tail) whose probability was clamped at the smallest
+  representable value.
 - `lr` is the learning rate at that step.
 - `tok/s`, `step` and `load` are the throughput, the wall time per step
   and the time spent reading the batch.

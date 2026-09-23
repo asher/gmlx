@@ -274,3 +274,20 @@ def test_cache_counts_take_positive_integers():
 def test_filter_help_names_the_trace_repeat_threshold():
     rc, out = _run(["distill", "filter", "--help"])
     assert rc == 0 and "--max-trace-repeat" in out
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--max-tokens", "0"],
+    ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--max-reply-tokens", "0"],
+])
+def test_zero_token_budgets_are_refused_at_parse_time(argv):
+    rc, out = _run(["distill", *argv])
+    assert rc == 2 and "positive" in out, out
+
+
+@pytest.mark.parametrize("flag", ["--max-repeat", "--max-trace-repeat", "--max-non-ascii"])
+@pytest.mark.parametrize("value", ["-0.1", "1.5", "x"])
+def test_fraction_flags_take_a_value_in_the_unit_interval(flag, value):
+    rc, out = _run(["distill", "filter", "--in", "a.jsonl", "--out", "o.jsonl", flag, value])
+    assert rc == 2 and "a fraction between 0 and 1 is required" in out, out

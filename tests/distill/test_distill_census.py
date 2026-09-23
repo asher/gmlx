@@ -145,7 +145,9 @@ def test_census_pairs_rows_and_writes_high_delta(tmp_path, tok):
     for row in s["per_row"]:
         assert row["high_delta_positions"] == 1 and row["id"].startswith("p")
     text = md.read_text()
-    assert "| paired reply rows | 3 (0 reply mismatches skipped) |" in text and "Delta histogram" in text
+    assert s["rows_without_positions"] == 0
+    assert "| paired reply rows | 3 (0 reply mismatches skipped, 0 pairs with no shared position) |" in text
+    assert "Delta histogram" in text
     # a second context identical to the first: residual zero, mismatch counted
     # for a row whose reply differs
     convs_other = [_conv(f"other {i}", r) for i, r in enumerate(REPLIES)]

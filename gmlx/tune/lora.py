@@ -52,8 +52,10 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
     layers (every layer when None) at the module paths in ``keys``
     (mlx-lm's per-architecture defaults when None), the base frozen and the
     adapter factors trainable. Works on a gmlx K-quant base and on an MLX
-    float checkpoint. Returns the number of adapted modules."""
-    from mlx_lm.tuner.lora import LoRALinear
+    float checkpoint. An expert stack (a switch layer) named by the keys
+    is left as it was: a GGUF adapter holds matrices only, and the fused
+    expert paths stay in force. Returns the number of adapted modules."""
+    from mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
@@ -65,6 +67,9 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
     if keys is not None:
         config["keys"] = set(keys)
     linear_to_lora_layers(model, n, config)
+    for path, m in list(model.named_modules()):
+        if isinstance(m, LoRASwitchLinear):
+            _set_module(model, path, m.linear)
     model.freeze()
     count = 0
 
@@ -76,6 +81,20 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
 
     model.apply_to_modules(unfreeze)
     return count
+
+
+def _set_module(root, path: str, module) -> None:
+    """Replace the module at a dotted ``path`` under ``root`` (list
+    entries by index)."""
+    parts = path.split(".")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[int(part)] if isinstance(parent, list) else getattr(parent, part)
+    last = parts[-1]
+    if isinstance(parent, list):
+        parent[int(last)] = module
+    else:
+        setattr(parent, last, module)
 
 
 def _selected(path: str, keys: Iterable[str] | None) -> bool:
