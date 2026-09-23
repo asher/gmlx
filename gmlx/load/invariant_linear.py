@@ -5,14 +5,16 @@ sum over K in different orders, so one row's output can move by a bf16
 ulp when more rows share the batch. On MoE and gated-delta models two
 small float projections turn that ulp into a different decision: the
 expert router (top-k over its logits) and the gated-delta decay gate.
-With ``GMLX_BATCH_INVARIANT=1`` the loader routes every float
+With ``GMLX_BATCH_INVARIANT=1`` the loader routes every plain float
 ``nn.Linear`` with at most ``GMLX_BATCH_INVARIANT_MAX_OUT`` outputs
-(default 256) through a Metal kernel with one thread per (row, output)
+(default 512, wide enough for a 512-expert router) through a Metal kernel with one thread per (row, output)
 and a sequential fp32 walk over K, so a row's result is the same at any
 batch size. bf16 inputs take 16-byte loads, other float dtypes an
 element loop, both in the same order. The cost is about one percent of
 a 512-token prefill on a 35B MoE; decode widths under 64 routed rows
-keep the fused router and are outside the guarantee.
+keep the fused router and are outside the guarantee, and so are the
+gates gmlx implements as raw arrays rather than ``nn.Linear``. Training
+forwards take the stock matmul, since the kernel has no gradient.
 """
 from __future__ import annotations
 
@@ -101,25 +103,32 @@ def invariant_linear(x, w, bias=None):
 
 class BatchInvariantLinear(nn.Linear):
     """``nn.Linear`` whose float forward runs the row-invariant kernel.
-    Non-float weights, or an input dtype that differs from the weight's,
-    fall through to the stock forward."""
+    A float32 weight takes a bf16 or f16 input promoted to float32, the
+    stock promotion, so the routers the loader keeps in float32 run the
+    kernel too. A non-float weight, a float input narrower than a bf16
+    or f16 weight, or a module in training mode (the kernel carries no
+    gradient) falls through to the stock forward."""
 
     def __call__(self, x):
         w = self.weight
-        if w.ndim == 2 and w.dtype in _FLOAT and x.dtype == w.dtype:
+        if self.training or w.ndim != 2 or w.dtype not in _FLOAT or x.dtype not in _FLOAT:
+            return super().__call__(x)
+        if w.dtype == mx.float32 and x.dtype != mx.float32:
+            x = x.astype(mx.float32)
+        if x.dtype == w.dtype:
             return invariant_linear(x, w, self["bias"] if "bias" in self else None)
         return super().__call__(x)
 
 
 def install_batch_invariant_linears(model, max_out=None) -> int:
     """Swap every plain float ``nn.Linear`` with at most ``max_out``
-    outputs (``GMLX_BATCH_INVARIANT_MAX_OUT``, default 256) onto
+    outputs (``GMLX_BATCH_INVARIANT_MAX_OUT``, default 512) onto
     BatchInvariantLinear. Off unless ``GMLX_BATCH_INVARIANT`` is set.
     Returns the number of layers swapped."""
     if not env_bool("GMLX_BATCH_INVARIANT", False):
         return 0
     if max_out is None:
-        max_out = env_int("GMLX_BATCH_INVARIANT_MAX_OUT", 256)
+        max_out = env_int("GMLX_BATCH_INVARIANT_MAX_OUT", 512)
     n = 0
     for _, m in model.named_modules():
         if type(m) is not nn.Linear:

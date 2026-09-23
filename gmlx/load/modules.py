@@ -1036,12 +1036,16 @@ def _make_fused_block(base_cls, caps):
                 # Adaptive fan-out on the routed slots only; the trailing
                 # shared-gate mix weight rides along untouched. Replay
                 # returned above, so no reweight callable is needed here.
+                # The seam sees the batch shape, so a recorder keeps the
+                # rows apart instead of reading the flat ids as one row.
                 from gmlx.stream.moe_experts import _apply_expert_controls
 
                 k = self.top_k
-                inds, routed = _apply_expert_controls(
-                    self, inds, sc[..., :k])
-                sc = mx.concatenate([routed, sc[..., k:]], axis=-1)
+                rows = x.shape[:-1]
+                inds3, routed = _apply_expert_controls(
+                    self, inds.reshape(*rows, k), sc[..., :k].reshape(*rows, k))
+                inds = inds3.reshape(t, k)
+                sc = mx.concatenate([routed.reshape(t, k), sc[..., k:]], axis=-1)
             sw, se = self.switch_mlp, self.shared_expert
             skw = {}
             if se.gate_proj.kquant_type != sw.gate_proj.kquant_type:
@@ -2188,7 +2192,31 @@ def install_lora_adapter(model: nn.Module, plan,
         raise ValueError(
             f"LoRA adapter targets {sorted(missing)} have no matching module in "
             f"the loaded model - adapter/base mismatch (never silently skipped)")
+    _drop_fused_wires(by_path, wrapped)
     return len(wrapped)
+
+
+# Fused decode wires the upstream patches cache on the module that owns the
+# projections (occupancy_fuse.py, qkv_fuse.py). A wire is built on first use
+# and checks for an adapter only then, so one built before the install would
+# keep serving the base weights alone.
+_FUSED_WIRE_SLOTS = ("_kq_wqkv", "_kq_bqkv", "_kq_wgu", "_kq_wdn")
+
+
+def _drop_fused_wires(by_path: dict, wrapped: set[str]) -> int:
+    """Clear cached fused wires on every module that owns a wrapped leaf,
+    so the next forward rebuilds them and sees the adapter. Returns the
+    number of wires cleared."""
+    n = 0
+    for path in wrapped:
+        owner = by_path.get(path.rsplit(".", 1)[0]) if "." in path else None
+        if owner is None:
+            continue
+        for slot in _FUSED_WIRE_SLOTS:
+            if vars(owner).get(slot) is not None:
+                object.__setattr__(owner, slot, None)
+                n += 1
+    return n
 
 
 def dequantize_unattachable_leaves(model: nn.Module,

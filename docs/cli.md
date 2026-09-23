@@ -977,7 +977,7 @@ later, in `align` and `eval`.
 | `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
-| `--resume` | off | continue after the last verified shard |
+| `--resume` | off | continue after the last verified shard, refused when the corpus or row options changed |
 | `--max-rows N` | none | stop after this many rows |
 | `--max-tokens N` | none | stop after this many teacher tokens |
 | `--limit-docs N` | none | read at most this many documents |
@@ -1010,7 +1010,7 @@ Alignment flags, in the order `--help` prints them.
 |------|---------|---------|
 | `--cache DIR` | required | the cache directory |
 | `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
-| `--out DIR` | required | the view directory to write |
+| `--out DIR` | required | the view directory to write, an earlier view there is removed first |
 | `--tables DIR` | none | an earlier view directory whose tokenizer tables are reused when the pair matches |
 | `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary |
 | `--materialize` | off | also write the batch tensors as view shards |
@@ -1058,7 +1058,7 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
-| `--resume` | off | continue from the last checkpoint |
+| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass |
@@ -1100,7 +1100,7 @@ examples shown before each question.
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
 | `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions |
-| `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against |
+| `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against, refused on another tokenizer |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |

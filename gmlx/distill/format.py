@@ -25,8 +25,6 @@ SHARD_FIELDS = ("top_k_log_softmax", "top_k_indices", "token_ids",
                 "attention_mask", "token_end_byte", "onpath_log_p",
                 "onpath_mask", "tail_log_mass", "log_boundary_mass",
                 "text_bytes", "text_offsets")
-ROW_KEYS = ("row_id", "doc_id", "window", "n_tokens", "source",
-            "generator_id", "suffix_start_byte", "prefix_n_tokens")
 
 
 def bytes_per_position(K: int, floor: bool = False, text_bytes: float = 4.4,

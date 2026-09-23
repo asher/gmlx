@@ -359,6 +359,19 @@ def run_cache(opts: CacheOptions) -> int:
     if not opts.resume and writer.n_done:
         log(f"[cache] refuse: {out} already has {writer.n_done} shards, pass --resume or a fresh --out")
         return 2
+    # rows are sorted by length over the whole row set, so any change to the
+    # corpus or the row options changes every shard's contents: a resume
+    # must continue the same run
+    run = {"corpus_sha256": corpus_sha, "n_rows": len(rows), "n_tokens": int(n_tokens),
+           "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
+           "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
+           "hidden": bool(opts.hidden)}
+    prev = writer.progress.get("run")
+    if opts.resume and prev is not None and prev != run:
+        diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
+        log(f"[cache] refuse: --resume with other inputs than the first run ({diff}), use a fresh --out")
+        return 2
+    writer.progress["run"] = run
     shards = [rows[i:i + opts.rows_per_shard] for i in range(0, len(rows), opts.rows_per_shard)]
     log(f"[cache] {len(shards)} shards of {opts.rows_per_shard} rows, {done} verified already")
 
@@ -370,7 +383,7 @@ def run_cache(opts: CacheOptions) -> int:
     cfg = config.get("text_config", config) if isinstance(config, dict) else config
     head = teacher_head(model)
     V = head.V
-    hidden_blk = None
+    hidden_blk = writer.progress.get("hidden") if opts.hidden else None
     R_hidden = None   # the sketch matrix, built from the first trunk chunk's width
     recorder, routing = None, None
     if opts.routes:
@@ -387,6 +400,10 @@ def run_cache(opts: CacheOptions) -> int:
         routing = {"moe_layers": list(recorder.layers), "k": None, "n_experts": n_experts,
                    "dtype": np.dtype(_format.routes_dtype(n_experts)).name, "layout": "[B, L, n_moe, k]",
                    "path": "streaming" if streaming else "resident", "seam": "gmlx.stream.moe_routes"}
+        # k is learned from the first recorded chunk, so a resume that finds
+        # every shard written takes it from progress.json
+        if (writer.progress.get("routing") or {}).get("k") is not None:
+            routing["k"] = int(writer.progress["routing"]["k"])
         log(f"[cache] routes: {len(recorder.layers)} MoE layers, {n_experts} experts, {routing['dtype']}")
     feeder = getattr(model, "_kq_feeder", None) if streaming else None
     if streaming:
@@ -448,6 +465,7 @@ def run_cache(opts: CacheOptions) -> int:
                     d_model = int(hidden.shape[-1])
                     R_hidden = mx.array(_hidden.projection_matrix(d_model, opts.hidden_dim, opts.hidden_seed))
                     hidden_blk = _hidden.hidden_block(d_model, opts.hidden_dim, opts.hidden_seed)
+                    writer.progress["hidden"] = hidden_blk
                     log(f"[cache] hidden: final state {d_model} -> {opts.hidden_dim} dims, "
                         f"seed {opts.hidden_seed}, float16")
                 hidden_sk = _hidden.sketch(hidden, R_hidden)
@@ -459,6 +477,7 @@ def run_cache(opts: CacheOptions) -> int:
                     return 3
                 if routing["k"] is None:
                     routing["k"] = int(routes_blt.shape[-1])
+                    writer.progress["routing"] = routing
                     per_pos = routes_blt.shape[2] * routing["k"] * np.dtype(routes_blt.dtype).itemsize
                     est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, routes_bytes=per_pos)
                     log(f"[cache] routes: k={routing['k']}, estimate with routes {est / GB:.2f} GB")

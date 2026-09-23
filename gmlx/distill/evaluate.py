@@ -12,14 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
-from gmlx.load.tokenizer import token_bytes
+from gmlx.load.tokenizer import token_bytes, vocab_map_hash
 
 from . import eval as _eval
 from . import frames as _frames
 from .constants import GB, log
 from .corpus import nfc
 from .data import CacheReader
-from .format import read_json, write_json_atomic
+from .format import read_json, replay_layers_for, shard_texts, write_json_atomic
 from .student import adapter_disabled
 from .trainer import load_student
 
@@ -63,9 +63,14 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def corpus_texts(cache: Path):
+    """The cached rows' text, read from the text fields alone so the
+    top-K arrays of every shard stay on disk."""
+    from safetensors import safe_open
     reader = CacheReader(cache, keep=1)
     for i in range(reader.n_shards):
-        for t in reader.shard(i)["_texts"]:
+        with safe_open(str(reader.dir / f"batch-{i:05d}.safetensors"), framework="np") as fh:
+            sh = {k: fh.get_tensor(k) for k in ("text_bytes", "text_offsets")}
+        for t in shard_texts(sh):
             yield t
 
 
@@ -111,7 +116,8 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         t0 = time.perf_counter()
         model.eval()
         reader = CacheReader(Path(opts.kld_cache), keep=2)
-        k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer)
+        replay = replay_layers_for(getattr(model, "language_model", model), reader.manifest)
+        k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer, replay_layers=replay)
         k["wall_s"] = time.perf_counter() - t0
         res["kld"] = k
         log(f"[eval] kld vs cache K={k['K']}: {k['mean_kld_nats']:.5f} nats se {k['clustered_se']:.5f} "
@@ -237,8 +243,9 @@ def run_eval(opts: EvalOptions) -> int:
                     "bpb_prefix": opts.bpb_prefix}
     contaminated = set()
     if opts.cache and slices:
+        texts = list(corpus_texts(Path(opts.cache)))
         for name, text in slices.items():
-            f = _eval.decontam_fraction(text.encode("utf-8"), corpus_texts(Path(opts.cache)))
+            f = _eval.decontam_fraction(text.encode("utf-8"), texts)
             report["decontam"][name] = f
             if f > opts.decontam_threshold:
                 contaminated.add(name)
@@ -259,6 +266,12 @@ def run_eval(opts: EvalOptions) -> int:
             if t == "gsm8k":
                 tasks[t]["shots"] = read_jsonl(td / "gsm8k_shots.jsonl")[:8]
     model, _cfg, tokenizer, _kind = load_student(opts.student, opts.adapter, opts.hf_source)
+    if opts.kld_cache:
+        kld_manifest = read_json(Path(opts.kld_cache) / "manifest.json")
+        if kld_manifest.get("tokenizer_hash") != vocab_map_hash(tokenizer):
+            log(f"[eval] refuse: --kld-cache {opts.kld_cache} was cached with another tokenizer than the "
+                "student's, the sparse KL is defined on a same-tokenizer cache only")
+            return 2
     if (opts.chat_sanity or chat_specs) and not _frames.has_chat_template(tokenizer):
         # a checkpoint without its template renders every conversation as
         # plain text, and the chat numbers then measure another prompt format

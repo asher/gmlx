@@ -12,7 +12,6 @@ FORMAT_VERSION = 1
 TABLES_VERSION = 1
 LOG_FLOOR = math.log(2.0 ** -126)   # the f32 min-normal underflow floor
 NEG_INF = float("-inf")
-SENTINEL_LOG_P = NEG_INF
 
 # Loss defaults. The CLI flags override them per run.
 DEFAULT_KNOBS: dict[str, Any] = dict(

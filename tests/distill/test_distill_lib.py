@@ -1472,3 +1472,162 @@ def test_align_refusal_leaves_no_view(tmp_path, tok_bl, tok_spm, monkeypatch):
     assert not (tmp_path / "view" / "view.json").exists()
     assert _view.run_align(_view.AlignOptions(**opts, force=True)) == 0
     assert (tmp_path / "view" / "view.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# review fixes: identity width, stale views, checkpoints, loss modes, hashing
+# ---------------------------------------------------------------------------
+
+def test_identity_tables_at_a_wider_student_head():
+    """A same-vocabulary pair whose student head is wider than the teacher's
+    (pad-style surplus ids) takes identity tables at the student width, so
+    the head's slot map and boundary mask match its logits."""
+    V_T, V_S, d, K = 10, 12, 8, 3
+    tables = dl.identity_tables(V_S, np.zeros(V_S, bool), "t", "s", V_T=V_T)
+    assert tables.G == V_S and tables.V_T == V_T and tables.V_S == V_S
+    assert tables.target_g.shape == (V_T,) and tables.group_of.shape == (V_S,)
+    with pytest.raises(ValueError):
+        dl.identity_tables(V_T, np.zeros(V_T, bool), "t", "s", V_T=V_S)
+    rng = np.random.default_rng(0)
+    head = dl.linear_head(mx.array(rng.standard_normal((V_S, d)).astype(np.float32)))
+    T = 6
+    ids = np.arange(1, T + 1, dtype=np.int32)
+    row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
+           "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
+           "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
+                        teacher_special=set(), student_special=set(), identity=True)
+    b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
+    h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
+    loss, _aux = dl.distill_loss(h, b, head, group_of=None, G=tables.G, Kp=K,
+                                 log_bmask=dl.log_bmask_from(tables.bmask_S), knobs=dict(KNOBS, lambda_alm=0.0))
+    mx.eval(loss)
+    assert np.isfinite(float(loss))
+
+
+def test_align_rewrites_a_reused_view_directory(tmp_path, tok_bl, tok_spm):
+    """A second align into the same --out leaves nothing of the first: the
+    materialized shards and view.json are removed before the pass, and a
+    tables artifact for other head widths is rebuilt."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    opts = dict(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"), out=str(out))
+    assert _view.run_align(_view.AlignOptions(**opts, materialize=True)) == 0
+    shards = sorted(out.glob("view-*.safetensors"))
+    assert shards
+    (out / "view-00099.safetensors").write_bytes(b"stale")
+    assert _view.run_align(_view.AlignOptions(**opts)) == 0
+    assert not list(out.glob("view-*.safetensors"))
+    assert (out / "view.json").exists()
+    # the tables check covers the head widths as well as the pair hashes
+    t = dl.load_tables(out)
+    wrong = dl.load_tables(out)
+    wrong.V_S = t.V_S + 8
+    dl.save_tables(tmp_path / "wide", wrong)
+    got = _view.get_tables(tok_bl, tok_spm, tmp_path / "wide", tmp_path / "view2", V_T=t.V_T, V_S=t.V_S)
+    assert got.V_S == t.V_S
+
+
+def test_train_refuses_tables_that_are_not_the_views_own(tmp_path, tok_bl, tok_spm, capsys):
+    """view.json and tables.json in one directory must come from the same
+    align, else train reads a projection the view was not built with."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"),
+                                              out=str(out))) == 0
+    tj = json.loads((out / "tables.json").read_text())
+    tj["student_hash"] = "0" * len(tj["student_hash"])
+    (out / "tables.json").write_text(json.dumps(tj))
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "student.gguf").write_bytes(b"")
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(out)], student=str(fake / "student.gguf"), iters=1))
+    assert rc == 2
+    assert "not the ones view.json was aligned with" in capsys.readouterr().err
+
+
+def test_cache_resume_refuses_other_inputs(tmp_path, tok_bl, capsys):
+    """progress.json records the corpus and row options of the first run,
+    and a resume with any of them changed is refused before the teacher
+    loads."""
+    from gmlx.distill import teacher as _teacher
+
+    tok_bl.save_pretrained(tmp_path / "teacher")
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": "alpha beta gamma delta " * 3}) + "\n" for _ in range(4)))
+    out = tmp_path / "cache"
+    out.mkdir()
+    prev = {"shards": [], "tokens": 0, "bytes": 0, "wall_s": 0.0, "min_step": None, "trunk_chunk": None,
+            "bytes_per_v_element": None, "format_version": dl.FORMAT_VERSION,
+            "run": {"corpus_sha256": "other", "n_rows": 1, "n_tokens": 1, "max_len": 64, "rows_per_shard": 2,
+                    "top_k": 8, "floor": False, "frame": "none", "routes": False, "hidden": False}}
+    (out / "progress.json").write_text(json.dumps(prev))
+    opts = _teacher.CacheOptions(teacher=str(tmp_path / "teacher"), corpus=str(corpus), out=str(out),
+                                 top_k=8, max_len=64, rows_per_shard=2, resume=True)
+    assert _teacher.run_cache(opts) == 2
+    assert "other inputs than the first run" in capsys.readouterr().err
+
+
+def test_checkpoint_replace_is_crash_safe(tmp_path):
+    """The previous checkpoint moves aside until the new one is in place,
+    and a crash that left only the moved copy is restored on the next
+    resume; an empty directory offers nothing to resume."""
+    import mlx.nn as nn
+    import mlx.optimizers as optim
+
+    from gmlx.distill import trainer as _trainer
+
+    model = nn.Linear(4, 3)
+    opt = optim.AdamW(learning_rate=1e-3)
+    opt.init(model.trainable_parameters())
+    ck = tmp_path / "ckpt"
+    ck.mkdir()
+    assert _trainer.checkpoint_dir(ck, "last") is None
+    _trainer.save_checkpoint(ck, "last", model, opt, {"iteration": 1})
+    _trainer.save_checkpoint(ck, "last", model, opt, {"iteration": 2})
+    assert sorted(p.name for p in ck.iterdir()) == ["last"]
+    assert json.loads((ck / "last" / "state.json").read_text())["iteration"] == 2
+    (ck / "last").rename(ck / "last.old")
+    assert _trainer.checkpoint_dir(ck, "last") == ck / "last"
+    assert json.loads((ck / "last" / "state.json").read_text())["iteration"] == 2
+    got = _trainer.load_checkpoint(ck, "last", model, opt)
+    assert got["iteration"] == 2
+
+
+def test_loss_modes_stay_finite_on_an_empty_boundary():
+    """A boundary with no kept group (all pads, M = 0) gives a finite loss
+    and finite gradients under renorm, under a tempered conditional factor
+    and under the paper loss, not only under the default mode."""
+    Kp = 3
+    lp = mx.array([[math.log(0.5), math.log(0.4), dl.NEG_INF], [dl.NEG_INF] * Kp])
+    logM = mx.array([math.log(0.9), dl.NEG_INF])
+    w = mx.array([1.0, 0.0])
+    Q = mx.array([[0.5, 0.3, 0.0, 0.2], [0.25, 0.25, 0.25, 0.25]])
+    for mode, T in (("bucketed", 2.0), ("paper", 2.0), ("renorm", 1.0), ("renorm", 2.0), ("paper", 1.0)):
+        def f(Qv, mode=mode, T=T):
+            lv, _a = dl.bucketed_kl(lp, logM, Qv, w, mode=mode, T_dk=T)
+            return lv
+        v, g = mx.value_and_grad(f)(Q)
+        mx.eval(v, g)
+        assert np.isfinite(float(v)), (mode, T)
+        assert np.all(np.isfinite(np.asarray(g))), (mode, T)
+        assert np.all(np.asarray(g)[1] == 0.0), (mode, T)
+
+
+def test_window_hashes_blocked_equals_whole():
+    rng = np.random.default_rng(3)
+    data = rng.integers(0, 256, 5000, dtype=np.uint8).tobytes()
+    whole = dl_eval.window_hashes(data, 64, block=1 << 20)
+    blocked = dl_eval.window_hashes(data, 64, block=700)
+    assert whole.shape == (5000 - 63,)
+    assert np.array_equal(whole, blocked)
+    assert dl_eval.window_hashes(data[:70], 64, block=3).shape == (7,)

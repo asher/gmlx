@@ -1000,9 +1000,11 @@ def whitespace_start_mask(tokenizer, width: int,
 
 def vocab_map_hash(tokenizer) -> str:
     """A 16-hex-digit SHA-256 prefix over the id-to-token map with special
-    ids left out. Two tokenizers with equal hashes tokenize identically;
-    a map that is a prefix of a longer one hashes differently and needs a
-    prefix comparison."""
+    ids left out. Equal hashes mean equal id-to-token maps outside the
+    specials, not identical tokenization: merges, the pre-tokenizer, the
+    normalizer and the special ids are not covered, so callers that need
+    the same encoding check that separately. A map that is a prefix of a
+    longer one hashes differently and needs a prefix comparison."""
     inner = hf_inner(tokenizer)
     special = set(inner.all_special_ids)
     h = hashlib.sha256()

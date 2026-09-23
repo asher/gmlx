@@ -165,6 +165,9 @@ def test_gen_marks_the_thinking_budget_hit(tmp_path, stub_server, monkeypatch):
     assert rows["long"]["messages"][-1]["reasoning_content"].startswith("thinking")
     sent = [c for c in _Handler.calls if c.get("thinking_budget")]
     assert sent and all(c["thinking_budget"] == 40 for c in sent)
+    # a server gen did not start sees the switch and the kwargs on the request itself
+    assert all(c["enable_thinking"] is True for c in sent)
+    assert all(c["chat_template_kwargs"] == {"preserve_thinking": True, "enable_thinking": True} for c in sent)
     side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
     assert side["chat_template_kwargs"] == {"preserve_thinking": True, "enable_thinking": True}
     assert side["thinking_budget"] == 40 and side["run"]["budget_hits"] == 1

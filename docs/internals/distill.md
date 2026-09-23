@@ -41,8 +41,8 @@ bandwidth the pass saw.
 ## The training head
 
 The student's head is fused into the loss and runs over the gathered
-compute positions in chunks of `--chunk` positions inside a checkpoint,
-with the head parameters threaded explicitly. A boundary chunk holds the
+compute positions in chunks of `--chunk` positions, with a closed-form
+backward and the head parameters passed explicitly. A boundary chunk holds the
 float32 logits, the softmax, one logsumexp temporary, the slot map over
 the projected groups and the gather of every student token's slot, then
 the cotangent in the backward. That is 24 bytes per position and

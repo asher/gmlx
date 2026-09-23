@@ -75,7 +75,7 @@ class _Toy(nn.Module):
         super().__init__()
         self.router = nn.Linear(64, 8, bias=False)
         self.gate = nn.Linear(64, 4, bias=True)
-        self.wide = nn.Linear(64, 512, bias=False)
+        self.wide = nn.Linear(64, 1024, bias=False)
         self.quant = nn.QuantizedLinear(64, 8, bias=False)
 
 
@@ -92,10 +92,31 @@ def test_install_swaps_only_small_float_linears(monkeypatch):
     y = m.router(x)
     mx.eval(y)
     assert y.shape == (2, 3, 8) and y.dtype == mx.bfloat16
-    # an input dtype that differs from the weight's takes the stock forward
+    # an input wider than the weight takes the stock forward
     y32 = m.router(x.astype(mx.float32))
     mx.eval(y32)
     assert y32.dtype == mx.float32
+
+
+def test_float32_weight_takes_a_bf16_input_and_training_skips_the_kernel(monkeypatch):
+    """The loader keeps MoE routers in float32 while activations are bf16:
+    the kernel runs on the promoted input, as stock promotion would, and a
+    module in training mode never enters the kernel (it has no gradient)."""
+    monkeypatch.setenv("GMLX_BATCH_INVARIANT", "1")
+    m = _Toy()
+    m.eval()  # a fresh module is in training mode
+    il.install_batch_invariant_linears(m)
+    x = mx.random.normal((2, 3, 64)).astype(mx.bfloat16)
+    calls = []
+    orig = il.invariant_linear
+    monkeypatch.setattr(il, "invariant_linear", lambda *a, **k: calls.append(1) or orig(*a, **k))
+    y = m.router(x)
+    mx.eval(y)
+    assert y.dtype == mx.float32 and y.shape == (2, 3, 8) and calls == [1]
+    m.train()
+    y_train = m.router(x)
+    mx.eval(y_train)
+    assert y_train.dtype == mx.float32 and calls == [1]
 
 
 def test_install_off_by_default(monkeypatch):

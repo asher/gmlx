@@ -1,6 +1,7 @@
-"""The fused chunked head: logits per chunk inside a checkpoint, the slot
-masses of the student over the projected groups, the on-path log-prob and
-the boundary mass. No full logits array outlives a chunk."""
+"""The fused chunked head: logits per chunk with a closed-form backward,
+the slot masses of the student over the projected groups, the on-path
+log-prob and the boundary mass. The head runs outside the trunk's gradient
+transform, and no full logits array outlives a chunk."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,10 +17,11 @@ from .constants import LOG_FLOOR, NEG_INF
 
 @dataclass
 class HeadSpec:
-    """The student's output projection as a checkpointable function.
+    """The student's output projection as a pure function of its parameters.
 
-    fn(params, h [C, d]) -> z [C, V]. params is the pytree threaded through
-    mx.checkpoint (trainer.py:25-38 idiom). softcap is gemma's
+    fn(params, h [C, d]) -> z [C, V]. params is the pytree the function
+    reads, kept explicit so the head pass can run outside the trunk's
+    gradient transform and detach the head at will. softcap is gemma's
     final_logit_softcapping or None."""
     fn: Callable
     params: Any

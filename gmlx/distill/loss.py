@@ -14,6 +14,9 @@ from .cache import log1mexp
 from .constants import LOG_FLOOR, NEG_INF
 from .head import HeadSpec, chunked_head, chunked_head_vjp
 
+# a finite stand-in for -inf at pads inside the softmax branches (see bucketed_kl)
+PAD_FILL = -1e30
+
 # ---------------------------------------------------------------------------
 # loss
 # ---------------------------------------------------------------------------
@@ -59,22 +62,27 @@ def bucketed_kl(target_log_p, log_M, Q_slot, weight, *, mode: str = "bucketed",
     logQ_tail = logQ[:, Kp]
     logM = mx.minimum(log_M, mx.array(-1e-7, dtype=mx.float32))
     M = mx.exp(log_M)
+    # pads in the softmax branches hold a finite floor, not -inf: a boundary
+    # with no kept group would otherwise put -inf - (-inf) in the branch that
+    # mx.where masks, and the NaN reaches the gradient through the logsumexp
+    pad_fill = mx.full(lp.shape, PAD_FILL, dtype=mx.float32)
     if mode == "renorm":
-        lq_valid = mx.where(pad, mx.full(lp.shape, NEG_INF, dtype=mx.float32), logQ_g)
+        lq_valid = mx.where(pad, pad_fill, logQ_g)
         log_q_t = lq_valid - mx.logsumexp(lq_valid, axis=-1, keepdims=True)
-        log_p_t = lp - log_M[:, None]
+        log_p_t = lp - mx.maximum(log_M, mx.array(LOG_FLOOR, dtype=mx.float32))[:, None]
         per = mx.sum(mx.where(pad, mx.zeros_like(lp), mx.exp(log_p_t) * (log_p_t - log_q_t)), axis=-1)
     elif T_dk != 1.0:
         # conditional factor over groups, tempered on both sides
-        lq_valid = mx.where(pad, mx.full(lp.shape, NEG_INF, dtype=mx.float32), logQ_g)
+        lq_valid = mx.where(pad, pad_fill, logQ_g)
         log_q_t = lq_valid / T_dk
         log_q_t = log_q_t - mx.logsumexp(log_q_t, axis=-1, keepdims=True)
-        lp_valid = mx.where(pad, mx.full(lp.shape, NEG_INF, dtype=mx.float32), lp)
+        lp_valid = mx.where(pad, pad_fill, lp)
         log_p_t = lp_valid / T_dk
         log_p_t = log_p_t - mx.logsumexp(log_p_t, axis=-1, keepdims=True)
         cond = mx.sum(mx.where(pad, mx.zeros_like(lp), mx.exp(log_p_t) * (log_p_t - log_q_t)), axis=-1)
         log_QS = mx.logsumexp(lq_valid, axis=-1)
-        per = M * cond + kl_bern(logM, log_QS) if mode == "bucketed" else M * cond + M * (logM - log_QS)
+        logM_f = mx.maximum(logM, mx.array(LOG_FLOOR, dtype=mx.float32))
+        per = M * cond + kl_bern(logM, log_QS) if mode == "bucketed" else M * cond + M * (logM_f - log_QS)
     else:
         head_term = mx.sum(mx.where(pad, mx.zeros_like(lp), P * (lp - logQ_g)), axis=-1)
         if mode == "paper":
@@ -257,7 +265,7 @@ def trunk_surrogate(hidden_btd, positions, head: HeadSpec, loss_value, dh, dpara
     gradient is dh at the gathered hidden states and dparams at the head's
     live parameters (read through head.current(), so under
     nn.value_and_grad they are the traced arrays). positions None means
-    every compute position in flat order, as full_vocab_head_pass uses."""
+    every compute position in flat order."""
     from mlx.utils import tree_flatten
     if positions is None:
         B, T, d = hidden_btd.shape
@@ -293,67 +301,3 @@ def distill_loss(hidden_btd, batch: dict, head: HeadSpec, *, group_of, G: int, K
                                        knobs=knobs, B=B, Tm1=T - 1, C=C, head_trainable=head_trainable,
                                        params_static=params_static)
     return trunk_surrogate(hidden_btd, batch["positions"], head, loss, dh, dparams), aux
-
-
-def full_vocab_head_pass(h, head: HeadSpec, teacher_lp, compute_mask, C: int, *, head_trainable: bool = True,
-                         params_static=None):
-    """Full-vocabulary KL(teacher || student) head pass over flat hidden
-    states h [B*(T-1), d] with the teacher log-probs materialized
-    [B, T-1, V]: the mean over compute positions and the closed-form
-    dL/dz = w (q - p) per position. Returns (loss, dh, dparams) like
-    head_pass; run it outside any transform for the same reason."""
-    import mlx.core as mx
-    from mlx.utils import tree_map
-    tlp = teacher_lp.reshape(h.shape[0], -1)
-    cm = compute_mask.reshape(-1).astype(mx.float32)
-    N = int(h.shape[0])
-    denom = mx.maximum(mx.sum(cm), mx.array(1.0))
-    h_d = detached(h)
-    if params_static is not None:
-        params_d = params_static
-    else:
-        params = head.current()
-        params_d = tree_map(detached, params) if head_trainable else params
-    W = head.dense_weight(params_d)
-    tot = mx.zeros((), dtype=mx.float32)
-    dh_parts = []
-    dW = None
-    for s in range(0, N, C):
-        e = min(s + C, N)
-        h_c = h_d[s:e]
-        z_pre = head.fn(params_d, h_c).astype(mx.float32)
-        z = head.softcap * mx.tanh(z_pre / head.softcap) if head.softcap else z_pre
-        lq = z - mx.logsumexp(z, axis=-1, keepdims=True)
-        tl = tlp[s:e]
-        p = mx.exp(tl)
-        w = (cm[s:e] / denom)[:, None]
-        kl = mx.sum(p * (tl - lq), axis=-1, keepdims=True)
-        tot = tot + mx.sum(kl * w)
-        dz = w * (mx.exp(lq) - p)
-        if head.softcap:
-            dz = dz * (1.0 - (z / head.softcap) ** 2)
-        dh_c = (dz.astype(W.dtype) @ W).astype(mx.float32)
-        if head_trainable:
-            dW_c = dz.T @ h_c.astype(mx.float32)
-            dW = dW_c if dW is None else dW + dW_c
-            mx.eval(tot, dh_c, dW)
-        else:
-            mx.eval(tot, dh_c)
-        dh_parts.append(dh_c)
-    dh = mx.concatenate(dh_parts) if dh_parts else mx.zeros(h_d.shape, dtype=mx.float32)
-    mx.eval(tot, dh)
-    return tot, dh, ({"weight": dW} if (head_trainable and dW is not None) else None)
-
-
-def full_vocab_kl(hidden, head: HeadSpec, teacher_lp, compute_mask, C: int, *, head_trainable: bool = True,
-                  params_static=None):
-    """Full-vocabulary KL as one differentiable scalar from hidden states
-    [B, T, d]: `full_vocab_head_pass` then `trunk_surrogate`. Same caveat
-    as distill_loss about calling it inside a transform with a trunk."""
-    B, T, d = hidden.shape
-    h = hidden[:, :-1, :].reshape(B * (T - 1), d)
-    loss, dh, dparams = full_vocab_head_pass(h, head, teacher_lp, compute_mask, C, head_trainable=head_trainable,
-                                             params_static=params_static)
-    return trunk_surrogate(hidden, None, head, loss, dh, dparams)
-
-

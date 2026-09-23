@@ -473,7 +473,7 @@ class KimiK3DeltaAttention(nn.Module):
         if self.training and cache is None:
             # per-key-channel decay: the checkpointed loop, not the chunked rule
             out, ssm_state = training_gated_delta_ops(q, k, v, g, beta, ssm_state, mask)
-        elif self._can_kernel and mx.default_device() == mx.gpu:
+        elif self._can_kernel and mx.default_device() == mx.gpu and not self.training:
             out, ssm_state = gated_delta_kernel(q, k, v, g, beta, ssm_state, mask)
         else:
             out, ssm_state = gated_delta_ops(q, k, v, g, beta, ssm_state, mask)

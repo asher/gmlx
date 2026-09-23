@@ -163,18 +163,25 @@ def identity_pair(teacher_tok, student_tok) -> tuple[bool, str]:
     return True, f"prefix maps, {max(nt, ns) - n} pad-style surplus ids"
 
 
-_SPECIAL_TEXT: dict[tuple[int, int], bytes | None] = {}
-
-
 def _special_text_bytes(inner, tid: int) -> bytes | None:
-    key = (id(inner), int(tid))
-    if key not in _SPECIAL_TEXT:
+    """The text a special id renders as, cached on the tokenizer object
+    itself (a module-level map keyed by id() would outlive the tokenizer
+    and could answer for another one at the same address)."""
+    cache = getattr(inner, "_gmlx_special_text", None)
+    if cache is None:
+        cache = {}
         try:
-            t = inner.convert_ids_to_tokens(int(tid))
+            inner._gmlx_special_text = cache
+        except AttributeError:
+            pass
+    tid = int(tid)
+    if tid not in cache:
+        try:
+            t = inner.convert_ids_to_tokens(tid)
         except Exception:
             t = None
-        _SPECIAL_TEXT[key] = t.encode("utf-8") if isinstance(t, str) and t else None
-    return _SPECIAL_TEXT[key]
+        cache[tid] = t.encode("utf-8") if isinstance(t, str) and t else None
+    return cache[tid]
 
 
 def encode_with_byte_ends(tokenizer, text_bytes: bytes,

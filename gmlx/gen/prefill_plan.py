@@ -38,14 +38,20 @@ def prefill_plan(model, *, V: int, cap_gb: float = 4.0, floor: bool = False,
     """The trunk chunk ``trunk`` (tokens, a multiple of 512) and the head
     sub-chunk ``step`` for one teacher, with the inputs to both.
 
-    With ``model`` None the plan is the arithmetic alone. Otherwise the
-    trunk starts from gmlx's prefill step for the model, is capped by the
-    chunked-prefill depth ceiling for the row length, and never widens past
-    ``dense_trunk`` for a resident teacher or ``target_streaming_trunk`` for
-    a streamed one. ``requested_trunk`` overrides that target. Headroom is
-    sampled after the buffer cache is cleared and reported, not enforced.
-    ``config`` supplies the attention head count (under ``text_config`` when
-    present) and defaults to the model's own ``args``."""
+    The trunk is a token budget the caller turns into whole rows per
+    forward (``trunk // row_len`` rows, at least one), so a row longer
+    than the trunk still runs as one forward and the plan never sees the
+    row length. With ``model`` None the plan is the arithmetic alone.
+    Otherwise the trunk starts from gmlx's prefill step for the model, is
+    capped by the prefill transient ceiling at depth zero from
+    ``decayed_step``, and never widens past ``dense_trunk`` for a resident
+    teacher or ``target_streaming_trunk`` for a streamed one.
+    ``requested_trunk`` overrides that target. The result is rounded down
+    to a multiple of 512 with a floor of 512, so a smaller request or
+    ceiling still yields 512. Headroom is sampled after the buffer cache
+    is cleared and reported, not enforced. ``config`` supplies the
+    attention head count (under ``text_config`` when present) and defaults
+    to the model's own ``args``."""
     if bytes_per_v is None:
         bytes_per_v = BYTES_PER_V_ELEMENT_FLOOR if floor else BYTES_PER_V_ELEMENT
     step = head_step(V, cap_gb, bytes_per_v)

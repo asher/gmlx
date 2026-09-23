@@ -246,6 +246,12 @@ def _sampling(opts: GenOptions, seed: int) -> dict:
         body["min_p"] = opts.min_p
     if opts.thinking_budget:
         body["thinking_budget"] = opts.thinking_budget
+    # a server gen did not start (--base-url) only sees what the request
+    # carries, so the thinking switch and the template kwargs ride along
+    if opts.thinking:
+        body["enable_thinking"] = True
+    if opts.chat_template_kwargs:
+        body["chat_template_kwargs"] = json.loads(_template_kwargs(opts) or "{}")
     return body
 
 

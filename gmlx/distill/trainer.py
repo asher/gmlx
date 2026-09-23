@@ -33,8 +33,6 @@ class TrainOptions:
     student: str
     iters: int
     adapter_out: str | None = None
-    out: str | None = None
-    full: bool = False
     lora_rank: int = 16
     lora_scale: float | None = None
     lora_alpha: float | None = None
@@ -81,7 +79,8 @@ def gguf_file(path: str) -> str:
 
 
 def load_student(path: str, adapter: str | None, hf_source: str | None):
-    """(model, config, tokenizer, kind) with kind "gguf" or "mlx"."""
+    """(model, config, tokenizer, kind) with kind "gguf" or "mlx". The CLI
+    admits GGUF students only; the MLX loader serves the library."""
     if is_gguf(path):
         model, cfg, tok = _student.load_gguf_student(gguf_file(path), adapter=adapter, hf_source=hf_source)
         return model, cfg, tok, "gguf"
@@ -103,33 +102,37 @@ def trainable_count(model) -> int:
     return sum(int(np.prod(a.shape)) for _, a in flat)
 
 
-def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict, *, student_kind: str,
-                    full: bool, base_cfg: dict | None, tokenizer=None) -> None:
+def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict) -> None:
     """Trainable parameters, optimizer state and the run state under
-    ckpt_dir/tag, replaced atomically. A full fine-tune of an MLX student
-    also writes a loadable checkpoint (weights, config, tokenizer)."""
+    ckpt_dir/tag. The previous checkpoint moves to tag.old until the new one
+    is in place, so a crash mid-save leaves one of the two loadable."""
     import mlx.core as mx
     from mlx.utils import tree_flatten
     d = ckpt_dir / tag
     tmp = ckpt_dir / (tag + ".tmp")
-    if tmp.exists():
-        shutil.rmtree(tmp)
+    old = ckpt_dir / (tag + ".old")
+    for stale in (tmp, old):
+        if stale.exists():
+            shutil.rmtree(stale)
     tmp.mkdir(parents=True)
     params: dict[str, Any] = dict(tree_flatten(model.trainable_parameters()))
     mx.save_safetensors(str(tmp / "trainable.safetensors"), params)
     mx.save_safetensors(str(tmp / "optimizer.safetensors"), dict(tree_flatten(opt.state)))
     write_json_atomic(tmp / "state.json", state)
-    if full and student_kind == "mlx" and base_cfg is not None:
-        flat: Any = tree_flatten(model.parameters())
-        allp: dict[str, Any] = {k: (v.astype(mx.bfloat16) if v.dtype == mx.float32 else v) for k, v in flat}
-        mx.save_safetensors(str(tmp / "model.safetensors"), allp)
-        write_json_atomic(tmp / "config.json", base_cfg)
-        if tokenizer is not None:
-            from gmlx.load.tokenizer import hf_inner
-            hf_inner(tokenizer).save_pretrained(str(tmp))
     if d.exists():
-        shutil.rmtree(d)
+        os.replace(d, old)
     os.replace(tmp, d)
+    if old.exists():
+        shutil.rmtree(old)
+
+
+def checkpoint_dir(ckpt_dir: Path, tag: str) -> Path | None:
+    """ckpt_dir/tag, or tag.old restored when a crash left only that, else None."""
+    d = ckpt_dir / tag
+    old = ckpt_dir / (tag + ".old")
+    if not d.exists() and old.exists():
+        os.replace(old, d)
+    return d if (d / "state.json").is_file() else None
 
 
 def load_checkpoint(ckpt_dir: Path, tag: str, model, opt) -> dict:
@@ -150,7 +153,7 @@ def run_train(opts: TrainOptions) -> int:
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
-    from mlx.utils import tree_flatten, tree_map
+    from mlx.utils import tree_map
 
     if opts.lora_scale is not None and opts.lora_alpha is not None:
         log("[train] refuse: --lora-scale and --lora-alpha are two conventions for one multiplier, give one")
@@ -176,6 +179,11 @@ def run_train(opts: TrainOptions) -> int:
             return 2
     view_dir, view = view_dirs[0], views[0]
     tables = _align.load_tables(view_dir)
+    if (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S) != \
+            (view["teacher_hash"], view["student_hash"], view["V_T"], view["V_S"]):
+        log(f"[train] refuse: the tables in {view_dir} are not the ones view.json was aligned with, "
+            "run gmlx distill align again")
+        return 2
     for d, v in zip(view_dirs[1:], views[1:]):
         t2 = _align.load_tables(d)
         if (t2.teacher_hash, t2.student_hash, t2.V_T, t2.V_S, bool(v["identity"])) != \
@@ -196,11 +204,6 @@ def run_train(opts: TrainOptions) -> int:
         knobs["lambda_alm"] = 0.0
 
     model, cfg, tokenizer, kind = load_student(opts.student, None, opts.hf_source)
-    if opts.full and kind == "mlx":
-        # f32 master weights: an AdamW step of lr on a bf16 weight rounds to
-        # zero once |w| > lr * 2^8
-        model.set_dtype(mx.float32)
-        log("[train] full fine-tune: parameters cast to float32 (bf16 on save)")
     _frames.set_render_kwargs(tokenizer, view.get("student_render_kwargs") or {})
     if vocab_map_hash(tokenizer) != view["student_hash"]:
         log("[train] refuse: student tokenizer hash does not match the view")
@@ -219,15 +222,8 @@ def run_train(opts: TrainOptions) -> int:
     # otherwise accumulate in MLX's cache up to the memory limit
     mx.set_cache_limit(int(opts.cache_limit_gb * GB))
     mx.random.seed(opts.seed)
-    if opts.full:
-        if kind != "mlx":
-            log("[train] refuse: --full needs an MLX checkpoint student")
-            return 2
-        model.unfreeze()
-        n_adapted = 0
-    else:
-        n_adapted = prepare_lora_student(model, rank=opts.lora_rank, scale=scale, dropout=opts.lora_dropout,
-                                         keys=LORA_KEYS)
+    n_adapted = prepare_lora_student(model, rank=opts.lora_rank, scale=scale, dropout=opts.lora_dropout,
+                                     keys=LORA_KEYS)
     from gmlx.tune.attention import install_training_attention
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
@@ -240,9 +236,9 @@ def run_train(opts: TrainOptions) -> int:
         log(f"[train] checkpointed gated delta training scan on {gdn_install.count} mlx-lm layers")
     model.train()
     head = head_spec_from_model(inner)
-    wd = opts.weight_decay if opts.weight_decay is not None else (0.01 if opts.full else 0.0)
+    wd = opts.weight_decay if opts.weight_decay is not None else 0.0
     opt = optim.AdamW(learning_rate=make_schedule(opts.lr, opts.iters, opts.warmup), weight_decay=wd)
-    log(f"[train] {kind} student, {'full fine-tune' if opts.full else f'LoRA {n_adapted} modules'}, "
+    log(f"[train] {kind} student, LoRA {n_adapted} modules, "
         f"{trainable_count(model) / 1e6:.2f}M trainable, path={'identity' if view['identity'] else 'general'}, knobs={knobs}")
 
     G, Kp = tables.G, max(int(v["Kp"]) for v in views)
@@ -308,7 +304,7 @@ def run_train(opts: TrainOptions) -> int:
         hg = _loss.gather_positions(hidden, batch["positions"])
         loss, aux, dh, dparams = _loss.head_pass(hg, batch, head, group_of=group_of, G=G, Kp=Kp,
                                                  log_bmask=log_bmask, knobs=knobs, B=B, Tm1=T - 1, C=opts.chunk,
-                                                 head_trainable=bool(opts.full))
+                                                 head_trainable=False)
         n_bnd = int(batch["n_bnd"])
         if opts.hs and n_bnd > 0 and "hidden_target" in batch:
             hh = hs_head_for(int(hg.shape[-1]))
@@ -344,11 +340,14 @@ def run_train(opts: TrainOptions) -> int:
         model.train()
         return tot / max(ntok, 1)
 
-    ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else (Path(opts.out or ".") / "ckpt")
+    ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     state = {"iteration": 0, "tokens": 0, "seed": opts.seed, "lr": opts.lr, "best_val": None,
              "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}}
-    if opts.resume and (ckpt_dir / "last").exists():
+    if opts.resume:
+        if checkpoint_dir(ckpt_dir, "last") is None:
+            log(f"[train] refuse: --resume and no checkpoint under {ckpt_dir}/last (--ckpt-dir names it)")
+            return 2
         state = load_checkpoint(ckpt_dir, "last", model, opt)
         log(f"[train] resumed at step {state['iteration']}")
     est_ckpt = 2 * trainable_count(model) * 4 * 3
@@ -360,7 +359,26 @@ def run_train(opts: TrainOptions) -> int:
     skipped = 0
     step_walls: list[float] = []
     load_walls: list[float] = []
-    base_cfg = cfg if isinstance(cfg, dict) else None
+
+    def checkpoints_due(it_idx: int) -> None:
+        """Validation and the best/last saves on their cadence and at the
+        final step, whether or not the step's batch ran."""
+        if (it_idx + 1) % opts.val_every == 0 or it_idx + 1 == opts.iters:
+            v = validate()
+            log_rows.append({"it": it_idx + 1, "val": v})
+            best = state['best_val']
+            log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
+                else f"[train] it {it_idx + 1} val {v:.4f}")
+            if state["best_val"] is None or v < state["best_val"]:
+                state["best_val"] = v
+                save_checkpoint(ckpt_dir, "best", model, opt, state)
+                if hs_state["head"] is not None:
+                    hs_state["head"].save(ckpt_dir / "best")
+        if (it_idx + 1) % opts.save_every == 0 or it_idx + 1 == opts.iters:
+            save_checkpoint(ckpt_dir, "last", model, opt, state)
+            if hs_state["head"] is not None:
+                hs_state["head"].save(ckpt_dir / "last")
+
     for it_idx, rows in it.iterate(skip=state["iteration"]):
         if it_idx >= opts.iters:
             break
@@ -370,6 +388,7 @@ def run_train(opts: TrainOptions) -> int:
         if b is None or int(b["positions"].shape[0]) == 0:
             skipped += 1
             state["iteration"] = it_idx + 1
+            checkpoints_due(it_idx)
             continue
         bm = _data.batch_to_mx({k: v for k, v in b.items() if not k.startswith("_")})
         ts0 = time.perf_counter()
@@ -401,52 +420,16 @@ def run_train(opts: TrainOptions) -> int:
                 f"{rec['tokens'] / max(rec['wall_s'], 1e-9):.0f} tok/s step {rec['step_ms']:.0f} ms "
                 f"load {rec['load_ms']:.0f} ms peak {rec['peak_gb']:.1f} GB "
                 f"active {rec['active_gb']:.1f} cache {rec['cache_gb']:.1f}")
-        if (it_idx + 1) % opts.val_every == 0 or it_idx + 1 == opts.iters:
-            v = validate()
-            log_rows.append({"it": it_idx + 1, "val": v})
-            best = state['best_val']
-            log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
-                else f"[train] it {it_idx + 1} val {v:.4f}")
-            if state["best_val"] is None or v < state["best_val"]:
-                state["best_val"] = v
-                save_checkpoint(ckpt_dir, "best", model, opt, state, student_kind=kind, full=opts.full,
-                                base_cfg=base_cfg, tokenizer=tokenizer)
-                if hs_state["head"] is not None:
-                    hs_state["head"].save(ckpt_dir / "best")
-        if (it_idx + 1) % opts.save_every == 0 or it_idx + 1 == opts.iters:
-            save_checkpoint(ckpt_dir, "last", model, opt, state, student_kind=kind, full=opts.full,
-                            base_cfg=base_cfg, tokenizer=tokenizer)
-            if hs_state["head"] is not None:
-                hs_state["head"].save(ckpt_dir / "last")
+        checkpoints_due(it_idx)
     restore_attn()
     log(f"[train] done: {state['iteration']} steps, {state['tokens']} tokens, {skipped} skipped, "
         f"{time.perf_counter() - t0:.0f}s")
-    if not opts.full and kind == "gguf" and opts.adapter_out:
+    if opts.adapter_out:
         from gmlx.load.preflight import preflight
         from gmlx.tune.lora import save_trained_adapter
         n = save_trained_adapter(inner, cfg, base_arch=preflight(gguf_file(opts.student)).arch,
                                  out_path=opts.adapter_out, rank=opts.lora_rank, scale=scale, keys=LORA_KEYS)
         log(f"[train] wrote {opts.adapter_out} ({n} modules)")
-    elif not opts.full and kind == "mlx" and opts.out:
-        out = Path(opts.out)
-        out.mkdir(parents=True, exist_ok=True)
-        mx.save_safetensors(str(out / "adapters.safetensors"), dict(tree_flatten(model.trainable_parameters())))
-        write_json_atomic(out / "adapter_config.json", {
-            "fine_tune_type": "lora", "num_layers": len(getattr(inner, "layers", [])),
-            "lora_parameters": {"rank": opts.lora_rank, "scale": scale, "alpha": scale * opts.lora_rank,
-                                "dropout": opts.lora_dropout, "keys": list(LORA_KEYS)}})
-        log(f"[train] wrote {out}/adapters.safetensors")
-    elif opts.full and opts.out:
-        out = Path(opts.out)
-        if (ckpt_dir / "last").exists():
-            out.mkdir(parents=True, exist_ok=True)
-            for f in (ckpt_dir / "last").iterdir():
-                if f.is_file() and f.name not in ("state.json", "optimizer.safetensors", "trainable.safetensors"):
-                    shutil.copy(f, out / f.name)
-            gen_cfg = Path(opts.student) / "generation_config.json"
-            if gen_cfg.is_file() and not (out / gen_cfg.name).exists():
-                shutil.copy(gen_cfg, out / gen_cfg.name)
-            log(f"[train] wrote full checkpoint to {out}")
     if opts.report:
         write_json_atomic(Path(opts.report), {
             "state": state, "log": log_rows,

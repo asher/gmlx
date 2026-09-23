@@ -361,13 +361,6 @@ def assistant_tails(tokenizer) -> list[str]:
     return tails
 
 
-def _assistant_tail(tokenizer) -> str:
-    """The first turn-end marker (assistant_tails), for callers that want
-    one string."""
-    t = assistant_tails(tokenizer)
-    return t[0] if t else ""
-
-
 def target_mask(ends: np.ndarray, spans: list | None) -> np.ndarray:
     """Per position t, whether token t + 1 lies inside a target span (its
     bytes [ends[t], ends[t+1]) within [content start, target end)). Without

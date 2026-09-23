@@ -1786,7 +1786,7 @@ class DecodeFeeder:
                 f"{self._routed_log_path}")
             self._routed_log = None
         if not getattr(self, "_stats_verbose", True):
-            self._print_wedges()
+            self._print_wedges(wait=wait)
             return
         if getattr(self, "_lookups", 0):
             print(
@@ -1847,9 +1847,9 @@ class DecodeFeeder:
             print(
                 f"[stream] layer-shed: {self._layer_shed_n} token-layer "
                 "routed paths skipped (shared expert only)")
-        self._print_wedges()
+        self._print_wedges(wait=wait)
 
-    def _print_wedges(self) -> None:
+    def _print_wedges(self, wait: bool = True) -> None:
         wedges = getattr(self, "_wedges", 0)
         if wedges:
             print(
@@ -1859,7 +1859,9 @@ class DecodeFeeder:
                      getattr(self, "_la_pool", None)):
             if pool is not None:
                 # A wedged worker never returns; joining it would hang exit.
-                pool.shutdown(wait=wedges == 0)
+                # The finalizer passes wait=False: a collection that runs
+                # on a read worker cannot join its own thread.
+                pool.shutdown(wait=wait and wedges == 0)
         locked, self._locked = getattr(self, "_locked", {}), {}
         self.locked_bytes = 0
         if locked:

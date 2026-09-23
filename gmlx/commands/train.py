@@ -50,6 +50,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from gmlx.load.loader import load_model
     from gmlx.load.preflight import preflight
     from gmlx.tune.attention import install_training_attention
+    from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
 
     mx.random.seed(seed)
@@ -80,13 +81,17 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     # so the only artifact left on disk is our GGUF, written below.
     restore_attention = install_training_attention(model)
     install_training_gdn(model)   # mlx-lm gated delta layers: the checkpointed scan under training
+    if grad_checkpoint:
+        # every decoder-layer class, under language_model too; mlx-lm's own
+        # grad_checkpoint wraps the class of model.layers[0] alone
+        print(f"[train] per-layer checkpointing on {checkpoint_layers(model)} layer classes")
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(
                 batch_size=batch_size, iters=iters, val_batches=val_batches,
                 steps_per_report=steps_per_report, steps_per_eval=steps_per_eval,
                 steps_per_save=iters + 1,  # suppress the periodic safetensors snapshots
-                max_seq_length=max_seq_length, grad_checkpoint=grad_checkpoint,
+                max_seq_length=max_seq_length, grad_checkpoint=False,
                 adapter_file=os.path.join(scratch, "mlx_lm_final.safetensors"))
             train(model, opt, CacheDataset(train_set), CacheDataset(val_set), args=args)
     finally:

@@ -74,12 +74,16 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
         t = _align.load_tables(tables_dir)
-        if t.teacher_hash == th and t.student_hash == sh:
-            log(f"[align] tables from {tables_dir} (pair hashes match)")
+        if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
+                and (V_S is None or t.V_S == V_S):
+            log(f"[align] tables from {tables_dir} (pair hashes and widths match)")
             if tables_dir.resolve() != out_dir.resolve():
                 _align.save_tables(out_dir, t)
             return t
-        log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
+        if t.teacher_hash == th and t.student_hash == sh:
+            log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
+        else:
+            log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
     t0 = time.perf_counter()
     t = _align.build_tables(teacher_tok, student_tok, V_T=V_T, V_S=V_S)
     log(f"[align] tables built in {time.perf_counter() - t0:.1f}s: G={t.G} "
@@ -134,6 +138,13 @@ def run_align(opts: AlignOptions) -> int:
         return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
+    # a view directory is rewritten whole: shards of an earlier align over
+    # another student or other knobs would otherwise be reused by train
+    stale = sorted(out.glob("view-*.safetensors")) + [p for p in (out / "view.json",) if p.exists()]
+    for p in stale:
+        p.unlink()
+    if stale:
+        log(f"[align] removed {len(stale)} files of an earlier view in {out}")
     reader = CacheReader(cache)
     manifest = reader.manifest
     teacher_tok = _tokens.load_tokenizer(str(cache / "tokenizer")) if (cache / "tokenizer").exists() \
@@ -171,8 +182,10 @@ def run_align(opts: AlignOptions) -> int:
     # an identical vocabulary keeps the identity tables even on the general
     # path (group_of is the identity, so the projection is exact)
     if same_vocab:
-        tables = _align.identity_tables(V_T, whitespace_start_mask(student_tok, V_T), vocab_map_hash(teacher_tok),
-                                        vocab_map_hash(student_tok))
+        # at the student's width: the head runs over V_S columns, and a wider
+        # student head keeps the teacher's ids as a prefix
+        tables = _align.identity_tables(V_S, whitespace_start_mask(student_tok, V_S), vocab_map_hash(teacher_tok),
+                                        vocab_map_hash(student_tok), V_T=V_T)
         _align.save_tables(out, tables)
     else:
         tables = get_tables(teacher_tok, student_tok, Path(opts.tables) if opts.tables else None, out,

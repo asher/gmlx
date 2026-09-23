@@ -114,3 +114,39 @@ def test_no_lora_layers_raises(tmp_path):
         train.save_trained_adapter(Plain(), CONFIG, base_arch="llama",
                                    out_path=str(tmp_path / "x.gguf"),
                                    rank=R, scale=S)
+
+
+def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path):
+    """--grad-checkpoint wraps every decoder-layer class through
+    gmlx.tune.checkpoint, which also enters a language_model stack; mlx-lm's
+    own grad_checkpoint (layer 0's class only) stays off."""
+    import contextlib
+
+    import mlx_lm.tuner.datasets as datasets
+    import mlx_lm.tuner.trainer as trainer
+    import mlx_kquant.mlx_lm_patch as patch
+
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+    import gmlx.tune.attention as attention
+    import gmlx.tune.checkpoint as checkpoint
+    import gmlx.tune.gdn as gdn
+
+    seen = {}
+    model = _Model()
+    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
+    monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: None))
+    monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
+    monkeypatch.setattr(checkpoint, "checkpoint_layers", lambda m: seen.setdefault("ckpt", m) and 2)
+    monkeypatch.setattr(trainer, "train", lambda m, o, tr, va, args: seen.setdefault("args", args))
+    monkeypatch.setattr(train, "save_trained_adapter", lambda *a, **k: 0)
+    train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"),
+                     iters=1, grad_checkpoint=True)
+    assert seen["ckpt"] is model
+    assert seen["args"].grad_checkpoint is False

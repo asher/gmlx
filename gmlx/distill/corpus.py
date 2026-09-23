@@ -120,13 +120,6 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
             return
 
 
-def iter_messages(spec: str, key: str = "messages", limit: int | None = None,
-                  hf_split: str = "train") -> Iterator[tuple[str, list[dict]]]:
-    """(doc_id, messages): iter_conversations without the student list."""
-    for doc, msgs, _st in iter_conversations(spec, key, None, limit, hf_split):
-        yield doc, msgs
-
-
 def per_turn_rows(msgs: list[dict]) -> list[list[dict]]:
     """One conversation per assistant turn with content: the messages up to
     and including that turn, so every target turn is the final turn of

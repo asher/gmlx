@@ -189,3 +189,30 @@ def test_apply_keeps_the_outer_model_when_the_plan_names_the_prefix(monkeypatch)
     outer = _Multimodal()
     assert adapter.apply_gguf_adapter(outer, {}, "ignored.gguf") == 1
     assert isinstance(outer.language_model.q_proj, modules.LoRAKQuantLinear)
+
+
+def test_install_drops_fused_wires_on_the_wrapped_owner():
+    """A fused decode wire the upstream patches cached on the attention
+    module before the adapter arrived would keep serving the base alone;
+    the install clears it so the next forward rebuilds with the adapter."""
+    class _Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = nn.Linear(4, 4, bias=False)
+
+    class _Outer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = _Attn()
+            self.other = _Attn()
+
+    m = _Outer()
+    object.__setattr__(m.attn, "_kq_wqkv", mx.zeros((1,)))
+    object.__setattr__(m.attn, "_kq_bqkv", mx.zeros((1,)))
+    object.__setattr__(m.other, "_kq_wqkv", mx.zeros((1,)))
+    a = mx.zeros((2, 4))
+    b = mx.zeros((4, 2))
+    plan = _plan({"attn.q_proj": _lm("attn.q_proj", a, b, 1.0)})
+    assert modules.install_lora_adapter(m, plan) == 1
+    assert vars(m.attn)["_kq_wqkv"] is None and vars(m.attn)["_kq_bqkv"] is None
+    assert vars(m.other)["_kq_wqkv"] is not None  # untouched owners keep their wires

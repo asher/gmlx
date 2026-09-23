@@ -1825,6 +1825,15 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
         return orig(self, wait=wait, **kw)
 
     monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", spy)
+    from gmlx.stream import decode_feeder as df
+
+    orig_read = df._DaemonReadPool.shutdown
+
+    def spy_read(self, wait=True):
+        waits.append(wait)
+        return orig_read(self, wait=wait)
+
+    monkeypatch.setattr(df._DaemonReadPool, "shutdown", spy_read)
     def with_pools():  # the seed pools exist only once seeding has run
         feeder, _ = _make_feeder(monkeypatch, tmp_path)
         feeder._seed_pool = concurrent.futures.ThreadPoolExecutor(1)

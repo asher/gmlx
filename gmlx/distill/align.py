@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 
@@ -23,7 +23,7 @@ from gmlx.load.tokenizer import (
 
 from .constants import NEG_INF, TABLES_VERSION
 from .format import read_json, write_json_atomic
-from .tokens import bos_id, encode_with_byte_ends, identity_pair
+from .tokens import bos_id, identity_pair
 
 # ---------------------------------------------------------------------------
 # alignment tables and projection
@@ -113,13 +113,21 @@ class Tables:
                 "identity": self.identity, "roles": self.roles}
 
 
-def identity_tables(V: int, bmask: np.ndarray, teacher_hash: str, student_hash: str) -> Tables:
+def identity_tables(V: int, bmask: np.ndarray, teacher_hash: str, student_hash: str, *,
+                    V_T: int | None = None) -> Tables:
+    """Identity tables at the student width V. A teacher head narrower than
+    the student's (V_T < V, pad-style surplus ids on the student) keeps its
+    ids as a prefix, so the teacher-side arrays run to V_T only."""
+    V_T = V if V_T is None else V_T
+    if V_T > V:
+        raise ValueError(f"identity tables need V_T <= V_S, got V_T={V_T} V_S={V}")
     ar = np.arange(V, dtype=np.int32)
-    return Tables(v1=ar.copy(), u1=ar.copy(), group_of=ar.copy(), target_g=ar.copy(),
+    at = np.arange(V_T, dtype=np.int32)
+    return Tables(v1=ar.copy(), u1=at.copy(), group_of=ar.copy(), target_g=at.copy(),
                   group_key=ar.copy(), group_size=np.ones(V, dtype=np.int32),
                   nonsingleton_ids=np.zeros(0, dtype=np.int32), bmask_S=bmask.astype(bool),
-                  own=np.ones(V, dtype=bool), roles={"identity": True},
-                  teacher_hash=teacher_hash, student_hash=student_hash, V_T=V, V_S=V,
+                  own=np.ones(V_T, dtype=bool), roles={"identity": True},
+                  teacher_hash=teacher_hash, student_hash=student_hash, V_T=V_T, V_S=V,
                   identity=True)
 
 
@@ -412,77 +420,4 @@ def tokenization_bias_check(proj: dict[str, np.ndarray], onpath_gid: np.ndarray,
 # ---------------------------------------------------------------------------
 # census (tokenizer only, no cache)
 # ---------------------------------------------------------------------------
-
-def census_pair(teacher_tok, student_tok, tables: Tables, texts: Iterable[str], *,
-                max_len: int = 512, max_chunk_len: int = 8,
-                teacher_tb=None, student_tb=None) -> dict:
-    """Frequency-weighted a and s over teacher token occurrences, shared
-    boundary fraction of student positions, redirected fraction, group
-    sizes, rows with < 2 boundaries, chunk-length histogram."""
-    ti = hf_inner(teacher_tok)
-    ttb = teacher_tb if teacher_tb is not None else token_bytes(teacher_tok, tables.V_T)
-    stb = student_tb if student_tb is not None else token_bytes(student_tok, tables.V_S)
-    t_spec = set(ti.all_special_ids)
-    n_tok = n_own = n_single = n_redirect = n_drop = 0
-    gs_sum = 0.0
-    gs_max = 0
-    s_positions = s_bnd = 0
-    rows = rows_lt2 = 0
-    chunk_hist: dict[int, int] = {}
-    flagged = 0
-    for text in texts:
-        tb_ = text.encode("utf-8")
-        t_ids, t_ends, f1 = encode_with_byte_ends(teacher_tok, tb_, ttb)
-        s_ids, s_ends, f2 = encode_with_byte_ends(student_tok, tb_, stb)
-        flagged += int(f1 or f2)
-        for v in t_ids:
-            v = int(v)
-            if v in t_spec:
-                continue
-            n_tok += 1
-            g = tables.target_g[v]
-            if g < 0:
-                n_drop += 1
-                continue
-            if tables.own[v]:
-                n_own += 1
-            else:
-                n_redirect += 1
-            sz = int(tables.group_size[g])
-            gs_sum += sz
-            gs_max = max(gs_max, sz)
-            if sz == 1:
-                n_single += 1
-        al = shared_boundaries(t_ends, s_ends)
-        rows += 1
-        s_positions += max(len(s_ids) - 1, 0)
-        s_bnd += al.J
-        if al.J < 2:
-            rows_lt2 += 1
-        for j in range(1, al.J):
-            ls = int(al.s_pos[j] - al.s_pos[j - 1])
-            lt = int(al.t_pos[j] - al.t_pos[j - 1])
-            key = max(ls, lt)
-            chunk_hist[key] = chunk_hist.get(key, 0) + 1
-    chunks = sum(chunk_hist.values())
-    kept = sum(c for k, c in chunk_hist.items() if k <= max_chunk_len)
-    return {
-        "teacher_tokens": n_tok,
-        "a_own_fraction": n_own / max(n_tok, 1),
-        "s_singleton_fraction": n_single / max(n_tok, 1),
-        "redirected_fraction": n_redirect / max(n_tok, 1),
-        "dropped_fraction": n_drop / max(n_tok, 1),
-        "mean_group_size": gs_sum / max(n_own + n_redirect, 1),
-        "max_group_size": gs_max,
-        "shared_boundary_fraction": s_bnd / max(s_positions, 1),
-        "rows": rows,
-        "rows_lt2_boundaries": rows_lt2,
-        "chunks": chunks,
-        "chunks_kept_fraction": kept / max(chunks, 1),
-        "chunk_length_histogram": {str(k): v for k, v in sorted(chunk_hist.items())},
-        "rows_offset_fallback": flagged,
-        "G": tables.G, "V_T": tables.V_T, "V_S": tables.V_S,
-        "N_ns": int(tables.nonsingleton_ids.shape[0]),
-    }
-
 

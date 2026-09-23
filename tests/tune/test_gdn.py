@@ -510,3 +510,37 @@ def test_training_gated_delta_ops_matches_the_loop_with_gradients():
     assert np.allclose(float(lr), float(lc), rtol=1e-5)
     for a, b in zip(gr, gc):
         assert np.allclose(np.array(a), np.array(b), atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.parametrize("tiled", [False, True])
+def test_chunk_gradients_match_scan_with_grouped_heads(tiled):
+    """Hk != Hv: gradients through the chunked scan match the per-token
+    scan on heads expanded by hand, for the grouped mapping (value head hv
+    reads key head hv // r) and the GGUF tiled one (hv % Hk)."""
+    q, k, v, g, beta = _inputs(T=70, Hk=2, Hv=4, seed=13)
+    r = np.random.default_rng(5)
+    w = mx.array(r.standard_normal((2, 70, 4, 24)).astype(np.float32))
+    mask = np.ones((2, 70), dtype=bool)
+    mask[0, 55:] = False
+    mask = mx.array(mask)
+    wm = w * mask[..., None, None]
+
+    def expand(a):
+        return mx.tile(a, [1, 1, 2, 1]) if tiled else mx.repeat(a, 2, -2)
+
+    def loss_scan(q, k, v, g, beta):
+        y, s = gd.gated_delta_ops(expand(q), expand(k), v, g, beta, None, mask)
+        return (y * wm).sum() + (s * s).sum() * 0.01
+
+    def loss_chunk(q, k, v, g, beta):
+        y, s = tg.gated_delta_chunk(q, k, v, g, beta, None, mask, chunk=32, tiled=tiled)
+        return (y * wm).sum() + (s * s).sum() * 0.01
+
+    g0 = mx.grad(loss_scan, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+    g1 = mx.grad(loss_chunk, argnums=(0, 1, 2, 3, 4))(q, k, v, g, beta)
+    mx.eval(g0, g1)
+    m = np.array(mask)
+    for name, a, b in zip("qkvgb", g0, g1):
+        a, b = np.array(a)[m], np.array(b)[m]
+        scale = max(np.abs(a).max(), 1e-6)
+        assert np.allclose(a, b, atol=2e-3 * scale, rtol=2e-3), (name, tiled)

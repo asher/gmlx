@@ -277,3 +277,42 @@ def test_recorder_take_resets_and_joins_chunks():
     assert out.dtype == np.int32
     assert out[0, 0, 4].tolist() == [16, 17, 18, 19]
     assert rec.take().shape == (0, 1, 0, 1)
+
+
+def test_fused_block_records_rows_apart(monkeypatch):
+    """The loader's fused MoE block routes over flat (tokens, k) ids; the
+    seam has to see the batch shape or a two-row chunk records as one row
+    and the teacher pass refuses the routes."""
+    import gmlx.load.modules as lm
+
+    d, E, k, B, L = 16, 8, 4, 2, 3
+
+    class _Base(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(d, E, bias=False)
+            self.shared_expert_gate = nn.Linear(d, 1, bias=False)
+            self.top_k = k
+            self.norm_topk_prob = True
+            proj = lambda: SimpleNamespace(weight=mx.zeros((1,)), kquant_type="q8_0")  # noqa: E731
+            self.switch_mlp = SimpleNamespace(gate_proj=proj(), up_proj=proj(), down_proj=proj())
+            self.shared_expert = SimpleNamespace(gate_proj=proj(), up_proj=proj(), down_proj=proj())
+
+    kq = SimpleNamespace(
+        moe_glu_gather_shexp_kq=lambda xf, *a, **kw: mx.zeros((xf.shape[0], k + 1, 8)),
+        gather_qmv_mix_kq=lambda h, *a, **kw: mx.zeros((h.shape[0], d), dtype=mx.bfloat16),
+    )
+    cls = lm._make_fused_block(_Base, SimpleNamespace(kq=kq))
+    block = cls()
+    block.eval()  # the fused path serves inference only
+    mx.eval(block.parameters())
+    monkeypatch.setattr(lm, "_kq_fused_device_ok", lambda *mods: True)
+    model = _shell(block)
+    rec = install_moe_route_record(model)
+    x = mx.random.normal((B, L, d)).astype(mx.bfloat16)
+    y = block(x)
+    mx.eval(y)
+    assert y.shape == (B, L, d)
+    routes = rec.take()
+    clear_moe_route_controls(model)
+    assert routes.shape == (1, B, L, k)

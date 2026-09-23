@@ -30,8 +30,10 @@ from .tokens import adds_bos, bos_id, encode_with_byte_ends
 # eval
 # ---------------------------------------------------------------------------
 
-def window_hashes(data: bytes, w: int = 64) -> np.ndarray:
-    """Polynomial rolling hash of every w-byte window, uint64 wraparound."""
+def window_hashes(data: bytes, w: int = 64, block: int = 1 << 20) -> np.ndarray:
+    """Polynomial hash of every w-byte window, uint64 wraparound. Hashed in
+    blocks of ``block`` bytes (overlapping by w - 1) so the expanded window
+    view never exceeds w * block * 8 bytes at once."""
     b = np.frombuffer(data, dtype=np.uint8)
     if len(b) < w:
         return np.zeros(0, dtype=np.uint64)
@@ -41,9 +43,13 @@ def window_hashes(data: bytes, w: int = 64) -> np.ndarray:
         for i in range(1, w):
             powers[i] = powers[i - 1] * P
     powers = powers[::-1].copy()
-    view = np.lib.stride_tricks.sliding_window_view(b, w).astype(np.uint64)
-    with np.errstate(over="ignore"):
-        return view @ powers
+    out = []
+    for start in range(0, len(b) - w + 1, block):
+        seg = b[start:start + block + w - 1]
+        view = np.lib.stride_tricks.sliding_window_view(seg, w).astype(np.uint64)
+        with np.errstate(over="ignore"):
+            out.append(view @ powers)
+    return np.concatenate(out) if len(out) > 1 else out[0]
 
 
 def decontam_fraction(slice_bytes: bytes, corpus_texts: Iterable[bytes], w: int = 64) -> float:
@@ -114,22 +120,25 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
         elif t_pos.size == 0:
             continue
         assert s_pos is not None
+        # the scored positions are gathered before the float32 cast and the
+        # softmax, so no full-row full-vocab float32 array is built
+        sel_pos = mx.array(s_pos)
         if replay_layers is not None and ids is t_ids and ROUTES_FIELD in arrs:
             with pin_routes(model, arrs[ROUTES_FIELD], replay_layers):
                 out = model(mx.array(ids[None]))
                 out = out.logits if hasattr(out, "logits") else out
-                lf = out[0].astype(mx.float32)
-                mx.eval(lf)
+                sel = out[0][sel_pos].astype(mx.float32)
+                mx.eval(sel)
             replayed += 1
         else:
             out = model(mx.array(ids[None]))
             out = out.logits if hasattr(out, "logits") else out
-            lf = out[0].astype(mx.float32)
-        lsm = lf - mx.logsumexp(lf, axis=-1, keepdims=True)
+            sel = out[0][sel_pos].astype(mx.float32)
+        lsm = sel - mx.logsumexp(sel, axis=-1, keepdims=True)
         pos = t_pos
         idx = mx.array(arrs["top_k_indices"][pos].astype(np.int32))
-        lq = mx.take_along_axis(lsm[mx.array(s_pos)], idx, axis=-1)
-        top1 = mx.argmax(lsm[mx.array(s_pos)], axis=-1)
+        lq = mx.take_along_axis(lsm, idx, axis=-1)
+        top1 = mx.argmax(lsm, axis=-1)
         mx.eval(lq, top1)
         lq = np.asarray(lq).astype(np.float64)
         lp = arrs["top_k_log_softmax"][pos].astype(np.float64)
