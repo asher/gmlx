@@ -445,7 +445,9 @@ A reply whose reasoning trace hit the budget is unfinished and is
 dropped as `budget`. Expect to lose about a third of the replies at a
 1000-token budget, so write more prompts than the rows you need. `gen`
 counts the trace itself, so a trace the model closed on its own within
-two tokens of the budget is dropped with them.
+two tokens of the budget is dropped with them. A trace the server never
+cut, which a drafter does when requests batch, is marked
+`budget_unenforced` and kept, and `filter` warns with the count.
 `--min-words` counts words of the answer, not of the trace, and its
 default of 16 suits prose replies. A right answer here can be one short
 query, so the command sets it to 1. The report file has the kept and

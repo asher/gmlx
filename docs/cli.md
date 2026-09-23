@@ -930,7 +930,7 @@ block as it found it.
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, recorded and compared on a resume. Refused: `--thinking-budget` here, or a drafter flag beside `--thinking-budget` |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
-| `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace has its own budget on top plus 4 tokens for its close, without one the trace shares this budget |
+| `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close on top, without one the trace shares this budget |
 | `--temperature F` | `0.7` | sampling temperature |
 | `--top-p F` | `0.9` | keep the most likely tokens whose probabilities add to this |
 | `--top-k N` | the server's | sampler top-k cutoff |
@@ -1059,7 +1059,7 @@ Training flags, in the order `--help` prints them.
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
-| `--warmup F` | `0.05` | warmup as a fraction of the steps, at least one step, then cosine decay. `0` starts at the peak rate |
+| `--warmup F` | `0.05` | warmup as a fraction of the steps, at least one step and never the last, then cosine decay. `0` starts at the peak rate |
 | `--weight-decay F` | `0` | AdamW weight decay |
 | `--clip F` | `1.0` | gradient norm clip, `0` turns clipping off |
 | `--seed N` | `1` | data order and LoRA init |

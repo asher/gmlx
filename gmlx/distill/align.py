@@ -23,7 +23,7 @@ from gmlx.load.tokenizer import (
 )
 
 from .constants import NEG_INF, TABLES_VERSION
-from .format import read_json, write_json_atomic
+from .format import read_json, sha256_file, write_json_atomic
 from .tokens import bos_id, identity_pair
 
 # ---------------------------------------------------------------------------
@@ -286,14 +286,23 @@ def save_tables(dirpath: Path, t: Tables) -> None:
         except OSError:
             pass
         raise
-    write_json_atomic(dirpath / "tables.json", t.meta())
+    # tables.json names the arrays it was written with, so the two files
+    # replaced one after the other never pass as a pair when a kill
+    # separates them
+    write_json_atomic(dirpath / "tables.json",
+                      dict(t.meta(), safetensors_sha256=sha256_file(dirpath / "tables.safetensors")))
 
 
 def load_tables(dirpath: Path) -> Tables:
+    """The tables under dirpath; ValueError when tables.json does not name
+    the tables.safetensors beside it."""
     from safetensors.numpy import load_file
     dirpath = Path(dirpath)
-    a = load_file(str(dirpath / "tables.safetensors"))
     m = read_json(dirpath / "tables.json")
+    if m.get("safetensors_sha256") != sha256_file(dirpath / "tables.safetensors"):
+        raise ValueError(f"the tables under {dirpath} are torn (tables.safetensors is not the one "
+                         "tables.json names)")
+    a = load_file(str(dirpath / "tables.safetensors"))
     return Tables(v1=a["v1"], u1=a["u1"], group_of=a["group_of"], target_g=a["target_g"],
                   group_key=a["group_key"], group_size=a["group_size"],
                   nonsingleton_ids=a["nonsingleton_ids"], bmask_S=a["bmask_S"].astype(bool),

@@ -365,3 +365,12 @@ def test_the_remaining_float_flags_refuse_nan_and_out_of_range_values_at_parse_t
     row loop; the parser refuses each."""
     rc, out = _run(argv)
     assert rc == 2 and word in out
+
+
+@pytest.mark.parametrize("port", ["0", "70000"])
+def test_gen_refuses_a_port_outside_the_tcp_range_at_parse_time(port):
+    """Port 0 serves on a random port that the readiness poll never finds,
+    and a port past 65535 raises inside the socket call; the parser
+    refuses both."""
+    rc, out = _run(_GEN + ["--port", port])
+    assert rc == 2 and "a port between 1 and 65535 is required" in out

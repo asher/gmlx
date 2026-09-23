@@ -34,7 +34,8 @@ from .format import write_bytes_atomic, write_json_atomic
 from .frames import CONTINUE_INSTRUCTION
 
 GEN_VERSION = "4"
-# tokens the request budget leaves for the closing marker of a cut trace
+# tokens a forced close spends when the tokenizer gives no better count
+# (run_gen measures the wrap phrase plus the closing marker)
 CLOSE_ALLOWANCE = 4
 # a cut trace re-tokenized by gen can lose this many tokens to merges
 RETOKENIZE_SLACK = 2
@@ -66,6 +67,7 @@ class GenOptions:
     thinking: bool = False
     thinking_budget: int | None = None
     tokenizer: str | None = None
+    close_tokens: int = CLOSE_ALLOWANCE      # set by run_gen from the tokenizer
     serve_arg: list[str] = field(default_factory=list)
     startup_timeout: float = 900.0
     concurrency: int = 8
@@ -320,6 +322,21 @@ def trace_tokens(tokenizer, reasoning: str) -> int:
     return len(tokenizer.encode(reasoning, add_special_tokens=False)) if reasoning else 0
 
 
+def wrap_closed(reasoning: str) -> bool:
+    """True when the trace ends with the phrase a gmlx server injects
+    ahead of a forced close."""
+    from ..gen.thinking_budget import BUDGET_WRAP_PHRASE
+    return bool(reasoning) and reasoning.rstrip().endswith(BUDGET_WRAP_PHRASE.strip())
+
+
+def close_tokens(tokenizer) -> int:
+    """Tokens the server's forced close spends inside the trace (the wrap
+    phrase and the closing marker), CLOSE_ALLOWANCE when the tokenizer
+    resolves no thinking marker."""
+    from ..gen.thinking_budget import budget_close_tokens
+    return max(budget_close_tokens(tokenizer), CLOSE_ALLOWANCE)
+
+
 def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOptions, seed: int,
              tokenizer=None) -> dict:
     """One chat completion. With a thinking budget, ``budget_hit`` is True
@@ -343,13 +360,18 @@ def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOption
     budget_hit: bool | None = None
     unenforced = False
     if opts.thinking_budget and rt is not None:
-        # the server forces the close once the count reaches the budget; its
-        # own count is exact, a trace re-tokenized here can come out a merge
-        # or two short. A trace far past the budget plus its close was never
-        # cut, which a drafter at concurrency above 1 does (it drops the
-        # budget with a note in the server log)
-        unenforced = rt > opts.thinking_budget + CLOSE_ALLOWANCE + UNENFORCED_MARGIN
-        budget_hit = not unenforced and rt >= opts.thinking_budget - (0 if reported else RETOKENIZE_SLACK)
+        # a gmlx server ends every trace it cuts with its wrap phrase, so
+        # that alone marks a hit whatever the count (a drafter overshoots
+        # by a draft block). Elsewhere the count decides: the server forces
+        # the close once the count reaches the budget, its own count is
+        # exact, a trace re-tokenized here can come out a merge or two
+        # short, and a trace far past the budget plus its close was never
+        # cut (a drafter at concurrency above 1 drops the budget with a
+        # note in the server log)
+        wrapped = wrap_closed(reasoning)
+        unenforced = not wrapped and rt > opts.thinking_budget + opts.close_tokens + UNENFORCED_MARGIN
+        budget_hit = wrapped or (not unenforced
+                                 and rt >= opts.thinking_budget - (0 if reported else RETOKENIZE_SLACK))
     return {"content": msg.get("content") or "", "reasoning": reasoning,
             "finish_reason": ch.get("finish_reason"), "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"), "reasoning_tokens": rt,
@@ -379,11 +401,11 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 def answer_budget(opts: GenOptions) -> int:
     """max_tokens for a request: the server counts the reasoning trace in
     it, so a thinking budget is added on top, plus the tokens a forced
-    close spends on the closing marker, and the answer keeps the
-    --max-tokens budget. A thinking reply without a budget shares
-    --max-tokens with its trace."""
+    close spends inside the trace (the wrap phrase and the closing
+    marker), and the answer keeps the --max-tokens budget. A thinking
+    reply without a budget shares --max-tokens with its trace."""
     if opts.thinking and opts.thinking_budget:
-        return opts.max_tokens + opts.thinking_budget + CLOSE_ALLOWANCE
+        return opts.max_tokens + opts.thinking_budget + opts.close_tokens
     return opts.max_tokens
 
 
@@ -586,6 +608,7 @@ def run_gen(opts: GenOptions) -> int:
         except (FileNotFoundError, OSError, ValueError) as e:
             print(f"[gen] refuse: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
             return 2
+        opts.close_tokens = close_tokens(tokenizer)
     if opts.corpus is not None:
         c = opts.corpus
         if (c.endswith((".jsonl", ".txt")) or c.startswith((".", "/", "~"))) and not Path(c).expanduser().exists():

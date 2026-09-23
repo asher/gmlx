@@ -62,6 +62,8 @@ _BUDGET_WRAP_PHRASE = (
     "\n\nI've hit my thinking budget, so I'll stop reasoning here and "
     "write the complete final answer now.\n"
 )
+# the phrase a client finds at the end of a trace the budget cut
+BUDGET_WRAP_PHRASE = _BUDGET_WRAP_PHRASE
 
 # Forced when the user presses ^T (finish thinking now) - same rationale,
 # but the model should see the user's request, not a phantom budget.
@@ -456,6 +458,19 @@ def _forced_close_ids(tokenizer, budget, end_seq):
         if wrap:
             skip_ids = list(wrap) + list(end_seq)
     return reclose_ids, forced_ids, skip_ids
+
+
+def budget_close_tokens(tokenizer, *, start_token=None, end_token=None) -> int:
+    """Tokens the first budget-triggered close spends inside the thinking
+    block (the wrap phrase and the closing marker), or 0 when no
+    thinking-end token resolves, since the budget is then ignored."""
+    try:
+        _, end_seq = _thinking_token_seqs(tokenizer, start_token, end_token)
+    except Exception:  # noqa: BLE001 - a bare tokenizer with no think tokens
+        return 0
+    if not end_seq:
+        return 0
+    return len(_forced_close_ids(tokenizer, 1, end_seq)[1])
 
 
 def _announce_budget(tokenizer, budget, end_seq) -> None:

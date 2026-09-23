@@ -335,6 +335,10 @@ def run_filter(opts: FilterOptions) -> int:
         except ValueError as e:
             print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
+    unenforced = sum(1 for r in survivors if (r.get("gen") or {}).get("budget_unenforced"))
+    if unenforced:
+        log(f"[filter] warn: {unenforced} kept rows carry budget_unenforced, a trace the server never cut "
+            "(a drafter drops the budget when requests batch)")
     # written beside the final name and moved into place, so a failed
     # write leaves the corpus that was there
     tmp = out.with_name(out.name + ".tmp")
@@ -363,7 +367,7 @@ def run_filter(opts: FilterOptions) -> int:
         # every earlier pass stays on record, oldest first
         sidecar["filter_history"] = [*(sidecar.get("filter_history") or []), sidecar["filter"]]
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
-                         "inputs": [str(p) for p in inputs]}
+                         "budget_unenforced": unenforced, "inputs": [str(p) for p in inputs]}
     joined = [(p, s) for p, s in zip(inputs, sides) if s is not None]
     if joined and isinstance(joined[0][1].get("run"), dict):
         # the run block keeps what gen measured (a join adds the inputs'
@@ -398,7 +402,7 @@ def run_filter(opts: FilterOptions) -> int:
                         "recontext_from": [str(p) for p in inputs], "prompts": kept})
     write_json_atomic(out.with_suffix(out.suffix + ".gen.json"), sidecar)
     summary = {"inputs": [str(p) for p in inputs], "out": str(out), "kept": kept, "dropped": dict(counts),
-               "filter_version": sidecar["filter_version"]}
+               "budget_unenforced": unenforced, "filter_version": sidecar["filter_version"]}
     log(f"[filter] kept {kept}, dropped {dict(counts)} -> {out}")
     if opts.report:
         write_json_atomic(Path(opts.report).expanduser(), summary)

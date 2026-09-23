@@ -66,7 +66,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--base-url", default=None, metavar="URL",
                    help="A running server's /v1 base to use instead of serving --teacher.")
     p.add_argument("--host", default="127.0.0.1", help="Bind host of the served teacher (default 127.0.0.1).")
-    p.add_argument("--port", type=int, default=8093, help="Port of the served teacher (default 8093).")
+    p.add_argument("--port", type=_port, default=8093, help="Port of the served teacher (default 8093).")
     p.add_argument("--text-key", default="text", help="With --corpus: text column of a jsonl or dataset row (default text).")
     p.add_argument("--hf-split", default="train", help="With --corpus: dataset split for a Hugging Face id (default train).")
     p.add_argument("--prefix-chars", type=_positive_int, default=1500,
@@ -298,7 +298,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--lr", type=_positive_float, default=1e-4, help="Peak learning rate (default 1e-4).")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Rows per step (default 8).")
     p.add_argument("--warmup", type=_fraction, default=0.05,
-                   help="Warmup as a fraction of the steps, then cosine decay (default 0.05).")
+                   help="Warmup as a fraction of the steps, at least one step and never the last, then cosine "
+                        "decay (default 0.05).")
     p.add_argument("--weight-decay", type=_nonneg_float, default=None,
                    help="AdamW weight decay (default 0 for LoRA).")
     p.add_argument("--clip", type=_nonneg_float, default=1.0,
@@ -496,6 +497,16 @@ def _positive_int(text: str) -> int:
         raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"a positive integer is required, got {n}")
+    return n
+
+
+def _port(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
+    if not 1 <= n <= 65535:
+        raise argparse.ArgumentTypeError(f"a port between 1 and 65535 is required, got {n}")
     return n
 
 

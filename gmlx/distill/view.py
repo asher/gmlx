@@ -82,21 +82,25 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
             log(f"[align] tables at {tables_dir} are version {version}, this build writes {TABLES_VERSION}, "
                 "rebuilding")
         else:
-            t = _align.load_tables(tables_dir)
-            if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
-                    and (V_S is None or t.V_S == V_S) and _align.same_roles(t.roles, roles):
-                log(f"[align] tables from {tables_dir} (pair hashes, widths and special roles match)")
-                if save and tables_dir.resolve() != out_dir.resolve():
-                    _align.save_tables(out_dir, t)
-                return t
-            elif t.teacher_hash == th and t.student_hash == sh and not _align.same_roles(t.roles, roles):
-                # the vocab hash leaves special ids out, so a base and an
-                # instruct student share it while their EOS ids differ
-                log(f"[align] tables at {tables_dir} carry other special roles (EOS or BOS ids differ), rebuilding")
-            elif t.teacher_hash == th and t.student_hash == sh:
-                log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
+            try:
+                t = _align.load_tables(tables_dir)
+            except ValueError as e:
+                log(f"[align] {e}, rebuilding")
             else:
-                log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
+                if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
+                        and (V_S is None or t.V_S == V_S) and _align.same_roles(t.roles, roles):
+                    log(f"[align] tables from {tables_dir} (pair hashes, widths and special roles match)")
+                    if save and tables_dir.resolve() != out_dir.resolve():
+                        _align.save_tables(out_dir, t)
+                    return t
+                elif t.teacher_hash == th and t.student_hash == sh and not _align.same_roles(t.roles, roles):
+                    # the vocab hash leaves special ids out, so a base and an
+                    # instruct student share it while their EOS ids differ
+                    log(f"[align] tables at {tables_dir} carry other special roles (EOS or BOS ids differ), rebuilding")
+                elif t.teacher_hash == th and t.student_hash == sh:
+                    log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
+                else:
+                    log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
     t0 = time.perf_counter()
     t = _align.build_tables(teacher_tok, student_tok, V_T=V_T, V_S=V_S)
     log(f"[align] tables built in {time.perf_counter() - t0:.1f}s: G={t.G} "
@@ -181,7 +185,8 @@ def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
         val = set(min(docs.values(), key=len))
     elif len(names) == 1:
         only = docs[names[0]]
-        val = set(only[-max(1, min(want, len(only) - 1)):])
+        # a one-row cache trains its row and validates nothing
+        val = set(only[-min(want, len(only) - 1):]) if len(only) > 1 else set()
     return val
 
 
@@ -326,7 +331,7 @@ def run_align(opts: AlignOptions) -> int:
         e["split"] = "val" if i in val else "train"
     n_docs = len(set(doc_ids))
     log(f"[align] validation: {len(val)} of {len(index)} rows from {len({doc_ids[i] for i in val})} of "
-        f"{n_docs} documents" + (", the only document is split" if n_docs == 1 and len(val) < len(index) else ""))
+        f"{n_docs} documents" + (", the only document is split" if n_docs == 1 and 0 < len(val) < len(index) else ""))
     retained = [1.0 - d for d in stats["dropped"]]
     jw = np.array(stats["J"], dtype=np.float64) * np.array(stats["bias_cov"], dtype=np.float64) \
         if stats["bias_ok"] else np.zeros(0)
@@ -404,7 +409,9 @@ def run_align(opts: AlignOptions) -> int:
     if staged is None:
         # a staging directory a killed --materialize left behind
         shutil.rmtree(out / "materialize.tmp", ignore_errors=True)
-    for name in ("tables.json", "tables.safetensors"):
+    for name in ("tables.safetensors", "tables.json"):
+        # arrays first: a kill between the two leaves the earlier
+        # tables.json, which names other arrays and refuses these
         os.replace(tables_tmp / name, out / name)
     shutil.rmtree(tables_tmp, ignore_errors=True)
     if staged is not None:

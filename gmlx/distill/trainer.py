@@ -164,10 +164,13 @@ def load_student(path: str, adapter: str | None, hf_source: str | None):
 
 def make_schedule(lr: float, iters: int, warmup_frac: float):
     """Linear warmup over the first warmup_frac of the steps (at least one
-    step for any fraction above 0), then cosine decay; a fraction of 0
-    turns warmup off, so step 0 runs at the peak rate."""
+    step for any fraction above 0, never the last step, so a one-step run
+    has none), then cosine decay; a fraction of 0 turns warmup off. The
+    optimizer reads the schedule at the step count before the update, so
+    the first warmup step runs at rate 0 and step 0 without warmup at
+    the peak rate."""
     import mlx.optimizers as optim
-    warm = 0 if warmup_frac <= 0 else max(1, round(iters * warmup_frac))
+    warm = 0 if warmup_frac <= 0 or iters < 2 else min(iters - 1, max(1, round(iters * warmup_frac)))
     if warm <= 0:
         return optim.cosine_decay(lr, max(1, iters))
     warmup = optim.linear_schedule(0.0, lr, warm)
@@ -288,14 +291,22 @@ def run_train(opts: TrainOptions) -> int:
                 f"uses {TABLES_VERSION}, run gmlx distill align again")
             return 2
     view_dir, view = view_dirs[0], views[0]
-    tables = _align.load_tables(view_dir)
+    try:
+        tables = _align.load_tables(view_dir)
+    except ValueError as e:
+        log(f"[train] refuse: {e}, run gmlx distill align again")
+        return 2
     if (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S) != \
             (view["teacher_hash"], view["student_hash"], view["V_T"], view["V_S"]):
         log(f"[train] refuse: the tables in {view_dir} are not the ones view.json was aligned with, "
             "run gmlx distill align again")
         return 2
     for d, v in zip(view_dirs[1:], views[1:]):
-        t2 = _align.load_tables(d)
+        try:
+            t2 = _align.load_tables(d)
+        except ValueError as e:
+            log(f"[train] refuse: {e}, run gmlx distill align again")
+            return 2
         if (t2.teacher_hash, t2.student_hash, t2.V_T, t2.V_S, bool(v["identity"])) != \
                 (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S, bool(view["identity"])):
             log(f"[train] refuse: {d} is over another tokenizer pair than {view_dir}")

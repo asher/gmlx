@@ -3074,7 +3074,10 @@ def test_train_accepts_views_that_differ_only_in_loss_knobs(tmp_path, tok_bl, mo
                                               out=str(tmp_path / "v2"), T_dk=2.0, tau_alm=0.5)) == 0
     assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v2")], student=str(student),
                                                     iters=1, batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16,
-                                                    val_batches=1, ckpt_dir=str(tmp_path / "ck"))) == 0
+                                                    val_batches=1, ckpt_dir=str(tmp_path / "ck"),
+                                                    T_dk=3.0, tau_alm=0.25)) == 0
+    state = json.loads((tmp_path / "ck" / "last" / "state.json").read_text())
+    assert state["knobs"]["T_dk"] == 3.0 and state["knobs"]["tau_alm"] == 0.25
 
 
 def test_train_refuses_a_resume_mismatch_before_the_student_loads(tmp_path, tok_bl, capsys, monkeypatch):
@@ -3388,7 +3391,7 @@ def test_val_split_keeps_training_rows_on_few_documents():
     many = ["d%d" % (i // 3) for i in range(300)] + ["big"] * 100
     val = _view.val_split(many, 0.02, 1)
     assert 8 <= len(val) <= 16 and not any(many[i] == "big" for i in val)
-    assert _view.val_split(["x"], 0.02, 1) == {0}
+    assert _view.val_split(["x"], 0.02, 1) == set()
     assert _view.val_split(["x", "x"], 0.9, 1) == {1}
 
 
@@ -5880,7 +5883,9 @@ def test_census_orders_doc_keys_by_file_then_line_number():
 
 def test_train_schedule_without_warmup_starts_at_the_peak_rate_and_a_full_warmup_climbs_to_the_end():
     """--warmup 0 means no warmup: step 0 runs at the peak rate and the
-    cosine falls from there. --warmup 1 climbs for the whole run."""
+    cosine falls from there. --warmup 1 climbs for the whole run and
+    reaches the peak rate on the last step, which is never a warmup
+    step."""
     from gmlx.distill import trainer as _trainer
 
     lr, iters = 1e-3, 20
@@ -5888,7 +5893,7 @@ def test_train_schedule_without_warmup_starts_at_the_peak_rate_and_a_full_warmup
     assert vals[0] == pytest.approx(lr) and all(a > b for a, b in zip(vals, vals[1:])) and vals[-1] > 0
     vals = [float(_trainer.make_schedule(lr, iters, 1.0)(i)) for i in range(iters)]
     assert vals[0] == 0.0 and all(a < b for a, b in zip(vals, vals[1:]))
-    assert vals[-1] == pytest.approx(lr * (iters - 1) / iters)
+    assert vals[-2] == pytest.approx(lr * (iters - 2) / (iters - 1)) and vals[-1] == pytest.approx(lr)
 
 
 def test_train_refuses_an_identity_view_when_the_identity_path_leaves_no_loss(tmp_path, tok_bl, capsys,
@@ -6084,3 +6089,65 @@ def test_train_schedule_keeps_one_warmup_step_when_the_fraction_rounds_to_zero()
     s = _trainer.make_schedule(lr, 10, 0.05)
     assert float(s(0)) == 0.0 and float(s(1)) == pytest.approx(lr) and float(s(2)) < lr
     assert float(_trainer.make_schedule(lr, 10, 0.0)(0)) == pytest.approx(lr)
+    # the warmup never takes the last step: a one-step run has none, and
+    # a two-step run at any fraction warms one step and trains the other
+    assert float(_trainer.make_schedule(lr, 1, 0.05)(0)) == pytest.approx(lr)
+    two = _trainer.make_schedule(lr, 2, 0.9)
+    assert float(two(0)) == 0.0 and float(two(1)) == pytest.approx(lr)
+
+
+def test_train_one_step_updates_the_adapter(tmp_path, tok_bl, monkeypatch):
+    """--iters 1 under the default warmup runs its only step at the peak
+    rate, so the checkpoint's LoRA B matrices are no longer zero."""
+    import mlx.core as mx
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1")
+    ck = tmp_path / "ck"
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=1, batch_size=2,
+                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                    ckpt_dir=str(ck))) == 0
+    params = mx.load(str(ck / "last" / "trainable.safetensors"))
+    bs = [v for k, v in params.items() if k.endswith("lora_b")]
+    assert bs and any(float(mx.abs(v).max()) > 0 for v in bs)
+
+
+def test_validator_refuses_a_window_outside_its_turn_count(tmp_path, tok_bl):
+    """A per-turn row's window sits below its turns, or the census never
+    sees the document's last turn and gives it no map."""
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    reply = {"role": "assistant", "content": "the cat"}
+    msgs = [{"role": "user", "content": "q"}, reply]
+    _tiny_reply_cache(tmp_path / "c", tok, [(msgs, msgs)])
+    rows_path = tmp_path / "c" / "rows-00000.jsonl"
+    rows = dl.read_rows_jsonl(rows_path)
+    for turns, window, bad in ((1, 1, True), (2, 1, False), (True, 0, True), (0, 0, True), (2, 0, False)):
+        rows_path.write_text(json.dumps(dict(rows[0], turns=turns, window=window)) + "\n")
+        found = any("outside its turns" in p for p in dl.validate_cache(tmp_path / "c", check_sha=False))
+        assert found == bad, (turns, window)
+
+
+def test_a_torn_tables_pair_is_rebuilt_by_align_and_refused_by_train(tmp_path, tok_bl, tok_spm, capsys,
+                                                                     monkeypatch):
+    """tables.json names the tables.safetensors it was written with, so a
+    kill between the two replacements leaves a pair align rebuilds and
+    train refuses instead of loading another pair's arrays."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", student_tok=tok_spm)
+    meta = json.loads((v1 / "tables.json").read_text())
+    assert len(meta["safetensors_sha256"]) == 64
+    (v1 / "tables.json").write_text(json.dumps(dict(meta, safetensors_sha256="0" * 64)))
+    with pytest.raises(ValueError, match="torn"):
+        dl.load_tables(v1)
+    capsys.readouterr()
+    t = _view.get_tables(tok_bl, tok_spm, v1, tmp_path / "fresh", V_T=None, V_S=None)
+    assert f"[align] the tables under {v1} are torn" in capsys.readouterr().err
+    assert t.teacher_hash == meta["teacher_hash"] and dl.load_tables(tmp_path / "fresh").student_hash == t.student_hash
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=1, batch_size=2,
+                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                    ckpt_dir=str(tmp_path / "ck"))) == 2
+    assert f"[train] refuse: the tables under {v1} are torn" in capsys.readouterr().err
