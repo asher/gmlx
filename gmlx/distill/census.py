@@ -247,7 +247,11 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
                 hd["bytes"] += nbytes
                 hd["positions"] += 1
         rid = id_of.get(key, doc_id)
-        if (ranges or tranges) and window == last_window[key]:
+        # a per-turn cache records the turn count, so a final turn every
+        # cache dropped is told apart from the last turn they hold
+        turns = meta0.get("turns")
+        is_last = window == int(turns) - 1 if turns else window == last_window[key]
+        if (ranges or tranges) and is_last:
             high[rid] = ranges
             if tranges:
                 high_trace[rid] = tranges

@@ -166,7 +166,8 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     student_rows += 1
                 flagged += int(flag)
                 rows.append((len(rows), doc_id, w, ids.astype(np.int32), ends.astype(np.uint32), text, m2, spans,
-                             ("reply-think" if reason_target else "reply") if reply_kind else "chat", st_row))
+                             ("reply-think" if reason_target else "reply") if reply_kind else "chat", st_row,
+                             len(variants) if per_turn else None))
                 n_tokens += len(ids)
                 if full():
                     break
@@ -269,6 +270,10 @@ def row_meta(r, source: str, frame: str, generator_id: str = "", special: set[in
             meta.content_start = int(r[7][-1][0])
         if len(r) > 9 and r[9] is not None:
             meta.student_messages = r[9]
+        if len(r) > 10 and r[10] is not None:
+            # the census needs the final turn's number even when no cache
+            # holds the final turn
+            meta.turns = int(r[10])
     return meta
 
 

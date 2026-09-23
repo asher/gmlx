@@ -335,3 +335,33 @@ def test_float_flags_refuse_zero_nan_and_infinite_values_at_parse_time(argv, wor
     each."""
     rc, out = _run(argv)
     assert rc == 2 and word in out
+
+
+_GEN = ["distill", "gen", "--out", "o.jsonl", "--prompts", "p.jsonl", "--base-url", "http://h"]
+_CACHE = ["distill", "cache", "--teacher", "t.gguf", "--corpus", "c", "--out", "o"]
+_ALIGN = ["distill", "align", "--cache", "c", "--student", "s.gguf", "--out", "v"]
+_EVAL = ["distill", "eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json"]
+_CENSUS = ["distill", "census", "--without", "a", "--with", "b", "--out", "c.json"]
+
+
+@pytest.mark.parametrize("argv, word", [
+    (_GEN + ["--temperature", "nan"], "at least 0"),
+    (_GEN + ["--top-p", "2"], "between 0 and 1"),
+    (_GEN + ["--min-p", "-1"], "between 0 and 1"),
+    (_GEN + ["--timeout", "0"], "positive"),
+    (_GEN + ["--startup-timeout", "nan"], "positive"),
+    (_CACHE + ["--logits-cap-gb", "nan"], "positive"),
+    (_CACHE + ["--max-disk-gb", "nan"], "at least 0"),
+    (_CACHE + ["--expert-bytes-gb", "-1"], "at least 0"),
+    (_ALIGN + ["--max-disk-gb", "inf"], "at least 0"),
+    (_ALIGN + ["--val-fraction", "5"], "between 0 and 1"),
+    (_EVAL + ["--decontam-threshold", "nan"], "between 0 and 1"),
+    (_CENSUS + ["--delta-threshold", "nan"], "finite"),
+])
+def test_the_remaining_float_flags_refuse_nan_and_out_of_range_values_at_parse_time(argv, word):
+    """A nan cap never refuses anything (every comparison is False), a nan
+    sampling value fails every request after the server started, and a
+    validation fraction past 1 holds out the wrong rows after the whole
+    row loop; the parser refuses each."""
+    rc, out = _run(argv)
+    assert rc == 2 and word in out

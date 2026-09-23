@@ -38,6 +38,10 @@ GEN_VERSION = "4"
 CLOSE_ALLOWANCE = 4
 # a cut trace re-tokenized by gen can lose this many tokens to merges
 RETOKENIZE_SLACK = 2
+# a trace this far past the budget was never cut: the server ignored it
+UNENFORCED_MARGIN = 32
+# serve flags that install a drafter, whose budget close differs
+DRAFTER_FLAGS = ("--mtp", "--speculative", "--draft-gguf")
 DEFAULT_CONTEXT_FORMAT = "{context}\n\n{prompt}"
 
 
@@ -319,7 +323,9 @@ def trace_tokens(tokenizer, reasoning: str) -> int:
 def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOptions, seed: int,
              tokenizer=None) -> dict:
     """One chat completion. With a thinking budget, ``budget_hit`` is True
-    when the trace reached the budget and the server forced it closed:
+    when the trace reached the budget and the server forced it closed,
+    and ``budget_unenforced`` when the trace ran so far past it that the
+    server cannot have applied it (the trace is then whole, not cut):
     the server's reasoning token count when it reports one, else the
     trace re-tokenized with ``tokenizer``. None without a budget or a
     way to count."""
@@ -335,15 +341,19 @@ def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOption
     if rt is None and tokenizer is not None and opts.thinking_budget:
         rt = trace_tokens(tokenizer, reasoning)
     budget_hit: bool | None = None
+    unenforced = False
     if opts.thinking_budget and rt is not None:
         # the server forces the close once the count reaches the budget; its
         # own count is exact, a trace re-tokenized here can come out a merge
-        # or two short
-        budget_hit = rt >= opts.thinking_budget - (0 if reported else RETOKENIZE_SLACK)
+        # or two short. A trace far past the budget plus its close was never
+        # cut, which a drafter at concurrency above 1 does (it drops the
+        # budget with a note in the server log)
+        unenforced = rt > opts.thinking_budget + CLOSE_ALLOWANCE + UNENFORCED_MARGIN
+        budget_hit = not unenforced and rt >= opts.thinking_budget - (0 if reported else RETOKENIZE_SLACK)
     return {"content": msg.get("content") or "", "reasoning": reasoning,
             "finish_reason": ch.get("finish_reason"), "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"), "reasoning_tokens": rt,
-            "budget_hit": budget_hit, "wall_s": time.perf_counter() - t0}
+            "budget_hit": budget_hit, "budget_unenforced": unenforced, "wall_s": time.perf_counter() - t0}
 
 
 def reply_row(r: dict, c: dict, seed: int) -> dict:
@@ -357,6 +367,7 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
     row["gen"] = {"finish_reason": c["finish_reason"], "completion_tokens": c["completion_tokens"],
                   "prompt_tokens": c["prompt_tokens"], "reasoning_tokens": c["reasoning_tokens"],
                   "reasoning_chars": len(c["reasoning"]), "budget_hit": c["budget_hit"],
+                  "budget_unenforced": bool(c.get("budget_unenforced")),
                   "context": bool(r.get("student_messages")), "seed": seed, "wall_s": round(c["wall_s"], 3)}
     return row
 
@@ -380,7 +391,7 @@ def row_totals(out: Path) -> dict:
     """The run totals of every reply row in ``out``, read from the rows'
     ``gen`` blocks, so the totals describe the file after any number of
     resumes and interrupts rather than the runs that wrote it."""
-    completed = stops = tokens = budget_hits = longest = 0
+    completed = stops = tokens = budget_hits = longest = unenforced = 0
     if out.exists():
         with open(out, encoding="utf-8") as fh:
             for line in fh:
@@ -394,12 +405,13 @@ def row_totals(out: Path) -> dict:
                 ct = int(g.get("completion_tokens") or 0)
                 tokens += ct
                 budget_hits += int(bool(g.get("budget_hit")))
+                unenforced += int(bool(g.get("budget_unenforced")))
                 if g.get("finish_reason") == "stop":
                     stops += 1
                     longest = max(longest, ct)
     return {"completed": completed, "generated_tokens": tokens, "stops": stops,
             "stop_fraction": stops / max(completed, 1), "budget_hits": budget_hits,
-            "longest_stopped_reply_tokens": longest}
+            "budget_unenforced": unenforced, "longest_stopped_reply_tokens": longest}
 
 
 def _done_ids(out: Path) -> dict[str, list | None]:
@@ -548,6 +560,13 @@ def run_gen(opts: GenOptions) -> int:
     if opts.thinking_budget and not opts.thinking:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
         return 2
+    if opts.thinking_budget and any(a == f or a.startswith(f + "=") for a in opts.serve_arg for f in DRAFTER_FLAGS):
+        # a drafted teacher closes a cut trace with a sentence-long phrase
+        # the answer budget is not sized for, and drops the budget when
+        # requests batch
+        print("[gen] refuse: --thinking-budget with a drafter (--mtp, --speculative or --draft-gguf in --serve-arg) "
+              "is not enforced per request, serve the teacher without the drafter", file=sys.stderr)
+        return 2
     if any(a == "--thinking-budget" or a.startswith("--thinking-budget=") for a in opts.serve_arg):
         # a server-wide budget would cap every request under what the
         # sidecar records as the budget
@@ -649,7 +668,7 @@ def run_gen(opts: GenOptions) -> int:
         lock = threading.Lock()
         t0 = time.perf_counter()
         n_ok = n_err = 0
-        gen_tokens = stops = budget_hits = longest = 0
+        gen_tokens = stops = budget_hits = longest = unenforced = 0
 
         def work(i, r):
             return i, r, complete(base_url, model_id, r["messages"], opts, opts.seed + i, tokenizer)
@@ -687,6 +706,12 @@ def run_gen(opts: GenOptions) -> int:
                             gen_tokens += int(c["completion_tokens"] or 0)
                             stops += int(c["finish_reason"] == "stop")
                             budget_hits += int(bool(c["budget_hit"]))
+                            if c.get("budget_unenforced"):
+                                unenforced += 1
+                                if unenforced == 1:
+                                    log("[gen] warn: a reasoning trace ran past --thinking-budget, the server is "
+                                        "not enforcing it (a drafter at --concurrency above 1 drops the budget); "
+                                        "such rows are marked budget_unenforced, not budget_hit")
                             if c["finish_reason"] == "stop":
                                 longest = max(longest, int(c["completion_tokens"] or 0))
                             if n_ok % opts.report_every == 0:
@@ -733,7 +758,8 @@ def run_gen(opts: GenOptions) -> int:
             sidecar["run"]["wall_s"] += prev["run"].get("wall_s", 0)
         write_json_atomic(side, sidecar)
         log(f"[gen] done: {n_ok} replies, {gen_tokens} tokens, {gen_tokens / max(el, 1e-9):.0f} tok/s aggregate, "
-            f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {n_err} failed, sidecar {side}")
+            f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {unenforced} past the budget, "
+            f"{n_err} failed, sidecar {side}")
         return 0 if n_err == 0 else 1
     except PortInUse as e:
         print(f"[gen] refuse: {e}", file=sys.stderr)

@@ -238,6 +238,10 @@ def run_align(opts: AlignOptions) -> int:
                                                override=_frames.parse_render_kwargs(opts.frame_kwargs))
     _frames.set_render_kwargs(student_tok, student_kw)
     if frame:
+        why = _frames.template_problem(student_tok)
+        if why:
+            log(f"[align] refuse: the student's {why.removeprefix('the ')}")
+            return 2
         log(f"[align] student chat-template kwargs {student_kw or '{}'}, turn-end markers "
             f"{_frames.assistant_tails(student_tok)!r}"
             + ("" if _frames.has_chat_template(student_tok) else " (no chat template: plain render)"))
@@ -302,6 +306,12 @@ def run_align(opts: AlignOptions) -> int:
         if (r + 1) % 1000 == 0:
             log(f"[align] {r + 1}/{n} rows ({(time.perf_counter() - t0) / (r + 1) * 1000:.1f} ms/row)")
     wall = time.perf_counter() - t0
+    if not index:
+        # an empty view would pass the own-group gate (no boundary to
+        # average) and replace an earlier view with nothing for train
+        log(f"[align] refuse: no row compiled ({n} rows, {loader.dropped} dropped, {loader.render_failures} "
+            "student render failures), no view written")
+        return 2
     Kp = opts.kprime or (max(stats["n_groups_max"]) if stats["n_groups_max"] else reader.K)
     if identity:
         if opts.kprime and opts.kprime != reader.K:
@@ -371,9 +381,21 @@ def run_align(opts: AlignOptions) -> int:
             log(f"[align] refuse: {e}, the partial view was removed")
             return 2
         staged = (staging, nsh, time.perf_counter() - t1)
-    # every refusal is behind: a view directory is rewritten whole, since
-    # shards of an earlier align over another student or other knobs
-    # would otherwise be reused by train
+    # every refusal is behind, and the tables are staged first, so the
+    # earlier view goes only once every new file is on disk; a view
+    # directory is then rewritten whole, since shards of an earlier align
+    # over another student or other knobs would otherwise be reused by
+    # train
+    tables_tmp = out / "tables.tmp"
+    shutil.rmtree(tables_tmp, ignore_errors=True)
+    try:
+        _align.save_tables(tables_tmp, tables)
+    except OSError as e:
+        shutil.rmtree(tables_tmp, ignore_errors=True)
+        if staged is not None:
+            shutil.rmtree(staged[0], ignore_errors=True)
+        log(f"[align] refuse: cannot write the tables under {out}: {e}")
+        return 2
     stale = sorted(out.glob("view-*.safetensors")) + [p for p in (out / "view.json",) if p.exists()]
     for p in stale:
         p.unlink()
@@ -382,13 +404,9 @@ def run_align(opts: AlignOptions) -> int:
     if staged is None:
         # a staging directory a killed --materialize left behind
         shutil.rmtree(out / "materialize.tmp", ignore_errors=True)
-    try:
-        _align.save_tables(out, tables)
-    except OSError as e:
-        if staged is not None:
-            shutil.rmtree(staged[0], ignore_errors=True)
-        log(f"[align] refuse: cannot write the tables under {out}: {e}")
-        return 2
+    for name in ("tables.json", "tables.safetensors"):
+        os.replace(tables_tmp / name, out / name)
+    shutil.rmtree(tables_tmp, ignore_errors=True)
     if staged is not None:
         staging, nsh, wall_m = staged
         for p in sorted(staging.glob("view-*.safetensors")):

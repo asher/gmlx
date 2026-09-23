@@ -163,11 +163,11 @@ def load_student(path: str, adapter: str | None, hf_source: str | None):
 
 
 def make_schedule(lr: float, iters: int, warmup_frac: float):
-    """Linear warmup over the first warmup_frac of the steps, then cosine
-    decay; no warmup step at all when the fraction rounds to zero, so
-    step 0 runs at the peak rate."""
+    """Linear warmup over the first warmup_frac of the steps (at least one
+    step for any fraction above 0), then cosine decay; a fraction of 0
+    turns warmup off, so step 0 runs at the peak rate."""
     import mlx.optimizers as optim
-    warm = int(iters * warmup_frac)
+    warm = 0 if warmup_frac <= 0 else max(1, round(iters * warmup_frac))
     if warm <= 0:
         return optim.cosine_decay(lr, max(1, iters))
     warmup = optim.linear_schedule(0.0, lr, warm)

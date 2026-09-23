@@ -366,15 +366,23 @@ def run_filter(opts: FilterOptions) -> int:
                          "inputs": [str(p) for p in inputs]}
     joined = [(p, s) for p, s in zip(inputs, sides) if s is not None]
     if joined and isinstance(joined[0][1].get("run"), dict):
-        # the run block's totals are read back from the rows written, so
-        # they count the survivors; the request counts and walls stay
+        # the run block keeps what gen measured (a join adds the inputs'
+        # counts up), and the survivors' totals sit beside it under kept
         from .gen import row_totals
         runs = [s.get("run") or {} for _, s in joined]
-        run = {**runs[0], **row_totals(out)}
+        run = dict(runs[0])
         if len(joined) > 1:
-            run["failed"] = sum(int(r.get("failed") or 0) for r in runs)
+            for k in ("completed", "failed", "generated_tokens", "stops", "budget_hits", "budget_unenforced"):
+                if any(k in r for r in runs):
+                    run[k] = sum(int(r.get(k) or 0) for r in runs)
             run["wall_s"] = sum(float(r.get("wall_s") or 0.0) for r in runs)
+            if "stops" in run and "completed" in run:
+                run["stop_fraction"] = run["stops"] / max(run["completed"], 1)
+            if any("longest_stopped_reply_tokens" in r for r in runs):
+                run["longest_stopped_reply_tokens"] = max(int(r.get("longest_stopped_reply_tokens") or 0)
+                                                          for r in runs)
             run.pop("tok_s_aggregate", None)     # one rate cannot describe two runs
+        run["kept"] = row_totals(out)
         sidecar["run"] = run
     if len(joined) > 1:
         # one sidecar describes every input: the prompt fields list each

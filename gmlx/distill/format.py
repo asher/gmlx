@@ -176,6 +176,7 @@ class RowMeta:
     student_messages: list | None = None
     content_start: int | None = None
     zero_width: list | None = None      # token indices that span no bytes (a dummy prefix after a special)
+    turns: int | None = None            # per-turn rows: how many turns the conversation has, window counts from 0
 
     def as_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -189,6 +190,8 @@ class RowMeta:
             d.pop("zero_width", None)
         if d.get("content_start") is None:
             d.pop("content_start", None)
+        if d.get("turns") is None:
+            d.pop("turns", None)
         return d
 
 

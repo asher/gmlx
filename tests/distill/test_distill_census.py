@@ -31,7 +31,7 @@ def tok():
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
                  K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None,
                  boost_rows: set[int] | None = None, content_offset: int = 0, frame: str = "reply",
-                 record_content_start: bool = True):
+                 record_content_start: bool = True, turns: int | None = None):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -78,7 +78,8 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
         metas.append(dl.RowMeta(row_id=r, doc_id=doc_id, window=window, n_tokens=n, frame=frame,
                                 messages=msgs, spans=[list(s) for s in spans],
                                 prefix_n_tokens=int(np.argmax(tm)) + 1, suffix_start_byte=b0,
-                                content_start=b0 + content_offset if record_content_start else None))
+                                content_start=b0 + content_offset if record_content_start else None,
+                                turns=turns))
     writer.write(0, dl.pack_shard(rows, tbytes, K, False), metas, wall_s=0.01, step=64)
     dl.write_manifest(tmp, teacher_path="synthetic", dataset="synthetic", num_samples=len(rows),
                       max_seq_len=64, seed=seed, top_k=K, vocab_size=V, config_vocab_size=V,
@@ -503,3 +504,26 @@ def test_census_gives_no_positions_map_to_a_document_whose_last_turn_one_cache_d
     s = json.loads(out.read_text())
     assert s["rows"] == 1 and s["teacher_high_delta"]["positions"] == 1
     assert s["high_delta"] == {}
+
+
+def test_census_gives_no_positions_map_when_every_cache_dropped_the_final_turn(tmp_path, tok):
+    """When every cache dropped a document's final turn (it did not fit),
+    the union of their rows ends at an earlier turn; the turn count the
+    cache recorded on the rows tells the census that turn is not the one
+    eval scores, so no map is stored under the document's id."""
+    turn0 = _conv("say it 0", REPLIES[0])
+    without = _reply_cache(tmp_path / "without", tok, [turn0], doc_prefix="a.jsonl", docs=[("a.jsonl:0", 0)],
+                           turns=2)
+    with_ = _reply_cache(tmp_path / "with", tok, [turn0], doc_prefix="b.jsonl", boost={0: 6.0},
+                         docs=[("b.jsonl:0", 0)], turns=2)
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["rows"] == 1 and s["teacher_high_delta"]["positions"] == 1 and s["high_delta"] == {}
+    # the final turn present on both sides keeps its map
+    final = _reply_cache(tmp_path / "w2", tok, [turn0], doc_prefix="a.jsonl", docs=[("a.jsonl:0", 1)], turns=2)
+    final_ctx = _reply_cache(tmp_path / "c2", tok, [turn0], doc_prefix="b.jsonl", boost={0: 6.0},
+                             docs=[("b.jsonl:0", 1)], turns=2)
+    out2 = tmp_path / "census2.json"
+    assert cs.run_census(cs.CensusOptions(without=str(final), with_=[str(final_ctx)], out=str(out2))) == 0
+    assert set(json.loads(out2.read_text())["high_delta"]) == {"a.jsonl:0"}

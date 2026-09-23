@@ -95,19 +95,19 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="Tokenizer for the reasoning trace count with --base-url (default: read from --teacher).")
     p.add_argument("--serve-arg", action="append", default=[], metavar="ARG",
                    help="Extra gmlx serve argument, repeatable.")
-    p.add_argument("--startup-timeout", type=float, default=900.0,
+    p.add_argument("--startup-timeout", type=_positive_float, default=900.0,
                    help="Seconds to wait for the served teacher (default 900).")
     p.add_argument("--concurrency", type=_positive_int, default=8, help="Requests in flight (default 8).")
     p.add_argument("--max-tokens", type=_positive_int, default=1024,
                    help="Answer budget per request (default 1024). With --thinking-budget the trace has its own "
                         "budget on top; without one a thinking reply shares this budget with its trace.")
-    p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
-    p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
+    p.add_argument("--temperature", type=_nonneg_float, default=0.7, help="Sampling temperature (default 0.7).")
+    p.add_argument("--top-p", type=_fraction, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
-    p.add_argument("--min-p", type=float, default=None, help="Minimum-probability cutoff (default the server's).")
+    p.add_argument("--min-p", type=_fraction, default=None, help="Minimum-probability cutoff (default the server's).")
     p.add_argument("--seed", type=_nonneg_int, default=1,
                    help="Base seed, and each request uses it plus the prompt index (default 1).")
-    p.add_argument("--timeout", type=float, default=1800.0, help="Per-request timeout in seconds (default 1800).")
+    p.add_argument("--timeout", type=_positive_float, default=1800.0, help="Per-request timeout in seconds (default 1800).")
     p.add_argument("--report-every", type=_positive_int, default=50, help="Progress line interval in replies (default 50).")
     return p
 
@@ -173,11 +173,11 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=_positive_int, default=256, help="Log-probabilities kept per position (default 256).")
     p.add_argument("--max-len", type=_positive_int, default=2048,
                    help="Teacher tokens per window including the start token (default 2048).")
-    p.add_argument("--max-disk-gb", type=float, default=None,
+    p.add_argument("--max-disk-gb", type=_nonneg_float, default=None,
                    help="Refuse when the size estimate exceeds this (default none).")
     p.add_argument("--cache-limit-gb", type=_nonneg_float, default=8.0,
                    help="MLX buffer cache cap during the pass (default 8).")
-    p.add_argument("--logits-cap-gb", type=float, default=4.0,
+    p.add_argument("--logits-cap-gb", type=_positive_float, default=4.0,
                    help="Memory cap that sizes the head sub-chunk (default 4).")
     p.add_argument("--floor", action="store_true",
                    help="Also store floor_kld, the KL against the f16-rounded top-k.")
@@ -220,7 +220,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Leave the wired limit where it is for a teacher that fits in memory.")
     p.add_argument("--stream-experts", action="store_true",
                    help="Force expert streaming on a MoE teacher that would fit in memory.")
-    p.add_argument("--expert-bytes-gb", type=float, default=None,
+    p.add_argument("--expert-bytes-gb", type=_nonneg_float, default=None,
                    help="Expert bytes read per forward, for the read-traffic report of a streaming teacher.")
     p.add_argument("--routes", action="store_true",
                    help="MoE teachers: store every layer's top-k expert ids per position (the routes field, "
@@ -251,10 +251,10 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
                    help="Cap on distinct student-token groups kept per boundary (default: the maximum seen).")
     p.add_argument("--materialize", action="store_true",
                    help="Also write the batch tensors as view shards, for a pair whose loader is slow.")
-    p.add_argument("--max-disk-gb", type=float, default=None,
+    p.add_argument("--max-disk-gb", type=_nonneg_float, default=None,
                    help="Refuse to materialize past this size (default none).")
     p.add_argument("--force", action="store_true", help="Keep a view the own-group check would refuse.")
-    p.add_argument("--val-fraction", type=float, default=0.02,
+    p.add_argument("--val-fraction", type=_fraction, default=0.02,
                    help="Fraction of rows held for validation (default 0.02).")
     p.add_argument("--seed", type=_nonneg_int, default=1, help="Seed of the validation split (default 1).")
     p.add_argument("--w-mid", type=_nonneg_float, default=DEFAULT_KNOBS["w_mid"],
@@ -390,7 +390,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                         "template prefix.")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Windows per batch (default 8).")
     p.add_argument("--cache-limit-gb", type=_nonneg_float, default=4.0, help="MLX buffer cache cap (default 4).")
-    p.add_argument("--decontam-threshold", type=float, default=0.01,
+    p.add_argument("--decontam-threshold", type=_fraction, default=0.01,
                    help="Slice window fraction found in the corpus above which its gate is void (default 0.01).")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
@@ -411,7 +411,7 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--md", type=_path, default=None, metavar="PATH", help="Markdown summary to write.")
     p.add_argument("--corpus", type=_path, default=None, metavar="JSONL",
                    help="The corpus jsonl the caches were made from, so high_delta is keyed by row id.")
-    p.add_argument("--delta-threshold", type=float, default=1.0,
+    p.add_argument("--delta-threshold", type=_finite_float, default=1.0,
                    help="Nats gained at the token the teacher wrote that make a position high-delta (default 1.0).")
     p.add_argument("--pair-by", choices=("line", "doc"), default="line",
                    help="Pair rows across caches by corpus line (default) or by the full doc_id.")
@@ -446,6 +446,16 @@ def _nonneg_float(text: str) -> float:
         raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
     if not (math.isfinite(x) and x >= 0):
         raise argparse.ArgumentTypeError(f"a finite number of at least 0 is required, got {text}")
+    return x
+
+
+def _finite_float(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not math.isfinite(x):
+        raise argparse.ArgumentTypeError(f"a finite number is required, got {text}")
     return x
 
 

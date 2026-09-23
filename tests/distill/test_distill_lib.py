@@ -5943,8 +5943,11 @@ def test_align_removes_a_leftover_staging_directory_and_refuses_when_the_tables_
 
     monkeypatch.setattr(_align, "save_tables", fail)
     capsys.readouterr()
+    before = (out / "view.json").read_bytes()
     assert _view.run_align(opts) == 2
     assert "[align] refuse: cannot write the tables" in capsys.readouterr().err
+    assert (out / "view.json").read_bytes() == before and not (out / "tables.tmp").exists()
+    assert dl.load_tables(out).teacher_hash == dl.vocab_map_hash(tok_bl)
 
 
 def test_cache_kld_through_the_distill_head_matches_the_full_logits(tmp_path, tok_bl):
@@ -5958,7 +5961,17 @@ def test_cache_kld_through_the_distill_head_matches_the_full_logits(tmp_path, to
     reader = dl.CacheReader(tmp_path / "c")
     model, _cfg, _tok = _student.load_mlx_student(_tiny_mlx_teacher(tmp_path / "m", tok_bl))
     full = dl.cache_kld(model, reader)
-    via = dl.cache_kld(model, reader, head=head_spec_from_model(model), head_chunk=4)
+
+    class TrunkOnly:
+        """The model with its own forward disabled: the head path must
+        run the trunk and the head spec, never the full logits."""
+        def __init__(self, m):
+            self.model = m.model
+
+        def __call__(self, *a, **k):
+            raise AssertionError("the head path built full logits")
+
+    via = dl.cache_kld(TrunkOnly(model), reader, head=head_spec_from_model(model), head_chunk=4)
     assert via["positions"] == full["positions"] and via["rows"] == full["rows"]
     assert via["top1_agreement"] == full["top1_agreement"]
     assert via["mean_kld_nats"] == pytest.approx(full["mean_kld_nats"], rel=1e-4, abs=1e-6)
@@ -6003,3 +6016,71 @@ def test_cache_refuses_a_named_template_set_without_a_default(tmp_path, capsys):
                                                   frame="reply", top_k=8, max_len=64))
     err = capsys.readouterr().err
     assert rc == 2 and '[cache] refuse: the chat template is a named set without a "default" entry' in err
+
+
+def test_align_refuses_a_student_named_template_set_and_a_cache_where_every_row_drops(tmp_path, tok_bl, capsys,
+                                                                                    monkeypatch):
+    """A student whose named template set has no "default" would drop
+    every row; so would a cache where no row compiles. Both are refused
+    with exit 2 before any file of an earlier view is touched, instead of
+    exit 0 with an empty view that train loads the student to refuse."""
+    from gmlx.distill import view as _view
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    msgs = [dl.continue_messages(t) for t in ("the cat is the cat", "is the cat the cat is", "cat cat the")]
+    cache = tmp_path / "cache"
+    _tiny_framed_cache(cache, teacher, msgs, open_tail=True)
+    teacher.save_pretrained(cache / "tokenizer")
+    out = tmp_path / "view"
+    good = _with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_B)
+    good.save_pretrained(tmp_path / "student")
+    opts = _view.AlignOptions(cache=str(cache), student=str(tmp_path / "student"), out=str(out))
+    assert _view.run_align(opts) == 0
+    before = (out / "view.json").read_bytes()
+    named = _with_template(_bytelevel_tokenizer(_BL_MERGES), {"rag": _TEMPLATE_B})
+    named.save_pretrained(tmp_path / "named")
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(tmp_path / "named"), out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and '[align] refuse: the student\'s chat template is a named set without a "default"' in err
+    assert (out / "view.json").read_bytes() == before
+    monkeypatch.setattr(_view.ViewLoader, "compile", lambda self, r: None)
+    rc = _view.run_align(opts)
+    err = capsys.readouterr().err
+    assert rc == 2 and "[align] refuse: no row compiled" in err, err
+    assert (out / "view.json").read_bytes() == before
+
+
+def test_per_turn_rows_record_their_turn_count(tmp_path, tok_bl):
+    """A per-turn cache numbers a document's rows by turn; the count of
+    turns on each row lets the census tell the final turn apart from an
+    earlier one even when every cache dropped the final turn."""
+    from gmlx.distill import format as _format
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    conv = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "the cat"},
+            {"role": "user", "content": "more"}, {"role": "assistant", "content": "is the cat"}]
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"messages": conv}) + "\n", encoding="utf-8")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out),
+                                                    frame="reply", per_turn=True, top_k=8, max_len=64)) == 0
+    rows = _format.read_rows_jsonl(out / "rows-00000.jsonl")
+    assert sorted((r["window"], r["turns"]) for r in rows) == [(0, 2), (1, 2)]
+    plain = _text_corpus(tmp_path / "p.jsonl", n=1)
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(plain), out=str(tmp_path / "pc"),
+                                                    top_k=8, max_len=64)) == 0
+    assert "turns" not in _format.read_rows_jsonl(tmp_path / "pc" / "rows-00000.jsonl")[0]
+
+
+def test_train_schedule_keeps_one_warmup_step_when_the_fraction_rounds_to_zero():
+    """--warmup 0.05 over 10 steps is one warmup step, not none; only
+    --warmup 0 turns warmup off."""
+    from gmlx.distill import trainer as _trainer
+
+    lr = 1e-3
+    s = _trainer.make_schedule(lr, 10, 0.05)
+    assert float(s(0)) == 0.0 and float(s(1)) == pytest.approx(lr) and float(s(2)) < lr
+    assert float(_trainer.make_schedule(lr, 10, 0.0)(0)) == pytest.approx(lr)

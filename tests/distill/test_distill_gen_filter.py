@@ -1331,8 +1331,8 @@ def test_filter_join_refuses_other_filter_settings_and_sums_the_run_totals(tmp_p
     assert side["joined"] == [str(fa), str(fb)]
     assert side["prompt_set_sha256"] not in ("aaaa", "bbbb") and len(side["prompt_set_sha256"]) == 64
     run = side["run"]
-    assert run["completed"] == 5 and run["generated_tokens"] == 50 and run["failed"] == 2
-    assert run["wall_s"] == 7.0
+    assert run["completed"] == 5 and run["failed"] == 2 and run["wall_s"] == 7.0
+    assert run["kept"] == {**run["kept"], "completed": 5, "generated_tokens": 50}
     assert run["concurrency"] == 2 and "tok_s_aggregate" not in run
     # a single input keeps its gen run block as it was
     single = json.loads((tmp_path / "fa.jsonl.gen.json").read_text())
@@ -1433,8 +1433,8 @@ def test_filter_join_compares_the_verify_command_and_the_corpus_prompting_and_a_
     fa = tmp_path / "fa.jsonl"
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(fa), min_words=4)) == 0
     single = json.loads((tmp_path / "fa.jsonl.gen.json").read_text())
-    assert single["run"]["completed"] == 2 and single["run"]["generated_tokens"] == 20
-    assert single["run"]["tok_s_aggregate"] == 9.0 and single["run"]["wall_s"] == 1.0
+    assert single["run"]["completed"] == 3 and single["run"]["tok_s_aggregate"] == 9.0
+    assert single["run"]["kept"] == {**single["run"]["kept"], "completed": 2, "generated_tokens": 20}
     b = gen_file("b", 2)
     fb = tmp_path / "fb.jsonl"
     assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(fb), min_words=4)) == 0
@@ -1452,3 +1452,38 @@ def test_filter_join_compares_the_verify_command_and_the_corpus_prompting_and_a_
     # an input generated before the corpus keys were recorded joins one that has them
     e = gen_file("e", 2)
     assert flt.run_filter(flt.FilterOptions(inputs=[str(c), str(e)], out=str(tmp_path / "j.jsonl"))) == 0
+
+
+def test_gen_refuses_a_thinking_budget_with_a_drafter_and_flags_a_budget_the_server_ignored(tmp_path, stub_server,
+                                                                                            capsys, monkeypatch):
+    """A drafted teacher closes a cut trace with a long phrase and drops
+    the budget when requests batch, so --thinking-budget with a drafter
+    flag in --serve-arg is refused. Against any server, a trace that ran
+    well past the budget shows the server did not enforce it: the row is
+    marked unenforced rather than a hit, and one warning is printed."""
+    import gmlx.distill.tokens as tokens_mod
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"id": "long", "messages": [{"role": "user", "content": "LONG one"}]},
+        {"id": "short", "messages": [{"role": "user", "content": "brief"}]},
+    ])
+    for flag in (["--mtp"], ["--draft-gguf", "d.gguf"], ["--speculative=1"]):
+        rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
+                                        thinking=True, thinking_budget=40, tokenizer="teacher.gguf",
+                                        serve_arg=flag))
+        err = capsys.readouterr().err
+        assert rc == 2 and "[gen] refuse: --thinking-budget with a drafter" in err, err
+    monkeypatch.setattr(tokens_mod, "load_tokenizer", lambda path: _WordTokenizer())
+    monkeypatch.setattr(gen, "_reasoning_tokens", lambda obj: None)
+    monkeypatch.setattr(gen, "trace_tokens", lambda tok, text: len(text.split()) * 3)
+    out = tmp_path / "b.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, thinking=True,
+                                      thinking_budget=40, tokenizer="teacher.gguf")) == 0
+    err = capsys.readouterr().err
+    rows = {r["id"]: r for r in _rows(out)}
+    assert rows["long"]["gen"]["reasoning_tokens"] == 120
+    assert rows["long"]["gen"]["budget_hit"] is False and rows["long"]["gen"]["budget_unenforced"] is True
+    assert rows["short"]["gen"]["reasoning_tokens"] == 60
+    assert rows["short"]["gen"]["budget_hit"] is True and rows["short"]["gen"]["budget_unenforced"] is False
+    assert err.count("[gen] warn: a reasoning trace ran past --thinking-budget") == 1
+    side = json.loads((tmp_path / "b.jsonl.gen.json").read_text())
+    assert side["run"]["budget_hits"] == 1 and side["run"]["budget_unenforced"] == 1
