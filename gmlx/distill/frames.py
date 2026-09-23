@@ -291,23 +291,23 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
 
 def _header_end(tokenizer, prior: list[dict], rendered: str) -> int:
     """Where the assistant turn after ``prior`` can start in ``rendered``:
-    the length of the longest common prefix of the render and the
-    generation prompt for ``prior``, backed off to the last whitespace
-    or marker close inside it, 0 when the template cannot render that
-    prefix."""
+    the length of the frame the template renders a reply behind
+    (``render_frame``) when the render carries it whole, else the common
+    prefix of the two backed off to the last whitespace or marker close,
+    0 when the template cannot render the frame."""
     try:
-        if has_chat_template(tokenizer):
-            gen = apply_template(tokenizer, prior, add_generation_prompt=True)
-        else:
-            gen = _plain_render(tokenizer, prior, gen_prompt=True)
+        hdr = render_frame(tokenizer, prior)
     except ValueError:
         return 0
-    h = len(os.path.commonprefix([gen, rendered]))
-    # a generation prompt can run past the header (a think block it opens
-    # for the reply), and the common prefix then ends inside a reply that
-    # starts with a tag: back off to the last boundary the header renders
-    while h > 0 and not (rendered[h - 1].isspace() or rendered[h - 1] == ">"):
-        h -= 1
+    h = len(os.path.commonprefix([hdr, rendered]))
+    # a frame can leave the render before its end (a think block whose
+    # content the template moves, a reply that starts with a tag), and
+    # the common prefix then ends inside the reply: back off to the last
+    # boundary the frame renders; a frame carried whole ends where it ends,
+    # marker or not ("[/INST]", "<|message|>")
+    if h < len(hdr):
+        while h > 0 and not (rendered[h - 1].isspace() or rendered[h - 1] == ">"):
+            h -= 1
     return h
 
 
@@ -528,12 +528,15 @@ def shared_boundaries_spans(t_ends: np.ndarray, s_ends: np.ndarray,
 
 
 def cut_windows(ids: np.ndarray, ws_start: np.ndarray, max_len: int,
-                n_special_prefix: int) -> list[tuple[int, int]]:
+                n_special_prefix: int, text: bytes | None = None,
+                ends: np.ndarray | None = None) -> list[tuple[int, int]]:
     """Windows [start, end) over a document's teacher tokens, at most
     max_len tokens each, cut at the last whitespace-initial token boundary.
     The first window keeps the special prefix (BOS); later windows start at
     a whitespace-initial token. A window with no whitespace-initial token
-    in range is cut hard at max_len."""
+    in range is cut hard at max_len, backed off to a character boundary
+    when the text bytes and the per-token end offsets are given (a
+    byte-level tokenizer splits a multi-byte character over tokens)."""
     n = len(ids)
     out = []
     start = 0
@@ -546,6 +549,9 @@ def cut_windows(ids: np.ndarray, ws_start: np.ndarray, max_len: int,
                 cut -= 1
             if cut > lo:
                 end = cut
+            elif text is not None and ends is not None:
+                while end > lo and int(ends[end - 1]) < len(text) and (text[int(ends[end - 1])] & 0xC0) == 0x80:
+                    end -= 1
         out.append((start, end))
         start = end
     return out

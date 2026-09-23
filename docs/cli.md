@@ -1033,7 +1033,7 @@ Training flags, in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--view DIR` | required | a view directory, repeatable to mix views over one tokenizer pair |
+| `--view DIR` | required | a view directory, repeatable to mix views aligned alike over one tokenizer pair |
 | `--student GGUF` | required | the student GGUF, sharded ok |
 | `--adapter-out PATH` | required | where to write the GGUF adapter |
 | `--iters N` | required | training steps |
@@ -1054,12 +1054,12 @@ Training flags, in the order `--help` prints them.
 | `--ce F` | `0` | weight of the cross-entropy term |
 | `--T-dk F` | the view's | override the view's T_dk |
 | `--tau-alm F` | the view's | override the view's tau_alm |
-| `--gamma F` | the view's | override the view's gamma |
+| `--gamma F` | the view's | override the view's gamma, refused on a materialized view (its chunks are cut by `align`) |
 | `--chunk N` | `512` | positions per head chunk |
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
-| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none or the views, batch, seed, steps, lr, knobs, clip, decay, dropout or `--hs` changed |
+| `--resume` | off | resume the last checkpoint under `--ckpt-dir`, refused when none exists or views, student, LoRA, batch, seed, steps, lr, knobs, clip, decay or `--hs` changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |

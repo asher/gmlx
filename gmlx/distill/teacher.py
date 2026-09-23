@@ -184,7 +184,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
             flagged += int(flag)
             if len(ids) == 0:
                 continue
-            for w, (s, e) in enumerate(_frames.cut_windows(ids, ws, budget, 0)):
+            for w, (s, e) in enumerate(_frames.cut_windows(ids, ws, budget, 0, text=tbytes, ends=ends)):
                 b0 = int(ends[s - 1]) if s > 0 else 0
                 b1 = int(ends[e - 1])
                 wtext = tbytes[b0:b1]
@@ -258,13 +258,14 @@ IDENTITY_HEAD_BYTES = 16 * 1024 * 1024
 
 def teacher_identity(path: str) -> dict:
     """What a resume compares to know it continues on the same teacher:
-    the resolved path, the size and a hash over the leading bytes of a
-    GGUF file and its split shards, or of a directory checkpoint's
-    config and each weight file. The same bytes written again, or
-    touched, still match."""
+    the absolute path as named (symlinks kept, so a Hugging Face snapshot
+    keeps its shard names and its .gguf suffix), the size and a hash over
+    the leading bytes of a GGUF file and its split shards, or of a
+    directory checkpoint's config and each weight file. The same bytes
+    written again, or touched, still match."""
     from gmlx.load.preflight import find_split_shards
 
-    p = Path(path).expanduser().resolve()
+    p = Path(path).expanduser().absolute()
     if p.is_file():
         try:
             files = [Path(f) for f in find_split_shards(str(p))]
@@ -639,7 +640,7 @@ def run_cache(opts: CacheOptions) -> int:
     hist = np.histogram(captured, bins=edges)[0].tolist() if captured.size else []
     wall_total = time.perf_counter() - t0
     template = getattr(hf_inner(tokenizer), "chat_template", "") or ""
-    teacher_abs = str(Path(opts.teacher).expanduser().resolve())
+    teacher_abs = str(Path(opts.teacher).expanduser().absolute())
     _format.write_manifest(
         out, teacher_path=teacher_abs, dataset=opts.corpus, num_samples=len(rows),
         max_seq_len=opts.max_len, seed=0, top_k=opts.top_k, vocab_size=V,

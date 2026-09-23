@@ -107,14 +107,20 @@ def lora_modules_to_gguf(model, keys: Iterable[str] | None = None) -> list:
 
 
 def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
-                         rank: int, scale: float,
+                         scale: float, rank: int | None = None,
                          keys: Iterable[str] | None = None) -> int:
     """Write a model's trained LoRA layers as a llama.cpp GGUF adapter.
     ``alpha`` is stored as ``scale * rank`` so the loader's ``alpha / rank``
-    recomputes the trained ``scale``. Returns the module count."""
+    recomputes the trained ``scale``; the rank is the factors' own, and a
+    ``rank`` given that differs from it is refused. Returns the module
+    count."""
     modules = lora_modules_to_gguf(model, keys)
     if not modules:
         raise ValueError("model has no trained LoRA layers to save")
+    trained = int(modules[0][1].shape[0])
+    if rank is not None and int(rank) != trained:
+        raise ValueError(f"rank {rank} differs from the trained factors' rank {trained}")
+    rank = trained
     cfg = config.get("text_config", config)
     n_head = cfg["num_attention_heads"]
     n_head_kv = cfg.get("num_key_value_heads", n_head)

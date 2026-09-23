@@ -26,6 +26,7 @@ from . import loss as _loss
 from . import student as _student
 from .constants import DEFAULT_KNOBS, GB, log
 from .format import free_bytes, manifest_sha256, read_json, write_json_atomic
+from .teacher import teacher_identity
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
 
 
@@ -94,20 +95,25 @@ def view_fingerprint(view: dict) -> str:
     return hashlib.sha256(json.dumps(sub, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict) -> dict:
+def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale: float) -> dict:
     """What a resumed run must share with the run that wrote the
     checkpoint, else the batches it skips are not the ones already
-    trained on and the schedule moves: the views by fingerprint, the
-    batch size, the seed, the step count, the learning-rate settings, the
-    loss knobs, the gradient clip, the weight decay, the LoRA dropout and
-    the hidden-state term."""
+    trained on, the schedule moves, or the checkpoint's factors do not
+    fit the model: the views by fingerprint, the batch size, the seed,
+    the step count, the learning-rate settings, the loss knobs, the
+    gradient clip, the weight decay, the LoRA rank, multiplier, keys and
+    dropout, the hidden-state term and the student by size and leading
+    bytes."""
+    ident = teacher_identity(opts.student)
     return {"views": [view_fingerprint(v) for v in views],
             "batch_size": int(opts.batch_size), "seed": int(opts.seed), "iters": int(opts.iters),
             "lr": float(opts.lr), "warmup": float(opts.warmup), "knobs": dict(knobs),
             "clip": float(opts.clip),
             "weight_decay": None if opts.weight_decay is None else float(opts.weight_decay),
+            "lora_rank": int(opts.lora_rank), "lora_scale": float(scale), "lora_keys": list(LORA_KEYS),
             "lora_dropout": float(opts.lora_dropout), "hs": float(opts.hs),
-            "hs_loss": opts.hs_loss if opts.hs else None}
+            "hs_loss": opts.hs_loss if opts.hs else None,
+            "student": {"size": ident["size"], "sha256_head": ident["sha256_head"]}}
 
 
 def load_student(path: str, adapter: str | None, hf_source: str | None):
@@ -242,12 +248,25 @@ def run_train(opts: TrainOptions) -> int:
         if (v.get("student_render_kwargs") or {}) != (view.get("student_render_kwargs") or {}):
             log(f"[train] refuse: {d} renders the student with other chat-template kwargs than {view_dir}")
             return 2
+        if v["knobs"] != view["knobs"]:
+            diff = ", ".join(f"{k} {v['knobs'].get(k)!r} vs {view['knobs'].get(k)!r}"
+                             for k in sorted(set(v["knobs"]) | set(view["knobs"]))
+                             if v["knobs"].get(k) != view["knobs"].get(k))
+            log(f"[train] refuse: {d} was aligned with other loss knobs than {view_dir} ({diff}); "
+                "the chunks of a view are cut with its own knobs, align every view alike")
+            return 2
     knobs = dict(view["knobs"], lambda_dk=opts.dk, lambda_alm=opts.alm, lambda_ce=opts.ce, loss_mode=opts.loss)
     if opts.T_dk is not None:
         knobs["T_dk"] = opts.T_dk
     if opts.tau_alm is not None:
         knobs["tau_alm"] = opts.tau_alm
-    if opts.gamma is not None:
+    if opts.gamma is not None and opts.gamma != view["knobs"]["gamma"]:
+        # a materialized view holds chunks already cut at its own gamma
+        for d in view_dirs:
+            if any(d.glob("view-*.safetensors")):
+                log(f"[train] refuse: --gamma {opts.gamma} cannot reach the materialized view {d}, whose chunks "
+                    f"were cut at gamma {view['knobs']['gamma']} by align; align again with --gamma")
+                return 2
         knobs["gamma"] = opts.gamma
     if view["identity"]:
         knobs["lambda_alm"] = 0.0
@@ -279,8 +298,16 @@ def run_train(opts: TrainOptions) -> int:
     n_adapted = prepare_lora_student(model, rank=opts.lora_rank, scale=scale, dropout=opts.lora_dropout,
                                      keys=LORA_KEYS)
     from gmlx.tune.attention import install_training_attention
-    from gmlx.tune.checkpoint import checkpoint_layers
+    from gmlx.tune.checkpoint import checkpoint_layers, layer_list
     from gmlx.tune.gdn import install_training_gdn
+    if n_adapted == 0:
+        log(f"[train] refuse: no module of the student matched the LoRA keys ({', '.join(LORA_KEYS)}), "
+            "nothing would train")
+        return 2
+    n_layers = len(layer_list(model))
+    if n_adapted < n_layers * len(LORA_KEYS):
+        log(f"[train] warn: LoRA adapted {n_adapted} modules over {n_layers} layers, under the "
+            f"{len(LORA_KEYS)} per layer the keys name; fused or differently named projections stay frozen")
     if opts.grad_checkpoint:
         log(f"[train] per-layer checkpointing on {checkpoint_layers(model, replay_dropout=True)} layer classes")
     restore_attn = install_training_attention(model)
@@ -414,7 +441,7 @@ def run_train(opts: TrainOptions) -> int:
 
         ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        run = resume_fingerprint(views, opts, knobs)
+        run = resume_fingerprint(views, opts, knobs, scale)
         state = {"iteration": 0, "tokens": 0, "seed": opts.seed, "lr": opts.lr, "best_val": None,
                  "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}, "run": run}
         if opts.resume:
@@ -427,7 +454,7 @@ def run_train(opts: TrainOptions) -> int:
                 diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
                 log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
                     "a resume repeats the views, batch size, seed, step count, learning rate, loss knobs, gradient "
-                    "clip, weight decay, LoRA dropout and hidden-state term")
+                    "clip, weight decay, LoRA rank, multiplier, keys and dropout, hidden-state term and student")
                 return 2
             state = load_checkpoint(ckpt_dir, "last", model, opt)
             log(f"[train] resumed at step {state['iteration']}")
@@ -510,7 +537,7 @@ def run_train(opts: TrainOptions) -> int:
             from gmlx.load.preflight import preflight
             from gmlx.tune.lora import save_trained_adapter
             n = save_trained_adapter(inner, cfg, base_arch=preflight(gguf_file(opts.student)).arch,
-                                     out_path=opts.adapter_out, rank=opts.lora_rank, scale=scale, keys=LORA_KEYS)
+                                     out_path=opts.adapter_out, scale=scale, keys=LORA_KEYS)
             log(f"[train] wrote {opts.adapter_out} ({n} modules)")
         if opts.report:
             write_json_atomic(Path(opts.report), {

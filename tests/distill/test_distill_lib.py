@@ -2807,3 +2807,153 @@ def test_teacher_identity_covers_split_shards_and_gguf_directories(tmp_path):
     assert ident_dir["size"] == 12
     (e / "one.gguf").write_bytes(b"GGUF" + bytes(7) + b"\x01")
     assert _teacher.teacher_identity(str(e)) != ident_dir
+
+
+# ---------------------------------------------------------------------------
+# review round seven: headers that end in a marker, the LoRA and student
+# fingerprint, per-view knobs, symlinked teachers, hard cuts inside a
+# character, a student that adapts nothing
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_INST = ("{{ bos_token }}{% for m in messages %}{% if m['role'] == 'user' %}[INST] {{ m['content'] }} [/INST]"
+                  "{% else %}{{ m['content'] }}</s>{% endif %}{% endfor %}")
+_TEMPLATE_FINAL = ("{% for m in messages %}{% if m['role'] == 'user' %}<|start|>user<|message|>{{ m['content'] }}<|end|>"
+                   "{% else %}<|start|>assistant<|channel|>final<|message|>{{ m['content'] }}<|return|>{% endif %}"
+                   "{% endfor %}{% if add_generation_prompt %}<|start|>assistant{% endif %}")
+
+
+def test_render_row_keeps_short_replies_out_of_headers_ending_in_a_marker(tok_bl):
+    """A header that ends in a marker rather than whitespace ("[/INST]"),
+    and one that runs past the generation prompt ("<|channel|>final
+    <|message|>"), still put a one-letter reply after the header."""
+    for template, tail in ((_TEMPLATE_INST, b"</s>"), (_TEMPLATE_FINAL, b"<|return|>")):
+        tok = _with_template(tok_bl, template)
+        for reply in ("I", "INST", "a", "t", "final", "Hello"):
+            msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": reply}]
+            text, spans = dl.render_row(tok, msgs, open_tail=False)
+            b0, b1, b2 = spans[0]
+            assert text[b0:b1] == reply.encode() and text[b1:b2] == tail, (template[:12], reply, text)
+            assert text[:b0].endswith(b"[/INST]" if tail == b"</s>" else b"<|message|>")
+
+
+def test_train_resume_refuses_other_lora_settings_or_student(tmp_path, tok_bl, capsys, monkeypatch):
+    """The checkpoint's LoRA rank, multiplier, keys and student are part
+    of the run; a resume under another one is refused before the load
+    of a checkpoint whose factors would not fit."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    other = _tiny_mlx_teacher(tmp_path / "student2", tok_bl, seed=3)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    run = json.loads((ck / "last" / "state.json").read_text())["run"]
+    assert run["lora_rank"] == 2 and run["lora_scale"] == 2.0 and run["student"]["sha256_head"]
+    capsys.readouterr()
+    for change, key in ((dict(lora_rank=4), "lora_rank"), (dict(lora_scale=7.0), "lora_scale"),
+                        (dict(lora_alpha=1.0), "lora_scale"), (dict(student=str(other)), "student")):
+        rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True, **change)))
+        err = capsys.readouterr().err
+        assert rc == 2 and "other settings than the run" in err and key in err, (change, err)
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
+
+
+def test_train_refuses_views_with_other_knobs_and_a_gamma_override_on_a_materialized_view(tmp_path, tok_bl,
+                                                                                              capsys, monkeypatch):
+    """Views aligned with other loss knobs cannot mix, since a view's
+    chunks are cut with its own gamma and chunk length at align time,
+    and a gamma override on a materialized view would change nothing."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1")
+    cache = tmp_path / "cache"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "v2"),
+                                              gamma=0.01)) == 0
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "v3"),
+                                              materialize=True)) == 0
+    base = dict(student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16,
+                val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v2")], **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "other loss knobs" in err and "gamma" in err
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(tmp_path / "v3")], gamma=0.01, **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "materialized" in err and "--gamma" in err
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(tmp_path / "v3")], gamma=0.001, **base)) == 0
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v3")], **base)) == 0
+
+
+def test_teacher_identity_and_path_keep_symlinks(tmp_path, tok_bl):
+    """A teacher reached through symlinks (the Hugging Face cache layout)
+    keeps its own name in the identity and the manifest, so the split
+    shards are found and the tokenizer can be read back from the path."""
+    from gmlx.distill import teacher as _teacher
+
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "aaa").write_bytes(b"GGUF" + bytes(64))
+    (blobs / "bbb").write_bytes(b"GGUF" + bytes(32))
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    first = snap / "m-00001-of-00002.gguf"
+    first.symlink_to(blobs / "aaa")
+    (snap / "m-00002-of-00002.gguf").symlink_to(blobs / "bbb")
+    ident = _teacher.teacher_identity(str(first))
+    assert ident["path"].endswith("snap/m-00001-of-00002.gguf") and ident["size"] == 68 + 36
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    link = tmp_path / "link"
+    link.symlink_to(teacher)
+    corpus = _text_corpus(tmp_path / "t.jsonl")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(link), corpus=str(corpus), out=str(out), top_k=8,
+                                                    max_len=64)) == 0
+    man = json.loads((out / "manifest.json").read_text())
+    assert man["teacher_path"].endswith("/link") and man["gmlx_distill"]["teacher"]["path"].endswith("/link")
+    assert _teacher.teacher_identity(str(link))["path"].endswith("/link")
+
+
+def test_cut_windows_hard_cut_stays_on_a_character_boundary(tmp_path, tok_bl):
+    """A window cut hard at the token limit inside a multi-byte character
+    backs off to the character's start, so a continue-frame cache over
+    text with no whitespace-initial token still builds."""
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    tb = dl.token_bytes(tok)
+    text = ("\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8" * 20).encode("utf-8")
+    ids, ends, _ = dl.encode_with_byte_ends(tok, text, tb, add_special_tokens=False)
+    ws = dl.whitespace_start_mask(tok, len(tb), tb)
+    windows = _frames.cut_windows(ids, ws, 40, 0, text=text, ends=ends)
+    assert len(windows) > 1
+    for s, e in windows:
+        b0 = int(ends[s - 1]) if s > 0 else 0
+        text[b0:int(ends[e - 1])].decode("utf-8")
+    corpus = tmp_path / "cjk.jsonl"
+    corpus.write_text(json.dumps({"text": text.decode("utf-8")}) + "\n", encoding="utf-8")
+    rows = _teacher.build_rows(tok, str(corpus), max_len=40, text_key="text", max_rows=None, max_tokens=None,
+                               source=None, hf_split="train", limit_docs=None, frame="continue")
+    assert len(rows[0]) > 1
+
+
+def test_train_refuses_a_student_that_adapts_nothing_and_warns_on_a_partial_match(tmp_path, tok_bl, capsys,
+                                                                                    monkeypatch):
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    monkeypatch.setattr(_trainer, "LORA_KEYS", ("self_attn.qkv_proj",))
+    rc = _trainer.run_train(_trainer.TrainOptions(**base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "nothing would train" in err and "self_attn.qkv_proj" in err
+    monkeypatch.setattr(_trainer, "LORA_KEYS", ("self_attn.q_proj", "self_attn.qkv_proj"))
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    err = capsys.readouterr().err
+    assert "[train] warn: LoRA adapted 2 modules over 2 layers" in err

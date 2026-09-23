@@ -159,3 +159,19 @@ def test_cmd_train_refuses_grad_checkpoint_with_dropout(tmp_path, capsys):
                           "--grad-checkpoint", "--dropout", "0.1"])
     assert rc == 2
     assert "--grad-checkpoint recomputes each layer under a fresh dropout mask" in capsys.readouterr().err
+
+
+def test_adapter_alpha_follows_the_trained_rank(tmp_path):
+    """The stored alpha is the multiplier times the factors' own rank; a
+    rank argument that disagrees with the factors is refused rather than
+    written."""
+    model = _Model()
+    model.freeze()
+    model.apply_to_modules(
+        lambda _k, m: m.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+        if isinstance(m, LoRALinear) else None)
+    out = str(tmp_path / "trained.gguf")
+    assert train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=out, scale=S) == 3
+    assert adapter.load_lora_adapter(out).alpha == pytest.approx(S * R)
+    with pytest.raises(ValueError, match="rank"):
+        train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=out, rank=R + 1, scale=S)

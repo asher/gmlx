@@ -234,7 +234,7 @@ def bits_per_byte(model, tokenizer, text: str, *, max_len: int = 512, batch_size
     while n_prefix < len(ids) and int(ids[n_prefix]) in special:
         n_prefix += 1
     ws = whitespace_start_mask(tokenizer, len(tb), tb)
-    windows = cut_windows(ids, ws, max_len, n_prefix)
+    windows = cut_windows(ids, ws, max_len, n_prefix, text=text_b, ends=ends)
     bos = bos_id(tokenizer) if adds_bos(tokenizer) else None
     prefix_ids = [int(t) for t in inner.encode(window_prefix, add_special_tokens=False)] if window_prefix else []
     head = ([bos] if bos is not None else []) + prefix_ids
