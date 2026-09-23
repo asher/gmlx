@@ -128,11 +128,24 @@ TASK_KEYS = {"gsm8k": ("id", "question", "answer")}
 MC_KEYS = ("id", "query", "choices", "gold")
 
 
+def check_gsm8k_items(path, rows: list, keys: tuple = TASK_KEYS["gsm8k"]) -> list:
+    """rows of gsm8k (or its shots, with keys question and answer): the
+    question and the answer are strings, else UnreadableInput (the
+    extractor would raise after the first generation)."""
+    for r in check_keys(path, rows, keys):
+        for k in ("question", "answer"):
+            if not isinstance(r[k], str):
+                raise UnreadableInput(f"{path}: item {r.get('id')!r} has no string {k!r}")
+    return rows
+
+
 def check_mc_items(path, rows: list) -> list:
-    """rows of a multiple-choice task: choices is a non-empty list of
-    strings and gold an index into it, else UnreadableInput (the scorer
-    would raise after the slices ran)."""
+    """rows of a multiple-choice task: query is a string, choices a
+    non-empty list of strings and gold an index into it, else
+    UnreadableInput (the scorer would raise after the slices ran)."""
     for r in check_keys(path, rows, MC_KEYS):
+        if not isinstance(r["query"], str):
+            raise UnreadableInput(f"{path}: item {r.get('id')!r} has no string 'query'")
         ch = r["choices"]
         if not isinstance(ch, list) or not ch or not all(isinstance(c, str) for c in ch):
             raise UnreadableInput(f"{path}: item {r.get('id')!r} has no list of choice strings")
@@ -440,14 +453,15 @@ def run_eval(opts: EvalOptions) -> int:
                 if not t:
                     continue
                 items = read_jsonl(td / f"{t}.jsonl")
-                items = check_keys(td / f"{t}.jsonl", items, TASK_KEYS[t]) if t in TASK_KEYS \
+                items = check_gsm8k_items(td / f"{t}.jsonl", items) if t == "gsm8k" \
                     else check_mc_items(td / f"{t}.jsonl", items)
                 if opts.task_limit:
                     items = items[:opts.task_limit]
                 tasks[t] = {"items": items}
                 if t == "gsm8k":
-                    tasks[t]["shots"] = check_keys(td / "gsm8k_shots.jsonl", read_jsonl(td / "gsm8k_shots.jsonl"),
-                                                   ("question", "answer"))[:8]
+                    tasks[t]["shots"] = check_gsm8k_items(td / "gsm8k_shots.jsonl",
+                                                          read_jsonl(td / "gsm8k_shots.jsonl"),
+                                                          ("question", "answer"))[:8]
         chat_slices = {name: read_conversations(Path(path).expanduser()) for name, path in chat_specs}
         reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
         positions = trace_positions = None

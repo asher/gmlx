@@ -853,7 +853,9 @@ The other tables follow the same after and before pattern.
   when `--teacher-bpb` supplies it. `decontam` is the share of a slice's
   64-byte windows found in the training corpus, and a slice over one
   percent has `void` in its `gate` column, meaning the slice was trained
-  on and its score does not count.
+  on and its score does not count. `ok` means the share was measured
+  and is under the threshold, and `unchecked` means no corpus was given
+  to measure it against.
 - The chat slice table scores conversations on their assistant turns.
 - The task table gives accuracy on the local task files.
 - The chat sanity table gives the share of replies that kept the turn

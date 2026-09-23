@@ -1912,6 +1912,17 @@ def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
                                                           "gold": gold}) + "\n")
         rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
         assert rc == 2 and "unreadable input" in err and why in err, (why, err)
+    (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": None, "choices": ["x"], "gold": 0}) + "\n")
+    rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
+    assert rc == 2 and "has no string 'query'" in err
+    (tasks / "gsm8k.jsonl").write_text(json.dumps({"id": "a", "question": "q", "answer": 72}) + "\n")
+    (tasks / "gsm8k_shots.jsonl").write_text(json.dumps({"question": "q", "answer": "#### 1"}) + "\n")
+    rc, err = run(tasks="gsm8k", tasks_dir=str(tasks))
+    assert rc == 2 and "gsm8k.jsonl: item 'a' has no string 'answer'" in err
+    (tasks / "gsm8k.jsonl").write_text(json.dumps({"id": "a", "question": "q", "answer": "#### 72"}) + "\n")
+    (tasks / "gsm8k_shots.jsonl").write_text(json.dumps({"question": None, "answer": "#### 1"}) + "\n")
+    rc, err = run(tasks="gsm8k", tasks_dir=str(tasks))
+    assert rc == 2 and "gsm8k_shots.jsonl: item None has no string 'question'" in err
     (tasks / "gsm8k.jsonl").write_text(json.dumps({"id": "a", "question": "q", "answer": "1"}) + "\n")
     (tasks / "gsm8k_shots.jsonl").write_text(json.dumps({"question": "q"}) + "\n")
     rc, err = run(tasks="gsm8k", tasks_dir=str(tasks))
@@ -6395,6 +6406,9 @@ def test_a_teacher_token_spelling_a_student_special_never_targets_the_unmapped_g
     v = teacher.convert_tokens_to_ids("<pad>")
     assert isinstance(v, int) and v >= 0 and tables.group_key[0] == -1
     assert tables.target_g[v] == -1
+    # the rule change invalidates tables built under the earlier one
+    from gmlx.distill.constants import TABLES_VERSION
+    assert TABLES_VERSION >= 5
     assert not np.any(tables.group_key[tables.target_g[tables.target_g >= 0]] == -1)
 
 
@@ -6422,11 +6436,34 @@ def test_train_refuses_a_student_whose_template_or_ids_differ_from_the_views(tmp
                 chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
     assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 2
     err = capsys.readouterr().err
-    assert "[train] refuse: the student's chat_template_sha256 differ from the view's student, align again" in err
+    assert f"[train] refuse: the student's chat_template_sha256 differ from the student {view} was aligned with" in err
     # a view written before the field existed still trains
     del meta["student_identity"]
     dl.write_json_atomic(view / "view.json", meta)
     assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 0
+    # a second view aligned with the other template is refused by name,
+    # and so is one whose tables map the specials by other roles
+    v2 = tmp_path / "v2"
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(student),
+                                              out=str(v2))) == 0
+    cfg["chat_template"] = _TEMPLATE_A
+    cfg_path.write_text(json.dumps(cfg))
+    (student / "chat_template.jinja").write_text(_TEMPLATE_A)
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(opts, views=[str(view), str(v2)],
+                                                         ckpt_dir=str(tmp_path / "ck2"))))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"differ from the student {v2} was aligned with" in err
+    tj = json.loads((v2 / "tables.json").read_text())
+    tj["roles"]["eos"] = [int(x) + 1 for x in tj["roles"]["eos"]] if tj["roles"].get("eos") else [1]
+    dl.write_json_atomic(v2 / "tables.json", tj)
+    meta2 = json.loads((v2 / "view.json").read_text())
+    del meta2["student_identity"]
+    dl.write_json_atomic(v2 / "view.json", meta2)
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(opts, views=[str(view), str(v2)],
+                                                         ckpt_dir=str(tmp_path / "ck3"))))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"{v2} maps the student's specials by other roles than" in err
 
 
 def test_cache_refuses_a_top_k_at_the_head_width_and_a_manifest_it_cannot_write(tmp_path, tok_bl, monkeypatch,
@@ -6487,3 +6524,18 @@ def test_corpus_readers_name_a_line_that_is_not_json(tmp_path):
     (tmp_path / "m.jsonl").write_text('{"messages": [{"role": "user", "content": "hi"}]}\n[\n', encoding="utf-8")
     with pytest.raises(ValueError, match=r"m.jsonl line 2: not JSON \("):
         list(_corpus.iter_conversations(str(tmp_path / "m.jsonl")))
+
+
+def test_header_tokenizer_carries_the_bundled_template_of_its_arch(gguf_index, monkeypatch):
+    """The header-only tokenizer align reads installs the same template
+    the model loader bundles for the architecture, so align and train
+    record one student identity."""
+    import gmlx.load.tokenizer as _lt
+    from gmlx.distill import tokens as _tokens
+    from tests.conftest import require_arch
+
+    path = require_arch(gguf_index, "qwen3")
+    plain = _tokens.tokenizer_from_gguf(path).chat_template
+    monkeypatch.setattr(_lt, "bundled_chat_template_for_arch", lambda arch: "{{ messages }} bundled")
+    assert _tokens.tokenizer_from_gguf(path).chat_template == "{{ messages }} bundled"
+    assert plain != "{{ messages }} bundled"

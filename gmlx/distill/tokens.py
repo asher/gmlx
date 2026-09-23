@@ -20,11 +20,13 @@ def tokenizer_from_gguf(path: str):
     with gmlx's _gguf_* attributes set."""
     import gguf
 
-    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+    from gmlx.load.tokenizer import bundled_chat_template_for_arch, load_tokenizer_from_gguf
     reader = gguf.GGUFReader(path)
     f = reader.fields["general.architecture"]
     arch = bytes(f.parts[f.data[0]]).decode()
-    fast = load_tokenizer_from_gguf(reader, arch)
+    # the same template the model loader installs, so align and train
+    # see one student identity
+    fast = load_tokenizer_from_gguf(reader, arch, chat_template_override=bundled_chat_template_for_arch(arch))
     llamacpp_bos_default(fast, reader)
     return fast
 

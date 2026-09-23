@@ -312,6 +312,11 @@ def run_train(opts: TrainOptions) -> int:
                 (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S, bool(view["identity"])):
             log(f"[train] refuse: {d} is over another tokenizer pair than {view_dir}")
             return 2
+        if not _align.same_roles(t2.roles, tables.roles):
+            # every loader groups with view 0's tables; a view whose
+            # specials map by other roles would train on its rows regrouped
+            log(f"[train] refuse: {d} maps the student's specials by other roles than {view_dir}, align it again")
+            return 2
         if (v.get("student_render_kwargs") or {}) != (view.get("student_render_kwargs") or {}):
             log(f"[train] refuse: {d} renders the student with other chat-template kwargs than {view_dir}")
             return 2
@@ -390,14 +395,16 @@ def run_train(opts: TrainOptions) -> int:
     if vocab_map_hash(tokenizer) != view["student_hash"]:
         log("[train] refuse: student tokenizer hash does not match the view")
         return 2
-    want = view.get("student_identity")
-    have = _view.student_identity(tokenizer) if want is not None else None
-    if want is not None and want != have:
-        # the vocab hash leaves the special ids and the template out, and a
-        # base and an instruct student of one family share it
-        diff = ", ".join(k for k in want if want.get(k) != (have or {}).get(k))
-        log(f"[train] refuse: the student's {diff} differ from the view's student, align again with this student")
-        return 2
+    have = _view.student_identity(tokenizer)
+    for d, v in zip(view_dirs, views):
+        want = v.get("student_identity")
+        if want is not None and want != have:
+            # the vocab hash leaves the special ids and the template out,
+            # and a base and an instruct student of one family share it
+            diff = ", ".join(k for k in want if want.get(k) != have.get(k))
+            log(f"[train] refuse: the student's {diff} differ from the student {d} was aligned with, "
+                "align it again with this student")
+            return 2
     inner = getattr(model, "language_model", model)
     head = head_spec_from_model(inner)
     gap = head_parity_gap(model, head, mx.arange(1, 9)[None])
