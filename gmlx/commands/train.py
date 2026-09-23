@@ -102,6 +102,16 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     return out_path, n
 
 
+def _rank(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"a rank of at least 1 is required, got {n}")
+    return n
+
+
 def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -125,7 +135,7 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
                    help="Examples per training step (default 4).")
     p.add_argument("--num-layers", type=int, default=8, metavar="N",
                    help="Number of top transformer layers to adapt (default 8).")
-    p.add_argument("--rank", type=int, default=8,
+    p.add_argument("--rank", type=_rank, default=8,
                    help="LoRA rank (default 8).")
     p.add_argument("--scale", type=float, default=20.0,
                    help="LoRA scale; alpha = scale x rank, recovered on load (default 20.0).")

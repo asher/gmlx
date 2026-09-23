@@ -399,7 +399,8 @@ go to
 `r1-replies.jsonl.gen.json`, a sidecar that `filter` and `cache` read.
 
 Each action resumes in its own way. A `gen` that stops part way resumes
-when rerun, since prompt ids already in the output are skipped.
+when rerun, since prompt ids already in the output are skipped, and it
+refuses when a skipped id no longer names the prompt it answered.
 `cache --resume` continues after the last shard, a file of 64 cached
 rows, that it wrote and verified, and refuses when the corpus or the row
 flags differ from the first run. `train --resume` continues from the

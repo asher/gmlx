@@ -343,7 +343,8 @@ def run_train(opts: TrainOptions) -> int:
                 f"{opts.student}")
             return 2
     if opts.report:
-        Path(opts.report).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        opts.report = os.path.abspath(os.path.expanduser(opts.report))
+        Path(opts.report).parent.mkdir(parents=True, exist_ok=True)
 
     model, cfg, tokenizer, kind = load_student(opts.student, None, opts.hf_source)
     _frames.set_render_kwargs(tokenizer, view.get("student_render_kwargs") or {})

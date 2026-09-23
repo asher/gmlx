@@ -139,7 +139,9 @@ def test_gen_resumes_by_prompt_id_and_accumulates_the_run(tmp_path, stub_server)
         {"id": "b", "messages": [{"role": "user", "content": "beta"}]},
     ])
     out = tmp_path / "corpus.jsonl"
-    out.write_text(json.dumps({"id": "a", "messages": [], "gen": {}}) + "\n")
+    out.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": "alpha"},
+                                                   {"role": "assistant", "content": "x"}],
+                               "gen": {}}) + "\n")
     opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)
     assert gen.run_gen(opts) == 0
     assert [r["id"] for r in _rows(out)] == ["a", "b"]
@@ -809,3 +811,109 @@ def test_filter_joins_files_whose_sidecars_name_one_teacher_two_ways(tmp_path, m
     assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(out2), context="ctx.txt")) == 0
     side = json.loads((tmp_path / "ctx.jsonl.gen.json").read_text())
     assert side["context"] == str(ctx) and side["shared_context"] == str(ctx)
+
+
+def test_gen_resume_refuses_a_done_id_whose_prompt_changed(tmp_path, stub_server, capsys):
+    """Ids from line numbers shift when a line is inserted, and an explicit
+    id can be reused for another prompt; a resume compares each done id's
+    prompt to the prompt file and refuses a mismatch instead of skipping
+    the new prompt and answering the old one twice."""
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"messages": [{"role": "user", "content": "alpha"}]},
+        {"messages": [{"role": "user", "content": "beta"}]},
+    ])
+    out = tmp_path / "corpus.jsonl"
+    base = dict(out=str(out), prompts=prompts, base_url=stub_server)
+    assert gen.run_gen(gen.GenOptions(**base)) == 0
+    assert sorted(r["id"] for r in _rows(out)) == ["0", "1"]
+    shifted = _prompts(tmp_path / "p.jsonl", [
+        {"messages": [{"role": "user", "content": "gamma"}]},
+        {"messages": [{"role": "user", "content": "alpha"}]},
+        {"messages": [{"role": "user", "content": "beta"}]},
+    ])
+    capsys.readouterr()
+    rc = gen.run_gen(gen.GenOptions(**dict(base, prompts=shifted)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[gen] refuse:" in err and "prompt" in err and "'0'" in err, err
+    assert sorted(r["id"] for r in _rows(out)) == ["0", "1"]
+    named = _prompts(tmp_path / "n.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out2 = tmp_path / "named.jsonl"
+    assert gen.run_gen(gen.GenOptions(**dict(base, out=str(out2), prompts=named))) == 0
+    renamed = _prompts(tmp_path / "n.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "delta"}]},
+                                              {"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    rc = gen.run_gen(gen.GenOptions(**dict(base, out=str(out2), prompts=renamed)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "'a'" in err, err
+    gone = _prompts(tmp_path / "n.jsonl", [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    rc = gen.run_gen(gen.GenOptions(**dict(base, out=str(out2), prompts=gone)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "'a'" in err and "not in" in err, err
+    assert [r["id"] for r in _rows(out2)] == ["a"]
+
+
+def test_gen_and_filter_compare_the_serve_args(tmp_path, stub_server, capsys):
+    """The server flags shape every reply (a KV quantization, a draft
+    model), so they are part of the settings a resume and a join compare."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    base = dict(out=str(out), prompts=prompts, base_url=stub_server, serve_arg=["--kv-bits", "4"])
+    assert gen.run_gen(gen.GenOptions(**base)) == 0
+    side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
+    assert side["serve_args"] == ["--kv-bits", "4"]
+    more = _prompts(tmp_path / "p.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    capsys.readouterr()
+    rc = gen.run_gen(gen.GenOptions(**dict(base, prompts=more, serve_arg=[])))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "serve_args" in err, err
+    assert gen.run_gen(gen.GenOptions(**dict(base, prompts=more))) == 0
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    common = {"gen_version": "3", "model": "t.gguf", "seed": 1, "thinking": False}
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({**common, "serve_args": ["--kv-bits", "4"]}))
+    (tmp_path / "b.jsonl.gen.json").write_text(json.dumps({**common, "serve_args": []}))
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(tmp_path / "j.jsonl")))
+    err = capsys.readouterr().err
+    assert rc == 2 and "serve_args" in err, err
+
+
+def test_gen_refuses_a_missing_corpus_and_a_context_format_without_both_fields(tmp_path, stub_server, capsys):
+    """A corpus path that does not exist and a context format that would
+    drop the prompt or name an unknown field are refused before any
+    request, in gen and in filter alike."""
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_text("the context\n", encoding="utf-8")
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    rc = gen.run_gen(gen.GenOptions(out=str(out), corpus=str(tmp_path / "missing.jsonl"), base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "no corpus" in err, err
+    for fmt in ("{context}\n\n", "{ctx}\n\n{prompt}", "{context} {prompt} {extra}"):
+        rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, context=str(ctx),
+                                        context_format=fmt))
+        err = capsys.readouterr().err
+        assert rc == 2 and "--context-format" in err, (fmt, err)
+        a = tmp_path / "a.jsonl"
+        a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+        rc = flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(tmp_path / "f.jsonl"), context=str(ctx),
+                                              context_format=fmt))
+        err = capsys.readouterr().err
+        assert rc == 2 and "--context-format" in err, (fmt, err)
+    assert not out.exists() and _Handler.calls == []
+
+
+def test_filter_refuses_an_id_two_inputs_share(tmp_path, capsys):
+    """Rows are keyed by id downstream (census pairs, gen resume), so two
+    inputs that carry one id are refused instead of joined."""
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n" + json.dumps(_row("b", GOOD)) + "\n")
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    out = tmp_path / "j.jsonl"
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[filter] refuse:" in err and "'b'" in err and str(b) in err, err
+    assert not out.exists()
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 0

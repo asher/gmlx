@@ -80,7 +80,7 @@ def head_weight_fn(mod) -> Callable:
                 block = mx.dequantize(w[r:r + step], mod.scales[r:r + step],
                                       mod.biases[r:r + step] if getattr(mod, "biases", None) is not None else None,
                                       mod.group_size, mod.bits)
-            parts.append(block.astype(mx.bfloat16))
+            parts.append(block if block.dtype == mx.float16 else block.astype(mx.bfloat16))
             mx.eval(parts[-1])
         cache["w"] = mx.concatenate(parts, axis=0)
         mx.eval(cache["w"])
@@ -191,10 +191,11 @@ def linear_head(weight, softcap: float | None = None, scale: float = 1.0) -> Hea
 
 def _head_logits_f32(head: HeadSpec, params, h_c):
     import mlx.core as mx
-    z = head.fn(params, h_c)
+    # the cap runs on the f32 logits, as the VJP recomputes it
+    z = head.fn(params, h_c).astype(mx.float32)
     if head.softcap:
         z = head.softcap * mx.tanh(z / head.softcap)
-    return z.astype(mx.float32)
+    return z
 
 
 def _bnd_chunk_fn(head: HeadSpec, next_c, gid_c, group_of, G: int, Kp: int, log_bmask):

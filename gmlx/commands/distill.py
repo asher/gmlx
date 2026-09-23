@@ -251,14 +251,14 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--seed", type=_nonneg_int, default=1, help="Seed of the validation split (default 1).")
     p.add_argument("--w-mid", type=float, default=DEFAULT_KNOBS["w_mid"],
                    help="Weight of an intra-word shared boundary (default 0.5).")
-    p.add_argument("--gamma", type=float, default=DEFAULT_KNOBS["gamma"],
+    p.add_argument("--gamma", type=_positive_float, default=DEFAULT_KNOBS["gamma"],
                    help="Drop chunks of the chunk term (ALM) whose teacher boundary mass is below this "
                         "(default 0.001).")
-    p.add_argument("--tau-alm", type=float, default=DEFAULT_KNOBS["tau_alm"],
+    p.add_argument("--tau-alm", type=_positive_float, default=DEFAULT_KNOBS["tau_alm"],
                    help="Temperature on the chunk term (ALM) (default 1.0).")
-    p.add_argument("--T-dk", type=float, default=DEFAULT_KNOBS["T_dk"],
+    p.add_argument("--T-dk", type=_positive_float, default=DEFAULT_KNOBS["T_dk"],
                    help="Temperature on the conditional factor of the bucketed KL (default 1.0).")
-    p.add_argument("--max-chunk-len", type=int, default=DEFAULT_KNOBS["max_chunk_len"],
+    p.add_argument("--max-chunk-len", type=_positive_int, default=DEFAULT_KNOBS["max_chunk_len"],
                    help="Longest ALM chunk in tokens on either side (default 8).")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every student render, stored in the view.")
@@ -302,9 +302,9 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="Weight of the chunk term (ALM), 0 when align took the identity path (default 1).")
     p.add_argument("--ce", type=float, default=DEFAULT_KNOBS["lambda_ce"],
                    help="Weight of the cross-entropy term (default 0).")
-    p.add_argument("--T-dk", type=float, default=None, help="Override the view's T_dk.")
-    p.add_argument("--tau-alm", type=float, default=None, help="Override the view's tau_alm.")
-    p.add_argument("--gamma", type=float, default=None,
+    p.add_argument("--T-dk", type=_positive_float, default=None, help="Override the view's T_dk.")
+    p.add_argument("--tau-alm", type=_positive_float, default=None, help="Override the view's tau_alm.")
+    p.add_argument("--gamma", type=_positive_float, default=None,
                    help="Override the view's gamma; refused when it differs on a materialized view.")
     p.add_argument("--chunk", type=_positive_int, default=512, help="Positions per head chunk (default 512).")
     p.add_argument("--hs", type=float, default=0.0,
@@ -411,6 +411,16 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
 PARSERS = {"gen": _gen_parser, "filter": _filter_parser, "cache": _cache_parser, "align": _align_parser,
            "census": _census_parser,
            "train": _train_parser, "eval": _eval_parser}
+
+
+def _positive_float(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not x > 0:
+        raise argparse.ArgumentTypeError(f"a positive number is required, got {text}")
+    return x
 
 
 def _positive_int(text: str) -> int:

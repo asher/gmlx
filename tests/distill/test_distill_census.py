@@ -368,3 +368,21 @@ def test_census_refuses_a_reply_think_cache_without_content_starts(tmp_path, tok
     assert not out.exists()
     plain = _reply_cache(tmp_path / "plain", tok, convs_without, doc_prefix="a.jsonl", record_content_start=False)
     assert cs.run_census(cs.CensusOptions(without=str(plain), with_=[str(with_)], out=str(out))) == 0
+
+
+def test_eval_reply_rows_apply_trace_ranges_only_when_a_trace_is_rendered(tok):
+    """A reply row without reasoning content renders no trace, so its
+    content start is its span start; trace ranges keyed to that row must
+    keep nothing rather than the content bytes at the same offsets."""
+    tk = _with_template(tok, _TEMPLATE_TRACE)
+    row = {"id": "p0", "messages": [{"role": "user", "content": "say it"},
+                                    {"role": "assistant", "content": "is the cat"}]}
+    text, spans = dl.render_row(tk, row["messages"], open_tail=False, last_only=True, reason_target=True)
+    b0, b1, _b2 = spans[-1]
+    assert text[b0:b1] == b"is the cat"
+    only_trace, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
+                                       positions={}, trace_positions={"p0": [[0, 3]]})
+    assert only_trace == []
+    content, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
+                                    positions={"p0": [[0, 3]]}, trace_positions={"p0": [[0, 3]]})
+    assert len(content) == 1

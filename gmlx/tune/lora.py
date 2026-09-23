@@ -105,6 +105,10 @@ def lora_modules_to_gguf(model, keys: Iterable[str] | None = None) -> list:
         elif key.endswith(_B):
             b_by[key[: -len(_B)]] = arr
     paths = sorted(mp for mp in set(a_by) & set(b_by) if _selected(mp, keys))
+    for mp in paths:
+        if a_by[mp].ndim != 2 or b_by[mp].ndim != 2:
+            raise ValueError(f"the LoRA factors of {mp} have {a_by[mp].ndim} and {b_by[mp].ndim} axes, a GGUF "
+                             "adapter holds matrices only (stacked expert factors cannot be exported)")
     return [(mp, a_by[mp].T, b_by[mp].T) for mp in paths]
 
 

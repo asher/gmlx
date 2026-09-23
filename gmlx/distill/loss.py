@@ -82,7 +82,11 @@ def bucketed_kl(target_log_p, log_M, Q_slot, weight, *, mode: str = "bucketed",
         cond = mx.sum(mx.where(pad, mx.zeros_like(lp), mx.exp(log_p_t) * (log_p_t - log_q_t)), axis=-1)
         log_QS = mx.logsumexp(lq_valid, axis=-1)
         logM_f = mx.maximum(logM, mx.array(LOG_FLOOR, dtype=mx.float32))
-        per = M * cond + kl_bern(logM, log_QS) if mode == "bucketed" else M * cond + M * (logM_f - log_QS)
+        per = M * cond + M * (logM_f - log_QS)
+        if mode == "bucketed":
+            # the tail slot, not 1 - Q_S, which loses the tail in f32
+            log1mM = log1mexp(logM)
+            per = per + mx.where(log_M < -1e-7, mx.exp(log1mM) * (log1mM - logQ_tail), mx.zeros_like(log_M))
     else:
         head_term = mx.sum(mx.where(pad, mx.zeros_like(lp), P * (lp - logQ_g)), axis=-1)
         if mode == "paper":

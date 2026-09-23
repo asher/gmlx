@@ -2137,7 +2137,7 @@ def test_jsonl_readers_keep_unicode_line_separators(tmp_path):
                  encoding="utf-8")
     assert [r["id"] for r in _ev.read_jsonl(p)] == ["a"]
     assert [r["id"] for r in _flt._read_rows(p)] == ["a"]
-    assert _gen._done_ids(p) == {"a"}
+    assert set(_gen._done_ids(p)) == {"a"}
     rows = _gen.prompt_rows(_gen.GenOptions(out="x", prompts=str(p)))
     assert len(rows) == 1 and rows[0]["messages"][0]["content"] == text
 
@@ -3693,3 +3693,163 @@ def test_align_materialize_removes_the_partial_view_on_a_write_error(tmp_path, t
     err = capsys.readouterr().err
     assert rc == 2 and "partial view was removed" in err
     assert not (out / "view.json").exists() and not list(out.glob("view-*.safetensors"))
+
+
+# ---------------------------------------------------------------------------
+# a student list shorter than the teacher's, the softcap in f32, unpaired
+# spans, the tempered tail, a stale manifest, the report path, a few
+# materialized shards in memory
+# ---------------------------------------------------------------------------
+
+def test_build_rows_trims_the_student_list_by_the_turns_the_teacher_lost(tmp_path, tok_bl):
+    """When the teacher's list carries a system turn the student's lacks,
+    the two lists differ in length; the turns fit_reply drops from the
+    teacher are still dropped from the student, counted on the bodies
+    after any system turn. Bodies of other lengths are a mismatch."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    reply = {"role": "assistant", "content": "the cat is 123"}
+    u1 = {"role": "user", "content": "the cat is the cat " * 30}
+    a1 = {"role": "assistant", "content": "the cat is 123 the cat"}
+    u2 = {"role": "user", "content": "what is it"}
+    sysm = {"role": "system", "content": "be brief"}
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"messages": [sysm, u1, a1, u2, reply], "student_messages": [u1, a1, u2, reply]})
+                      + "\n" + json.dumps({"messages": [sysm, u1, a1, u2, reply],
+                                           "student_messages": [u1, u2, reply]}) + "\n", encoding="utf-8")
+    res = _teacher.build_rows(tok, str(corpus), max_len=80, text_key="text", max_rows=None, max_tokens=None,
+                              source=None, hf_split="train", limit_docs=None, frame="reply")
+    rows, info = res[0], res[7]
+    assert len(rows) == 1 and info["reply_mismatch"] == 1
+    _ids, _ends, _text, m2, _spans, _kind, st_row = rows[0][3], rows[0][4], rows[0][5], rows[0][6], rows[0][7], \
+        rows[0][8], rows[0][9]
+    assert m2 == [sysm, u2, reply]
+    assert st_row == [u2, reply]
+
+
+def test_chunked_head_applies_the_softcap_in_f32():
+    """A bf16 head's softcap runs on the f32 logits, the way the VJP
+    recomputes it, so the forward log-probs agree with an f32 reference
+    to f32 precision and not to bf16's three digits."""
+    rng = np.random.default_rng(5)
+    V, d, N, n_bnd, Kp, G = 64, 8, 6, 2, 5, 20
+    group_of = rng.integers(0, G, V).astype(np.int32)
+    case = _make_case(rng, V, d, N, n_bnd, Kp, G, group_of, 4, 30.0)
+    h = mx.array(case["h"]).astype(mx.bfloat16)
+    W = mx.array(case["W"] * 12.0).astype(mx.bfloat16)
+    head = dl.linear_head(W, 30.0)
+    onpath, _q, _bm = dl.chunked_head(h, head, mx.array(case["next_ids"]), n_bnd=n_bnd,
+                                      target_gid=mx.array(case["gid"]), group_of=mx.array(group_of), G=G, Kp=Kp,
+                                      log_bmask=dl.log_bmask_from(case["bmask"]), C=4)
+    mx.eval(onpath)
+    z = np.asarray((h @ W.T).astype(mx.float32)).astype(np.float64)
+    assert np.abs(z).max() > 8.0
+    z = 30.0 * np.tanh(z / 30.0)
+    logq = z - np.logaddexp.reduce(z, axis=1, keepdims=True)
+    ref = logq[np.arange(N), case["next_ids"]]
+    assert np.abs(np.asarray(onpath).astype(np.float64) - ref).max() < 1e-4
+
+
+def test_view_loader_counts_a_row_whose_spans_cannot_pair(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """A framed row whose two renders pair no spans (a template that
+    rewrites the content) is dropped and counted like a render failure,
+    not raised out of the batch loop."""
+    from gmlx.distill import data as _data
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    student = _with_template(tok_spm, _TEMPLATE_B)
+    reply = {"role": "assistant", "content": "the cat is the cat 123"}
+    t_msgs = [{"role": "user", "content": "the cat is 123 the cat the cat\n\nwhat is it"}, reply]
+    _tiny_reply_cache(tmp_path / "c", teacher, [(t_msgs, None), (t_msgs, None)])
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(teacher, student)
+    loader = dl.ViewLoader(reader, student, tables, knobs=KNOBS, Kp=8, identity=False)
+    assert loader.compile(0) is not None
+
+    def boom(*a, **k):
+        raise ValueError("paired spans differ in content length")
+    monkeypatch.setattr(_data, "shared_boundaries_spans", boom)
+    assert loader.compile(1) is None
+    assert loader.dropped == 1 and loader.render_failures == 1
+    assert loader.batch([0, 1]) is None
+
+
+def test_bucketed_kl_tempered_bernoulli_term_uses_the_exact_tail():
+    """Under a tempered conditional factor the Bernoulli term reads the
+    tail slot, as the T_dk = 1 branch does; 1 - Q_S loses the tail when
+    the groups carry all but 1e-9 of the mass."""
+    lp = mx.array([[math.log(0.6), math.log(0.3999)]])
+    log_M = mx.array([math.log(0.9999)])
+    w = mx.array([1.0])
+    Q = mx.array([[0.5, 0.5 - 1e-9, 1e-9]])
+    l1, _ = dl.bucketed_kl(lp, log_M, Q, w, T_dk=1.0)
+    l2, _ = dl.bucketed_kl(lp, log_M, Q, w, T_dk=1.0 + 1e-6)
+    mx.eval(l1, l2)
+    assert np.isfinite(float(l2))
+    assert abs(float(l1) - float(l2)) < 1e-5, (float(l1), float(l2))
+
+
+def test_cache_resume_removes_a_stale_manifest_before_the_first_write(tmp_path, tok_bl, monkeypatch):
+    """A manifest left beside a cache that lost a shard describes shards
+    the resume rewrites; it goes before the first write, so a resume that
+    refuses on a write cannot pass as finished."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl", n=4)
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=1)
+    assert _teacher.run_cache(opts) == 0
+    (out / "batch-00003.safetensors").unlink()
+    assert (out / "manifest.json").is_file()
+    real = _teacher._format.ShardWriter.write
+
+    def cut(self, *a, **k):
+        raise RuntimeError("cut mid-resume")
+    monkeypatch.setattr(_teacher._format.ShardWriter, "write", cut)
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 2
+    assert not (out / "manifest.json").exists()
+    monkeypatch.setattr(_teacher._format.ShardWriter, "write", real)
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+    assert (out / "manifest.json").is_file() and dl.validate_cache(out) == []
+
+
+def test_train_expands_the_report_path(tmp_path, tok_bl, monkeypatch):
+    """A --report under ~ lands in the home directory, not in a directory
+    named ~ under the working directory."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    opts = _trainer.TrainOptions(views=[str(view)], student=str(student), iters=1, batch_size=2,
+                                 no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                 ckpt_dir=str(tmp_path / "ck"), report="~/rep/r.json")
+    assert _trainer.run_train(opts) == 0
+    assert (home / "rep" / "r.json").is_file()
+    assert not (tmp_path / "~").exists()
+
+
+def test_materialized_views_keep_a_few_shards_in_memory(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """Length-sorted batches draw rows from several shards at once; the
+    loader keeps the last few materialized shards instead of reloading a
+    shard on every change."""
+    import safetensors.numpy as stn
+
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=6)
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(tok_bl, tok_spm)
+    loader = dl.ViewLoader(reader, tok_spm, tables, knobs=KNOBS, Kp=8, identity=False)
+    loader.materialize(tmp_path / "v")
+    mat = dl.ViewLoader(reader, tok_spm, tables, knobs=KNOBS, Kp=8, identity=False, view_dir=tmp_path / "v")
+    loads = []
+    real = stn.load_file
+    monkeypatch.setattr(stn, "load_file", lambda p: (loads.append(str(p)), real(p))[1])
+    for r in (0, 2, 4, 0, 2, 4, 1, 3, 5):
+        assert mat.compile(r) is not None
+    assert len(loads) == 3, loads

@@ -195,8 +195,9 @@ and SentencePiece vocabularies map the U+2581 marker to a space and
 `<0xNN>` pieces to that byte. `whitespace_start_mask(tokenizer, width,
 token_bytes_list=None)` marks the ids whose bytes start with ASCII
 whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
-hashes the id-to-token map with specials left out, so two tokenizers with
-equal hashes tokenize identically.
+hashes the id-to-token map with specials left out. Equal hashes mean
+equal maps, not identical tokenization, since merges, the pre-tokenizer
+and the normalizer are not covered.
 
 ## mlx-lm server bridge
 

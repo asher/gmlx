@@ -892,7 +892,11 @@ whose messages end on a user turn. A row's context, or the file given by
 that took a context is written with the teacher's list under `messages`
 and the prompt as given under `student_messages`, and a row without one
 carries `messages` alone. Prompt ids already in the output are skipped,
-so a run resumes where it stopped.
+so a run resumes where it stopped. A resume checks that each skipped id
+still names the prompt it answered and refuses when one differs or is
+gone, since ids taken from line numbers shift when a line is inserted.
+An interrupt cancels the queued requests and stops the server, and the
+run ends when the requests in flight have failed or returned.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -911,11 +915,11 @@ so a run resumes where it stopped.
 | `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
 | `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
-| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
 | `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
-| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
+| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, recorded in the sidecar and compared on a resume |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
 | `--max-tokens N` | `1024` | answer budget per request, the reasoning trace not counted |
@@ -942,7 +946,7 @@ carries `student_messages`, since that row was generated with a context.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the files' sidecars record other generator settings than each other |
+| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the sidecars disagree or two rows share an id |
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
 | `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
@@ -955,7 +959,7 @@ carries `student_messages`, since that row was generated with a context.
 | `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
 | `--verify CMD` | none | shell command of your checker, which reads the survivors on stdin and prints `ok` or a reason per row |
 | `--context FILE` | none | put this text on the teacher's side of every kept row |
-| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
 
 ### distill cache
 
@@ -1020,10 +1024,10 @@ Alignment flags, in the order `--help` prints them.
 | `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row; a one-document cache splits it |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
-| `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this |
-| `--tau-alm F` | `1.0` | temperature on the chunk term (ALM) |
-| `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL |
-| `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side |
+| `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this, positive |
+| `--tau-alm F` | `1.0` | temperature on the chunk term (ALM), positive |
+| `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL, positive |
+| `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side, at least 1 |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 

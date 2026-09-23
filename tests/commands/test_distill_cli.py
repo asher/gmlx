@@ -230,3 +230,15 @@ def test_negative_seeds_and_counts_are_refused_at_parse_time(argv):
     parser refuses it, and zero stays valid where it means all."""
     rc, out = _run(["distill", *argv])
     assert rc == 2 and "at least 0" in out, out
+
+
+@pytest.mark.parametrize("argv", [
+    ["align", "--cache", "c", "--student", "s.gguf", "--out", "v", "--max-chunk-len", "0"],
+    ["align", "--cache", "c", "--student", "s.gguf", "--out", "v", "--gamma", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1", "--gamma", "-1"],
+])
+def test_non_positive_chunk_knobs_are_refused_at_parse_time(argv):
+    """A zero chunk length keeps no chunk and a zero gamma keeps every
+    chunk the log of zero would drop; the parser refuses both."""
+    rc, out = _run(["distill", *argv])
+    assert rc == 2 and "positive" in out, out

@@ -18,7 +18,7 @@ from . import eval as _eval
 from . import frames as _frames
 from . import tokens as _tokens
 from .constants import GB, log
-from .corpus import nfc
+from .corpus import nfc, norm_messages
 from .data import CacheReader
 from .format import read_json, replay_layers_for, shard_texts, write_bytes_atomic, write_json_atomic
 from .student import adapter_disabled
@@ -73,6 +73,10 @@ def read_jsonl(path: Path) -> list[dict]:
         raise UnreadableInput(f"{path}: {e}") from e
     if not all(isinstance(r, dict) for r in rows):
         raise UnreadableInput(f"{path}: every line must be a JSON object")
+    for r in rows:
+        for key in ("messages", "student_messages"):
+            if isinstance(r.get(key), list) and all(isinstance(m, dict) for m in r[key]):
+                r[key] = norm_messages(r[key])
     return rows
 
 

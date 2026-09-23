@@ -338,7 +338,9 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
                 b0, b1, _b2 = (int(x) for x in spans[-1])
                 cs = (m[-1].get("content") or "").strip()
                 cstart = b1 - len(cs.encode("utf-8"))
-                for anchor, rs in ((cstart, ranges), (b0, tranges)):
+                # a row without a trace has b0 == cstart: its trace ranges
+                # would otherwise select content bytes
+                for anchor, rs in ((cstart, ranges), (b0, tranges if b0 < cstart else None)):
                     starts = e[:-1] - anchor
                     for a, z in rs or ():
                         keep[:-1] |= (starts >= int(a)) & (starts < int(z))

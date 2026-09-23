@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .constants import log
 from .format import write_json_atomic
-from .gen import DEFAULT_CONTEXT_FORMAT, apply_context
+from .gen import DEFAULT_CONTEXT_FORMAT, apply_context, context_format_error
 
 FILTER_VERSION = "2"
 MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<start_of_turn>", "<end_of_turn>", "<turn|>",
@@ -163,7 +163,7 @@ def _read_rows(path: Path) -> list[dict]:
 
 
 _GEN_KEYS = ("model", "sampling", "seed", "chat_template_kwargs", "thinking", "thinking_budget",
-             "context", "context_format")
+             "context", "context_format", "serve_args")
 
 
 def _read_sidecar(path: Path) -> dict | None:
@@ -213,12 +213,17 @@ def run_filter(opts: FilterOptions) -> int:
     if opts.context and not Path(opts.context).expanduser().is_file():
         print(f"[filter] refuse: no such file: {opts.context}", file=sys.stderr)
         return 2
+    fmt_err = context_format_error(opts.context_format) if opts.context else None
+    if fmt_err:
+        print(f"[filter] refuse: {fmt_err}", file=sys.stderr)
+        return 2
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
     counts: Counter = Counter()
     rejects: list[dict] = []
     survivors: list[dict] = []
+    seen: dict[str, Path] = {}
     for p in inputs:
         try:
             rows = _read_rows(p)
@@ -226,6 +231,14 @@ def run_filter(opts: FilterOptions) -> int:
             print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
         for row in rows:
+            rid = row.get("id")
+            if rid is not None:
+                # rows are keyed by id downstream (a gen resume, census pairs)
+                if str(rid) in seen:
+                    print(f"[filter] refuse: id {str(rid)!r} appears in {p} and in {seen[str(rid)]}, "
+                          "give the inputs distinct ids", file=sys.stderr)
+                    return 2
+                seen[str(rid)] = p
             why = reason(row, opts)
             if why:
                 counts[why] += 1

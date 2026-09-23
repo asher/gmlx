@@ -30,7 +30,7 @@ from pathlib import Path
 
 from . import corpus as _corpus
 from .constants import log
-from .format import write_json_atomic
+from .format import write_bytes_atomic, write_json_atomic
 from .frames import CONTINUE_INSTRUCTION
 
 GEN_VERSION = "3"
@@ -335,10 +335,12 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 # the run
 # ---------------------------------------------------------------------------
 
-def _done_ids(out: Path) -> set[str]:
-    """The ids already in ``out``. A torn final line (a kill mid-write) is
-    cut off and logged; a bad line anywhere else raises ValueError."""
-    done: set[str] = set()
+def _done_ids(out: Path) -> dict[str, list | None]:
+    """The ids already in ``out`` with the prompt each one answered (its
+    messages without the reply, None when the row has none). A torn
+    final line (a kill mid-write) is cut off and logged; a bad line
+    anywhere else raises ValueError."""
+    done: dict[str, list | None] = {}
     if not out.exists():
         return done
     text = out.read_text(encoding="utf-8")
@@ -347,14 +349,47 @@ def _done_ids(out: Path) -> set[str]:
         if not line.strip():
             continue
         try:
-            done.add(str(json.loads(line)["id"]))
-        except (ValueError, KeyError, TypeError) as e:
+            row = json.loads(line)
+            msgs = row.get("messages")
+            done[str(row["id"])] = list(msgs[:-1]) if isinstance(msgs, list) and msgs else None
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
             if k == len(lines) - 1:
-                out.write_text(text[:len(text) - len(line)], encoding="utf-8")
+                write_bytes_atomic(out, text[:len(text) - len(line)].encode("utf-8"))
                 log(f"[gen] dropped a torn last line of {out} ({len(line)} chars)")
                 break
             raise ValueError(f"{out}: line {k + 1} is not a JSON row with an id ({e})") from e
     return done
+
+
+def prompt_conflict(done: dict[str, list | None], rows: list[dict], out: Path, source: str) -> str | None:
+    """Why the rows already in ``out`` cannot be resumed against these
+    prompt rows: a done id whose prompt is not this row's, or one that
+    the prompt set no longer holds. Ids from line numbers shift when a
+    line is inserted or removed, so both cases mean another prompt set."""
+    by_id = {r["id"]: r["messages"] for r in rows}
+    gone = sorted(i for i in done if i not in by_id)
+    changed = sorted(i for i, p in done.items() if i in by_id and p is not None and p != by_id[i])
+    if not gone and not changed:
+        return None
+    what = []
+    if changed:
+        what.append(f"{len(changed)} answered another prompt under the same id (first {changed[0]!r})")
+    if gone:
+        what.append(f"{len(gone)} have ids not in {source} (first {gone[0]!r})")
+    return (f"of the {len(done)} replies in {out}, " + " and ".join(what)
+            + "; ids taken from line numbers shift when a line is added or removed, pass a fresh --out")
+
+
+def context_format_error(fmt: str) -> str | None:
+    """Why ``fmt`` cannot combine a context and a prompt: a field other
+    than the two, or one of the two missing."""
+    try:
+        probe = fmt.format(context="\x00C\x00", prompt="\x00P\x00")
+    except (KeyError, IndexError, ValueError, AttributeError) as e:
+        return f"--context-format takes the fields {{context}} and {{prompt}} only ({e!r})"
+    if "\x00C\x00" not in probe or "\x00P\x00" not in probe:
+        return "--context-format must place both {context} and {prompt}"
+    return None
 
 
 def run_settings(opts: GenOptions) -> dict:
@@ -364,7 +399,8 @@ def run_settings(opts: GenOptions) -> dict:
                          "min_p": opts.min_p, "max_tokens": opts.max_tokens},
             "seed": opts.seed,
             "chat_template_kwargs": json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else None,
-            "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget}
+            "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget,
+            "serve_args": list(opts.serve_arg)}
 
 
 def teacher_name(opts: GenOptions) -> str | None:
@@ -456,6 +492,15 @@ def run_gen(opts: GenOptions) -> int:
         except (FileNotFoundError, OSError, ValueError) as e:
             print(f"[gen] refuse: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
             return 2
+    if opts.corpus is not None:
+        c = opts.corpus
+        if (c.endswith((".jsonl", ".txt")) or c.startswith((".", "/", "~"))) and not Path(c).expanduser().exists():
+            print(f"[gen] refuse: no corpus at {c}", file=sys.stderr)
+            return 2
+    fmt_err = context_format_error(opts.context_format)
+    if fmt_err:
+        print(f"[gen] refuse: {fmt_err}", file=sys.stderr)
+        return 2
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -478,6 +523,10 @@ def run_gen(opts: GenOptions) -> int:
         done = _done_ids(out)
     except ValueError as e:
         print(f"[gen] refuse: {e}", file=sys.stderr)
+        return 2
+    conflict = prompt_conflict(done, rows, out, opts.prompts or opts.corpus or "the prompt set")
+    if conflict:
+        print(f"[gen] refuse: {conflict}", file=sys.stderr)
         return 2
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
@@ -565,7 +614,7 @@ def run_gen(opts: GenOptions) -> int:
         sidecar = {
             "gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url, "served_model_id": model_id,
             **run_settings(opts),
-            "serve_args": list(opts.serve_arg), "prompt_source": opts.prompts or opts.corpus,
+            "prompt_source": opts.prompts or opts.corpus,
             "prompt_set_sha256": prompt_hash, "prompts": len(rows),
             "instruction": opts.instruction if opts.corpus else None,
             "prefix_chars": opts.prefix_chars if opts.corpus else None, "filter_version": None,

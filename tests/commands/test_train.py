@@ -223,3 +223,33 @@ def test_lora_rank_below_one_and_a_slash_terminated_adapter_path_are_refused(tmp
         lora_scale(-1, None, 4.0)
     err = train.probe_writable(str(tmp_path / "new") + "/")
     assert err and "directory" in err
+
+
+def test_lora_modules_to_gguf_refuses_a_factor_that_is_not_a_matrix(tmp_path):
+    """A stacked expert factor (three axes) cannot be transposed into the
+    two-axis tensors a GGUF adapter holds; the export names the module
+    rather than writing a wrong tensor."""
+    from gmlx.tune.lora import lora_modules_to_gguf
+
+    class _Stacked(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lora_a = mx.zeros((2, 3, 4))
+            self.lora_b = mx.zeros((2, 4, 3))
+
+    class _M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [_Stacked()]
+
+    with pytest.raises(ValueError, match="layers.0"):
+        lora_modules_to_gguf(_M())
+
+
+def test_train_rank_below_one_is_refused_at_parse_time(tmp_path, capsys):
+    """The rank reaches the factors' shapes; zero or less is refused by the
+    parser, before the base model is resolved."""
+    with pytest.raises(SystemExit) as e:
+        train.cmd_train([str(tmp_path / "m.gguf"), "--data", str(tmp_path), "--adapter-out",
+                         str(tmp_path / "a.gguf"), "--rank", "0"])
+    assert e.value.code == 2 and "at least 1" in capsys.readouterr().err

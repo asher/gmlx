@@ -147,9 +147,16 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                 if st_variants is not None:
                     st_row = list(st_variants[w])
                     lost = len(m) - len(m2)
-                    if lost and len(st_row) == len(m):
-                        head = 1 if st_row[0].get("role") == "system" else 0
-                        st_row = st_row[:head] + st_row[head + lost:]
+                    if lost:
+                        # the turns fit_reply dropped go from the student's
+                        # list too, counted on the bodies after any system
+                        # turn, since one side may carry a system turn alone
+                        th = 1 if m[0].get("role") == "system" else 0
+                        sh = 1 if st_row and st_row[0].get("role") == "system" else 0
+                        if len(st_row) - sh != len(m) - th:
+                            mismatch += 1
+                            continue
+                        st_row = st_row[:sh] + st_row[sh + lost:]
                     student_rows += 1
                 flagged += int(flag)
                 rows.append((len(rows), doc_id, w, ids.astype(np.int32), ends.astype(np.uint32), text, m2, spans,
@@ -456,6 +463,11 @@ def run_cache(opts: CacheOptions) -> int:
         # a rewritten manifest would change the hash every view carries
         log(f"[cache] nothing to do: all {done} shards verified and the manifest is present")
         return 0
+    if opts.resume and (out / "manifest.json").is_file():
+        # the manifest describes shards this run rewrites; without it a
+        # resume cut short cannot pass as finished
+        (out / "manifest.json").unlink()
+        log("[cache] removed the manifest of an unfinished cache, it is rewritten after the last shard")
 
     try:
         model, config, arch, streaming, offloaded = load_teacher(opts)
@@ -489,7 +501,7 @@ def run_cache(opts: CacheOptions) -> int:
                    "path": "streaming" if streaming else "resident", "seam": "gmlx.stream.moe_routes"}
         # k is learned from the first recorded chunk, so a resume that finds
         # every shard written takes it from progress.json
-        if (writer.progress.get("routing") or {}).get("k") is not None:
+        if opts.resume and (writer.progress.get("routing") or {}).get("k") is not None:
             routing["k"] = int(writer.progress["routing"]["k"])
         log(f"[cache] routes: {len(recorder.layers)} MoE layers, {n_experts} experts, {routing['dtype']}")
     feeder = getattr(model, "_kq_feeder", None) if streaming else None
@@ -567,7 +579,8 @@ def run_cache(opts: CacheOptions) -> int:
                     routing["k"] = int(routes_blt.shape[-1])
                     writer.progress["routing"] = routing
                     per_pos = routes_blt.shape[2] * routing["k"] * np.dtype(routes_blt.dtype).itemsize
-                    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, routes_bytes=per_pos)
+                    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, routes_bytes=per_pos,
+                                                       hidden_bytes=2 * opts.hidden_dim if opts.hidden else 0.0)
                     log(f"[cache] routes: k={routing['k']}, estimate with routes {est / GB:.2f} GB")
                     if opts.max_disk_gb is not None and est > opts.max_disk_gb * GB:
                         log(f"[cache] refuse: estimate with routes exceeds --max-disk-gb {opts.max_disk_gb}")

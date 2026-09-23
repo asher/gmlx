@@ -365,9 +365,15 @@ class ViewLoader:
             self.render_failures += 1
             return None
         t_spans = [tuple(x) for x in meta["spans"]] if (s_spans is not None and meta.get("spans")) else None
-        rv = compile_row(arrs, text, s_ids, s_ends, self.tables, Kp=self.Kp, knobs=self.knobs,
-                         teacher_special=set(), student_special=self.student_special,
-                         identity=self.identity, t_spans=t_spans, s_spans=s_spans)
+        try:
+            rv = compile_row(arrs, text, s_ids, s_ends, self.tables, Kp=self.Kp, knobs=self.knobs,
+                             teacher_special=set(), student_special=self.student_special,
+                             identity=self.identity, t_spans=t_spans, s_spans=s_spans)
+        except ValueError:
+            # the two renders pair no spans (a template that rewrites content)
+            self.dropped += 1
+            self.render_failures += 1
+            return None
         if rv is None:
             self.dropped += 1
         return rv
@@ -409,6 +415,8 @@ class ViewLoader:
             written += 1
         return written
 
+    MAT_KEEP = 4
+
     def _materialized(self, r: int) -> RowView | None:
         i, slot = self.reader.index[r]
         sh = self._mat.get(i)
@@ -418,7 +426,12 @@ class ViewLoader:
                 return None
             from safetensors.numpy import load_file
             sh = load_file(str(p))
-            self._mat = {i: sh}
+            # length-sorted batches draw on a few shards at once
+            while len(self._mat) >= self.MAT_KEEP:
+                del self._mat[next(iter(self._mat))]
+        else:
+            del self._mat[i]
+        self._mat[i] = sh
         key = f"r{slot}.student_ids"
         if key not in sh:
             return None
