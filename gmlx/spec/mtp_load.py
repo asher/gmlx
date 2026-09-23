@@ -33,6 +33,7 @@ from gmlx.load.loader import (
     _install_and_load,
     _resolve_chat_template,
     build_model,
+    collect_after_load,
     materialize_module_arrays,
     model_is_moe,
     print_inventory,
@@ -1986,6 +1987,7 @@ def load_mtp_model(
     if wire:
         _wire_big_model(model)
     wait_for_populate(pf.shards, log=_log)
+    collect_after_load()
 
     return model, drafter, config, tokenizer
 

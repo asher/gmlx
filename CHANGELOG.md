@@ -21,6 +21,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own dispatch. The scan records each position's state update instead of
   storing every state, and the next step replays the accepted ones.
 
+### Fixed
+
+- A model load now ends with a full garbage collection, so Python's first
+  full pass over the new model no longer stalls a decode step soon after.
+
 ## [0.4.14] - 2026-09-18
 
 ### Added

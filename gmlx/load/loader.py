@@ -14,6 +14,7 @@ arch-generic.
 
 from __future__ import annotations
 
+import gc
 import os
 import time
 
@@ -690,6 +691,15 @@ def materialize_module_arrays(*modules) -> None:
     preload/keep-warm). Cheap: weights are already evaluated, only small
     stragglers remain, and zero-copy mmap views evaluate without paging."""
     mx.eval(list(modules))
+
+
+def collect_after_load() -> None:
+    """Run a full garbage collection. A load puts the whole module tree in
+    the collector's oldest generation, and CPython then runs a full pass
+    soon, one that visits every module and array handle: tens of ms on a
+    large model, inside whichever decode step starts it. The loader entry
+    points call this last so the pass runs during the load."""
+    gc.collect()
 
 
 def _warm_touch_threshold_bytes() -> int:
@@ -1776,6 +1786,7 @@ def load_model(
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)
+    collect_after_load()
 
     # Resident generation re-enters mlx-lm's wired_limit() every turn, and
     # its near-budget warning prints on every entry; cap it at one.
