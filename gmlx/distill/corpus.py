@@ -32,6 +32,8 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 if not line:
                     continue
                 obj = json.loads(line)
+                if not isinstance(obj, dict) or text_key not in obj:
+                    raise ValueError(f"{p.name} line {i + 1}: no {text_key!r} key")
                 yield f"{prefix or p.name}:{i}", nfc(obj[text_key])
                 n += 1
                 if limit and n >= limit:
@@ -97,6 +99,8 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
     view of the conversation; None when the row has none). Contents are
     NFC-normalized (norm_messages)."""
     def one(row, doc):
+        if not isinstance(row, dict) or key not in row:
+            raise ValueError(f"{doc}: no {key!r} key")
         st = row.get(student_key) if student_key else None
         return doc, norm_messages(row[key]), (norm_messages(st) if st else None)
     p = Path(spec).expanduser()

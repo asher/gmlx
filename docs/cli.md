@@ -1017,7 +1017,7 @@ Alignment flags, in the order `--help` prints them.
 | `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
 | `--out DIR` | required | the view directory to write, an earlier view there is removed first |
 | `--tables DIR` | none | an earlier view directory whose tokenizer tables are reused when the pair matches |
-| `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary |
+| `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary; ignored on the identity path, where K' = K |
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
 | `--force` | off | keep a view the own-group check would refuse |
@@ -1106,7 +1106,7 @@ examples shown before each question.
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
 | `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` maps restrict the reply slices, refused when it names none of their rows or its frame differs from `--reply-think` |
 | `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a cached id beyond the student's head |
-| `--kld-rows N` | all | rows of the KL cache to score |
+| `--kld-rows N` | all | rows of the KL cache to score, spread over its length order |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |
 | `--bpb-prefix TEXT` | none | text placed before every window (`\n`, `\t`, `\r` and `\\` decoded), or `@continue` or `@model` for that frame's template prefix; another `@` exits 2 |
@@ -1123,7 +1123,9 @@ rows in one or more caches made with one. It reports how much more
 likely the context makes each token the teacher wrote, the distance
 between the two stored top-k distributions with everything outside the
 top-k pooled, and, with several contexts, the part no single adapter can
-learn. Runs on the CPU. Exits 2 when a cache has no manifest, when a
+learn. With several `--with` caches the effect, the histogram and the
+positions map come from the first, and the others enter the residual
+only. Runs on the CPU. Exits 2 when a cache has no manifest, when a
 reply-think cache records no `content_start` (one written before rows
 carried it), or when no rows pair.
 

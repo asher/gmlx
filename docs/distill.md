@@ -351,10 +351,11 @@ An effect under about 0.05 nats, or a high-delta share under 0.01,
 means the document changes little that a student could learn, and the
 run is not worth its hours. The other rows are diagnostics. The
 `paired reply rows` row also counts reply mismatches skipped, rows whose
-reply bytes differed between the two caches, and
-`residual across contexts` matters only with several documents. Keep
-the census JSON, since the evaluation reads it to score the adapter at
-those positions.
+reply bytes differed between the two caches. `residual across contexts`
+matters only with several documents, and is the one row that reads
+every `--with` cache, since the effect, the histogram and the positions
+map come from the first. Keep the census JSON, which the evaluation
+reads to score the adapter at those positions.
 
 The same replies give the teacher's own pass rate, computed as under
 [Use and measure the adapter](#use-and-measure-the-adapter). A teacher
@@ -839,7 +840,8 @@ The other tables follow the same after and before pattern.
   `truncated_rate`. `refusal_rate` is the share of refusal prompts the
   student refused, and `task_refusal_rate` the share of task prompts it
   refused. `ref_nll_nats` is the student's surprise at the replies of an
-  earlier report given by `--chat-refs`.
+  earlier report given by `--chat-refs`, or under `--before` at the
+  adapter-off replies, which then win.
 - The KL table gives the KL divergence, a distance between the student's
   next-token probabilities and the teacher's stored ones, in nats.
   `clustered se` is its standard error over rows, and `top-1` the share

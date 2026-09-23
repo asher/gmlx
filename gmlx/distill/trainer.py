@@ -134,13 +134,15 @@ def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale
     checkpoint, else the batches it skips are not the ones already
     trained on, the schedule moves, or the checkpoint's factors do not
     fit the model: the views by fingerprint, the batch size, the seed,
-    the step count, the learning-rate settings, the loss knobs, the
-    gradient clip, the weight decay, the LoRA rank, multiplier, keys and
+    the step count, the validation sample size, the learning-rate
+    settings, the loss knobs, the gradient clip, the weight decay, the
+    LoRA rank, multiplier, keys and
     dropout, the hidden-state term and the student by size and leading
     bytes."""
     ident = teacher_identity(opts.student)
     return {"views": [view_fingerprint(v) for v in views],
             "batch_size": int(opts.batch_size), "seed": int(opts.seed), "iters": int(opts.iters),
+            "val_batches": int(opts.val_batches),
             "lr": float(opts.lr), "warmup": float(opts.warmup), "knobs": dict(knobs),
             "clip": float(opts.clip),
             "weight_decay": None if opts.weight_decay is None else float(opts.weight_decay),
@@ -325,8 +327,9 @@ def run_train(opts: TrainOptions) -> int:
         if prev is not None and prev != run:
             diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
             log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
-                "a resume repeats the views, batch size, seed, step count, learning rate, loss knobs, gradient "
-                "clip, weight decay, LoRA rank, multiplier, keys and dropout, hidden-state term and student")
+                "a resume repeats the views, batch size, seed, step count, validation sample size, learning "
+                "rate, loss knobs, gradient clip, weight decay, LoRA rank, multiplier, keys and dropout, "
+                "hidden-state term and student")
             return 2
     if opts.adapter_out:
         from gmlx.tune.lora import probe_writable
@@ -508,7 +511,7 @@ def run_train(opts: TrainOptions) -> int:
 
         vg = nn.value_and_grad(model, trunk_loss)
 
-        def validate() -> float:
+        def validate() -> float | None:
             model.eval()
             cur_seed[0] = None
             tot, ntok = 0.0, 0
@@ -522,7 +525,7 @@ def run_train(opts: TrainOptions) -> int:
                 tot += float(loss) * n
                 ntok += n
             model.train()
-            return tot / max(ntok, 1)
+            return tot / ntok if ntok else None
 
         state = {"iteration": 0, "tokens": 0, "seed": opts.seed, "lr": opts.lr, "best_val": None,
                  "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}, "run": run}
@@ -557,9 +560,12 @@ def run_train(opts: TrainOptions) -> int:
                 v = validate()
                 log_rows.append({"it": it_idx + 1, "val": v})
                 best = state['best_val']
-                log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
-                    else f"[train] it {it_idx + 1} val {v:.4f}")
-                if state["best_val"] is None or v < state["best_val"]:
+                if v is None:
+                    log(f"[train] it {it_idx + 1} val none: no validation position scored, best unchanged")
+                else:
+                    log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
+                        else f"[train] it {it_idx + 1} val {v:.4f}")
+                if v is not None and (state["best_val"] is None or v < state["best_val"]):
                     state["best_val"] = v
                     save_checkpoint(ckpt_dir, "best", model, opt, state, extra=hs_save)
             if (it_idx + 1) % opts.save_every == 0 or it_idx + 1 == opts.iters:

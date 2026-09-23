@@ -10,6 +10,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -301,14 +302,16 @@ def teacher_identity(path: str) -> dict:
 
 
 def head_logits(head: HeadSpec, h):
-    """The teacher's bf16 logits for hidden states ``h``: the projection,
-    then the softcap when the head carries one. The pass and both memory
-    probes go through here, so they measure the same graph."""
+    """The teacher's half-precision logits for hidden states ``h``: the
+    projection, then the softcap when the head carries one. f16 logits
+    stay f16 (a cast to bf16 would drop three mantissa bits), anything
+    else goes to bf16. The pass and both memory probes go through here,
+    so they measure the same graph."""
     import mlx.core as mx
     z = head.fn(head.params, h)
     if head.softcap:
         z = head.softcap * mx.tanh(z / head.softcap)
-    return z.astype(mx.bfloat16)
+    return z if z.dtype == mx.float16 else z.astype(mx.bfloat16)
 
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw) -> dict:
@@ -329,11 +332,27 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None}
 
 
+def teacher_over_budget(model, budget: int | None = None) -> bool:
+    """Whether the model's parameters exceed the wired budget, nine
+    tenths of the recommended working set as the expert streaming
+    installer reads it. False when no device reports one."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    if budget is None:
+        try:
+            budget = int(0.9 * int(mx.device_info()["max_recommended_working_set_size"]))
+        except Exception:  # noqa: BLE001
+            return False
+    flat: Any = tree_flatten(model.parameters())
+    return sum(int(a.nbytes) for _k, a in flat) > budget
+
+
 def load_teacher(opts: CacheOptions):
-    """(model, config, arch, streaming, expert_bytes). A
-    GGUF teacher loads through gmlx; ``stream_experts`` forces expert
-    streaming (and the prefill feeder) on a MoE teacher that would
-    otherwise sit resident. A directory is loaded as an MLX checkpoint."""
+    """(model, config, arch, streaming, expert_bytes). A GGUF teacher
+    loads through gmlx; one over the wired budget streams its experts
+    from disk (and runs the prefill feeder), and ``stream_experts``
+    forces that on a MoE teacher that would otherwise sit resident. A
+    directory is loaded as an MLX checkpoint."""
     teacher_is_gguf = Path(opts.teacher).is_file() and opts.teacher.endswith(".gguf")
     offloaded = 0
     if teacher_is_gguf:
@@ -355,6 +374,15 @@ def load_teacher(opts: CacheOptions):
             n, offloaded = install_expert_streaming(model, gguf_path=opts.teacher, force_stream=True)
             if n == 0:
                 raise ValueError("--stream-experts on a teacher with no expert stacks")
+        elif teacher_over_budget(model):
+            # a resident load would pin the whole model under the wired
+            # limit set below; the installer streams what is over budget
+            from gmlx.stream.expert_streaming import install_expert_streaming
+            for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
+                os.environ.setdefault(var, "0")
+            n, offloaded = install_expert_streaming(model, gguf_path=opts.teacher)
+            log("[cache] teacher over the wired budget: " + (f"{n} expert stacks stream from disk" if n
+                                                             else "no expert stacks to stream"))
         streaming = bool(moe_streaming_active(model))
     else:
         model, config, _tok = _student.load_mlx_student(opts.teacher)
@@ -537,7 +565,7 @@ def run_cache(opts: CacheOptions) -> int:
     tokens_done = writer.progress["tokens"]
     tokens_run = 0
     reads_bytes = 0.0
-    E_bytes = opts.expert_bytes_gb * GB if opts.expert_bytes_gb else float(offloaded)
+    E_bytes = opts.expert_bytes_gb * GB if opts.expert_bytes_gb is not None else float(offloaded)
     row_len = opts.max_len
     trunk_wall = 0.0
     trunk_forwards = 0

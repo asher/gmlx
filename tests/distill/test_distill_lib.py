@@ -3924,8 +3924,6 @@ def test_compile_row_chunks_and_weights_match_a_reference(tmp_path, tok_bl):
         chunks = []
         for j in range(1, len(pos)):
             s0, s1 = int(pos[j - 1]), int(pos[j])
-            if s1 - s0 > knobs["max_chunk_len"]:
-                continue
             if lbm[s1] <= math.log(knobs["gamma"]):
                 seen_gamma += 1
                 continue
@@ -3938,6 +3936,76 @@ def test_compile_row_chunks_and_weights_match_a_reference(tmp_path, tok_bl):
             assert g[0] == w[0] and g[1] == w[1]
             assert abs(g[2] - w[2]) < 1e-5 and abs(g[3] - w[3]) < 1e-6
     assert seen_mid > 0 and seen_gamma > 0 and kept > 0
+
+
+class _MaskedRows:
+    """A reader whose row 0 has its on-path mask cleared at every third
+    interior position, so some chunk spans a position without a target."""
+
+    def __init__(self, reader):
+        self.reader, self.manifest, self.K = reader, reader.manifest, reader.K
+
+    def __len__(self):
+        return len(self.reader)
+
+    def row(self, r):
+        arrs, text, meta = self.reader.row(r)
+        if r == 0:
+            arrs = dict(arrs)
+            onm = arrs["onpath_mask"].copy()
+            onm[1:-1:3] = False
+            arrs["onpath_mask"] = onm
+        return arrs, text, meta
+
+
+def test_compile_row_drops_a_chunk_over_the_length_or_without_a_target_on_a_cross_pair(tmp_path, tok_bl,
+                                                                                         tok_spm):
+    """Across two tokenizers the spans between shared boundaries run over
+    several tokens on either side, so a chunk longer than max_chunk_len in
+    teacher or student tokens is dropped, as is one spanning a position
+    the cache holds no target for, and the rest keep the teacher's on-path
+    sum and end mass."""
+    from gmlx.distill import align as _align
+
+    _tiny_cache(tmp_path / "c", tok_bl, K=8, n_rows=8)
+    reader = _MaskedRows(dl.CacheReader(tmp_path / "c"))
+    tables = dl.build_tables(tok_bl, tok_spm)
+    tb_s = dl.token_bytes(tok_spm)
+    knobs = dict(KNOBS, max_chunk_len=1, gamma=1e-9)
+    comp = dl.ViewLoader(reader, tok_spm, tables, knobs=knobs, Kp=8, identity=False, student_tb=tb_s)
+    seen_len = seen_onm = kept = 0
+    for r in range(len(reader)):
+        rv = comp.compile(r)
+        if rv is None:
+            continue
+        arrs, text, _meta = reader.row(r)
+        s_ids, s_ends, _f = dl.encode_with_byte_ends(tok_spm, text, tb_s, add_special_tokens=True)
+        al = _align.shared_boundaries(arrs["token_end_byte"].astype(np.int64), s_ends.astype(np.int64))
+        assert np.array_equal(al.s_pos, rv.bnd_pos) and np.array_equal(s_ids, rv.student_ids)
+        onp = arrs["onpath_log_p"].astype(np.float64)
+        onm = arrs["onpath_mask"]
+        lbm = arrs["log_boundary_mass"].astype(np.float32)
+        chunks = []
+        for j in range(1, al.J):
+            s0, s1 = int(al.s_pos[j - 1]), int(al.s_pos[j])
+            t0, t1 = int(al.t_pos[j - 1]), int(al.t_pos[j])
+            if s1 - s0 > knobs["max_chunk_len"] or t1 - t0 > knobs["max_chunk_len"]:
+                seen_len += 1
+                continue
+            if lbm[t1] <= math.log(knobs["gamma"]):
+                continue
+            if not np.all(onm[t0:t1]):
+                seen_onm += 1
+                continue
+            chunks.append((s0, s1 - 1, float(onp[t0:t1].sum()), float(lbm[t1])))
+        got = list(zip(rv.chunk_start.tolist(), rv.chunk_end.tolist(), rv.chunk_teacher_ll.tolist(),
+                       rv.chunk_teacher_log_bm.tolist()))
+        assert len(got) == len(chunks), (r, got, chunks)
+        kept += len(got)
+        for g, w in zip(got, chunks):
+            assert g[0] == w[0] and g[1] == w[1]
+            assert abs(g[2] - w[2]) < 1e-5 and abs(g[3] - w[3]) < 1e-6
+    assert seen_len > 0 and seen_onm > 0 and kept > 0
 
 
 def test_collate_positions_index_the_flat_b_times_t_minus_one_grid(tmp_path, tok_bl, tok_spm):
@@ -4244,8 +4312,16 @@ def test_cache_kld_matches_a_per_position_reference(tmp_path, tok_bl):
     _tiny_cache(tmp_path / "c", tok_bl, n_rows=4)
     reader = dl.CacheReader(tmp_path / "c")
     V = len(dl.token_bytes(tok_bl))
-    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
-    logW = np.asarray(W).astype(np.float64)
+    Wn = np.random.default_rng(3).standard_normal((V, V)).astype(np.float32)
+    # the student agrees with the cache's first id at the first on-path
+    # position of every row, and nowhere by chance
+    for r in range(len(reader)):
+        arrs, _text, _meta = reader.row(r)
+        t = int(np.nonzero(arrs["onpath_mask"])[0][0])
+        # a lead of about 6 nats keeps the student's tail mass resolvable in f32
+        Wn[int(arrs["token_ids"][t]), int(arrs["top_k_indices"][t][0])] = 6.0
+    W = mx.array(Wn)
+    logW = Wn.astype(np.float64)
     logW = logW - np.logaddexp.reduce(logW, axis=1, keepdims=True)
 
     class Stub:
@@ -4271,7 +4347,7 @@ def test_cache_kld_matches_a_per_position_reference(tmp_path, tok_bl):
             tails += abs(tail)
             hits += int(np.argmax(logW[int(ids[t])]) == idx[0])
             npos += 1
-    assert res["positions"] == npos and tails / npos > 1e-3
+    assert res["positions"] == npos and tails / npos > 1e-3 and 0 < hits < npos
     assert res["mean_kld_nats"] == pytest.approx(tot / npos, rel=1e-5)
     assert res["top1_agreement"] == pytest.approx(hits / npos)
 
@@ -4314,10 +4390,14 @@ def test_holm_steps_down_and_the_bootstrap_p_is_the_regression_tail():
 def test_train_schedule_warms_up_linearly_then_decays():
     from gmlx.distill import trainer as _trainer
 
-    s = _trainer.make_schedule(1e-3, 100, 0.1)
+    lr, iters, warm = 1e-3, 100, 10
+    s = _trainer.make_schedule(lr, iters, 0.1)
     vals = [float(s(i)) for i in (0, 5, 10, 50, 99)]
     assert vals[0] == 0.0 and vals[1] == pytest.approx(5e-4) and vals[2] == pytest.approx(1e-3)
-    assert vals[2] > vals[3] > vals[4] >= 0.0
+    # the schedule runs in f32, and 1 + cos near pi loses digits
+    for t, v in ((50, vals[3]), (99, vals[4])):
+        assert v == pytest.approx(lr * 0.5 * (1 + math.cos(math.pi * (t - warm) / (iters - warm))), rel=1e-3)
+    assert vals[2] > vals[3] > vals[4] > 0.0
 
 
 def test_train_validation_weights_tokens_and_clips_and_best_tracks_the_lowest(tmp_path, tok_bl, monkeypatch):
@@ -4460,6 +4540,181 @@ def test_same_render_rejects_a_student_template_that_renders_other_ids(tmp_path,
     reader = dl.CacheReader(tmp_path / "c")
     same, why = _view.same_render(reader, teacher, "reply")
     assert same and why == "3 rows checked"
-    student = _with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_B)
+    # the same tokenizer under a template of the same length in tokens
+    # and bytes, differing in the turn header's letters alone
+    student = _with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_A.replace("Model:", "Robot:"))
+    a = teacher.encode(teacher.apply_chat_template(msgs, tokenize=False), add_special_tokens=False)
+    b = student.encode(student.apply_chat_template(msgs, tokenize=False), add_special_tokens=False)
+    assert len(a) == len(b) and a != b
     same, why = _view.same_render(reader, student, "reply")
-    assert not same and "student tokens vs" in why
+    counts = [int(w) for w in why.replace(":", "").split() if w.isdigit()]
+    assert not same and "student tokens vs" in why and counts[1] == counts[2] == len(b)
+
+
+# ---------------------------------------------------------------------------
+# a float f16 head, the over-budget teacher, f16 teacher logits, the
+# spread of --kld-rows, home-relative paths, a corpus row without the
+# key, an unscored validation, the validation sample in the fingerprint,
+# --kprime on the identity path, a module reached under two names
+# ---------------------------------------------------------------------------
+
+def test_float_f16_head_gets_bf16_cotangents_like_a_quantized_one():
+    """An f16 head is cached as bf16 by the getter and cast by the VJP
+    when it comes straight from the params, since the backward casts dz
+    to the weight's dtype and softmax cotangents of 1e-9 flush in f16."""
+    import mlx.nn as nn
+
+    rng = np.random.default_rng(9)
+    V, d, N = 32768, 32, 6
+    W32 = mx.array((rng.standard_normal((V, d)) * 0.3).astype(np.float32))
+    W16 = W32.astype(mx.float16)
+    lin = nn.Linear(d, V, bias=False)
+    lin.weight = W16
+    getter = dl.head_weight_fn(lin)
+    assert getter().dtype == mx.bfloat16 and lin.weight.dtype == mx.float16
+    h = mx.array(rng.standard_normal((N, d)).astype(np.float32))
+    next_ids = mx.array(rng.integers(0, V, N).astype(np.int32))
+    d_onpath = mx.full((N,), -1.0 / 8192, dtype=mx.float32)
+
+    def f(hid):
+        z = (hid @ W32.T).astype(mx.float32)
+        logq = z - mx.logsumexp(z, axis=-1, keepdims=True)
+        return mx.sum(d_onpath * mx.take_along_axis(logq, next_ids[:, None], axis=1)[:, 0])
+    ref = mx.grad(f)(h)
+    heads = [dl.HeadSpec(fn=lambda params, hh: lin(hh), params=lin.parameters(), softcap=None, V=V, weight=getter),
+             dl.linear_head(W16)]
+    assert heads[1].dense_weight(None).dtype == mx.float16
+    for head in heads:
+        dh, _ = dl.chunked_head_vjp(h, head, next_ids, n_bnd=0, target_gid=mx.zeros((0, 4), dtype=mx.int32),
+                                    group_of=None, G=V, Kp=4, log_bmask=dl.log_bmask_from(np.zeros(V, bool)), C=4,
+                                    params=head.params, d_onpath=d_onpath, d_Qslot=mx.zeros((0, 5)),
+                                    d_logbm=mx.zeros((0,)), want_params=False)
+        mx.eval(dh, ref)
+        a, b = np.asarray(dh, dtype=np.float64), np.asarray(ref, dtype=np.float64)
+        # bf16 rounds the backward matmul to about 0.5 percent; f16 cotangents err by 5 percent
+        assert np.abs(a - b).max() < 2e-2 * np.abs(b).max(), np.abs(a - b).max() / np.abs(b).max()
+
+
+def test_teacher_over_budget_compares_the_parameter_bytes_with_the_budget():
+    import mlx.nn as nn
+    from gmlx.distill import teacher as _teacher
+
+    m = nn.Linear(8, 8)
+    nbytes = 8 * 8 * 4 + 8 * 4
+    assert _teacher.teacher_over_budget(m, budget=nbytes - 1)
+    assert not _teacher.teacher_over_budget(m, budget=nbytes)
+    assert isinstance(_teacher.teacher_over_budget(m), bool)
+
+
+def test_head_logits_keep_f16_and_cast_the_rest_to_bf16():
+    from gmlx.distill import teacher as _teacher
+
+    W = mx.array(np.random.default_rng(1).standard_normal((16, 4)).astype(np.float32))
+    h = mx.array(np.random.default_rng(2).standard_normal((3, 4)).astype(np.float32))
+    assert _teacher.head_logits(dl.linear_head(W.astype(mx.float16)), h.astype(mx.float16)).dtype == mx.float16
+    assert _teacher.head_logits(dl.linear_head(W), h).dtype == mx.bfloat16
+    assert _teacher.head_logits(dl.linear_head(W, softcap=5.0), h).dtype == mx.bfloat16
+
+
+def test_cache_kld_max_rows_spreads_the_rows_over_the_length_order(tmp_path, tok_bl):
+    """max_rows picks that many rows evenly over the cache, first and last
+    included, in ascending order; the first rows alone would be the
+    shortest ones."""
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=8)
+    reader = dl.CacheReader(tmp_path / "c")
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    spread = dl.cache_kld(Stub(), reader, max_rows=3)
+    picked = dl.cache_kld(Stub(), _RowSubset(reader, [0, 4, 7]))
+    first = dl.cache_kld(Stub(), _RowSubset(reader, [0, 1, 2]))
+    assert spread["rows"] == 3 and spread["positions"] == picked["positions"]
+    assert spread["mean_kld_nats"] == pytest.approx(picked["mean_kld_nats"], rel=1e-6)
+    assert (first["positions"], first["mean_kld_nats"]) != (picked["positions"], picked["mean_kld_nats"])
+    whole = dl.cache_kld(Stub(), reader)
+    capped = dl.cache_kld(Stub(), reader, max_rows=8)
+    assert capped["rows"] == whole["rows"] == 8 and capped["mean_kld_nats"] == whole["mean_kld_nats"]
+
+
+def test_named_slices_expand_a_home_relative_path(tmp_path, monkeypatch):
+    from gmlx.distill import evaluate as _ev
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _ev._named(["a=~/x.jsonl"]) == [("a", str(tmp_path / "x.jsonl"))]
+
+
+def test_corpus_readers_refuse_a_row_without_the_key(tmp_path):
+    from gmlx.distill import corpus as _corpus
+
+    (tmp_path / "c.jsonl").write_text(json.dumps({"txt": "the cat"}) + "\n", encoding="utf-8")
+    (tmp_path / "m.jsonl").write_text(json.dumps({"msgs": []}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="c.jsonl line 1: no 'text' key"):
+        list(_corpus.iter_corpus(str(tmp_path / "c.jsonl")))
+    with pytest.raises(ValueError, match="no 'messages' key"):
+        list(_corpus.iter_conversations(str(tmp_path / "m.jsonl")))
+
+
+def test_train_logs_an_unscored_validation_as_none_and_keeps_no_best(tmp_path, tok_bl, monkeypatch, capsys):
+    """With no validation position scored the value is none, not zero, so
+    it never wins the best checkpoint."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    monkeypatch.setattr(_trainer._data, "sample_rows", lambda pairs, lengths, n, seed: [])
+    ck = tmp_path / "ckpt"
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=1, batch_size=2,
+                                                  seed=1, ckpt_dir=str(ck), val_every=1, val_batches=1,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16))
+    err = capsys.readouterr().err
+    assert rc == 0 and "val none: no validation position scored" in err
+    assert (ck / "last").is_dir() and not (ck / "best").exists()
+    assert json.loads((ck / "last" / "state.json").read_text())["best_val"] is None
+
+
+def test_train_resume_refuses_another_validation_sample_size(tmp_path, tok_bl, monkeypatch, capsys):
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True, val_batches=2)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "val_batches 1 -> 2" in err and "validation sample size" in err
+
+
+def test_align_logs_kprime_ignored_on_the_identity_path(tmp_path, tok_bl, capsys):
+    view, _student = _cpu_view(tmp_path, tok_bl, kprime=4)
+    err = capsys.readouterr().err
+    v = json.loads((view / "view.json").read_text())
+    assert v["identity"] and v["Kp"] == v["K"] == 8
+    assert "[align] --kprime 4 ignored on the identity path, K' = K = 8" in err
+
+
+def test_adapter_disabled_restores_a_module_reached_under_two_names():
+    """A LoRA module registered twice is saved once with its live scale;
+    saving it again after the first pass would record zero and restore
+    that."""
+    import mlx.nn as nn
+    gm = pytest.importorskip("gmlx.load.modules")
+
+    class Two(nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.a = m
+            self.b = m
+
+    base = nn.Linear(8, 6, bias=False)
+    m = gm.LoRAKQuantLinear(base, mx.random.normal((4, 8)) * 0.1, mx.random.normal((6, 4)) * 0.1, scale=2.0)
+    model = Two(m)
+    with dl.adapter_disabled(model) as off:
+        assert m.scale == 0.0 and len(off.saved) == 1
+    assert m.scale == 2.0

@@ -24,8 +24,14 @@ class adapter_disabled:
 
     def __enter__(self):
         from mlx_lm.tuner.lora import LoRALinear
+        # a module reachable under two names is saved once, else the
+        # second save records the zeroed scale and the exit restores that
+        seen: set[int] = set()
 
         def off(_k, m):
+            if id(m) in seen:
+                return
+            seen.add(id(m))
             if isinstance(m, LoRALinear) or hasattr(m, "lora_a") and hasattr(m, "scale"):
                 self.saved.append((m, m.scale))
                 m.scale = 0.0
@@ -35,6 +41,9 @@ class adapter_disabled:
             first = getattr(m, "_kq_lora", None)
             if first is not None:
                 for e in [first, *(getattr(m, "_kq_lora_extra", None) or [])]:
+                    if id(e) in seen:
+                        continue
+                    seen.add(id(e))
                     self.saved.append((e, e.scale))
                     e.scale = 0.0
                     self._drop_tables(e)

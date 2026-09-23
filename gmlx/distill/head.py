@@ -37,7 +37,9 @@ class HeadSpec:
         dequantize once and cache."""
         if params is not None and isinstance(params, dict) and "weight" in params:
             w = params["weight"]
-            if w.dtype in (_MX().float32, _MX().float16, _MX().bfloat16):
+            if w.dtype in (_MX().float32, _MX().bfloat16):
+                return w
+            if w.dtype == _MX().float16 and self.weight is None:
                 return w
         if self.weight is not None:
             return self.weight()
@@ -56,8 +58,9 @@ def _MX():
 
 
 def head_weight_fn(mod) -> Callable:
-    """() -> the module's [V, d] weight as bf16, cached; dequantizes affine
-    (mlx) and kquant heads row-block by row-block."""
+    """() -> the module's [V, d] weight in f32 or bf16, cached: an f16
+    float weight is copied to bf16, affine (mlx) and kquant heads are
+    dequantized row-block by row-block."""
     import mlx.core as mx
     cache: dict[str, Any] = {}
 
@@ -65,9 +68,15 @@ def head_weight_fn(mod) -> Callable:
         if "w" in cache:
             return cache["w"]
         w = mod.weight
-        if w.dtype in (mx.float32, mx.float16, mx.bfloat16):
+        if w.dtype in (mx.float32, mx.bfloat16):
             cache["w"] = w
             return w
+        if w.dtype == mx.float16:
+            # bf16, never f16: the backward casts dz to this dtype and the
+            # softmax cotangents (about q / N) underflow f16
+            cache["w"] = w.astype(mx.bfloat16)
+            mx.eval(cache["w"])
+            return cache["w"]
         mode = getattr(mod, "mode", "affine")
         rows = int(w.shape[0])
         parts = []
@@ -304,6 +313,10 @@ def chunked_head_vjp(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid
     N = int(hidden.shape[0])
     V = head.V
     W = head.dense_weight(params)
+    if W.dtype == mx.float16:
+        # an f16 head with no cached bf16 copy: the softmax cotangents
+        # (about q / N) underflow f16
+        W = W.astype(mx.bfloat16)
     arange_kp = mx.arange(Kp, dtype=mx.int32)
     in_B = mx.exp(log_bmask)[None, :]            # 0/1 [1, V]
     lo = mx.array(LOG_FLOOR, dtype=mx.float32)

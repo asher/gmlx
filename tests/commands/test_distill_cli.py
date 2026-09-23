@@ -242,3 +242,14 @@ def test_non_positive_chunk_knobs_are_refused_at_parse_time(argv):
     chunk the log of zero would drop; the parser refuses both."""
     rc, out = _run(["distill", *argv])
     assert rc == 2 and "positive" in out, out
+
+
+def test_distill_paths_expand_a_home_relative_argument(tmp_path, monkeypatch):
+    """A quoted ~ reaches the parser unexpanded; every path argument
+    expands it, so the refusal names the real path and no literal ~
+    directory is ever written."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    rc, out = _run(["distill", "eval", "--student", "~/nope.gguf", "--md", "~/r.md", "--json", "~/r.json"])
+    assert rc == 2 and str(tmp_path / "nope.gguf") in out and "~/" not in out
+    assert not (tmp_path / "~").exists()

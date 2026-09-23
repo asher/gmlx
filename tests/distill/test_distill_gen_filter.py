@@ -25,12 +25,14 @@ from gmlx.distill import gen
 
 class _Handler(BaseHTTPRequestHandler):
     calls: list = []
+    model_id: str = "stub-teacher"
+    fail_once: set = set()              # first words whose first request fails with a 500
 
     def log_message(self, *a):  # silence
         pass
 
     def do_GET(self):
-        body = json.dumps({"data": [{"id": "stub-teacher"}]}).encode()
+        body = json.dumps({"data": [{"id": type(self).model_id}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -42,6 +44,12 @@ class _Handler(BaseHTTPRequestHandler):
         type(self).calls.append(req)
         last = req["messages"][-1]["content"]
         word = last.split()[0] if last.split() else "empty"
+        if word in type(self).fail_once:
+            type(self).fail_once.discard(word)
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"stub failure")
+            return
         content = f"reply about {word} " + "and more words " * 8
         msg: dict = {"role": "assistant", "content": content}
         budget = req.get("thinking_budget")
@@ -63,6 +71,8 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def stub_server():
     _Handler.calls = []
+    _Handler.model_id = "stub-teacher"
+    _Handler.fail_once = set()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -917,3 +927,64 @@ def test_filter_refuses_an_id_two_inputs_share(tmp_path, capsys):
     assert rc == 2 and "[filter] refuse:" in err and "'b'" in err and str(b) in err, err
     assert not out.exists()
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 0
+
+
+# ---------------------------------------------------------------------------
+# a resume against another served model, the sidecar totals after a
+# resume, a corpus row without the text key
+# ---------------------------------------------------------------------------
+
+def test_gen_resume_refuses_a_server_serving_another_model(tmp_path, stub_server, capsys):
+    """The sidecar records the model the server named; a resume against a
+    server naming another refuses before any request, since the done
+    replies and the new ones would come from different teachers."""
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+    ])
+    out = tmp_path / "corpus.jsonl"
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)
+    assert gen.run_gen(opts) == 0
+    side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
+    assert side["served_model_id"] == "stub-teacher"
+    _prompts(tmp_path / "p.jsonl", [
+        {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+        {"id": "b", "messages": [{"role": "user", "content": "beta"}]},
+    ])
+    _Handler.model_id = "other-teacher"
+    _Handler.calls = []
+    capsys.readouterr()
+    assert gen.run_gen(opts) == 2
+    err = capsys.readouterr().err
+    assert "the server now serves other-teacher" in err and "came from stub-teacher" in err
+    assert len(_Handler.calls) == 1 and [r["id"] for r in _rows(out)] == ["a"]
+    assert json.loads((tmp_path / "corpus.jsonl.gen.json").read_text()) == side
+
+
+def test_gen_sidecar_totals_after_a_resume(tmp_path, stub_server):
+    """A prompt that failed is retried by the resume, so the sidecar's
+    failed count is the last run's; completed and stops accumulate and the
+    stop fraction is over every completed reply, not the last run's."""
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+        {"id": "b", "messages": [{"role": "user", "content": "beta CUT"}]},
+    ])
+    out = tmp_path / "corpus.jsonl"
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)
+    _Handler.fail_once = {"beta"}
+    assert gen.run_gen(opts) == 1
+    run = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())["run"]
+    assert run["completed"] == 1 and run["failed"] == 1 and run["stops"] == 1 and run["stop_fraction"] == 1.0
+    assert gen.run_gen(opts) == 0
+    run = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())["run"]
+    assert [r["id"] for r in _rows(out)] == ["a", "b"]
+    assert run["completed"] == 2 and run["failed"] == 0 and run["stops"] == 1
+    assert run["stop_fraction"] == pytest.approx(0.5)
+
+
+def test_gen_refuses_a_corpus_row_without_the_text_key(tmp_path, stub_server, capsys):
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"txt": "the cat"}) + "\n")
+    out = tmp_path / "corpus.jsonl"
+    rc = gen.run_gen(gen.GenOptions(out=str(out), corpus=str(corpus), base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "c.jsonl line 1: no 'text' key" in err

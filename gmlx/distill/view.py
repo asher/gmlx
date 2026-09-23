@@ -255,6 +255,8 @@ def run_align(opts: AlignOptions) -> int:
     wall = time.perf_counter() - t0
     Kp = opts.kprime or (max(stats["n_groups_max"]) if stats["n_groups_max"] else reader.K)
     if identity:
+        if opts.kprime and opts.kprime != reader.K:
+            log(f"[align] --kprime {opts.kprime} ignored on the identity path, K' = K = {reader.K}")
         Kp = reader.K
     a = float(np.mean(stats["own"])) if stats["own"] else 1.0
     s = float(np.mean(stats["singleton"])) if stats["singleton"] else 1.0

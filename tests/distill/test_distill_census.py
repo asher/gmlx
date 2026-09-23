@@ -434,6 +434,27 @@ def test_census_kl_runs_from_the_context_cache_and_counts_a_moved_top1(tmp_path,
                for k, pair in by_line.items())
 
 
+def test_census_top1_holds_when_the_boost_lands_on_the_leader(tmp_path, tok):
+    """A boost on a token that already leads moves the mass, so the KL is
+    positive, and moves no top-1: the count reads the first ids, not the
+    KL."""
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with the long context text here {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl")
+    r0 = dl.CacheReader(without)
+    arrs, _text, meta = r0.row(0)
+    t = meta["prefix_n_tokens"]
+    # the second reply token of row 0 is the teacher's leader already
+    assert arrs["top_k_indices"][t][0] == arrs["token_ids"][t + 1]
+    off = int(arrs["token_end_byte"][t] - arrs["token_end_byte"][meta["prefix_n_tokens"] - 1])
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl", boost={off: 3.0},
+                         boost_rows={0})
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["distillable_effect_kl_nats"] > 1e-3 and s["top1_moved_fraction"] == 0.0
+
+
 def test_residual_kl_counts_the_mass_outside_the_top_k_as_rest():
     ids = np.array([3, 7])
     lp_a, lp_b = np.log(np.array([0.5, 0.3])), np.log(np.array([0.2, 0.4]))

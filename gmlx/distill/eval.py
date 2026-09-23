@@ -109,16 +109,20 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
     re-rendered row cannot replay and is counted. Returns the mean over
     positions, its cluster-robust SE with rows as the clusters, top-1
     agreement over positions, the counts, the rows re-rendered and the
-    rows replayed."""
+    rows replayed. max_rows scores that many rows spread over the
+    cache's length order, in ascending order so shard reads stay
+    sequential; the first rows alone would be the shortest ones."""
     import mlx.core as mx
-    n_rows = len(reader) if max_rows is None else min(max_rows, len(reader))
+    n_all = len(reader)
+    order = (range(n_all) if max_rows is None or max_rows >= n_all
+             else np.unique(np.linspace(0, n_all - 1, max_rows).round().astype(int)))
     replayed = 0
     frame = (reader.manifest.get("gmlx_distill") or {}).get("frame") if tokenizer is not None else None
     stb = token_bytes(tokenizer, int(reader.manifest["vocab_size"])) if frame else None
     # per-row KL sums, top-1 hits and position counts: the means are over
     # positions, the SE clusters by row
     row_kl, row_hits, row_n, rerendered = [], [], [], 0
-    for r in range(n_rows):
+    for r in order:
         arrs, _text, meta = reader.row(r)
         t_ids = arrs["token_ids"].astype(np.int32)
         n = len(t_ids)

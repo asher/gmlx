@@ -10,6 +10,7 @@ The library behind each action is ``gmlx.distill``."""
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -52,13 +53,13 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
         description="Run a teacher to its own end of turn over a prompt set through gmlx serve, several "
                     "requests at a time, and write the replies as a conversation corpus with a generator "
                     "sidecar. The run resumes, since prompt ids already in --out are skipped.")
-    p.add_argument("--out", required=True, metavar="PATH", help="Corpus jsonl to write, with <out>.gen.json beside it.")
+    p.add_argument("--out", type=_path, required=True, metavar="PATH", help="Corpus jsonl to write, with <out>.gen.json beside it.")
     src = p.add_mutually_exclusive_group()
-    src.add_argument("--prompts", metavar="PATH",
+    src.add_argument("--prompts", type=_path, metavar="PATH",
                      help="A jsonl of {id, messages, context?} rows whose messages end on a user turn.")
-    src.add_argument("--corpus", metavar="PATH|ID",
+    src.add_argument("--corpus", type=_path, metavar="PATH|ID",
                      help="A text corpus (jsonl, directory or Hugging Face id) to build continuation prompts from.")
-    p.add_argument("--teacher", "--model", dest="teacher", metavar="GGUF",
+    p.add_argument("--teacher", "--model", type=_path, dest="teacher", metavar="GGUF",
                    help="GGUF to serve for the run, the teacher or, for a measurement, the student. "
                         "--model is the same flag.")
     p.add_argument("--base-url", default=None, metavar="URL",
@@ -78,7 +79,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--chat-template-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every teacher render, as a JSON object, passed to gmlx serve "
                         "--chat-template-config.")
-    p.add_argument("--context", default=None, metavar="FILE",
+    p.add_argument("--context", type=_path, default=None, metavar="FILE",
                    help="Text the teacher reads for every prompt without its own context field. The "
                         "student's list is written without it.")
     p.add_argument("--context-format", default=DEFAULT_CONTEXT_FORMAT,
@@ -116,11 +117,11 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
                     "and stamp the filter version into the corpus sidecar. Optionally run a task-specific "
                     "verify command over the survivors, or put a context the model that wrote the replies never saw on the "
                     "teacher's side of every kept row.")
-    p.add_argument("--in", dest="inputs", action="append", required=True, metavar="PATH",
+    p.add_argument("--in", type=_path, dest="inputs", action="append", required=True, metavar="PATH",
                    help="Generated corpus jsonl, repeatable and concatenated in order.")
-    p.add_argument("--out", required=True, metavar="PATH", help="Filtered corpus to write, with <out>.gen.json beside it.")
-    p.add_argument("--report", default=None, metavar="JSON", help="Write the kept and dropped counts here.")
-    p.add_argument("--rejects", default=None, metavar="PATH",
+    p.add_argument("--out", type=_path, required=True, metavar="PATH", help="Filtered corpus to write, with <out>.gen.json beside it.")
+    p.add_argument("--report", type=_path, default=None, metavar="JSON", help="Write the kept and dropped counts here.")
+    p.add_argument("--rejects", type=_path, default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
     p.add_argument("--min-words", "--min-tokens", dest="min_words", type=int, default=16, metavar="N",
                    help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
@@ -140,7 +141,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--verify", default=None, metavar="CMD",
                    help="Shell command that reads the surviving rows as jsonl on stdin and prints one line "
                         "per row, ok or a reason word to drop it.")
-    p.add_argument("--context", default=None, metavar="FILE",
+    p.add_argument("--context", type=_path, default=None, metavar="FILE",
                    help="Put this text on the teacher's side of every kept row, keeping the prompt as "
                         "given under student_messages.")
     p.add_argument("--context-format", default=DEFAULT_CONTEXT_FORMAT,
@@ -156,12 +157,12 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
         description="Run a teacher GGUF over a corpus once and store, per position, its most likely next "
                     "tokens with their log-probabilities, plus what a student with another tokenizer needs to "
                     "use them. Sizes in decimal GB.")
-    p.add_argument("--teacher", metavar="GGUF", help="Teacher GGUF (sharded ok).")
-    p.add_argument("--corpus", metavar="PATH|ID",
+    p.add_argument("--teacher", type=_path, metavar="GGUF", help="Teacher GGUF (sharded ok).")
+    p.add_argument("--corpus", type=_path, metavar="PATH|ID",
                    help="A jsonl file, a directory of text files, or a Hugging Face dataset id "
                         "(id[@config], which needs the datasets package).")
-    p.add_argument("--out", metavar="DIR", help="Cache directory to write.")
-    p.add_argument("--validate", metavar="DIR", help="Validate an existing cache and exit.")
+    p.add_argument("--out", type=_path, metavar="DIR", help="Cache directory to write.")
+    p.add_argument("--validate", type=_path, metavar="DIR", help="Validate an existing cache and exit.")
     p.add_argument("--top-k", type=_positive_int, default=256, help="Log-probabilities kept per position (default 256).")
     p.add_argument("--max-len", type=_positive_int, default=2048,
                    help="Teacher tokens per window including the start token (default 2048).")
@@ -233,11 +234,11 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
         description="Map a cache onto a student tokenizer in one CPU pass. Writes tables for the tokenizer "
                     "pair, the alignment statistics, the train and validation row index, and optionally the "
                     "materialized batch tensors.")
-    p.add_argument("--cache", required=True, metavar="DIR", help="Cache directory from `distill cache`.")
-    p.add_argument("--student", required=True, metavar="GGUF|DIR",
+    p.add_argument("--cache", type=_path, required=True, metavar="DIR", help="Cache directory from `distill cache`.")
+    p.add_argument("--student", type=_path, required=True, metavar="GGUF|DIR",
                    help="Student GGUF, or an MLX checkpoint directory for its tokenizer.")
-    p.add_argument("--out", required=True, metavar="DIR", help="View directory to write.")
-    p.add_argument("--tables", default=None, metavar="DIR",
+    p.add_argument("--out", type=_path, required=True, metavar="DIR", help="View directory to write.")
+    p.add_argument("--tables", type=_path, default=None, metavar="DIR",
                    help="An earlier view directory whose tokenizer tables are reused when the pair matches.")
     p.add_argument("--kprime", type=_positive_int, default=None,
                    help="Cap on distinct student-token groups kept per boundary (default: the maximum seen).")
@@ -273,11 +274,11 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
         description="Train a LoRA adapter on a K-quant GGUF student against one or more views and write "
                     "it as a GGUF adapter. The loop is gmlx's own: seeded batch order, resume by exact "
                     "step, last and best checkpoints.")
-    p.add_argument("--view", action="append", default=[], required=True, metavar="DIR",
+    p.add_argument("--view", type=_path, action="append", default=[], required=True, metavar="DIR",
                    help="View directory from `distill align`, repeatable to mix views aligned alike over one "
                         "tokenizer pair.")
-    p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
-    p.add_argument("--adapter-out", required=True, metavar="PATH", help="Output path for the .gguf adapter.")
+    p.add_argument("--student", type=_path, required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
+    p.add_argument("--adapter-out", type=_path, required=True, metavar="PATH", help="Output path for the .gguf adapter.")
     p.add_argument("--iters", type=_positive_int, required=True, help="Training steps.")
     p.add_argument("--lora-rank", type=_positive_int, default=16, help="LoRA rank (default 16).")
     p.add_argument("--lora-scale", type=float, default=None,
@@ -312,14 +313,14 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                         "hidden state to the cache's sketch at every boundary (default 0, off).")
     p.add_argument("--hs-loss", choices=("cosine", "mse"), default="cosine",
                    help="cosine: 1 - cosine similarity. mse: squared error on unit vectors (default cosine).")
-    p.add_argument("--ckpt-dir", default=None, metavar="DIR",
+    p.add_argument("--ckpt-dir", type=_path, default=None, metavar="DIR",
                    help="Checkpoint directory (default ./ckpt in the working directory).")
     p.add_argument("--resume", action="store_true", help="Continue from the last checkpoint.")
     p.add_argument("--save-every", type=_positive_int, default=200, help="Checkpoint interval in steps (default 200).")
     p.add_argument("--val-every", type=_positive_int, default=200, help="Validation interval in steps (default 200).")
     p.add_argument("--val-batches", type=_positive_int, default=16, help="Validation batches per pass (default 16).")
     p.add_argument("--report-every", type=_positive_int, default=10, help="Train-loss report interval (default 10).")
-    p.add_argument("--report", default=None, metavar="JSON", help="Write the run log here.")
+    p.add_argument("--report", type=_path, default=None, metavar="JSON", help="Write the run log here.")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--no-wired-limit", action="store_true", help="Leave the wired limit where it is.")
     p.add_argument("--cache-limit-gb", type=float, default=8.0, help="MLX buffer cache cap (default 8).")
@@ -333,16 +334,16 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
         description="Score a GGUF student, with and without its adapter in one process: bits per byte on "
                     "held-out slices, sparse KL against a same-tokenizer cache, downstream tasks from "
                     "local jsonl files, and a chat sanity set. Writes a Markdown and a JSON report.")
-    p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF.")
-    p.add_argument("--adapter", default=None, metavar="GGUF", help="GGUF adapter to apply.")
-    p.add_argument("--md", required=True, metavar="PATH", help="Markdown report to write.")
-    p.add_argument("--json", required=True, metavar="PATH", help="JSON report to write.")
-    p.add_argument("--cache", default=None, metavar="DIR",
+    p.add_argument("--student", type=_path, required=True, metavar="GGUF", help="Student GGUF.")
+    p.add_argument("--adapter", type=_path, default=None, metavar="GGUF", help="GGUF adapter to apply.")
+    p.add_argument("--md", type=_path, required=True, metavar="PATH", help="Markdown report to write.")
+    p.add_argument("--json", type=_path, required=True, metavar="PATH", help="JSON report to write.")
+    p.add_argument("--cache", type=_path, default=None, metavar="DIR",
                    help="Cache whose corpus the slices are checked against for overlap.")
     p.add_argument("--slice", action="append", default=[], metavar="NAME=PATH",
                    help="A held-out text slice, repeatable.")
-    p.add_argument("--teacher-bpb", default=None, metavar="JSON", help="Teacher bits per byte per slice.")
-    p.add_argument("--tasks-dir", default=None, metavar="DIR",
+    p.add_argument("--teacher-bpb", type=_path, default=None, metavar="JSON", help="Teacher bits per byte per slice.")
+    p.add_argument("--tasks-dir", type=_path, default=None, metavar="DIR",
                    help="Directory of task files: arc_easy.jsonl, hellaswag.jsonl, gsm8k.jsonl, gsm8k_shots.jsonl "
                         "(default the working directory).")
     p.add_argument("--tasks", default="", help="Comma list of arc_easy, hellaswag, gsm8k.")
@@ -352,11 +353,11 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="Also score with the adapter disabled in process.")
     p.add_argument("--chat-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of {messages} conversations scored on their assistant turns, repeatable.")
-    p.add_argument("--chat-sanity", default=None, metavar="PATH",
+    p.add_argument("--chat-sanity", type=_path, default=None, metavar="PATH",
                    help="A jsonl of {id, messages, kind} chat prompts, kind being task or refuse, scored for "
                         "template compliance and drift, how far the replies moved from an earlier report's.")
     p.add_argument("--chat-max-tokens", type=_positive_int, default=256, help="Reply budget for the chat sanity set (default 256).")
-    p.add_argument("--chat-refs", default=None, metavar="JSON",
+    p.add_argument("--chat-refs", type=_path, default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score. Ignored with --before, "
                         "which anchors on the adapter-off replies.")
     p.add_argument("--chat-max-len", type=_positive_int, default=2048, help="Longest conversation scored (default 2048).")
@@ -365,12 +366,13 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="A jsonl of conversations scored on the final reply, repeatable.")
     p.add_argument("--reply-think", action="store_true",
                    help="Reply slices target the final turn from its reasoning trace onward.")
-    p.add_argument("--reply-positions", default=None, metavar="JSON",
+    p.add_argument("--reply-positions", type=_path, default=None, metavar="JSON",
                    help="A distill census JSON whose high_delta map restricts every reply slice to the "
                         "high-delta positions.")
-    p.add_argument("--kld-cache", default=None, metavar="DIR",
+    p.add_argument("--kld-cache", type=_path, default=None, metavar="DIR",
                    help="Same-tokenizer cache to score sparse KL against.")
-    p.add_argument("--kld-rows", type=_positive_int, default=None, help="Rows of the KL cache to score (default all).")
+    p.add_argument("--kld-rows", type=_positive_int, default=None,
+                   help="Rows of the KL cache to score, spread over its length order (default all).")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every render, as a JSON object or a file.")
     p.add_argument("--max-len", type=_positive_int, default=512, help="Window length for bits per byte (default 512).")
@@ -393,12 +395,12 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
                     "more reply caches (distill cache --frame reply or reply-think) of the same replies, one "
                     "made without the context and one per context. Writes a JSON whose high_delta map "
                     "distill eval --reply-positions reads, and a Markdown summary. CPU only.")
-    p.add_argument("--without", required=True, metavar="DIR", help="Cache of the same replies read without the context.")
-    p.add_argument("--with", dest="with_", action="append", required=True, metavar="DIR",
+    p.add_argument("--without", type=_path, required=True, metavar="DIR", help="Cache of the same replies read without the context.")
+    p.add_argument("--with", type=_path, dest="with_", action="append", required=True, metavar="DIR",
                    help="Cache with a context, repeatable.")
-    p.add_argument("--out", required=True, metavar="JSON", help="Census JSON to write.")
-    p.add_argument("--md", default=None, metavar="PATH", help="Markdown summary to write.")
-    p.add_argument("--corpus", default=None, metavar="JSONL",
+    p.add_argument("--out", type=_path, required=True, metavar="JSON", help="Census JSON to write.")
+    p.add_argument("--md", type=_path, default=None, metavar="PATH", help="Markdown summary to write.")
+    p.add_argument("--corpus", type=_path, default=None, metavar="JSONL",
                    help="The corpus jsonl the caches were made from, so high_delta is keyed by row id.")
     p.add_argument("--delta-threshold", type=float, default=1.0,
                    help="Nats gained at the token the teacher wrote that make a position high-delta (default 1.0).")
@@ -411,6 +413,11 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
 PARSERS = {"gen": _gen_parser, "filter": _filter_parser, "cache": _cache_parser, "align": _align_parser,
            "census": _census_parser,
            "train": _train_parser, "eval": _eval_parser}
+
+
+def _path(text: str) -> str:
+    """A path argument with ~ expanded, so a quoted ~ reaches no reader."""
+    return os.path.expanduser(text)
 
 
 def _positive_float(text: str) -> float:

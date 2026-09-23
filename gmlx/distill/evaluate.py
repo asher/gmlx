@@ -6,6 +6,7 @@ one process, with a Markdown and a JSON report. ``run_eval`` is what
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -218,7 +219,7 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
         name, sep, path = spec.partition("=")
         if not sep or not name or not path:
             raise ValueError(f"expected name=path, got {spec!r}")
-        out.append((name, path))
+        out.append((name, os.path.expanduser(path)))
     return out
 
 
@@ -511,7 +512,10 @@ def run_eval(opts: EvalOptions) -> int:
     if opts.chat_sanity:
         items = chat_items
         refs = refs_before
-        if refs is not None:
+        if refs is not None and opts.before:
+            log(f"[eval] --chat-refs {opts.chat_refs} ignored: --before anchors the drift score on the "
+                "adapter-off replies")
+        elif refs is not None:
             log(f"[eval] chat drift references: {len(refs)} replies from {opts.chat_refs}")
         if opts.before:
             t0 = time.perf_counter()

@@ -170,7 +170,9 @@ def main() -> int:
             return 1
         cache_gen = os.path.join(tmp, "cache-gen")
         if _run([gmlx, "distill", "cache", "--teacher", teacher, "--corpus", str(corpus_gen), "--out", cache_gen,
-                 "--frame", "reply", "--top-k", str(a.top_k), "--max-len", str(a.max_len), "--rows-per-shard", "16"],
+                 # replies run to 256 tokens, and a row whose last exchange does not fit is dropped
+                 "--frame", "reply", "--top-k", str(a.top_k), "--max-len", str(max(a.max_len, 512)),
+                 "--rows-per-shard", "16"],
                 os.path.join(tmp, "cache-gen.log")):
             return 1
         if _run([gmlx, "distill", "cache", "--validate", cache_gen], os.path.join(tmp, "validate-gen.log")):

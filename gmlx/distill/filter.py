@@ -162,8 +162,8 @@ def _read_rows(path: Path) -> list[dict]:
     return rows
 
 
-_GEN_KEYS = ("model", "sampling", "seed", "chat_template_kwargs", "thinking", "thinking_budget",
-             "context", "context_format", "serve_args")
+_GEN_KEYS = ("model", "served_model_id", "sampling", "seed", "chat_template_kwargs", "thinking",
+             "thinking_budget", "context", "context_format", "serve_args")
 
 
 def _read_sidecar(path: Path) -> dict | None:

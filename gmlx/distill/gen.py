@@ -540,6 +540,12 @@ def run_gen(opts: GenOptions) -> int:
             proc = spawn_server(opts, out.with_suffix(out.suffix + ".server.log"))
         model_id = wait_ready(base_url, proc, opts.startup_timeout)
         log(f"[gen] server ready: model {model_id}")
+        if done and side.exists():
+            prev_id = json.loads(side.read_text(encoding="utf-8")).get("served_model_id")
+            if prev_id not in (None, model_id):
+                print(f"[gen] refuse: the server now serves {model_id}, the {len(done)} replies in {out} came "
+                      f"from {prev_id}, pass a fresh --out", file=sys.stderr)
+                return 2
         if done and not side.exists():
             log(f"[gen] warn: {len(done)} rows in {out} without a sidecar, this run's settings are recorded "
                 "for them as well")
@@ -623,12 +629,19 @@ def run_gen(opts: GenOptions) -> int:
             "context_format": opts.context_format if with_context else None,
             "run": {"completed": n_ok, "failed": n_err, "generated_tokens": gen_tokens, "wall_s": el,
                     "tok_s_aggregate": gen_tokens / max(el, 1e-9), "stop_fraction": stops / max(n_ok, 1),
-                    "budget_hits": budget_hits, "longest_stopped_reply_tokens": longest,
+                    "stops": stops, "budget_hits": budget_hits, "longest_stopped_reply_tokens": longest,
                     "concurrency": opts.concurrency}}
         prev = json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
         if prev and prev.get("prompt_set_sha256") == prompt_hash and isinstance(prev.get("run"), dict):
-            for k in ("completed", "failed", "generated_tokens", "wall_s", "budget_hits"):
-                sidecar["run"][k] += prev["run"].get(k, 0)
+            pr = prev["run"]
+            for k in ("completed", "generated_tokens", "wall_s", "budget_hits"):
+                sidecar["run"][k] += pr.get(k, 0)
+            # a sidecar from before the stops count carries the fraction only
+            sidecar["run"]["stops"] += pr.get("stops", round(pr.get("stop_fraction", 0.0) * pr.get("completed", 0)))
+            sidecar["run"]["stop_fraction"] = sidecar["run"]["stops"] / max(sidecar["run"]["completed"], 1)
+            # every prompt that failed before was retried now, so the
+            # outstanding failures are this run's
+            sidecar["run"]["failed"] = n_err
             sidecar["run"]["longest_stopped_reply_tokens"] = max(
                 longest, prev["run"].get("longest_stopped_reply_tokens", 0))
             sidecar["run"]["tok_s_aggregate"] = sidecar["run"]["generated_tokens"] / max(sidecar["run"]["wall_s"], 1e-9)
