@@ -12,6 +12,7 @@ import os
 import mlx.core as mx
 import pytest
 
+import gmlx.spec.speculative as sp
 import gmlx.upstream.gdn_patches as gp
 from gmlx.models.qwen35.gdn import OwnedQwen3_5GatedDeltaNet, prepare_gdn
 from gmlx.upstream.gdn_patches import _patch_gated_delta_tiled_v
@@ -133,6 +134,18 @@ def test_a_replaced_state_voids_the_pending_replay():
     c[1] = mx.zeros_like(c[1])
     assert gp.take_gdn_replay(c) is None
     assert c._gdn_replay is None
+
+
+def test_a_snapshot_restore_keeps_the_pending_replay():
+    lm = _armed(True)
+    cache = _prefilled(lm)
+    _verify(lm, cache)
+    snap = sp._cache_snapshot(cache)
+    assert snap is not None
+    _verify(lm, cache)
+    sp._cache_restore(snap)
+    for c in _ssm(cache):
+        assert c._gdn_replay[0] is c[1]
 
 
 def test_engine_rounds_match_the_states_form():

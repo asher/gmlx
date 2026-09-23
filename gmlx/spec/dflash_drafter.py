@@ -273,14 +273,39 @@ class CandidateSelector(nn.Module):
         return cands, first, edges
 
 
-def greedy_walk(cands: mx.array, first: mx.array, edges: mx.array) -> mx.array:
-    """Argmax path through a lattice, as a lazy scalar chain. Returns [L]."""
-    sel = mx.argmax(first)
-    toks = [cands[0][sel]]
+def greedy_path(first: mx.array, edges: mx.array) -> mx.array:
+    """Candidate column of each position on the argmax path through a
+    lattice, as a lazy scalar chain. Returns [L]."""
+    sel = [mx.argmax(first)]
     for p in range(edges.shape[0]):
-        sel = mx.argmax(edges[p][sel])
-        toks.append(cands[p + 1][sel])
-    return mx.stack(toks)
+        sel.append(mx.argmax(edges[p][sel[-1]]))
+    return mx.stack(sel)
+
+
+def greedy_walk(cands: mx.array, first: mx.array, edges: mx.array) -> mx.array:
+    """Argmax path through a lattice. Returns the drafted tokens [L]."""
+    sel = greedy_path(first, edges)
+    return mx.take_along_axis(cands, sel[:, None], axis=-1)[:, 0]
+
+
+def path_estimate(first: mx.array, edges: mx.array, sel: mx.array) -> mx.array:
+    """Tokens a round is expected to emit from the path ``sel``, as a lazy
+    float32 scalar.
+
+    Each pick counts as accepted with its probability under a softmax over
+    its row's k candidates, and a draft is accepted only when every draft
+    before it is. The estimate is 1 for the token the round always emits
+    plus, for each position, the product of the pick probabilities up to
+    and including that position.
+    """
+    f = first.astype(mx.float32)
+    lp = (f[sel[0]] - mx.logsumexp(f))[None]
+    n = int(edges.shape[0])
+    if n:
+        rows = edges.astype(mx.float32)[mx.arange(n), sel[:-1]]         # [L-1, k]
+        picked = mx.take_along_axis(rows, sel[1:, None], axis=-1)[:, 0]
+        lp = mx.concatenate([lp, picked - mx.logsumexp(rows, axis=-1)])
+    return 1.0 + mx.exp(mx.cumsum(lp)).sum()
 
 
 # --- draw / stash -------------------------------------------------------------
@@ -497,6 +522,7 @@ class DFlashDrafter(nn.Module):
         self.lm_head = None
         self.accept_lens: List[int] = []
         self.draft_lens: List[int] = []
+        self.gated_rounds = 0
         self._native_block_size = (
             native_block_size(config) or int(config.block_size))
         self._hidden = hidden
@@ -557,6 +583,7 @@ class DFlashDrafter(nn.Module):
         self.bind(target_model)
         self.accept_lens = []
         self.draft_lens = []
+        self.gated_rounds = 0
         self._cache = self.make_cache()
         return self._cache
 
@@ -696,6 +723,16 @@ class DFlash2Drafter(DFlashDrafter):
         self.candidate_selector = CandidateSelector(
             config.hidden_size, config.vocab_size, config.selector_rank,
             config.selector_top_k)
+        # Outside the parameter tree: the lattice and path of the last greedy
+        # draft.
+        object.__setattr__(self, "_round_path", None)
+
+    @property
+    def round_estimate(self) -> Optional[mx.array]:
+        """path_estimate of the last draft, None unless it was greedy. Built
+        on read, so a round the engine does not gate builds nothing."""
+        path = self._round_path
+        return None if path is None else path_estimate(*path)
 
     def draft_block(
         self,
@@ -709,12 +746,15 @@ class DFlash2Drafter(DFlashDrafter):
         stash: Optional[DraftStash] = None,
     ) -> mx.array:
         del hidden, cache
+        object.__setattr__(self, "_round_path", None)
         block = self._block_tokens(last_bonus, block_size, token_dtype)
         h = self._draft_hidden(block)[:, 1:]
         logits = self._logits(h)[0]
         cands, first, edges = self.candidate_selector.lattice(h[0], logits, block[0, 0])
         if greedy and stash is None:
-            return greedy_walk(cands, first, edges)[None]
+            sel = greedy_path(first, edges)
+            object.__setattr__(self, "_round_path", (first, edges, sel))
+            return mx.take_along_axis(cands, sel[:, None], axis=-1).reshape(1, -1)
         # Sequential: each row is the lattice row of the realized predecessor.
         # Draws happen on the compact k-wide row; only stash rows are widened.
         vocab = int(self.config.vocab_size)

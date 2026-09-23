@@ -11,6 +11,7 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 |----------|---------|
 | `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with that reason and the model runs fp16 KV. |
 | `GMLX_DSPARK_CONF=T` | Confidence threshold of a DSpark drafter's block cut, in 0..1. Default `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on the DFlash-backbone drafters. |
+| `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step. `auto` derives X from round costs. Off by default. Output is unchanged. |
 | `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Differs at fp16 rounding only. Set this first when debugging kvarn. |
 | `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Same numerics to fp16 rounding. Widths above 4 materialize. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |

@@ -43,7 +43,8 @@ def _annotated_sampler(temp=1.0, top_p=1.0, top_k=0, min_p=0.0):
 def _fake_target(logits):
     lm = SimpleNamespace(
         speculative_logits_from_hidden=lambda hidden: mx.array(logits))
-    verify = SimpleNamespace(target_tokens=None, hidden=mx.zeros((1, 1, 1)))
+    verify = SimpleNamespace(target_tokens=None, hidden=mx.zeros((1, 1, 1)),
+                             logits=None)
     return lm, verify
 
 
