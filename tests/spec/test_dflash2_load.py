@@ -92,7 +92,9 @@ def test_container_prefers_dflash2_over_muse():
     assert dflash_container(arrays) == "dflash2"
     muse = {n: None for n in arrays if "selector" not in n and "conv" not in n}
     assert dflash_container(muse) == "muse_glimmer"
-    assert dflash_container({"markov_w1.weight": None, **arrays}) == "dspark"
+    assert dflash_container({"markov_w1.weight": None, **arrays}) == "dflash_dspark"
+    assert dflash_container({"markov_w1.weight": None, "blk.0.attn_q_a.weight": None,
+                             **arrays}) == "dspark"
 
 
 def test_remap_covers_every_dflash2_param_exactly():

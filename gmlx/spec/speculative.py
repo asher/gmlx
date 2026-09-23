@@ -31,12 +31,13 @@ from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_float, env_int
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
 # spec_helpers) instead of mlx-vlm's private speculative API. The drafter model
 # classes and mlx_vlm.models.cache are still consumed from mlx-vlm by design.
 from .helpers import (
+    _MTPVerifyResult,
     _SpeculativeSamplerRNG,
     _buffer_mtp_target_cache,
     _resolve_block_total,
@@ -223,6 +224,18 @@ _PQ_LOG = env_bool("GMLX_MTP_PQ_LOG", False)
 # presets the default for A/B runs. Acceptance gains are measured in
 # docs/performance.md.
 _STOCH_ACCEPT = env_bool("GMLX_MTP_STOCH_ACCEPT", False)
+# Round gate (B=1 owned rounds): a drafter that publishes round_estimate
+# after its draft, the tokens the round is expected to emit, has a round
+# under the threshold run as one plain target step instead of a verify.
+# "auto" sets the threshold to the measured cost of a verified round over
+# that of a gated one, a number fixes it, and 0 turns the gate off. Output
+# is unchanged either way: a gated round emits the target's own next token.
+_ROUND_GATE_AUTO = os.environ.get("GMLX_SPEC_GATE", "0").strip().lower() == "auto"
+_ROUND_GATE = 0.0 if _ROUND_GATE_AUTO else env_float("GMLX_SPEC_GATE", 0.0)
+# The auto threshold before the first gated round has been timed, and the
+# weight of each new round in the cost averages.
+_GATE_PRIOR = 2.0
+_GATE_EMA = 0.2
 
 
 def set_stoch_accept(enabled: bool) -> None:
@@ -586,7 +599,8 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
             if pq is not None:
                 _pq_stats["skipped"] += 1
         else:
-            logits = lm.speculative_logits_from_hidden(verify.hidden)
+            logits = (verify.logits if verify.logits is not None
+                      else lm.speculative_logits_from_hidden(verify.hidden))
             if logits.ndim == 3:
                 logits = logits[0]
             if _WALK_PROFILE == 2:
@@ -699,6 +713,132 @@ def _next_forced_chunk(hook, queue: list, block_total: int):
     chunk = queue[:take]
     del queue[:take]
     return chunk
+
+
+# Values a cache snapshot copies. A cache whose state holds anything else,
+# such as a nested storage object a forward could mutate in place, is never
+# snapshotted.
+_SNAP_SCALARS = (int, float, bool, str, type(None), mx.Dtype)
+
+
+def _snap_value(v, memo: dict):
+    if isinstance(v, mx.array):
+        # A second handle on the same node, without a copy: a slice write
+        # (x[i] = y) rebinds the handle it writes through and leaves this
+        # one on the value before the write. One handle per original, so
+        # fields that alias one array still alias it after a restore.
+        out = memo.get(id(v))
+        if out is None:
+            out = memo[id(v)] = v.astype(v.dtype)
+        return out
+    if isinstance(v, _SNAP_SCALARS):
+        return v
+    if type(v) in (list, tuple):
+        return type(v)(_snap_value(x, memo) for x in v)
+    if type(v) is dict:
+        return {k: _snap_value(x, memo) for k, x in v.items()}
+    raise TypeError(type(v).__name__)
+
+
+def _cache_objects(prompt_cache) -> list:
+    """Every cache object of a stack, CacheList containers and members."""
+    out = []
+    for c in prompt_cache or ():
+        out.append(c)
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            out.extend(_cache_objects(members))
+    return out
+
+
+def _cache_snapshot(prompt_cache) -> list | None:
+    """The state of every cache in the stack, for _cache_restore to put back
+    after a forward that was built but never evaluated. None when a cache
+    holds state the snapshot cannot copy."""
+    snap = []
+    memo: dict = {}
+    try:
+        for c in _cache_objects(prompt_cache):
+            # A container's member tuple is not forward state; its members
+            # are snapshotted on their own.
+            snap.append((c, {k: (v if k == "caches" else _snap_value(v, memo))
+                             for k, v in vars(c).items()}))
+    except TypeError:
+        return None
+    return snap
+
+
+def _cache_restore(snap: list) -> None:
+    for c, state in snap:
+        d = vars(c)
+        d.clear()
+        d.update(state)
+
+
+# The GDN layer whose conv input ends the first command buffer a verified
+# round commits after the round gate's decision.
+_HEAD_GDN = 3
+
+
+def _leading_gdn_layers(lm) -> int:
+    """GDN layers ahead of the first attention layer."""
+    n = 0
+    for layer in getattr(lm, "layers", ()):
+        if not getattr(layer, "is_linear", False):
+            break
+        n += 1
+    return n
+
+
+def _commit_verify_head(verify, index: int) -> None:
+    """Commit the verify up to the conv input of GDN layer ``index``, so the
+    GPU starts on it while the host encodes the rest."""
+    states = verify.gdn_states
+    if states and index >= 0:
+        mx.async_eval(states[min(index, len(states) - 1)][9])
+
+
+class _GateCost:
+    """Average wall time of a verified round and of a gated one. A round
+    that emits fewer tokens than their ratio yields fewer tokens per second
+    than the plain step that replaces it, so the ratio is the auto gate
+    threshold."""
+
+    __slots__ = ("verify", "gated")
+
+    def __init__(self):
+        self.verify: float | None = None
+        self.gated: float | None = None
+
+    def add(self, gated: bool, seconds: float) -> None:
+        prev = self.gated if gated else self.verify
+        cur = seconds if prev is None else prev + _GATE_EMA * (seconds - prev)
+        if gated:
+            self.gated = cur
+        else:
+            self.verify = cur
+
+    def threshold(self) -> float:
+        if self.verify is None:
+            return 0.0
+        if self.gated is None:
+            return _GATE_PRIOR
+        return self.verify / self.gated
+
+
+def _plain_step(lm, token: int, prompt_cache: list, *, greedy: bool,
+                token_dtype, shared_kv: bool):
+    """A gated round's target forward: one decode step on the bonus token,
+    shaped as the verify of an empty draft. A plain forward rather than
+    _mtp_verify_target, whose verify route records per-position rollback
+    states that one token never needs."""
+    out = lm(mx.array([[token]], dtype=token_dtype), cache=prompt_cache,
+             return_hidden=True, return_shared_kv=shared_kv)
+    return _MTPVerifyResult(
+        hidden=out.hidden_states[-1],
+        shared_kv_states=out.shared_kv_states or {},
+        target_tokens=mx.argmax(out.logits, axis=-1) if greedy else None,
+        logits=out.logits)
 
 
 def _owned_decode_rounds(
@@ -892,6 +1032,11 @@ def _owned_decode_rounds(
     _needs_shared_kv = getattr(drafter, "uses_shared_kv", True)
     _draft_block = drafter.draft_block
     _prefer_fixed_bs = getattr(drafter, "prefer_requested_block_size", False)
+    # The verify layers a gated round may run and discard: every GDN layer
+    # ahead of the first attention layer, whose cache write would copy the
+    # buffer the snapshot holds.
+    _gate_head = _leading_gdn_layers(lm) - 1
+    gate_cost = _GateCost() if _ROUND_GATE_AUTO else None
 
     def _finish_round(delivered: int) -> None:
         """Close the final round at ``delivered`` tokens so the target KV and
@@ -928,6 +1073,7 @@ def _owned_decode_rounds(
         while emitted < max_tokens:
             _t0 = time.perf_counter()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            gated = False
             forced = (_next_forced_chunk(thinking_hook, forced_queue, block_total)
                       if thinking_hook is not None else None)
             if forced is not None:
@@ -970,17 +1116,55 @@ def _owned_decode_rounds(
                 # must see the actual width or rejection math trims valid
                 # tokens from the cache.
                 bs = int(draft_tokens.shape[1]) + 1
+                # Round gate. The verify graph is built while the GPU runs the
+                # draft, over a snapshot of the cache state, so a gated round
+                # drops the graph unevaluated and restores the cache. A stack
+                # the snapshot cannot copy decides before the build.
+                snap = None
+                threshold = (gate_cost.threshold() if gate_cost is not None
+                             else _ROUND_GATE)
+                estimate = (getattr(drafter, "round_estimate", None)
+                            if threshold > 0 else None)
+                if estimate is not None:
+                    mx.async_eval(estimate)
+                    snap = _cache_snapshot(prompt_cache)
+                    if snap is None:
+                        gated = estimate.item() < threshold
 
                 if _ROUND_PROFILE:
                     mx.eval(draft_tokens)
                 _td = time.perf_counter()
 
-                with mx.stream(generation_stream), \
-                        lora_rows.published([row_uid]):
-                    verify_input = mx.concatenate(
-                        [mx.array([[b]], dtype=token_dtype), draft_tokens], axis=1)
-                    verify = _mtp_verify_target(lm, verify_input, prompt_cache, sampler,
-                                                sample_target_tokens=greedy)
+                if not gated:
+                    with mx.stream(generation_stream), \
+                            lora_rows.published([row_uid]):
+                        verify_input = mx.concatenate(
+                            [mx.array([[b]], dtype=token_dtype), draft_tokens],
+                            axis=1)
+                        verify = _mtp_verify_target(lm, verify_input, prompt_cache,
+                                                    sampler,
+                                                    sample_target_tokens=greedy)
+                    if snap is not None:
+                        # The first layers run while the host waits for the
+                        # estimate, so the GPU does not idle through the wait.
+                        _commit_verify_head(verify, _gate_head)
+                        gated = estimate.item() < threshold
+                        if gated:
+                            verify = None
+                            _cache_restore(snap)
+                        # Dropped before the attention layers run: a live handle
+                        # on a cache buffer keeps their writes from reusing it.
+                        snap = None
+                        if not gated:
+                            _commit_verify_head(verify, _HEAD_GDN)
+                if gated:
+                    draft_tokens = draft_tokens[:, :0]
+                    bs = 1
+                    with mx.stream(generation_stream), \
+                            lora_rows.published([row_uid]):
+                        verify = _plain_step(lm, b, prompt_cache, greedy=greedy,
+                                             token_dtype=token_dtype,
+                                             shared_kv=_needs_shared_kv)
 
                 if _ROUND_PROFILE:
                     mx.eval(verify.hidden)
@@ -1010,11 +1194,17 @@ def _owned_decode_rounds(
             if pq_stash is not None:
                 pq_stash.clear()
             sampler_rng.target_sampled(sync_draft=True)
-            if forced is None:
+            if gated:
+                # Counted apart: no draft was verified, and a zero-length
+                # round would skew accept stats and adaptive block sizing.
+                drafter.gated_rounds = getattr(drafter, "gated_rounds", 0) + 1
+            elif forced is None:
                 # Forced rounds drafted nothing; recording them would skew
                 # accept stats and the adaptive block sizing.
                 _record_speculative_round(drafter, accepted, bs - 1)
             _t1 = time.perf_counter()
+            if gate_cost is not None and forced is None:
+                gate_cost.add(gated, _t1 - _t0)
 
             n_new = len(new_tokens)
             budget_left = max_tokens - emitted

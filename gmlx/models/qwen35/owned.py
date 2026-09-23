@@ -46,6 +46,7 @@ from mlx_vlm.models.base import create_attention_mask
 from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5 import language as _L
 
+import gmlx.upstream.gdn_patches as _gp
 from gmlx.spec.dflash_drafter import DFlashCaptureHooks
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
@@ -412,13 +413,51 @@ class OwnedQwen3_5Model(_L.Qwen3_5Model):
         self.fa_idx = args.full_attention_interval - 1
 
 
-class OwnedQwen3_5LanguageModel(DFlashCaptureHooks, _L.LanguageModel):
+class GdnReplayRollback:
+    """Speculative rollback that knows the records form of the fused GDN
+    verify (``_gp.GdnRecords`` in the sink, B=1 only). A rejected round
+    leaves each GDN cache as the round's start state plus a replay of the
+    accepted positions, which the next fused kernel runs in its prologue.
+    Any other sink takes the stock rollback."""
+
+    def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
+        if not gdn_states or not all(
+            len(s) > 11 and isinstance(s[11], _gp.GdnRecords) for s in gdn_states
+        ):
+            return super().rollback_speculative_cache(
+                caches, gdn_states, accepted, block_size
+            )
+        if isinstance(accepted, mx.array):
+            accepted = accepted.reshape(-1).tolist()
+        if not isinstance(accepted, int):
+            (accepted,) = accepted
+        a0 = int(accepted)
+        # The stock B=1 rollback, with the replay in place of the stored state.
+        trim = block_size - (a0 + 1)
+        ssm = []
+        for c in caches:
+            if c is None:
+                continue
+            if not c.is_trimmable() and not hasattr(c, "zero_row_tail"):
+                ssm.append(c)
+            elif c.is_trimmable() and trim > 0:
+                c.trim(trim)
+        for c, entry in zip(ssm, gdn_states):
+            conv_input, K, rec = entry[9], entry[10], entry[11]
+            if a0 < int(rec.records[0].shape[1]) - 1:
+                _gp.set_gdn_replay(c, rec.base, rec.records, a0 + 1)
+                c[0] = conv_input[:, a0 + 1 : a0 + K]
+        return a0
+
+
+class OwnedQwen3_5LanguageModel(GdnReplayRollback, DFlashCaptureHooks, _L.LanguageModel):
     """Stock LanguageModel wrapper over the owned model scaffold.
 
     The wrapper __call__ (mrope position resolution, sinks, head) and all
     speculative_* hooks are inherited stock, under the DFlash capture
-    mixin; only the inner model class changes. __init__ mirrors the stock body instead of calling it so the
-    stock Qwen3_5Model is never built and thrown away.
+    mixin, and the rollback takes the GDN replay mixin; only the inner model
+    class changes. __init__ mirrors the stock body instead of calling it so
+    the stock Qwen3_5Model is never built and thrown away.
     """
 
     def __init__(self, args: _Q35TextConfig, config: _Q35ModelConfig = None):
@@ -456,7 +495,9 @@ def _moe_classes():
             self.ssm_idx = 0
             self.fa_idx = args.full_attention_interval - 1
 
-    class OwnedQwen3_5MoeLanguageModel(DFlashCaptureHooks, _ML.LanguageModel):
+    class OwnedQwen3_5MoeLanguageModel(
+        GdnReplayRollback, DFlashCaptureHooks, _ML.LanguageModel
+    ):
         def __init__(self, args, config=None):
             nn.Module.__init__(self)
             self.args = args

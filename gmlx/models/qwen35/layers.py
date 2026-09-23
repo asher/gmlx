@@ -11,7 +11,6 @@ build is weight-identical to a seeded stock build (certified by the
 construction-pair tests).
 """
 
-from functools import partial
 from typing import Any, Optional
 
 import mlx.core as mx
@@ -19,6 +18,8 @@ import mlx.nn as nn
 
 from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.switch_layers import SwitchGLU
+
+from gmlx.load.hadamard_modules import fold_of, glu_rotate
 
 from .attn import OwnedQwen3_5Attention
 from .gdn import OwnedQwen3_5GatedDeltaNet
@@ -29,12 +30,7 @@ from .verify_linear import verify_linear, verify_linears
 __all__ = ["OwnedQwen3_5MLP", "OwnedQwen3_5DecoderLayer", "moe_layer_classes"]
 
 
-# --- verbatim upstream copies (activations.py / qwen3_5_moe/language.py) ---
-
-
-@partial(mx.compile, shapeless=True)
-def swiglu(gate, x):
-    return nn.silu(gate) * x
+# --- verbatim upstream copy (qwen3_5_moe/language.py) ---
 
 
 def _target_verify_switch_glu(switch_mlp: SwitchGLU, x, indices, target_verify: bool):
@@ -59,13 +55,17 @@ def _target_verify_switch_glu(switch_mlp: SwitchGLU, x, indices, target_verify: 
 
 class OwnedQwen3_5MLP(_L.Qwen3_5MLP):
     """Stock construction; forward mirrors upstream with the projection
-    indirections routed through the owned verify-linear family."""
+    indirections routed through the owned verify-linear family and the
+    swiglu through ``glu_rotate``, which fuses a folded down projection's
+    rotation into it."""
 
     def __call__(self, x, target_verify: bool = False) -> mx.array:
         gate, up = verify_linears(
             (self.gate_proj, self.up_proj), x, target_verify
         )
-        return verify_linear(self.down_proj, swiglu(gate, up), target_verify)
+        return verify_linear(
+            self.down_proj, glu_rotate(up, gate, fold_of(self.down_proj)),
+            target_verify)
 
 
 class OwnedQwen3_5DecoderLayer(_L.Qwen3_5DecoderLayer):

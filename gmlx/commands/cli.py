@@ -1619,6 +1619,7 @@ def _run_generate(args) -> int:
             f"| accept_rate={stats['accept_rate'] * 100:.1f}% "
             f"mean_accept_len={stats['mean_accept_len']:.2f} "
             f"rounds={stats['rounds']}"
+            + (f" gated={stats['gated_rounds']}" if stats.get("gated_rounds") else "")
         )
         warn_cap_hit(args, stats.get("tokens"))
         return 0
@@ -1922,6 +1923,7 @@ def _run_vlm_mtp(args) -> int:
         f"| accept_rate={stats['accept_rate'] * 100:.1f}% "
         f"mean_accept_len={stats['mean_accept_len']:.2f} "
         f"rounds={stats['rounds']}"
+        + (f" gated={stats['gated_rounds']}" if stats.get("gated_rounds") else "")
     )
     warn_cap_hit(args, stats.get("tokens"))
     return 0

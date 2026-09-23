@@ -11,6 +11,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
   GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
   applied at run time. `validate` reports a folded file.
+- DSpark drafters on the DFlash backbone, such as the community Ternary
+  Bonsai 2 drafters, load with `--draft-gguf` against Qwen3.5-family targets.
+
+### Changed
+
+- Requires mlx-kquant 0.4.13. On GPUs without NAX (M1 to M4), its verify
+  kernels speed up speculative decoding for `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`,
+  `PQ2_0` and `PTQ1_0` targets.
+- The Qwen3.5-family speculative verify runs the gated-delta scan on a kernel
+  that spreads each head across the GPU, with the gated output norm as its
+  own dispatch. The scan records each position's state update instead of
+  storing every state, and the next step replays the accepted ones.
+
+### Fixed
+
+- A model load now ends with a full garbage collection, so Python's first
+  full pass over the new model no longer stalls a decode step soon after.
 
 ## [0.4.14] - 2026-09-18
 

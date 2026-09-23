@@ -39,6 +39,7 @@ from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
+    collect_after_load,
     materialize_module_arrays,
     weights_source_key,
 )
@@ -3472,6 +3473,7 @@ def load_vlm_model(
             model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
         _log("[vlm] processor: synthesized from GGUF (no download)")
+    collect_after_load()
     if return_tokenizer:
         return model, config, processor, mtp_tokenizer
     return model, config, processor

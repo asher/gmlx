@@ -358,6 +358,9 @@ class _MTPVerifyResult:
     shared_kv_states: dict
     target_tokens: mx.array | None = None
     gdn_states: list | None = None
+    # Head output the forward already produced; the walk samples from it
+    # instead of projecting the hidden a second time.
+    logits: mx.array | None = None
 
 
 def _mtp_draft_hidden(lm: nn.Module, hidden: mx.array) -> mx.array:

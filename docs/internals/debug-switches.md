@@ -10,14 +10,18 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with that reason and the model runs fp16 KV. |
+| `GMLX_DSPARK_CONF=T` | Confidence threshold of a DSpark drafter's block cut, in 0..1. Default `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on the DFlash-backbone drafters. |
+| `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step. `auto` derives X from round costs. Off by default. Output is unchanged. |
 | `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Differs at fp16 rounding only. Set this first when debugging kvarn. |
 | `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Same numerics to fp16 rounding. Widths above 4 materialize. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. Set only to rule it out when debugging long context. |
 | `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse attention route may apply to, comma separated, for a quality gate on a new arch. The default is the llama family only. |
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
+| `GMLX_GDN_REPLAY=0` | Qwen3.5 and 3.6 verify rounds store the recurrent state after each position instead of records the next step replays. Bit-identical either way. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Same numerics to one rounding. Set this first when debugging a folded file. |
+| `GMLX_HADAMARD_FUSE=0` | Rotate a folded down or output projection's input as its own dispatch instead of inside the swiglu or output gate kernel. Same numerics to bf16 rounding. |
 | `GMLX_HADAMARD_TRACE=1` | Count rotations per forward on a Hadamard-folded file, read back through `hadamard_modules.rotation_count`. |
 | `GMLX_HADAMARD_ROTATE=0` | Skip the Hadamard-fold rotation entirely. The model produces garbage. A benchmark under it measures the rotation's whole cost. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |

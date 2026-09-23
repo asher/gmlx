@@ -1,14 +1,16 @@
-"""Shared Hadamard rotation for the mlx-lm qwen3_next attention and MLP.
+"""Shared and fused Hadamard rotation for the qwen3_next attention and MLP.
 
 The stock ``Qwen3NextAttention`` and ``Qwen3NextMLP`` call q/k/v and
 gate/up as separate module calls, so on a Hadamard-folded file each
 projection rotates the same input again. ``install_hadamard_sharing``
 class-swaps those instances onto subclasses whose forward mirrors the
 stock body with the projection group routed through
-``hadamard_modules.shared_linears``, which rotates once per group. The
-op sequence is otherwise the stock one, so the output is bit-identical
-to the per-module form. GDN layers take the same sharing inside
-``gdn_patches``, and the owned tree takes it through ``verify_linears``.
+``hadamard_modules.shared_linears``, which rotates once per group, and
+with the swiglu and the attention output gate computed by
+``hadamard_modules.glu_rotate``, which returns the down and output
+projections' input already rotated where the fused kq op is present. GDN
+layers take the same sharing inside ``gdn_patches``, and the owned tree
+takes it through ``verify_linears`` and ``glu_rotate``.
 
 SDPA resolves from the defining module at call time, the
 ``occupancy_fuse`` rule, so seam patches cover the swapped path too.
@@ -22,7 +24,12 @@ import sys
 
 import mlx.core as mx
 
-from gmlx.load.hadamard_modules import is_folded, shared_linears
+from gmlx.load.hadamard_modules import (
+    fold_of,
+    glu_rotate,
+    is_folded,
+    shared_linears,
+)
 
 _QWEN_MODULES = ("models.qwen3_5", "models.qwen3_next")
 
@@ -82,19 +89,18 @@ def _make_shared_attention(base_cls):
             )
             output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
-            return self.o_proj(output * mx.sigmoid(gate))
+            return self.o_proj(glu_rotate(
+                output, gate, fold_of(self.o_proj), activation="sigmoid"))
 
     _SharedQwen35Attention.__name__ = "_SharedQwen35Attention"
     return _SharedQwen35Attention
 
 
 def _make_shared_mlp(base_cls):
-    from mlx_lm.models.activations import swiglu
-
     class _SharedQwen35MLP(base_cls):
         def __call__(self, x) -> mx.array:
             gate, up = shared_linears((self.gate_proj, self.up_proj), x)
-            return self.down_proj(swiglu(gate, up))
+            return self.down_proj(glu_rotate(up, gate, fold_of(self.down_proj)))
 
     _SharedQwen35MLP.__name__ = "_SharedQwen35MLP"
     return _SharedQwen35MLP

@@ -136,7 +136,8 @@ def test_pq_expected_tokens():
 def _fake_target(logits):
     lm = SimpleNamespace(
         speculative_logits_from_hidden=lambda hidden: mx.array(logits))
-    verify = SimpleNamespace(target_tokens=None, hidden=mx.zeros((1, 1, 1)))
+    verify = SimpleNamespace(target_tokens=None, hidden=mx.zeros((1, 1, 1)),
+                             logits=None)
     return lm, verify
 
 

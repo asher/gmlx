@@ -173,6 +173,8 @@ def test_rebind_engagement(monkeypatch):
     for g in gdns:
         assert type(g) is qwen35_gdn.OwnedQwen3_5GatedDeltaNet
         assert g._gdn_owned_fused
+        # The stock rollback reads per-position states, not records.
+        assert not g._gdn_records
     # Second walk finds no stock instances left.
     assert qwen35_gdn.rebind_gdn(lm) == 0
 

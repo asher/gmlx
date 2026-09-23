@@ -199,6 +199,21 @@ plain decoding and sampled output follows the target's sampler, and
 drafter roughly tripled decode speed over plain decoding and was about 1.5x
 the native head. The runs are in [benchmarks.md](benchmarks.md).
 
+### Bonsai drafters
+
+The community DSpark drafters for Ternary Bonsai 2 27B keep the DFlash layer
+stack and add a bigram head that biases each drafted position by the token
+before it, plus a confidence head. They pair with `--draft-gguf` the same
+way, the anchor position drafts as well, so a block-7 drafter proposes seven
+tokens a round, and the loader reports the file as `dflash_dspark`. The
+confidence head is off unless `GMLX_DSPARK_CONF` sets a threshold, since the
+exact-match walk keeps output identical either way.
+
+On Bonsai the Qwen3.8-27B DFlash 2 drafter is the faster pairing for most
+prompts. The Bonsai-trained drafters lead only on long code output, and on
+chat prompts every drafter runs at about the speed of plain decoding. Start
+with the Qwen3.8 drafter and benchmark the others on your own workload.
+
 ### Stochastic acceptance
 
 By default a draft is accepted only when it matches the token the base model

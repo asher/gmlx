@@ -117,6 +117,28 @@ def test_load_model_folds_gguf_eot_into_wrapper_stop_set(loaded):
     assert 2 in tokenizer.eos_token_ids            # declared eot folded in
 
 
+def test_load_model_ends_with_a_full_collection(tmp_path_factory):
+    """The first automatic full collection after a load visits the whole
+    module tree. load_model runs it before it returns, so that pass never
+    lands in a decode step."""
+    import gc
+
+    import gmlx
+
+    p = tmp_path_factory.mktemp("loader_gc") / "tiny-llama-gc.gguf"
+    _mint_tiny_llama(str(p))
+    last: list[int] = []
+
+    def seen(phase, info):
+        if phase == "stop":
+            last[:] = [info["generation"]]
+
+    gc.callbacks.append(seen)
+    try:
+        gmlx.load_model(str(p))
+    finally:
+        gc.callbacks.remove(seen)
+    assert last == [2]
 def test_background_thread_load_generates_on_main_thread(tmp_path_factory):
     """Chat background load and the server preload/keep-warm load on one
     thread and generate on another. MLX default streams are per-thread: any

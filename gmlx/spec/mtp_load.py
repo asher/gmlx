@@ -33,6 +33,7 @@ from gmlx.load.loader import (
     _install_and_load,
     _resolve_chat_template,
     build_model,
+    collect_after_load,
     materialize_module_arrays,
     model_is_moe,
     print_inventory,
@@ -107,6 +108,7 @@ _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
 _DFLASH_BLOCK_DEFAULT = {
     "muse_glimmer": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
     "dflash2": None,
+    "dflash_dspark": None,
 }
 
 
@@ -972,15 +974,18 @@ def dflash_container(arrays: dict) -> str:
     """Which drafter a llama.cpp ``dflash`` GGUF actually holds.
 
     The arch tag is shared: llama.cpp packages the DeepSeek-V4 DSpark drafter,
-    the Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``,
-    and picks its graph on header keys. Tensor presence is the equivalent
-    split here - DSpark carries the markov/confidence heads and MLA's
-    ``attn_q_a``, DFlash 2 the candidate selector, Muse Glimmer plain
-    ``attn_q`` with per-head QK-norms and no hyper-connections.
+    the DSpark heads on a DFlash backbone (the Ternary Bonsai drafters), the
+    Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``, and
+    picks its graph on header keys. Tensor presence is the equivalent split
+    here - the DeepSeek DSpark carries MLA's ``attn_q_a`` or the
+    hyper-connection head, the DFlash-backbone DSpark the markov head on
+    plain ``attn_q`` layers, DFlash 2 the candidate selector, Muse Glimmer
+    plain ``attn_q`` with per-head QK-norms and no hyper-connections.
     """
-    if any(n.startswith(("markov_w1", "markov_w2", "conf_proj", "output_hc_"))
-           or ".attn_q_a" in n for n in arrays):
+    if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in arrays):
         return "dspark"
+    if any(n.startswith("markov_w1") for n in arrays):
+        return "dflash_dspark"
     if any(n.startswith("selector_hidden") for n in arrays):
         return "dflash2"
     if any(".attn_q_norm" in n for n in arrays):
@@ -1028,14 +1033,26 @@ _DFLASH2_ROOT = {
     "selector_predecessor": "candidate_selector.predecessor_codebook.weight",
     "selector_successor": "candidate_selector.successor_codebook.weight",
 }
+# DSpark on the DFlash backbone: the bigram and confidence heads, and the
+# noise-level embedding of a log-SNR-conditioned drafter. ``conf_proj`` is
+# stored as one flat row.
+_DFLASH_DSPARK_ROOT = {
+    "markov_w1": "markov_w1.weight",
+    "markov_w2": "markov_w2.weight",
+    "conf_proj": "conf_proj.weight",
+    "log_snr_fc1": "log_snr_fc1.weight",
+    "log_snr_fc2": "log_snr_fc2.weight",
+}
 _DFLASH_CONTAINER_MAPS = {
     "muse_glimmer": (_DFLASH_BLK, _DFLASH_ROOT),
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
+    "dflash_dspark": (_DFLASH_BLK, {**_DFLASH_ROOT, **_DFLASH_DSPARK_ROOT}),
 }
 # Which target families a container can drive. A load-time check; the
 # arch-tag filter (arch_table.drafter_serves) is discovery's pairing-time one.
 _DFLASH_CONTAINER_TARGETS = {
     "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
+    "dflash_dspark": ("qwen3_5", "qwen3_5_text"),
     "muse_glimmer": ("muse_glimmer",),
 }
 
@@ -1051,7 +1068,11 @@ def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
     for name, arr in arrays.items():
         if name.endswith((".scales", ".biases")):
             continue
-        base = name[: -len(".weight")] if name.endswith(".weight") else name
+        base, suffix = name, ""
+        for s in (".weight", ".bias"):
+            if name.endswith(s):
+                base, suffix = name[: -len(s)], s
+                break
         if base.startswith("blk."):
             _, idx, leaf = base.split(".", 2)
             target = blk_map.get(leaf)
@@ -1064,6 +1085,11 @@ def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
                 f"{container} dflash remap: unknown tensor {name!r} "
                 f"(the drafter tensor set is closed)"
             )
+        if suffix == ".bias":
+            target = _strip_weight(target) + ".bias"
+        if base == "conf_proj" and suffix == ".weight" \
+                and getattr(arr, "ndim", 2) == 1:
+            arr = arr.reshape(1, -1)
         hf_weights[target] = arr
         codec = kquant_meta.get(name)
         if codec is not None:
@@ -1155,6 +1181,14 @@ def _dflash_config_from_meta(
     causal = meta.get("dflash.attention.causal")
     softcap = meta.get("dflash.final_logit_softcapping",
                        target_config_dict.get("final_logit_softcapping"))
+    markov_rank, confidence, snr_range, anchor = 0, False, None, True
+    if container == "dflash_dspark":
+        markov_rank, confidence, snr_range, anchor = _dspark_head_keys(
+            draft_gguf_path, meta, arrays)
+        # The anchor row proposes a token too, so the engine's block total
+        # (verify rows) is one more than the drafter's row count.
+        native_total, block_total = _drafter_block_depths(
+            int(block_size) + int(anchor), None)
     config = DFlashConfig(
         hidden_size=hidden,
         intermediate_size=int(meta["dflash.feed_forward_length"]),
@@ -1185,8 +1219,44 @@ def _dflash_config_from_meta(
         conv_group_size=int(meta.get("dflash.conv_group_size") or 0),
         selector_rank=int(meta.get("dflash.selector_rank") or 0),
         selector_top_k=int(meta.get("dflash.selector_top_k") or 0),
+        markov_rank=markov_rank,
+        confidence_head=confidence,
+        log_snr_range=snr_range,
+        sample_from_anchor=anchor,
     )
     return config, layer_ids
+
+
+def _dspark_head_keys(draft_gguf_path: str, meta: dict, arrays: dict):
+    """The DSpark head facts of a DFlash-backbone drafter, read the way
+    llama.cpp's dflash loader reads them: the rank from the markov table,
+    the confidence head from its key, log-SNR conditioning from its key
+    with both bounds required, the anchor convention from its key."""
+    w1 = arrays.get("markov_w1.weight")
+    rank = int(meta.get("dflash.markov_rank") or 0)
+    if rank <= 0 and w1 is not None:
+        rank = int(w1.shape[-1])
+    if rank <= 0:
+        raise ValueError(f"{draft_gguf_path}: dflash.markov_rank missing")
+    confidence = bool(meta.get("dflash.confidence_head", False))
+    if confidence and "conf_proj.weight" not in arrays:
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.confidence_head is set but "
+            "conf_proj.weight is missing")
+    snr_range = None
+    if bool(meta.get("dflash.log_snr_conditioning", False)):
+        lo, hi = meta.get("dflash.min_log_snr"), meta.get("dflash.max_log_snr")
+        if lo is None or hi is None or not float(hi) > float(lo):
+            raise ValueError(
+                f"{draft_gguf_path}: dflash.log_snr_conditioning needs "
+                "min_log_snr < max_log_snr")
+        for name in ("log_snr_fc1.weight", "log_snr_fc2.weight"):
+            if name not in arrays:
+                raise ValueError(f"{draft_gguf_path}: {name} missing")
+        snr_range = (float(lo), float(hi))
+    anchor = meta.get("dflash.sample_from_anchor")
+    anchor = True if anchor is None else bool(anchor)
+    return rank, confidence, snr_range, anchor
 
 
 def _wire_dflash_capture(target, layer_ids) -> None:
@@ -1307,6 +1377,60 @@ def _load_dflash2_drafter(
     return drafter
 
 
+def _load_dflash_dspark_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind a DSpark drafter on the DFlash backbone and wire
+    the target's ``_dflash_capture``."""
+    from .dflash_drafter import DSparkDFlashDrafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "dflash_dspark",
+        arrays=arrays, shapes=shapes)
+    drafter = DSparkDFlashDrafter(config)
+    log(
+        f"[mtp] drafter: dflash_dspark layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"(native {config.native_block_size}) window={config.sliding_window} "
+        f"causal={bool(config.is_causal)} markov_rank={config.markov_rank} "
+        f"confidence={config.confidence_head} log_snr={config.log_snr_range} "
+        f"anchor_drafts={config.sample_from_anchor}"
+    )
+
+    d_weights, d_meta, d_stats = remap_dflash_arrays(
+        arrays, kquant_meta, "dflash_dspark")
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] dflash_dspark drafter bound; target capture layers wired")
+    _stamp_mtp_width_cap(
+        drafter, str(target_config_dict.get("model_type") or "dflash_dspark"),
+        target=target, hard_limit=1, log=log)
+    return drafter
+
+
 def _load_dflash_drafter(
     draft_gguf_path: str,
     target,
@@ -1315,9 +1439,9 @@ def _load_dflash_drafter(
     zero_copy: bool = True,
     log=loadlog.verbose_print,
 ):
-    """Load a ``dflash`` companion drafter: Muse Glimmer's DFlash or a DFlash
-    2 drafter, by container. DSpark's ``dflash`` GGUFs load through the
-    deepseek_v4 path."""
+    """Load a ``dflash`` companion drafter: Muse Glimmer's DFlash, a DFlash
+    2 drafter or a DSpark drafter on the DFlash backbone, by container. The
+    DeepSeek DSpark ``dflash`` GGUFs load through the deepseek_v4 path."""
     active_before = _active_now()
     arrays, kquant_meta, d_arch, meta, shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
@@ -1332,6 +1456,7 @@ def _load_dflash_drafter(
         f"{len(kquant_meta)} kquant")
     loaders = {
         "dflash2": _load_dflash2_drafter,
+        "dflash_dspark": _load_dflash_dspark_drafter,
         "muse_glimmer": _load_muse_glimmer_dflash_drafter,
     }
     loader = loaders.get(container)
@@ -1862,6 +1987,7 @@ def load_mtp_model(
     if wire:
         _wire_big_model(model)
     wait_for_populate(pf.shards, log=_log)
+    collect_after_load()
 
     return model, drafter, config, tokenizer
 

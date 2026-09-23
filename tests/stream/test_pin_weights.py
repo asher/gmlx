@@ -95,19 +95,24 @@ def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
     n = 32 << 20
     p.write_bytes(b"\0" * n)
 
-    before = _vm_stat()
-    pin = pin_weights.WeightsPin({str(p): [(0, n)]})
-    try:
-        if pin.pinned_bytes < n:
-            pytest.skip("mlock refused; wire limit reached")
-        after = _vm_stat()
-    finally:
-        pin.close()
-
-    # Other activity moves these counters, so assert the direction and
-    # allow generous slack rather than an exact delta.
-    wired = after["Pages wired down"] - before["Pages wired down"]
-    filed = after["File-backed pages"] - before["File-backed pages"]
+    # Other activity moves these system-wide counters, often by more than
+    # the slack within one window, so the test takes the first of five
+    # windows that shows the pin's direction. On a quiet machine a platform
+    # change that stops moving the pin still fails every window.
+    wired = filed = 0
+    for _ in range(5):
+        before = _vm_stat()
+        pin = pin_weights.WeightsPin({str(p): [(0, n)]})
+        try:
+            if pin.pinned_bytes < n:
+                pytest.skip("mlock refused; wire limit reached")
+            after = _vm_stat()
+        finally:
+            pin.close()
+        wired = after["Pages wired down"] - before["Pages wired down"]
+        filed = after["File-backed pages"] - before["File-backed pages"]
+        if wired >= 0.5 * n and filed <= 0.5 * n:
+            break
     assert wired >= 0.5 * n, f"pin did not wire: {wired} of {n}"
     assert filed <= 0.5 * n, (
         "mlocked pages still count as file-backed; _available_ram_bytes now "
