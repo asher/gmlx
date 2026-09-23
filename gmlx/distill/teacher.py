@@ -320,7 +320,7 @@ def run_cache(opts: CacheOptions) -> int:
         if not _frames.has_chat_template(tokenizer):
             log("[cache] warn: teacher has no chat template, framed rows use the plain render "
                 "(contents separated by blank lines)")
-        log(f"[cache] frame {opts.frame}: render kwargs {render_kw or '{}'}, turn-end markers "
+        log(f"[cache] frame {opts.frame}: chat-template kwargs {render_kw or '{}'}, turn-end markers "
             f"{_frames.assistant_tails(tokenizer)!r}")
     try:
         rows, n_tokens, corpus_sha, flagged, tb, ws, source, frame_info = build_rows(

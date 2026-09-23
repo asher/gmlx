@@ -1104,7 +1104,7 @@ examples shown before each question.
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |
-| `--bpb-prefix TEXT` | none | text placed before every window, or `@KIND` for a frame prefix |
+| `--bpb-prefix TEXT` | none | text placed before every window, or `@FRAME`, such as `@continue`, for that frame's template prefix |
 | `--batch-size N` | `8` | windows per batch |
 | `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
 | `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |

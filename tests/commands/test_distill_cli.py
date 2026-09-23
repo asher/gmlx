@@ -114,8 +114,8 @@ def test_argparse_errors_print_as_refusals():
 
 def test_flag_aliases_share_a_destination():
     from gmlx.commands.distill import _filter_parser, _gen_parser
-    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-words", "1"]).min_tokens == 1
-    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-tokens", "2"]).min_tokens == 2
+    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-words", "1"]).min_words == 1
+    assert _filter_parser("gmlx distill filter").parse_args(["--in", "a", "--out", "b", "--min-tokens", "2"]).min_words == 2
     assert _gen_parser("gmlx distill gen").parse_args(["--out", "o", "--model", "s.gguf"]).teacher == "s.gguf"
 
 

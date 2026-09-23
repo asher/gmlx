@@ -137,6 +137,8 @@ training text on purpose, so `bpb after` in `smoke.md`, the student's
 bits per byte with the adapter, must come out below `bpb before`. The
 run passes when the `[train] it` lines show the loss, the figure
 training drives down, falling, and `eval` writes both reports.
+`--top-k` and `--max-len` shrink the cache for a quick run, and
+`--before` also scores the student with the adapter off.
 
 The served path is checked the same way, since `gen` and `filter` run on
 the same pair in under a minute:
@@ -151,7 +153,10 @@ gmlx distill filter --in smoke-replies.jsonl --out smoke-corpus.jsonl --min-word
 Both pass when `gen` ends with a `[gen] done:` line that reports
 `0 failed` and `filter` prints `[filter] kept 2`. The template setting
 turns the teacher's thinking off, since Qwen3 thinks by default and a
-96-token reply would not reach its end otherwise.
+96-token reply would not reach its end otherwise. `--model` names the
+GGUF `gen` serves and is the same flag as `--teacher`, and
+`--min-words 1` keeps one-sentence replies that the default of 16 words
+would drop.
 
 ## Write the inputs
 
@@ -404,8 +409,10 @@ and `--top-p` are the sampling settings, how much the teacher varies its
 wording and how much of its vocabulary it draws from, and 0.6 with 0.95
 gives varied replies that stay on task.
 
-A teacher without a thinking mode runs without `--thinking`. The caches
-below then take `--frame reply` instead of `reply-think`, and `eval`
+A teacher without a thinking mode runs without `--thinking` and
+`--thinking-budget`, since `gen` refuses a budget on its own. The caches
+below then take `--frame reply` instead of `reply-think`,
+`filter --max-reply-tokens` is sized from the answers alone, and `eval`
 under [Use and measure the adapter](#use-and-measure-the-adapter) drops
 `--reply-think`. Pair a thinking teacher with a student that has a
 thinking mode of its own, or run the teacher without `--thinking`.
@@ -763,10 +770,11 @@ fields.
   which `--loss bucketed`, the default, selects. `alm` compares whole
   chunks of text. It is 0 when `align` logs `path=identity`, meaning the
   student reads every row as exactly the teacher's tokens. On the worked
-  pair the two models share a vocabulary, so `a` is 1.000, but the
-  student's chat template wraps the reply rows in different tokens.
-  `align` therefore logged `path=general`, which is expected, and `alm`
-  is nonzero there.
+  pair the two models share a vocabulary, so `a` is 1.000, but every
+  reply row carries `student_messages`, the prompt without the document,
+  so the student reads other tokens than the teacher did. `align`
+  therefore logged `path=general`, which is expected for any run with a
+  document, and `alm` is nonzero there.
 - `ce` is a third term that is measured but not trained on unless `--ce`
   is set.
 - `floored` counts positions whose probability was clamped at the

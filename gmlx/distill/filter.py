@@ -6,7 +6,7 @@ Checks run in a fixed order and the first failure names the reason:
 
     length   the reply did not reach its end of turn (finish_reason is not stop)
     budget   the thinking budget cut the trace (the gen block says so)
-    empty    the reply has fewer than min_tokens whitespace tokens
+    empty    the answer has fewer than min_words whitespace-separated words
     marker   a template marker string leaked into the reply
     repeat   repeated n-grams cover more than max_repeat of the reply, or one
              line repeats more than max_line_repeats times in a row
@@ -47,7 +47,7 @@ class FilterOptions:
     out: str
     report: str | None = None
     rejects: str | None = None
-    min_tokens: int = 16
+    min_words: int = 16
     ngram: int = 8
     max_repeat: float = 0.2
     max_line_repeats: int = 2
@@ -92,7 +92,7 @@ def reason(row: dict, opts: FilterOptions) -> str | None:
         return "length"
     if g.get("budget_hit") and not opts.keep_budget_hit:
         return "budget"
-    if len(reply.split()) < opts.min_tokens:
+    if len(reply.split()) < opts.min_words:
         return "empty"
     if any(m in reply for m in MARKERS):
         return "marker"
@@ -213,7 +213,7 @@ def run_filter(opts: FilterOptions) -> int:
     sidecar: dict = json.loads(side_in.read_text(encoding="utf-8")) if side_in.exists() else {"gen_version": None}
     prev = sidecar.get("filter_version")
     sidecar["filter_version"] = f"{prev}+{FILTER_VERSION}" if prev else FILTER_VERSION
-    params = {k: getattr(opts, k) for k in ("min_tokens", "ngram", "max_repeat", "max_line_repeats",
+    params = {k: getattr(opts, k) for k in ("min_words", "ngram", "max_repeat", "max_line_repeats",
                                             "max_non_ascii", "max_reply_tokens", "keep_budget_hit")}
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "inputs": [str(p) for p in inputs]}

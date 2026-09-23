@@ -76,7 +76,8 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="With --corpus: the user turn placed before the document prefix "
                         "(default 'Continue the following text.').")
     p.add_argument("--chat-template-kwargs", default=None, metavar="JSON",
-                   help="The teacher's render settings, passed to gmlx serve --chat-template-config.")
+                   help="Chat-template kwargs for every teacher render, as a JSON object, passed to gmlx serve "
+                        "--chat-template-config.")
     p.add_argument("--context", default=None, metavar="FILE",
                    help="Text the teacher reads for every prompt without its own context field. The "
                         "student's list is written without it.")
@@ -121,7 +122,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--report", default=None, metavar="JSON", help="Write the kept and dropped counts here.")
     p.add_argument("--rejects", default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
-    p.add_argument("--min-words", "--min-tokens", dest="min_tokens", type=int, default=16, metavar="N",
+    p.add_argument("--min-words", "--min-tokens", dest="min_words", type=int, default=16, metavar="N",
                    help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
                         "trace not counted (default 16). Set 1 when a right answer can be a few words. "
                         "--min-tokens is the same flag.")

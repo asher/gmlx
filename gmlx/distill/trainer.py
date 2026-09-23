@@ -183,7 +183,7 @@ def run_train(opts: TrainOptions) -> int:
             log(f"[train] refuse: {d} is over another tokenizer pair than {view_dir}")
             return 2
         if (v.get("student_render_kwargs") or {}) != (view.get("student_render_kwargs") or {}):
-            log(f"[train] refuse: {d} renders the student with other template kwargs than {view_dir}")
+            log(f"[train] refuse: {d} renders the student with other chat-template kwargs than {view_dir}")
             return 2
     knobs = dict(view["knobs"], lambda_dk=opts.dk, lambda_alm=opts.alm, lambda_ce=opts.ce, loss_mode=opts.loss)
     if opts.T_dk is not None:

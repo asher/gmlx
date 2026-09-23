@@ -148,7 +148,7 @@ def run_align(opts: AlignOptions) -> int:
                                                override=_frames.parse_render_kwargs(opts.frame_kwargs))
     _frames.set_render_kwargs(student_tok, student_kw)
     if frame:
-        log(f"[align] student render kwargs {student_kw or '{}'}, turn-end markers "
+        log(f"[align] student chat-template kwargs {student_kw or '{}'}, turn-end markers "
             f"{_frames.assistant_tails(student_tok)!r}"
             + ("" if _frames.has_chat_template(student_tok) else " (no chat template: plain render)"))
     prefixed = any(int(r.get("prefix_n_tokens", 0) or 0) for r in reader.rows_meta)
