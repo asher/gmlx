@@ -220,7 +220,7 @@ def _apply_expert_controls(mod, inds, weights, reweight=None):
         weights = reweight(inds)
     rec = getattr(mod, "_kq_route_record", None)
     if rec is not None:
-        rec.record(getattr(mod, "_kq_li", -1), inds)
+        inds = rec.record(getattr(mod, "_kq_li", -1), inds)
     probe = getattr(mod, "_kq_expert_probe", None)
     if probe is not None:
         probe.record(getattr(mod, "_kq_li", -1), weights)

@@ -316,3 +316,39 @@ def test_fused_block_records_rows_apart(monkeypatch):
     routes = rec.take()
     clear_moe_route_controls(model)
     assert routes.shape == (1, B, L, k)
+
+
+def test_recorded_ids_do_not_hold_the_selection_buffers():
+    """The ids a router hands the seam are a view of its [..., E] sort
+    buffer. The recorder keeps a copy tied into the forward that consumes
+    the ids, so the buffers go when each layer's forward is evaluated
+    instead of staying alive for every layer until take."""
+    from gmlx.stream.moe_experts import _apply_expert_controls
+
+    B, T, E, k, n_layers = 1, 8192, 384, 8, 3
+    rec = RouteRecorder()
+    rec.layers = list(range(n_layers))
+    mx.eval(mx.zeros((1,)))
+    mx.clear_cache()
+    base = mx.get_active_memory()
+    for li in range(n_layers):
+        g = mx.random.normal((B, T, E))
+        inds = mx.argpartition(g, kth=-k, axis=-1)[..., -k:]
+        w = mx.take_along_axis(g, inds, axis=-1)
+        inds, w = _apply_expert_controls(SimpleNamespace(_kq_li=li, _kq_route_record=rec), inds, w)
+        mx.eval((w * inds.astype(mx.float32)).sum())
+        del g, inds, w
+    mx.clear_cache()
+    held = mx.get_active_memory() - base
+    kept = n_layers * B * T * k * 4
+    assert held < kept + (1 << 20), f"{held / 1e6:.1f} MB held for {kept / 1e6:.1f} MB of ids"
+    out = rec.take()
+    assert out.shape == (n_layers, B, T, k) and int(out.max()) < E
+
+
+def test_replay_refuses_routes_past_the_expert_count():
+    routes = np.zeros((1, 1, 5, 4), dtype=np.int32)
+    routes[0, 0, 2] = [0, 1, 2, 9]
+    assert RouteReplay(routes, [0], n_experts=10).rows == 1
+    with pytest.raises(ValueError, match="routes carry expert id 9, the model has 8 experts"):
+        RouteReplay(routes, [0], n_experts=8)

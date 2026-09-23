@@ -13,7 +13,7 @@ import numpy as np
 from gmlx.load.tokenizer import hf_inner, token_bytes, whitespace_start_mask
 
 from .corpus import nfc, per_turn_rows
-from .format import ROUTES_FIELD, pin_routes
+from .format import ROUTES_FIELD, pin_routes, routing_block
 from .frames import (
     cut_windows,
     fit_conversation,
@@ -143,6 +143,7 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
              else np.unique(np.linspace(0, n_all - 1, max_rows).round().astype(int)))
     replayed = 0
     frame = (reader.manifest.get("gmlx_distill") or {}).get("frame") if tokenizer is not None else None
+    n_experts = (routing_block(reader.manifest) or {}).get("n_experts")
     stb = token_bytes(tokenizer, int(reader.manifest["vocab_size"])) if frame else None
     # per-row KL sums, top-1 hits and position counts: the means are over
     # positions, the SE clusters by row
@@ -210,7 +211,7 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
             return sel
 
         if replay_layers is not None and ids is t_ids and ROUTES_FIELD in arrs:
-            with pin_routes(model, arrs[ROUTES_FIELD], replay_layers):
+            with pin_routes(model, arrs[ROUTES_FIELD], replay_layers, n_experts=n_experts):
                 gathered = forward()
             replayed += 1
         else:

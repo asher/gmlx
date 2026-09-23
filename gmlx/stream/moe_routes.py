@@ -40,15 +40,23 @@ from gmlx.stream.moe_experts import (
 
 class RouteRecorder:
     """Collects the ids every hooked MoE block selects, per layer, across
-    the forwards between two ``take`` calls. Arrays stay lazy until
-    ``take`` evaluates them, so recording adds no sync to the forward."""
+    the forwards between two ``take`` calls. Each copy is evaluated with
+    the forward that consumes its ids, so recording adds no sync to the
+    forward."""
 
     def __init__(self):
         self.layers: list[int] = []
         self._parts: dict[int, list] = {}
 
-    def record(self, li: int, inds) -> None:
-        self._parts.setdefault(li, []).append(inds)
+    def record(self, li: int, inds):
+        """Keep a copy of layer ``li``'s ids and return ``inds`` tied to
+        it, so the forward that consumes the returned ids evaluates the
+        copy as well. The ids are a view of the selection's [..., E] sort
+        buffer, and a kept view, or a copy left unevaluated until
+        ``take``, would hold that buffer for every layer until then."""
+        c = mx.contiguous(inds)
+        self._parts.setdefault(li, []).append(c)
+        return mx.depends(inds, c)
 
     def take(self):
         """The recorded routes as int32 [n_moe, B, T, k], chunks joined along
@@ -76,8 +84,11 @@ class RouteReplay:
     [n_moe, T, k] for one row or [n_moe, B, T, k]; ``layers`` lists the
     model layer index behind each leading entry, in order."""
 
-    def __init__(self, routes, layers, offset: int = 0):
+    def __init__(self, routes, layers, offset: int = 0, n_experts: int | None = None):
         routes = np.asarray(routes)
+        if n_experts is not None and routes.size and int(routes.max()) >= int(n_experts):
+            raise ValueError(
+                f"routes carry expert id {int(routes.max())}, the model has {int(n_experts)} experts")
         if routes.ndim == 3:
             routes = routes[:, None]
         if routes.ndim != 4:
@@ -157,6 +168,29 @@ def _gate_weights_fn(gate):
 def moe_layers(model) -> list[int]:
     """Model layer indices that hold a MoE block, in forward order."""
     return [li for li, _ in _moe_owners(model)]
+
+
+def moe_expert_counts(model) -> list[int | None]:
+    """The number of experts behind each MoE layer of ``model``, in forward
+    order: the leading dimension of the block's first switch linear, else
+    its integer ``num_experts`` or ``n_routed_experts``, and None when
+    neither is found."""
+    out = []
+    for _, owner in _moe_owners(model):
+        n = None
+        for m in owner.modules():
+            w = getattr(m, "weight", None)
+            if type(m).__name__.endswith("SwitchLinear") and isinstance(w, mx.array) and w.ndim == 3:
+                n = int(w.shape[0])
+                break
+        if n is None:
+            for attr in ("num_experts", "n_routed_experts"):
+                v = getattr(owner, attr, None)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    n = v
+                    break
+        out.append(n)
+    return out
 
 
 def _targets(model):

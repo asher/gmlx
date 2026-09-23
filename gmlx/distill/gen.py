@@ -205,7 +205,9 @@ class PortInUse(RuntimeError):
 
 
 class ServerError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status   # the HTTP status, when the server answered with one
 
 
 def _get_json(url: str, timeout: float):
@@ -222,7 +224,7 @@ def _post_json(url: str, payload: dict, timeout: float):
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:500]
-        raise ServerError(f"HTTP {e.code} from {url}: {body}") from None
+        raise ServerError(f"HTTP {e.code} from {url}: {body}", status=e.code) from None
 
 
 def port_listening(host: str, port: int) -> bool:
@@ -277,10 +279,11 @@ def pick_model_id(ids: list[str], teacher: str | None) -> str:
 def wait_ready(base_url: str, proc, timeout: float, teacher: str | None = None) -> str:
     """Poll ``/models`` until it lists a model, then require one 1-token
     completion (the model list answers while the model still preloads,
-    and a server still loading answers the completion with an HTTP error,
-    which is polled again). Returns the served model id, chosen by
-    ``pick_model_id`` when the server lists several; a list in which none
-    or several match the teacher ends the wait at once."""
+    and a server still loading answers the completion with a 5xx, which
+    is polled again). Returns the served model id, chosen by
+    ``pick_model_id`` when the server lists several. A list in which none
+    or several match the teacher, and a 4xx other than 408 or 429, end
+    the wait at once."""
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
@@ -296,7 +299,13 @@ def wait_ready(base_url: str, proc, timeout: float, teacher: str | None = None) 
             try:
                 _post_json(base_url + "/chat/completions", body, timeout=120)
                 return model_id
-            except (ServerError, urllib.error.URLError, OSError, ValueError, KeyError) as e:
+            except ServerError as e:
+                if e.status is not None and 400 <= e.status < 500 and e.status not in (408, 429):
+                    # a request the server refuses (no such model, a bad
+                    # template) does not clear by waiting
+                    raise
+                last = str(e)
+            except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
                 last = str(e)
         time.sleep(2)
     raise ServerError(f"server not ready after {timeout:.0f}s" + (f" (last error: {last})" if last else ""))

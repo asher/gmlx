@@ -838,7 +838,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--steps-per-eval N` | `200` | validation interval |
 | `--seed N` | `0` | RNG seed |
 | `--hf-source ID` | none | tokenizer and config fallback, rarely needed |
-| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, which trades time for memory, refused with `--dropout` above 0 |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, trading time for memory. Refused with `--dropout` above 0 and on Kimi K3, whose layers share state |
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
@@ -1059,7 +1059,7 @@ Training flags, in the order `--help` prints them.
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly, nonzero |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, nonzero, instead of `--lora-scale` |
 | `--lora-dropout F` | `0.0` | LoRA dropout, below 1, one mask per step, replayed by `--grad-checkpoint` |
-| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass. Refused on Kimi K3, whose layers share state |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
 | `--warmup F` | `0.05` | warmup as a fraction of the steps, at least one step and never the last, then cosine decay. `0` starts at the peak rate |

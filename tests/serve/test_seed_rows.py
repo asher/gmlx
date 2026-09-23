@@ -216,3 +216,34 @@ def test_seeds_of_requests_queued_together_reach_their_own_rows(installed):
         uids += ar.BatchGenerator.insert(bg, [[1, 2, 3]])
     assert s._kq_row_seeds == {uids[0]: 101, uids[1]: 102}
     assert not sr._PENDING
+
+
+def test_an_unseeded_request_drops_a_seed_left_by_an_earlier_one(installed):
+    """A seeded request whose insert never ran leaves its seed pending on
+    the engine thread. The next request's processors build clears it, so
+    an unseeded request does not take it."""
+    s = _sampler()
+    rg = SimpleNamespace()
+    gen_mod.ResponseGenerator._make_logits_processors(rg, SimpleNamespace(seed=42, temperature=1.0), None)
+    gen_mod.ResponseGenerator._make_logits_processors(rg, SimpleNamespace(seed=None, temperature=1.0), None)
+    ar.BatchGenerator.insert(SimpleNamespace(sampler=s), [[1, 2, 3]])
+    assert s._kq_row_seeds == {}
+
+
+def test_a_seed_stashed_on_another_thread_stays_with_that_thread(installed):
+    """The pending seed is keyed by the thread that built the processors,
+    and an insert on another thread does not read it."""
+    import threading
+
+    s = _sampler()
+    rg = SimpleNamespace()
+    t = threading.Thread(target=gen_mod.ResponseGenerator._make_logits_processors,
+                         args=(rg, SimpleNamespace(seed=7, temperature=1.0), None))
+    t.start()
+    t.join()
+    try:
+        ar.BatchGenerator.insert(SimpleNamespace(sampler=s), [[1, 2, 3]])
+        assert s._kq_row_seeds == {}
+        assert list(sr._PENDING.values()) == [7]
+    finally:
+        sr._PENDING.clear()

@@ -16,8 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outputs, so the small model answers from a document without it in the prompt.
 - `gmlx.stream.moe_routes` records a forward's expert ids per layer and
   replays them in a later forward over the same positions.
-- `GMLX_BATCH_INVARIANT=1` makes a row's logits the same at any batch
-  size, at about one percent of prefill on a 35B MoE. Off by default.
+- `GMLX_BATCH_INVARIANT=1` keeps expert routing and the gated-delta decay
+  gate the same at any prefill batch size, for about one percent of prefill.
 
 ### Changed
 

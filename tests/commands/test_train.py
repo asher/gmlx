@@ -278,3 +278,55 @@ def test_adapter_export_reads_the_text_model_under_a_multimodal_wrapper(tmp_path
         "model.layers.0.self_attn.k_proj",
         "model.layers.0.mlp.down_proj",
     }
+
+
+def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp_path, capsys):
+    """A layer class that refuses per-layer checkpointing ends train_lora
+    before the train loop with the training attention taken off again, and
+    the command reports it and exits 2."""
+    import contextlib
+
+    import mlx_lm.tuner.datasets as datasets
+    import mlx_lm.tuner.trainer as trainer
+    import mlx_kquant.mlx_lm_patch as patch
+
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+    import gmlx.tune.attention as attention
+    import gmlx.tune.checkpoint as checkpoint
+    import gmlx.tune.gdn as gdn
+
+    seen = []
+    model = _Model()
+
+    def refuse(m):
+        raise ValueError("per-layer checkpointing cannot run _Layer: its layers share a bank")
+
+    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
+    monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: seen.append("restored")))
+    monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
+    monkeypatch.setattr(checkpoint, "checkpoint_layers", refuse)
+    monkeypatch.setattr(trainer, "train", lambda *a, **k: seen.append("trained"))
+    with pytest.raises(train.TrainRefused, match="--grad-checkpoint: per-layer checkpointing cannot run _Layer"):
+        train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1, grad_checkpoint=True)
+    assert seen == ["restored"]
+
+    def refused(*a, **k):
+        raise train.TrainRefused("--grad-checkpoint: per-layer checkpointing cannot run _Layer")
+
+    monkeypatch.setattr(train, "train_lora", refused)
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "train.jsonl").write_text('{"text": "a b c"}\n')
+    rc = train.cmd_train([str(base), "--data", str(data), "--adapter-out", str(tmp_path / "o.gguf"),
+                          "--grad-checkpoint"])
+    assert rc == 2
+    assert "error: --grad-checkpoint: per-layer checkpointing cannot run _Layer" in capsys.readouterr().err

@@ -29,6 +29,10 @@ from gmlx.tune.lora import (  # noqa: F401  (re-exported for callers and tests)
 )
 
 
+class TrainRefused(ValueError):
+    """A setting the loaded model cannot train with, found after the load."""
+
+
 def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                batch_size: int = 4, num_layers: int = 8, rank: int = 8,
                scale: float = 20.0, dropout: float = 0.0,
@@ -38,7 +42,8 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                hf_source: str | None = None,
                grad_checkpoint: bool = False) -> tuple[str, int]:
     """Train a LoRA adapter on a GGUF base and write it as a GGUF. Returns
-    ``(out_path, n_modules)``. The train loop runs on the GPU."""
+    ``(out_path, n_modules)``. The train loop runs on the GPU. Raises
+    TrainRefused when the loaded model cannot take a requested setting."""
     import mlx.core as mx
     import mlx.optimizers as optim
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
@@ -84,7 +89,12 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     if grad_checkpoint:
         # every decoder-layer class, under language_model too; mlx-lm's own
         # grad_checkpoint wraps the class of model.layers[0] alone
-        print(f"[train] per-layer checkpointing on {checkpoint_layers(model)} layer classes")
+        try:
+            n_ck = checkpoint_layers(model)
+        except ValueError as e:
+            restore_attention()
+            raise TrainRefused(f"--grad-checkpoint: {e}") from None
+        print(f"[train] per-layer checkpointing on {n_ck} layer classes")
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(
@@ -158,7 +168,8 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
                         "(rarely needed).")
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Recompute each layer's activations in the backward "
-                        "pass instead of keeping them, trading time for memory.")
+                        "pass instead of keeping them, trading time for memory. "
+                        "Refused on Kimi K3, whose layers share state.")
     a = p.parse_args(argv)
 
     if a.grad_checkpoint and a.dropout > 0:
@@ -199,14 +210,18 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
         print(f"error: --adapter-out is not writable: {err}", file=sys.stderr)
         return 2
 
-    out, n = train_lora(
-        os.path.abspath(os.path.expanduser(base)), a.data,
-        adapter_out,
-        iters=a.iters, batch_size=a.batch_size, num_layers=a.num_layers,
-        rank=a.rank, scale=a.scale, dropout=a.dropout,
-        learning_rate=a.learning_rate, max_seq_length=a.max_seq_length,
-        val_batches=a.val_batches, steps_per_report=a.steps_per_report,
-        steps_per_eval=a.steps_per_eval, seed=a.seed, hf_source=a.hf_source,
-        grad_checkpoint=a.grad_checkpoint)
+    try:
+        out, n = train_lora(
+            os.path.abspath(os.path.expanduser(base)), a.data,
+            adapter_out,
+            iters=a.iters, batch_size=a.batch_size, num_layers=a.num_layers,
+            rank=a.rank, scale=a.scale, dropout=a.dropout,
+            learning_rate=a.learning_rate, max_seq_length=a.max_seq_length,
+            val_batches=a.val_batches, steps_per_report=a.steps_per_report,
+            steps_per_eval=a.steps_per_eval, seed=a.seed, hf_source=a.hf_source,
+            grad_checkpoint=a.grad_checkpoint)
+    except TrainRefused as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"[gmlx] wrote {n}-module LoRA adapter -> {out}")
     return 0

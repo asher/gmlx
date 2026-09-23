@@ -28,6 +28,7 @@ class _Handler(BaseHTTPRequestHandler):
     model_id: str = "stub-teacher"
     model_ids: list | None = None       # several served models, in place of model_id
     fail_once: set = set()              # first words whose first request fails with a 500
+    refuse_status: int | None = None    # the status every request is refused with, when set
 
     def log_message(self, *a):  # silence
         pass
@@ -44,6 +45,11 @@ class _Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n))
         type(self).calls.append(req)
+        if type(self).refuse_status is not None:
+            self.send_response(type(self).refuse_status)
+            self.end_headers()
+            self.wfile.write(b"model_not_found")
+            return
         last = req["messages"][-1]["content"]
         word = last.split()[0] if last.split() else "empty"
         if word in type(self).fail_once:
@@ -80,6 +86,7 @@ def stub_server():
     _Handler.model_id = "stub-teacher"
     _Handler.model_ids = None
     _Handler.fail_once = set()
+    _Handler.refuse_status = None
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -1702,6 +1709,19 @@ def test_gen_waits_through_a_readiness_completion_that_fails_while_the_server_lo
     monkeypatch.setattr(gen, "_post_json", always_503)
     with pytest.raises(gen.ServerError, match=r"not ready after 0s \(last error: HTTP 503 from x: loading\)"):
         gen.wait_ready(stub_server, None, 0.5)
+
+
+def test_gen_ends_the_readiness_wait_on_a_request_the_server_refuses(stub_server):
+    """A 4xx answer to the readiness completion (no such model, a missing
+    model file) does not clear by waiting, so the wait ends on the first
+    one. A 429 is polled again like a 5xx."""
+    _Handler.refuse_status = 404
+    with pytest.raises(gen.ServerError, match=r"HTTP 404 from \S+: model_not_found") as ei:
+        gen.wait_ready(stub_server, None, 30)
+    assert ei.value.status == 404 and len(_Handler.calls) == 1
+    _Handler.refuse_status = 429
+    with pytest.raises(gen.ServerError, match=r"not ready after 1s \(last error: HTTP 429 from "):
+        gen.wait_ready(stub_server, None, 1)
 
 
 def test_filter_joins_a_rerun_sidecar_that_never_saw_the_server(tmp_path, stub_server, capsys):

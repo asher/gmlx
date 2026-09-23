@@ -295,7 +295,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="LoRA multiplier as alpha / rank. Give this or --lora-scale, not both.")
     p.add_argument("--lora-dropout", type=_dropout, default=0.0, help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--grad-checkpoint", action="store_true",
-                   help="Recompute each layer's activations in the backward pass.")
+                   help="Recompute each layer's activations in the backward pass. Refused on Kimi K3, "
+                        "whose layers share state.")
     p.add_argument("--lr", type=_positive_float, default=1e-4, help="Peak learning rate (default 1e-4).")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Rows per step (default 8).")
     p.add_argument("--warmup", type=_fraction, default=0.05,

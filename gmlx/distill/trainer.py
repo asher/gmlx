@@ -442,7 +442,12 @@ def run_train(opts: TrainOptions) -> int:
         log(f"[train] warn: LoRA keys matched on some layers only ({', '.join(mixed)}); "
             "the projections of the other layers stay frozen")
     if opts.grad_checkpoint:
-        log(f"[train] per-layer checkpointing on {checkpoint_layers(model, replay_dropout=True)} layer classes")
+        try:
+            n_ck = checkpoint_layers(model, replay_dropout=True)
+        except ValueError as e:
+            log(f"[train] refuse: --grad-checkpoint: {e}")
+            return 2
+        log(f"[train] per-layer checkpointing on {n_ck} layer classes")
     restore_attn = install_training_attention(model)
     log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} attention modules patched")
     try:

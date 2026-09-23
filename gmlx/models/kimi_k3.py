@@ -530,6 +530,12 @@ class _ResidualMixer:
 
 
 class KimiK3DecoderLayer(nn.Module):
+    # read by gmlx.tune.checkpoint: the mixer argument banks earlier layers'
+    # residuals, which a per-layer recompute can neither differentiate
+    # through nor restore
+    _gmlx_checkpoint_refusal = ("each layer reads and extends a bank of earlier layers' residuals, which a "
+                                "per-layer recompute can neither differentiate nor restore")
+
     def __init__(self, args: ModelArgs, layer_idx: int):
         super().__init__()
         self.is_linear = args.layer_types[layer_idx] == "linear_attention"

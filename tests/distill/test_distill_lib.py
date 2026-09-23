@@ -737,9 +737,18 @@ def test_route_record_and_pin_helpers():
     assert not np.array_equal(out[0, 2], ref[0][0, 2]) and np.array_equal(out[1], ref[0][1])
     manifest = {"gmlx_distill": {"routing": {"moe_layers": [0, 1], "k": 4, "n_experts": 8}}}
     assert dl.replay_layers_for(model, manifest) == [0, 1]
+    from gmlx.stream.moe_routes import moe_expert_counts
+    assert moe_expert_counts(model) == [8, 8]
+    # a student with the teacher's layers but another expert count would
+    # replay ids that name other experts, or none
+    manifest["gmlx_distill"]["routing"]["n_experts"] = 16
+    assert dl.replay_layers_for(model, manifest) is None
+    manifest["gmlx_distill"]["routing"]["n_experts"] = 8
     manifest["gmlx_distill"]["routing"]["moe_layers"] = [0]
     assert dl.replay_layers_for(model, manifest) is None
     assert dl.replay_layers_for(model, {"gmlx_distill": {}}) is None
+    with pytest.raises(ValueError, match="routes carry expert id 7, the model has 4 experts"):
+        dl.pin_routes(model, routes, [0, 1], n_experts=4)
 
 
 
@@ -5683,7 +5692,10 @@ def test_partial_route_recording_is_refused(monkeypatch):
     monkeypatch.setattr(_mr, "moe_layers", lambda m: [0, 1, 2])
     rec, why = dl.install_route_recording(model)
     assert rec is None and why == "route recording unsupported on MoE layers [2]"
-    clear_moe_route_controls(model)
+    # the refusal takes the recorder off again: left on, every later
+    # forward of the model would feed it
+    from gmlx.stream.moe_experts import expert_controls_active
+    assert not any(expert_controls_active(m) for ly in model.layers for m in ly.mlp.modules())
 
 
 def test_head_pass_can_skip_the_host_round_trip_and_an_f16_head_is_cast_once():
@@ -6804,6 +6816,32 @@ def test_train_hs_compares_the_teacher_by_content_not_by_path_or_serving(tmp_pat
     assert "hidden sketches come from other spaces" in capsys.readouterr().err
 
 
+def _segment_start_weights(t_tok, s_tok, tables, text=b"the cat is"):
+    """(boundary positions, weights) that compile_row gives one row of
+    ``text`` whose teacher puts 0.6 on the next token at every position."""
+    def encode(tok):
+        ids, ends, _ = dl.encode_with_byte_ends(tok, text, dl.token_bytes(tok), add_special_tokens=False)
+        return (np.concatenate([[tok.bos_token_id], ids]).astype(np.int32),
+                np.concatenate([[0], ends]).astype(np.int64))
+
+    t_ids, t_ends = encode(t_tok)
+    s_ids, s_ends = encode(s_tok)
+    T, K = len(t_ids), 4
+    top = np.zeros((T, K), dtype=np.int32)
+    for t in range(T):
+        nxt = int(t_ids[t + 1]) if t + 1 < T else int(t_ids[t])
+        others = [v for v in range(5, 5 + 2 * K) if v != nxt][:K - 1]
+        top[t] = [nxt] + others
+    row = {"token_ids": t_ids, "token_end_byte": t_ends, "top_k_indices": top,
+           "top_k_log_softmax": np.tile(np.log([0.6, 0.2, 0.1, 0.05]), (T, 1)).astype(np.float32),
+           "onpath_log_p": np.full(T, np.log(0.6), np.float32), "onpath_mask": np.arange(T) < T - 1,
+           "log_boundary_mass": np.full(T, np.log(0.5), np.float32),
+           "tail_log_mass": np.full(T, np.log(0.05), np.float32)}
+    rv = dl.compile_row(row, text, s_ids, s_ends, tables, Kp=K, knobs=dict(KNOBS),
+                        teacher_special=set(), student_special=set())
+    return rv.bnd_pos, rv.bnd_weight
+
+
 def test_a_boundary_where_one_side_spells_a_dummy_space_gets_no_weight(tmp_path, tok_bl):
     """A dummy-prefix tokenizer (Llama-2, Mistral) opens a segment with a
     space the text lacks. Paired with a byte-level one, the teacher's
@@ -6818,36 +6856,12 @@ def test_a_boundary_where_one_side_spells_a_dummy_space_gets_no_weight(tmp_path,
               ("\u2581ca", "t"), ("\u2581", "i"), ("\u2581i", "s")]
     spm = _spm_prefix_tokenizer(pieces, merges)
     spm2 = _spm_prefix_tokenizer(pieces + ["\u2581dog"], merges)
-    text = b"the cat is"
-
-    def encode(tok):
-        ids, ends, _ = dl.encode_with_byte_ends(tok, text, dl.token_bytes(tok), add_special_tokens=False)
-        return (np.concatenate([[tok.bos_token_id], ids]).astype(np.int32),
-                np.concatenate([[0], ends]).astype(np.int64))
-
-    def weights(t_tok, s_tok, tables):
-        t_ids, t_ends = encode(t_tok)
-        s_ids, s_ends = encode(s_tok)
-        T, K = len(t_ids), 4
-        top = np.zeros((T, K), dtype=np.int32)
-        for t in range(T):
-            nxt = int(t_ids[t + 1]) if t + 1 < T else int(t_ids[t])
-            others = [v for v in range(5, 5 + 2 * K) if v != nxt][:K - 1]
-            top[t] = [nxt] + others
-        row = {"token_ids": t_ids, "token_end_byte": t_ends, "top_k_indices": top,
-               "top_k_log_softmax": np.tile(np.log([0.6, 0.2, 0.1, 0.05]), (T, 1)).astype(np.float32),
-               "onpath_log_p": np.full(T, np.log(0.6), np.float32), "onpath_mask": np.arange(T) < T - 1,
-               "log_boundary_mass": np.full(T, np.log(0.5), np.float32),
-               "tail_log_mass": np.full(T, np.log(0.05), np.float32)}
-        rv = dl.compile_row(row, text, s_ids, s_ends, tables, Kp=K, knobs=dict(KNOBS),
-                            teacher_special=set(), student_special=set())
-        return rv.bnd_pos, rv.bnd_weight
 
     for t_tok, s_tok, zeroed in ((tok_bl, spm, True), (spm, tok_bl, True), (spm, spm2, False)):
         tables = dl.build_tables(t_tok, s_tok)
         assert not tables.identity and tables.t_len is not None and tables.s_len is not None
-        pos, w = weights(t_tok, s_tok, tables)
-        pos0, w0 = weights(t_tok, s_tok, dataclasses.replace(tables, t_len=None, s_len=None))
+        pos, w = _segment_start_weights(t_tok, s_tok, tables)
+        pos0, w0 = _segment_start_weights(t_tok, s_tok, dataclasses.replace(tables, t_len=None, s_len=None))
         assert np.array_equal(pos, pos0) and pos[0] == 0 and w0[0] > 0
         assert w[0] == (0.0 if zeroed else w0[0]) and np.array_equal(w[1:], w0[1:]), (w, w0)
     dl.save_tables(tmp_path / "t", tables)
@@ -6903,3 +6917,56 @@ def test_a_module_head_under_value_and_grad_gets_its_gradient_and_keeps_its_weig
     got = np.array(grads["lm_head"]["weight"])
     assert np.abs(got).max() > 0 and np.allclose(got, np.array(ref), atol=2e-4, rtol=2e-3), \
         np.abs(got - np.array(ref)).max()
+
+
+def test_a_same_vocab_pair_that_differs_in_the_dummy_prefix_keeps_the_token_lengths(tmp_path):
+    """Two tokenizers over one vocabulary, one with a dummy prefix and one
+    without, encode the cache's rows differently, so align takes the
+    general path with the identity tables. Those tables carry both sides'
+    token lengths, and the segment start, where only the teacher spells a
+    space, gets no weight."""
+    import dataclasses
+    import string
+
+    from gmlx.distill import align as _align
+
+    pieces = ["\u2581"] + list(string.ascii_letters + string.digits + ".,!?\n") + \
+        ["\u2581" + c for c in string.ascii_lowercase] + ["\u2581the", "\u2581cat", "\u2581is", "the", "cat"]
+    merges = [("\u2581", "t"), ("\u2581t", "h"), ("\u2581th", "e"), ("\u2581", "c"), ("\u2581c", "a"),
+              ("\u2581ca", "t"), ("\u2581", "i"), ("\u2581i", "s"), ("t", "h"), ("th", "e"), ("c", "a"),
+              ("ca", "t")]
+    teacher = _spm_prefix_tokenizer(pieces, merges, scheme="first")
+    student = _spm_prefix_tokenizer(pieces, merges, scheme="never")
+    view, _ = _cpu_view(tmp_path, teacher, student_tok=student)
+    assert json.loads((view / "view.json").read_text())["identity"] is False
+    tables = dl.load_tables(view)
+    V = len(dl.token_bytes(teacher))
+    assert np.array_equal(tables.t_len, _align.token_lengths(dl.token_bytes(teacher), V))
+    assert np.array_equal(tables.s_len, _align.token_lengths(dl.token_bytes(student), V))
+    pos, w = _segment_start_weights(teacher, student, tables)
+    pos0, w0 = _segment_start_weights(teacher, student, dataclasses.replace(tables, t_len=None, s_len=None))
+    assert np.array_equal(pos, pos0) and pos[0] == 0 and w0[0] > 0
+    assert w[0] == 0.0 and np.array_equal(w[1:], w0[1:]), (w, w0)
+
+
+def test_train_refuses_grad_checkpoint_on_a_layer_class_that_shares_state(tmp_path, tok_bl, capsys, monkeypatch):
+    """A layer class that declares state shared between layers ends the
+    run with exit 2 before the first step, and the class keeps its own
+    forward."""
+    from mlx_lm.models import llama
+
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    monkeypatch.setattr(llama.TransformerBlock, "_gmlx_checkpoint_refusal", "its layers share a bank",
+                        raising=False)
+    orig = llama.TransformerBlock.__call__
+    rc = _trainer.run_train(_trainer.TrainOptions(
+        views=[str(view)], student=str(student), iters=1, batch_size=2, seed=1, ckpt_dir=str(tmp_path / "ck"),
+        no_wired_limit=True, lora_rank=2, chunk=16, grad_checkpoint=True))
+    assert rc == 2
+    assert ("[train] refuse: --grad-checkpoint: per-layer checkpointing cannot run TransformerBlock: "
+            "its layers share a bank") in capsys.readouterr().err
+    assert llama.TransformerBlock.__call__ is orig
+    assert not (tmp_path / "ck" / "last").exists()

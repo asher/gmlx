@@ -221,3 +221,126 @@ def test_checkpoint_layers_marks_the_instances_not_the_class(monkeypatch):
     finally:
         cls.__call__ = orig
     assert np.isfinite(float(loss))
+
+
+class _Mixed(nn.Module):
+    """A layer whose arguments mix what crosses the checkpoint (the hidden
+    state, a tuple of floating arrays) with what stays in the closure (an
+    integer gather index, a frozen module, a string)."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(8, 8)
+
+    def __call__(self, x, idx, pair, frozen, tag="mix"):
+        h = mx.take_along_axis(self.proj(x) + frozen(x), idx, axis=-1)
+        return h * pair[0] + pair[1] if tag == "mix" else h
+
+
+class _MixedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.emb = nn.Linear(8, 8)
+        self.frozen = nn.Linear(8, 8)
+        self.frozen.freeze()
+        self.layers = [_Mixed(), _Mixed()]
+
+    def __call__(self, x, idx):
+        h = self.emb(x)
+        pair = (mx.sin(h), mx.tanh(h))
+        for layer in self.layers:
+            h = layer(h, idx, pair, self.frozen, tag="mix")
+        return h
+
+
+def test_arguments_left_in_the_closure_keep_the_plain_gradient():
+    """An integer index crossing the checkpoint would fail the gather's
+    backward, and a frozen module or a string cannot cross at all. They
+    stay in the closure while the tuple of floating arrays crosses, and
+    every gradient equals the plain backward."""
+    from mlx.utils import tree_flatten
+
+    mx.random.seed(4)
+    model = _MixedModel()
+    x = mx.random.normal((3, 8))
+    idx = mx.array(np.stack([np.random.default_rng(i).permutation(8) for i in range(3)]).astype(np.int32))
+
+    def loss(m, x, idx):
+        return (m(x, idx) ** 2).sum()
+
+    g0 = dict(tree_flatten(nn.value_and_grad(model, loss)(model, x, idx)[1]))
+    orig = _Mixed.__call__
+    try:
+        assert checkpoint_layers(model) == 1
+        g1 = dict(tree_flatten(nn.value_and_grad(model, loss)(model, x, idx)[1]))
+    finally:
+        _Mixed.__call__ = orig
+    assert g0.keys() == g1.keys() and "emb.weight" in g0 and "frozen.weight" not in g0
+    for k in g0:
+        assert np.allclose(np.array(g0[k]), np.array(g1[k]), atol=1e-5), k
+
+
+def test_an_argument_the_recompute_cannot_carry_is_refused_at_call_time():
+    """A dict can hold state the layer changes, a module with trainable
+    parameters would train outside the checkpoint's inputs, and a
+    floating array beside an integer one in a tuple would lose its
+    gradient. Each makes the checkpointed call raise and names the
+    argument."""
+
+    class _Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(8, 8)
+
+        def __call__(self, x, extra=None, state=None):
+            return self.proj(x)
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [_Layer()]
+
+    model = _Model()
+    x = mx.zeros((2, 8))
+    orig = _Layer.__call__
+    try:
+        checkpoint_layers(model)
+        layer = model.layers[0]
+        with pytest.raises(ValueError, match=r"cannot run _Layer: its argument 'state' is a dict, which the "
+                                             r"backward recompute would neither differentiate nor restore"):
+            layer(x, state={})
+        with pytest.raises(ValueError, match=r"its argument 1 is a Linear, which the backward recompute"):
+            layer(x, nn.Linear(8, 8))
+        with pytest.raises(ValueError, match=r"its argument 1 is a tuple holding floating arrays beside other "
+                                             r"values, which would get no gradient"):
+            layer(x, (x, mx.zeros((2,), dtype=mx.int32)))
+        assert layer(x, (mx.zeros((2,), dtype=mx.int32), "a", None, 3)).shape == (2, 8)
+    finally:
+        _Layer.__call__ = orig
+
+
+def test_a_class_refusal_raises_before_any_class_is_rewritten():
+    """A layer class that passes state between layers declares it, and
+    checkpoint_layers raises on it before it rewrites or marks a layer of
+    any class."""
+
+    class _Refused(nn.Module):
+        _gmlx_checkpoint_refusal = "its layers share a bank"
+
+        def __call__(self, x):
+            return x
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [_Mixed(), _Refused()]
+
+    model = _Model()
+    orig = _Mixed.__call__
+    try:
+        with pytest.raises(ValueError, match="per-layer checkpointing cannot run _Refused: its layers share a bank"):
+            checkpoint_layers(model)
+        assert _Mixed.__call__ is orig
+        assert not any(getattr(ly, "_gmlx_ckpt", False) for ly in model.layers)
+    finally:
+        _Mixed.__call__ = orig

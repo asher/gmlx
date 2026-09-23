@@ -98,7 +98,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default memory and cache limits on a streamed model. Every cache miss then purges the whole buffer cache. |
 | `GMLX_DECODE_ARENA_GB` | Decode arena size override in GB. The default is what the memory limit leaves after the every-token weights, KV room and prefill ring. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. No default. |
-| `GMLX_BATCH_INVARIANT=1` | Run float `nn.Linear` routers and gates on a kernel whose result does not depend on the row count. Raw-array gates and training stay on the stock matmul. |
+| `GMLX_BATCH_INVARIANT=1` | Run every float `nn.Linear` up to `GMLX_BATCH_INVARIANT_MAX_OUT` outputs, routers and decay gates included, on a row-count-invariant kernel. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | Widest float projection the batch-invariant kernel takes, in outputs. Default `512`. |
 | `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the host floor. |
 | `GMLX_STREAM_KV_CTX` | Tokens of KV cache the arena leaves room for. Default `32768`, capped at the trained context. Raise it for deep prompts. |

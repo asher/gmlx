@@ -324,8 +324,12 @@ def run_align(opts: AlignOptions) -> int:
     if same_vocab:
         # at the student's width: the head runs over V_S columns, and a wider
         # student head keeps the teacher's ids as a prefix
+        # with the token lengths, so a boundary where only one side spells a
+        # dummy-prefix space still gets no weight
         tables = _align.identity_tables(V_S, whitespace_start_mask(student_tok, V_S), vocab_map_hash(teacher_tok),
-                                        vocab_map_hash(student_tok), V_T=V_T)
+                                        vocab_map_hash(student_tok), V_T=V_T,
+                                        t_len=_align.token_lengths(token_bytes(teacher_tok), V_T),
+                                        s_len=_align.token_lengths(token_bytes(student_tok), V_S))
     else:
         tables = get_tables(teacher_tok, student_tok, Path(opts.tables) if opts.tables else None, out,
                             V_T=V_T, V_S=V_S, save=False)

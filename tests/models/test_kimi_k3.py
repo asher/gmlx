@@ -408,3 +408,20 @@ def test_short_conv_state_frees_conv_input():
     assert live < 2 * per_input, f"{live / 1e6:.0f} MB live after eval(h)"
     ref = mx.concatenate([mx.zeros((1, 3, C), dtype=x.dtype), x], axis=1)
     assert mx.array_equal(states[0], ref[:, -3:, :])
+
+
+def test_per_layer_checkpointing_refuses_the_residual_bank():
+    """Each layer reads and extends the bank of earlier residuals its mixer
+    holds, which a per-layer recompute can neither differentiate nor
+    restore, so checkpoint_layers refuses the model before it rewrites the
+    layer class."""
+    from gmlx.models.kimi_k3 import KimiK3DecoderLayer
+    from gmlx.tune.checkpoint import checkpoint_layers
+
+    model = Model(_tiny_args())
+    assert all(isinstance(ly, KimiK3DecoderLayer) for ly in model.layers)
+    orig = KimiK3DecoderLayer.__call__
+    with pytest.raises(ValueError, match="cannot run KimiK3DecoderLayer: each layer reads and extends a bank"):
+        checkpoint_layers(model)
+    assert KimiK3DecoderLayer.__call__ is orig
+    assert not any(getattr(ly, "_gmlx_ckpt", False) for ly in model.layers)

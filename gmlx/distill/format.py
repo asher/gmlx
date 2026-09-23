@@ -60,11 +60,14 @@ def install_route_recording(model):
         return None, "gmlx has no stream.moe_routes (route record and replay seam)"
     rec = _mr.install_moe_route_record(model)
     if not rec.layers:
+        _mr.clear_moe_route_controls(model)
         return None, "no supported MoE block found (dense model, or an unsupported router)"
     missing = sorted(set(_mr.moe_layers(model)) - set(rec.layers))
     if missing:
         # a routes field over some layers would fail the replay's layer
-        # check and eval would score without replay
+        # check, and eval would score without replay. The recorder comes
+        # off again, or every later forward would feed it
+        _mr.clear_moe_route_controls(model)
         return None, f"route recording unsupported on MoE layers {missing}"
     return rec, ""
 
@@ -80,13 +83,14 @@ class pin_routes:
     k] for one row) through ``model``'s MoE blocks for the forwards inside
     the block; the caller sets ``.replay.offset`` per chunk."""
 
-    def __init__(self, model, routes_blt: np.ndarray, layers: list[int]):
+    def __init__(self, model, routes_blt: np.ndarray, layers: list[int], n_experts: int | None = None):
         from gmlx.stream.moe_routes import RouteReplay
         r = np.asarray(routes_blt)
         if r.ndim == 3:
             r = r[None]
         self.model = model
-        self.replay = RouteReplay(np.transpose(r, (2, 0, 1, 3)).astype(np.int32), list(layers))
+        self.replay = RouteReplay(np.transpose(r, (2, 0, 1, 3)).astype(np.int32), list(layers),
+                                  n_experts=n_experts)
 
     def __enter__(self):
         from gmlx.stream.moe_routes import install_moe_route_replay
@@ -105,17 +109,23 @@ def routing_block(manifest: dict) -> dict | None:
 
 def replay_layers_for(model, manifest: dict) -> list[int] | None:
     """The manifest's MoE layer list when ``model`` carries the same layers
-    in the same order (the cache's own teacher), else None."""
+    in the same order with the same number of experts behind each (the
+    cache's own teacher), else None. A layer whose expert count cannot be
+    read is not compared."""
     rb = routing_block(manifest)
     if not rb:
         return None
     try:
-        from gmlx.stream.moe_routes import moe_layers
+        from gmlx.stream.moe_routes import moe_expert_counts, moe_layers
     except ImportError:
         return None
     inner = getattr(model, "language_model", model)
-    have = moe_layers(inner)
-    return list(rb["moe_layers"]) if have == list(rb["moe_layers"]) else None
+    if moe_layers(inner) != list(rb["moe_layers"]):
+        return None
+    n = rb.get("n_experts")
+    if n is not None and any(c is not None and c != int(n) for c in moe_expert_counts(inner)):
+        return None
+    return list(rb["moe_layers"])
 
 
 def sha256_file(path: Path, chunk: int = 1 << 24) -> str:
