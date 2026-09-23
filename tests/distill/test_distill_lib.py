@@ -5805,3 +5805,201 @@ def test_census_orders_numeric_row_ids_numerically():
 
     keys = [("10", 0), ("2", 1), ("2", 0), ("a", 0), ("1", 0)]
     assert _census.sorted_keys(keys) == [("1", 0), ("2", 0), ("2", 1), ("10", 0), ("a", 0)]
+
+
+def test_a_control_token_opens_a_segment_and_its_zero_width_prefix_validates(tmp_path):
+    """GGUF control tokens ([INST], <|im_start|>) are added tokens flagged
+    special that transformers leaves out of all_special_ids, and a plain
+    added token (<think>) is special nowhere; an SPM tokenizer still opens
+    a new segment after either with a bare U+2581 the text does not hold.
+    The byte ends must treat both as segment starts, the row sidecar must
+    list the zero-width token after either, the cache must validate, and
+    a cache with such rows is not one mlx-kld can read."""
+    from tokenizers import AddedToken
+    from transformers import PreTrainedTokenizerFast
+
+    from gmlx.distill import format as _format
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import tokens as _tokens
+    from gmlx.load.tokenizer import _build_spm_bpe
+
+    pieces = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)] + \
+        ["\u2581", "t", "h", "e", "a", "\u2581t", "\u2581th", "\u2581the", "\u2581a", "[INST]", "<think>"]
+    merges = [("\u2581", "t"), ("\u2581t", "h"), ("\u2581th", "e"), ("\u2581", "a")]
+    tk = _build_spm_bpe(pieces, merges, unk_str="<unk>", add_prefix_space=True)
+    tk.add_special_tokens([AddedToken(s, normalized=False, special=True) for s in ["<s>", "</s>", "[INST]"]])
+    tk.add_tokens([AddedToken("<think>", normalized=False, special=False)])
+    tok = PreTrainedTokenizerFast(tokenizer_object=tk, bos_token="<s>", eos_token="</s>", unk_token="<unk>")
+    inst, think = tok.convert_tokens_to_ids("[INST]"), tok.convert_tokens_to_ids("<think>")
+    assert inst not in tok.all_special_ids and tok.added_tokens_decoder[inst].special
+    assert {inst, think} <= _tokens.segment_markers(tok)
+    tb = dl.token_bytes(tok)
+    for text, marker in (("the[INST]1 a", "[INST]"), ("the<think>1 a", "<think>")):
+        ids, ends, flagged = dl.encode_with_byte_ends(tok, text.encode(), tb, add_special_tokens=False)
+        assert tok.convert_ids_to_tokens(ids.tolist()) == ["\u2581the", marker, "\u2581", "<0x31>", "\u2581a"]
+        m = 3 + len(marker)
+        assert ends.tolist() == [3, m, m, m + 1, m + 3] and not flagged
+        assert _tokens.zero_width_indices(ids, ends, _tokens.segment_markers(tok)) == [2]
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": t}) + "\n" for t in ("the[INST]1 a", "the<think>1 a")),
+                      encoding="utf-8")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out),
+                                                    top_k=8, max_len=64)) == 0
+    assert dl.validate_cache(out) == []
+    rows = _format.read_rows_jsonl(out / "rows-00000.jsonl")
+    assert [r["zero_width"] for r in rows] == [[2], [2]]
+    blk = json.loads((out / "manifest.json").read_text())["gmlx_distill"]
+    assert blk["mlx_kld_compatible"] is False and blk["corpus"]["zero_width_rows"] == 2
+
+
+def test_target_mask_reaches_a_zero_width_token_at_the_reply_start():
+    """A dummy-prefix token after the reply marker spans no bytes; the
+    position that predicts it is a target when the token after it is one,
+    so the first reply token is trained rather than skipped. A zero-width
+    token outside every span stays context."""
+    ends = np.array([3, 8, 8, 9, 10], dtype=np.int64)
+    assert dl.target_mask(ends, [(8, 10, 10)]).tolist() == [False, True, True, True, False]
+    assert dl.target_mask(np.array([3, 3, 5, 6], dtype=np.int64), [(5, 6, 6)]).tolist() == \
+        [False, False, True, False]
+    # two zero-width tokens in a row, both reached
+    ends = np.array([3, 8, 8, 8, 9], dtype=np.int64)
+    assert dl.target_mask(ends, [(8, 9, 9)]).tolist() == [False, True, True, True, False]
+
+
+def test_census_orders_doc_keys_by_file_then_line_number():
+    """--pair-by doc keys are "file:line"; the line part sorts as a number
+    so --max-rows takes the first rows of a file as it numbered them."""
+    from gmlx.distill import census as _census
+
+    keys = [("c.jsonl:10", 0), ("c.jsonl:2", 0), ("a.jsonl:3", 1), ("c.jsonl:1", 0), ("x", 0), ("7", 0)]
+    assert _census.sorted_keys(keys) == [("7", 0), ("a.jsonl:3", 1), ("c.jsonl:1", 0), ("c.jsonl:2", 0),
+                                         ("c.jsonl:10", 0), ("x", 0)]
+
+
+def test_train_schedule_without_warmup_starts_at_the_peak_rate_and_a_full_warmup_climbs_to_the_end():
+    """--warmup 0 means no warmup: step 0 runs at the peak rate and the
+    cosine falls from there. --warmup 1 climbs for the whole run."""
+    from gmlx.distill import trainer as _trainer
+
+    lr, iters = 1e-3, 20
+    vals = [float(_trainer.make_schedule(lr, iters, 0.0)(i)) for i in range(iters)]
+    assert vals[0] == pytest.approx(lr) and all(a > b for a, b in zip(vals, vals[1:])) and vals[-1] > 0
+    vals = [float(_trainer.make_schedule(lr, iters, 1.0)(i)) for i in range(iters)]
+    assert vals[0] == 0.0 and all(a < b for a, b in zip(vals, vals[1:]))
+    assert vals[-1] == pytest.approx(lr * (iters - 1) / iters)
+
+
+def test_train_refuses_an_identity_view_when_the_identity_path_leaves_no_loss(tmp_path, tok_bl, capsys,
+                                                                             monkeypatch):
+    """The identity path turns the ALM term off, so --dk 0 --ce 0 with the
+    default --alm leaves nothing to train; the refusal comes before the
+    student loads instead of a zero loss at every step."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    assert json.loads((view / "view.json").read_text())["identity"]
+    ck = tmp_path / "ck"
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=1, batch_size=2,
+                                                  seed=1, ckpt_dir=str(ck), no_wired_limit=True, lora_rank=2,
+                                                  chunk=16, dk=0.0, ce=0.0))
+    assert rc == 2
+    assert "[train] refuse: every loss weight in force is 0 (the identity path turns --alm off)" in \
+        capsys.readouterr().err
+    assert not (ck / "last").exists()
+
+
+def test_tables_version_is_past_the_roles_change():
+    """Tables written before the special roles gained the EOS and BOS
+    groups carry the same field names, so only the version tells them
+    apart; it must be past the value those tables recorded."""
+    from gmlx.distill.constants import TABLES_VERSION
+
+    assert TABLES_VERSION >= 3
+
+
+def test_align_removes_a_leftover_staging_directory_and_refuses_when_the_tables_cannot_be_written(
+        tmp_path, tok_bl, tok_spm, capsys, monkeypatch):
+    """A materialize.tmp left by a killed --materialize run goes on the next
+    align of that view, materialized or not; a tables write that fails is
+    a refusal with exit 2, not a traceback."""
+    from gmlx.distill import align as _align
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    (out / "materialize.tmp").mkdir(parents=True)
+    (out / "materialize.tmp" / "view-00000.safetensors").write_bytes(b"x")
+    opts = _view.AlignOptions(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"), out=str(out))
+    assert _view.run_align(opts) == 0
+    assert not (out / "materialize.tmp").exists() and (out / "view.json").exists()
+
+    def fail(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_align, "save_tables", fail)
+    capsys.readouterr()
+    assert _view.run_align(opts) == 2
+    assert "[align] refuse: cannot write the tables" in capsys.readouterr().err
+
+
+def test_cache_kld_through_the_distill_head_matches_the_full_logits(tmp_path, tok_bl):
+    """With the student's head spec the KL runs the trunk once and the
+    head over the scored positions in chunks, never a full-row full-vocab
+    logits array; the numbers match the plain forward."""
+    from gmlx.distill import student as _student
+    from gmlx.distill.head import head_spec_from_model
+
+    _tiny_cache(tmp_path / "c", tok_bl)
+    reader = dl.CacheReader(tmp_path / "c")
+    model, _cfg, _tok = _student.load_mlx_student(_tiny_mlx_teacher(tmp_path / "m", tok_bl))
+    full = dl.cache_kld(model, reader)
+    via = dl.cache_kld(model, reader, head=head_spec_from_model(model), head_chunk=4)
+    assert via["positions"] == full["positions"] and via["rows"] == full["rows"]
+    assert via["top1_agreement"] == full["top1_agreement"]
+    assert via["mean_kld_nats"] == pytest.approx(full["mean_kld_nats"], rel=1e-4, abs=1e-6)
+
+
+def test_cache_resume_refuses_a_changed_generator_sidecar(tmp_path, tok_bl, capsys):
+    """The generator block lands in the manifest and the row metas; a
+    resume after the corpus gained or changed its gen sidecar would mix
+    two generators under one cache."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl", n=4)
+    out = tmp_path / "cache"
+    base = dict(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64, source="synthetic")
+    assert _teacher.run_cache(_teacher.CacheOptions(**base)) == 0
+    (tmp_path / "c.jsonl.gen.json").write_text(json.dumps({"model": "m", "filter_version": "3"}), encoding="utf-8")
+    capsys.readouterr()
+    rc = _teacher.run_cache(_teacher.CacheOptions(**base, resume=True))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generator_id" in err and "source" not in err.split("refuse", 1)[1]
+
+
+def test_cache_refuses_a_named_template_set_without_a_default(tmp_path, capsys):
+    """transformers renders the "default" entry of a named template set;
+    a set without one raises on every row, which the row loop would count
+    as dropped rows and report as a corpus that yields nothing."""
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(_bytelevel_tokenizer(_BL_MERGES), {"rag": _TEMPLATE_B, "tool_use": _TEMPLATE_B})
+    why = _frames.template_problem(tok)
+    assert why and '"default"' in why and "rag, tool_use" in why
+    assert _frames.template_problem(_with_template(_bytelevel_tokenizer(_BL_MERGES), {"default": _TEMPLATE_B})) \
+        is None
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"messages": [{"role": "user", "content": "hi"},
+                                               {"role": "assistant", "content": "the cat"}]}) + "\n",
+                      encoding="utf-8")
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(tmp_path / "o"),
+                                                  frame="reply", top_k=8, max_len=64))
+    err = capsys.readouterr().err
+    assert rc == 2 and '[cache] refuse: the chat template is a named set without a "default" entry' in err

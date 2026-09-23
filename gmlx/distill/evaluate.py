@@ -236,10 +236,12 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
 
 def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: dict,
             chat_slices: dict | None = None, reply_slices: dict | None = None,
-            positions: dict | None = None, trace_positions: dict | None = None) -> dict:
+            positions: dict | None = None, trace_positions: dict | None = None, head=None) -> dict:
     """Every instrument on the loaded weights as they are. ``positions``
     and ``trace_positions``, a census high_delta map and its trace half,
-    restrict every reply slice to the byte ranges they name."""
+    restrict every reply slice to the byte ranges they name. ``head`` is
+    the student's head spec, so the cache KL runs the head over the
+    scored positions only."""
     res: dict = {"bpb": {}, "tasks": {}, "chat_bpb": {}, "reply_bpb": {}}
     for name, convs in (chat_slices or {}).items():
         t0 = time.perf_counter()
@@ -267,7 +269,8 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         model.eval()
         reader = CacheReader(Path(opts.kld_cache), keep=2)
         replay = kld_replay_layers(model, reader.manifest, opts.adapter)
-        k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer, replay_layers=replay)
+        k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer, replay_layers=replay,
+                            head=head)
         k["wall_s"] = time.perf_counter() - t0
         res["kld"] = k
         log(kld_line("", k))
@@ -515,11 +518,11 @@ def run_eval(opts: EvalOptions) -> int:
         report["reply_positions"] = opts.reply_positions
         log(f"[eval] reply slices restricted to the high-delta positions of {len(positions)} rows")
     report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions,
-                              trace_positions)
+                              trace_positions, head=head)
     if opts.before:
         with adapter_disabled(model):
             report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices,
-                                       positions, trace_positions)
+                                       positions, trace_positions, head=head)
     if opts.chat_sanity:
         items = chat_items
         refs = refs_before

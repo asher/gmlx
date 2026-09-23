@@ -94,7 +94,7 @@ def _target_logprobs(logits, targets: np.ndarray) -> np.ndarray:
 
 
 def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
-              replay_layers: list[int] | None = None) -> dict:
+              replay_layers: list[int] | None = None, head=None, head_chunk: int = 512) -> dict:
     """Sparse KL of the student against a same-tokenizer teacher cache, the
     bucketed form at the cache's K: sum over the top-K of p (log p - log q)
     plus (1 - M)(log(1 - M) - log Q_tail), per position where the cache has
@@ -111,8 +111,16 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
     agreement over positions, the counts, the rows re-rendered and the
     rows replayed. max_rows scores that many rows spread over the
     cache's length order, in ascending order so shard reads stay
-    sequential; the first rows alone would be the shortest ones."""
+    sequential; the first rows alone would be the shortest ones.
+    With ``head`` (the student's HeadSpec) the trunk runs once per row and
+    the head over the scored positions in chunks of ``head_chunk``, so no
+    full-row full-vocab logits array is built; without it the model's own
+    forward gives the logits."""
     import mlx.core as mx
+
+    from .head import _head_logits_f32
+    from .student import trunk_hidden
+    inner = getattr(model, "language_model", model)
     n_all = len(reader)
     order = (range(n_all) if max_rows is None or max_rows >= n_all
              else np.unique(np.linspace(0, n_all - 1, max_rows).round().astype(int)))
@@ -163,26 +171,43 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
             continue
         assert s_pos is not None
         # the scored positions are gathered before the float32 cast and the
-        # softmax, so no full-row full-vocab float32 array is built
+        # softmax, so no full-row full-vocab float32 array is built; through
+        # the head the hidden states are gathered and the logits exist per
+        # chunk only
         sel_pos = mx.array(s_pos)
-        if replay_layers is not None and ids is t_ids and ROUTES_FIELD in arrs:
-            with pin_routes(model, arrs[ROUTES_FIELD], replay_layers):
-                out = model(mx.array(ids[None]))
-                out = out.logits if hasattr(out, "logits") else out
-                sel = out[0][sel_pos].astype(mx.float32)
-                mx.eval(sel)
-            replayed += 1
-        else:
+        pos = t_pos
+        idx = arrs["top_k_indices"][pos].astype(np.int32)
+
+        def forward():
+            if head is not None:
+                hg = trunk_hidden(inner, mx.array(ids[None]))[0][sel_pos]
+                mx.eval(hg)
+                return hg
             out = model(mx.array(ids[None]))
             out = out.logits if hasattr(out, "logits") else out
             sel = out[0][sel_pos].astype(mx.float32)
-        lsm = sel - mx.logsumexp(sel, axis=-1, keepdims=True)
-        pos = t_pos
-        idx = mx.array(arrs["top_k_indices"][pos].astype(np.int32))
-        lq = mx.take_along_axis(lsm, idx, axis=-1)
-        top1 = mx.argmax(lsm, axis=-1)
-        mx.eval(lq, top1)
-        lq = np.asarray(lq).astype(np.float64)
+            mx.eval(sel)
+            return sel
+
+        if replay_layers is not None and ids is t_ids and ROUTES_FIELD in arrs:
+            with pin_routes(model, arrs[ROUTES_FIELD], replay_layers):
+                gathered = forward()
+            replayed += 1
+        else:
+            gathered = forward()
+        lq_parts, top1_parts = [], []
+        step = max(1, int(head_chunk)) if head is not None else len(s_pos)
+        for c0 in range(0, len(s_pos), step):
+            part = gathered[c0:c0 + step]
+            z = _head_logits_f32(head, head.current(), part) if head is not None else part
+            lsm = z - mx.logsumexp(z, axis=-1, keepdims=True)
+            lq_c = mx.take_along_axis(lsm, mx.array(idx[c0:c0 + step]), axis=-1)
+            top1_c = mx.argmax(lsm, axis=-1)
+            mx.eval(lq_c, top1_c)
+            lq_parts.append(np.asarray(lq_c))
+            top1_parts.append(np.asarray(top1_c))
+        lq = np.concatenate(lq_parts).astype(np.float64) if lq_parts else np.zeros((0, idx.shape[1]))
+        top1 = np.concatenate(top1_parts) if top1_parts else np.zeros(0, dtype=np.int64)
         lp = arrs["top_k_log_softmax"][pos].astype(np.float64)
         p = np.exp(lp)
         M = p.sum(axis=1)

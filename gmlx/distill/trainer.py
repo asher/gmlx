@@ -163,8 +163,13 @@ def load_student(path: str, adapter: str | None, hf_source: str | None):
 
 
 def make_schedule(lr: float, iters: int, warmup_frac: float):
+    """Linear warmup over the first warmup_frac of the steps, then cosine
+    decay; no warmup step at all when the fraction rounds to zero, so
+    step 0 runs at the peak rate."""
     import mlx.optimizers as optim
-    warm = max(1, int(iters * warmup_frac))
+    warm = int(iters * warmup_frac)
+    if warm <= 0:
+        return optim.cosine_decay(lr, max(1, iters))
     warmup = optim.linear_schedule(0.0, lr, warm)
     cosine = optim.cosine_decay(lr, max(1, iters - warm))
     return optim.join_schedules([warmup, cosine], [warm])
@@ -322,6 +327,9 @@ def run_train(opts: TrainOptions) -> int:
         knobs["gamma"] = opts.gamma
     if view["identity"]:
         knobs["lambda_alm"] = 0.0
+    if not any(w > 0 for w in (knobs["lambda_dk"], knobs["lambda_alm"], knobs["lambda_ce"], opts.hs)):
+        log("[train] refuse: every loss weight in force is 0 (the identity path turns --alm off), nothing to train")
+        return 2
 
     ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
     ckpt_dir.mkdir(parents=True, exist_ok=True)

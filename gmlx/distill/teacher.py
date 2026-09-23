@@ -15,7 +15,6 @@ from typing import Any
 import numpy as np
 
 from gmlx.load.tokenizer import (
-    special_ids,
     token_bytes,
     vocab_map_hash,
     whitespace_start_mask,
@@ -242,14 +241,14 @@ def row_meta(r, source: str, frame: str, generator_id: str = "", special: set[in
     """Row sidecar entry; framed rows carry their messages, teacher-render
     spans and the frame length as the prefix fields, plus the student's
     own message list when the corpus row had one. A token that spans no
-    bytes after a special (the dummy prefix of a Llama-2 style tokenizer
-    after a mid-row marker) is listed under zero_width for the
-    validator."""
+    bytes after a segment marker (the dummy prefix of a Llama-2 style
+    tokenizer after a mid-row control or added token) is listed under
+    zero_width for the validator; ``special`` is the marker set the byte
+    ends were computed with."""
     meta = _format.RowMeta(row_id=r[0], doc_id=str(r[1]), window=r[2], n_tokens=len(r[3]), source=source,
                            generator_id=generator_id)
     if special:
-        ids, ends = np.asarray(r[3]), np.asarray(r[4], dtype=np.int64)
-        zw = [i for i in range(1, len(ids)) if ends[i] == ends[i - 1] and ends[i] > 0 and int(ids[i - 1]) in special]
+        zw = _tokens.zero_width_indices(r[3], r[4], special)
         if zw:
             meta.zero_width = zw
     if r[6] is not None:
@@ -351,15 +350,16 @@ def head_logits(head: HeadSpec, h):
 
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw,
-                    tokenizer=None, source: str | None = None) -> dict:
+                    tokenizer=None, source: str | None = None, generator_id: str = "") -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
-    and row options, the teacher by size and leading bytes (its path may
-    be spelled another way), its vocabulary and, when rows are framed, its
-    chat template (a directory checkpoint keeps both outside the hashed
-    files), the hidden sketch and the render kwargs. Any difference
-    refuses the resume."""
+    and row options, the corpus's generator sidecar, the teacher by size
+    and leading bytes (its path may be spelled another way), its
+    vocabulary and, when rows are framed, its chat template (a directory
+    checkpoint keeps both outside the hashed files), the hidden sketch and
+    the render kwargs. Any difference refuses the resume."""
     template = _frames.template_text(tokenizer) if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
+            "generator_id": generator_id,
             "tokenizer_hash": vocab_map_hash(tokenizer) if tokenizer is not None else None,
             "template_sha256": hashlib.sha256(template.encode()).hexdigest() if opts.frame != "none" else None,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
@@ -496,6 +496,10 @@ def run_cache(opts: CacheOptions) -> int:
                                               override=_frames.parse_render_kwargs(opts.frame_kwargs))
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
+        why = _frames.template_problem(tokenizer)
+        if why:
+            log(f"[cache] refuse: {why}")
+            return 2
         if not _frames.has_chat_template(tokenizer):
             log("[cache] warn: teacher has no chat template, framed rows use the plain render "
                 "(contents separated by blank lines)")
@@ -516,7 +520,10 @@ def run_cache(opts: CacheOptions) -> int:
         log(f"[cache] refuse: {e}")
         return 2
     source = opts.source or ("synthetic" if generator else "human")
-    special = special_ids(tokenizer)
+    special = _tokens.segment_markers(tokenizer)
+    # rows with a zero-width token are not ones mlx-kld's reader can pair
+    # with its own offsets
+    zero_width_rows = sum(1 for r in rows if _tokens.zero_width_indices(r[3], r[4], special))
     if generator:
         log(f"[cache] generator sidecar: {generator.get('model')} filter_version "
             f"{generator.get('filter_version')} ({generator_id})")
@@ -552,7 +559,8 @@ def run_cache(opts: CacheOptions) -> int:
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
     # must continue the same run
-    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer, source=source)
+    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer, source=source,
+                          generator_id=generator_id)
     prev = writer.progress.get("run")
     if opts.resume and prev is not None and prev != run:
         diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
@@ -802,10 +810,11 @@ def run_cache(opts: CacheOptions) -> int:
             "corpus": {"spec": opts.corpus, "rows": len(rows), "tokens": n_tokens,
                        "window_policy": "last whitespace-initial boundary",
                        "normalization": "NFC", "rows_offset_fallback": flagged,
-                       "boundary_byte_set": " \\t\\n\\r\\x0b\\x0c", "source": source},
+                       "boundary_byte_set": " \\t\\n\\r\\x0b\\x0c", "source": source,
+                       "zero_width_rows": int(zero_width_rows)},
             "corpus_sha256": corpus_sha,
             "generator": generator,
-            "mlx_kld_compatible": opts.frame == "none",
+            "mlx_kld_compatible": opts.frame == "none" and not zero_width_rows,
             "routing": routing,
             "hidden": hidden_blk,
             "frame": None if opts.frame == "none" else {

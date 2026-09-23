@@ -318,3 +318,20 @@ def test_train_flags_refuse_values_out_of_range_at_parse_time(flag, value, word)
 def test_train_refuses_when_every_loss_weight_is_zero():
     rc, out = _run(_TRAIN + ["--dk", "0", "--alm", "0", "--ce", "0"])
     assert rc == 2 and "[train] refuse: every loss weight is 0" in out
+
+
+@pytest.mark.parametrize("argv, word", [
+    (_TRAIN + ["--lora-scale", "0"], "nonzero"),
+    (_TRAIN + ["--lora-alpha", "nan"], "nonzero"),
+    (_TRAIN + ["--lr", "inf"], "positive"),
+    (_TRAIN + ["--weight-decay", "inf"], "at least 0"),
+    (["distill", "align", "--cache", "c", "--student", "s.gguf", "--out", "v", "--w-mid", "-1"], "at least 0"),
+    (["distill", "cache", "--teacher", "t.gguf", "--corpus", "c", "--out", "o", "--cache-limit-gb", "-1"],
+     "at least 0"),
+])
+def test_float_flags_refuse_zero_nan_and_infinite_values_at_parse_time(argv, word):
+    """A LoRA scale of 0 trains an adapter that changes nothing, and inf or
+    nan anywhere reaches the optimizer as inf or nan; the parser refuses
+    each."""
+    rc, out = _run(argv)
+    assert rc == 2 and word in out

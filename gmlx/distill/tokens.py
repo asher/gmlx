@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from gmlx.load.tokenizer import backend, hf_inner, vocab_map_hash
+from gmlx.load.tokenizer import backend, hf_inner, special_ids, vocab_map_hash
 
 # ---------------------------------------------------------------------------
 # tokens
@@ -184,6 +184,23 @@ def _special_text_bytes(inner, tid: int) -> bytes | None:
     return cache[tid]
 
 
+def segment_markers(tokenizer) -> set[int]:
+    """The ids after which the tokenizer opens a new segment: every special
+    id (BOS, EOS, the control tokens a GGUF flags special, which
+    transformers keeps out of all_special_ids) and every added token, a
+    plain one such as <think> included, since the pre-tokenizer splits at
+    added tokens. A dummy prefix follows any of them."""
+    inner = hf_inner(tokenizer)
+    return set(special_ids(tokenizer)) | {int(t) for t in getattr(inner, "added_tokens_decoder", {})}
+
+
+def zero_width_indices(ids, ends, markers: set[int]) -> list[int]:
+    """The token indices that span no bytes after a segment marker: the
+    dummy prefix of a Llama-2 style tokenizer after a mid-row marker."""
+    ids, ends = np.asarray(ids), np.asarray(ends, dtype=np.int64)
+    return [i for i in range(1, len(ids)) if ends[i] == ends[i - 1] and ends[i] > 0 and int(ids[i - 1]) in markers]
+
+
 def encode_with_byte_ends(tokenizer, text_bytes: bytes,
                           tb: list[bytes | None],
                           add_special_tokens: bool = True) -> tuple[np.ndarray, np.ndarray, bool]:
@@ -199,37 +216,35 @@ def encode_with_byte_ends(tokenizer, text_bytes: bytes,
     b = backend(tokenizer)
     enc = b.encode(text, add_special_tokens=add_special_tokens)
     ids = np.asarray(enc.ids, dtype=np.int32)
-    special = set(inner.all_special_ids)
+    special = set(special_ids(tokenizer))
+    markers = segment_markers(tokenizer)
     ends = np.zeros(len(ids), dtype=np.uint32)
     pos = 0
     ok = True
     seg_start = True
     for i, tid in enumerate(ids):
-        if tid in special:
-            # a special rendered as text (a chat frame) spans its own bytes;
-            # one the backend added (BOS) spans none
+        tid = int(tid)
+        bb = tb[tid] if tid < len(tb) else None
+        if bb is None:
+            # a special rendered as text (a chat frame) or a control token
+            # outside all_special_ids (gemma-4's <|turn>, Qwen's
+            # <|im_start|>) spans its literal bytes; a special the backend
+            # added (BOS) spans none; anything else is unknown
             sb = _special_text_bytes(inner, tid)
             if sb and text_bytes[pos:pos + len(sb)] == sb:
                 pos += len(sb)
+            elif tid not in special:
+                ok = False
+                break
             ends[i] = pos
             seg_start = True
             continue
-        bb = tb[tid] if tid < len(tb) else None
-        if bb is not None and seg_start and bb.startswith(b" ") and text_bytes[pos:pos + 1] != b" ":
+        if seg_start and bb.startswith(b" ") and text_bytes[pos:pos + 1] != b" ":
             # a dummy prefix (Llama-2, Mistral SPM): the tokenizer prepends
             # a space the text does not hold, zero width here
             bb = bb[1:]
-        seg_start = False
-        if bb is None:
-            # a control token outside all_special_ids (gemma-4's <|turn>,
-            # Qwen's <|im_start|>) rendered as text spans its literal bytes
-            sb = _special_text_bytes(inner, tid)
-            if sb and text_bytes[pos:pos + len(sb)] == sb:
-                pos += len(sb)
-                ends[i] = pos
-                continue
-            ok = False
-            break
+        # a literal added token (<think>) also opens a segment
+        seg_start = tid in markers
         pos += len(bb)
         ends[i] = pos
     if ok and pos == len(text_bytes):

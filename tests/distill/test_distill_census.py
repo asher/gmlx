@@ -484,3 +484,22 @@ def test_census_refuses_a_corpus_line_that_is_not_an_object(tmp_path, tok, capsy
     rc = cs.run_census(cs.CensusOptions(without=str(a), with_=[str(b)], out=str(out), corpus=str(corpus)))
     assert rc == 2 and "[census] refuse: a.jsonl line 3: not JSON (" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_census_gives_no_positions_map_to_a_document_whose_last_turn_one_cache_dropped(tmp_path, tok):
+    """A document's positions map is its last turn's, the turn eval scores.
+    When a context cache dropped that turn (it did not fit), the pair over
+    an earlier turn is scored but not stored under the document's id,
+    since the map would then send eval to the wrong bytes."""
+    turn0 = _conv("say it 0", REPLIES[0])
+    turn1 = turn0 + [{"role": "user", "content": "again"}, {"role": "assistant", "content": REPLIES[1]}]
+    without = _reply_cache(tmp_path / "without", tok, [turn0, turn1], doc_prefix="a.jsonl",
+                           docs=[("a.jsonl:0", 0), ("a.jsonl:0", 1)])
+    with_ = _reply_cache(tmp_path / "with", tok, [turn0], doc_prefix="b.jsonl", boost={0: 6.0},
+                         docs=[("b.jsonl:0", 0)])
+    assert dl.validate_cache(without) == [] and dl.validate_cache(with_) == []
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["rows"] == 1 and s["teacher_high_delta"]["positions"] == 1
+    assert s["high_delta"] == {}

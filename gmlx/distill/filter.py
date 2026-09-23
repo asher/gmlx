@@ -197,8 +197,10 @@ def _read_rows(path: Path) -> list[dict]:
     return rows
 
 
-_GEN_KEYS = ("model", "served_model_id", "sampling", "seed", "chat_template_kwargs", "thinking",
+_GEN_KEYS = ("gen_version", "model", "served_model_id", "sampling", "seed", "chat_template_kwargs", "thinking",
              "thinking_budget", "context", "context_format", "serve_args")
+# recorded by a finished gen only; compared when both sidecars carry them
+_GEN_KEYS_IF_PRESENT = ("instruction", "prefix_chars")
 
 
 def _read_sidecar(path: Path) -> dict | None:
@@ -221,7 +223,8 @@ def _settings_diff(a: dict, b: dict) -> list[str]:
     context named two ways for one file agrees."""
     from .gen import same_name
     return [k for k in _GEN_KEYS if a.get(k) != b.get(k)
-            and not (k in ("model", "context") and same_name(a.get(k), b.get(k)))]
+            and not (k in ("model", "context") and same_name(a.get(k), b.get(k)))] + \
+        [k for k in _GEN_KEYS_IF_PRESENT if k in a and k in b and a[k] != b[k]]
 
 
 def run_filter(opts: FilterOptions) -> int:
@@ -257,7 +260,8 @@ def run_filter(opts: FilterOptions) -> int:
             return 2
         if s is not None and first is not None and isinstance(s.get("filter"), dict) \
                 and isinstance(first.get("filter"), dict):
-            pa, pb = s["filter"].get("params") or {}, first["filter"].get("params") or {}
+            pa = dict(s["filter"].get("params") or {}, verify=s["filter"].get("verify"))
+            pb = dict(first["filter"].get("params") or {}, verify=first["filter"].get("verify"))
             diff = ", ".join(sorted(k for k in set(pa) | set(pb) if pa.get(k) != pb.get(k)))
             if diff:
                 print(f"[filter] refuse: {p} was filtered with other settings than {first_path} ({diff}), "
@@ -361,17 +365,20 @@ def run_filter(opts: FilterOptions) -> int:
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "inputs": [str(p) for p in inputs]}
     joined = [(p, s) for p, s in zip(inputs, sides) if s is not None]
-    if len(joined) > 1:
-        # one sidecar describes every input: the totals are read back from
-        # the rows written, the counts and walls add up, and the prompt
-        # fields list each input's
+    if joined and isinstance(joined[0][1].get("run"), dict):
+        # the run block's totals are read back from the rows written, so
+        # they count the survivors; the request counts and walls stay
         from .gen import row_totals
         runs = [s.get("run") or {} for _, s in joined]
         run = {**runs[0], **row_totals(out)}
-        run["failed"] = sum(int(r.get("failed") or 0) for r in runs)
-        run["wall_s"] = sum(float(r.get("wall_s") or 0.0) for r in runs)
-        run.pop("tok_s_aggregate", None)     # one rate cannot describe two runs
+        if len(joined) > 1:
+            run["failed"] = sum(int(r.get("failed") or 0) for r in runs)
+            run["wall_s"] = sum(float(r.get("wall_s") or 0.0) for r in runs)
+            run.pop("tok_s_aggregate", None)     # one rate cannot describe two runs
         sidecar["run"] = run
+    if len(joined) > 1:
+        # one sidecar describes every input: the prompt fields list each
+        # input's
         sidecar["prompts"] = sum(int(s.get("prompts") or 0) for _, s in joined)
         sidecar["prompt_source"] = [s.get("prompt_source") for _, s in joined]
         sidecar["prompt_set_sha256"] = hashlib.sha256(

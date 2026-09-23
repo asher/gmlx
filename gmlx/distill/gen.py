@@ -33,7 +33,11 @@ from .constants import log
 from .format import write_bytes_atomic, write_json_atomic
 from .frames import CONTINUE_INSTRUCTION
 
-GEN_VERSION = "3"
+GEN_VERSION = "4"
+# tokens the request budget leaves for the closing marker of a cut trace
+CLOSE_ALLOWANCE = 4
+# a cut trace re-tokenized by gen can lose this many tokens to merges
+RETOKENIZE_SLACK = 2
 DEFAULT_CONTEXT_FORMAT = "{context}\n\n{prompt}"
 
 
@@ -327,13 +331,15 @@ def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOption
     usage = obj.get("usage") or {}
     reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
     rt = _reasoning_tokens(obj)
+    reported = rt is not None
     if rt is None and tokenizer is not None and opts.thinking_budget:
         rt = trace_tokens(tokenizer, reasoning)
     budget_hit: bool | None = None
     if opts.thinking_budget and rt is not None:
-        # the criteria forces the close once the count exceeds the budget, so a
-        # cut trace re-tokenizes to about budget + 1; a merge or two of slack
-        budget_hit = rt >= opts.thinking_budget
+        # the server forces the close once the count reaches the budget; its
+        # own count is exact, a trace re-tokenized here can come out a merge
+        # or two short
+        budget_hit = rt >= opts.thinking_budget - (0 if reported else RETOKENIZE_SLACK)
     return {"content": msg.get("content") or "", "reasoning": reasoning,
             "finish_reason": ch.get("finish_reason"), "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"), "reasoning_tokens": rt,
@@ -361,10 +367,13 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 
 def answer_budget(opts: GenOptions) -> int:
     """max_tokens for a request: the server counts the reasoning trace in
-    it, so a thinking budget is added on top and the answer keeps the
+    it, so a thinking budget is added on top, plus the tokens a forced
+    close spends on the closing marker, and the answer keeps the
     --max-tokens budget. A thinking reply without a budget shares
     --max-tokens with its trace."""
-    return opts.max_tokens + (opts.thinking_budget or 0) if opts.thinking else opts.max_tokens
+    if opts.thinking and opts.thinking_budget:
+        return opts.max_tokens + opts.thinking_budget + CLOSE_ALLOWANCE
+    return opts.max_tokens
 
 
 def row_totals(out: Path) -> dict:
@@ -458,6 +467,7 @@ def run_settings(opts: GenOptions) -> dict:
             "seed": opts.seed,
             "chat_template_kwargs": json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else None,
             "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget,
+            "request_max_tokens": answer_budget(opts),
             "serve_args": list(opts.serve_arg)}
 
 
@@ -497,7 +507,8 @@ def resume_conflict(prev: dict, opts: GenOptions, *, with_context: bool = False)
     as the sidecar records it (None when no row got a context); a context
     the rows carry themselves is recorded as per-prompt and is not a flag
     to compare."""
-    now: dict = dict(run_settings(opts), context_format=opts.context_format if with_context else None)
+    now: dict = dict(run_settings(opts), gen_version=GEN_VERSION,
+                     context_format=opts.context_format if with_context else None)
     if "shared_context" in prev:
         now["shared_context"] = shared_context(opts)
     elif prev.get("context") != "per-prompt":
@@ -536,6 +547,12 @@ def run_gen(opts: GenOptions) -> int:
             return 2
     if opts.thinking_budget and not opts.thinking:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
+        return 2
+    if any(a == "--thinking-budget" or a.startswith("--thinking-budget=") for a in opts.serve_arg):
+        # a server-wide budget would cap every request under what the
+        # sidecar records as the budget
+        print("[gen] refuse: --thinking-budget is gen's own flag, sent with every request, not a --serve-arg",
+              file=sys.stderr)
         return 2
     tokenizer = None
     if opts.thinking_budget:

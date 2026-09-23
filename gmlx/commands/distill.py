@@ -10,6 +10,7 @@ The library behind each action is ``gmlx.distill``."""
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
@@ -174,7 +175,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Teacher tokens per window including the start token (default 2048).")
     p.add_argument("--max-disk-gb", type=float, default=None,
                    help="Refuse when the size estimate exceeds this (default none).")
-    p.add_argument("--cache-limit-gb", type=float, default=8.0,
+    p.add_argument("--cache-limit-gb", type=_nonneg_float, default=8.0,
                    help="MLX buffer cache cap during the pass (default 8).")
     p.add_argument("--logits-cap-gb", type=float, default=4.0,
                    help="Memory cap that sizes the head sub-chunk (default 4).")
@@ -256,7 +257,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--val-fraction", type=float, default=0.02,
                    help="Fraction of rows held for validation (default 0.02).")
     p.add_argument("--seed", type=_nonneg_int, default=1, help="Seed of the validation split (default 1).")
-    p.add_argument("--w-mid", type=float, default=DEFAULT_KNOBS["w_mid"],
+    p.add_argument("--w-mid", type=_nonneg_float, default=DEFAULT_KNOBS["w_mid"],
                    help="Weight of an intra-word shared boundary (default 0.5).")
     p.add_argument("--gamma", type=_positive_float, default=DEFAULT_KNOBS["gamma"],
                    help="Drop chunks of the chunk term (ALM) whose teacher boundary mass is below this "
@@ -287,9 +288,9 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--adapter-out", type=_path, required=True, metavar="PATH", help="Output path for the .gguf adapter.")
     p.add_argument("--iters", type=_positive_int, required=True, help="Training steps.")
     p.add_argument("--lora-rank", type=_positive_int, default=16, help="LoRA rank (default 16).")
-    p.add_argument("--lora-scale", type=float, default=None,
+    p.add_argument("--lora-scale", type=_nonzero_float, default=None,
                    help="LoRA multiplier applied directly (default 2.0 unless --lora-alpha is given).")
-    p.add_argument("--lora-alpha", type=float, default=None,
+    p.add_argument("--lora-alpha", type=_nonzero_float, default=None,
                    help="LoRA multiplier as alpha / rank. Give this or --lora-scale, not both.")
     p.add_argument("--lora-dropout", type=_dropout, default=0.0, help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--grad-checkpoint", action="store_true",
@@ -331,7 +332,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--report", type=_path, default=None, metavar="JSON", help="Write the run log here.")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--no-wired-limit", action="store_true", help="Leave the wired limit where it is.")
-    p.add_argument("--cache-limit-gb", type=float, default=8.0, help="MLX buffer cache cap (default 8).")
+    p.add_argument("--cache-limit-gb", type=_nonneg_float, default=8.0, help="MLX buffer cache cap (default 8).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 
@@ -388,7 +389,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="Text placed before every window, or @FRAME (such as @continue) for that frame's "
                         "template prefix.")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Windows per batch (default 8).")
-    p.add_argument("--cache-limit-gb", type=float, default=4.0, help="MLX buffer cache cap (default 4).")
+    p.add_argument("--cache-limit-gb", type=_nonneg_float, default=4.0, help="MLX buffer cache cap (default 4).")
     p.add_argument("--decontam-threshold", type=float, default=0.01,
                    help="Slice window fraction found in the corpus above which its gate is void (default 0.01).")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
@@ -433,8 +434,8 @@ def _positive_float(text: str) -> float:
         x = float(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
-    if not x > 0:
-        raise argparse.ArgumentTypeError(f"a positive number is required, got {text}")
+    if not (math.isfinite(x) and x > 0):
+        raise argparse.ArgumentTypeError(f"a finite positive number is required, got {text}")
     return x
 
 
@@ -443,8 +444,18 @@ def _nonneg_float(text: str) -> float:
         x = float(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
-    if not x >= 0:
-        raise argparse.ArgumentTypeError(f"a number of at least 0 is required, got {text}")
+    if not (math.isfinite(x) and x >= 0):
+        raise argparse.ArgumentTypeError(f"a finite number of at least 0 is required, got {text}")
+    return x
+
+
+def _nonzero_float(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not (math.isfinite(x) and x != 0):
+        raise argparse.ArgumentTypeError(f"a finite nonzero number is required, got {text}")
     return x
 
 

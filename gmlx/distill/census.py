@@ -133,11 +133,19 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
 
 
 def sorted_keys(keys) -> list:
-    """(key, window) pairs with numeric ids in numeric order, so --max-rows
-    takes the first rows as the corpus numbered them."""
+    """(key, window) pairs with numeric ids in numeric order, and "file:N"
+    keys (--pair-by doc) by file then N as a number, so --max-rows takes
+    the first rows as the corpus numbered them."""
     def order(kw):
         key = str(kw[0])
-        return ((0, int(key)) if key.isdigit() else (1, key)), int(kw[1])
+        head, _sep, tail = key.rpartition(":")
+        if key.isdigit():
+            rank: tuple = (0, "", int(key))
+        elif tail.isdigit():
+            rank = (1, head, int(tail))
+        else:
+            rank = (2, key, 0)
+        return rank, int(kw[1])
     return sorted(keys, key=order)
 
 
@@ -157,10 +165,16 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         common &= set(rows)
     keys = sorted_keys(common)
     # a document's positions map is its last window's, the final turn on a
-    # per-turn cache and the one eval's reply slice scores; a document cut
-    # by max_rows before its last window gets no map
+    # per-turn cache and the one eval's reply slice scores. The last window
+    # is read over every cache's rows, not the common ones: a cache that
+    # dropped the final turn leaves the pair over an earlier turn, and that
+    # pair must not be stored as the document's map. A document cut by
+    # max_rows before its last window gets no map either
+    every = set(base_rows)
+    for _r, rows in ctx:
+        every |= set(rows)
     last_window: dict[str, int] = {}
-    for key, window in keys:
+    for key, window in every:
         last_window[key] = max(window, last_window.get(key, -1))
     if max_rows:
         keys = keys[:max_rows]

@@ -1295,7 +1295,7 @@ def test_gen_adds_the_thinking_budget_to_the_answer_budget(tmp_path, stub_server
                                       thinking=True, thinking_budget=5, max_tokens=7,
                                       tokenizer="teacher.gguf")) == 0
     sent = [c["max_tokens"] for c in _Handler.calls if "messages" in c and c.get("max_tokens") != 1]
-    assert sent == [12]
+    assert sent == [7 + 5 + gen.CLOSE_ALLOWANCE] and gen.CLOSE_ALLOWANCE == 4
     _Handler.calls = []
     assert gen.run_gen(gen.GenOptions(out=str(tmp_path / "b.jsonl"), prompts=prompts, base_url=stub_server,
                                       max_tokens=7)) == 0
@@ -1349,3 +1349,106 @@ def test_filter_accepts_an_empty_input(tmp_path, capsys):
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 0
     assert out.exists() and out.read_text() == ""
     assert "[filter] kept 0" in capsys.readouterr().err
+
+
+def test_gen_counts_a_retokenized_trace_one_short_of_the_budget_as_a_hit(tmp_path, stub_server, monkeypatch):
+    """A cut trace re-tokenized by gen can lose a token or two to merges,
+    so a count within two of the budget is a hit; a count the server
+    reports is exact and one below the budget is not."""
+    import gmlx.distill.tokens as tokens_mod
+    monkeypatch.setattr(tokens_mod, "load_tokenizer", lambda path: _WordTokenizer())
+    monkeypatch.setattr(gen, "_reasoning_tokens", lambda obj: None)
+    monkeypatch.setattr(gen, "trace_tokens", lambda tok, text: len(text.split()) - 1)
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"id": "long", "messages": [{"role": "user", "content": "LONG one"}]},
+        {"id": "short", "messages": [{"role": "user", "content": "brief"}]},
+    ])
+    out = tmp_path / "a.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, thinking=True,
+                                      thinking_budget=40, tokenizer="teacher.gguf")) == 0
+    rows = {r["id"]: r for r in _rows(out)}
+    assert rows["long"]["gen"]["reasoning_tokens"] == 39 and rows["long"]["gen"]["budget_hit"] is True
+    assert rows["short"]["gen"]["reasoning_tokens"] == 19 and rows["short"]["gen"]["budget_hit"] is False
+    monkeypatch.setattr(gen, "_reasoning_tokens", lambda obj: 39)
+    out2 = tmp_path / "b.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=prompts, base_url=stub_server, thinking=True,
+                                      thinking_budget=40, tokenizer="teacher.gguf")) == 0
+    assert all(r["gen"]["budget_hit"] is False and r["gen"]["reasoning_tokens"] == 39 for r in _rows(out2))
+
+
+def test_gen_refuses_a_thinking_budget_inside_the_serve_args(tmp_path, stub_server, capsys):
+    """The budget is sent with every request, so a server-wide one under
+    --serve-arg would silently cap what --thinking-budget records."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "q"}]}])
+    for arg in (["--thinking-budget", "40"], ["--kv-bits", "4", "--thinking-budget=40"]):
+        rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
+                                        serve_arg=arg))
+        err = capsys.readouterr().err
+        assert rc == 2 and "[gen] refuse: --thinking-budget is gen's own flag" in err, err
+    assert not (tmp_path / "a.jsonl").exists()
+
+
+def test_gen_resume_and_filter_join_refuse_another_gen_version(tmp_path, stub_server, capsys):
+    """The request a version sends differs (the answer budget changed
+    across versions), so rows of two versions are not one run."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    side_path = tmp_path / "corpus.jsonl.gen.json"
+    side = json.loads(side_path.read_text())
+    assert side["gen_version"] == gen.GEN_VERSION == "4" and side["request_max_tokens"] == 1024
+    side["gen_version"] = "3"
+    side_path.write_text(json.dumps(side))
+    more = _prompts(tmp_path / "p.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    capsys.readouterr()
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=more, base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "gen_version '3' -> '4'" in err, err
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    common = {"model": "t.gguf", "seed": 1, "thinking": False}
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({**common, "gen_version": "3"}))
+    (tmp_path / "b.jsonl.gen.json").write_text(json.dumps({**common, "gen_version": "4"}))
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(tmp_path / "j.jsonl")))
+    assert rc == 2 and "gen_version" in capsys.readouterr().err
+
+
+def test_filter_join_compares_the_verify_command_and_the_corpus_prompting_and_a_single_input_recounts(
+        tmp_path, capsys):
+    """Two filtered inputs joined under one sidecar must have run the same
+    verify command, two generated inputs the same corpus instruction; and
+    a single input's run block counts the rows written, as a join's does."""
+    def gen_file(name, n, **extra):
+        p = tmp_path / f"{name}.jsonl"
+        p.write_text("".join(json.dumps(_row(f"{name}{i}", GOOD if i else "too short", tokens=10)) + "\n"
+                             for i in range(n)))
+        (tmp_path / f"{name}.jsonl.gen.json").write_text(json.dumps({
+            "gen_version": gen.GEN_VERSION, "model": "m", "prompts": n,
+            "run": {"completed": n, "failed": 0, "wall_s": 1.0, "tok_s_aggregate": 9.0}, **extra}))
+        return p
+
+    a = gen_file("a", 3)
+    fa = tmp_path / "fa.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(fa), min_words=4)) == 0
+    single = json.loads((tmp_path / "fa.jsonl.gen.json").read_text())
+    assert single["run"]["completed"] == 2 and single["run"]["generated_tokens"] == 20
+    assert single["run"]["tok_s_aggregate"] == 9.0 and single["run"]["wall_s"] == 1.0
+    b = gen_file("b", 2)
+    fb = tmp_path / "fb.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(fb), min_words=4)) == 0
+    sb = json.loads((tmp_path / "fb.jsonl.gen.json").read_text())
+    sb["filter"]["verify"] = "true"
+    (tmp_path / "fb.jsonl.gen.json").write_text(json.dumps(sb))
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(fa), str(fb)], out=str(tmp_path / "j.jsonl")))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"{fb} was filtered with other settings than {fa} (verify)" in err, err
+    c = gen_file("c", 2, instruction="Continue.", prefix_chars=100)
+    d = gen_file("d", 2, instruction="Go on.", prefix_chars=100)
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(c), str(d)], out=str(tmp_path / "j.jsonl")))
+    err = capsys.readouterr().err
+    assert rc == 2 and "(instruction)" in err, err
+    # an input generated before the corpus keys were recorded joins one that has them
+    e = gen_file("e", 2)
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(c), str(e)], out=str(tmp_path / "j.jsonl"))) == 0

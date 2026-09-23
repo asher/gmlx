@@ -379,7 +379,16 @@ def run_align(opts: AlignOptions) -> int:
         p.unlink()
     if stale:
         log(f"[align] removed {len(stale)} files of an earlier view in {out}")
-    _align.save_tables(out, tables)
+    if staged is None:
+        # a staging directory a killed --materialize left behind
+        shutil.rmtree(out / "materialize.tmp", ignore_errors=True)
+    try:
+        _align.save_tables(out, tables)
+    except OSError as e:
+        if staged is not None:
+            shutil.rmtree(staged[0], ignore_errors=True)
+        log(f"[align] refuse: cannot write the tables under {out}: {e}")
+        return 2
     if staged is not None:
         staging, nsh, wall_m = staged
         for p in sorted(staging.glob("view-*.safetensors")):

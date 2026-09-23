@@ -52,6 +52,18 @@ def template_text(tokenizer) -> str:
     return json.dumps(tpl, sort_keys=True) if isinstance(tpl, dict) else str(tpl)
 
 
+def template_problem(tokenizer) -> str | None:
+    """Why the chat template cannot render a row at all, or None: a named
+    set without the "default" entry transformers renders when no name is
+    passed. Checked before the row loop, which would otherwise drop every
+    row and report a corpus that yields nothing."""
+    tpl = getattr(hf_inner(tokenizer), "chat_template", None)
+    if isinstance(tpl, dict) and "default" not in tpl:
+        return (f'the chat template is a named set without a "default" entry ({", ".join(sorted(tpl))}), '
+                "no framed row can be rendered")
+    return None
+
+
 def set_render_kwargs(tokenizer, kwargs: dict | None) -> None:
     """Attach the keyword arguments every template render of this tokenizer
     passes to apply_chat_template (enable_thinking, reasoning_effort,
@@ -504,9 +516,19 @@ def target_mask(ends: np.ndarray, spans: list | None) -> np.ndarray:
     e = np.asarray(ends, dtype=np.int64)
     starts = e[:-1]
     stops = e[1:]
+    zero = np.zeros(n - 1, dtype=bool)
     for sp in spans:
         b0, b2 = int(sp[0]), int(sp[-1])
-        m[:-1] |= (starts >= b0) & (stops <= b2) & (stops > starts)
+        inside = (starts >= b0) & (stops <= b2)
+        m[:-1] |= inside & (stops > starts)
+        zero |= inside & (stops == starts)
+    # a zero-width token (a dummy prefix after the reply marker) is a
+    # target when the token after it is one, so the reply's first token
+    # is predicted rather than skipped; the run is walked backwards so a
+    # chain of them is reached
+    for t in range(n - 3, -1, -1):
+        if zero[t] and m[t + 1]:
+            m[t] = True
     return m
 
 
