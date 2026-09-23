@@ -3,6 +3,7 @@ the group projection of a teacher top-K onto student groups at a shared
 boundary."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -249,10 +250,12 @@ def save_tables(dirpath: Path, t: Tables) -> None:
     from safetensors.numpy import save_file
     dirpath = Path(dirpath)
     dirpath.mkdir(parents=True, exist_ok=True)
+    tmp = dirpath / "tables.safetensors.tmp"
     save_file({"v1": t.v1, "u1": t.u1, "group_of": t.group_of, "target_g": t.target_g,
                "group_key": t.group_key, "group_size": t.group_size,
                "nonsingleton_ids": t.nonsingleton_ids, "bmask_S": t.bmask_S,
-               "own": t.own}, str(dirpath / "tables.safetensors"))
+               "own": t.own}, str(tmp))
+    os.replace(tmp, dirpath / "tables.safetensors")
     write_json_atomic(dirpath / "tables.json", t.meta())
 
 

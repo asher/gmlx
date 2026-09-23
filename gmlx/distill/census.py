@@ -17,9 +17,10 @@ against their mixture at the same position, the part no training
 recovers. The JSON carries per-row means, a delta histogram, the
 teacher's on-path nats over the high-delta positions with and without
 the context, ``high_delta``, byte ranges per row id above the
-threshold, which ``distill eval --reply-positions`` reads, and
-``frame``, the reply frame of the cache without context, which fixes
-where those ranges start."""
+threshold relative to the reply's content start, ``high_delta_trace``,
+the ranges inside a reasoning trace relative to the trace start (a
+reply-think cache), both of which ``distill eval --reply-positions``
+reads, and ``frame``, the reply frame of the cache without context."""
 from __future__ import annotations
 
 import json
@@ -155,6 +156,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     res_all: list[float] = []
     top1_all: list[bool] = []
     high: dict[str, list] = {}
+    high_trace: dict[str, list] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
     for key, window in order:
@@ -162,6 +164,10 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         doc_id = str(meta0["doc_id"])
         keys0, b0, _b2 = reply_positions(arrs0, meta0)
         reply0 = text0[b0:int(meta0["spans"][-1][1])]
+        # positions from the content start are keyed from it, so the map
+        # survives a student template that frames the trace differently;
+        # the trace's own positions stay relative to the trace start
+        cut = int(meta0.get("content_start", b0)) - b0
         sides = []
         ok = True
         for reader, rows in ctx:
@@ -183,6 +189,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         ends0 = arrs0["token_end_byte"].astype(np.int64)
         row_delta, row_kl, row_res, row_top1 = [], [], [], []
         ranges = []
+        tranges = []
         for r in rel:
             t0 = keys0[r]
             p0_ids, p0_lp = sparse(arrs0, t0)
@@ -200,19 +207,24 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
                 row_res.append(residual_kl(dists))
             if delta > delta_threshold:
                 nbytes = int(ends0[t0 + 1] - ends0[t0])
-                ranges.append([r, r + nbytes])
+                if r >= cut:
+                    ranges.append([r - cut, r - cut + nbytes])
+                else:
+                    tranges.append([r, r + nbytes])
                 hd["without"] += -on0
                 hd["with"] += -on1
                 hd["bytes"] += nbytes
                 hd["positions"] += 1
         rid = id_of.get(key, doc_id)
-        if ranges and window == last_window[key]:
+        if (ranges or tranges) and window == last_window[key]:
             high[rid] = ranges
+            if tranges:
+                high_trace[rid] = tranges
         by_key[(key, window)] = {"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
                                  "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
                                  "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),
                                  "mean_residual": float(np.mean(row_res)) if row_res else None,
-                                 "high_delta_positions": len(ranges)}
+                                 "high_delta_positions": len(ranges) + len(tranges)}
         deltas_all += row_delta
         kl_all += row_kl
         top1_all += row_top1
@@ -232,7 +244,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         "delta_histogram": {"bins": [str(b) for b in HIST_BINS], "counts": hist},
         "teacher_high_delta": {"nll_nats_without": hd["without"], "nll_nats_with": hd["with"],
                                "bytes": hd["bytes"], "positions": hd["positions"]},
-        "per_row": per_row, "high_delta": high}
+        "per_row": per_row, "high_delta": high, "high_delta_trace": high_trace}
 
 
 def report_markdown(opts: CensusOptions, s: dict) -> str:

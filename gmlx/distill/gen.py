@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -373,15 +373,31 @@ def model_label(opts: GenOptions) -> str:
     return opts.teacher or (opts.base_url.rstrip("/") if opts.base_url else f"http://{opts.host}:{opts.port}/v1")
 
 
-def resume_conflict(prev: dict, opts: GenOptions) -> str | None:
+def _same_name(a, b) -> bool:
+    """Two model or context names agree when they are one URL or one
+    file under two spellings of its path."""
+    def norm(s):
+        if not isinstance(s, str):
+            return s
+        if s.startswith(("http://", "https://")):
+            return s.rstrip("/")
+        return str(Path(s).expanduser().absolute())
+    return norm(a) == norm(b)
+
+
+def resume_conflict(prev: dict, opts: GenOptions, *, with_context: bool = False) -> str | None:
     """What differs between an earlier run's sidecar and this run's
-    settings, model and context, or None. A context the rows carry
-    themselves is recorded as per-prompt and is not a flag to compare."""
-    now: dict = dict(run_settings(opts), model=model_label(opts))
+    settings, model and context, or None. The context format is compared
+    as the sidecar records it (None when no row got a context); a context
+    the rows carry themselves is recorded as per-prompt and is not a flag
+    to compare."""
+    now: dict = dict(run_settings(opts), context_format=opts.context_format if with_context else None)
     if prev.get("context") != "per-prompt":
         now["context"] = opts.context
-        now["context_format"] = opts.context_format if opts.context else None
-    diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in now.items() if k in prev and prev.get(k) != v]
+    diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in now.items()
+             if k in prev and prev.get(k) != v and not (k == "context" and _same_name(prev.get(k), v))]
+    if "model" in prev and not _same_name(prev["model"], model_label(opts)):
+        diffs.append(f"model {prev['model']!r} -> {model_label(opts)!r}")
     return ", ".join(diffs) or None
 
 
@@ -429,11 +445,12 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
+    with_context = any(r.get("student_messages") for r in rows)
     side = out.with_suffix(out.suffix + ".gen.json")
     # the settings check comes before the torn-line cut, so a refused
     # resume leaves the file as it found it
     if out.exists() and out.stat().st_size > 0 and side.exists():
-        conflict = resume_conflict(json.loads(side.read_text(encoding="utf-8")), opts)
+        conflict = resume_conflict(json.loads(side.read_text(encoding="utf-8")), opts, with_context=with_context)
         if conflict:
             print(f"[gen] refuse: {out} was generated with other settings ({conflict}), pass a fresh --out",
                   file=sys.stderr)
@@ -444,7 +461,6 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
-    with_context = any(r.get("student_messages") for r in rows)
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
         f"concurrency {opts.concurrency}, max_tokens {opts.max_tokens}, T {opts.temperature} top_p {opts.top_p}")
     if not todo:
@@ -478,38 +494,51 @@ def run_gen(opts: GenOptions) -> int:
             return i, r, complete(base_url, model_id, r["messages"], opts, opts.seed + i, tokenizer)
 
         ex = ThreadPoolExecutor(max_workers=opts.concurrency)
+        queue = iter(todo)
+        pending: set = set()
         with open(out, "a", encoding="utf-8") as ofh:
-            futs = [ex.submit(work, i, r) for i, r in todo]
             try:
-                for fut in as_completed(futs):
-                    try:
-                        i, r, c = fut.result()
-                    except Exception as e:  # noqa: BLE001 - one bad request never ends the run
+                # twice the concurrency is in flight at a time, refilled as
+                # replies land, so a long run holds no finished reply in
+                # the pool and an interrupt has little to cancel
+                while True:
+                    while len(pending) < 2 * opts.concurrency:
+                        item = next(queue, None)
+                        if item is None:
+                            break
+                        pending.add(ex.submit(work, *item))
+                    if not pending:
+                        break
+                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in finished:
+                        try:
+                            i, r, c = fut.result()
+                        except Exception as e:  # noqa: BLE001 - one bad request never ends the run
+                            with lock:
+                                n_err += 1
+                            log(f"[gen] warn: request failed: {type(e).__name__}: {e}")
+                            continue
+                        row = reply_row(r, c, opts.seed + i)
                         with lock:
-                            n_err += 1
-                        log(f"[gen] warn: request failed: {type(e).__name__}: {e}")
-                        continue
-                    row = reply_row(r, c, opts.seed + i)
-                    with lock:
-                        ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                        ofh.flush()
-                        n_ok += 1
-                        gen_tokens += int(c["completion_tokens"] or 0)
-                        stops += int(c["finish_reason"] == "stop")
-                        budget_hits += int(bool(c["budget_hit"]))
-                        if c["finish_reason"] == "stop":
-                            longest = max(longest, int(c["completion_tokens"] or 0))
-                        if n_ok % opts.report_every == 0:
-                            el = time.perf_counter() - t0
-                            log(f"[gen] {n_ok}/{len(todo)} done, {gen_tokens} tokens, {gen_tokens / el:.0f} tok/s "
-                                f"aggregate, stop {stops / n_ok:.3f}, mean {gen_tokens / n_ok:.0f} tokens per "
-                                f"reply, {n_err} failed ({el:.0f}s)")
+                            ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                            ofh.flush()
+                            n_ok += 1
+                            gen_tokens += int(c["completion_tokens"] or 0)
+                            stops += int(c["finish_reason"] == "stop")
+                            budget_hits += int(bool(c["budget_hit"]))
+                            if c["finish_reason"] == "stop":
+                                longest = max(longest, int(c["completion_tokens"] or 0))
+                            if n_ok % opts.report_every == 0:
+                                el = time.perf_counter() - t0
+                                log(f"[gen] {n_ok}/{len(todo)} done, {gen_tokens} tokens, {gen_tokens / el:.0f} "
+                                    f"tok/s aggregate, stop {stops / n_ok:.3f}, mean {gen_tokens / n_ok:.0f} "
+                                    f"tokens per reply, {n_err} failed ({el:.0f}s)")
             except BaseException:
-                # an interrupt: the queued requests are cancelled and the
-                # server stops first so the requests in flight fail fast
+                # an interrupt: the queued requests are cancelled first,
+                # then the server stops so the requests in flight fail fast
+                ex.shutdown(wait=False, cancel_futures=True)
                 stop_server(opts, proc)
                 proc = None
-                ex.shutdown(wait=False, cancel_futures=True)
                 raise
             ex.shutdown(wait=True)
         el = time.perf_counter() - t0

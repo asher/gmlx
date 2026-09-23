@@ -175,3 +175,20 @@ def test_filter_refuses_a_malformed_jsonl_line(tmp_path, capsys):
     rc = cmd_filter(["--in", str(bad), "--out", str(tmp_path / "out.jsonl")])
     err = capsys.readouterr().err
     assert rc == 2 and "[filter] refuse:" in err and "line 2" in err
+
+
+@pytest.mark.parametrize("argv", [
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1", "--save-every", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1", "--val-every", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1",
+     "--report-every", "-1"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1", "--batch-size", "0"],
+    ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--concurrency", "0"],
+    ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--report-every", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--rows-per-shard", "0"],
+])
+def test_zero_cadence_and_size_flags_are_refused_at_parse_time(argv):
+    """A zero interval would divide the loop by zero after the load; the
+    parser refuses it."""
+    rc, out = _run(["distill", *argv])
+    assert rc == 2 and "positive" in out, out

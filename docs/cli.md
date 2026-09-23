@@ -1017,7 +1017,7 @@ Alignment flags, in the order `--help` prints them.
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
 | `--force` | off | keep a view the own-group check would refuse |
-| `--val-fraction F` | `0.02` | fraction of rows held for validation |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
 | `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this |
@@ -1100,12 +1100,12 @@ examples shown before each question.
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
-| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts the reply slices, refused when it names none of their rows or its frame differs from `--reply-think` |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` maps restrict the reply slices, refused when it names none of their rows or its frame differs from `--reply-think` |
 | `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a cached id beyond the student's head |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |
-| `--bpb-prefix TEXT` | none | text placed before every window, or `@FRAME`, such as `@continue`, for that frame's template prefix |
+| `--bpb-prefix TEXT` | none | text placed before every window (`\n`, `\t`, `\r` and `\\` decoded), or `@continue` or `@model` for that frame's template prefix; another `@` exits 2 |
 | `--batch-size N` | `8` | windows per batch |
 | `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
 | `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |

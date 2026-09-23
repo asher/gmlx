@@ -24,6 +24,7 @@ teacher then scores those replies with the context in its prompt."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -243,9 +244,19 @@ def run_filter(opts: FilterOptions) -> int:
         except ValueError as e:
             print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
-    with open(out, "w", encoding="utf-8") as ofh:
-        for row in survivors:
-            ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    # written beside the final name and moved into place, so a failed
+    # write leaves the corpus that was there
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as ofh:
+            for row in survivors:
+                ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            ofh.flush()
+            os.fsync(ofh.fileno())
+        os.replace(tmp, out)
+    except OSError as e:
+        print(f"[filter] refuse: cannot write {out}: {e}", file=sys.stderr)
+        return 2
     kept = len(survivors)
     sidecar: dict = dict(first) if first is not None else {"gen_version": None}
     prev = sidecar.get("filter_version")

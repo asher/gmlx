@@ -106,18 +106,21 @@ def _resolve(module, path: str):
 
 def lora_key_coverage(model, keys) -> dict[str, tuple[int, int]]:
     """Per LoRA key, how many layers hold a module at that dotted path,
-    over the layers that hold its parent module (a hybrid student has
-    attention on some layers only, a MoE student has dense projections on
-    its first layers only, and those layouts are not partial matches)."""
+    over the layers whose parent module is of a class that holds it on
+    some layer. A hybrid student has attention on some layers only and a
+    MoE student's expert layers hold another mlp class than its dense
+    layers, and neither layout is a partial match."""
     from gmlx.tune.checkpoint import layer_list
 
     layers = layer_list(model)
     cov = {}
     for key in keys:
-        parent = key.rsplit(".", 1)[0] if "." in key else ""
-        have = [la for la in layers if not parent or _resolve(la, parent) is not None]
-        n = sum(int(_resolve(la, key) is not None) for la in have)
-        cov[key] = (n, len(have))
+        parent, _, leaf = key.rpartition(".")
+        owners = [(_resolve(la, parent) if parent else la) for la in layers]
+        owners = [o for o in owners if o is not None]
+        kinds = {type(o) for o in owners if getattr(o, leaf, None) is not None}
+        have = [o for o in owners if type(o) in kinds] if kinds else owners
+        cov[key] = (sum(int(getattr(o, leaf, None) is not None) for o in have), len(have))
     return cov
 
 
@@ -198,6 +201,12 @@ def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict, extra=Non
     params: dict[str, Any] = dict(tree_flatten(model.trainable_parameters()))
     mx.save_safetensors(str(tmp / "trainable.safetensors"), params)
     mx.save_safetensors(str(tmp / "optimizer.safetensors"), dict(tree_flatten(opt.state)))
+    for name in ("trainable.safetensors", "optimizer.safetensors"):
+        fd = os.open(tmp / name, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     write_json_atomic(tmp / "state.json", state)
     if extra is not None:
         extra(tmp)
@@ -319,6 +328,14 @@ def run_train(opts: TrainOptions) -> int:
                 "a resume repeats the views, batch size, seed, step count, learning rate, loss knobs, gradient "
                 "clip, weight decay, LoRA rank, multiplier, keys and dropout, hidden-state term and student")
             return 2
+    if opts.adapter_out:
+        from gmlx.tune.lora import probe_writable
+        err = probe_writable(opts.adapter_out)
+        if err:
+            log(f"[train] refuse: cannot write --adapter-out {opts.adapter_out}: {err}")
+            return 2
+    if opts.report:
+        Path(opts.report).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
     model, cfg, tokenizer, kind = load_student(opts.student, None, opts.hf_source)
     _frames.set_render_kwargs(tokenizer, view.get("student_render_kwargs") or {})

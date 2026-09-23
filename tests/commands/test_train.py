@@ -175,3 +175,30 @@ def test_adapter_alpha_follows_the_trained_rank(tmp_path):
     assert adapter.load_lora_adapter(out).alpha == pytest.approx(S * R)
     with pytest.raises(ValueError, match="rank"):
         train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=out, rank=R + 1, scale=S)
+
+
+def test_adapter_export_is_atomic(tmp_path, monkeypatch):
+    """A failure while the adapter is written leaves no file at the
+    output path, and a good write leaves no temporary beside it."""
+    import gmlx.tune.lora as lora
+
+    model = _Model()
+    model.freeze()
+    model.apply_to_modules(
+        lambda _k, m: m.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+        if isinstance(m, LoRALinear) else None)
+    out = tmp_path / "trained.gguf"
+    real = lora.save_lora_adapter
+
+    def partial(path, *a, **k):
+        with open(path, "wb") as fh:
+            fh.write(b"GGUF" + bytes(16))
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(lora, "save_lora_adapter", partial)
+    with pytest.raises(RuntimeError, match="disk full"):
+        train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=str(out), scale=S)
+    assert not out.exists()
+    monkeypatch.setattr(lora, "save_lora_adapter", real)
+    assert train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=str(out), scale=S) == 3
+    assert out.exists() and [p.name for p in tmp_path.iterdir()] == ["trained.gguf"]

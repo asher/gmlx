@@ -30,7 +30,7 @@ def tok():
 
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
                  K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None,
-                 boost_rows: set[int] | None = None):
+                 boost_rows: set[int] | None = None, content_offset: int = 0):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -76,7 +76,8 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
         doc_id, window = docs[r] if docs else (f"{doc_prefix}:{r}", 0)
         metas.append(dl.RowMeta(row_id=r, doc_id=doc_id, window=window, n_tokens=n, frame="reply",
                                 messages=msgs, spans=[list(s) for s in spans],
-                                prefix_n_tokens=int(np.argmax(tm)) + 1, suffix_start_byte=b0))
+                                prefix_n_tokens=int(np.argmax(tm)) + 1, suffix_start_byte=b0,
+                                content_start=b0 + content_offset))
     writer.write(0, dl.pack_shard(rows, tbytes, K, False), metas, wall_s=0.01, step=64)
     dl.write_manifest(tmp, teacher_path="synthetic", dataset="synthetic", num_samples=len(rows),
                       max_seq_len=64, seed=seed, top_k=K, vocab_size=V, config_vocab_size=V,
@@ -298,3 +299,52 @@ def test_census_walks_the_rows_shard_by_shard():
     rows = {("d", 0): 0, ("a", 0): 1, ("c", 0): 2, ("b", 0): 3, ("e", 0): 4}
     keys = sorted(rows)
     assert cs.walk_order(_Reader(), rows, keys) == [("d", 0), ("c", 0), ("a", 0), ("e", 0), ("b", 0)]
+
+
+def test_census_anchors_content_ranges_at_the_content_start(tmp_path, tok):
+    """On a reply-think cache the target span opens at the trace, and the
+    gap between trace and content differs between templates; the map
+    keeps content positions relative to the content start and trace
+    positions, separately, relative to the trace start."""
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with context {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    # the reply "the cat is the cat" opens with the one-byte token "t"
+    # and has boundaries at 7 and 10 around " is"; with the content
+    # declared to start at byte 3 the first token is trace and " is" is
+    # content bytes 4..7
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl", content_offset=3)
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl", boost={0: 6.0, 7: 6.0},
+                         boost_rows={0}, content_offset=3)
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["high_delta"] == {"a.jsonl:0": [[4, 7]]}
+    assert s["high_delta_trace"] == {"a.jsonl:0": [[0, 1]]}
+
+
+_TEMPLATE_TRACE = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n"
+                   "{% if m['role'] == 'assistant' and m['reasoning_content'] %}<think>{{ m['reasoning_content'] }}"
+                   "</think>\n{% endif %}{{ m['content'] }}<|im_end|>\n{% endfor %}")
+
+
+def test_eval_reply_rows_apply_trace_and_content_ranges_from_their_own_anchors(tok):
+    tb = dl.token_bytes(tok)
+    tk = _with_template(tok, _TEMPLATE_TRACE)
+    row = {"id": "p0", "messages": [{"role": "user", "content": "say it"},
+                                    {"role": "assistant", "content": "is the cat", "reasoning_content": "the cat"}]}
+    text, spans = dl.render_row(tk, row["messages"], open_tail=False, last_only=True, reason_target=True)
+    b0, b1, _b2 = spans[-1]
+    cstart = b1 - len(b"is the cat")
+    assert text[b0:b0 + 7] == b"the cat" and text[cstart:b1] == b"is the cat" and cstart - b0 > 7
+    e = np.array(dl.encode_with_byte_ends(tk, text, tb, add_special_tokens=False)[1]).astype(np.int64)
+    rows, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
+                                 positions={"p0": [[0, 2]]}, trace_positions={"p0": [[4, 7]]})
+    assert len(rows) == 1
+    _ids, tm, nbytes, _ = rows[0]
+    kept = np.nonzero(tm[:-1])[0]
+    starts = e[:-1]
+    assert kept.size == 2
+    assert all((cstart <= starts[t] < cstart + 2) or (b0 + 4 <= starts[t] < b0 + 7) for t in kept)
+    only_trace, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
+                                       positions={}, trace_positions={"p0": [[0, 3]]})
+    assert len(only_trace) == 1

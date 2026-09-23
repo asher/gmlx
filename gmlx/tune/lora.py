@@ -125,9 +125,26 @@ def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
     n_head = cfg["num_attention_heads"]
     n_head_kv = cfg.get("num_key_value_heads", n_head)
     n_layers = cfg["num_hidden_layers"]
-    return save_lora_adapter(
-        out_path, modules, alpha=float(scale) * int(rank), base_arch=base_arch,
-        n_head=n_head, n_head_kv=n_head_kv, n_layers=n_layers)
+    # written beside the final name and moved into place, so a failure
+    # mid-write leaves no adapter a loader could read
+    tmp = out_path + ".tmp"
+    try:
+        n = save_lora_adapter(
+            tmp, modules, alpha=float(scale) * int(rank), base_arch=base_arch,
+            n_head=n_head, n_head_kv=n_head_kv, n_layers=n_layers)
+        fd = os.open(tmp, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return n
 
 
 def resolve_model_arg(base: str, config: str | None = None) -> tuple[str, str | None, str | None]:

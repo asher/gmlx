@@ -297,7 +297,8 @@ def _is_repetitive(text: str, n: int = 12, times: int = 3) -> bool:
 
 
 def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, last_only: bool = False,
-               positions: dict | None = None, reason_target: bool = False) -> tuple[list, int]:
+               positions: dict | None = None, reason_target: bool = False,
+               trace_positions: dict | None = None) -> tuple[list, int]:
     """Scorable rows (ids, target mask, target bytes, id) from conversations.
     Each entry of convs is a message list or a {id, messages,
     student_messages} row; the student's list is used when present. With
@@ -306,8 +307,10 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
     row is fitted by fit_reply, else by fit_conversation. positions, a
     {id: [[start, end], ...]} map of byte ranges relative to the reply's
     content start, restricts the targets to positions whose predicted
-    token starts inside a range (rows whose id is absent score nothing).
-    Returns the rows and the count dropped."""
+    token starts inside a range (rows whose id is absent from it and from
+    trace_positions score nothing); trace_positions holds ranges relative
+    to the start of the reasoning trace, the span's own start under
+    reason_target. Returns the rows and the count dropped."""
     tb = token_bytes(tokenizer)
     rows = []
     dropped = 0
@@ -327,13 +330,17 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
             ids, ends, _text, _m, spans, _f = fit
             e = ends.astype(np.int64)
             tm = target_mask(e, spans)
-            if positions is not None:
-                ranges = positions.get(rid) if not per_turn else positions.get(f"{rid}:{k}")
+            if positions is not None or trace_positions is not None:
+                key = rid if not per_turn else f"{rid}:{k}"
+                ranges = (positions or {}).get(key)
+                tranges = (trace_positions or {}).get(key)
                 keep = np.zeros_like(tm)
-                if ranges:
-                    b0 = int(spans[-1][0])
-                    starts = e[:-1] - b0
-                    for a, z in ranges:
+                b0, b1, _b2 = (int(x) for x in spans[-1])
+                cs = (m[-1].get("content") or "").strip()
+                cstart = b1 - len(cs.encode("utf-8"))
+                for anchor, rs in ((cstart, ranges), (b0, tranges)):
+                    starts = e[:-1] - anchor
+                    for a, z in rs or ():
                         keep[:-1] |= (starts >= int(a)) & (starts < int(z))
                 tm = tm & keep
             nbytes = int((e[1:] - e[:-1])[tm[:-1]].sum())
@@ -408,13 +415,15 @@ def chat_slice_nll(model, tokenizer, convs: list[list[dict]], *, max_len: int = 
 
 
 def reply_slice_nll(model, tokenizer, rows: list[dict], *, max_len: int = 2048, batch_tokens: int = 4096,
-                    positions: dict | None = None, reason_target: bool = False) -> dict:
+                    positions: dict | None = None, reason_target: bool = False,
+                    trace_positions: dict | None = None) -> dict:
     """Bits per byte and nats per token over the reply of held-out reply
     rows ({id, messages, student_messages}) under the student's own list,
-    restricted to the byte ranges in positions (a census high-delta map)
-    when given. Per-row items are returned for paired comparisons."""
+    restricted to the byte ranges in positions and trace_positions (a
+    census high-delta map) when given. Per-row items are returned for
+    paired comparisons."""
     srows, dropped = _span_rows(tokenizer, rows, max_len=max_len, last_only=True, positions=positions,
-                                reason_target=reason_target)
+                                reason_target=reason_target, trace_positions=trace_positions)
     r = _score_span_rows(model, srows, batch_tokens=batch_tokens)
     r["dropped"] = dropped
     r["restricted"] = positions is not None

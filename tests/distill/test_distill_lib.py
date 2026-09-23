@@ -3247,3 +3247,127 @@ def test_teacher_identity_refuses_reordered_shards(tmp_path):
     (renamed / "x-00002-of-00002.gguf").symlink_to(tmp_path / "bbb")
     c = _teacher.teacher_identity(str(renamed / "x-00001-of-00002.gguf"))
     assert a["size"] == b["size"] == c["size"] and a["sha256_head"] == c["sha256_head"] != b["sha256_head"]
+
+
+# ---------------------------------------------------------------------------
+# review round ten: LoRA keys over parents of one class, outputs proven
+# writable before the load, a corpus with no rows, atomic writes under a
+# missing directory, a validation split by document
+# ---------------------------------------------------------------------------
+
+
+def test_lora_key_coverage_counts_parents_of_the_class_that_holds_the_key():
+    """A MoE student's dense layers hold mlp.gate_proj and its expert
+    layers hold another mlp class without it; the key is covered on the
+    dense layers alone. A parent of the same class that lacks the
+    projection on some layers is still the mixed case."""
+    import mlx.nn as nn
+
+    from gmlx.distill import trainer as _trainer
+
+    class _Dense(nn.Module):
+        def __init__(self, gate=True):
+            super().__init__()
+            if gate:
+                self.gate_proj = nn.Linear(4, 4)
+            self.down_proj = nn.Linear(4, 4)
+
+    class _MoE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = nn.Linear(4, 4)
+
+    class _Layer(nn.Module):
+        def __init__(self, mlp):
+            super().__init__()
+            self.self_attn = nn.Module()
+            self.self_attn.q_proj = nn.Linear(4, 4)
+            self.mlp = mlp
+
+    class _Model(nn.Module):
+        def __init__(self, layers):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = layers
+
+    keys = ("self_attn.q_proj", "mlp.gate_proj", "mlp.down_proj")
+    moe = _Model([_Layer(_Dense()), _Layer(_MoE()), _Layer(_MoE()), _Layer(_MoE())])
+    cov = _trainer.lora_key_coverage(moe, keys)
+    assert cov == {"self_attn.q_proj": (4, 4), "mlp.gate_proj": (1, 1), "mlp.down_proj": (1, 1)}
+    assert _trainer.lora_mixed_keys(cov) == []
+    mixed = _Model([_Layer(_Dense()), _Layer(_Dense(gate=False)), _Layer(_MoE())])
+    cov = _trainer.lora_key_coverage(mixed, keys)
+    assert cov["mlp.gate_proj"] == (1, 2) and cov["mlp.down_proj"] == (2, 2)
+    assert _trainer.lora_mixed_keys(cov) == ["mlp.gate_proj 1/2"]
+    none = _Model([_Layer(_MoE()), _Layer(_MoE())])
+    assert _trainer.lora_key_coverage(none, keys)["mlp.gate_proj"] == (0, 2)
+
+
+def test_train_proves_the_adapter_and_report_paths_writable_before_the_load(tmp_path, tok_bl, capsys,
+                                                                             monkeypatch):
+    """An adapter path that cannot be written is refused before the
+    student loads, and a report under a missing directory gets it made."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    real = _trainer.load_student
+
+    def never(*a, **k):
+        raise AssertionError("the student loaded before the output paths were checked")
+
+    monkeypatch.setattr(_trainer, "load_student", never)
+    rc = _trainer.run_train(_trainer.TrainOptions(adapter_out=str(blocker / "a.gguf"), **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "cannot write --adapter-out" in err
+    monkeypatch.setattr(_trainer, "load_student", real)
+    report = tmp_path / "deep" / "er" / "run.json"
+    assert _trainer.run_train(_trainer.TrainOptions(report=str(report), **base)) == 0
+    assert report.exists()
+
+
+def test_cache_refuses_a_corpus_with_no_rows_before_the_teacher_loads(tmp_path, tok_bl, capsys, monkeypatch):
+    from gmlx.distill import teacher as _teacher
+
+    corpus = tmp_path / "blank.jsonl"
+    corpus.write_text(json.dumps({"text": "   "}) + "\n" + json.dumps({"text": ""}) + "\n", encoding="utf-8")
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+
+    def never(*a, **k):
+        raise AssertionError("the teacher loaded for a corpus with no rows")
+
+    monkeypatch.setattr(_teacher, "load_teacher", never)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                  out=str(tmp_path / "cache"), top_k=8, max_len=64))
+    err = capsys.readouterr().err
+    assert rc == 2 and "no rows" in err
+
+
+def test_atomic_writes_create_the_parent_directory(tmp_path):
+    from gmlx.distill import format as _format
+
+    p = tmp_path / "a" / "b" / "c.json"
+    _format.write_json_atomic(p, {"k": 1})
+    assert json.loads(p.read_text()) == {"k": 1}
+    assert not list((tmp_path / "a" / "b").glob("*.tmp"))
+
+
+def test_val_split_holds_whole_documents(tmp_path, tok_bl):
+    """The validation rows are drawn by document, so a per-turn cache
+    never scores a reply that trains as the context of a later turn."""
+    from gmlx.distill import view as _view
+
+    docs = ["a", "a", "a", "b", "c", "c", "d", "e", "e", "e", "e", "f"]
+    for seed in (1, 2, 3):
+        val = _view.val_split(docs, 0.25, seed)
+        assert val and val == _view.val_split(docs, 0.25, seed)
+        chosen = {docs[i] for i in val}
+        assert val == {i for i, d in enumerate(docs) if d in chosen}
+        assert len(val) >= 3
+    assert len(_view.val_split(["a", "b", "c"], 0.02, 1)) == 1
+    assert _view.val_split([], 0.02, 1) == set()
+    assert _view.val_split(["only"] * 5, 0.5, 1) == set(range(5))

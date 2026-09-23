@@ -127,6 +127,7 @@ def sha256_file(path: Path, chunk: int = 1 << 24) -> str:
 def write_bytes_atomic(path: Path, data: bytes) -> None:
     """Temp file in the same directory, fsync, os.replace, parent fsync."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as fh:
         fh.write(data)
@@ -168,6 +169,7 @@ class RowMeta:
     messages: list | None = None
     spans: list | None = None
     student_messages: list | None = None
+    content_start: int | None = None
 
     def as_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -177,6 +179,8 @@ class RowMeta:
             d.pop("spans")
         if d.get("student_messages") is None:
             d.pop("student_messages", None)
+        if d.get("content_start") is None:
+            d.pop("content_start", None)
         return d
 
 

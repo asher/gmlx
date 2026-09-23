@@ -20,7 +20,7 @@ from . import tokens as _tokens
 from .constants import GB, log
 from .corpus import nfc
 from .data import CacheReader
-from .format import read_json, replay_layers_for, shard_texts, write_json_atomic
+from .format import read_json, replay_layers_for, shard_texts, write_bytes_atomic, write_json_atomic
 from .student import adapter_disabled
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model
 from .trainer import load_student
@@ -220,10 +220,10 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
 
 def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: dict,
             chat_slices: dict | None = None, reply_slices: dict | None = None,
-            positions: dict | None = None) -> dict:
-    """Every instrument on the loaded weights as they are. ``positions``,
-    a census high_delta map, restricts every reply slice to the byte
-    ranges it names."""
+            positions: dict | None = None, trace_positions: dict | None = None) -> dict:
+    """Every instrument on the loaded weights as they are. ``positions``
+    and ``trace_positions``, a census high_delta map and its trace half,
+    restrict every reply slice to the byte ranges they name."""
     res: dict = {"bpb": {}, "tasks": {}, "chat_bpb": {}, "reply_bpb": {}}
     for name, convs in (chat_slices or {}).items():
         t0 = time.perf_counter()
@@ -240,7 +240,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         model.eval()
         r = _eval.reply_slice_nll(model, tokenizer, rows, max_len=opts.chat_max_len,
                                   batch_tokens=opts.batch_size * opts.max_len, positions=positions,
-                                  reason_target=opts.reply_think)
+                                  reason_target=opts.reply_think, trace_positions=trace_positions)
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
         log(f"[eval] {name}: reply bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
@@ -414,13 +414,15 @@ def run_eval(opts: EvalOptions) -> int:
                                                    ("question", "answer"))[:8]
         chat_slices = {name: read_conversations(Path(path).expanduser()) for name, path in chat_specs}
         reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
-        positions = None
+        positions = trace_positions = None
         if opts.reply_positions:
             census = read_report(Path(opts.reply_positions).expanduser())
             positions = census.get("high_delta") or {}
-            # the map's byte ranges start at the trace on a reply-think
-            # cache and at the reply otherwise, so the eval must score
-            # the reply under the same frame
+            trace_positions = census.get("high_delta_trace") or {}
+            # the content ranges are relative to the content start and
+            # the trace ranges to the trace start, which the reply row
+            # has under --reply-think alone, so the eval must score the
+            # reply under the frame that measured the map
             measured = census.get("frame")
             if measured in ("reply", "reply-think") and (measured == "reply-think") != bool(opts.reply_think):
                 log(f"[eval] refuse: --reply-positions {opts.reply_positions} was measured on a {measured} cache, "
@@ -437,7 +439,8 @@ def run_eval(opts: EvalOptions) -> int:
     except UnreadableInput as e:
         log(f"[eval] refuse: unreadable input {e}")
         return 2
-    if positions is not None and reply_slices and not (set(positions) & reply_row_ids(reply_slices)):
+    if positions is not None and reply_slices and not ((set(positions) | set(trace_positions or {}))
+                                                        & reply_row_ids(reply_slices)):
         log(f"[eval] refuse: --reply-positions {opts.reply_positions} names none of the reply-slice rows "
             "(a census run without --corpus keys its positions by cache row, not by corpus id)")
         return 2
@@ -495,11 +498,12 @@ def run_eval(opts: EvalOptions) -> int:
     if positions is not None:
         report["reply_positions"] = opts.reply_positions
         log(f"[eval] reply slices restricted to the high-delta positions of {len(positions)} rows")
-    report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions)
+    report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions,
+                              trace_positions)
     if opts.before:
         with adapter_disabled(model):
             report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices,
-                                       positions)
+                                       positions, trace_positions)
     if opts.chat_sanity:
         items = chat_items
         refs = refs_before
@@ -525,6 +529,6 @@ def run_eval(opts: EvalOptions) -> int:
         report["corpus_sources"] = corpus_sources
     write_json_atomic(Path(opts.json), report)
     md = report_markdown(opts, report, slices, chat_slices, reply_slices, contaminated)
-    Path(opts.md).write_text(md, encoding="utf-8")
+    write_bytes_atomic(Path(opts.md), md.encode("utf-8"))
     print(md, end="")
     return 0

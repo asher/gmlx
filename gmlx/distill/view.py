@@ -122,6 +122,26 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
     return checked > 0, f"{checked} rows checked"
 
 
+def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
+    """Row indexes held for validation: whole documents in a seeded order
+    until at least max(1, fraction * rows) rows are held, so a document's
+    windows, and a conversation's turns, never sit on both sides."""
+    if not doc_ids:
+        return set()
+    docs: dict = {}
+    for i, d in enumerate(doc_ids):
+        docs.setdefault(d, []).append(i)
+    names = list(docs)
+    order = np.random.default_rng(seed).permutation(len(names))
+    want = max(1, int(len(doc_ids) * fraction))
+    val: set[int] = set()
+    for j in order:
+        if len(val) >= want:
+            break
+        val.update(docs[names[int(j)]])
+    return val
+
+
 def run_align(opts: AlignOptions) -> int:
     """Returns 0 on a written view, 2 when the cache is missing, 3 when the
     projection gate refuses the pair (``force`` keeps the view)."""
@@ -226,9 +246,8 @@ def run_align(opts: AlignOptions) -> int:
     a = float(np.mean(stats["own"])) if stats["own"] else 1.0
     s = float(np.mean(stats["singleton"])) if stats["singleton"] else 1.0
     red = float(np.mean(stats["redirect"])) if stats["redirect"] else 0.0
-    rng = np.random.default_rng(opts.seed)
-    val = set(rng.choice(len(index), size=max(1, int(len(index) * opts.val_fraction)),
-                         replace=False).tolist()) if index else set()
+    val = val_split([str(reader.rows_meta[e["row"]].get("doc_id", e["row"])) for e in index],
+                    opts.val_fraction, opts.seed)
     for i, e in enumerate(index):
         e["split"] = "val" if i in val else "train"
     retained = [1.0 - d for d in stats["dropped"]]

@@ -238,6 +238,14 @@ def row_meta(r, source: str, frame: str, generator_id: str = "") -> _format.RowM
         meta.spans = [[int(x) for x in sp] for sp in r[7]]
         meta.prefix_n_tokens = first + 1
         meta.suffix_start_byte = int(r[7][0][0])
+        # where the reply's content starts: the target span opens at the
+        # reasoning trace on a reply-think row, and the census keys
+        # content positions from the content itself
+        if meta.frame in ("reply", "reply-think"):
+            cs = (r[6][-1].get("content") or "").strip()
+            meta.content_start = int(r[7][-1][1]) - len(cs.encode("utf-8"))
+        else:
+            meta.content_start = int(r[7][-1][0])
         if len(r) > 9 and r[9] is not None:
             meta.student_messages = r[9]
     return meta
@@ -411,6 +419,10 @@ def run_cache(opts: CacheOptions) -> int:
         log(f"[cache] frame {opts.frame}: {frame_info['frame_tokens']} frame tokens, "
             f"{frame_info['dropped']} conversations dropped, {frame_info['student_rows']} rows with a "
             f"student list, {frame_info['reply_mismatch']} dropped for a reply mismatch")
+    if not rows:
+        log(f"[cache] refuse: {opts.corpus} yields no rows (blank texts and conversations without an "
+            "assistant turn are skipped)")
+        return 2
     targets_total = sum(int(_frames.target_mask(r[4].astype(np.int64), r[7]).sum()) for r in rows)
     if opts.max_disk_gb is not None and est > opts.max_disk_gb * GB:
         log(f"[cache] refuse: estimate exceeds --max-disk-gb {opts.max_disk_gb}")

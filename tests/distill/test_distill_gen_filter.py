@@ -593,15 +593,17 @@ def test_gen_interrupt_cancels_the_queued_requests(tmp_path, stub_server, monkey
         calls.append(1)
         return real(*a, **k)
 
-    real_completed = gen.as_completed
+    real_wait = gen.wait
+    waits = []
 
-    def interrupted(futs):
-        it = real_completed(futs)
-        yield next(it)
-        raise KeyboardInterrupt
+    def interrupted(futs, **kw):
+        waits.append(1)
+        if len(waits) > 1:
+            raise KeyboardInterrupt
+        return real_wait(futs, **kw)
 
     monkeypatch.setattr(gen, "complete", counting)
-    monkeypatch.setattr(gen, "as_completed", interrupted)
+    monkeypatch.setattr(gen, "wait", interrupted)
     with pytest.raises(KeyboardInterrupt):
         gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, concurrency=1))
     assert len(calls) <= 3, len(calls)
@@ -624,3 +626,85 @@ def test_gen_resume_refuses_another_teacher_or_context(tmp_path, stub_server, ca
     assert rc == 2 and "generated with other settings" in err and "context" in err
     assert gen.run_gen(gen.GenOptions(**dict(base, prompts=more))) == 0
     assert sorted(r["id"] for r in _rows(out)) == ["a", "b"]
+
+
+def test_gen_resume_compares_the_context_format_as_recorded(tmp_path, stub_server, capsys):
+    """Rows that carry their own context still go through the format, so
+    another --context-format is refused; a context file that reaches no
+    row records no format and resumes under the same flags; a teacher
+    named by another spelling of its path is the same teacher."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}], "context": "own context"}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    more = _prompts(tmp_path / "p2.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}],
+                                                    "context": "other context"}])
+    out = tmp_path / "corpus.jsonl"
+    base = dict(out=str(out), prompts=prompts, base_url=stub_server, teacher="a.gguf")
+    assert gen.run_gen(gen.GenOptions(**base)) == 0
+    rc = gen.run_gen(gen.GenOptions(**dict(base, prompts=more, context_format="CTX={context} Q={prompt}")))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "context_format" in err
+    assert gen.run_gen(gen.GenOptions(**dict(base, prompts=more, teacher=str(Path("a.gguf").absolute())))) == 0
+    assert sorted(r["id"] for r in _rows(out)) == ["a", "b"]
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    out2 = tmp_path / "corpus2.jsonl"
+    plain = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    p3 = _prompts(tmp_path / "p3.jsonl", plain)
+    p4 = _prompts(tmp_path / "p4.jsonl", plain + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=p3, base_url=stub_server, context=str(empty))) == 0
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=p4, base_url=stub_server, context=str(empty))) == 0
+    assert sorted(r["id"] for r in _rows(out2)) == ["a", "b"]
+
+
+def test_gen_keeps_a_bounded_window_of_requests_in_flight(tmp_path, stub_server, monkeypatch):
+    """The pool never holds every prompt's future at once, so a long run
+    does not keep every finished reply in memory."""
+    rows = [{"id": f"r{i}", "messages": [{"role": "user", "content": f"prompt {i}"}]} for i in range(24)]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    peak = [0]
+    live = [0]
+    lock = threading.Lock()
+    real_pool = gen.ThreadPoolExecutor
+
+    class Counting(real_pool):
+        def submit(self, fn, *a, **k):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+
+            def done(_f):
+                with lock:
+                    live[0] -= 1
+            f = super().submit(fn, *a, **k)
+            f.add_done_callback(done)
+            return f
+
+    monkeypatch.setattr(gen, "ThreadPoolExecutor", Counting)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, concurrency=2)) == 0
+    assert len(_rows(out)) == 24
+    assert peak[0] <= 4, peak[0]
+
+
+def test_filter_keeps_the_old_corpus_when_the_write_fails(tmp_path, capsys):
+    """The output is written beside its final name and moved into place,
+    so a failed write leaves the earlier corpus intact."""
+    import os
+    import stat
+
+    src = tmp_path / "gen.jsonl"
+    src.write_text(json.dumps(_row("ok", GOOD)) + "\n")
+    outdir = tmp_path / "locked"
+    outdir.mkdir()
+    out = outdir / "corpus.jsonl"
+    out.write_text("earlier rows\n", encoding="utf-8")
+    os.chmod(outdir, stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        if os.access(outdir, os.W_OK):
+            pytest.skip("the directory stays writable (running as root)")
+        rc = flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(out)))
+        err = capsys.readouterr().err
+        assert rc == 2 and "refuse" in err and "corpus.jsonl" in err
+        assert out.read_text(encoding="utf-8") == "earlier rows\n"
+    finally:
+        os.chmod(outdir, stat.S_IRWXU)

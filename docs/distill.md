@@ -108,7 +108,7 @@ training on. Every flag of every action is listed under
 Run the pipeline end to end on a small pair before committing hours to a
 real one. The run exercises `cache`, `align`, `train` and `eval` on a
 Qwen3 0.6B teacher at Q8_0 and the same model at Q4_K_M as the student,
-and trains for 40 steps.
+and trains for 80 steps.
 
 Its corpus is a jsonl file, one JSON object per line, of 24
 `{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
@@ -147,14 +147,14 @@ the same pair in under a minute:
 ```sh
 python3 -c 'import json; [print(json.dumps({"id": f"smoke-{i}", "messages": [{"role": "user", "content": f"Describe lighthouse number {i} in one sentence."}]})) for i in range(2)]' > smoke-prompts.jsonl
 gmlx distill gen --model Qwen3-0.6B-Q8_0.gguf --prompts smoke-prompts.jsonl --max-tokens 96 \
-    --chat-template-kwargs '{"enable_thinking": false}' --out smoke-replies.jsonl
+    --out smoke-replies.jsonl
 gmlx distill filter --in smoke-replies.jsonl --out smoke-corpus.jsonl --min-words 1
 ```
 
 Both pass when `gen` ends with a `[gen] done:` line that reports
-`0 failed` and `filter` prints `[filter] kept 2`. The template setting
-turns the teacher's thinking off, since Qwen3 thinks by default and a
-96-token reply would not reach its end otherwise. `--model` names the
+`0 failed` and `filter` prints `[filter] kept 2`. `gen` serves the
+teacher with its thinking off unless `--thinking` is given, so a
+96-token reply reaches its end. `--model` names the
 GGUF `gen` serves and is the same flag as `--teacher`, and
 `--min-words 1` keeps one-sentence replies that the default of 16 words
 would drop.

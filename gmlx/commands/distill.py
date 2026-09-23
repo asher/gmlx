@@ -95,7 +95,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="Extra gmlx serve argument, repeatable.")
     p.add_argument("--startup-timeout", type=float, default=900.0,
                    help="Seconds to wait for the served teacher (default 900).")
-    p.add_argument("--concurrency", type=int, default=8, help="Requests in flight (default 8).")
+    p.add_argument("--concurrency", type=_positive_int, default=8, help="Requests in flight (default 8).")
     p.add_argument("--max-tokens", type=int, default=1024, help="Answer budget per request, the reasoning trace not counted (default 1024).")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
     p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
@@ -104,7 +104,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=1,
                    help="Base seed, and each request uses it plus the prompt index (default 1).")
     p.add_argument("--timeout", type=float, default=1800.0, help="Per-request timeout in seconds (default 1800).")
-    p.add_argument("--report-every", type=int, default=50, help="Progress line interval in replies (default 50).")
+    p.add_argument("--report-every", type=_positive_int, default=50, help="Progress line interval in replies (default 50).")
     return p
 
 
@@ -173,7 +173,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Memory cap that sizes the head sub-chunk (default 4).")
     p.add_argument("--floor", action="store_true",
                    help="Also store floor_kld, the KL against the f16-rounded top-k.")
-    p.add_argument("--rows-per-shard", type=int, default=64, help="Rows per shard file (default 64).")
+    p.add_argument("--rows-per-shard", type=_positive_int, default=64, help="Rows per shard file (default 64).")
     p.add_argument("--trunk", type=int, default=None,
                    help="Trunk chunk in tokens (default 512 for a teacher that fits in memory, 8192 streaming).")
     p.add_argument("--resume", action="store_true", help="Continue after the last verified shard.")
@@ -288,7 +288,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Recompute each layer's activations in the backward pass.")
     p.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate (default 1e-4).")
-    p.add_argument("--batch-size", type=int, default=8, help="Rows per step (default 8).")
+    p.add_argument("--batch-size", type=_positive_int, default=8, help="Rows per step (default 8).")
     p.add_argument("--warmup", type=float, default=0.05,
                    help="Warmup as a fraction of the steps, then cosine decay (default 0.05).")
     p.add_argument("--weight-decay", type=float, default=None, help="AdamW weight decay (default 0 for LoRA).")
@@ -306,7 +306,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--tau-alm", type=float, default=None, help="Override the view's tau_alm.")
     p.add_argument("--gamma", type=float, default=None,
                    help="Override the view's gamma; refused when it differs on a materialized view.")
-    p.add_argument("--chunk", type=int, default=512, help="Positions per head chunk (default 512).")
+    p.add_argument("--chunk", type=_positive_int, default=512, help="Positions per head chunk (default 512).")
     p.add_argument("--hs", type=float, default=0.0,
                    help="Weight of the hidden-state term, a learned linear map from the student's final "
                         "hidden state to the cache's sketch at every boundary (default 0, off).")
@@ -315,10 +315,10 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ckpt-dir", default=None, metavar="DIR",
                    help="Checkpoint directory (default ./ckpt in the working directory).")
     p.add_argument("--resume", action="store_true", help="Continue from the last checkpoint.")
-    p.add_argument("--save-every", type=int, default=200, help="Checkpoint interval in steps (default 200).")
-    p.add_argument("--val-every", type=int, default=200, help="Validation interval in steps (default 200).")
+    p.add_argument("--save-every", type=_positive_int, default=200, help="Checkpoint interval in steps (default 200).")
+    p.add_argument("--val-every", type=_positive_int, default=200, help="Validation interval in steps (default 200).")
     p.add_argument("--val-batches", type=int, default=16, help="Validation batches per pass (default 16).")
-    p.add_argument("--report-every", type=int, default=10, help="Train-loss report interval (default 10).")
+    p.add_argument("--report-every", type=_positive_int, default=10, help="Train-loss report interval (default 10).")
     p.add_argument("--report", default=None, metavar="JSON", help="Write the run log here.")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
     p.add_argument("--no-wired-limit", action="store_true", help="Leave the wired limit where it is.")
@@ -411,6 +411,16 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
 PARSERS = {"gen": _gen_parser, "filter": _filter_parser, "cache": _cache_parser, "align": _align_parser,
            "census": _census_parser,
            "train": _train_parser, "eval": _eval_parser}
+
+
+def _positive_int(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"a positive integer is required, got {n}")
+    return n
 
 
 def _cpu(args) -> None:
