@@ -16,6 +16,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Requires mlx-kquant 0.4.13. On GPUs without NAX (M1 to M4), its verify
+  kernels speed up speculative decoding for `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`,
+  `PQ2_0` and `PTQ1_0` targets.
 - The Qwen3.5-family speculative verify runs the gated-delta scan on a kernel
   that spreads each head across the GPU, with the gated output norm as its
   own dispatch. The scan records each position's state update instead of
