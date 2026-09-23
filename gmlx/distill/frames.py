@@ -255,21 +255,33 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
         cs = c.strip()
         if not cs:
             continue   # a tool-call-only turn: context, not a target
-        # the turn header before this reply can contain the reply's own
-        # characters (a reply of "a" sits inside "assistant"), so the search
-        # starts where the header the template renders for the turn ends
-        cursor = max(cursor, _header_end(tokenizer, messages[:i], rendered))
         rc = (m.get("reasoning_content") or "").strip()
         k0 = None
-        if rc:
-            kr = rendered.find(rc, cursor)
-            if kr >= 0:
-                cursor = kr + len(rc)
-                if reason_target:
+        # the markup around a reply holds the reply's own characters (a
+        # reply of "a" sits inside "assistant", "hi" inside "</think>"), so
+        # the content is located by rendering the conversation once more
+        # with this content replaced by a probe: everything before it
+        # renders the same, and the probe's position is the content's
+        k = _probe_start(tokenizer, messages, i, rendered, c, cursor)
+        if k is not None:
+            if rc and reason_target:
+                kr = rendered.rfind(rc, cursor, k)
+                if kr >= 0:
                     k0 = kr
-        k = rendered.find(cs, cursor)
-        if k < 0:
-            raise ValueError("assistant content not found in the rendered conversation")
+        else:
+            # a template that renders the turn differently around a probe
+            # (one that splits the content at a think tag): search after
+            # the header the template renders for the turn
+            cursor = max(cursor, _header_end(tokenizer, messages[:i], rendered))
+            if rc:
+                kr = rendered.find(rc, cursor)
+                if kr >= 0:
+                    cursor = kr + len(rc)
+                    if reason_target:
+                        k0 = kr
+            k = rendered.find(cs, cursor)
+            if k < 0:
+                raise ValueError("assistant content not found in the rendered conversation")
         end = k + len(cs)
         b0 = len(rendered[:k if k0 is None else k0].encode("utf-8"))
         b1 = len(rendered[:end].encode("utf-8"))
@@ -287,6 +299,33 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
     if last_only:
         spans = spans[-1:]
     return rendered.encode("utf-8"), spans
+
+
+def _probe_start(tokenizer, messages: list[dict], i: int, rendered: str, content: str,
+                 cursor: int) -> int | None:
+    """Where the content of turn ``i`` starts in ``rendered``: the
+    conversation is rendered once more with that content replaced by a
+    probe, and when everything before the probe matches the render, the
+    probe's position is the content's (after any leading whitespace the
+    template keeps). None when the template renders the turn differently
+    around the probe or the render does not hold the content there."""
+    probe = list(messages)
+    probe[i] = dict(messages[i], content=_PROBE)
+    try:
+        if has_chat_template(tokenizer):
+            r2 = apply_template(tokenizer, probe)
+        else:
+            r2 = _plain_render(tokenizer, probe, gen_prompt=False)
+    except ValueError:
+        return None
+    p = r2.find(_PROBE, cursor)
+    if p < 0 or r2[:p] != rendered[:p]:
+        return None
+    cs = content.strip()
+    for q in (p, p + len(content) - len(content.lstrip())):
+        if rendered.startswith(cs, q):
+            return q
+    return None
 
 
 def _header_end(tokenizer, prior: list[dict], rendered: str) -> int:

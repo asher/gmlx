@@ -261,8 +261,9 @@ def teacher_identity(path: str) -> dict:
     the absolute path as named (symlinks kept, so a Hugging Face snapshot
     keeps its shard names and its .gguf suffix), the size and a hash over
     the leading bytes of a GGUF file and its split shards, or of a
-    directory checkpoint's config and each weight file. The same bytes
-    written again, or touched, still match."""
+    directory checkpoint's config and each weight file, in order. The same
+    bytes written again, touched, or reached by another name still
+    match; a resume compares the size and the hash, not the path."""
     from gmlx.load.preflight import find_split_shards
 
     p = Path(path).expanduser().absolute()
@@ -275,10 +276,10 @@ def teacher_identity(path: str) -> dict:
         files = sorted(list(p.glob("config.json")) + list(p.glob("*.safetensors")) + list(p.glob("*.gguf")))
     h = hashlib.sha256()
     size = 0
-    for f in files:
+    for j, f in enumerate(files):
         n = int(f.stat().st_size)
         size += n
-        h.update(f"{f.name}:{n}:".encode())
+        h.update(f"{j}:{n}:".encode())
         with open(f, "rb") as fh:
             h.update(fh.read(IDENTITY_HEAD_BYTES))
     return {"path": str(p), "size": size, "sha256_head": h.hexdigest()}
@@ -297,12 +298,14 @@ def head_logits(head: HeadSpec, h):
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw) -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
-    and row options, the teacher, the hidden sketch and, when rows are
-    framed, the render kwargs. Any difference refuses the resume."""
+    and row options, the teacher by size and leading bytes (its path may
+    be spelled another way), the hidden sketch and, when rows are framed,
+    the render kwargs. Any difference refuses the resume."""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
             "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
-            "hidden": bool(opts.hidden), "teacher": teacher_identity(opts.teacher),
+            "hidden": bool(opts.hidden),
+            "teacher": {k: v for k, v in teacher_identity(opts.teacher).items() if k != "path"},
             "hidden_dim": opts.hidden_dim if opts.hidden else None,
             "hidden_seed": opts.hidden_seed if opts.hidden else None,
             "render_kwargs": (render_kw or None) if opts.frame != "none" else None,

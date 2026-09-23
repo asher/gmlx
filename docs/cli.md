@@ -1054,7 +1054,7 @@ Training flags, in the order `--help` prints them.
 | `--ce F` | `0` | weight of the cross-entropy term |
 | `--T-dk F` | the view's | override the view's T_dk |
 | `--tau-alm F` | the view's | override the view's tau_alm |
-| `--gamma F` | the view's | override the view's gamma, refused on a materialized view (its chunks are cut by `align`) |
+| `--gamma F` | the view's | override the view's gamma, refused when it differs on a materialized view (its chunks are cut by `align`) |
 | `--chunk N` | `512` | positions per head chunk |
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |

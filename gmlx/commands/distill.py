@@ -274,7 +274,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                     "it as a GGUF adapter. The loop is gmlx's own: seeded batch order, resume by exact "
                     "step, last and best checkpoints.")
     p.add_argument("--view", action="append", default=[], required=True, metavar="DIR",
-                   help="View directory from `distill align`, repeatable to mix views over one tokenizer pair.")
+                   help="View directory from `distill align`, repeatable to mix views aligned alike over one "
+                        "tokenizer pair.")
     p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
     p.add_argument("--adapter-out", required=True, metavar="PATH", help="Output path for the .gguf adapter.")
     p.add_argument("--iters", type=int, required=True, help="Training steps.")
@@ -303,7 +304,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="Weight of the cross-entropy term (default 0).")
     p.add_argument("--T-dk", type=float, default=None, help="Override the view's T_dk.")
     p.add_argument("--tau-alm", type=float, default=None, help="Override the view's tau_alm.")
-    p.add_argument("--gamma", type=float, default=None, help="Override the view's gamma.")
+    p.add_argument("--gamma", type=float, default=None,
+                   help="Override the view's gamma; refused when it differs on a materialized view.")
     p.add_argument("--chunk", type=int, default=512, help="Positions per head chunk (default 512).")
     p.add_argument("--hs", type=float, default=0.0,
                    help="Weight of the hidden-state term, a learned linear map from the student's final "

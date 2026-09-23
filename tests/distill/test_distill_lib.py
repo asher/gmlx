@@ -2002,10 +2002,8 @@ def test_head_carries_granite_logits_scaling_and_parity_catches_the_rest():
 
 def test_cache_pass_records_the_teacher_and_the_largest_id(tmp_path, tok_bl, capsys):
     """The manifest names the teacher by absolute path and the largest
-    cached token id; the resume fingerprint carries the teacher, so a
-    resume on another one is refused."""
-    import shutil
-
+    cached token id; the resume fingerprint carries the teacher by size
+    and leading bytes, so a resume on another one is refused."""
     from gmlx.distill import teacher as _teacher
 
     teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
@@ -2020,14 +2018,13 @@ def test_cache_pass_records_the_teacher_and_the_largest_id(tmp_path, tok_bl, cap
     V = len(dl.token_bytes(tok_bl))
     assert isinstance(man["max_top_k_id"], int) and 0 <= man["max_top_k_id"] < V
     run = json.loads((out / "progress.json").read_text())["run"]
-    assert run["teacher"]["path"] == man["teacher_path"] and run["teacher"]["size"] > 0
+    assert "path" not in run["teacher"] and run["teacher"]["size"] > 0 and run["teacher"]["sha256_head"]
     assert "render_kwargs" in run and run["hidden_dim"] is None
-    other = tmp_path / "teacher2"
-    shutil.copytree(teacher, other)
+    other = _tiny_mlx_teacher(tmp_path / "teacher2", tok_bl, seed=1)
     a = _teacher.run_fingerprint(opts, "x", 1, 1, None)
     b = _teacher.run_fingerprint(_teacher.CacheOptions(teacher=str(other), corpus=str(corpus), out=str(out)),
                                  "x", 1, 1, None)
-    assert a["teacher"]["path"] != b["teacher"]["path"]
+    assert a["teacher"]["sha256_head"] != b["teacher"]["sha256_head"]
     (out / "batch-00001.safetensors").unlink()
     rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(other), corpus=str(corpus), out=str(out), top_k=8,
                                                   max_len=64, rows_per_shard=2, resume=True))
@@ -2880,7 +2877,7 @@ def test_train_refuses_views_with_other_knobs_and_a_gamma_override_on_a_material
     capsys.readouterr()
     rc = _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v2")], **base))
     err = capsys.readouterr().err
-    assert rc == 2 and "other loss knobs" in err and "gamma" in err
+    assert rc == 2 and "other chunk knobs" in err and "gamma" in err
     rc = _trainer.run_train(_trainer.TrainOptions(views=[str(tmp_path / "v3")], gamma=0.01, **base))
     err = capsys.readouterr().err
     assert rc == 2 and "materialized" in err and "--gamma" in err
@@ -2955,5 +2952,174 @@ def test_train_refuses_a_student_that_adapts_nothing_and_warns_on_a_partial_matc
     assert rc == 2 and "nothing would train" in err and "self_attn.qkv_proj" in err
     monkeypatch.setattr(_trainer, "LORA_KEYS", ("self_attn.q_proj", "self_attn.qkv_proj"))
     assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+
+
+# ---------------------------------------------------------------------------
+# review round eight: a short reply behind a reasoning trace, a teacher
+# named another way on resume, LoRA key coverage, the shard LRU, loss-only
+# knobs across views, the resume check before the load, eval windows
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_TRACE = ("{% for m in messages %}{% if m['role'] == 'user' %}<|im_start|>user\n{{ m['content'] }}<|im_end|>\n"
+                   "{% else %}<|im_start|>assistant\n{% if m['reasoning_content'] %}<think>\n{{ m['reasoning_content'] }}"
+                   "\n</think>\n\n{% else %}<think>\n\n</think>\n\n{% endif %}{{ m['content'] }}<|im_end|>\n{% endif %}"
+                   "{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
+_TEMPLATE_ANALYSIS = ("{% for m in messages %}{% if m['role'] == 'user' %}<|start|>user<|message|>{{ m['content'] }}<|end|>"
+                      "{% else %}{% if m['reasoning_content'] %}<|start|>assistant<|channel|>analysis<|message|>"
+                      "{{ m['reasoning_content'] }}<|end|>{% endif %}<|start|>assistant<|channel|>final<|message|>"
+                      "{{ m['content'] }}<|return|>{% endif %}{% endfor %}"
+                      "{% if add_generation_prompt %}<|start|>assistant{% endif %}")
+
+
+def test_render_row_finds_a_short_reply_behind_a_reasoning_trace(tok_bl):
+    """The markup between a trace and the reply ("</think>", the final
+    channel header) holds the letters of a short reply; the reply is
+    still the target, whole, with its end marker."""
+    cases = ((_TEMPLATE_TRACE, b"<|im_end|>", b"\n</think>\n\n"), (_TEMPLATE_ANALYSIS, b"<|return|>", b"<|message|>"))
+    for template, tail, before in cases:
+        tok = _with_template(tok_bl, template)
+        for reply in ("hi", "ink", "a", "t", "final", "Hello"):
+            msgs = [{"role": "user", "content": "q"},
+                    {"role": "assistant", "content": reply, "reasoning_content": "Let me think."}]
+            text, spans = dl.render_row(tok, msgs, open_tail=False)
+            b0, b1, b2 = spans[0]
+            assert text[b0:b1] == reply.encode() and text[b1:b2].startswith(tail), (reply, text)
+            assert text[:b0].endswith(before), (reply, text)
+            text, spans = dl.render_row(tok, msgs, open_tail=False, reason_target=True)
+            b0, b1, b2 = spans[0]
+            assert text[b0:b1].startswith(b"Let me think.") and text[b0:b1].endswith(reply.encode()), (reply, text)
+
+
+def test_cache_resume_accepts_the_teacher_named_another_way(tmp_path, tok_bl):
+    """A resume through a symlink of another name, or another spelling of
+    the same path, continues on the verified shards; the identity hashes
+    the bytes, not the names."""
+    from gmlx.distill import teacher as _teacher
+
+    (tmp_path / "t.gguf").write_bytes(b"GGUF" + bytes(64))
+    (tmp_path / "other.gguf").symlink_to(tmp_path / "t.gguf")
+    (tmp_path / "sub").mkdir()
+    ids = [_teacher.teacher_identity(str(p)) for p in (tmp_path / "t.gguf", tmp_path / "other.gguf",
+                                                        tmp_path / "sub" / ".." / "t.gguf")]
+    assert len({i["sha256_head"] for i in ids}) == 1 and len({i["size"] for i in ids}) == 1
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    link = tmp_path / "renamed-teacher"
+    link.symlink_to(teacher)
+    corpus = _text_corpus(tmp_path / "t.jsonl")
+    out = tmp_path / "cache"
+    base = dict(corpus=str(corpus), out=str(out), top_k=8, max_len=64, rows_per_shard=1)
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), **base)) == 0
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(link), resume=True, **base)) == 0
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(tmp_path / "sub" / ".." / "teacher"), resume=True,
+                                                    **base)) == 0
+
+
+def test_train_logs_lora_key_coverage_and_warns_on_a_mixed_match(tmp_path, tok_bl, capsys, monkeypatch):
+    """A key that matches on no layer is a layout the student does not have
+    (a MoE mlp, a linear-attention layer) and is reported, not warned; a
+    key that matches on some layers only leaves projections frozen by
+    accident and is warned."""
+    import mlx.nn as nn
+
+    from gmlx.distill import trainer as _trainer
+
+    class _Layer(nn.Module):
+        def __init__(self, gate):
+            super().__init__()
+            self.self_attn = nn.Module()
+            self.self_attn.q_proj = nn.Linear(4, 4)
+            self.mlp = nn.Module()
+            if gate:
+                self.mlp.gate_proj = nn.Linear(4, 4)
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = [_Layer(True), _Layer(False)]
+
+    cov = _trainer.lora_key_coverage(_Model(), ("self_attn.q_proj", "mlp.gate_proj", "mlp.up_proj"))
+    assert cov == {"self_attn.q_proj": (2, 2), "mlp.gate_proj": (1, 2), "mlp.up_proj": (0, 2)}
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    monkeypatch.setattr(_trainer, "LORA_KEYS", ("self_attn.q_proj", "self_attn.qkv_proj"))
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
     err = capsys.readouterr().err
-    assert "[train] warn: LoRA adapted 2 modules over 2 layers" in err
+    assert "[train] LoRA keys: self_attn.q_proj 2/2, self_attn.qkv_proj 0/2" in err
+    assert "[train] warn: LoRA" not in err
+
+
+def test_cache_reader_keeps_the_recently_used_shards(tmp_path, tok_bl):
+    from gmlx.distill import data as _data
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_text_corpus(tmp_path / "t.jsonl")),
+                                                    out=str(out), top_k=8, max_len=64, rows_per_shard=1)) == 0
+    r = _data.CacheReader(out, keep=2)
+    assert r.n_shards >= 3
+    for i in (0, 1, 0, 2):
+        r.shard(i)
+    assert set(r._shards) == {0, 2}
+
+
+def test_train_accepts_views_that_differ_only_in_loss_knobs(tmp_path, tok_bl, monkeypatch):
+    """T_dk and tau_alm never shape a view's chunks, so views aligned with
+    other values of them mix; the loss takes the first view's (and the
+    overrides)."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1")
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(student),
+                                              out=str(tmp_path / "v2"), T_dk=2.0, tau_alm=0.5)) == 0
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v2")], student=str(student),
+                                                    iters=1, batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16,
+                                                    val_batches=1, ckpt_dir=str(tmp_path / "ck"))) == 0
+
+
+def test_train_refuses_a_resume_mismatch_before_the_student_loads(tmp_path, tok_bl, capsys, monkeypatch):
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, save_every=1, ckpt_dir=str(tmp_path / "ck"))
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+
+    def _no_load(*a, **k):
+        raise RuntimeError("the student loaded before the resume check")
+
+    monkeypatch.setattr(_trainer, "load_student", _no_load)
+    capsys.readouterr()
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True, lora_rank=4))) == 2
+    assert "other settings than the run" in capsys.readouterr().err
+
+
+def test_bits_per_byte_windows_stay_on_character_boundaries(tmp_path, tok_bl, monkeypatch):
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import student as _student
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    model, _cfg, tok = _student.load_mlx_student(str(teacher), adapter_path=None)
+    seen = []
+    real = _frames.cut_windows
+
+    def _spy(ids, ws, max_len, n_prefix, text=None, ends=None):
+        out = real(ids, ws, max_len, n_prefix, text=text, ends=ends)
+        seen.append((out, text, ends))
+        return out
+
+    monkeypatch.setattr(dl_eval, "cut_windows", _spy)
+    text = "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8" * 6
+    r = dl_eval.bits_per_byte(model, tok, text, max_len=8)
+    assert r["bpb"] is not None
+    (windows, tb, ends), = seen
+    assert tb is not None and ends is not None and len(windows) > 1
+    for _s, e in windows:
+        tb[: int(ends[e - 1])].decode("utf-8")

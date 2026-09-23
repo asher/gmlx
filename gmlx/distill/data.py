@@ -288,7 +288,10 @@ class CacheReader:
 
     def shard(self, i: int) -> dict:
         sh = self._shards.get(i)
-        if sh is None:
+        if sh is not None:
+            self._order.remove(i)
+            self._order.append(i)
+        else:
             sh = load_shard(self.dir / f"batch-{i:05d}.safetensors")
             sh["_texts"] = shard_texts(sh)
             self._shards[i] = sh
