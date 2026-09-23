@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-09-22
+
 ### Added
 
 - The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
