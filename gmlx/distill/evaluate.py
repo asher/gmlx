@@ -22,6 +22,7 @@ from .corpus import nfc
 from .data import CacheReader
 from .format import read_json, replay_layers_for, shard_texts, write_json_atomic
 from .student import adapter_disabled
+from .head import head_spec_from_model
 from .trainer import load_student
 
 
@@ -92,9 +93,85 @@ def read_report(path: Path) -> dict:
 
 
 def reply_row_ids(reply_slices: dict) -> set[str]:
-    """The ids of every reply-slice row, the keys a census high_delta map
+    """The ids of every reply-slice row (its ``id``, else its index in the
+    file, the way the scorer names it), the keys a census high_delta map
     must share with them for ``--reply-positions`` to score anything."""
-    return {str(r["id"]) for rows in reply_slices.values() for r in rows if r.get("id") is not None}
+    return {str(r.get("id", i)) for rows in reply_slices.values() for i, r in enumerate(rows)}
+
+
+def check_keys(path, rows: list, keys: tuple) -> list:
+    """rows, each of which must carry every key, else UnreadableInput."""
+    for r in rows:
+        for k in keys:
+            if k not in r:
+                raise UnreadableInput(f"{path}: a row has no {k!r} key")
+    return rows
+
+
+TASK_KEYS = {"gsm8k": ("id", "question", "answer")}
+MC_KEYS = ("id", "query", "choices", "gold")
+
+
+def chat_refs(path) -> dict:
+    """{id: reply} of the compliant, non-empty replies in an earlier
+    report, the anchors of the drift score."""
+    items = (read_report(path).get("after") or {}).get("chat", {}).get("items", [])
+    try:
+        return {r["id"]: r["reply"] for r in items if r["compliant"] and r["reply"].strip()}
+    except (KeyError, TypeError, AttributeError) as e:
+        raise UnreadableInput(f"{path}: not an eval report with chat items ({e})") from e
+
+
+def cache_sources(cache: Path) -> dict[str, int]:
+    """Rows per source of a cache, read from its sidecars alone."""
+    try:
+        rows = CacheReader(cache, keep=1).rows_meta
+    except (OSError, ValueError, KeyError) as e:
+        raise UnreadableInput(f"{cache}: not a cache ({e})") from e
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r.get("source", "human")] = counts.get(r.get("source", "human"), 0) + 1
+    return counts
+
+
+def kld_cache_refusal(kld_dir: Path, manifest: dict, tokenizer, head_width: int) -> str | None:
+    """Why --kld-cache cannot score this student, or None: the cache's
+    vocabulary must be the student's (equal maps, or pad-style surplus ids
+    on one side) and no wider than the student's head, since the sparse
+    KL gathers the cache's token ids from the student's logits."""
+    if int(manifest.get("vocab_size", 0)) > head_width:
+        return f"its vocabulary ({manifest.get('vocab_size')}) is wider than the student's head ({head_width})"
+    if manifest.get("tokenizer_hash") == vocab_map_hash(tokenizer):
+        return None
+    # the hash is the fast path; a same-vocabulary pair whose maps differ
+    # by pad-style surplus ids is what align accepts as identity too
+    tok_dir = kld_dir / "tokenizer"
+    src = str(tok_dir) if tok_dir.exists() else manifest.get("teacher_path")
+    if not src:
+        return "it carries no tokenizer directory and its manifest names no teacher_path"
+    same, why = _tokens.identity_pair(_tokens.load_tokenizer(src), tokenizer)
+    return None if same else f"it was cached with another tokenizer than the student's ({why})"
+
+
+def kld_replay_layers(model, manifest: dict, adapter: str | None) -> list[int] | None:
+    """The cache's MoE layers to replay recorded routes on: the model must
+    carry the teacher's layers and run without an adapter, since an
+    adapter's own routing changes are part of what the score measures."""
+    if adapter:
+        return None
+    return replay_layers_for(getattr(model, "language_model", model), manifest)
+
+
+def kld_line(label: str, k: dict) -> str:
+    return (f"[eval] kld vs cache K={k['K']}{label}: {_fmt(k['mean_kld_nats'], 5)} nats se "
+            f"{_fmt(k['clustered_se'], 5)} top-1 {_fmt(k['top1_agreement'])} over {k['rows']} rows, "
+            f"{k['rerendered_rows']} re-rendered through the student template ({k['wall_s']:.0f}s)")
+
+
+def chat_line(label: str, c: dict) -> str:
+    return (f"[eval] chat {label}: compliance {_fmt(c['compliance'], 3)} truncated {_fmt(c['truncated_rate'], 3)} "
+            f"refusal {_fmt(c['refusal_rate'], 3)} task refusal {_fmt(c['task_refusal_rate'], 3)} "
+            f"ref nll {_fmt(c.get('ref_nll_nats'))} ({c['wall_s']:.0f}s)")
 
 
 def corpus_texts(cache: Path):
@@ -151,13 +228,11 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         t0 = time.perf_counter()
         model.eval()
         reader = CacheReader(Path(opts.kld_cache), keep=2)
-        replay = replay_layers_for(getattr(model, "language_model", model), reader.manifest)
+        replay = kld_replay_layers(model, reader.manifest, opts.adapter)
         k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer, replay_layers=replay)
         k["wall_s"] = time.perf_counter() - t0
         res["kld"] = k
-        log(f"[eval] kld vs cache K={k['K']}: {k['mean_kld_nats']:.5f} nats se {k['clustered_se']:.5f} "
-            f"top-1 {k['top1_agreement']:.4f} over {k['rows']} rows, {k['rerendered_rows']} re-rendered "
-            f"through the student template ({k['wall_s']:.0f}s)")
+        log(kld_line("", k))
     tb = token_bytes(tokenizer)
     prefix = None
     if opts.bpb_prefix:
@@ -227,9 +302,11 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
         ka = report["after"]["kld"]
         kb = before.get("kld")
         md += ["", f"| kld vs cache K={ka['K']} | nats | clustered se | top-1 |", "|---|---|---|---|",
-               f"| after | {ka['mean_kld_nats']:.5f} | {ka['clustered_se']:.5f} | {ka['top1_agreement']:.4f} |"]
+               f"| after | {_fmt(ka['mean_kld_nats'], 5)} | {_fmt(ka['clustered_se'], 5)} | "
+               f"{_fmt(ka['top1_agreement'])} |"]
         if kb:
-            md.append(f"| before | {kb['mean_kld_nats']:.5f} | {kb['clustered_se']:.5f} | {kb['top1_agreement']:.4f} |")
+            md.append(f"| before | {_fmt(kb['mean_kld_nats'], 5)} | {_fmt(kb['clustered_se'], 5)} | "
+                      f"{_fmt(kb['top1_agreement'])} |")
     if opts.chat_sanity:
         md += ["", "| chat sanity | after | before |", "|---|---|---|"]
         ca = report["after"]["chat"]
@@ -245,8 +322,8 @@ def run_eval(opts: EvalOptions) -> int:
     """Returns 0 with both reports written, 2 on a refusal: before the
     load, a missing or unreadable input, ``--before`` without ``--adapter``
     or a positions map naming none of the reply rows; after it, a kld cache
-    over another tokenizer or a chat instrument asked of a student without
-    a template."""
+    the student's tokenizer or head cannot score, or a chat instrument
+    asked of a student without a template."""
     import mlx.core as mx
     # batch shapes differ per slice, item and conversation, so freed buffers
     # of many sizes would otherwise accumulate in MLX's cache
@@ -282,6 +359,7 @@ def run_eval(opts: EvalOptions) -> int:
     # in seconds and never after minutes of scoring
     tasks: dict = {}
     kld_manifest: dict = {}
+    corpus_sources = None
     try:
         slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
                   for name, path in slice_specs}
@@ -291,23 +369,26 @@ def run_eval(opts: EvalOptions) -> int:
                 t = t.strip()
                 if not t:
                     continue
-                items = read_jsonl(td / f"{t}.jsonl")
+                items = check_keys(td / f"{t}.jsonl", read_jsonl(td / f"{t}.jsonl"), TASK_KEYS.get(t, MC_KEYS))
                 if opts.task_limit:
                     items = items[:opts.task_limit]
                 tasks[t] = {"items": items}
                 if t == "gsm8k":
-                    tasks[t]["shots"] = read_jsonl(td / "gsm8k_shots.jsonl")[:8]
+                    tasks[t]["shots"] = check_keys(td / "gsm8k_shots.jsonl", read_jsonl(td / "gsm8k_shots.jsonl"),
+                                                   ("question", "answer"))[:8]
         chat_slices = {name: read_conversations(Path(path).expanduser()) for name, path in chat_specs}
         reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
         positions = None
         if opts.reply_positions:
             positions = read_report(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
-        chat_items = read_jsonl(Path(opts.chat_sanity)) if opts.chat_sanity else []
-        ref_items = ((read_report(Path(opts.chat_refs)).get("after") or {}).get("chat", {}).get("items", [])
-                     if opts.chat_refs else [])
+        chat_items = (check_keys(Path(opts.chat_sanity), read_jsonl(Path(opts.chat_sanity)), ("messages",))
+                      if opts.chat_sanity else [])
+        refs_before = chat_refs(Path(opts.chat_refs)) if opts.chat_refs else None
         teacher_bpb = read_report(Path(opts.teacher_bpb)) if opts.teacher_bpb else None
         if opts.kld_cache:
             kld_manifest = read_report(Path(opts.kld_cache) / "manifest.json")
+        if opts.cache:
+            corpus_sources = cache_sources(Path(opts.cache))
     except UnreadableInput as e:
         log(f"[eval] refuse: unreadable input {e}")
         return 2
@@ -329,16 +410,12 @@ def run_eval(opts: EvalOptions) -> int:
             else:
                 log(f"[eval] {name}: decontam fraction {f:.5f}")
     model, _cfg, tokenizer, _kind = load_student(opts.student, opts.adapter, opts.hf_source)
-    if opts.kld_cache and kld_manifest.get("tokenizer_hash") != vocab_map_hash(tokenizer):
-        # the hash is the fast path; a same-vocabulary pair whose maps differ
-        # by pad-style surplus ids is what align accepts as identity too
-        kld_dir = Path(opts.kld_cache)
-        cache_tok = _tokens.load_tokenizer(str(kld_dir / "tokenizer")) if (kld_dir / "tokenizer").exists() \
-            else _tokens.load_tokenizer(kld_manifest["teacher_path"])
-        same, why = _tokens.identity_pair(cache_tok, tokenizer)
-        if not same:
-            log(f"[eval] refuse: --kld-cache {opts.kld_cache} was cached with another tokenizer than the "
-                f"student's ({why}), the sparse KL is defined on a same-tokenizer cache only")
+    if opts.kld_cache:
+        width = head_spec_from_model(getattr(model, "language_model", model)).V
+        why = kld_cache_refusal(Path(opts.kld_cache), kld_manifest, tokenizer, width)
+        if why:
+            log(f"[eval] refuse: --kld-cache {opts.kld_cache}: {why}; the sparse KL is defined on a "
+                "same-tokenizer cache only")
             return 2
     if (opts.chat_sanity or chat_specs) and not _frames.has_chat_template(tokenizer):
         # a checkpoint without its template renders every conversation as
@@ -359,9 +436,8 @@ def run_eval(opts: EvalOptions) -> int:
                                        positions)
     if opts.chat_sanity:
         items = chat_items
-        refs = None
-        if opts.chat_refs:
-            refs = {r["id"]: r["reply"] for r in ref_items if r["compliant"] and r["reply"].strip()}
+        refs = refs_before
+        if refs is not None:
             log(f"[eval] chat drift references: {len(refs)} replies from {opts.chat_refs}")
         if opts.before:
             t0 = time.perf_counter()
@@ -370,25 +446,17 @@ def run_eval(opts: EvalOptions) -> int:
             before["wall_s"] = time.perf_counter() - t0
             report["before"]["chat"] = before
             refs = {r["id"]: r["reply"] for r in before["items"] if r["compliant"] and r["reply"].strip()}
-            log(f"[eval] chat before: compliance {before['compliance']:.3f} truncated "
-                f"{before['truncated_rate']:.3f} refusal {before['refusal_rate']} "
-                f"task refusal {before['task_refusal_rate']} ({before['wall_s']:.0f}s)")
+            log(chat_line("before", before))
         t0 = time.perf_counter()
         after = _eval.chat_sanity(model, tokenizer, items, refs=refs, max_tokens=opts.chat_max_tokens)
         after["wall_s"] = time.perf_counter() - t0
         report["after"]["chat"] = after
-        log(f"[eval] chat after: compliance {after['compliance']:.3f} truncated {after['truncated_rate']:.3f} "
-            f"refusal {after['refusal_rate']} task refusal {after['task_refusal_rate']} "
-            f"ref nll {after['ref_nll_nats']} ({after['wall_s']:.0f}s)")
+        log(chat_line("after", after))
     if teacher_bpb is not None:
         report["teacher_bpb"] = teacher_bpb
     report["contaminated_slices"] = sorted(contaminated)
-    if opts.cache:
-        reader = CacheReader(Path(opts.cache), keep=1)
-        counts: dict[str, int] = {}
-        for r in reader.rows_meta:
-            counts[r.get("source", "human")] = counts.get(r.get("source", "human"), 0) + 1
-        report["corpus_sources"] = counts
+    if corpus_sources is not None:
+        report["corpus_sources"] = corpus_sources
     write_json_atomic(Path(opts.json), report)
     md = report_markdown(opts, report, slices, chat_slices, reply_slices, contaminated)
     Path(opts.md).write_text(md, encoding="utf-8")

@@ -911,7 +911,7 @@ so a run resumes where it stopped.
 | `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
-| `--thinking` | off | thinking on, with the reasoning trace kept as `reasoning_content` on the reply |
+| `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends `enable_thinking` false |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
@@ -1039,7 +1039,7 @@ Training flags, in the order `--help` prints them.
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
-| `--lora-dropout F` | `0.0` | LoRA dropout, one mask per step |
+| `--lora-dropout F` | `0.0` | LoRA dropout, one mask per step, replayed by `--grad-checkpoint` |
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
@@ -1100,7 +1100,7 @@ examples shown before each question.
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
 | `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions, refused when it names none of their rows |
-| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer |
+| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a vocabulary wider than the student's head |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |

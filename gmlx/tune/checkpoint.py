@@ -13,6 +13,19 @@ wrapper.
 from __future__ import annotations
 
 import mlx.core as mx
+import mlx.nn as nn
+
+
+def draws_random(module) -> bool:
+    """True when a training forward of ``module`` draws from the global
+    random stream: a dropout with p > 0 somewhere inside it."""
+    return bool(module.training) and any(isinstance(m, nn.Dropout) and float(m._p_1) < 1.0
+                                          for m in module.modules())
+
+
+def layer_seed() -> int:
+    """One seed drawn from the global stream, for a recompute to replay."""
+    return int(mx.random.randint(0, 2 ** 31 - 1, shape=()).item())
 
 
 def layer_list(model):
@@ -45,7 +58,14 @@ def checkpoint_layers(model) -> int:
 
         def make(fn):
             def checkpointed(self, *args, **kwargs):
+                # the backward recomputes the layer, and a dropout inside it
+                # would draw fresh masks from the global stream by then: the
+                # layer's seed is drawn once here and replayed in the recompute
+                seed = layer_seed() if draws_random(self) else None
+
                 def inner(params, *args, **kwargs):
+                    if seed is not None:
+                        mx.random.seed(seed)
                     self.update(params)
                     return fn(self, *args, **kwargs)
                 return mx.checkpoint(inner)(self.trainable_parameters(), *args, **kwargs)

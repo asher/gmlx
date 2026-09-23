@@ -29,7 +29,8 @@ def tok():
 
 
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
-                 K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None):
+                 K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None,
+                 boost_rows: set[int] | None = None):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -38,7 +39,8 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
     teacher at chosen positions. Hidden states depend on the byte offset
     from the reply start only, so two caches with the same seed agree
     wherever no boost applies. docs, when given, names each row's (doc_id,
-    window) instead of one window-0 document per row."""
+    window) instead of one window-0 document per row. boost_rows limits
+    the boost to those row indexes."""
     tb = dl.token_bytes(tok)
     V = len(tb)
     log_bmask = dl.log_bmask_from(dl.whitespace_start_mask(tok, V, tb))
@@ -57,7 +59,7 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
             h[t] = np.random.default_rng(seed * 1000 + int(ends[t]) - b0 + 500).standard_normal(6)
         nxt = np.concatenate([ids[1:], [-1]]).astype(np.int32)
         logits = (mx.array(h) @ W.T)
-        if boost:
+        if boost and (boost_rows is None or r in boost_rows):
             e = ends.astype(np.int64)
             for off, nats in boost.items():
                 t = int(np.nonzero(e[:-1] - b0 == off)[0][0])
@@ -211,3 +213,35 @@ def test_high_delta_keeps_the_last_window_of_a_document(tmp_path, tok):
     s = json.loads(out.read_text())
     assert s["rows"] == 2 and [r["high_delta_positions"] for r in s["per_row"]] == [1, 1]
     assert s["high_delta"] == {"a.jsonl:0": [[0, 3]]}
+
+
+def test_high_delta_is_the_last_windows_or_nothing(tmp_path, tok):
+    """A document whose last window has no high-delta position gets no
+    map, whatever an earlier window held, and a document cut by max_rows
+    before its last window gets none either."""
+    convs = [_conv("second turn", "cat is cat"), _conv("first turn", "the cat"), _conv("third turn", "the cat")]
+    docs = [("a.jsonl:0", 1), ("a.jsonl:0", 0), ("a.jsonl:0", 2)]
+    without = _reply_cache(tmp_path / "without", tok, convs, doc_prefix="a.jsonl", docs=docs)
+    flat_last = _reply_cache(tmp_path / "flat", tok, convs, doc_prefix="b.jsonl", docs=docs, boost={0: 6.0},
+                             boost_rows={0, 1})
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(flat_last)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert [r["high_delta_positions"] for r in s["per_row"]] == [1, 1, 0]
+    assert s["high_delta"] == {}
+    every = _reply_cache(tmp_path / "every", tok, convs, doc_prefix="c.jsonl", docs=docs, boost={0: 6.0})
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(every)], out=str(out))) == 0
+    assert json.loads(out.read_text())["high_delta"] == {"a.jsonl:0": [[0, 1]]}
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(every)], out=str(out),
+                                          max_rows=2)) == 0
+    assert json.loads(out.read_text())["high_delta"] == {}
+
+
+def test_corpus_ids_fall_back_to_the_non_blank_row_index(tmp_path):
+    """A row without an id is named by its index among the non-blank rows,
+    the way eval names a reply-slice row, while the pairing key stays the
+    cache's line number."""
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"messages": []}) + "\n\n" + json.dumps({"messages": []}) + "\n"
+                      + json.dumps({"id": "z", "messages": []}) + "\n")
+    assert cs.corpus_ids(corpus, "line") == {"0": "0", "2": "1", "3": "z"}

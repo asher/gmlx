@@ -1070,9 +1070,12 @@ Memory and the measurements behind these defaults are on the
   counting its reasoning against `--thinking-budget` then needs
   `--tokenizer`. It cannot be cached, since `cache` runs the teacher
   itself and needs a local GGUF.
-- Recorded routes are replayed by `eval --kld-cache` on the cache's own
-  teacher. `train` does not replay them, so a MoE student trained from a
-  MoE teacher of the same family learns from the teacher's outputs alone.
+- Recorded routes are replayed by `eval --kld-cache` when the student
+  carries the teacher's MoE layers and no adapter is loaded, so a
+  requantized teacher is scored on the teacher's own routes and an
+  adapter's routing changes count against it. `train` does not replay
+  them, so a MoE student trained from a MoE teacher of the same family
+  learns from the teacher's outputs alone.
 - The hidden-state term reads the teacher's final hidden state only. No
   intermediate layer is stored, and the sketch is fixed at cache time.
 - Task files for `eval` are read from disk, in the formats listed under

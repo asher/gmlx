@@ -113,9 +113,13 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     """{pairing key: the corpus row's id} so high_delta is keyed the way
     the eval's reply slice names its rows."""
     out = {}
+    n = 0
     for i, line in enumerate(corpus.read_text(encoding="utf-8").splitlines()):
         if line.strip():
-            out[row_key(f"{corpus.name}:{i}", pair_by)] = str(json.loads(line).get("id", i))
+            # the fallback id counts rows the way eval's reply slice does,
+            # blank lines skipped; the pairing key is the cache's line number
+            out[row_key(f"{corpus.name}:{i}", pair_by)] = str(json.loads(line).get("id", n))
+            n += 1
     return out
 
 
@@ -127,6 +131,12 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     for _r, rows in ctx:
         common &= set(rows)
     keys = sorted(common)
+    # a document's positions map is its last window's, the final turn on a
+    # per-turn cache and the one eval's reply slice scores; a document cut
+    # by max_rows before its last window gets no map
+    last_window: dict[str, int] = {}
+    for key, window in keys:
+        last_window[key] = max(window, last_window.get(key, -1))
     if max_rows:
         keys = keys[:max_rows]
     per_row = []
@@ -135,7 +145,6 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     res_all: list[float] = []
     top1_all: list[bool] = []
     high: dict[str, list] = {}
-    high_window: dict[str, int] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
     for key, window in keys:
@@ -187,11 +196,8 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
                 hd["bytes"] += nbytes
                 hd["positions"] += 1
         rid = id_of.get(key, doc_id)
-        # one map per row id, the last window's: on a per-turn cache that
-        # is the final turn, the one eval's reply slice scores
-        if ranges and window >= high_window.get(rid, -1):
+        if ranges and window == last_window[key]:
             high[rid] = ranges
-            high_window[rid] = window
         per_row.append({"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
                         "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
                         "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),

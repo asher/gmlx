@@ -231,7 +231,7 @@ def run_align(opts: AlignOptions) -> int:
     jw = np.array(stats["J"], dtype=np.float64) * np.array(stats["bias_cov"], dtype=np.float64) \
         if stats["bias_ok"] else np.zeros(0)
     view = {
-        "cache_manifest_sha256": manifest_sha256(cache), "cache_dir": str(cache),
+        "cache_manifest_sha256": manifest_sha256(cache), "cache_dir": str(cache.resolve()),
         "teacher_hash": tables.teacher_hash, "student_hash": tables.student_hash,
         "V_T": V_T, "V_S": V_S, "tables_version": TABLES_VERSION, "identity": identity,
         "K": reader.K, "Kp": int(Kp), "knobs": knobs, "student": opts.student,
@@ -271,6 +271,12 @@ def run_align(opts: AlignOptions) -> int:
     if opts.materialize:
         loader2 = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=int(Kp), identity=identity)
         t1 = time.perf_counter()
-        nsh = loader2.materialize(out, opts.max_disk_gb)
+        try:
+            nsh = loader2.materialize(out, opts.max_disk_gb)
+        except RuntimeError as e:
+            for p in sorted(out.glob("view-*.safetensors")) + [out / "view.json"]:
+                p.unlink(missing_ok=True)
+            log(f"[align] refuse: {e}, the partial view was removed")
+            return 2
         log(f"[align] materialized {nsh} view shards in {time.perf_counter() - t1:.1f}s")
     return 0

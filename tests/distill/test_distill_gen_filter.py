@@ -124,6 +124,12 @@ def test_gen_writes_rows_with_two_lists_and_a_sidecar(tmp_path, stub_server):
     assert side["run"]["completed"] == 2 and side["run"]["failed"] == 0
     assert side["prompts"] == 2 and len(side["prompt_set_sha256"]) == 64
     assert side["thinking"] is False and side["thinking_budget"] is None
+    # the switch is sent off explicitly, so a template that thinks by
+    # default does not think behind a sidecar that says off
+    sampled = [c for c in _Handler.calls if "seed" in c]
+    assert sampled and all(c["enable_thinking"] is False and c["chat_template_kwargs"] == {"enable_thinking": False}
+                           for c in sampled)
+    assert side["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_gen_resumes_by_prompt_id_and_accumulates_the_run(tmp_path, stub_server):
@@ -375,3 +381,28 @@ def test_recontext_row_needs_a_user_turn_before_the_reply():
     out = flt.recontext_row(row, "ctx", "{context} | {prompt}")
     assert out["messages"][1]["content"] == "ctx | q" and out["messages"][0]["content"] == "s"
     assert out["student_messages"] == row["messages"]
+
+
+def test_gen_sends_the_thinking_switch_both_ways(monkeypatch, tmp_path):
+    """Without --thinking the request and the served template carry
+    enable_thinking false, so a template whose default is thinking does
+    not think behind a sidecar that says off; the switch wins over a
+    same-named kwarg."""
+    off = gen.GenOptions(out="x.jsonl", prompts="p.jsonl")
+    body = gen._sampling(off, 1)
+    assert body["enable_thinking"] is False and body["chat_template_kwargs"] == {"enable_thinking": False}
+    on = gen.GenOptions(out="x.jsonl", prompts="p.jsonl", thinking=True,
+                        chat_template_kwargs='{"enable_thinking": false, "preserve_thinking": true}')
+    assert gen._sampling(on, 1)["chat_template_kwargs"] == {"enable_thinking": True, "preserve_thinking": True}
+    from gmlx.serve import lifecycle
+    seen: dict = {}
+
+    def start(args, **kw):
+        seen["args"] = list(args)
+        return object(), None
+
+    monkeypatch.setattr(gen, "port_listening", lambda host, port: False)
+    monkeypatch.setattr(lifecycle, "start_background_nowait", start)
+    gen.spawn_server(gen.GenOptions(out="x.jsonl", prompts="p.jsonl", teacher="t.gguf", serve_arg=["--kv-bits", "8"]),
+                     tmp_path / "log")
+    assert seen["args"] == ["t.gguf", "--chat-template-config", '{"enable_thinking": false}', "--kv-bits", "8"]

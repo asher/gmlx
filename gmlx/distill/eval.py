@@ -287,12 +287,12 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
     tb = token_bytes(tokenizer)
     rows = []
     dropped = 0
-    for c in convs:
+    for i, c in enumerate(convs):
         if isinstance(c, dict):
-            rid = str(c.get("id", len(rows)))
+            rid = str(c.get("id", i))
             msgs = c.get("student_messages") or c.get("messages") or []
         else:
-            rid, msgs = str(len(rows)), c
+            rid, msgs = str(i), c
         variants = per_turn_rows(msgs) if per_turn else [msgs]
         for k, m in enumerate(variants):
             fit = (fit_reply(tokenizer, m, max_len, tb, reason_target=reason_target) if (per_turn or last_only)

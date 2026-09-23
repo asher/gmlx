@@ -61,10 +61,12 @@ head inside the trunk's transform would pin every chunk's logits at once.
 The trunk therefore runs twice per step, once for the head pass and once
 under the transform. Both forwards are seeded with the step's seed right
 before they run, so LoRA dropout draws the same mask in both and the
-cotangents land on the hidden states they were computed from. The
-hidden-state map of `--hs` draws its initial weights from its own key,
-so building it at the first step of a run or a resume leaves the run's
-random stream where it was.
+cotangents land on the hidden states they were computed from. A
+checkpointed layer draws one seed before its forward and replays it in
+the backward recompute, so the recompute sees the mask the forward drew.
+The hidden-state map of `--hs` draws its initial weights from its own
+key, so building it at the first step of a run or a resume leaves the
+run's random stream where it was.
 
 ## Why the defaults are what they are
 

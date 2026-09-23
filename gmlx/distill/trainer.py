@@ -187,6 +187,10 @@ def run_train(opts: TrainOptions) -> int:
             return 2
     views = [read_json(d / "view.json") for d in view_dirs]
     for d, v in zip(view_dirs, views):
+        if not (Path(v["cache_dir"]) / "manifest.json").is_file():
+            log(f"[train] refuse: the view's cache is no longer at {v['cache_dir']} ({d}), "
+                "run gmlx distill align again")
+            return 2
         if manifest_sha256(Path(v["cache_dir"])) != v["cache_manifest_sha256"]:
             log(f"[train] refuse: the view's cache manifest hash does not match the cache on disk ({d})")
             return 2

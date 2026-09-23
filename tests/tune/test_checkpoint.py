@@ -71,3 +71,50 @@ def test_finds_layers_under_a_language_model_wrapper():
         assert checkpoint_layers(Wrapper(model)) == 1
     finally:
         cls.__call__ = orig
+
+
+def test_checkpointed_layers_replay_the_dropout_mask(monkeypatch):
+    """A dropout inside a checkpointed layer draws from the global stream,
+    so the backward recompute would see a fresh mask; the layer's seed is
+    drawn once and replayed, and the gradient equals a plain backward whose
+    layers draw the same masks."""
+    import gmlx.tune.checkpoint as ck
+    from mlx_lm.tuner.lora import LoRALinear
+
+    def build():
+        model = _model(3)
+        for layer in model.layers:
+            q = LoRALinear.from_base(layer.self_attn.q_proj, r=4, dropout=0.5)
+            q.lora_b = mx.random.normal(q.lora_b.shape)
+            layer.self_attn.q_proj = q
+        model.train()
+        return model
+
+    ids = mx.array([[1, 5, 9, 2, 7, 3], [4, 4, 8, 1, 2, 6]])
+    ref = build()
+    cls = type(ref.layers[0])
+    orig = cls.__call__
+
+    def seeded(self, *args, **kwargs):
+        mx.random.seed(7)
+        return orig(self, *args, **kwargs)
+
+    try:
+        cls.__call__ = seeded
+        g0 = nn.value_and_grad(ref, _loss)(ref, ids)[1]
+        mx.eval(g0)
+        cls.__call__ = orig
+        model = build()
+        monkeypatch.setattr(ck, "layer_seed", lambda: 7)
+        assert checkpoint_layers(model) == 1
+        g1 = nn.value_and_grad(model, _loss)(model, ids)[1]
+        mx.eval(g1)
+    finally:
+        cls.__call__ = orig
+    from mlx.utils import tree_flatten
+    a = dict(tree_flatten(g0))
+    b = dict(tree_flatten(g1))
+    assert a.keys() == b.keys() and any("lora_b" in k for k in a)
+    for k in a:
+        assert np.allclose(np.array(a[k]), np.array(b[k]), atol=1e-5), k
+    assert not ck.draws_random(ref.eval()) and ck.draws_random(ref.train())

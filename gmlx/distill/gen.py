@@ -185,9 +185,7 @@ def spawn_server(opts: GenOptions, log_path: Path):
     if port_listening(opts.host, opts.port):
         raise PortInUse(f"port {opts.port} already has a listener; stop it (gmlx stop --port {opts.port}) "
                           "or pass another --port")
-    serve_args = [opts.teacher]
-    if opts.chat_template_kwargs:
-        serve_args += ["--chat-template-config", opts.chat_template_kwargs]
+    serve_args = [opts.teacher, "--chat-template-config", _template_kwargs(opts) or "{}"]
     serve_args += list(opts.serve_arg)
     spawned = lifecycle.start_background_nowait(serve_args, host=opts.host, port=opts.port, log=str(log_path))
     if spawned is None:
@@ -247,11 +245,11 @@ def _sampling(opts: GenOptions, seed: int) -> dict:
     if opts.thinking_budget:
         body["thinking_budget"] = opts.thinking_budget
     # a server gen did not start (--base-url) only sees what the request
-    # carries, so the thinking switch and the template kwargs ride along
-    if opts.thinking:
-        body["enable_thinking"] = True
-    if opts.chat_template_kwargs:
-        body["chat_template_kwargs"] = json.loads(_template_kwargs(opts) or "{}")
+    # carries, so the thinking switch and the template kwargs ride along;
+    # the switch goes both ways, since a template whose default is thinking
+    # would otherwise think without --thinking while the sidecar says off
+    body["enable_thinking"] = bool(opts.thinking)
+    body["chat_template_kwargs"] = json.loads(_template_kwargs(opts) or "{}")
     return body
 
 
@@ -328,10 +326,11 @@ def _done_ids(out: Path) -> set[str]:
 
 
 def _template_kwargs(opts: GenOptions) -> str | None:
-    if not opts.thinking:
-        return opts.chat_template_kwargs
+    """The chat-template kwargs the run uses, with the thinking switch
+    spelled as enable_thinking both ways (the switch wins over a same-named
+    key, as it does in gmlx serve)."""
     kw = json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else {}
-    kw["enable_thinking"] = True
+    kw["enable_thinking"] = bool(opts.thinking)
     return json.dumps(kw)
 
 

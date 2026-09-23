@@ -1758,7 +1758,7 @@ def test_eval_refuses_bad_inputs_before_the_load(tmp_path, capsys):
     nomsg.write_text(json.dumps({"id": "a"}) + "\n")
     rc, err = run(chat_slices=["c=" + str(nomsg)])
     assert rc == 2 and "no 'messages' key" in err
-    assert _ev.reply_row_ids({"h": [{"id": "a"}, {"id": 3}, {"x": 1}]}) == {"a", "3"}
+    assert _ev.reply_row_ids({"h": [{"id": "a"}, {"id": 3}, {"x": 1}]}) == {"a", "3", "2"}
 
 
 def test_save_checkpoint_extra_lands_inside_the_swap(tmp_path):
@@ -1799,3 +1799,137 @@ def test_assistant_tails_cache_lives_on_the_tokenizer(tok_bl):
     tb = _frames.assistant_tails(b)
     assert tb != ta and _frames.assistant_tails(a) == ta
     assert not hasattr(_frames, "_TAIL_CACHE")
+
+
+# ---------------------------------------------------------------------------
+# review round three: ids by index, None-safe lines, pre-load checks, views
+# ---------------------------------------------------------------------------
+
+def test_report_lines_survive_none_aggregates():
+    """One scored row leaves the clustered se None and an empty chat set
+    leaves every rate None; the log lines and the markdown print them."""
+    from gmlx.distill import evaluate as _ev
+
+    k = {"K": 8, "mean_kld_nats": 0.5, "clustered_se": None, "top1_agreement": 0.9, "rows": 1,
+         "rerendered_rows": 0, "wall_s": 0.0}
+    assert "se None" in _ev.kld_line("", k)
+    c = {"compliance": None, "truncated_rate": None, "refusal_rate": None, "task_refusal_rate": None,
+         "ref_nll_nats": None, "wall_s": 0.0}
+    assert "compliance None truncated None" in _ev.chat_line("after", c)
+    opts = _ev.EvalOptions(student="s.gguf", md="r.md", json="r.json", kld_cache="c")
+    report = {"after": {"kld": k, "tasks": {}}, "before": {"kld": dict(k, clustered_se=None)},
+              "decontam": {}, "contaminated_slices": []}
+    md = _ev.report_markdown(opts, report, {}, {}, {}, set())
+    assert "| after | 0.50000 | None | 0.9000 |" in md and "| before | 0.50000 | None |" in md
+
+
+def test_reply_rows_without_ids_are_named_by_index(tok_bl):
+    """A reply row with no id is named by its index in the file, by the
+    scorer and by the refusal check alike, so a census map keyed that way
+    scores it."""
+    from gmlx.distill import evaluate as _ev
+
+    assert _ev.reply_row_ids({"h": [{"x": 1}, {"id": "a"}, {"y": 2}]}) == {"0", "a", "2"}
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    st = [{"role": "user", "content": "what"}, {"role": "assistant", "content": "is the cat 123"}]
+    rows, _ = dl_eval._span_rows(tok, [{"messages": st}, {"id": "b", "messages": st}, {"messages": st}],
+                                 max_len=256, last_only=True)
+    assert [r[3] for r in rows] == ["0", "b", "2"]
+    res, _ = dl_eval._span_rows(tok, [{"messages": st}, {"messages": st}], max_len=256, last_only=True,
+                                positions={"1": [[7, 8]]})
+    assert len(res) == 1 and res[0][3] == "1"
+
+
+def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
+    """--cache that is not a cache, --chat-refs without chat items and a
+    task file missing a key exit 2 before any model load."""
+    from gmlx.distill import evaluate as _ev
+
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+
+    def run(**kw):
+        opts = _ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
+                               **kw)
+        return _ev.run_eval(opts), capsys.readouterr().err
+
+    (tmp_path / "nocache").mkdir()
+    rc, err = run(cache=str(tmp_path / "nocache"))
+    assert rc == 2 and "unreadable input" in err and "not a cache" in err
+    refs = tmp_path / "refs.json"
+    refs.write_text(json.dumps({"after": {"chat": {"items": [{"id": "a", "reply": "x"}]}}}))
+    chat = tmp_path / "chat.jsonl"
+    chat.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": "hi"}]}) + "\n")
+    rc, err = run(chat_sanity=str(chat), chat_refs=str(refs))
+    assert rc == 2 and "not an eval report with chat items" in err
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": "q", "choices": ["x", "y"]}) + "\n")
+    rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
+    assert rc == 2 and "no 'gold' key" in err
+    (tasks / "gsm8k.jsonl").write_text(json.dumps({"id": "a", "question": "q", "answer": "1"}) + "\n")
+    (tasks / "gsm8k_shots.jsonl").write_text(json.dumps({"question": "q"}) + "\n")
+    rc, err = run(tasks="gsm8k", tasks_dir=str(tasks))
+    assert rc == 2 and "gsm8k_shots.jsonl: a row has no 'answer' key" in err
+    nomsg = tmp_path / "nomsg.jsonl"
+    nomsg.write_text(json.dumps({"id": "a"}) + "\n")
+    rc, err = run(chat_sanity=str(nomsg))
+    assert rc == 2 and "no 'messages' key" in err
+
+
+def test_kld_cache_refusal_and_replay_gate(tmp_path, tok_bl):
+    """A kld cache wider than the student's head, or one whose tokenizer
+    cannot be found, is refused; a same-map cache passes through the hash
+    or the saved tokenizer; routes are replayed only without an adapter."""
+    from gmlx.distill import evaluate as _ev
+
+    h = dl.vocab_map_hash(tok_bl)
+    V = len(dl.token_bytes(tok_bl))
+    assert _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": h}, tok_bl, V) is None
+    why = _ev.kld_cache_refusal(tmp_path, {"vocab_size": V + 1, "tokenizer_hash": h}, tok_bl, V)
+    assert why and "wider than the student's head" in why
+    why = _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": "x"}, tok_bl, V)
+    assert why and "no tokenizer directory" in why
+    tok_bl.save_pretrained(tmp_path / "tokenizer")
+    assert _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": "x"}, tok_bl, V) is None
+    manifest = {"gmlx_distill": {"routing": None}}
+    assert _ev.kld_replay_layers(object(), manifest, "adapter.gguf") is None
+    assert _ev.kld_replay_layers(object(), manifest, None) == dl.replay_layers_for(object(), manifest)
+
+
+def test_view_records_the_cache_absolutely_and_train_refuses_a_moved_cache(tmp_path, tok_bl, tok_spm,
+                                                                           monkeypatch, capsys):
+    """view.json names the cache by absolute path, so a train run from
+    another directory finds it, and a cache that moved is refused with a
+    pointer to align rather than a traceback."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    monkeypatch.chdir(tmp_path)
+    assert _view.run_align(_view.AlignOptions(cache="cache", student="student", out="view")) == 0
+    v = json.loads((tmp_path / "view" / "view.json").read_text())
+    assert Path(v["cache_dir"]).is_absolute() and Path(v["cache_dir"]) == (tmp_path / "cache").resolve()
+    (tmp_path / "cache").rename(tmp_path / "moved")
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "student.gguf").write_bytes(b"")
+    rc = _trainer.run_train(_trainer.TrainOptions(views=["view"], student=str(fake / "student.gguf"), iters=1))
+    assert rc == 2 and "no longer at" in capsys.readouterr().err
+
+
+def test_align_materialize_over_the_disk_cap_leaves_no_view(tmp_path, tok_bl, tok_spm, capsys):
+    """--materialize past --max-disk-gb refuses with exit 2 and removes the
+    partial shards and view.json, so train cannot pick up a half view."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    rc = _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"),
+                                            out=str(out), materialize=True, max_disk_gb=1e-9))
+    assert rc == 2 and "[align] refuse: --max-disk-gb" in capsys.readouterr().err
+    assert not list(out.glob("view-*.safetensors")) and not (out / "view.json").exists()
