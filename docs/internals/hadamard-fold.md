@@ -82,12 +82,12 @@ bf16, and `GMLX_ACTIVATION_DTYPE=float16` tightens the teacher-forced
 logprob delta against the reference on the 27B from about 0.3 nats to
 about 0.04. The bf16 delta already sits inside gmlx's own
 prefill-versus-decode noise, and float16 costs speed on a GPU with native
-bf16: on the PQ2_0 file an M3 Max decodes about 2 percent slower and the
-prefill tile runs about 20 percent slower. The 16K decode integrity test
-passes the PQ2_0 file on float16, so the narrower exponent range holds at
-depth, and float16 stays the option for parity work rather than the
-default. Passing f32 activations changes nothing, because the kquant
-matmul's internal precision follows its output dtype.
+bf16. On the PQ2_0 file an M3 Max decodes about 2 percent slower on float16,
+and the prefill tile runs about 20 percent slower. The 16K decode
+integrity test passes the PQ2_0 file on float16, so the narrower exponent
+range holds at depth, and float16 stays the option for parity work rather
+than the default. Passing f32 activations changes nothing, because the
+kquant matmul's internal precision follows its output dtype.
 
 ## Refusal
 
