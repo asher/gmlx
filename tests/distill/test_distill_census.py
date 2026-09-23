@@ -31,7 +31,7 @@ def tok():
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
                  K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None,
                  boost_rows: set[int] | None = None, content_offset: int = 0, frame: str = "reply",
-                 record_content_start: bool = True, turns: int | None = None):
+                 record_content_start: bool = True, turns: int | None = None, reason_target: bool = False):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -49,7 +49,7 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
     writer = dl.ShardWriter(tmp, K, False)
     rows, metas, tbytes = [], [], []
     for r, msgs in enumerate(convs):
-        text, spans = dl.render_row(tok, msgs, open_tail=False, last_only=True)
+        text, spans = dl.render_row(tok, msgs, open_tail=False, last_only=True, reason_target=reason_target)
         ids, ends, _ = dl.encode_with_byte_ends(tok, text, tb, add_special_tokens=False)
         n = len(ids)
         b0 = spans[-1][0]
@@ -548,3 +548,63 @@ def test_census_skips_a_context_row_that_lost_its_history(tmp_path, tok):
     assert set(s["high_delta"]) == {"a.jsonl:1"}
     assert "| paired reply rows | 1 (0 reply mismatches skipped, 1 history mismatches skipped, " \
            "0 pairs with no shared position) |" in md.read_text()
+
+
+def test_census_refuses_a_with_cache_of_another_top_k_tokenizer_or_teacher(tmp_path, tok, capsys):
+    """The caches a census pairs must hold one teacher's distributions over
+    one vocabulary at one top-k, else the delta measures the teacher or
+    compares ids from two maps; the teacher compares by the fingerprint
+    progress.json records when both caches carry one."""
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with context {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl")
+    narrow = _reply_cache(tmp_path / "narrow", tok, convs_with, doc_prefix="b.jsonl", K=6)
+    out = tmp_path / "census.json"
+    rc = cs.run_census(cs.CensusOptions(without=str(without), with_=[str(narrow)], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"[census] refuse: {narrow} was made with another top-k (8 vs 6)" in err
+    assert not out.exists()
+    other_tok = _with_template(_bytelevel_tokenizer([("\u0120", "t"), ("h", "e")]), _TEMPLATE_A)
+    other = _reply_cache(tmp_path / "other", other_tok, convs_with, doc_prefix="b.jsonl")
+    rc = cs.run_census(cs.CensusOptions(without=str(without), with_=[str(other)], out=str(out)))
+    assert rc == 2 and "was made with another tokenizer" in capsys.readouterr().err
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl")
+    for c, size in ((without, 10), (with_, 11)):
+        prog = json.loads((c / "progress.json").read_text())
+        prog["run"] = {"teacher": {"size": size, "sha256_sample": "x"}}
+        (c / "progress.json").write_text(json.dumps(prog))
+    rc = cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out)))
+    assert rc == 2 and "another teacher (by size and content hash)" in capsys.readouterr().err
+    prog = json.loads((with_ / "progress.json").read_text())
+    prog["run"]["teacher"]["size"] = 10
+    (with_ / "progress.json").write_text(json.dumps(prog))
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+
+
+def test_census_keeps_the_closing_markup_out_of_the_trace_ranges(tmp_path, tok):
+    """A reply-think row's positions before the content start cover the
+    trace and then the template's closing markup. eval anchors trace
+    ranges at the student's trace start, whose markup may differ, so a
+    high-delta position inside the markup is kept out of the map."""
+    tk = _with_template(tok, _TEMPLATE_TRACE)
+    trace = "the cat"
+    closing = "</think>\n"
+    convs = [[{"role": "user", "content": f"say it {i}"},
+              {"role": "assistant", "content": r, "reasoning_content": trace}] for i, r in enumerate(REPLIES)]
+    off = len(trace) + len(closing)
+    common = dict(frame="reply-think", reason_target=True, content_offset=off)
+    without = _reply_cache(tmp_path / "without", tk, convs, doc_prefix="a.jsonl", **common)
+    # 4 starts "cat" inside the trace, 8 starts "/" inside the markup, off starts the content
+    with_ = _reply_cache(tmp_path / "with", tk, convs, doc_prefix="a.jsonl", boost={4: 6.0, 8: 6.0, off: 6.0},
+                         seed=5, **common)
+    text, spans = dl.render_row(tk, convs[0], open_tail=False, last_only=True,
+                                reason_target=True)
+    b0 = spans[-1][0]
+    assert text[b0:b0 + off] == (trace + closing).encode()
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert len(s["high_delta_trace"]) == len(REPLIES)
+    assert all(v == [[4, 7]] for v in s["high_delta_trace"].values()), s["high_delta_trace"]
+    assert all(len(v) == 1 and v[0][0] == 0 for v in s["high_delta"].values()), s["high_delta"]
+    assert s["teacher_high_delta"]["positions"] == 2 * len(REPLIES)

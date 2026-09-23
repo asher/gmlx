@@ -33,6 +33,7 @@ import math
 import sys
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from gmlx.envflags import env_bool
 
@@ -79,18 +80,21 @@ def tiled_heads() -> bool:
     return bool(getattr(gd, "_gmlx_tiled_v_patched", False))
 
 
-def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array,
+def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array | None,
                       beta: mx.array, state: mx.array | None = None,
                       mask: mx.array | None = None,
-                      chunk: int = 64, tiled: bool | None = None) -> tuple[mx.array, mx.array]:
+                      chunk: int = 64, tiled: bool | None = None, *,
+                      log_g: mx.array | None = None) -> tuple[mx.array, mx.array]:
     """Chunked gated delta rule with ``gated_delta_ops``' shapes: q, k
     [B, T, Hk, Dk]; v [B, T, Hv, Dv]; g, beta [B, T, Hv] (g the decay
     factor); state [B, Hv, Dv, Dk] or None; mask [B, T] bool or None.
     Returns y [B, T, Hv, Dv] in q's dtype and the final state in float32.
     ``tiled`` picks the K->V head mapping when Hv > Hk: grouped (value
     head hv reads key head hv // r) or tiled (hv % Hk, the GGUF layout);
-    None follows ``tiled_heads``."""
-    if g.ndim != 3:
+    None follows ``tiled_heads``. ``log_g`` is the log decay in place of
+    ``g`` (g is then None): a model that computes its decay as exp(-x)
+    passes -x, so a decay that underflows to 0 keeps a finite gradient."""
+    if (g if log_g is None else log_g).ndim != 3:
         raise ValueError("gated_delta_chunk takes scalar gating g[B, T, Hv]")
     B, T, Hk, Dk = q.shape
     Hv, Dv = v.shape[-2:]
@@ -109,7 +113,13 @@ def gated_delta_chunk(q: mx.array, k: mx.array, v: mx.array, g: mx.array,
     k = k.astype(mx.float32)
     v = v.astype(mx.float32)
     beta = beta.astype(mx.float32)
-    lg = mx.maximum(mx.log(g.astype(mx.float32)), LOG_FLOOR)
+    if log_g is not None:
+        lg = mx.maximum(log_g.astype(mx.float32), LOG_FLOOR)
+    else:
+        # the floor goes under the log: a decay of exactly 0 (an
+        # underflowed reset gate) would send maximum's zero cotangent
+        # through log's 1/x and give a NaN gradient
+        lg = mx.log(mx.maximum(g.astype(mx.float32), math.exp(LOG_FLOOR)))
     if mask is not None:
         m = mask.astype(mx.bool_)[..., None]                    # [B, T, 1]
         beta = mx.where(m, beta, 0.0)       # no update at padded positions
@@ -169,10 +179,11 @@ def gated_delta_update_chunked(q, k, v, a, b, A_log, dt_bias, state=None,
                                mask=None, chunk: int = 64):
     """``gated_delta_update``'s signature (gates from a, b, A_log, dt_bias)
     on the chunked path; scalar gating only."""
-    from mlx_lm.models.gated_delta import compute_g
     beta = mx.sigmoid(b)
-    g = compute_g(A_log, a, dt_bias)
-    return gated_delta_chunk(q, k, v, g, beta, state, mask, chunk=chunk)
+    # compute_g's exponent, passed as the log decay: exp then log would
+    # lose a reset gate whose decay underflows to 0
+    log_g = -mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias)
+    return gated_delta_chunk(q, k, v, None, beta, state, mask, chunk=chunk, log_g=log_g)
 
 
 _F32_GEMM_EXACT: dict[str, bool] = {}   # per default device: a suite moves between devices

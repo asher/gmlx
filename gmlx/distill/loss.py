@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import mlx.core as mx
 
 from .cache import log1mexp
-from .constants import LOG_FLOOR, NEG_INF
+from .constants import DEFAULT_KNOBS, LOG_FLOOR, NEG_INF
 from .head import HeadSpec, chunked_head, chunked_head_vjp
 
 # a finite stand-in for -inf at pads inside the softmax branches (see bucketed_kl)
@@ -114,15 +114,34 @@ def scatter_back(values, positions, B: int, Tm1: int):
     return flat.reshape(B, Tm1)
 
 
+def chunk_loglik(onpath_full, chunk_start, chunk_end, max_chunk_len: int):
+    """[B, Nc] sum of on-path log-probs over each chunk's positions, start
+    to end inclusive, at most ``max_chunk_len`` of them. Each chunk is
+    summed over its own entries: a difference of two row-wide float32
+    cumulative sums carries the rounding of the whole row, about 1e-3
+    nats at 8192 positions. Positions past the row's end read its last
+    entry and are masked out."""
+    import mlx.core as mx
+    Tm1 = int(onpath_full.shape[1])
+    length = chunk_end - chunk_start
+    ll = mx.zeros(chunk_start.shape, dtype=mx.float32)
+    for j in range(int(max_chunk_len)):
+        at = mx.minimum(chunk_start + j, Tm1 - 1)
+        ll = ll + mx.where(j <= length, mx.take_along_axis(onpath_full, at, axis=1), 0.0)
+    return ll
+
+
 def alm_term(onpath_full, log_bm_full, chunk_start, chunk_end, chunk_teacher_ll,
-             chunk_teacher_log_bm, chunk_mask, *, tau: float = 1.0):
+             chunk_teacher_log_bm, chunk_mask, *, tau: float = 1.0,
+             max_chunk_len: int = DEFAULT_KNOBS["max_chunk_len"]):
     """Mean over kept chunks of KL_bern(teacher || student) on the chunk
     likelihood times the chunk-end boundary mass. Pads carry start = end =
-    0 and are zeroed by chunk_mask; no negative index reaches the gather."""
+    0 and are zeroed by chunk_mask; no negative index reaches the gather.
+    A chunk's log-likelihood is summed over its own positions, at most
+    ``max_chunk_len`` of them (the view cut longer chunks), by
+    ``chunk_loglik``."""
     import mlx.core as mx
-    B, Tm1 = onpath_full.shape
-    cs = mx.cumsum(mx.concatenate([mx.zeros((B, 1), dtype=mx.float32), onpath_full], axis=1), axis=1)
-    ll = mx.take_along_axis(cs, chunk_end + 1, axis=1) - mx.take_along_axis(cs, chunk_start, axis=1)
+    ll = chunk_loglik(onpath_full, chunk_start, chunk_end, max_chunk_len)
     bm_s = mx.take_along_axis(log_bm_full, chunk_end + 1, axis=1)
     log_a = (chunk_teacher_ll + chunk_teacher_log_bm) / tau
     log_b = (ll + bm_s) / tau
@@ -160,7 +179,7 @@ def loss_from_head_outputs(onpath, Q_slot, log_bm, batch: dict, *, knobs: dict, 
         log_bm_full = scatter_back(log_bm, positions[:n_bnd], B, Tm1)
         alm, n_chunks = alm_term(onpath_full, log_bm_full, batch["chunk_start"], batch["chunk_end"],
                                  batch["chunk_teacher_ll"], batch["chunk_teacher_log_bm"],
-                                 batch["chunk_mask"], tau=knobs["tau_alm"])
+                                 batch["chunk_mask"], tau=knobs["tau_alm"], max_chunk_len=knobs["max_chunk_len"])
         aux["alm"] = alm
         aux["n_chunks"] = n_chunks
         loss = loss + knobs["lambda_alm"] * alm

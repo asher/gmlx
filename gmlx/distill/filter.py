@@ -369,11 +369,14 @@ def run_filter(opts: FilterOptions) -> int:
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "budget_unenforced": unenforced, "inputs": [str(p) for p in inputs]}
     joined = [(p, s) for p, s in zip(inputs, sides) if s is not None]
-    if joined and isinstance(joined[0][1].get("run"), dict):
+    if joined:
         # the run block keeps what gen measured (a join adds the inputs'
-        # counts up), and the survivors' totals sit beside it under kept
+        # counts up), and the survivors' totals sit beside it under kept;
+        # an input whose sidecar holds no run block (a run cut short) is
+        # counted from its rows
         from .gen import row_totals
-        runs = [s.get("run") or {} for _, s in joined]
+        runs = [dict(s["run"]) if isinstance(s.get("run"), dict) else {**row_totals(p), "wall_s": 0.0}
+                for p, s in joined]
         run = dict(runs[0])
         if len(joined) > 1:
             for k in ("completed", "failed", "generated_tokens", "stops", "budget_hits", "budget_unenforced"):

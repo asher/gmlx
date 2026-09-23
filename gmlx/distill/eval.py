@@ -24,6 +24,7 @@ from .frames import (
     shared_boundaries_spans,
     target_mask,
 )
+from .constants import LOG_FLOOR
 from .tokens import adds_bos, bos_id, encode_with_byte_ends
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,22 @@ def _target_logprobs(logits, targets: np.ndarray) -> np.ndarray:
         mx.eval(lp)
         rows.append(np.asarray(lp))
     return np.stack(rows)
+
+
+def sparse_kl(lp: np.ndarray, lq: np.ndarray, log_q_tail: np.ndarray) -> np.ndarray:
+    """KL(teacher || student) per position over the partition of the
+    teacher's stored top-k and its tail, in float64: the stored entries
+    [P, K] against the student's log-probs at the same ids, plus the
+    teacher's mass outside its top-k against the student's log mass
+    outside those ids, floored at the float32 underflow. A stored entry
+    with no mass (a pad, or -inf) contributes nothing."""
+    p = np.exp(lp)
+    with np.errstate(invalid="ignore"):
+        terms = np.where(p > 0, p * (lp - lq), 0.0)
+    rest = np.maximum(1.0 - p.sum(axis=1), 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tail = np.where(rest > 0, rest * (np.log(rest) - np.maximum(log_q_tail, LOG_FLOOR)), 0.0)
+    return terms.sum(axis=1) + tail
 
 
 def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
@@ -177,6 +194,9 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
         sel_pos = mx.array(s_pos)
         pos = t_pos
         idx = arrs["top_k_indices"][pos].astype(np.int32)
+        # a pad (no id) reads the leader's column; its stored entry has
+        # no mass, so it contributes nothing either way
+        idx = np.where(idx >= 0, idx, idx[:, :1])
 
         def forward():
             if head is not None:
@@ -195,29 +215,28 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
             replayed += 1
         else:
             gathered = forward()
-        lq_parts, top1_parts = [], []
+        lq_parts, lt_parts, top1_parts = [], [], []
         step = max(1, int(head_chunk)) if head is not None else len(s_pos)
         for c0 in range(0, len(s_pos), step):
             part = gathered[c0:c0 + step]
             z = _head_logits_f32(head, head.current(), part) if head is not None else part
             lsm = z - mx.logsumexp(z, axis=-1, keepdims=True)
-            lq_c = mx.take_along_axis(lsm, mx.array(idx[c0:c0 + step]), axis=-1)
+            idx_c = mx.array(idx[c0:c0 + step])
+            lq_c = mx.take_along_axis(lsm, idx_c, axis=-1)
             top1_c = mx.argmax(lsm, axis=-1)
-            mx.eval(lq_c, top1_c)
+            # the student's mass outside the teacher's top-k, summed at
+            # full width: one minus the top-k mass floors at a confident
+            # position and would inflate the tail term
+            lt_c = mx.logsumexp(mx.put_along_axis(lsm, idx_c, mx.array(-mx.inf), axis=-1), axis=-1)
+            mx.eval(lq_c, top1_c, lt_c)
             lq_parts.append(np.asarray(lq_c))
+            lt_parts.append(np.asarray(lt_c))
             top1_parts.append(np.asarray(top1_c))
         lq = np.concatenate(lq_parts).astype(np.float64) if lq_parts else np.zeros((0, idx.shape[1]))
+        lt = np.concatenate(lt_parts).astype(np.float64) if lt_parts else np.zeros(0)
         top1 = np.concatenate(top1_parts) if top1_parts else np.zeros(0, dtype=np.int64)
         lp = arrs["top_k_log_softmax"][pos].astype(np.float64)
-        p = np.exp(lp)
-        M = p.sum(axis=1)
-        kl = (p * (lp - lq)).sum(axis=1)
-        q_tail = np.maximum(1.0 - np.exp(lq).sum(axis=1), 2.0 ** -126)
-        rest = np.maximum(1.0 - M, 0.0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            tail = np.where(rest > 0, rest * (np.log(rest) - np.log(q_tail)), 0.0)
-        kl = kl + tail
-        row_kl.append(float(kl.sum()))
+        row_kl.append(float(sparse_kl(lp, lq, lt).sum()))
         row_hits.append(int((np.asarray(top1) == arrs["top_k_indices"][pos, 0]).sum()))
         row_n.append(len(pos))
     n_pos = int(sum(row_n))

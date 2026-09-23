@@ -199,6 +199,18 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         # survives a student template that frames the trace differently;
         # the trace's own positions stay relative to the trace start
         cut = int(meta0.get("content_start", b0)) - b0
+        # the trace's own bytes when the row renders one: the positions
+        # after them and before the content are the template's closing
+        # markup, which eval cannot anchor on a student whose markup
+        # differs. A trace the row's messages do not spell as rendered
+        # keeps every position before the content
+        trace_len = None
+        msgs0 = meta0.get("messages") or []
+        rc = msgs0[-1].get("reasoning_content") if msgs0 and isinstance(msgs0[-1], dict) else None
+        if isinstance(rc, str) and rc:
+            tb = rc.encode("utf-8")
+            if text0[b0:b0 + len(tb)] == tb:
+                trace_len = len(tb)
         sides = []
         ok = True
         history = None
@@ -251,8 +263,10 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
                 nbytes = int(ends0[t0 + 1] - ends0[t0])
                 if r >= cut:
                     ranges.append([r - cut, r - cut + nbytes])
-                else:
+                elif trace_len is None or r + nbytes <= trace_len:
                     tranges.append([r, r + nbytes])
+                else:
+                    continue
                 hd["without"] += -on0
                 hd["with"] += -on1
                 hd["bytes"] += nbytes
@@ -320,14 +334,59 @@ def report_markdown(opts: CensusOptions, s: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def cache_mismatch(base_dir: Path, base: dict, other_dir: Path, other: dict) -> str | None:
+    """What keeps two caches from being compared position by position:
+    another tokenizer (the stored ids would index two vocabularies),
+    another top-k or head width (the pooled tail would differ by
+    construction), or another teacher (the delta would measure the
+    teacher change, not the context). The teacher compares by the size
+    and content hash progress.json records when both caches have one,
+    and by the manifest's arch otherwise."""
+    for key, name in (("tokenizer_hash", "tokenizer"), ("top_k", "top-k"), ("vocab_size", "head width")):
+        if base.get(key) != other.get(key):
+            return f"{name} ({base.get(key)!r} vs {other.get(key)!r})"
+    ta = (base.get("gmlx_distill") or {}).get("teacher") or {}
+    tb = (other.get("gmlx_distill") or {}).get("teacher") or {}
+    if ta.get("arch") != tb.get("arch"):
+        return f"teacher arch ({ta.get('arch')!r} vs {tb.get('arch')!r})"
+    fa, fb = _teacher_fingerprint(base_dir), _teacher_fingerprint(other_dir)
+    if fa and fb and fa != fb:
+        return "teacher (by size and content hash)"
+    return None
+
+
+def _teacher_fingerprint(cache_dir: Path) -> dict | None:
+    """The teacher block of the cache's run fingerprint, None when the
+    cache has no progress.json or it records none."""
+    try:
+        run = json.loads((cache_dir / "progress.json").read_text(encoding="utf-8")).get("run") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    t = run.get("teacher") if isinstance(run, dict) else None
+    return dict(t) if isinstance(t, dict) else None
+
+
 def run_census(opts: CensusOptions) -> int:
     """Pair the caches, measure, and write the JSON (and Markdown).
-    Returns 0, or 2 when a cache directory has no manifest or no rows
-    pair across the caches."""
+    Returns 0, or 2 when a cache directory has no manifest, a --with
+    cache was made by another teacher, tokenizer or top-k than
+    --without, or no rows pair across the caches."""
     caches = [Path(opts.without).expanduser()] + [Path(c).expanduser() for c in opts.with_]
+    manifests = []
     for c in caches:
         if not (c / "manifest.json").is_file():
             print(f"[census] refuse: no manifest in {c}", file=sys.stderr)
+            return 2
+        try:
+            manifests.append(json.loads((c / "manifest.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            print(f"[census] refuse: cannot read the manifest in {c} ({e})", file=sys.stderr)
+            return 2
+    for c, m in zip(caches[1:], manifests[1:]):
+        diff = cache_mismatch(caches[0], manifests[0], c, m)
+        if diff:
+            print(f"[census] refuse: {c} was made with another {diff} than {caches[0]}; the census pairs caches "
+                  "of one teacher, tokenizer and top-k", file=sys.stderr)
             return 2
     base = reply_rows(caches[0], opts.pair_by)
     ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]

@@ -561,3 +561,48 @@ def test_qwen3next_training_forward_stays_stock_under_sharding(monkeypatch):
     y = mod(mx.random.normal((2, 37, 64)))
     mx.eval(y)
     assert calls == []
+
+
+def test_chunk_gradient_stays_finite_when_a_decay_gate_underflows():
+    """One token asking for a hard reset drives its decay exp(-x) to
+    exactly 0. The chunked path must keep a finite gradient there and
+    match the per-token loop, on the update wrapper (the log decay is
+    passed directly) and on gated_delta_chunk fed the decay itself."""
+    B, T, H, Dk, Dv = 1, 8, 2, 4, 4
+    r = np.random.default_rng(0)
+    q = mx.array(r.standard_normal((B, T, H, Dk)).astype(np.float32))
+    k = mx.array(r.standard_normal((B, T, H, Dk)).astype(np.float32) * 0.3)
+    v = mx.array(r.standard_normal((B, T, H, Dv)).astype(np.float32))
+    a = r.standard_normal((B, T, H)).astype(np.float32)
+    a[0, 3, 0] += 200.0
+    a = mx.array(a)
+    b = mx.array(r.standard_normal((B, T, H)).astype(np.float32))
+    A_log = mx.array([2.0, 1.0])
+    dt = mx.zeros((H,))
+    assert float(gd.compute_g(A_log, a, dt).min()) == 0.0
+
+    def f_chunk(a):
+        y, _s = tg.gated_delta_update_chunked(q, k, v, a, b, A_log, dt, None, None, chunk=4)
+        return y.sum()
+
+    def f_loop(a):
+        y, _s = gd.gated_delta_update(q, k, v, a, b, A_log, dt, None, None, use_kernel=False)
+        return y.sum()
+
+    vc, gc = mx.value_and_grad(f_chunk)(a)
+    vl, gl = mx.value_and_grad(f_loop)(a)
+    mx.eval(vc, gc, vl, gl)
+    assert np.isfinite(np.array(gc)).all()
+    assert np.allclose(float(vc), float(vl), atol=1e-4)
+    assert np.allclose(np.array(gc), np.array(gl), atol=1e-4, rtol=1e-3)
+    # the decay itself, with a zero in it
+    g = gd.compute_g(A_log, a, dt)
+    beta = mx.sigmoid(b)
+
+    def f_g(g):
+        y, _s = tg.gated_delta_chunk(q, k, v, g, beta, chunk=4)
+        return y.sum()
+
+    gg = mx.grad(f_g)(g)
+    mx.eval(gg)
+    assert np.isfinite(np.array(gg)).all()

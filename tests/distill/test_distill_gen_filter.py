@@ -26,13 +26,15 @@ from gmlx.distill import gen
 class _Handler(BaseHTTPRequestHandler):
     calls: list = []
     model_id: str = "stub-teacher"
+    model_ids: list | None = None       # several served models, in place of model_id
     fail_once: set = set()              # first words whose first request fails with a 500
 
     def log_message(self, *a):  # silence
         pass
 
     def do_GET(self):
-        body = json.dumps({"data": [{"id": type(self).model_id}]}).encode()
+        ids = type(self).model_ids or [type(self).model_id]
+        body = json.dumps({"data": [{"id": i} for i in ids]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -76,6 +78,7 @@ class _Handler(BaseHTTPRequestHandler):
 def stub_server():
     _Handler.calls = []
     _Handler.model_id = "stub-teacher"
+    _Handler.model_ids = None
     _Handler.fail_once = set()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -1560,3 +1563,124 @@ def test_the_close_allowance_matches_the_spawned_server_and_a_base_url_takes_the
     assert gen.close_tokens(_ThinkTokenizer(), spawned=True) == gen.CLOSE_ALLOWANCE
     assert gen.close_tokens(_ThinkTokenizer(), spawned=False) == len(BUDGET_WRAP_PHRASE.split()) + 1
     assert gen.close_tokens(_WordTokenizer(), spawned=False) == gen.CLOSE_ALLOWANCE
+
+
+def test_gen_refuses_a_thinking_key_in_the_template_kwargs(tmp_path, stub_server, capsys):
+    """serve maps the thinking switch gen sends onto the template's own
+    variable and the mapped switch wins over a same-named kwarg, so a
+    kwarg naming one is refused before any request."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    for kw in ('{"enable_thinking": true}', '{"thinking": false}', '{"thinking_mode": "on", "x": 1}'):
+        rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server,
+                                        chat_template_kwargs=kw))
+        err = capsys.readouterr().err
+        assert rc == 2 and "[gen] refuse: --chat-template-kwargs sets " in err and "use --thinking" in err
+    assert _Handler.calls == [] and not out.exists()
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server,
+                                      chat_template_kwargs='{"x": 1}')) == 0
+    assert _Handler.calls[-1]["chat_template_kwargs"] == {"x": 1} and _Handler.calls[-1]["thinking"] == "off"
+
+
+def test_gen_resume_ends_a_last_row_lacking_its_newline_and_refuses_a_row_without_an_id(tmp_path, stub_server,
+                                                                                         capsys):
+    """A complete last row with no newline after it (an editor's save)
+    gets one before the next row is appended, so the rows stay one per
+    line; a complete last row with no id is a bad row, not a torn one."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    data = out.read_bytes()
+    assert data.endswith(b"\n")
+    out.write_bytes(data[:-1])
+    prompts = _prompts(tmp_path / "p.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    capsys.readouterr()
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    assert "ended the last row of" in capsys.readouterr().err
+    assert [r["id"] for r in _rows(out)] == ["a", "b"] and out.read_bytes().count(b"\n") == 2
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"messages": [{"role": "user", "content": "gamma"}]}))
+    before = out.read_bytes()
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "line 3 is not a JSON row with an id" in err and "torn" not in err
+    assert out.read_bytes() == before
+
+
+def test_gen_rerun_with_nothing_to_do_writes_the_run_block(tmp_path, stub_server):
+    """A rerun that finds every prompt answered contacts no server, but a
+    sidecar left without a run block (a run cut short) or missing
+    altogether still gains one from the rows, so filter and cache read
+    the corpus as generated."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    side = out.with_suffix(out.suffix + ".gen.json")
+    out.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": "alpha"},
+                                                   {"role": "assistant", "content": "x"}],
+                               "gen": {"finish_reason": "stop", "completion_tokens": 7}}) + "\n")
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)
+    assert gen.run_gen(opts) == 0 and _Handler.calls == []
+    got = json.loads(side.read_text())
+    assert got["run"] == {**got["run"], "completed": 1, "generated_tokens": 7, "stops": 1, "failed": 0}
+    assert {k: got[k] for k in gen.run_settings(opts)} == gen.run_settings(opts) and got["prompts"] == 1
+    got["run"] = None
+    got["served_model_id"] = "earlier"
+    side.write_text(json.dumps(got))
+    assert gen.run_gen(opts) == 0 and _Handler.calls == []
+    again = json.loads(side.read_text())
+    assert again["served_model_id"] == "earlier" and again["run"]["completed"] == 1
+    # a run block already there is left alone
+    again["run"]["completed"] = 5
+    side.write_text(json.dumps(again))
+    assert gen.run_gen(opts) == 0
+    assert json.loads(side.read_text())["run"]["completed"] == 5
+
+
+def test_gen_picks_the_served_model_named_like_the_teacher_among_several(tmp_path, stub_server, capsys):
+    """A --base-url server listing several models: the one named like
+    --teacher serves the run, and none or several matching is an error,
+    since the first id listed is an arbitrary model."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    _Handler.model_ids = ["other-model", "teacher-Q4_K_M.gguf"]
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[gen] error: the server lists 2 models (other-model, teacher-Q4_K_M.gguf) and none match" in err
+    assert _Handler.calls == []
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server,
+                          teacher=str(tmp_path / "models" / "teacher-Q4_K_M.gguf"))
+    assert gen.run_gen(opts) == 0
+    assert all(c["model"] == "teacher-Q4_K_M.gguf" for c in _Handler.calls) and len(_Handler.calls) == 2
+    assert json.loads(out.with_suffix(out.suffix + ".gen.json").read_text())["served_model_id"] == "teacher-Q4_K_M.gguf"
+    _Handler.model_ids = ["teacher-Q4_K_M.gguf", "teacher-Q4_K_M"]
+    rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "c2.jsonl"), prompts=prompts, base_url=stub_server,
+                                    teacher="teacher-Q4_K_M.gguf"))
+    assert rc == 2 and "several match" in capsys.readouterr().err
+
+
+def test_filter_counts_an_input_whose_sidecar_has_no_run_block_from_its_rows(tmp_path):
+    """A gen cut short leaves its sidecar with run null. filter counts
+    that input's rows itself, alone or in a join, instead of writing a
+    null run block or counting the input as zero."""
+    def gen_file(name, n, run):
+        p = tmp_path / f"{name}.jsonl"
+        p.write_text("".join(json.dumps(_row(f"{name}{i}", GOOD, tokens=10)) + "\n" for i in range(n)))
+        (tmp_path / f"{name}.jsonl.gen.json").write_text(json.dumps({
+            "gen_version": "3", "model": "m", "prompts": n, "prompt_source": f"{name}-prompts.jsonl",
+            "prompt_set_sha256": name * 4, "run": run}))
+        return p
+
+    a = gen_file("a", 2, None)
+    b = gen_file("b", 3, {"completed": 3, "failed": 0, "wall_s": 4.0, "stops": 3, "stop_fraction": 1.0, "generated_tokens": 30,
+                          "longest_stopped_reply_tokens": 10, "tok_s_aggregate": 9.0, "concurrency": 2})
+    fa = tmp_path / "fa.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(fa))) == 0
+    run = json.loads((tmp_path / "fa.jsonl.gen.json").read_text())["run"]
+    assert run == {**run, "completed": 2, "generated_tokens": 20, "stops": 2, "wall_s": 0.0}
+    for inputs in ([str(a), str(b)], [str(b), str(a)]):
+        j = tmp_path / "j.jsonl"
+        assert flt.run_filter(flt.FilterOptions(inputs=inputs, out=str(j))) == 0
+        run = json.loads((tmp_path / "j.jsonl.gen.json").read_text())["run"]
+        assert run["completed"] == 5 and run["generated_tokens"] == 50 and run["wall_s"] == 4.0
+        assert run["kept"]["completed"] == 5

@@ -6608,3 +6608,135 @@ def test_header_tokenizer_carries_the_bundled_template_and_transforms_of_its_arc
     assert tok.apply_chat_template(msgs, tokenize=False) == "True"
     monkeypatch.setitem(_cs.GGUF_ARCH_TO_MODEL_TYPE, "qwen2", "qwen2")
     assert _tokens.tokenizer_from_gguf(str(path)).apply_chat_template(msgs, tokenize=False) == "False"
+
+
+def test_align_takes_the_general_path_on_an_unframed_cache_the_student_segments_differently(tmp_path, tok_bl,
+                                                                                            capsys):
+    """An equal vocabulary is not an equal tokenization: a student with the
+    same id-to-token map and no merges segments every row into other ids
+    than the cache holds, so an unframed cache must not forward the
+    cached ids to it as the identity path would."""
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+    from gmlx.distill import view as _view
+    teacher = tok_bl
+    vocab = {k: i for k, i in teacher.get_vocab().items() if k not in ("<eos>", "<bos>")}
+    tk = Tokenizer(models.BPE(vocab=vocab, merges=[]))
+    tk.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
+    tk.decoder = decoders.ByteLevel()
+    student = PreTrainedTokenizerFast(tokenizer_object=tk, eos_token="<eos>", bos_token="<bos>")
+    assert teacher.get_vocab() == student.get_vocab()
+    assert dl.identity_pair(teacher, student) == (True, "equal vocab maps")
+    _tiny_cache(tmp_path / "c", teacher, K=8)
+    teacher.save_pretrained(tmp_path / "c" / "tokenizer")
+    student.save_pretrained(tmp_path / "s")
+    reader = dl.CacheReader(tmp_path / "c")
+    _arrs, text, _meta = reader.row(0)
+    assert student.encode(text.decode("utf-8"), add_special_tokens=False) != list(reader.token_ids([0])[0])
+    capsys.readouterr()
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "c"), student=str(tmp_path / "s"),
+                                              out=str(tmp_path / "v"))) == 0
+    err = capsys.readouterr().err
+    assert "[align] unframed cache: student encoding differs (row 0:" in err and "path=general" in err
+    view = json.loads((tmp_path / "v" / "view.json").read_text())
+    assert view["identity"] is False
+    # the teacher itself still takes the identity path, every row checked
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "c"), student=str(tmp_path / "c" / "tokenizer"),
+                                              out=str(tmp_path / "v2"))) == 0
+    err = capsys.readouterr().err
+    assert f"[align] unframed cache: student encoding matches ({len(reader)} rows)" in err
+    assert json.loads((tmp_path / "v2" / "view.json").read_text())["identity"] is True
+
+
+def test_students_whose_special_strings_swap_ids_share_no_tables_identity_or_view(tmp_path, tok_bl):
+    """The vocab hash leaves special ids out, so two students whose special
+    strings swap ids hash alike. They are not an identity pair, a tables
+    artifact built for one is rebuilt for the other (the identical-added
+    map is keyed by string), and a view aligned with one refuses the
+    other as its student."""
+    import string
+    from gmlx.distill import view as _view
+    from gmlx.distill.align import same_roles
+    teacher = _bytelevel_tokenizer(_BL_MERGES)
+    teacher.add_special_tokens({"additional_special_tokens": ["<|a|>", "<|b|>"]})
+    pieces = ["\u2581"] + list(string.ascii_letters + string.digits + ".,!?\n")
+
+    def student(extra):
+        s = _spm_tokenizer(pieces, [])
+        s.add_special_tokens({"additional_special_tokens": extra})
+        return s
+
+    A, B = student(["<|a|>", "<|x|>"]), student(["<|x|>", "<|a|>"])
+    assert dl.vocab_map_hash(A) == dl.vocab_map_hash(B) and len(A) == len(B)
+    ident, why = dl.identity_pair(A, B)
+    assert not ident and why.startswith("special token strings differ at id ")
+    assert dl.identity_pair(A, A)[0]
+    assert _view.student_identity(A) != _view.student_identity(B)
+    assert _view.student_identity(A)["specials"] != _view.student_identity(B)["specials"]
+    tA, tB = dl.build_tables(teacher, A), dl.build_tables(teacher, B)
+    assert tA.roles["identical_added"] != tB.roles["identical_added"]
+    assert not same_roles(tA.roles, tB.roles) and same_roles(tA.roles, dl.build_tables(teacher, A).roles)
+    dl.save_tables(tmp_path / "t", tA)
+    got = _view.get_tables(teacher, B, tmp_path / "t", tmp_path / "v", V_T=None, V_S=None)
+    assert got.roles == tB.roles and np.array_equal(got.v1, tB.v1)
+    ta = teacher.convert_tokens_to_ids("<|a|>")
+    ua = B.convert_tokens_to_ids("<|a|>")
+    assert list(np.nonzero(got.group_of == got.target_g[ta])[0]) == [ua]
+
+
+def test_sparse_kl_keeps_the_exact_tail_and_skips_entries_without_mass():
+    """The tail term reads the student's log mass outside the teacher's
+    top-k as the head computes it at full width; one minus the summed
+    top-k mass floors at a confident position and inflates the term. A
+    stored entry with no mass (a pad, or -inf) contributes nothing."""
+    from gmlx.distill.eval import sparse_kl
+    rng = np.random.default_rng(0)
+    V, K, P = 4000, 16, 64
+    z = rng.normal(0, 2, (P, V)).astype(np.float32)
+    z[:, 0] = 25.0 + rng.normal(0, 1, P)
+    lsm = mx.array(z) - mx.logsumexp(mx.array(z), axis=-1, keepdims=True)
+    idx = np.argsort(-z, axis=1)[:, :K].astype(np.int32)
+    lq = np.asarray(mx.take_along_axis(lsm, mx.array(idx), axis=-1)).astype(np.float64)
+    lt = np.asarray(mx.logsumexp(mx.put_along_axis(lsm, mx.array(idx), mx.array(-mx.inf), axis=-1), axis=-1))
+    z64 = z.astype(np.float64)
+    lsm64 = z64 - (np.log(np.exp(z64 - z64.max(1, keepdims=True)).sum(1)) + z64.max(1))[:, None]
+    q_top = np.exp(np.take_along_axis(lsm64, idx.astype(np.int64), 1))
+    tail64 = 1.0 - q_top.sum(1)
+    assert (tail64 < 1e-6).sum() > P // 4       # confident positions, where the subtraction floors
+    assert ((1.0 - np.exp(lq).sum(axis=1)) <= 2.0 ** -126).sum() > 0
+    lp = np.log(np.full((P, K), 0.999 / K))     # the teacher keeps 1e-3 outside its top-k
+    got = sparse_kl(lp, lq, lt.astype(np.float64))
+    p = np.exp(lp)
+    want = (p * (lp - lq)).sum(1) + 1e-3 * (np.log(1e-3) - np.log(tail64))
+    assert np.allclose(got, want, rtol=1e-4, atol=1e-6)
+    lp2 = lp.copy()
+    lp2[:, -1] = -np.inf
+    got2 = sparse_kl(lp2, lq, lt.astype(np.float64))
+    p2 = np.exp(lp2)
+    rest2 = 1.0 - p2.sum(1)
+    want2 = (p2[:, :-1] * (lp2[:, :-1] - lq[:, :-1])).sum(1) + rest2 * (np.log(rest2) - np.log(tail64))
+    assert np.isfinite(got2).all() and np.allclose(got2, want2, rtol=1e-4, atol=1e-6)
+
+
+def test_chunk_loglik_sums_each_chunk_exactly_at_depth():
+    """Each chunk's log-likelihood is summed over its own positions: the
+    difference of two row-wide float32 cumulative sums is off by up to
+    1e-3 nats at 8192 positions."""
+    from gmlx.distill.loss import chunk_loglik
+    rng = np.random.default_rng(0)
+    T = 8192
+    on = (rng.normal(-3.0, 1.0, (2, T))).astype(np.float32)
+    starts = np.sort(rng.choice(T - 8, size=(2, 200), replace=False), axis=1).astype(np.int32)
+    lengths = rng.integers(0, 8, size=(2, 200)).astype(np.int32)
+    ends = starts + lengths
+    ll = np.asarray(chunk_loglik(mx.array(on), mx.array(starts), mx.array(ends), 8)).astype(np.float64)
+    want = np.array([[on[b, s:e + 1].astype(np.float64).sum() for s, e in zip(starts[b], ends[b])] for b in range(2)])
+    assert np.abs(ll - want).max() < 2e-5
+    cs = np.cumsum(np.concatenate([np.zeros((2, 1), np.float32), on], axis=1).astype(np.float32), axis=1,
+                   dtype=np.float32)
+    old = np.take_along_axis(cs, ends + 1, 1) - np.take_along_axis(cs, starts, 1)
+    assert np.abs(old - want).max() > 2e-4
+    # a pad chunk (start = end = 0) reads one entry, and an end past the row is clamped
+    ll0 = np.asarray(chunk_loglik(mx.array(on), mx.array(np.array([[0, T - 2]], np.int32)), mx.array(np.array([[0, T + 5]], np.int32)),
+                                  8))
+    assert np.isclose(ll0[0, 0], on[0, 0]) and np.isfinite(ll0[0, 1])

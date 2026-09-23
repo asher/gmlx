@@ -144,17 +144,37 @@ def _pad_style(tok: str | None) -> bool:
         or tok.startswith("<unused") or tok.startswith("<|pad")
 
 
+def specials_digest(tokenizer) -> str:
+    """A 16-hex-digit SHA-256 prefix over {id: string} of the special and
+    added tokens, the ids the vocab hash leaves out, so two tokenizers
+    that share the hash but spell a special differently at one id are
+    told apart."""
+    import hashlib
+    inner = hf_inner(tokenizer)
+    ids = {int(i) for i in inner.all_special_ids}
+    ids |= {int(k) for k in getattr(inner, "added_tokens_decoder", {})}
+    h = hashlib.sha256()
+    for tid in sorted(ids):
+        h.update(f"{tid}\t{inner.convert_ids_to_tokens(tid)}\n".encode("utf-8", errors="replace"))
+    return h.hexdigest()[:16]
+
+
 def identity_pair(teacher_tok, student_tok) -> tuple[bool, str]:
     """Equal vocab maps, or the shorter a prefix of the longer with only
-    pad-style surplus ids. Returns (identity, reason)."""
+    pad-style surplus ids, with the same string at every special id both
+    hold (the hash leaves those out). Returns (identity, reason)."""
     ti, si = hf_inner(teacher_tok), hf_inner(student_tok)
     nt, ns = len(ti), len(si)
     n = min(nt, ns)
+    spec = set(ti.all_special_ids) | set(si.all_special_ids)
+    for i in sorted(spec):
+        if i < n and ti.convert_ids_to_tokens(i) != si.convert_ids_to_tokens(i):
+            return False, (f"special token strings differ at id {i}: {ti.convert_ids_to_tokens(i)!r} vs "
+                           f"{si.convert_ids_to_tokens(i)!r}")
     if vocab_map_hash(ti) == vocab_map_hash(si) and nt == ns:
         return True, "equal vocab maps"
     tt = ti.convert_ids_to_tokens(list(range(n)))
     st = si.convert_ids_to_tokens(list(range(n)))
-    spec = set(ti.all_special_ids) | set(si.all_special_ids)
     for i in range(n):
         if i in spec:
             continue

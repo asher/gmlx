@@ -43,6 +43,9 @@ RETOKENIZE_SLACK = 2
 UNENFORCED_MARGIN = 32
 # serve flags that install a drafter, whose budget close differs
 DRAFTER_FLAGS = ("--native-mtp", "--speculative", "--draft-gguf")
+# the template variables serve's thinking switch is mapped onto; the
+# mapped switch overwrites a same-named kwarg, so gen owns them
+THINKING_KWARGS = ("enable_thinking", "thinking", "thinking_mode")
 
 
 def drafter_flag(arg: str) -> bool:
@@ -252,10 +255,30 @@ def spawn_server(opts: GenOptions, log_path: Path):
     return proc
 
 
-def wait_ready(base_url: str, proc, timeout: float) -> str:
+def pick_model_id(ids: list[str], teacher: str | None) -> str:
+    """The served id gen sends: the only one listed or, among several,
+    the one named like ``--teacher`` (its path, file name or stem).
+    Raises ServerError otherwise, since a request to the first id
+    listed would go to a model the sidecar does not name."""
+    if len(ids) == 1:
+        return ids[0]
+    names: set[str] = set()
+    if teacher:
+        p = Path(teacher).expanduser()
+        names = {teacher, p.name, p.stem}
+    hits = [i for i in ids if i in names or Path(i).name in names or Path(i).stem in names]
+    if len(hits) == 1:
+        return hits[0]
+    raise ServerError(f"the server lists {len(ids)} models ({', '.join(ids)}) and "
+                      f"{'several' if hits else 'none'} match --teacher {teacher!r}; point --base-url at a "
+                      "server holding the teacher alone, or name the served model as --teacher")
+
+
+def wait_ready(base_url: str, proc, timeout: float, teacher: str | None = None) -> str:
     """Poll ``/models`` until it lists a model, then require one 1-token
     completion (the model list answers while the model still preloads).
-    Returns the served model id."""
+    Returns the served model id, chosen by ``pick_model_id`` when the
+    server lists several."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
@@ -263,11 +286,11 @@ def wait_ready(base_url: str, proc, timeout: float) -> str:
         try:
             data = _get_json(base_url + "/models", timeout=3).get("data") or []
             if data:
-                model_id = data[0]["id"]
+                model_id = pick_model_id([str(d["id"]) for d in data], teacher)
                 body = {"model": model_id, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
                 _post_json(base_url + "/chat/completions", body, timeout=120)
                 return model_id
-        except (urllib.error.URLError, OSError, ValueError, ServerError, KeyError):
+        except (urllib.error.URLError, OSError, ValueError, KeyError):
             pass
         time.sleep(2)
     raise ServerError(f"server not ready after {timeout:.0f}s")
@@ -423,6 +446,21 @@ def answer_budget(opts: GenOptions) -> int:
     return opts.max_tokens
 
 
+def sidecar_settings(opts: GenOptions, rows: list, prompt_hash: str, with_context: bool, base_url: str,
+                     model_id: str | None) -> dict:
+    """The sidecar's settings block, everything but the run totals:
+    what a resume compares, the prompt set and the context."""
+    return {"gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url, "served_model_id": model_id,
+            **run_settings(opts),
+            "prompt_source": opts.prompts or opts.corpus,
+            "prompt_set_sha256": prompt_hash, "prompts": len(rows),
+            "instruction": opts.instruction if opts.corpus else None,
+            "prefix_chars": opts.prefix_chars if opts.corpus else None, "filter_version": None,
+            "context": shared_context(opts) or ("per-prompt" if with_context else None),
+            "shared_context": shared_context(opts),
+            "context_format": opts.context_format if with_context else None}
+
+
 def row_totals(out: Path) -> dict:
     """The run totals of every reply row in ``out``, read from the rows'
     ``gen`` blocks, so the totals describe the file after any number of
@@ -453,8 +491,9 @@ def row_totals(out: Path) -> dict:
 def _done_ids(out: Path) -> dict[str, list | None]:
     """The ids already in ``out`` with the prompt each one answered (its
     messages without the reply, None when the row has none). A torn
-    final line (a kill mid-write) is cut off and logged; a bad line
-    anywhere else raises ValueError."""
+    final line (a kill mid-write) is cut off and logged, a complete
+    final row with no newline after it gets one, and a bad line
+    anywhere raises ValueError."""
     done: dict[str, list | None] = {}
     if not out.exists():
         return done
@@ -465,16 +504,25 @@ def _done_ids(out: Path) -> dict[str, list | None]:
     for k, line in enumerate(lines):
         if not line.strip():
             continue
+        # the last element is a line only when no newline ends the data
+        unterminated = k == len(lines) - 1
         try:
             row = json.loads(line.decode("utf-8"))
-            msgs = row.get("messages")
-            done[str(row["id"])] = list(msgs[:-1]) if isinstance(msgs, list) and msgs else None
-        except (ValueError, KeyError, TypeError, AttributeError) as e:
-            if k == len(lines) - 1:
+        except ValueError as e:
+            if unterminated:
                 write_bytes_atomic(out, data[:len(data) - len(line)])
                 log(f"[gen] dropped a torn last line of {out} ({len(line)} bytes)")
                 break
+            raise ValueError(f"{out}: line {k + 1} is not a JSON row ({e})") from e
+        try:
+            msgs = row.get("messages")
+            done[str(row["id"])] = list(msgs[:-1]) if isinstance(msgs, list) and msgs else None
+        except (KeyError, TypeError, AttributeError) as e:
             raise ValueError(f"{out}: line {k + 1} is not a JSON row with an id ({e})") from e
+        if unterminated:
+            # the next row would otherwise be written onto this line
+            write_bytes_atomic(out, data + b"\n")
+            log(f"[gen] ended the last row of {out} with the newline it lacked")
     return done
 
 
@@ -590,10 +638,17 @@ def run_gen(opts: GenOptions) -> int:
         return 2
     if opts.chat_template_kwargs:
         try:
-            if not isinstance(json.loads(opts.chat_template_kwargs), dict):
+            template_kw = json.loads(opts.chat_template_kwargs)
+            if not isinstance(template_kw, dict):
                 raise ValueError("not an object")
         except ValueError as e:
             print(f"[gen] refuse: --chat-template-kwargs is not a JSON object: {e}", file=sys.stderr)
+            return 2
+        named = [k for k in THINKING_KWARGS if k in template_kw]
+        if named:
+            print(f"[gen] refuse: --chat-template-kwargs sets {', '.join(named)}; the thinking switch gen sends "
+                  "with every request is mapped onto that variable and wins over the kwarg, so drop the key "
+                  "and use --thinking", file=sys.stderr)
             return 2
     if opts.thinking_budget and not opts.thinking:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
@@ -672,14 +727,29 @@ def run_gen(opts: GenOptions) -> int:
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
         f"concurrency {opts.concurrency}, max_tokens {opts.max_tokens}, T {opts.temperature} top_p {opts.top_p}")
-    if not todo:
-        return 0
     base_url = opts.base_url.rstrip("/") if opts.base_url else f"http://{opts.host}:{opts.port}/v1"
+    if not todo:
+        try:
+            prev = _read_side(side) if side.exists() else None
+        except ValueError:
+            prev = None
+        if prev is None or not isinstance(prev.get("run"), dict):
+            # every prompt is answered by a run that was cut short (its
+            # sidecar holds no run block) or that left no sidecar: the
+            # totals still describe the rows, and filter or cache then
+            # read the corpus as generated
+            sidecar = dict(prev) if prev else sidecar_settings(opts, rows, prompt_hash, with_context, base_url,
+                                                              None)
+            sidecar["run"] = {**row_totals(out), "failed": 0, "wall_s": 0.0, "tok_s_aggregate": 0.0,
+                              "concurrency": opts.concurrency}
+            write_json_atomic(side, sidecar)
+            log(f"[gen] nothing to run, sidecar {side} written from the {len(done)} rows")
+        return 0
     proc = None
     try:
         if not opts.base_url:
             proc = spawn_server(opts, out.with_suffix(out.suffix + ".server.log"))
-        model_id = wait_ready(base_url, proc, opts.startup_timeout)
+        model_id = wait_ready(base_url, proc, opts.startup_timeout, teacher=opts.teacher)
         log(f"[gen] server ready: model {model_id}")
         if done and side.exists():
             try:
@@ -699,12 +769,8 @@ def run_gen(opts: GenOptions) -> int:
             # short still leaves what a resume compares against; a sidecar
             # beside a deleted output is replaced, one beside rows already
             # generated is kept for its run totals
-            write_json_atomic(side, {"gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url,
-                                     "served_model_id": model_id, **run_settings(opts),
-                                     "context": shared_context(opts) or ("per-prompt" if with_context else None),
-                                     "shared_context": shared_context(opts),
-                                     "context_format": opts.context_format if with_context else None,
-                                     "prompt_set_sha256": prompt_hash, "run": None})
+            write_json_atomic(side, {**sidecar_settings(opts, rows, prompt_hash, with_context, base_url, model_id),
+                                     "run": None})
         lock = threading.Lock()
         t0 = time.perf_counter()
         n_ok = n_err = 0
@@ -772,15 +838,7 @@ def run_gen(opts: GenOptions) -> int:
             ex.shutdown(wait=True)
         el = time.perf_counter() - t0
         sidecar = {
-            "gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url, "served_model_id": model_id,
-            **run_settings(opts),
-            "prompt_source": opts.prompts or opts.corpus,
-            "prompt_set_sha256": prompt_hash, "prompts": len(rows),
-            "instruction": opts.instruction if opts.corpus else None,
-            "prefix_chars": opts.prefix_chars if opts.corpus else None, "filter_version": None,
-            "context": shared_context(opts) or ("per-prompt" if with_context else None),
-            "shared_context": shared_context(opts),
-            "context_format": opts.context_format if with_context else None,
+            **sidecar_settings(opts, rows, prompt_hash, with_context, base_url, model_id),
             # the totals come from the rows, so they cover every run that
             # wrote to the file; failed is this run's, since a resume
             # retries every earlier failure; wall_s adds up over the runs

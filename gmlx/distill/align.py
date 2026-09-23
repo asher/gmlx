@@ -24,7 +24,7 @@ from gmlx.load.tokenizer import (
 
 from .constants import NEG_INF, TABLES_VERSION
 from .format import read_json, sha256_file, write_json_atomic
-from .tokens import bos_id, identity_pair
+from .tokens import bos_id, identity_pair, specials_digest
 
 # ---------------------------------------------------------------------------
 # alignment tables and projection
@@ -252,10 +252,12 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
 
 
 def special_roles(teacher_tok, student_tok) -> dict[str, Any]:
-    """The EOS and BOS ids of a pair, the part of a tables artifact the
-    vocab hash does not cover (special ids are left out of it), so a
-    tables artifact is reused only for a student with the same roles."""
-    roles: dict[str, Any] = {}
+    """The EOS and BOS ids of a pair and the digests of both sides'
+    special token strings, the part of a tables artifact the vocab hash
+    does not cover (special ids are left out of it), so a tables
+    artifact is reused only for a student with the same roles."""
+    roles: dict[str, Any] = {"specials": {"teacher": specials_digest(teacher_tok),
+                                          "student": specials_digest(student_tok)}}
     t_eos, s_eos = eos_ids(teacher_tok), eos_ids(student_tok)
     t_bos, s_bos = bos_id(teacher_tok), bos_id(student_tok)
     if s_eos and t_eos:
@@ -266,7 +268,7 @@ def special_roles(teacher_tok, student_tok) -> dict[str, Any]:
 
 
 def same_roles(a: dict, b: dict) -> bool:
-    return all(a.get(k) == b.get(k) for k in ("eos", "bos"))
+    return all(a.get(k) == b.get(k) for k in ("eos", "bos", "specials"))
 
 
 def save_tables(dirpath: Path, t: Tables) -> None:

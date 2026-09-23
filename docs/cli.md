@@ -904,7 +904,10 @@ match and is written before the first request. When a run ends it
 gains a `run` block with the reply and token totals read from the output
 rows, the wall time summed over the runs that ended, and this run's
 failed requests and aggregate token rate. An interrupted run leaves the
-block as it found it.
+block as it found it, and a rerun that finds every prompt answered
+writes the block from the rows when the sidecar has none. A `--base-url`
+server that lists several models serves the run with the one named like
+`--teacher`, and gen refuses when none or several match.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -921,7 +924,7 @@ block as it found it.
 | `--min-chars N` | `2000` | with `--corpus`, skip documents shorter than this |
 | `--docs N` | all | with `--corpus`, prompts to build |
 | `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
-| `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
+| `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to serve as `--chat-template-config`; a thinking key is refused, `--thinking` is the switch |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field, refused when blank |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
 | `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
@@ -1137,10 +1140,11 @@ top-k pooled, and, with several contexts, the part no single adapter can
 learn. With several `--with` caches, every cache decides which rows
 pair and which positions count, while the effect, the histogram and
 the positions map come from the first. Runs on the CPU. Exits 2 when a
-cache has no manifest, when a reply-think cache records no
-`content_start` (one written before rows carried it), or when no rows
-pair. A `--corpus` that names no file, or holds a line that is not a
-JSON object, also exits 2.
+cache has no manifest, when a `--with` cache was made with another
+teacher, tokenizer or top-k than `--without`, when a reply-think cache
+records no `content_start` (one written before rows carried it), or
+when no rows pair. A `--corpus` that names no file, or holds a line
+that is not a JSON object, also exits 2.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

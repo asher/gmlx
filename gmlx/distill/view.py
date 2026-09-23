@@ -71,15 +71,16 @@ def student_width(path: str) -> int | None:
 
 def student_identity(tokenizer) -> dict:
     """The student's fields the vocab hash leaves out and a view depends
-    on: its end and start ids, whether it adds a start token, and its chat
-    template's digest. train refuses a student whose values differ."""
+    on: its end and start ids, whether it adds a start token, the strings
+    of its special tokens, and its chat template's digest. train refuses
+    a student whose values differ."""
     import hashlib
     import json
     tpl = getattr(tokenizer, "chat_template", None)
     if isinstance(tpl, dict):
         tpl = json.dumps(tpl, sort_keys=True)
     return {"eos": [int(v) for v in eos_ids(tokenizer)], "bos": _tokens.bos_id(tokenizer),
-            "adds_bos": bool(_tokens.adds_bos(tokenizer)),
+            "adds_bos": bool(_tokens.adds_bos(tokenizer)), "specials": _tokens.specials_digest(tokenizer),
             "chat_template_sha256": hashlib.sha256(tpl.encode("utf-8")).hexdigest() if isinstance(tpl, str) else None}
 
 
@@ -114,7 +115,8 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
                 elif t.teacher_hash == th and t.student_hash == sh and not _align.same_roles(t.roles, roles):
                     # the vocab hash leaves special ids out, so a base and an
                     # instruct student share it while their EOS ids differ
-                    log(f"[align] tables at {tables_dir} carry other special roles (EOS or BOS ids differ), rebuilding")
+                    log(f"[align] tables at {tables_dir} carry other special roles (EOS or BOS ids or special "
+                        "token strings differ), rebuilding")
                 elif t.teacher_hash == th and t.student_hash == sh:
                     log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
                 else:
@@ -126,6 +128,23 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     if save:
         _align.save_tables(out_dir, t)
     return t
+
+
+def same_encoding(reader: CacheReader, student_tok) -> tuple[bool, str]:
+    """Whether the student's tokenizer reproduces the cached token ids of
+    every unframed row from the row's bytes, its own special tokens
+    added (the BOS policies were compared before). An equal vocabulary
+    with other merges or another pre-tokenizer segments the same bytes
+    differently, and the identity path would train the student on ids
+    it never produces."""
+    stb = token_bytes(student_tok)
+    for r in range(len(reader)):
+        arrs, text, _meta = reader.row(r)
+        ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, text, stb, add_special_tokens=True)
+        cached = arrs["token_ids"]
+        if len(ids) != len(cached) or not np.array_equal(ids, cached):
+            return False, f"row {r}: {len(ids)} student tokens vs {len(cached)} cached"
+    return True, f"{len(reader)} rows"
 
 
 def same_render(reader: CacheReader, student_tok, kind: str, n_check: int | None = 8) -> tuple[bool, str]:
@@ -292,6 +311,14 @@ def run_align(opts: AlignOptions) -> int:
     elif identity and prefixed:
         log("[align] prefixed rows without a frame block, general path")
         identity = False
+    elif identity:
+        # an unframed cache holds the teacher's own encoding of every row
+        # and the identity path forwards it, so the student's tokenizer
+        # must produce it: the vocab hash covers the map, not the merges
+        # or the pre-tokenizer
+        same, why_e = same_encoding(reader, student_tok)
+        log(f"[align] unframed cache: student encoding {'matches' if same else 'differs'} ({why_e})")
+        identity = same
     log(f"[align] path={'identity' if identity else 'general'} ({why}), V_T={V_T} V_S={V_S}")
     # an identical vocabulary keeps the identity tables even on the general
     # path (group_of is the identity, so the projection is exact)

@@ -793,6 +793,9 @@ def run_cache(opts: CacheOptions) -> int:
                     rr[_format.HIDDEN_FIELD] = hidden_sk[j, :m]
                 reduced.append((r, rr))
                 off += m
+            # the chunk's hidden states would otherwise stay alive through
+            # the next chunk's trunk forward
+            del hidden, flat_h, hidden_sk
         packed = _format.pack_shard([rr for _, rr in reduced], [r[5] for r, _ in reduced], opts.top_k, opts.floor)
         metas = [row_meta(r, source, opts.frame, generator_id, special) for r, _ in reduced]
         wall = time.perf_counter() - ts
