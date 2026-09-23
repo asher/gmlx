@@ -191,7 +191,8 @@ The adapter file is the llama.cpp GGUF LoRA format, which
 `convert_lora_to_gguf.py` emits from a PEFT directory. It has `general.type`
 of `adapter`, `adapter.lora.alpha` in the metadata and `lora_a` and `lora_b`
 tensor pairs for each target, keyed to base tensor names, with PEFT scaling.
-Adapters trained with `gmlx train` therefore load in llama.cpp with `--lora`.
+Adapters trained with `gmlx train` or `gmlx distill train` therefore load
+in llama.cpp with `--lora`.
 Any PEFT LoRA converted with that script loads here, as do existing community
 GGUF adapters built for llama.cpp.
 

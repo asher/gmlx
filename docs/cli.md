@@ -845,9 +845,9 @@ in the formats mlx-lm's trainer accepts.
 
 ## gmlx distill
 
-`gmlx distill` trains a small GGUF on a larger one's outputs in six
-actions plus one check. The teacher and the student may use different tokenizers,
-and the walkthrough is [distill.md](distill.md).
+`gmlx distill` trains a LoRA adapter for a small GGUF on a larger one's
+outputs in six actions plus one check. The teacher and the student may
+use different tokenizers, and the walkthrough is [distill.md](distill.md).
 
 - `gen` runs a teacher through `gmlx serve` over a prompt set and writes
   its replies as a corpus.
@@ -932,8 +932,8 @@ Checks run in a fixed order and the first failure names the reason,
 one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
 `tokens` and `verify`, each defined in
 [Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
-guide. The verify command reads the surviving rows as jsonl on stdin and
-prints one line per row, `ok` or a reason word. `--context` rebuilds
+guide. The checker, the `--verify` command, reads the surviving rows as
+jsonl on stdin and prints one line per row, `ok` or a reason word. `--context` rebuilds
 every kept row with the context on the teacher's side and the prompt as
 given under `student_messages`, which prepares a second round from
 replies a student wrote without it. It refuses a row that already
@@ -952,7 +952,7 @@ carries `student_messages`, since that row was generated with a context.
 | `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
 | `--max-reply-tokens N` | off | drop replies longer than this many tokens, reasoning trace included |
 | `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
-| `--verify CMD` | none | shell command that reads the survivors on stdin and prints `ok` or a reason per row |
+| `--verify CMD` | none | shell command of your checker, which reads the survivors on stdin and prints `ok` or a reason per row |
 | `--context FILE` | none | put this text on the teacher's side of every kept row |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
 
@@ -1011,7 +1011,7 @@ Alignment flags, in the order `--help` prints them.
 | `--cache DIR` | required | the cache directory |
 | `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
 | `--out DIR` | required | the view directory to write |
-| `--tables DIR` | none | an earlier view's `tables.safetensors` to reuse when the tokenizer pair matches |
+| `--tables DIR` | none | an earlier view directory whose tokenizer tables are reused when the pair matches |
 | `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary |
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
@@ -1123,7 +1123,7 @@ pair.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--without DIR` | required | cache of the prompts without any context |
+| `--without DIR` | required | cache of the same replies read without the context |
 | `--with DIR` | required | cache with a context, repeatable |
 | `--out JSON` | required | the census JSON to write |
 | `--md PATH` | none | Markdown summary to write |

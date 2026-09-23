@@ -152,8 +152,9 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     from gmlx.distill.teacher import CONTINUE_INSTRUCTION, FRAME_CHOICES
     p = _Parser(
         prog=prog,
-        description="Run a teacher GGUF over a corpus once and store, per position, its top-k "
-                    "log-probabilities and the side fields a student of any tokenizer needs. Sizes in decimal GB.")
+        description="Run a teacher GGUF over a corpus once and store, per position, its most likely next "
+                    "tokens with their log-probabilities, plus what a student with another tokenizer needs to "
+                    "use them. Sizes in decimal GB.")
     p.add_argument("--teacher", metavar="GGUF", help="Teacher GGUF (sharded ok).")
     p.add_argument("--corpus", metavar="PATH|ID",
                    help="A jsonl file, a directory of text files, or a Hugging Face dataset id "
@@ -236,7 +237,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
                    help="Student GGUF, or an MLX checkpoint directory for its tokenizer.")
     p.add_argument("--out", required=True, metavar="DIR", help="View directory to write.")
     p.add_argument("--tables", default=None, metavar="DIR",
-                   help="An earlier view's tables.safetensors to reuse when the tokenizer pair matches.")
+                   help="An earlier view directory whose tokenizer tables are reused when the pair matches.")
     p.add_argument("--kprime", type=int, default=None,
                    help="Cap on distinct student-token groups kept per boundary (default: the maximum seen).")
     p.add_argument("--materialize", action="store_true",
@@ -371,7 +372,8 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="Chat-template kwargs for every render, as a JSON object or a file.")
     p.add_argument("--max-len", type=int, default=512, help="Window length for bits per byte (default 512).")
     p.add_argument("--bpb-prefix", default=None,
-                   help="Text placed before every window, or @KIND for a frame prefix.")
+                   help="Text placed before every window, or @FRAME (such as @continue) for that frame's "
+                        "template prefix.")
     p.add_argument("--batch-size", type=int, default=8, help="Windows per batch (default 8).")
     p.add_argument("--cache-limit-gb", type=float, default=4.0, help="MLX buffer cache cap (default 4).")
     p.add_argument("--decontam-threshold", type=float, default=0.01,
@@ -388,7 +390,7 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
                     "more reply caches (distill cache --frame reply or reply-think) of the same replies, one "
                     "made without the context and one per context. Writes a JSON whose high_delta map "
                     "distill eval --reply-positions reads, and a Markdown summary. CPU only.")
-    p.add_argument("--without", required=True, metavar="DIR", help="Cache of the prompts without any context.")
+    p.add_argument("--without", required=True, metavar="DIR", help="Cache of the same replies read without the context.")
     p.add_argument("--with", dest="with_", action="append", required=True, metavar="DIR",
                    help="Cache with a context, repeatable.")
     p.add_argument("--out", required=True, metavar="JSON", help="Census JSON to write.")
@@ -440,6 +442,7 @@ def cmd_cache(argv: list[str], prog: str = "gmlx distill cache") -> int:
         problems = validate_cache(Path(args.validate))
         if problems:
             print("\n".join("[cache] validate: " + x for x in problems), file=sys.stderr)
+            print(f"[cache] error: validator failed with {len(problems)} problems", file=sys.stderr)
         else:
             print("[cache] valid")
         return 0 if not problems else 1

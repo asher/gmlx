@@ -143,7 +143,15 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 
 
 def _read_rows(path: Path) -> list[dict]:
-    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    rows = []
+    for n, ln in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not ln.strip():
+            continue
+        try:
+            rows.append(json.loads(ln))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} line {n}: not JSON ({e.msg})") from None
+    return rows
 
 
 def run_filter(opts: FilterOptions) -> int:
@@ -165,7 +173,12 @@ def run_filter(opts: FilterOptions) -> int:
     rejects: list[dict] = []
     survivors: list[dict] = []
     for p in inputs:
-        for row in _read_rows(p):
+        try:
+            rows = _read_rows(p)
+        except ValueError as e:
+            print(f"[filter] refuse: {e}", file=sys.stderr)
+            return 2
+        for row in rows:
             why = reason(row, opts)
             if why:
                 counts[why] += 1
@@ -176,7 +189,7 @@ def run_filter(opts: FilterOptions) -> int:
         try:
             verdicts = run_verify(opts.verify, survivors)
         except RuntimeError as e:
-            print(f"[filter] refuse: {e}", file=sys.stderr)
+            print(f"[filter] error: {e}", file=sys.stderr)
             return 2
         kept_rows = []
         for row, v in zip(survivors, verdicts):
