@@ -24,7 +24,7 @@ from . import frames as _frames
 from . import hidden as _hidden
 from . import loss as _loss
 from . import student as _student
-from .constants import DEFAULT_KNOBS, GB, log
+from .constants import DEFAULT_KNOBS, GB, TABLES_VERSION, log
 from .format import free_bytes, manifest_sha256, read_json, write_json_atomic
 from .teacher import teacher_identity
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
@@ -274,6 +274,11 @@ def run_train(opts: TrainOptions) -> int:
         if manifest_sha256(Path(v["cache_dir"])) != v["cache_manifest_sha256"]:
             log(f"[train] refuse: the view's cache manifest hash does not match the cache on disk ({d})")
             return 2
+    for d, v in zip(view_dirs, views):
+        if v.get("tables_version") != TABLES_VERSION:
+            log(f"[train] refuse: {d} was aligned with tables version {v.get('tables_version')}, this build "
+                f"uses {TABLES_VERSION}, run gmlx distill align again")
+            return 2
     view_dir, view = view_dirs[0], views[0]
     tables = _align.load_tables(view_dir)
     if (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S) != \
@@ -440,9 +445,15 @@ def run_train(opts: TrainOptions) -> int:
         # scores the same rows at every cadence and not the shortest rows of
         # the first view
         val_rows = _data.sample_rows(val_rows, lengths, opts.val_batches * opts.batch_size, opts.seed)
-        # shard order: the reader keeps a few shards, and the draw spans
-        # every shard of a large cache
-        val_rows.sort(key=lambda vr: (vr[0], tuple(int(x) for x in readers[vr[0]].index[vr[1]])))
+        # the batches stay length-sorted (little padding) and walk the
+        # cache in shard order, since the reader keeps a few shards and the
+        # draw spans every shard of a large cache
+        def shard_key(vr):
+            return (vr[0], tuple(int(x) for x in readers[vr[0]].index[vr[1]]))
+        bs = int(opts.batch_size)
+        val_batches = [val_rows[i:i + bs] for i in range(0, len(val_rows), bs)]
+        val_batches.sort(key=lambda b: min(shard_key(vr) for vr in b))
+        val_rows = [vr for b in val_batches for vr in b]
         if len(views) > 1:
             counts = [sum(1 for vi, _ in train_rows if vi == i) for i in range(len(views))]
             log(f"[train] {len(views)} views mixed: train rows {counts} from {[str(d) for d in view_dirs]}")

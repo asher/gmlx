@@ -41,6 +41,8 @@ MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<start_of_turn>", "<e
            "<|eot_id|>", "<|start_header_id|>", "<|channel|>", "<|message|>", "<|return|>", "<|user|>",
            "<|assistant|>", "<think>", "</think>")
 REASONS = ("length", "budget", "empty", "marker", "repeat", "ascii", "tokens", "verify")
+# the trace is delimited by the think tags, so those two are not a leak there
+TRACE_MARKERS = tuple(m for m in MARKERS if m not in ("<think>", "</think>"))
 
 
 @dataclass
@@ -90,16 +92,19 @@ def reason(row: dict, opts: FilterOptions) -> str | None:
     check (the verify command runs separately, over the survivors)."""
     g = row.get("gen") or {}
     reply = row["messages"][-1].get("content") or ""
+    trace = row["messages"][-1].get("reasoning_content") or ""
     if g.get("finish_reason") != "stop":
         return "length"
     if g.get("budget_hit") and not opts.keep_budget_hit:
         return "budget"
     if len(reply.split()) < opts.min_words:
         return "empty"
-    if any(m in reply for m in MARKERS):
+    if any(m in reply for m in MARKERS) or any(m in trace for m in TRACE_MARKERS):
         return "marker"
-    if repeat_fraction(reply, opts.ngram) > opts.max_repeat or max_line_run(reply) > opts.max_line_repeats:
-        return "repeat"
+    for text in (reply, trace):
+        if text and (repeat_fraction(text, opts.ngram) > opts.max_repeat
+                     or max_line_run(text) > opts.max_line_repeats):
+            return "repeat"
     if opts.max_non_ascii is not None and reply:
         na = sum(1 for ch in reply if ord(ch) > 126) / len(reply)
         if na > opts.max_non_ascii:

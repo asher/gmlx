@@ -110,7 +110,9 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
             if not msgs or msgs[-1].get("role") != "user":
                 raise ValueError(f"{where}: messages must end on a user turn")
             own = r.get("context")
-            ctx = own if isinstance(own, str) and own.strip() else shared
+            if own is not None and (not isinstance(own, str) or not own.strip()):
+                raise ValueError(f"{where}: context must be a non-empty string")
+            ctx = own if own is not None else shared
             extra = {k: v for k, v in r.items() if k not in ("id", "messages", "context", "student_messages")}
             row = {"id": str(r.get("id", i)), "messages": msgs, **extra}
             if ctx:

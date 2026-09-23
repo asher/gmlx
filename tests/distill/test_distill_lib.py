@@ -5107,3 +5107,102 @@ def test_eval_scores_chat_reply_and_kld_slices_in_process(tmp_path, tok_bl, monk
     text = md.read_text()
     for head in ("| chat slice |", "| reply slice |", "| kld vs cache K=8 |"):
         assert head in text
+
+
+# ---------------------------------------------------------------------------
+# round nineteen: per-turn pairs end on the same reply, the render check
+# per conversation shape, the tables version, a slice named twice
+# ---------------------------------------------------------------------------
+
+def test_per_turn_rows_with_a_student_list_pair_on_the_same_reply(tmp_path, tok_bl, capsys):
+    """Per-turn rows pair the teacher's and the student's turns by
+    position; a pair whose replies differ is a mismatch dropped before
+    the teacher forward, not a row the validator rejects after it."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    u1, u2 = {"role": "user", "content": "the cat"}, {"role": "user", "content": "the hat"}
+    a1, b1 = {"role": "assistant", "content": "the cat is the cat"}, {"role": "assistant", "content": "is the cat 123"}
+    a2 = {"role": "assistant", "content": "the cat is the cat 123"}
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"id": "x", "messages": [u1, a1, u2, a2], "student_messages": [u1, b1, u2, a2]})
+                      + "\n" + json.dumps({"id": "y", "messages": [u1, a1, u2, a2],
+                                            "student_messages": [u1, a1, u2, a2]}) + "\n", encoding="utf-8")
+    out = tmp_path / "cache"
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8,
+                                                  max_len=256, frame="reply", per_turn=True))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "1 dropped for a reply mismatch" in err
+    reader = dl.CacheReader(out)
+    assert len(reader) == 3
+    assert all(_corpus_same(reader.rows_meta[r]) for r in range(3))
+
+
+def _corpus_same(meta) -> bool:
+    from gmlx.distill import corpus as _corpus
+    return _corpus.same_reply(meta["messages"], meta["student_messages"])
+
+
+def test_same_render_checks_every_conversation_shape(tmp_path, tok_bl):
+    """A student template that agrees on plain exchanges and differs on a
+    system turn fails the check even when the rows with a system turn
+    sit where a sample over the whole cache would miss them."""
+    from gmlx.distill import view as _view
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    plain = [{"role": "user", "content": "the cat"}, {"role": "assistant", "content": "is the cat 123"}]
+    with_sys = [{"role": "system", "content": "be the cat"}] + plain
+    pairs = [(plain, None)] + [(with_sys, None)] * 2 + [(plain, None)] * 19
+    _tiny_reply_cache(tmp_path / "c", teacher, pairs)
+    reader = dl.CacheReader(tmp_path / "c")
+    same, why = _view.same_render(reader, teacher, "reply")
+    assert same and why == "10 rows checked over 2 conversation shapes"
+    sys_template = _TEMPLATE_A.replace("{% if m['role'] == 'user' %}",
+                                       "{% if m['role'] == 'system' %}Sys: {{ m['content'] }}\n"
+                                       "{% elif m['role'] == 'user' %}")
+    student = _with_template(_bytelevel_tokenizer(_BL_MERGES), sys_template)
+    same, why = _view.same_render(reader, student, "reply")
+    assert not same and why.startswith("row 1: ")
+
+
+def test_tables_version_is_checked_on_reuse_and_by_train(tmp_path, tok_bl, tok_spm, capsys):
+    """A tables artifact of another version is rebuilt rather than
+    reused, and train refuses a view aligned under another version."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+    from gmlx.distill.constants import TABLES_VERSION
+
+    out, _student = _cpu_view(tmp_path, tok_bl, student_tok=tok_spm)
+    tj = json.loads((out / "tables.json").read_text())
+    assert tj["tables_version"] == TABLES_VERSION
+    tj["tables_version"] = TABLES_VERSION - 1
+    (out / "tables.json").write_text(json.dumps(tj))
+    capsys.readouterr()
+    t = _view.get_tables(tok_bl, tok_spm, out, tmp_path / "fresh", V_T=None, V_S=None)
+    assert f"are version {TABLES_VERSION - 1}, this build writes {TABLES_VERSION}, rebuilding" in \
+        capsys.readouterr().err
+    assert json.loads((tmp_path / "fresh" / "tables.json").read_text())["tables_version"] == TABLES_VERSION
+    assert t.teacher_hash == dl.vocab_map_hash(tok_bl)
+    vj = json.loads((out / "view.json").read_text())
+    vj["tables_version"] = TABLES_VERSION - 1
+    (out / "view.json").write_text(json.dumps(vj))
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "student.gguf").write_bytes(b"")
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(out)], student=str(fake / "student.gguf"), iters=1))
+    assert rc == 2
+    assert f"was aligned with tables version {TABLES_VERSION - 1}, this build uses {TABLES_VERSION}" in \
+        capsys.readouterr().err
+
+
+def test_eval_refuses_a_slice_named_twice(tmp_path, capsys):
+    from gmlx.distill import evaluate as _ev
+
+    with pytest.raises(ValueError, match="slice 'a' is named twice"):
+        _ev._named(["a=x", "b=y", "a=z"])
+    assert _ev._named(["a=x", "b=y"]) == [("a", "x"), ("b", "y")]
+    rc = _ev.run_eval(_ev.EvalOptions(student="none.gguf", md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
+                                      slices=["a=x", "a=y"]))
+    assert rc == 2 and "[eval] refuse: slice 'a' is named twice" in capsys.readouterr().err

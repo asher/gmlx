@@ -138,6 +138,11 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                 mismatch += 1
                 continue
             for w, m in enumerate(variants):
+                # per-turn rows pair by position: the pair must end on the
+                # same reply, as the whole conversations were checked to
+                if st_variants is not None and not _corpus.same_reply(m, st_variants[w]):
+                    mismatch += 1
+                    continue
                 row = (_frames.fit_reply(tokenizer, m, max_len, tb, reason_target=reason_target) if reply_kind
                        else _frames.fit_conversation(tokenizer, m, max_len, tb))
                 if row is None:

@@ -262,3 +262,9 @@ def test_distill_gen_tokenizer_expands_a_home_relative_argument(tmp_path, monkey
     rc, out = _run(["distill", "gen", "--base-url", "http://127.0.0.1:9/v1", "--prompts", str(p), "--out",
                     str(tmp_path / "o.jsonl"), "--thinking", "--thinking-budget", "40", "--tokenizer", "~/t.gguf"])
     assert rc == 2 and f"cannot load the tokenizer from {tmp_path / 't.gguf'}" in out and "~/" not in out
+
+
+def test_cache_counts_take_positive_integers():
+    for flag in ("--max-tokens", "--trunk"):
+        rc, out = _run(["distill", "cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", flag, "0"])
+        assert rc == 2 and "a positive integer is required, got 0" in out

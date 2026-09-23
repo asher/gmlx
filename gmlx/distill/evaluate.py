@@ -228,6 +228,8 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
         name, sep, path = spec.partition("=")
         if not sep or not name or not path:
             raise ValueError(f"expected name=path, got {spec!r}")
+        if any(name == n for n, _p in out):
+            raise ValueError(f"slice {name!r} is named twice")
         out.append((name, os.path.expanduser(path)))
     return out
 

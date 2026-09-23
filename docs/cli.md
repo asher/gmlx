@@ -975,7 +975,7 @@ The flags of the teacher pass, in the order `--help` prints them.
 `--student-messages-key` only names the list the student's render reads
 later, in `align` and `eval`. A reply or reply-think row whose final
 turn has no content, such as a tool call, has nothing to target and is
-dropped, counted in the `[cache] done:` line.
+dropped, counted in the `[cache] frame` line.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1072,7 +1072,7 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
-| `--resume` | off | resume the last checkpoint under `--ckpt-dir`, refused when none exists or views, student, LoRA, batch, seed, steps, lr, knobs, clip, decay or `--hs` changed |
+| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or views, student, LoRA, batch, seed, steps, val batches, lr, warmup, knobs, clip, decay or hs changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |

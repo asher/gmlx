@@ -22,7 +22,7 @@ from . import frames as _frames
 from . import tokens as _tokens
 from .constants import DEFAULT_KNOBS, TABLES_VERSION, log
 from .data import CacheReader, ViewLoader
-from .format import manifest_sha256, write_json_atomic
+from .format import manifest_sha256, read_json, write_json_atomic
 
 # Projection gates on the own-group mass fraction a and the singleton mass
 # fraction s, mass-weighted over the top-K at shared boundaries.
@@ -73,14 +73,18 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     and ``eval`` read them from the view."""
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
+        version = read_json(tables_dir / "tables.json").get("tables_version")
         t = _align.load_tables(tables_dir)
-        if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
+        if version != TABLES_VERSION:
+            log(f"[align] tables at {tables_dir} are version {version}, this build writes {TABLES_VERSION}, "
+                "rebuilding")
+        elif t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
                 and (V_S is None or t.V_S == V_S):
             log(f"[align] tables from {tables_dir} (pair hashes and widths match)")
             if tables_dir.resolve() != out_dir.resolve():
                 _align.save_tables(out_dir, t)
             return t
-        if t.teacher_hash == th and t.student_hash == sh:
+        elif t.teacher_hash == th and t.student_hash == sh:
             log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
         else:
             log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
@@ -94,7 +98,10 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
 
 def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -> tuple[bool, str]:
     """Whether the student's chat template reproduces the cached token ids
-    on n_check framed rows spread over the cache. Never when any row of the cache
+    on n_check framed rows of every conversation shape (the sequence of
+    roles, and which turns carry a reasoning trace or tool calls), spread
+    over the cache, since a template can agree on plain exchanges and
+    differ on a system turn or a tool call. Never when any row of the cache
     carries a student message list of its own: such a row renders for the
     student without the teacher's context, so the cached ids cannot be
     the student's input."""
@@ -102,24 +109,30 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
     with_list = sum(1 for m in reader.rows_meta if m.get("student_messages"))
     if with_list:
         return False, f"{with_list} rows carry their own student message list"
+    shapes: dict[tuple, list[int]] = {}
+    for r in range(len(reader)):
+        msgs = reader.rows_meta[r].get("messages")
+        if msgs:
+            key = tuple((m.get("role"), bool(m.get("reasoning_content")), bool(m.get("tool_calls"))) for m in msgs)
+            shapes.setdefault(key, []).append(r)
     checked = 0
-    framed = [r for r in range(len(reader)) if reader.rows_meta[r].get("messages")]
-    # rows are length-sorted, so the sample spans short and long rows
-    picks = sorted(set(int(x) for x in np.linspace(0, len(framed) - 1, n_check))) if framed else []
-    for r in (framed[k] for k in picks):
-        meta = reader.rows_meta[r]
-        arrs, _text, _ = reader.row(r)
-        try:
-            stext, _spans = _frames.render_row(student_tok, meta["messages"],
-                                               **_frames.row_render_args(meta.get("frame") or kind))
-        except ValueError as e:
-            return False, f"row {r}: {e}"
-        ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, stext, stb, add_special_tokens=False)
-        if len(ids) != len(arrs["token_ids"]) or not np.array_equal(ids, arrs["token_ids"]):
-            return False, f"row {r}: {len(ids)} student tokens vs {len(arrs['token_ids'])} cached"
-        checked += 1
-        if checked >= n_check:
-            break
+    for framed in shapes.values():
+        # rows are length-sorted, so the sample spans short and long rows
+        picks = sorted(set(int(x) for x in np.linspace(0, len(framed) - 1, n_check)))
+        for r in (framed[k] for k in picks):
+            meta = reader.rows_meta[r]
+            arrs, _text, _ = reader.row(r)
+            try:
+                stext, _spans = _frames.render_row(student_tok, meta["messages"],
+                                                   **_frames.row_render_args(meta.get("frame") or kind))
+            except ValueError as e:
+                return False, f"row {r}: {e}"
+            ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, stext, stb, add_special_tokens=False)
+            if len(ids) != len(arrs["token_ids"]) or not np.array_equal(ids, arrs["token_ids"]):
+                return False, f"row {r}: {len(ids)} student tokens vs {len(arrs['token_ids'])} cached"
+            checked += 1
+    if len(shapes) > 1:
+        return checked > 0, f"{checked} rows checked over {len(shapes)} conversation shapes"
     return checked > 0, f"{checked} rows checked"
 
 

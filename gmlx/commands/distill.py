@@ -175,11 +175,11 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--floor", action="store_true",
                    help="Also store floor_kld, the KL against the f16-rounded top-k.")
     p.add_argument("--rows-per-shard", type=_positive_int, default=64, help="Rows per shard file (default 64).")
-    p.add_argument("--trunk", type=int, default=None,
+    p.add_argument("--trunk", type=_positive_int, default=None,
                    help="Trunk chunk in tokens (default 512 for a teacher that fits in memory, 8192 streaming).")
     p.add_argument("--resume", action="store_true", help="Continue after the last verified shard.")
     p.add_argument("--max-rows", type=_positive_int, default=None, help="Stop after this many rows.")
-    p.add_argument("--max-tokens", type=int, default=None, help="Stop after this many teacher tokens.")
+    p.add_argument("--max-tokens", type=_positive_int, default=None, help="Stop after this many teacher tokens.")
     p.add_argument("--limit-docs", type=_positive_int, default=None, help="Read at most this many documents.")
     p.add_argument("--text-key", default="text", help="Text column of a jsonl or dataset row (default text).")
     p.add_argument("--hf-split", default="train", help="Dataset split for a Hugging Face id (default train).")

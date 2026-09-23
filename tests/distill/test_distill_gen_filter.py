@@ -1084,3 +1084,35 @@ def test_gen_sidecar_wall_time_carries_over_a_resume_with_added_prompts(tmp_path
     second = json.loads(side.read_text())
     assert second["prompt_set_sha256"] != first["prompt_set_sha256"]
     assert second["run"]["completed"] == 2 and second["run"]["wall_s"] > first["run"]["wall_s"] > 0
+
+
+def test_filter_checks_the_reasoning_trace_for_markers_and_repeats():
+    """reply-think trains on the trace, so a leaked marker or a looping
+    trace fails the row the way the answer would; the think tags that
+    delimit a trace are not a leak."""
+    opts = flt.FilterOptions(inputs=[], out="o.jsonl")
+    assert flt.reason(_row("a", GOOD, reasoning="thinking <|im_start|> more"), opts) == "marker"
+    assert flt.reason(_row("b", GOOD, reasoning="the same line\n" * 5), opts) == "repeat"
+    assert flt.reason(_row("c", GOOD, reasoning="<think>a short thought</think>"), opts) is None
+    assert flt.reason(_row("d", GOOD), opts) is None
+
+
+def test_prompt_rows_refuse_a_blank_or_non_string_context(tmp_path):
+    """A prompt's own context is a non-empty string; a blank or numeric
+    one is refused rather than silently replaced by the shared context,
+    and a null one means the row has none."""
+    import re
+
+    shared = tmp_path / "ctx.txt"
+    shared.write_text("shared context", encoding="utf-8")
+    p = tmp_path / "p.jsonl"
+    msgs = [{"role": "user", "content": "alpha"}]
+    for bad in ("", "  ", 5):
+        p.write_text(json.dumps({"id": "a", "messages": msgs, "context": bad}) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape("prompt 0 of p.jsonl: context must be a non-empty string")):
+            gen.prompt_rows(gen.GenOptions(out="o.jsonl", prompts=str(p), context=str(shared)))
+    p.write_text(json.dumps({"id": "a", "messages": msgs, "context": None}) + "\n"
+                 + json.dumps({"id": "b", "messages": msgs, "context": "own"}) + "\n", encoding="utf-8")
+    rows = gen.prompt_rows(gen.GenOptions(out="o.jsonl", prompts=str(p), context=str(shared)))
+    assert "shared context" in rows[0]["messages"][-1]["content"]
+    assert rows[1]["messages"][-1]["content"].startswith("own")
