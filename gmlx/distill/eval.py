@@ -123,9 +123,12 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
             continue
         valid = arrs["onpath_mask"][:n - 1].astype(bool)
         ids, t_pos, s_pos = t_ids, None, None
-        if frame and meta.get("messages"):
+        # the student's own list when the row carries one: the conversation
+        # training scored the student on, without the teacher's context
+        msgs = meta.get("student_messages") or meta.get("messages")
+        if frame and msgs:
             try:
-                stext, s_spans = render_row(tokenizer, meta["messages"], **row_render_args(meta.get("frame")))
+                stext, s_spans = render_row(tokenizer, msgs, **row_render_args(meta.get("frame")))
             except ValueError:
                 continue
             assert stb is not None

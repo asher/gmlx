@@ -150,3 +150,12 @@ def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path
                      iters=1, grad_checkpoint=True)
     assert seen["ckpt"] is model
     assert seen["args"].grad_checkpoint is False
+
+
+def test_cmd_train_refuses_grad_checkpoint_with_dropout(tmp_path, capsys):
+    """The compiled train step cannot replay a layer's dropout mask in the
+    backward recompute, so the pair is refused before any model load."""
+    rc = train.cmd_train(["base.gguf", "--data", str(tmp_path), "--adapter-out", str(tmp_path / "o.gguf"),
+                          "--grad-checkpoint", "--dropout", "0.1"])
+    assert rc == 2
+    assert "--grad-checkpoint recomputes each layer under a fresh dropout mask" in capsys.readouterr().err

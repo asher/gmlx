@@ -28,7 +28,7 @@ from . import hidden as _hidden
 from . import student as _student
 from . import tokens as _tokens
 from .constants import GB, log
-from .head import HeadSpec, head_spec_from_model, log_bmask_from
+from .head import HEAD_PARITY_TOL, HeadSpec, head_parity_gap, head_spec_from_model, log_bmask_from
 
 CONTINUE_INSTRUCTION = _frames.CONTINUE_INSTRUCTION
 FRAME_CHOICES = ("none", "continue", "chat", "reply", "reply-think")
@@ -253,6 +253,31 @@ def teacher_head(model) -> HeadSpec:
     return head_spec_from_model(inner)
 
 
+def teacher_identity(path: str) -> dict:
+    """What a resume compares to know it continues on the same teacher:
+    the resolved path and, for a file, its size and mtime (a directory
+    checkpoint's config file stands in for it)."""
+    p = Path(path).expanduser().resolve()
+    probe = p if p.is_file() else (p / "config.json" if (p / "config.json").is_file() else p)
+    st = probe.stat()
+    return {"path": str(p), "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+
+
+def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw) -> dict:
+    """The inputs a resumed pass must share with the first run: the corpus
+    and row options, the teacher, the hidden sketch and the render kwargs.
+    Any difference refuses the resume."""
+    return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens,
+            "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
+            "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
+            "hidden": bool(opts.hidden), "teacher": teacher_identity(opts.teacher),
+            "hidden_dim": opts.hidden_dim if opts.hidden else None,
+            "hidden_seed": opts.hidden_seed if opts.hidden else None,
+            "render_kwargs": render_kw or None, "per_turn": bool(opts.per_turn),
+            "close_final_windows": bool(opts.close_final_windows),
+            "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None}
+
+
 def load_teacher(opts: CacheOptions):
     """(model, config, arch, streaming, expert_bytes). A
     GGUF teacher loads through gmlx; ``stream_experts`` forces expert
@@ -362,10 +387,7 @@ def run_cache(opts: CacheOptions) -> int:
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
     # must continue the same run
-    run = {"corpus_sha256": corpus_sha, "n_rows": len(rows), "n_tokens": int(n_tokens),
-           "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
-           "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
-           "hidden": bool(opts.hidden)}
+    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw)
     prev = writer.progress.get("run")
     if opts.resume and prev is not None and prev != run:
         diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
@@ -382,6 +404,11 @@ def run_cache(opts: CacheOptions) -> int:
         return 2
     cfg = config.get("text_config", config) if isinstance(config, dict) else config
     head = teacher_head(model)
+    gap = head_parity_gap(model, head, mx.array(rows[0][3][:8].astype(np.int32))[None])
+    if gap > HEAD_PARITY_TOL:
+        log(f"[cache] refuse: the head does not reproduce the teacher's own logits (relative gap {gap:.3f}), "
+            "the model changes its logits after the projection in a way the distill head does not carry")
+        return 2
     V = head.V
     hidden_blk = writer.progress.get("hidden") if opts.hidden else None
     R_hidden = None   # the sketch matrix, built from the first trunk chunk's width
@@ -554,7 +581,12 @@ def run_cache(opts: CacheOptions) -> int:
         packed = _format.pack_shard([rr for _, rr in reduced], [r[5] for r, _ in reduced], opts.top_k, opts.floor)
         metas = [row_meta(r, source, opts.frame, generator_id) for r, _ in reduced]
         wall = time.perf_counter() - ts
-        entry = writer.write(si, packed, metas, wall_s=wall, step=step, trunk_chunk=T)
+        try:
+            entry = writer.write(si, packed, metas, wall_s=wall, step=step, trunk_chunk=T,
+                                 max_id=int(packed["top_k_indices"].max()))
+        except RuntimeError as e:
+            log(f"[cache] refuse: {e}, the {writer.n_done} verified shards stay for --resume")
+            return 2
         tokens_done += entry["tokens"]
         rate = entry["tokens"] / max(wall, 1e-9)
         log(f"[cache] shard {si + 1}/{len(shards)}: {entry['tokens']} tokens {wall:.1f}s "
@@ -572,13 +604,14 @@ def run_cache(opts: CacheOptions) -> int:
     hist = np.histogram(captured, bins=edges)[0].tolist() if captured.size else []
     wall_total = time.perf_counter() - t0
     template = getattr(hf_inner(tokenizer), "chat_template", "") or ""
+    teacher_abs = str(Path(opts.teacher).expanduser().resolve())
     _format.write_manifest(
-        out, teacher_path=opts.teacher, dataset=opts.corpus, num_samples=len(rows),
+        out, teacher_path=teacher_abs, dataset=opts.corpus, num_samples=len(rows),
         max_seq_len=opts.max_len, seed=0, top_k=opts.top_k, vocab_size=V,
         config_vocab_size=(cfg.get("vocab_size") if isinstance(cfg, dict) else None),
         tokenizer_hash=tokenizer_hash, batch_size=opts.rows_per_shard,
         gmlx_distill={
-            "teacher": {"arch": arch, "path": opts.teacher, "feeder_installed": bool(feeder),
+            "teacher": {"arch": arch, "path": teacher_abs, "feeder_installed": bool(feeder),
                         "streaming": streaming},
             "corpus": {"spec": opts.corpus, "rows": len(rows), "tokens": n_tokens,
                        "window_policy": "last whitespace-initial boundary",

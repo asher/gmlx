@@ -106,7 +106,7 @@ def test_checkpointed_layers_replay_the_dropout_mask(monkeypatch):
         cls.__call__ = orig
         model = build()
         monkeypatch.setattr(ck, "layer_seed", lambda: 7)
-        assert checkpoint_layers(model) == 1
+        assert checkpoint_layers(model, replay_dropout=True) == 1
         g1 = nn.value_and_grad(model, _loss)(model, ids)[1]
         mx.eval(g1)
     finally:
@@ -118,3 +118,36 @@ def test_checkpointed_layers_replay_the_dropout_mask(monkeypatch):
     for k in a:
         assert np.allclose(np.array(a[k]), np.array(b[k]), atol=1e-5), k
     assert not ck.draws_random(ref.eval()) and ck.draws_random(ref.train())
+
+
+def test_checkpointed_layers_run_under_a_compiled_step():
+    """Without replay_dropout a checkpointed layer draws nothing eagerly,
+    so a compiled training step (mlx-lm's train loop) runs through it even
+    when the layer holds dropout."""
+    from functools import partial
+
+    from mlx_lm.tuner.lora import LoRALinear
+
+    model = _model(5)
+    for layer in model.layers:
+        q = LoRALinear.from_base(layer.self_attn.q_proj, r=4, dropout=0.5)
+        q.lora_b = mx.random.normal(q.lora_b.shape)
+        layer.self_attn.q_proj = q
+    model.train()
+    ids = mx.array([[1, 5, 9, 2, 7, 3], [4, 4, 8, 1, 2, 6]])
+    cls = type(model.layers[0])
+    orig = cls.__call__
+    try:
+        assert checkpoint_layers(model) == 1
+        lvg = nn.value_and_grad(model, _loss)
+        state = [model.state, mx.random.state]
+
+        @partial(mx.compile, inputs=state, outputs=state)
+        def step(batch):
+            loss, grads = lvg(model, batch)
+            return loss, grads
+        loss, grads = step(ids)
+        mx.eval(loss, grads)
+    finally:
+        cls.__call__ = orig
+    assert np.isfinite(float(loss))

@@ -151,6 +151,13 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
                         "pass instead of keeping them, trading time for memory.")
     a = p.parse_args(argv)
 
+    if a.grad_checkpoint and a.dropout > 0:
+        # the compiled train step cannot replay a layer's dropout mask in
+        # the backward recompute, so the recompute would see a fresh one
+        print("error: --grad-checkpoint recomputes each layer under a fresh dropout mask; "
+              "use it with --dropout 0", file=sys.stderr)
+        return 2
+
     base, note, err = resolve_model_arg(a.model, a.config)
     if err is not None:
         print(f"error: {err}", file=sys.stderr)

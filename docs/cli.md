@@ -838,7 +838,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--steps-per-eval N` | `200` | validation interval |
 | `--seed N` | `0` | RNG seed |
 | `--hf-source ID` | none | tokenizer and config fallback, rarely needed |
-| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, which trades time for memory |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, which trades time for memory, refused with `--dropout` above 0 |
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
@@ -911,7 +911,7 @@ so a run resumes where it stopped.
 | `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
-| `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends `enable_thinking` false |
+| `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable |
@@ -977,7 +977,7 @@ later, in `align` and `eval`.
 | `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
-| `--resume` | off | continue after the last verified shard, refused when the corpus or row options changed |
+| `--resume` | off | continue after the last verified shard, refused when the corpus, the teacher or the row options changed |
 | `--max-rows N` | none | stop after this many rows |
 | `--max-tokens N` | none | stop after this many teacher tokens |
 | `--limit-docs N` | none | read at most this many documents |
@@ -1085,7 +1085,7 @@ examples shown before each question.
 | `--json PATH` | required | the JSON report to write |
 | `--cache DIR` | none | cache whose corpus the slices are checked against for overlap |
 | `--slice NAME=PATH` | none | a held-out text slice, repeatable |
-| `--teacher-bpb JSON` | none | teacher bits per byte per slice, shown beside the student's |
+| `--teacher-bpb JSON` | none | teacher bits per byte per slice, a `{slice: bpb}` map or an earlier eval report, shown beside the student's |
 | `--tasks-dir DIR` | `.` | directory of the four task files |
 | `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
 | `--task-limit N` | all | items per task |
@@ -1100,7 +1100,7 @@ examples shown before each question.
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
 | `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions, refused when it names none of their rows |
-| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a vocabulary wider than the student's head |
+| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a cached id beyond the student's head |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |

@@ -245,3 +245,10 @@ def test_corpus_ids_fall_back_to_the_non_blank_row_index(tmp_path):
     corpus.write_text(json.dumps({"messages": []}) + "\n\n" + json.dumps({"messages": []}) + "\n"
                       + json.dumps({"id": "z", "messages": []}) + "\n")
     assert cs.corpus_ids(corpus, "line") == {"0": "0", "2": "1", "3": "z"}
+
+
+def test_corpus_ids_keep_unicode_line_separators(tmp_path):
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"id": "a", "text": "x\u2028y"}, ensure_ascii=False) + "\n"
+                      + json.dumps({"id": "b", "text": "z"}) + "\n", encoding="utf-8")
+    assert cs.corpus_ids(corpus, "line") == {"0": "a", "1": "b"}

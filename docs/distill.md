@@ -461,12 +461,13 @@ conversations and the targets start at the final turn's reasoning
 trace. `--frame-kwargs` sets the same thinking switch `gen` used, so the
 teacher reads the conversation the way it wrote it.
 
-`enable_thinking` is the variable the Qwen chat template reads for its
-thinking switch, and `gen --thinking` sets that variable by name. A
-teacher from a family whose template reads another name gets its switch
-through `--chat-template-kwargs` on `gen` and `--frame-kwargs` on
-`cache` instead. `align` reads the switch from the cache, so it needs no
-flag of its own.
+`gen --thinking` sends the server's thinking switch with every request
+and starts the teacher with `--thinking on`, so serve maps it onto the
+variable the teacher's template reads, `enable_thinking` for Qwen and
+the family's own name elsewhere. `cache` renders rows in process, so
+`--frame-kwargs` names that variable itself, `{"enable_thinking": true}`
+for a Qwen teacher. `align` reads the switch from the cache, so it needs
+no flag of its own.
 
 `--max-len` is the longest window, the stretch of a row cached as one
 piece, in teacher tokens, and a longer row is cut into windows at word

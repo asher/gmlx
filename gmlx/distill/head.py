@@ -29,6 +29,7 @@ class HeadSpec:
     V: int
     live: Callable | None = None   # () -> the module's current parameter tree
     weight: Callable | None = None  # () -> W [V, d] in a float dtype (dequantized once)
+    scale: float = 1.0             # the factor fn applies after the projection (Granite, Cohere, MiniCPM)
 
     def dense_weight(self, params=None):
         """W [V, d] for the closed-form backward (dz @ W). A float weight in
@@ -87,16 +88,36 @@ def head_weight_fn(mod) -> Callable:
     return get
 
 
+def head_scale(args) -> float:
+    """The factor an mlx-lm model applies to its logits after the
+    projection: Granite divides by logits_scaling, Cohere multiplies by
+    logit_scale, MiniCPM divides the hidden states by hidden_size over
+    dim_model_base. 1.0 for every other model."""
+    s = 1.0
+    ls = getattr(args, "logits_scaling", None)
+    if ls:
+        s /= float(ls)
+    lg = getattr(args, "logit_scale", None)
+    if lg is not None:
+        s *= float(lg)
+    dmb = getattr(args, "dim_model_base", None)
+    hs = getattr(args, "hidden_size", None)
+    if dmb and hs:
+        s /= float(hs) / float(dmb)
+    return s
+
+
 def head_spec_from_model(model) -> HeadSpec:
     """mlx-lm style models: lm_head when present, else the tied embedding
     as_linear; softcap from args.final_logit_softcapping through the
-    text_config fallback."""
+    text_config fallback; the post-projection scale from head_scale."""
     args = getattr(model, "args", None)
     cfg = getattr(args, "__dict__", {}) if args is not None else {}
     cfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
     softcap = cfg.get("final_logit_softcapping") if isinstance(cfg, dict) else None
     if softcap is not None:
         softcap = float(softcap) or None
+    scale = head_scale(args)
     inner = getattr(model, "model", model)
     head = getattr(model, "lm_head", None)
     if head is not None and not (isinstance(getattr(args, "tie_word_embeddings", None), bool)
@@ -105,18 +126,37 @@ def head_spec_from_model(model) -> HeadSpec:
 
         def fn(params, h):
             mod.update(params)
-            return mod(h)
+            return mod(h) * scale if scale != 1.0 else mod(h)
         V = int(mod.weight.shape[0]) if hasattr(mod, "weight") else int(mod(mx_zeros(1, h_dim(inner))).shape[-1])
         return HeadSpec(fn=fn, params=mod.parameters(), softcap=softcap, V=V, live=mod.parameters,
-                        weight=head_weight_fn(mod))
+                        weight=head_weight_fn(mod), scale=scale)
     emb = inner.embed_tokens
 
     def fn2(params, h):
         emb.update(params)
-        return emb.as_linear(h)
+        return emb.as_linear(h) * scale if scale != 1.0 else emb.as_linear(h)
     return HeadSpec(fn=fn2, params=emb.parameters(), softcap=softcap,
                     V=int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1]),
-                    live=emb.parameters, weight=head_weight_fn(emb))
+                    live=emb.parameters, weight=head_weight_fn(emb), scale=scale)
+
+
+HEAD_PARITY_TOL = 0.05
+
+
+def head_parity_gap(model, head: HeadSpec, ids) -> float:
+    """The largest difference between the model's own logits on ``ids``
+    [1, T] and the head applied to the trunk's hidden states, relative to
+    the largest logit. A model whose forward changes its logits after the
+    projection in a way the head does not carry shows up here."""
+    import mlx.core as mx
+    from .student import trunk_hidden
+    inner = getattr(model, "language_model", model)
+    ref = inner(ids)
+    ref = getattr(ref, "logits", ref)[0].astype(mx.float32)
+    z = _head_logits_f32(head, head.current(), trunk_hidden(inner, ids)[0])
+    gap = mx.abs(z - ref).max() / mx.maximum(mx.abs(ref).max(), 1.0)
+    mx.eval(gap)
+    return float(gap)
 
 
 def mx_zeros(*shape):
@@ -132,11 +172,12 @@ def h_dim(inner) -> int:
     return int(getattr(emb, "dims", 0) or getattr(inner.args, "hidden_size"))
 
 
-def linear_head(weight, softcap: float | None = None) -> HeadSpec:
+def linear_head(weight, softcap: float | None = None, scale: float = 1.0) -> HeadSpec:
     """A plain [V, d] weight as a head (tests, synthetic sweeps)."""
     def fn(params, h):
-        return h @ params["weight"].T
-    return HeadSpec(fn=fn, params={"weight": weight}, softcap=softcap, V=int(weight.shape[0]))
+        z = h @ params["weight"].T
+        return z * scale if scale != 1.0 else z
+    return HeadSpec(fn=fn, params={"weight": weight}, softcap=softcap, V=int(weight.shape[0]), scale=scale)
 
 
 def _head_logits_f32(head: HeadSpec, params, h_c):
@@ -287,6 +328,8 @@ def chunked_head_vjp(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid
                                mx.take_along_axis(dz, next_ids[s:e][:, None], axis=1) + a[:, None], axis=1)
         if head.softcap:
             dz = dz * (1.0 - (z / head.softcap) ** 2)
+        if head.scale != 1.0:
+            dz = dz * head.scale                    # fn scales the projection, so dh and dW scale too
         dh_c = (dz.astype(W.dtype) @ W).astype(mx.float32)
         if want_params:
             dW_c = dz.T @ h_c.astype(mx.float32)

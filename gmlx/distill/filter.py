@@ -144,7 +144,7 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 
 def _read_rows(path: Path) -> list[dict]:
     rows = []
-    for n, ln in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for n, ln in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not ln.strip():
             continue
         try:

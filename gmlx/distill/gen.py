@@ -96,7 +96,7 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
         path = Path(opts.prompts).expanduser()
         if not path.is_file():
             raise ValueError(f"no prompts file at {path}")
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        for i, line in enumerate(path.read_text(encoding="utf-8").split("\n")):
             if not line.strip():
                 continue
             r = json.loads(line)
@@ -185,7 +185,12 @@ def spawn_server(opts: GenOptions, log_path: Path):
     if port_listening(opts.host, opts.port):
         raise PortInUse(f"port {opts.port} already has a listener; stop it (gmlx stop --port {opts.port}) "
                           "or pass another --port")
-    serve_args = [opts.teacher, "--chat-template-config", _template_kwargs(opts) or "{}"]
+    # serve maps its own thinking switch onto whatever variable the
+    # teacher's template reads, so the switch is sent as that, not as a
+    # template kwarg of one family's name
+    serve_args = [opts.teacher, "--thinking", "on" if opts.thinking else "off"]
+    if opts.chat_template_kwargs:
+        serve_args += ["--chat-template-config", opts.chat_template_kwargs]
     serve_args += list(opts.serve_arg)
     spawned = lifecycle.start_background_nowait(serve_args, host=opts.host, port=opts.port, log=str(log_path))
     if spawned is None:
@@ -245,11 +250,14 @@ def _sampling(opts: GenOptions, seed: int) -> dict:
     if opts.thinking_budget:
         body["thinking_budget"] = opts.thinking_budget
     # a server gen did not start (--base-url) only sees what the request
-    # carries, so the thinking switch and the template kwargs ride along;
-    # the switch goes both ways, since a template whose default is thinking
-    # would otherwise think without --thinking while the sidecar says off
-    body["enable_thinking"] = bool(opts.thinking)
-    body["chat_template_kwargs"] = json.loads(_template_kwargs(opts) or "{}")
+    # carries, so the thinking switch and the template kwargs ride along.
+    # The switch is serve's own thinking control, which it maps onto the
+    # variable the teacher's template reads, and it goes both ways: a
+    # template whose default is thinking would otherwise think without
+    # --thinking while the sidecar says off
+    body["thinking"] = "on" if opts.thinking else "off"
+    if opts.chat_template_kwargs:
+        body["chat_template_kwargs"] = json.loads(opts.chat_template_kwargs)
     return body
 
 
@@ -317,21 +325,43 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def _done_ids(out: Path) -> set[str]:
+    """The ids already in ``out``. A torn final line (a kill mid-write) is
+    cut off and logged; a bad line anywhere else raises ValueError."""
     done: set[str] = set()
-    if out.exists():
-        for line in out.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                done.add(str(json.loads(line)["id"]))
+    if not out.exists():
+        return done
+    text = out.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    for k, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            done.add(str(json.loads(line)["id"]))
+        except (ValueError, KeyError, TypeError) as e:
+            if k == len(lines) - 1:
+                out.write_text(text[:len(text) - len(line)], encoding="utf-8")
+                log(f"[gen] dropped a torn last line of {out} ({len(line)} chars)")
+                break
+            raise ValueError(f"{out}: line {k + 1} is not a JSON row with an id ({e})") from e
     return done
 
 
-def _template_kwargs(opts: GenOptions) -> str | None:
-    """The chat-template kwargs the run uses, with the thinking switch
-    spelled as enable_thinking both ways (the switch wins over a same-named
-    key, as it does in gmlx serve)."""
-    kw = json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else {}
-    kw["enable_thinking"] = bool(opts.thinking)
-    return json.dumps(kw)
+def run_settings(opts: GenOptions) -> dict:
+    """The settings every row of one output file shares, recorded in the
+    sidecar; a resume must match them."""
+    return {"sampling": {"temperature": opts.temperature, "top_p": opts.top_p, "top_k": opts.top_k,
+                         "min_p": opts.min_p, "max_tokens": opts.max_tokens},
+            "seed": opts.seed,
+            "chat_template_kwargs": json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else None,
+            "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget}
+
+
+def resume_conflict(prev: dict, opts: GenOptions) -> str | None:
+    """What differs between an earlier run's sidecar and this run's
+    settings, or None."""
+    diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in run_settings(opts).items()
+             if k in prev and prev.get(k) != v]
+    return ", ".join(diffs) or None
 
 
 def run_gen(opts: GenOptions) -> int:
@@ -370,7 +400,6 @@ def run_gen(opts: GenOptions) -> int:
         except (FileNotFoundError, OSError, ValueError) as e:
             print(f"[gen] refuse: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
             return 2
-    opts.chat_template_kwargs = _template_kwargs(opts)
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -379,7 +408,18 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
-    done = _done_ids(out)
+    try:
+        done = _done_ids(out)
+    except ValueError as e:
+        print(f"[gen] refuse: {e}", file=sys.stderr)
+        return 2
+    side = out.with_suffix(out.suffix + ".gen.json")
+    if done and side.exists():
+        conflict = resume_conflict(json.loads(side.read_text(encoding="utf-8")), opts)
+        if conflict:
+            print(f"[gen] refuse: {out} was generated with other settings ({conflict}), pass a fresh --out",
+                  file=sys.stderr)
+            return 2
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
         f"concurrency {opts.concurrency}, max_tokens {opts.max_tokens}, T {opts.temperature} top_p {opts.top_p}")
@@ -392,6 +432,12 @@ def run_gen(opts: GenOptions) -> int:
             proc = spawn_server(opts, out.with_suffix(out.suffix + ".server.log"))
         model_id = wait_ready(base_url, proc, opts.startup_timeout)
         log(f"[gen] server ready: model {model_id}")
+        if not side.exists():
+            # the settings land before the first request, so a run cut
+            # short still leaves what a resume compares against
+            write_json_atomic(side, {"gen_version": GEN_VERSION, "model": opts.teacher or base_url,
+                                     "served_model_id": model_id, **run_settings(opts),
+                                     "prompt_set_sha256": prompt_hash, "run": None})
         lock = threading.Lock()
         t0 = time.perf_counter()
         n_ok = n_err = 0
@@ -429,22 +475,17 @@ def run_gen(opts: GenOptions) -> int:
         with_context = any(r.get("student_messages") for r in rows)
         sidecar = {
             "gen_version": GEN_VERSION, "model": opts.teacher or base_url, "served_model_id": model_id,
-            "sampling": {"temperature": opts.temperature, "top_p": opts.top_p, "top_k": opts.top_k,
-                         "min_p": opts.min_p, "max_tokens": opts.max_tokens},
-            "seed": opts.seed,
-            "chat_template_kwargs": json.loads(opts.chat_template_kwargs) if opts.chat_template_kwargs else None,
+            **run_settings(opts),
             "serve_args": list(opts.serve_arg), "prompt_source": opts.prompts or opts.corpus,
             "prompt_set_sha256": prompt_hash, "prompts": len(rows),
             "instruction": opts.instruction if opts.corpus else None,
             "prefix_chars": opts.prefix_chars if opts.corpus else None, "filter_version": None,
             "context": opts.context or ("per-prompt" if with_context else None),
             "context_format": opts.context_format if with_context else None,
-            "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget,
             "run": {"completed": n_ok, "failed": n_err, "generated_tokens": gen_tokens, "wall_s": el,
                     "tok_s_aggregate": gen_tokens / max(el, 1e-9), "stop_fraction": stops / max(n_ok, 1),
                     "budget_hits": budget_hits, "longest_stopped_reply_tokens": longest,
                     "concurrency": opts.concurrency}}
-        side = out.with_suffix(out.suffix + ".gen.json")
         prev = json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
         if prev and prev.get("prompt_set_sha256") == prompt_hash and isinstance(prev.get("run"), dict):
             for k in ("completed", "failed", "generated_tokens", "wall_s", "budget_hits"):

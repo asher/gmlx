@@ -285,7 +285,8 @@ class ShardWriter:
         return self.dir / f"rows-{i:05d}.jsonl"
 
     def write(self, i: int, arrays: dict[str, np.ndarray], rows: list[RowMeta],
-              wall_s: float, step: int | None = None, trunk_chunk: int | None = None) -> dict:
+              wall_s: float, step: int | None = None, trunk_chunk: int | None = None,
+              max_id: int | None = None) -> dict:
         data = save_safetensors_bytes(arrays)
         if self.max_disk_bytes is not None and self.progress["bytes"] + len(data) > self.max_disk_bytes:
             raise RuntimeError(
@@ -308,6 +309,10 @@ class ShardWriter:
             self.progress["min_step"] = step if ms is None else min(ms, step)
         if trunk_chunk is not None:
             self.progress["trunk_chunk"] = trunk_chunk
+        if max_id is not None:
+            # the largest token id any shard holds, what a student head
+            # must be wider than to gather the cache's ids
+            self.progress["max_top_k_id"] = max(int(max_id), int(self.progress.get("max_top_k_id") or -1))
         write_json_atomic(self.progress_path, self.progress)
         return entry
 
@@ -354,6 +359,7 @@ def write_manifest(cache_dir: Path, *, teacher_path: str, dataset: str,
         "num_batches": len(progress["shards"]),
         "batch_size": batch_size,
         "logit_dtype": "float16",
+        "max_top_k_id": progress.get("max_top_k_id"),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "gmlx_distill": dict(gmlx_distill, format_version=FORMAT_VERSION,
                              shards=progress["shards"], tokens=progress["tokens"],

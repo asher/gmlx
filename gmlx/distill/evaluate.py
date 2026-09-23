@@ -22,8 +22,9 @@ from .corpus import nfc
 from .data import CacheReader
 from .format import read_json, replay_layers_for, shard_texts, write_json_atomic
 from .student import adapter_disabled
-from .head import head_spec_from_model
+from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model
 from .trainer import load_student
+from .view import student_width
 
 
 @dataclass
@@ -66,7 +67,8 @@ class UnreadableInput(Exception):
 
 def read_jsonl(path: Path) -> list[dict]:
     try:
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        # newlines only: a row may hold U+2028 or another line separator
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
     except (OSError, ValueError) as e:
         raise UnreadableInput(f"{path}: {e}") from e
     if not all(isinstance(r, dict) for r in rows):
@@ -112,6 +114,18 @@ TASK_KEYS = {"gsm8k": ("id", "question", "answer")}
 MC_KEYS = ("id", "query", "choices", "gold")
 
 
+def teacher_bpb_map(path) -> dict:
+    """{slice: bpb} from a --teacher-bpb file: a plain map, or an eval
+    report whose after.bpb block is read."""
+    d = read_report(path)
+    after = d.get("after")
+    if isinstance(after, dict) and isinstance(after.get("bpb"), dict):
+        return {n: (r.get("bpb") if isinstance(r, dict) else None) for n, r in after["bpb"].items()}
+    if d and all(v is None or isinstance(v, (int, float)) for v in d.values()):
+        return d
+    raise UnreadableInput(f"{path}: neither a {{slice: bpb}} map nor an eval report")
+
+
 def chat_refs(path) -> dict:
     """{id: reply} of the compliant, non-empty replies in an earlier
     report, the anchors of the drift score."""
@@ -137,10 +151,16 @@ def cache_sources(cache: Path) -> dict[str, int]:
 def kld_cache_refusal(kld_dir: Path, manifest: dict, tokenizer, head_width: int) -> str | None:
     """Why --kld-cache cannot score this student, or None: the cache's
     vocabulary must be the student's (equal maps, or pad-style surplus ids
-    on one side) and no wider than the student's head, since the sparse
-    KL gathers the cache's token ids from the student's logits."""
-    if int(manifest.get("vocab_size", 0)) > head_width:
-        return f"its vocabulary ({manifest.get('vocab_size')}) is wider than the student's head ({head_width})"
+    on one side) and every cached id must fall inside the student's head,
+    since the sparse KL gathers the cache's token ids from the student's
+    logits."""
+    top = manifest.get("max_top_k_id")
+    if top is not None:
+        if int(top) >= head_width:
+            return f"it holds token id {top}, beyond the student's head ({head_width})"
+    elif int(manifest.get("vocab_size", 0)) > head_width:
+        return (f"its vocabulary ({manifest.get('vocab_size')}) is wider than the student's head ({head_width}) "
+                "and it records no largest cached id")
     if manifest.get("tokenizer_hash") == vocab_map_hash(tokenizer):
         return None
     # the hash is the fast path; a same-vocabulary pair whose maps differ
@@ -149,6 +169,8 @@ def kld_cache_refusal(kld_dir: Path, manifest: dict, tokenizer, head_width: int)
     src = str(tok_dir) if tok_dir.exists() else manifest.get("teacher_path")
     if not src:
         return "it carries no tokenizer directory and its manifest names no teacher_path"
+    if not Path(src).expanduser().exists():
+        return f"its tokenizer is not at {src} (no tokenizer directory, and the manifest's teacher_path is gone)"
     same, why = _tokens.identity_pair(_tokens.load_tokenizer(src), tokenizer)
     return None if same else f"it was cached with another tokenizer than the student's ({why})"
 
@@ -384,7 +406,7 @@ def run_eval(opts: EvalOptions) -> int:
         chat_items = (check_keys(Path(opts.chat_sanity), read_jsonl(Path(opts.chat_sanity)), ("messages",))
                       if opts.chat_sanity else [])
         refs_before = chat_refs(Path(opts.chat_refs)) if opts.chat_refs else None
-        teacher_bpb = read_report(Path(opts.teacher_bpb)) if opts.teacher_bpb else None
+        teacher_bpb = teacher_bpb_map(Path(opts.teacher_bpb)) if opts.teacher_bpb else None
         if opts.kld_cache:
             kld_manifest = read_report(Path(opts.kld_cache) / "manifest.json")
         if opts.cache:
@@ -396,6 +418,21 @@ def run_eval(opts: EvalOptions) -> int:
         log(f"[eval] refuse: --reply-positions {opts.reply_positions} names none of the reply-slice rows "
             "(a census run without --corpus keys its positions by cache row, not by corpus id)")
         return 2
+    # the kld cache check needs the student's tokenizer and head width, both
+    # readable from its header, so it runs before the load; a student whose
+    # width the header does not give is checked after it
+    kld_width = student_width(opts.student) if opts.kld_cache else None
+    if opts.kld_cache and kld_width is not None:
+        try:
+            tok0 = _tokens.load_tokenizer(opts.student)
+        except (OSError, ValueError) as e:
+            log(f"[eval] refuse: cannot load the student tokenizer from {opts.student}: {e}")
+            return 2
+        why = kld_cache_refusal(Path(opts.kld_cache), kld_manifest, tok0, kld_width)
+        if why:
+            log(f"[eval] refuse: --kld-cache {opts.kld_cache}: {why}; the sparse KL is defined on a "
+                "same-tokenizer cache only")
+            return 2
     report: dict = {"student": opts.student, "adapter": opts.adapter, "slices": {}, "decontam": {},
                     "bpb_prefix": opts.bpb_prefix}
     contaminated = set()
@@ -410,9 +447,15 @@ def run_eval(opts: EvalOptions) -> int:
             else:
                 log(f"[eval] {name}: decontam fraction {f:.5f}")
     model, _cfg, tokenizer, _kind = load_student(opts.student, opts.adapter, opts.hf_source)
-    if opts.kld_cache:
-        width = head_spec_from_model(getattr(model, "language_model", model)).V
-        why = kld_cache_refusal(Path(opts.kld_cache), kld_manifest, tokenizer, width)
+    import mlx.core as mx
+    head = head_spec_from_model(getattr(model, "language_model", model))
+    gap = head_parity_gap(model, head, mx.arange(1, 9)[None])
+    if gap > HEAD_PARITY_TOL:
+        log(f"[eval] refuse: the head does not reproduce the student's own logits (relative gap {gap:.3f}), "
+            "the model changes its logits after the projection in a way the distill head does not carry")
+        return 2
+    if opts.kld_cache and kld_width is None:
+        why = kld_cache_refusal(Path(opts.kld_cache), kld_manifest, tokenizer, head.V)
         if why:
             log(f"[eval] refuse: --kld-cache {opts.kld_cache}: {why}; the sparse KL is defined on a "
                 "same-tokenizer cache only")

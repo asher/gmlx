@@ -124,12 +124,13 @@ def test_gen_writes_rows_with_two_lists_and_a_sidecar(tmp_path, stub_server):
     assert side["run"]["completed"] == 2 and side["run"]["failed"] == 0
     assert side["prompts"] == 2 and len(side["prompt_set_sha256"]) == 64
     assert side["thinking"] is False and side["thinking_budget"] is None
-    # the switch is sent off explicitly, so a template that thinks by
-    # default does not think behind a sidecar that says off
+    # the switch is sent off explicitly as serve's own control, so a
+    # template that thinks by default does not think behind a sidecar
+    # that says off; no template kwarg is invented for it
     sampled = [c for c in _Handler.calls if "seed" in c]
-    assert sampled and all(c["enable_thinking"] is False and c["chat_template_kwargs"] == {"enable_thinking": False}
+    assert sampled and all(c["thinking"] == "off" and "enable_thinking" not in c and "chat_template_kwargs" not in c
                            for c in sampled)
-    assert side["chat_template_kwargs"] == {"enable_thinking": False}
+    assert side["chat_template_kwargs"] is None
 
 
 def test_gen_resumes_by_prompt_id_and_accumulates_the_run(tmp_path, stub_server):
@@ -172,10 +173,10 @@ def test_gen_marks_the_thinking_budget_hit(tmp_path, stub_server, monkeypatch):
     sent = [c for c in _Handler.calls if c.get("thinking_budget")]
     assert sent and all(c["thinking_budget"] == 40 for c in sent)
     # a server gen did not start sees the switch and the kwargs on the request itself
-    assert all(c["enable_thinking"] is True for c in sent)
-    assert all(c["chat_template_kwargs"] == {"preserve_thinking": True, "enable_thinking": True} for c in sent)
+    assert all(c["thinking"] == "on" for c in sent)
+    assert all(c["chat_template_kwargs"] == {"preserve_thinking": True} for c in sent)
     side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
-    assert side["chat_template_kwargs"] == {"preserve_thinking": True, "enable_thinking": True}
+    assert side["chat_template_kwargs"] == {"preserve_thinking": True}
     assert side["thinking_budget"] == 40 and side["run"]["budget_hits"] == 1
 
 
@@ -384,16 +385,18 @@ def test_recontext_row_needs_a_user_turn_before_the_reply():
 
 
 def test_gen_sends_the_thinking_switch_both_ways(monkeypatch, tmp_path):
-    """Without --thinking the request and the served template carry
-    enable_thinking false, so a template whose default is thinking does
-    not think behind a sidecar that says off; the switch wins over a
-    same-named kwarg."""
+    """The request carries serve's own thinking control on or off, and the
+    spawned server gets --thinking the same way, so serve maps the switch
+    onto whatever variable the teacher's template reads (enable_thinking
+    for Qwen, thinking_mode for MiniMax, and so on). Template kwargs the
+    user passes go through verbatim."""
     off = gen.GenOptions(out="x.jsonl", prompts="p.jsonl")
     body = gen._sampling(off, 1)
-    assert body["enable_thinking"] is False and body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["thinking"] == "off" and "enable_thinking" not in body and "chat_template_kwargs" not in body
     on = gen.GenOptions(out="x.jsonl", prompts="p.jsonl", thinking=True,
-                        chat_template_kwargs='{"enable_thinking": false, "preserve_thinking": true}')
-    assert gen._sampling(on, 1)["chat_template_kwargs"] == {"enable_thinking": True, "preserve_thinking": True}
+                        chat_template_kwargs='{"preserve_thinking": true}')
+    body = gen._sampling(on, 1)
+    assert body["thinking"] == "on" and body["chat_template_kwargs"] == {"preserve_thinking": True}
     from gmlx.serve import lifecycle
     seen: dict = {}
 
@@ -405,4 +408,31 @@ def test_gen_sends_the_thinking_switch_both_ways(monkeypatch, tmp_path):
     monkeypatch.setattr(lifecycle, "start_background_nowait", start)
     gen.spawn_server(gen.GenOptions(out="x.jsonl", prompts="p.jsonl", teacher="t.gguf", serve_arg=["--kv-bits", "8"]),
                      tmp_path / "log")
-    assert seen["args"] == ["t.gguf", "--chat-template-config", '{"enable_thinking": false}', "--kv-bits", "8"]
+    assert seen["args"] == ["t.gguf", "--thinking", "off", "--kv-bits", "8"]
+    gen.spawn_server(gen.GenOptions(out="x.jsonl", prompts="p.jsonl", teacher="t.gguf", thinking=True,
+                                    chat_template_kwargs='{"preserve_thinking": true}'), tmp_path / "log")
+    assert seen["args"] == ["t.gguf", "--thinking", "on", "--chat-template-config", '{"preserve_thinking": true}']
+
+
+def test_gen_resume_drops_a_torn_last_line_and_refuses_other_settings(tmp_path, stub_server, capsys):
+    """A kill mid-write leaves a torn last line, which a resume cuts off
+    and regenerates; a bad line elsewhere and a resume under other
+    sampling settings are refused."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+            {"id": "b", "messages": [{"role": "user", "content": "beta"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write('{"id": "c", "mess')
+    prompts = _prompts(tmp_path / "p.jsonl", rows + [{"id": "c", "messages": [{"role": "user", "content": "gamma"}]}])
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    assert "dropped a torn last line" in capsys.readouterr().err
+    assert [r["id"] for r in _rows(out)] == ["a", "b", "c"]
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, temperature=0.2))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "sampling" in err
+    text = out.read_text(encoding="utf-8")
+    out.write_text(text.replace('"id": "b"', 'oops', 1), encoding="utf-8")
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
+    assert rc == 2 and "line 2 is not a JSON row" in capsys.readouterr().err

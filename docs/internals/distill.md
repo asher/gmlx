@@ -17,7 +17,19 @@ vocabulary width. The reduction per sub-chunk is a float32 log-softmax, a
 full-width index from the top-k selection, and one temporary at a time
 for the tail mass and the boundary mass. Those run as separate steps, so
 at most one full-width temporary is live beyond the log-softmax. That is 14
-bytes per V-element, budgeted as 16 without `--floor` and 20 with it.
+bytes per V-element, budgeted as 16 without `--floor` and 20 with it. The
+sub-chunk's logits are cast to bfloat16 before the reduction whatever the
+activation dtype, which is what that budget counts, and the stored top-K
+values are float16 in any case.
+
+Some families scale their logits after the projection, and the head
+carries that scale beside the softcap. Granite divides by
+`logits_scaling`, Cohere multiplies by `logit_scale` and MiniCPM scales
+the hidden states. As a check that nothing else was missed, the head
+runs beside the model's own forward on eight tokens before the pass, and
+again before `train` and `eval` score anything. A difference in the
+logits refuses the run, so a model that changes its logits in a way the
+head does not carry never reaches the cache.
 
 `step` is the largest halving tier of 4096 positions with `step * V *
 bytes` under `--logits-cap-gb`, from `gmlx.gen.prefill_plan`. The first
@@ -64,6 +76,9 @@ before they run, so LoRA dropout draws the same mask in both and the
 cotangents land on the hidden states they were computed from. A
 checkpointed layer draws one seed before its forward and replays it in
 the backward recompute, so the recompute sees the mask the forward drew.
+The draw evaluates an array, which the eager distill loop allows and a
+compiled step does not, so `gmlx train` refuses dropout with
+checkpointing instead of replaying.
 The hidden-state map of `--hs` draws its initial weights from its own
 key, so building it at the first step of a run or a resume leaves the
 run's random stream where it was.

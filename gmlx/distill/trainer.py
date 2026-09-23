@@ -24,7 +24,7 @@ from . import loss as _loss
 from . import student as _student
 from .constants import DEFAULT_KNOBS, GB, log
 from .format import free_bytes, manifest_sha256, read_json, write_json_atomic
-from .head import head_spec_from_model, log_bmask_from
+from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
 
 
 @dataclass
@@ -227,6 +227,11 @@ def run_train(opts: TrainOptions) -> int:
         return 2
     inner = getattr(model, "language_model", model)
     head = head_spec_from_model(inner)
+    gap = head_parity_gap(model, head, mx.arange(1, 9)[None])
+    if gap > HEAD_PARITY_TOL:
+        log(f"[train] refuse: the head does not reproduce the student's own logits (relative gap {gap:.3f}), "
+            "the model changes its logits after the projection in a way the distill head does not carry")
+        return 2
     if head.V != view["V_S"]:
         log(f"[train] refuse: student head width {head.V} != view V_S {view['V_S']}")
         return 2
@@ -245,7 +250,7 @@ def run_train(opts: TrainOptions) -> int:
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
     if opts.grad_checkpoint:
-        log(f"[train] per-layer checkpointing on {checkpoint_layers(model)} layer classes")
+        log(f"[train] per-layer checkpointing on {checkpoint_layers(model, replay_dropout=True)} layer classes")
     restore_attn = install_training_attention(model)
     log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} attention modules patched")
     gdn_install = install_training_gdn(model)

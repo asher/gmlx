@@ -441,12 +441,12 @@ def test_alm_and_scatter_vs_python_reference():
     assert np.array_equal(np.asarray(full), ref.reshape(B, Tm1))
 
 
-def _dense_loss_mx(hidden, W, batch, group_of, G, Kp, bmask, knobs, softcap=None):
+def _dense_loss_mx(hidden, W, batch, group_of, G, Kp, bmask, knobs, softcap=None, scale=1.0):
     """Dense mx reference of distill_loss (materialized logits, plain
     scatter), for gradient comparison."""
     B, T, d = hidden.shape
     Tm1 = T - 1
-    z = (hidden[:, :-1, :].reshape(B * Tm1, d) @ W.T).astype(mx.float32)
+    z = (hidden[:, :-1, :].reshape(B * Tm1, d) @ W.T).astype(mx.float32) * scale
     if softcap:
         z = softcap * mx.tanh(z / softcap)
     logq = z - mx.logsumexp(z, axis=-1, keepdims=True)
@@ -509,8 +509,9 @@ def _synthetic_batch(rng, B, T, V, G, group_of, Kp, bmask, n_chunks=3):
     return dl.collate(rows, Kp, G, pad_to=8)
 
 
-@pytest.mark.parametrize("V,C,softcap", [(64, 5, None), (64, 64, 30.0), (151936, 7, None)])
-def test_distill_loss_gradient_vs_dense(V, C, softcap):
+@pytest.mark.parametrize("V,C,softcap,scale", [(64, 5, None, 1.0), (64, 64, 30.0, 1.0), (151936, 7, None, 1.0),
+                                                (64, 9, None, 0.125)])
+def test_distill_loss_gradient_vs_dense(V, C, softcap, scale):
     rng = np.random.default_rng(7)
     B, T, d, G, Kp = 2, 14, 8, min(V, 30), 4
     group_of = rng.integers(0, G, V).astype(np.int32) if G < V else np.arange(V, dtype=np.int32)
@@ -523,13 +524,13 @@ def test_distill_loss_gradient_vs_dense(V, C, softcap):
     knobs = dict(KNOBS, lambda_ce=0.5)
 
     def fused(hid, w):
-        head = dl.linear_head(w, softcap)
+        head = dl.linear_head(w, softcap, scale=scale)
         loss, _ = dl.distill_loss(hid, bm, head, group_of=mx.array(group_of), G=G, Kp=Kp,
                                   log_bmask=dl.log_bmask_from(bmask), knobs=knobs, C=C)
         return loss
 
     def dense(hid, w):
-        return _dense_loss_mx(hid, w, bm, mx.array(group_of), G, Kp, bmask, knobs, softcap=softcap)
+        return _dense_loss_mx(hid, w, bm, mx.array(group_of), G, Kp, bmask, knobs, softcap=softcap, scale=scale)
 
     lf, ld = fused(hidden, W), dense(hidden, W)
     gf = mx.grad(fused, argnums=(0, 1))(hidden, W)
@@ -1877,7 +1878,7 @@ def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
     assert rc == 2 and "no 'messages' key" in err
 
 
-def test_kld_cache_refusal_and_replay_gate(tmp_path, tok_bl):
+def test_kld_cache_refusal_and_replay_gate(tmp_path, tok_bl, monkeypatch):
     """A kld cache wider than the student's head, or one whose tokenizer
     cannot be found, is refused; a same-map cache passes through the hash
     or the saved tokenizer; routes are replayed only without an adapter."""
@@ -1893,8 +1894,10 @@ def test_kld_cache_refusal_and_replay_gate(tmp_path, tok_bl):
     tok_bl.save_pretrained(tmp_path / "tokenizer")
     assert _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": "x"}, tok_bl, V) is None
     manifest = {"gmlx_distill": {"routing": None}}
+    assert _ev.kld_replay_layers(object(), manifest, None) == dl.replay_layers_for(object(), manifest) is None
+    monkeypatch.setattr(_ev, "replay_layers_for", lambda model, man: [1, 3])
+    assert _ev.kld_replay_layers(object(), manifest, None) == [1, 3]
     assert _ev.kld_replay_layers(object(), manifest, "adapter.gguf") is None
-    assert _ev.kld_replay_layers(object(), manifest, None) == dl.replay_layers_for(object(), manifest)
 
 
 def test_view_records_the_cache_absolutely_and_train_refuses_a_moved_cache(tmp_path, tok_bl, tok_spm,
@@ -1933,3 +1936,222 @@ def test_align_materialize_over_the_disk_cap_leaves_no_view(tmp_path, tok_bl, to
                                             out=str(out), materialize=True, max_disk_gb=1e-9))
     assert rc == 2 and "[align] refuse: --max-disk-gb" in capsys.readouterr().err
     assert not list(out.glob("view-*.safetensors")) and not (out / "view.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# review round four: head scale and parity, the teacher pass end to end,
+# readers, the kld cache before the load
+# ---------------------------------------------------------------------------
+
+def _tiny_mlx_teacher(tmp: Path, tok, seed=0) -> Path:
+    """A two-layer llama checkpoint over tok's vocabulary, loadable by
+    mlx_lm.load, so the teacher pass runs end to end on the CPU."""
+    from mlx.utils import tree_flatten
+    from mlx_lm.models import llama
+
+    d = tmp
+    d.mkdir(parents=True, exist_ok=True)
+    tok.save_pretrained(d)
+    cfg = dict(model_type="llama", hidden_size=32, num_hidden_layers=2, intermediate_size=64,
+               num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5, vocab_size=len(dl.token_bytes(tok)),
+               tie_word_embeddings=True, max_position_embeddings=512, rope_theta=10000.0)
+    mx.random.seed(seed)
+    model = llama.Model(llama.ModelArgs.from_dict(cfg))
+    mx.save_safetensors(str(d / "model.safetensors"), dict(tree_flatten(model.parameters())))
+    (d / "config.json").write_text(json.dumps(cfg))
+    return d
+
+
+def _text_corpus(path: Path, n=3) -> Path:
+    path.write_text("".join(json.dumps({"text": "the cat is the cat " * 4}) + "\n" for _ in range(n)))
+    return path
+
+
+def test_head_carries_granite_logits_scaling_and_parity_catches_the_rest():
+    """Granite divides its logits by logits_scaling after the projection;
+    the head spec folds that in, and the parity gap against the model's
+    own forward is what refuses any other post-projection change."""
+    from mlx_lm.models import granite, llama
+
+    from gmlx.distill import head as _head
+
+    V = 64
+    ga = granite.ModelArgs(model_type="granite", hidden_size=32, num_hidden_layers=1, intermediate_size=64,
+                           num_attention_heads=4, rms_norm_eps=1e-5, vocab_size=V, logits_scaling=8.0,
+                           attention_multiplier=0.125, embedding_multiplier=1.0, residual_multiplier=1.0,
+                           max_position_embeddings=512, num_key_value_heads=2, attention_bias=False,
+                           mlp_bias=False, rope_theta=10000.0)
+    mx.random.seed(1)
+    g = granite.Model(ga)
+    ids = mx.array([[1, 2, 3, 4, 5, 6, 7, 8]])
+    spec = _head.head_spec_from_model(g)
+    assert spec.scale == pytest.approx(0.125)
+    assert _head.head_parity_gap(g, spec, ids) < 1e-4
+    la = llama.ModelArgs(model_type="llama", hidden_size=32, num_hidden_layers=1, intermediate_size=64,
+                         num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5, vocab_size=V)
+    m = llama.Model(la)
+    plain = _head.head_spec_from_model(m)
+    assert plain.scale == 1.0 and _head.head_parity_gap(m, plain, ids) < 1e-4
+    orig = llama.Model.__call__
+    try:
+        llama.Model.__call__ = lambda self, inputs, cache=None: orig(self, inputs, cache) * 3.0
+        assert _head.head_parity_gap(m, plain, ids) > _head.HEAD_PARITY_TOL
+    finally:
+        llama.Model.__call__ = orig
+
+
+def test_cache_pass_records_the_teacher_and_the_largest_id(tmp_path, tok_bl, capsys):
+    """The manifest names the teacher by absolute path and the largest
+    cached token id; the resume fingerprint carries the teacher, so a
+    resume on another one is refused."""
+    import shutil
+
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=2)
+    assert _teacher.run_cache(opts) == 0
+    man = json.loads((out / "manifest.json").read_text())
+    assert Path(man["teacher_path"]).is_absolute() and Path(man["teacher_path"]) == teacher.resolve()
+    assert man["gmlx_distill"]["teacher"]["path"] == man["teacher_path"]
+    V = len(dl.token_bytes(tok_bl))
+    assert isinstance(man["max_top_k_id"], int) and 0 <= man["max_top_k_id"] < V
+    run = json.loads((out / "progress.json").read_text())["run"]
+    assert run["teacher"]["path"] == man["teacher_path"] and run["teacher"]["size"] > 0
+    assert "render_kwargs" in run and run["hidden_dim"] is None
+    other = tmp_path / "teacher2"
+    shutil.copytree(teacher, other)
+    a = _teacher.run_fingerprint(opts, "x", 1, 1, None)
+    b = _teacher.run_fingerprint(_teacher.CacheOptions(teacher=str(other), corpus=str(corpus), out=str(out)),
+                                 "x", 1, 1, None)
+    assert a["teacher"]["path"] != b["teacher"]["path"]
+    (out / "batch-00001.safetensors").unlink()
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(other), corpus=str(corpus), out=str(out), top_k=8,
+                                                  max_len=64, rows_per_shard=2, resume=True))
+    err = capsys.readouterr().err
+    assert rc == 2 and "other inputs than the first run" in err and "teacher" in err
+
+
+def test_cache_pass_refuses_a_writer_error_and_a_head_that_misses_the_logits(tmp_path, tok_bl, monkeypatch,
+                                                                              capsys):
+    """A disk-cap or free-space error from the shard writer exits 2 with
+    the verified shards kept, and a model whose logits the head does not
+    reproduce is refused before any shard is written."""
+    from mlx_lm.models import llama
+
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+
+    def boom(self, *a, **k):
+        raise RuntimeError("--max-disk-gb 0.0 would be exceeded by shard 0")
+
+    monkeypatch.setattr(dl.ShardWriter, "write", boom)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                  out=str(tmp_path / "c1"), top_k=8, max_len=64))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[cache] refuse: --max-disk-gb 0.0 would be exceeded" in err
+    assert not list((tmp_path / "c1").glob("batch-*.safetensors"))
+    monkeypatch.undo()
+    orig = llama.Model.__call__
+    monkeypatch.setattr(llama.Model, "__call__", lambda self, inputs, cache=None: orig(self, inputs, cache) * 3.0)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                  out=str(tmp_path / "c2"), top_k=8, max_len=64))
+    err = capsys.readouterr().err
+    assert rc == 2 and "does not reproduce the teacher's own logits" in err
+    assert not list((tmp_path / "c2").glob("batch-*.safetensors"))
+
+
+def test_kld_cache_refusal_reads_the_largest_cached_id_and_a_gone_teacher_path(tmp_path, tok_bl):
+    from gmlx.distill import evaluate as _ev
+
+    h = dl.vocab_map_hash(tok_bl)
+    V = len(dl.token_bytes(tok_bl))
+    # a wider vocabulary whose cached ids all fit the head is accepted
+    assert _ev.kld_cache_refusal(tmp_path, {"vocab_size": V + 7, "tokenizer_hash": h, "max_top_k_id": V - 1},
+                                 tok_bl, V) is None
+    why = _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": h, "max_top_k_id": V}, tok_bl, V)
+    assert why and "beyond the student's head" in why
+    why = _ev.kld_cache_refusal(tmp_path, {"vocab_size": V + 7, "tokenizer_hash": h}, tok_bl, V)
+    assert why and "records no largest cached id" in why
+    why = _ev.kld_cache_refusal(tmp_path, {"vocab_size": V, "tokenizer_hash": "x",
+                                           "teacher_path": str(tmp_path / "gone")}, tok_bl, V)
+    assert why and "is not at" in why
+
+
+def test_eval_refuses_the_kld_cache_before_the_load(tmp_path, tok_bl, monkeypatch, capsys):
+    """The kld cache check reads the student's width and tokenizer from
+    its header, so a cache the student cannot score is refused before
+    the model load."""
+    from gmlx.distill import evaluate as _ev
+
+    V = len(dl.token_bytes(tok_bl))
+    monkeypatch.setattr(_ev, "student_width", lambda path: V)
+    monkeypatch.setattr(_ev._tokens, "load_tokenizer", lambda path: tok_bl)
+    kld = tmp_path / "kld"
+    kld.mkdir()
+    (kld / "manifest.json").write_text(json.dumps({"vocab_size": V, "tokenizer_hash": "x", "top_k": 8,
+                                                   "num_batches": 0}))
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+    rc = _ev.run_eval(_ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
+                                      kld_cache=str(kld)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[eval] refuse: --kld-cache" in err and "no tokenizer directory" in err
+
+
+def test_teacher_bpb_accepts_a_map_or_an_eval_report(tmp_path):
+    from gmlx.distill import evaluate as _ev
+
+    p = tmp_path / "t.json"
+    p.write_text(json.dumps({"prose": 0.5, "code": None}))
+    assert _ev.teacher_bpb_map(p) == {"prose": 0.5, "code": None}
+    p.write_text(json.dumps({"after": {"bpb": {"prose": {"bpb": 0.4, "bytes": 10}}}}))
+    assert _ev.teacher_bpb_map(p) == {"prose": 0.4}
+    p.write_text(json.dumps({"after": {"tasks": {}}}))
+    with pytest.raises(_ev.UnreadableInput):
+        _ev.teacher_bpb_map(p)
+
+
+def test_jsonl_readers_keep_unicode_line_separators(tmp_path):
+    """The writers emit non-ASCII text verbatim, so a row holding U+2028
+    must survive every reader: a line is what a newline ends."""
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import filter as _flt
+    from gmlx.distill import gen as _gen
+
+    text = "one\u2028two\u2029three\u0085four"
+    p = tmp_path / "r.jsonl"
+    p.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": text}]}, ensure_ascii=False) + "\n",
+                 encoding="utf-8")
+    assert [r["id"] for r in _ev.read_jsonl(p)] == ["a"]
+    assert [r["id"] for r in _flt._read_rows(p)] == ["a"]
+    assert _gen._done_ids(p) == {"a"}
+    rows = _gen.prompt_rows(_gen.GenOptions(out="x", prompts=str(p)))
+    assert len(rows) == 1 and rows[0]["messages"][0]["content"] == text
+
+
+def test_cache_kld_scores_the_students_own_list(tmp_path, tok_bl):
+    """A row with student_messages is re-rendered from that list, the
+    conversation training scored the student on, not from the teacher's
+    longer one."""
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    reply = {"role": "assistant", "content": "the cat is the cat 123"}
+    t_msgs = [{"role": "user", "content": "the cat is 123 the cat the cat\n\nwhat is it"}, reply]
+    s_msgs = [{"role": "user", "content": "what is it"}, reply]
+    _tiny_reply_cache(tmp_path / "c", teacher, [(t_msgs, s_msgs), (t_msgs, None)])
+    reader = dl.CacheReader(tmp_path / "c")
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    res = dl.cache_kld(Stub(), reader, tokenizer=teacher)
+    assert res["rows"] == 2 and res["rerendered_rows"] == 1 and res["positions"] > 0
+    assert np.isfinite(res["mean_kld_nats"])

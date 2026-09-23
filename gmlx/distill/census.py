@@ -114,7 +114,7 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     the eval's reply slice names its rows."""
     out = {}
     n = 0
-    for i, line in enumerate(corpus.read_text(encoding="utf-8").splitlines()):
+    for i, line in enumerate(corpus.read_text(encoding="utf-8").split("\n")):
         if line.strip():
             # the fallback id counts rows the way eval's reply slice does,
             # blank lines skipped; the pairing key is the cache's line number
