@@ -367,11 +367,21 @@ def run_settings(opts: GenOptions) -> dict:
             "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget}
 
 
+def model_label(opts: GenOptions) -> str:
+    """What the sidecar records as the model: the teacher file, else the
+    server the replies came from."""
+    return opts.teacher or (opts.base_url.rstrip("/") if opts.base_url else f"http://{opts.host}:{opts.port}/v1")
+
+
 def resume_conflict(prev: dict, opts: GenOptions) -> str | None:
     """What differs between an earlier run's sidecar and this run's
-    settings, or None."""
-    diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in run_settings(opts).items()
-             if k in prev and prev.get(k) != v]
+    settings, model and context, or None. A context the rows carry
+    themselves is recorded as per-prompt and is not a flag to compare."""
+    now: dict = dict(run_settings(opts), model=model_label(opts))
+    if prev.get("context") != "per-prompt":
+        now["context"] = opts.context
+        now["context_format"] = opts.context_format if opts.context else None
+    diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in now.items() if k in prev and prev.get(k) != v]
     return ", ".join(diffs) or None
 
 
@@ -434,6 +444,7 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
+    with_context = any(r.get("student_messages") for r in rows)
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
         f"concurrency {opts.concurrency}, max_tokens {opts.max_tokens}, T {opts.temperature} top_p {opts.top_p}")
     if not todo:
@@ -455,6 +466,8 @@ def run_gen(opts: GenOptions) -> int:
             # generated is kept for its run totals
             write_json_atomic(side, {"gen_version": GEN_VERSION, "model": opts.teacher or base_url,
                                      "served_model_id": model_id, **run_settings(opts),
+                                     "context": opts.context or ("per-prompt" if with_context else None),
+                                     "context_format": opts.context_format if with_context else None,
                                      "prompt_set_sha256": prompt_hash, "run": None})
         lock = threading.Lock()
         t0 = time.perf_counter()
@@ -464,33 +477,42 @@ def run_gen(opts: GenOptions) -> int:
         def work(i, r):
             return i, r, complete(base_url, model_id, r["messages"], opts, opts.seed + i, tokenizer)
 
-        with open(out, "a", encoding="utf-8") as ofh, ThreadPoolExecutor(max_workers=opts.concurrency) as ex:
+        ex = ThreadPoolExecutor(max_workers=opts.concurrency)
+        with open(out, "a", encoding="utf-8") as ofh:
             futs = [ex.submit(work, i, r) for i, r in todo]
-            for fut in as_completed(futs):
-                try:
-                    i, r, c = fut.result()
-                except Exception as e:  # noqa: BLE001 - one bad request never ends the run
+            try:
+                for fut in as_completed(futs):
+                    try:
+                        i, r, c = fut.result()
+                    except Exception as e:  # noqa: BLE001 - one bad request never ends the run
+                        with lock:
+                            n_err += 1
+                        log(f"[gen] warn: request failed: {type(e).__name__}: {e}")
+                        continue
+                    row = reply_row(r, c, opts.seed + i)
                     with lock:
-                        n_err += 1
-                    log(f"[gen] warn: request failed: {type(e).__name__}: {e}")
-                    continue
-                row = reply_row(r, c, opts.seed + i)
-                with lock:
-                    ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                    ofh.flush()
-                    n_ok += 1
-                    gen_tokens += int(c["completion_tokens"] or 0)
-                    stops += int(c["finish_reason"] == "stop")
-                    budget_hits += int(bool(c["budget_hit"]))
-                    if c["finish_reason"] == "stop":
-                        longest = max(longest, int(c["completion_tokens"] or 0))
-                    if n_ok % opts.report_every == 0:
-                        el = time.perf_counter() - t0
-                        log(f"[gen] {n_ok}/{len(todo)} done, {gen_tokens} tokens, {gen_tokens / el:.0f} tok/s "
-                            f"aggregate, stop {stops / n_ok:.3f}, mean {gen_tokens / n_ok:.0f} tokens per reply, "
-                            f"{n_err} failed ({el:.0f}s)")
+                        ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        ofh.flush()
+                        n_ok += 1
+                        gen_tokens += int(c["completion_tokens"] or 0)
+                        stops += int(c["finish_reason"] == "stop")
+                        budget_hits += int(bool(c["budget_hit"]))
+                        if c["finish_reason"] == "stop":
+                            longest = max(longest, int(c["completion_tokens"] or 0))
+                        if n_ok % opts.report_every == 0:
+                            el = time.perf_counter() - t0
+                            log(f"[gen] {n_ok}/{len(todo)} done, {gen_tokens} tokens, {gen_tokens / el:.0f} tok/s "
+                                f"aggregate, stop {stops / n_ok:.3f}, mean {gen_tokens / n_ok:.0f} tokens per "
+                                f"reply, {n_err} failed ({el:.0f}s)")
+            except BaseException:
+                # an interrupt: the queued requests are cancelled and the
+                # server stops first so the requests in flight fail fast
+                stop_server(opts, proc)
+                proc = None
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+            ex.shutdown(wait=True)
         el = time.perf_counter() - t0
-        with_context = any(r.get("student_messages") for r in rows)
         sidecar = {
             "gen_version": GEN_VERSION, "model": opts.teacher or base_url, "served_model_id": model_id,
             **run_settings(opts),

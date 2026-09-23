@@ -3123,3 +3123,127 @@ def test_bits_per_byte_windows_stay_on_character_boundaries(tmp_path, tok_bl, mo
     assert tb is not None and ends is not None and len(windows) > 1
     for _s, e in windows:
         tb[: int(ends[e - 1])].decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# review round nine: LoRA keys over the layers that hold them, the model
+# frame prefix, the bpb prefix refusals, a BOS that is also an EOS, the
+# GSM8K answer, shard order in the teacher identity
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_HEADERS = ("{{ bos_token }}{% for m in messages %}<|start_header_id|>{{ m['role'] }}<|end_header_id|>\n\n"
+                     "{{ m['content'] }}<|eot_id|>{% endfor %}{% if add_generation_prompt %}"
+                     "<|start_header_id|>assistant<|end_header_id|>\n\n{% endif %}")
+_TEMPLATE_BARE = ("[gMASK]<sop>{% for m in messages %}<|{{ m['role'] }}|>\n{{ m['content'] }}{% endfor %}"
+                  "{% if add_generation_prompt %}<|assistant|>\n{% endif %}")
+_TEMPLATE_CHATML = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+                    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
+
+
+def test_lora_key_coverage_counts_over_the_layers_that_hold_the_parent():
+    """A hybrid student holds attention on some layers only; its keys are
+    covered when every layer that has the parent module matches, and a
+    key missing on some of those layers is the mixed case that warns."""
+    import mlx.nn as nn
+
+    from gmlx.distill import trainer as _trainer
+
+    class _Layer(nn.Module):
+        def __init__(self, attn, q=True):
+            super().__init__()
+            if attn:
+                self.self_attn = nn.Module()
+                if q:
+                    self.self_attn.q_proj = nn.Linear(4, 4)
+                self.self_attn.o_proj = nn.Linear(4, 4)
+            else:
+                self.linear_attn = nn.Module()
+            self.mlp = nn.Module()
+            self.mlp.gate_proj = nn.Linear(4, 4)
+
+    class _Model(nn.Module):
+        def __init__(self, layers):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = layers
+
+    keys = ("self_attn.q_proj", "self_attn.o_proj", "mlp.gate_proj", "self_attn.qkv_proj")
+    hybrid = _Model([_Layer(False), _Layer(True), _Layer(False), _Layer(True)])
+    cov = _trainer.lora_key_coverage(hybrid, keys)
+    assert cov == {"self_attn.q_proj": (2, 2), "self_attn.o_proj": (2, 2), "mlp.gate_proj": (4, 4),
+                   "self_attn.qkv_proj": (0, 2)}
+    assert _trainer.lora_mixed_keys(cov) == []
+    mixed = _Model([_Layer(False), _Layer(True), _Layer(False), _Layer(True, q=False)])
+    cov = _trainer.lora_key_coverage(mixed, keys)
+    assert cov["self_attn.q_proj"] == (1, 2) and _trainer.lora_mixed_keys(cov) == ["self_attn.q_proj 1/2"]
+
+
+def test_model_frame_prefix_is_the_assistant_header_on_every_template(tok_bl):
+    from gmlx.distill import frames as _frames
+
+    cases = ((_TEMPLATE_HEADERS, "<|start_header_id|>assistant<|end_header_id|>\n\n"),
+             (_TEMPLATE_BARE, "<|assistant|>\n"), (_TEMPLATE_CHATML, "<|im_start|>assistant\n"))
+    for template, want in cases:
+        tok = _with_template(tok_bl, template)
+        assert _frames.frame_prefix(tok, "model") == want, template[:16]
+    assert "continue" in _frames.FRAME_PREFIX_KINDS and "model" in _frames.FRAME_PREFIX_KINDS
+
+
+def test_eval_refuses_an_unknown_bpb_prefix_frame_before_the_load_and_keeps_literal_text(tmp_path, capsys,
+                                                                                            monkeypatch):
+    from gmlx.distill import evaluate as _evaluate
+
+    assert _evaluate.literal_prefix("\u65e5\\n\\tx\\\\") == "\u65e5\n\tx\\"
+    monkeypatch.setattr(_evaluate, "load_student", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("loaded")))
+    student = tmp_path / "s.gguf"
+    student.write_bytes(b"GGUF")
+    rc = _evaluate.run_eval(_evaluate.EvalOptions(student=str(student), md=str(tmp_path / "r.md"),
+                                                  json=str(tmp_path / "r.json"), bpb_prefix="@chat"))
+    err = capsys.readouterr().err
+    assert rc == 2 and "--bpb-prefix" in err and "continue" in err and "model" in err
+
+
+def test_a_student_bos_that_is_also_an_eos_stays_in_the_eos_group():
+    """Qwen's BOS is its endoftext token, one of the end-of-generation ids;
+    the EOS group keeps it, and the BOS role maps only a BOS that is not
+    an EOS."""
+    import string
+
+    t = _bytelevel_tokenizer(_BL_MERGES)
+    s = _spm_tokenizer(["\u2581"] + list(string.ascii_letters), [])
+    s.add_special_tokens({"additional_special_tokens": ["<|im_end|>"]})
+    ie = s.convert_tokens_to_ids("<|im_end|>")
+    s._gguf_eos_token_ids = [ie, s.bos_token_id]
+    tb = dl.build_tables(t, s)
+    assert tb.group_of[s.bos_token_id] == tb.group_of[ie] and tb.target_g[t.eos_token_id] == tb.group_of[ie]
+    assert "bos" not in tb.roles
+
+
+def test_gsm8k_extract_needs_a_digit():
+    assert dl_eval.gsm8k_extract("so #### 1,234") == "1234"
+    assert dl_eval.gsm8k_extract("so #### -3.5 ok") == "-3.5"
+    assert dl_eval.gsm8k_extract("so #### ,") is None
+    assert dl_eval.gsm8k_extract("so #### , then 7") == "7"
+
+
+def test_teacher_identity_refuses_reordered_shards(tmp_path):
+    from gmlx.distill import teacher as _teacher
+
+    for name, size in (("aaa", 64), ("bbb", 32)):
+        (tmp_path / name).write_bytes(b"GGUF" + bytes(size))
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "m-00001-of-00002.gguf").symlink_to(tmp_path / "aaa")
+    (snap / "m-00002-of-00002.gguf").symlink_to(tmp_path / "bbb")
+    a = _teacher.teacher_identity(str(snap / "m-00001-of-00002.gguf"))
+    swapped = tmp_path / "swapped"
+    swapped.mkdir()
+    (swapped / "m-00001-of-00002.gguf").symlink_to(tmp_path / "bbb")
+    (swapped / "m-00002-of-00002.gguf").symlink_to(tmp_path / "aaa")
+    b = _teacher.teacher_identity(str(swapped / "m-00001-of-00002.gguf"))
+    renamed = tmp_path / "renamed"
+    renamed.mkdir()
+    (renamed / "x-00001-of-00002.gguf").symlink_to(tmp_path / "aaa")
+    (renamed / "x-00002-of-00002.gguf").symlink_to(tmp_path / "bbb")
+    c = _teacher.teacher_identity(str(renamed / "x-00001-of-00002.gguf"))
+    assert a["size"] == b["size"] == c["size"] and a["sha256_head"] == c["sha256_head"] != b["sha256_head"]

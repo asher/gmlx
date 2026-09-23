@@ -525,7 +525,7 @@ def score_multiple_choice(model, tokenizer, items: list[dict]) -> list[dict]:
 
 def gsm8k_extract(text: str) -> str | None:
     import re
-    m = re.findall(r"####\s*(-?[\d,]+(?:\.\d+)?)", text)
+    m = re.findall(r"####\s*(-?\d[\d,]*(?:\.\d+)?)", text)
     if m:
         return m[-1].replace(",", "")
     m = re.findall(r"-?\d[\d,]*(?:\.\d+)?", text)

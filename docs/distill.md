@@ -1051,7 +1051,9 @@ worked task. On a student of another size, start from them and change
 one at a time, judged by the validation loss. `--seed` fixes the batch order
 and the adapter's initialization, and `--resume` restarts at the exact
 step from `--ckpt-dir`. `--view` repeats to train on several views over
-one tokenizer pair, aligned with the same loss knobs.
+one tokenizer pair, aligned with the same chunk settings (`--gamma`,
+`--max-chunk-len`, `--w-mid`). The first view's `--T-dk` and `--tau-alm`
+apply to all of them unless the train flags override them.
 
 `--iters` follows from the training row count. One pass over the rows,
 an epoch, is the train rows of every view divided by `--batch-size`,

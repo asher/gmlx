@@ -125,6 +125,13 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     return out
 
 
+def walk_order(reader, rows: dict, keys: list) -> list:
+    """keys reordered by the shard and slot of their base row, so a walk
+    loads each shard once; the rows of a cache are sorted by length
+    across shards while the keys sort by id."""
+    return sorted(keys, key=lambda k: reader.index[rows[k]])
+
+
 def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], *,
            delta_threshold: float, id_of: dict[str, str], max_rows: int | None = None) -> dict:
     """The summary dict over the rows every cache holds."""
@@ -141,7 +148,8 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         last_window[key] = max(window, last_window.get(key, -1))
     if max_rows:
         keys = keys[:max_rows]
-    per_row = []
+    order = walk_order(base_reader, base_rows, keys)
+    by_key: dict = {}
     deltas_all: list[float] = []
     kl_all: list[float] = []
     res_all: list[float] = []
@@ -149,7 +157,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     high: dict[str, list] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
-    for key, window in keys:
+    for key, window in order:
         arrs0, text0, meta0 = base_reader.row(base_rows[(key, window)])
         doc_id = str(meta0["doc_id"])
         keys0, b0, _b2 = reply_positions(arrs0, meta0)
@@ -200,15 +208,16 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         rid = id_of.get(key, doc_id)
         if ranges and window == last_window[key]:
             high[rid] = ranges
-        per_row.append({"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
-                        "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
-                        "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),
-                        "mean_residual": float(np.mean(row_res)) if row_res else None,
-                        "high_delta_positions": len(ranges)})
+        by_key[(key, window)] = {"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
+                                 "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
+                                 "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),
+                                 "mean_residual": float(np.mean(row_res)) if row_res else None,
+                                 "high_delta_positions": len(ranges)}
         deltas_all += row_delta
         kl_all += row_kl
         top1_all += row_top1
         res_all += row_res
+    per_row = [by_key[k] for k in keys if k in by_key]
     deltas = np.array(deltas_all)
     hist = np.histogram(deltas, bins=HIST_BINS)[0].tolist() if deltas.size else []
     frame = ((base_reader.manifest.get("gmlx_distill") or {}).get("frame") or {}).get("kind")

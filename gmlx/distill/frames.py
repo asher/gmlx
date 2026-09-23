@@ -143,6 +143,9 @@ def render_frame(tokenizer, messages: list[dict]) -> str:
     return pre
 
 
+FRAME_PREFIX_KINDS = ("continue", "model")
+
+
 def frame_prefix(tokenizer, kind: str, instruction: str = CONTINUE_INSTRUCTION) -> str:
     """A bpb window prefix rendered from the tokenizer's own template, with
     no leading BOS (the scorer adds it): "continue" is the frame over one
@@ -152,10 +155,20 @@ def frame_prefix(tokenizer, kind: str, instruction: str = CONTINUE_INSTRUCTION) 
     if kind == "continue":
         frame = render_frame(tokenizer, [{"role": "user", "content": instruction}])
     elif kind == "model":
-        r = render_frame(tokenizer, [{"role": "user", "content": _PROBE}])
-        k = r.rfind(_PROBE)
-        nl = r.find("\n", k)
-        frame = r[nl + 1:] if nl >= 0 else r[k + len(_PROBE):]
+        # the header is what the frame adds beyond the user turn rendered
+        # on its own, whatever the template ends that turn with
+        msgs = [{"role": "user", "content": _PROBE}]
+        r = render_frame(tokenizer, msgs)
+        if has_chat_template(tokenizer):
+            plain = apply_template(tokenizer, msgs)
+        else:
+            plain = _plain_render(tokenizer, msgs, gen_prompt=False)
+        if len(r) > len(plain) and r.startswith(plain):
+            frame = r[len(plain):]
+        else:
+            k = r.rfind(_PROBE)
+            nl = r.find("\n", k)
+            frame = r[nl + 1:] if nl >= 0 else r[k + len(_PROBE):]
     else:
         raise ValueError(f"unknown frame prefix kind {kind!r}")
     bos = getattr(inner, "bos_token", None)

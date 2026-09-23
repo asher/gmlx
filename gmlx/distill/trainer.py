@@ -98,22 +98,32 @@ def view_fingerprint(view: dict) -> str:
 CHUNK_KNOBS = ("gamma", "max_chunk_len", "w_mid", "redirect_cut")
 
 
+def _resolve(module, path: str):
+    for part in path.split("."):
+        module = getattr(module, part, None) if module is not None else None
+    return module
+
+
 def lora_key_coverage(model, keys) -> dict[str, tuple[int, int]]:
-    """Per LoRA key, how many of the model's layers hold a module at that
-    dotted path, over the layer count."""
+    """Per LoRA key, how many layers hold a module at that dotted path,
+    over the layers that hold its parent module (a hybrid student has
+    attention on some layers only, a MoE student has dense projections on
+    its first layers only, and those layouts are not partial matches)."""
     from gmlx.tune.checkpoint import layer_list
 
     layers = layer_list(model)
     cov = {}
     for key in keys:
-        n = 0
-        for layer in layers:
-            mod = layer
-            for part in key.split("."):
-                mod = getattr(mod, part, None) if mod is not None else None
-            n += int(mod is not None)
-        cov[key] = (n, len(layers))
+        parent = key.rsplit(".", 1)[0] if "." in key else ""
+        have = [la for la in layers if not parent or _resolve(la, parent) is not None]
+        n = sum(int(_resolve(la, key) is not None) for la in have)
+        cov[key] = (n, len(have))
     return cov
+
+
+def lora_mixed_keys(cov: dict[str, tuple[int, int]]) -> list[str]:
+    """The keys matched on some of their layers and not others."""
+    return [f"{k} {n}/{total}" for k, (n, total) in cov.items() if 0 < n < total]
 
 
 def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale: float) -> dict:
@@ -345,7 +355,7 @@ def run_train(opts: TrainOptions) -> int:
         return 2
     cov = lora_key_coverage(model, LORA_KEYS)
     log("[train] LoRA keys: " + ", ".join(f"{k} {n}/{total}" for k, (n, total) in cov.items()))
-    mixed = [f"{k} {n}/{total}" for k, (n, total) in cov.items() if 0 < n < total]
+    mixed = lora_mixed_keys(cov)
     if mixed:
         log(f"[train] warn: LoRA keys matched on some layers only ({', '.join(mixed)}); "
             "the projections of the other layers stay frozen")

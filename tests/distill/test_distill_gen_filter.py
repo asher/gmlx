@@ -572,3 +572,55 @@ def test_filter_names_the_sidecar_it_compares_against_and_warns_on_a_missing_one
     assert rc == 0 and "[filter] warn:" in err and "plain.jsonl has no sidecar" in err and "a.jsonl" in err
     side = json.loads(out.with_suffix(out.suffix + ".gen.json").read_text())
     assert side["thinking"] is True and side["filter"]["inputs"] == [plain, a]
+
+
+# ---------------------------------------------------------------------------
+# review round nine: an interrupt stops the queue, a resume compares the
+# teacher and the context
+# ---------------------------------------------------------------------------
+
+
+def test_gen_interrupt_cancels_the_queued_requests(tmp_path, stub_server, monkeypatch):
+    """A Ctrl-C while replies are still queued must not let the pool drain
+    the queue behind the user's back."""
+    rows = [{"id": f"r{i}", "messages": [{"role": "user", "content": f"prompt {i}"}]} for i in range(12)]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    calls = []
+    real = gen.complete
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    real_completed = gen.as_completed
+
+    def interrupted(futs):
+        it = real_completed(futs)
+        yield next(it)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gen, "complete", counting)
+    monkeypatch.setattr(gen, "as_completed", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, concurrency=1))
+    assert len(calls) <= 3, len(calls)
+
+
+def test_gen_resume_refuses_another_teacher_or_context(tmp_path, stub_server, capsys):
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_text("the context\n", encoding="utf-8")
+    base = dict(out=str(out), prompts=prompts, base_url=stub_server, teacher="a.gguf")
+    assert gen.run_gen(gen.GenOptions(**base)) == 0
+    more = _prompts(tmp_path / "p.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    rc = gen.run_gen(gen.GenOptions(**dict(base, prompts=more, teacher="b.gguf")))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "model" in err
+    rc = gen.run_gen(gen.GenOptions(**dict(base, prompts=more, context=str(ctx))))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "context" in err
+    assert gen.run_gen(gen.GenOptions(**dict(base, prompts=more))) == 0
+    assert sorted(r["id"] for r in _rows(out)) == ["a", "b"]

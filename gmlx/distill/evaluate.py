@@ -259,7 +259,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
     prefix = None
     if opts.bpb_prefix:
         prefix = _frames.frame_prefix(tokenizer, opts.bpb_prefix[1:]) if opts.bpb_prefix.startswith("@") \
-            else opts.bpb_prefix.encode().decode("unicode_escape")
+            else literal_prefix(opts.bpb_prefix)
     res["bpb_prefix_text"] = prefix
     for name, text in slices.items():
         t0 = time.perf_counter()
@@ -340,6 +340,16 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
     return "\n".join(md) + "\n"
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+
+
+def literal_prefix(text: str) -> str:
+    """A prefix given as text, with the escapes \\n, \\t, \\r and \\\\ decoded and
+    every other character kept as typed."""
+    import re
+    return re.sub(r"\\([ntr\\])", lambda m: _ESCAPES[m.group(1)], text)
+
+
 def run_eval(opts: EvalOptions) -> int:
     """Returns 0 with both reports written, 2 on a refusal: before the
     load, a missing or unreadable input, ``--before`` without ``--adapter``
@@ -376,6 +386,10 @@ def run_eval(opts: EvalOptions) -> int:
             return 2
     if opts.before and not opts.adapter:
         log("[eval] refuse: --before scores the adapter disabled in process, so it needs --adapter")
+        return 2
+    if opts.bpb_prefix and opts.bpb_prefix.startswith("@") and opts.bpb_prefix[1:] not in _frames.FRAME_PREFIX_KINDS:
+        log(f"[eval] refuse: --bpb-prefix {opts.bpb_prefix} names no frame, the frames are "
+            + ", ".join("@" + k for k in _frames.FRAME_PREFIX_KINDS) + " (or give the prefix text)")
         return 2
     # every input is read before the load, so a malformed file is refused
     # in seconds and never after minutes of scoring

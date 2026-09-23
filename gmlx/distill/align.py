@@ -190,7 +190,7 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
             if u < V_S:
                 v1[u] = t_eos[0]
         roles["eos"] = {"teacher": t_eos, "student": s_eos}
-    if s_bos is not None and t_bos is not None and s_bos < V_S:
+    if s_bos is not None and t_bos is not None and s_bos < V_S and s_bos not in s_eos:
         v1[s_bos] = t_bos
         roles["bos"] = {"teacher": t_bos, "student": s_bos}
     same_added = []

@@ -287,3 +287,14 @@ def test_census_records_the_frame_and_eval_refuses_a_mismatch(tmp_path, tok, cap
     (tmp_path / "nocache").mkdir()
     rc, err = run(reply_think=True, cache=str(tmp_path / "nocache"))
     assert rc == 2 and "unreadable input" in err and "measured on a" not in err
+
+
+def test_census_walks_the_rows_shard_by_shard():
+    """Cache rows are sorted by length across shards while the pairing keys
+    sort by id, so the walk is ordered by shard to load each one once."""
+    class _Reader:
+        index = [(0, 0), (1, 0), (0, 1), (2, 0), (1, 1)]
+
+    rows = {("d", 0): 0, ("a", 0): 1, ("c", 0): 2, ("b", 0): 3, ("e", 0): 4}
+    keys = sorted(rows)
+    assert cs.walk_order(_Reader(), rows, keys) == [("d", 0), ("c", 0), ("a", 0), ("e", 0), ("b", 0)]
