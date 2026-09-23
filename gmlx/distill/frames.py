@@ -42,6 +42,16 @@ def has_chat_template(tokenizer) -> bool:
     return bool(getattr(hf_inner(tokenizer), "chat_template", None))
 
 
+def template_text(tokenizer) -> str:
+    """The chat template as one string: the template itself, or the JSON
+    of a named set (transformers keeps several templates as a dict), so
+    it can be hashed and searched for the variables it reads."""
+    tpl = getattr(hf_inner(tokenizer), "chat_template", None)
+    if not tpl:
+        return ""
+    return json.dumps(tpl, sort_keys=True) if isinstance(tpl, dict) else str(tpl)
+
+
 def set_render_kwargs(tokenizer, kwargs: dict | None) -> None:
     """Attach the keyword arguments every template render of this tokenizer
     passes to apply_chat_template (enable_thinking, reasoning_effort,
@@ -60,7 +70,7 @@ def resolve_render_kwargs(tokenizer, inherit: dict | None = None, override: dict
     cache was rendered with, the date pinned to the other side's), then
     the user's overrides."""
     kw = default_render_kwargs(tokenizer, date=(inherit or {}).get("date_string"))
-    tpl = getattr(hf_inner(tokenizer), "chat_template", None) or ""
+    tpl = template_text(tokenizer)
     kw.update({k: v for k, v in (inherit or {}).items() if k in tpl})
     kw.update(override or {})
     return kw
@@ -71,7 +81,7 @@ def default_render_kwargs(tokenizer, date: str | None = None) -> dict:
     templates that read date_string (Llama 3.x) get today's date pinned in
     the Llama format, so the cached render and every later re-render of the
     same conversation agree byte for byte."""
-    tpl = getattr(hf_inner(tokenizer), "chat_template", None) or ""
+    tpl = template_text(tokenizer)
     kw: dict = {}
     if "date_string" in tpl:
         kw["date_string"] = date or today_string()

@@ -291,3 +291,30 @@ def test_zero_token_budgets_are_refused_at_parse_time(argv):
 def test_fraction_flags_take_a_value_in_the_unit_interval(flag, value):
     rc, out = _run(["distill", "filter", "--in", "a.jsonl", "--out", "o.jsonl", flag, value])
     assert rc == 2 and "a fraction between 0 and 1 is required" in out, out
+
+
+_TRAIN = ["distill", "train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1"]
+
+
+@pytest.mark.parametrize("flag,value,word", [
+    ("--warmup", "5", "fraction"),
+    ("--lora-dropout", "1.0", "below 1"),
+    ("--lora-dropout", "-0.1", "below 1"),
+    ("--lr", "0", "positive"),
+    ("--weight-decay", "-1", "at least 0"),
+    ("--dk", "-1", "at least 0"),
+    ("--alm", "-0.5", "at least 0"),
+    ("--ce", "-1", "at least 0"),
+    ("--hs", "-1", "at least 0"),
+])
+def test_train_flags_refuse_values_out_of_range_at_parse_time(flag, value, word):
+    """A warmup past 1 never reaches the peak rate, a dropout of 1 raises
+    after the student loads, and a negative rate or loss weight trains the
+    wrong way; the parser refuses each."""
+    rc, out = _run(_TRAIN + [flag, value])
+    assert rc == 2 and word in out
+
+
+def test_train_refuses_when_every_loss_weight_is_zero():
+    rc, out = _run(_TRAIN + ["--dk", "0", "--alm", "0", "--ce", "0"])
+    assert rc == 2 and "[train] refuse: every loss weight is 0" in out

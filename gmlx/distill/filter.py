@@ -25,6 +25,7 @@ is prepared: a student answers the prompts without the context, and the
 teacher then scores those replies with the context in its prompt."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import os
@@ -254,6 +255,14 @@ def run_filter(opts: FilterOptions) -> int:
                   f"({s.get('filter_version')!r} vs {first.get('filter_version')!r}), filter the unfiltered "
                   "inputs first or join unfiltered files", file=sys.stderr)
             return 2
+        if s is not None and first is not None and isinstance(s.get("filter"), dict) \
+                and isinstance(first.get("filter"), dict):
+            pa, pb = s["filter"].get("params") or {}, first["filter"].get("params") or {}
+            diff = ", ".join(sorted(k for k in set(pa) | set(pb) if pa.get(k) != pb.get(k)))
+            if diff:
+                print(f"[filter] refuse: {p} was filtered with other settings than {first_path} ({diff}), "
+                      "filter the unfiltered inputs together", file=sys.stderr)
+                return 2
     for p, s in zip(inputs, sides):
         if s is None and first is not None:
             # the output sidecar labels every row it holds
@@ -282,7 +291,7 @@ def run_filter(opts: FilterOptions) -> int:
         except ValueError as e:
             print(f"[filter] refuse: {e}", file=sys.stderr)
             return 2
-        if not any(isinstance(row.get("gen"), dict) for row in rows):
+        if rows and not any(isinstance(row.get("gen"), dict) for row in rows):
             # every row would drop as length and the output would be empty
             print(f"[filter] refuse: no row of {p} carries a gen block, this is not a generated corpus",
                   file=sys.stderr)
@@ -351,6 +360,23 @@ def run_filter(opts: FilterOptions) -> int:
         sidecar["filter_history"] = [*(sidecar.get("filter_history") or []), sidecar["filter"]]
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "inputs": [str(p) for p in inputs]}
+    joined = [(p, s) for p, s in zip(inputs, sides) if s is not None]
+    if len(joined) > 1:
+        # one sidecar describes every input: the totals are read back from
+        # the rows written, the counts and walls add up, and the prompt
+        # fields list each input's
+        from .gen import row_totals
+        runs = [s.get("run") or {} for _, s in joined]
+        run = {**runs[0], **row_totals(out)}
+        run["failed"] = sum(int(r.get("failed") or 0) for r in runs)
+        run["wall_s"] = sum(float(r.get("wall_s") or 0.0) for r in runs)
+        run.pop("tok_s_aggregate", None)     # one rate cannot describe two runs
+        sidecar["run"] = run
+        sidecar["prompts"] = sum(int(s.get("prompts") or 0) for _, s in joined)
+        sidecar["prompt_source"] = [s.get("prompt_source") for _, s in joined]
+        sidecar["prompt_set_sha256"] = hashlib.sha256(
+            "\n".join(str(s.get("prompt_set_sha256")) for _, s in joined).encode()).hexdigest()
+        sidecar["joined"] = [str(p) for p, _ in joined]
     if opts.context is not None:
         ctx_name = str(Path(opts.context).expanduser().absolute())
         sidecar.update({"context": ctx_name, "shared_context": ctx_name, "context_format": opts.context_format,

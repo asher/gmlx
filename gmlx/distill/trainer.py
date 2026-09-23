@@ -248,6 +248,9 @@ def run_train(opts: TrainOptions) -> int:
     import mlx.optimizers as optim
     from mlx.utils import tree_map
 
+    if not any(w > 0 for w in (opts.dk, opts.alm, opts.ce, opts.hs)):
+        log("[train] refuse: every loss weight is 0 (--dk, --alm, --ce, --hs), nothing to train")
+        return 2
     if opts.lora_scale is not None and opts.lora_alpha is not None:
         log("[train] refuse: --lora-scale and --lora-alpha are two conventions for one multiplier, give one")
         return 2

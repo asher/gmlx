@@ -98,7 +98,8 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                    help="Seconds to wait for the served teacher (default 900).")
     p.add_argument("--concurrency", type=_positive_int, default=8, help="Requests in flight (default 8).")
     p.add_argument("--max-tokens", type=_positive_int, default=1024,
-                   help="Answer budget per request, the reasoning trace not counted (default 1024).")
+                   help="Answer budget per request (default 1024). With --thinking-budget the trace has its own "
+                        "budget on top; without one a thinking reply shares this budget with its trace.")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default 0.7).")
     p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
@@ -290,30 +291,32 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="LoRA multiplier applied directly (default 2.0 unless --lora-alpha is given).")
     p.add_argument("--lora-alpha", type=float, default=None,
                    help="LoRA multiplier as alpha / rank. Give this or --lora-scale, not both.")
-    p.add_argument("--lora-dropout", type=float, default=0.0, help="LoRA dropout (default 0.0).")
+    p.add_argument("--lora-dropout", type=_dropout, default=0.0, help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Recompute each layer's activations in the backward pass.")
-    p.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate (default 1e-4).")
+    p.add_argument("--lr", type=_positive_float, default=1e-4, help="Peak learning rate (default 1e-4).")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Rows per step (default 8).")
-    p.add_argument("--warmup", type=float, default=0.05,
+    p.add_argument("--warmup", type=_fraction, default=0.05,
                    help="Warmup as a fraction of the steps, then cosine decay (default 0.05).")
-    p.add_argument("--weight-decay", type=float, default=None, help="AdamW weight decay (default 0 for LoRA).")
-    p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
+    p.add_argument("--weight-decay", type=_nonneg_float, default=None,
+                   help="AdamW weight decay (default 0 for LoRA).")
+    p.add_argument("--clip", type=_nonneg_float, default=1.0,
+                   help="Gradient norm clip, 0 turns clipping off (default 1.0).")
     p.add_argument("--seed", type=_nonneg_int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
                    help="bucketed: sparse KL with the tail bucket. paper: the top-k term alone, no tail bucket. renorm: both distributions rescaled to sum to one over the top-k.")
-    p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
+    p.add_argument("--dk", type=_nonneg_float, default=DEFAULT_KNOBS["lambda_dk"],
                    help="Weight of the bucketed KL term (default 1).")
-    p.add_argument("--alm", type=float, default=DEFAULT_KNOBS["lambda_alm"],
+    p.add_argument("--alm", type=_nonneg_float, default=DEFAULT_KNOBS["lambda_alm"],
                    help="Weight of the chunk term (ALM), 0 when align took the identity path (default 1).")
-    p.add_argument("--ce", type=float, default=DEFAULT_KNOBS["lambda_ce"],
+    p.add_argument("--ce", type=_nonneg_float, default=DEFAULT_KNOBS["lambda_ce"],
                    help="Weight of the cross-entropy term (default 0).")
     p.add_argument("--T-dk", type=_positive_float, default=None, help="Override the view's T_dk.")
     p.add_argument("--tau-alm", type=_positive_float, default=None, help="Override the view's tau_alm.")
     p.add_argument("--gamma", type=_positive_float, default=None,
                    help="Override the view's gamma; refused when it differs on a materialized view.")
     p.add_argument("--chunk", type=_positive_int, default=512, help="Positions per head chunk (default 512).")
-    p.add_argument("--hs", type=float, default=0.0,
+    p.add_argument("--hs", type=_nonneg_float, default=0.0,
                    help="Weight of the hidden-state term, a learned linear map from the student's final "
                         "hidden state to the cache's sketch at every boundary (default 0, off).")
     p.add_argument("--hs-loss", choices=("cosine", "mse"), default="cosine",
@@ -432,6 +435,26 @@ def _positive_float(text: str) -> float:
         raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
     if not x > 0:
         raise argparse.ArgumentTypeError(f"a positive number is required, got {text}")
+    return x
+
+
+def _nonneg_float(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not x >= 0:
+        raise argparse.ArgumentTypeError(f"a number of at least 0 is required, got {text}")
+    return x
+
+
+def _dropout(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not 0.0 <= x < 1.0:
+        raise argparse.ArgumentTypeError(f"a dropout of at least 0 and below 1 is required, got {text}")
     return x
 
 

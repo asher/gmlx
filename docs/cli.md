@@ -930,7 +930,7 @@ block as it found it.
 | `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, recorded in the sidecar and compared on a resume |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
-| `--max-tokens N` | `1024` | answer budget per request, the reasoning trace not counted |
+| `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace has its own budget on top, without one the trace shares this budget |
 | `--temperature F` | `0.7` | sampling temperature |
 | `--top-p F` | `0.9` | keep the most likely tokens whose probabilities add to this |
 | `--top-k N` | the server's | sampler top-k cutoff |
@@ -1055,13 +1055,13 @@ Training flags, in the order `--help` prints them.
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
-| `--lora-dropout F` | `0.0` | LoRA dropout, one mask per step, replayed by `--grad-checkpoint` |
+| `--lora-dropout F` | `0.0` | LoRA dropout, below 1, one mask per step, replayed by `--grad-checkpoint` |
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
 | `--warmup F` | `0.05` | warmup as a fraction of the steps, then cosine decay |
 | `--weight-decay F` | `0` | AdamW weight decay |
-| `--clip F` | `1.0` | gradient norm clip |
+| `--clip F` | `1.0` | gradient norm clip, `0` turns clipping off |
 | `--seed N` | `1` | data order and LoRA init |
 | `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
 | `--dk F` | `1` | weight of the bucketed KL term |

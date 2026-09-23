@@ -99,12 +99,18 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
 def generator_sidecar(corpus: str) -> tuple[dict | None, str]:
     """The generator sidecar beside a synthetic corpus file (<corpus>.gen.json)
     as the manifest's generator block, with its fingerprint (sha256 of
-    the block, 12 hex chars); (None, "") for a corpus without one."""
+    the block, 12 hex chars); (None, "") for a corpus without one. A
+    sidecar that is not a JSON object raises ValueError."""
     p = Path(corpus).expanduser()
     side = p.with_suffix(p.suffix + ".gen.json") if p.is_file() else None
     if side is None or not side.exists():
         return None, ""
-    block = json.loads(side.read_text(encoding="utf-8"))
+    try:
+        block = json.loads(side.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{side} is not a JSON object ({e})") from None
+    if not isinstance(block, dict):
+        raise ValueError(f"{side} is not a JSON object")
     fp = hashlib.sha256(json.dumps(block, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
     return block, fp
 

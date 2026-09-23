@@ -175,6 +175,7 @@ class RowMeta:
     spans: list | None = None
     student_messages: list | None = None
     content_start: int | None = None
+    zero_width: list | None = None      # token indices that span no bytes (a dummy prefix after a special)
 
     def as_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -184,6 +185,8 @@ class RowMeta:
             d.pop("spans")
         if d.get("student_messages") is None:
             d.pop("student_messages", None)
+        if d.get("zero_width") is None:
+            d.pop("zero_width", None)
         if d.get("content_start") is None:
             d.pop("content_start", None)
         return d
@@ -477,14 +480,21 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
         for b in range(B):
             n = int(am[b].sum())
             ends = sh["token_end_byte"][b, :n].astype(np.int64)
+            r = rows[b] if b < len(rows) else {}
             if n and (np.any(np.diff(ends) < 0) or ends[-1] != len(texts[b])):
                 problems.append(f"shard {i} row {b}: byte offsets not monotone or last != text length")
             if n:
-                # strictly increasing after the special prefix
-                spec_prefix = int(np.sum(ends == 0))
-                if np.any(np.diff(ends[max(spec_prefix - 1, 0):]) <= 0):
+                # strictly increasing after the special prefix, except at
+                # the indices the row sidecar names as zero width (a dummy
+                # prefix after a mid-row special spans no bytes)
+                zw = [int(z) for z in (r.get("zero_width") or [])] if r else []
+                if any(z < 1 or z >= n or ends[z] != ends[z - 1] for z in zw):
+                    problems.append(f"shard {i} row {b}: zero_width names a token that spans bytes")
+                keep = np.setdiff1d(np.arange(n), np.asarray(zw, dtype=np.int64))
+                e2 = ends[keep]
+                spec_prefix = int(np.sum(e2 == 0))
+                if np.any(np.diff(e2[max(spec_prefix - 1, 0):]) <= 0):
                     problems.append(f"shard {i} row {b}: byte offsets not strictly increasing")
-            r = rows[b] if b < len(rows) else {}
             if r and (r.get("prefix_n_tokens", 0) or r.get("suffix_start_byte", 0)) and not allow_prefix:
                 problems.append(f"shard {i} row {b}: prefix fields nonzero with mlx_kld_compatible true")
             if r and r.get("messages") is not None:

@@ -4,6 +4,8 @@ index, and the materialized batch tensors on request. ``run_align`` is what
 ``gmlx distill align`` calls."""
 from __future__ import annotations
 
+import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,11 +69,13 @@ def student_width(path: str) -> int | None:
 
 
 def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path, *,
-               V_T: int | None, V_S: int | None) -> _align.Tables:
-    """An existing tables artifact when its pair hashes match, else a fresh
-    build. Either way the tables are saved under out_dir, since ``train``
-    and ``eval`` read them from the view."""
+               V_T: int | None, V_S: int | None, save: bool = True) -> _align.Tables:
+    """An existing tables artifact when its pair hashes, widths and special
+    roles match, else a fresh build. With ``save`` the tables are written
+    under out_dir, since ``train`` and ``eval`` read them from the view;
+    ``run_align`` saves them itself once every refusal is behind it."""
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
+    roles = _align.special_roles(teacher_tok, student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
         version = read_json(tables_dir / "tables.json").get("tables_version")
         if version != TABLES_VERSION:
@@ -80,11 +84,15 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
         else:
             t = _align.load_tables(tables_dir)
             if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
-                    and (V_S is None or t.V_S == V_S):
-                log(f"[align] tables from {tables_dir} (pair hashes and widths match)")
-                if tables_dir.resolve() != out_dir.resolve():
+                    and (V_S is None or t.V_S == V_S) and _align.same_roles(t.roles, roles):
+                log(f"[align] tables from {tables_dir} (pair hashes, widths and special roles match)")
+                if save and tables_dir.resolve() != out_dir.resolve():
                     _align.save_tables(out_dir, t)
                 return t
+            elif t.teacher_hash == th and t.student_hash == sh and not _align.same_roles(t.roles, roles):
+                # the vocab hash leaves special ids out, so a base and an
+                # instruct student share it while their EOS ids differ
+                log(f"[align] tables at {tables_dir} carry other special roles (EOS or BOS ids differ), rebuilding")
             elif t.teacher_hash == th and t.student_hash == sh:
                 log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
             else:
@@ -93,7 +101,8 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     t = _align.build_tables(teacher_tok, student_tok, V_T=V_T, V_S=V_S)
     log(f"[align] tables built in {time.perf_counter() - t0:.1f}s: G={t.G} "
         f"N_ns={t.nonsingleton_ids.shape[0]} identity={t.identity}")
-    _align.save_tables(out_dir, t)
+    if save:
+        _align.save_tables(out_dir, t)
     return t
 
 
@@ -221,13 +230,6 @@ def run_align(opts: AlignOptions) -> int:
         return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
-    # a view directory is rewritten whole: shards of an earlier align over
-    # another student or other knobs would otherwise be reused by train
-    stale = sorted(out.glob("view-*.safetensors")) + [p for p in (out / "view.json",) if p.exists()]
-    for p in stale:
-        p.unlink()
-    if stale:
-        log(f"[align] removed {len(stale)} files of an earlier view in {out}")
     V_S = student_width(opts.student) or len(hf_inner(student_tok))
     knobs = dict(DEFAULT_KNOBS, w_mid=opts.w_mid, gamma=opts.gamma, tau_alm=opts.tau_alm,
                  T_dk=opts.T_dk, max_chunk_len=opts.max_chunk_len)
@@ -271,10 +273,9 @@ def run_align(opts: AlignOptions) -> int:
         # student head keeps the teacher's ids as a prefix
         tables = _align.identity_tables(V_S, whitespace_start_mask(student_tok, V_S), vocab_map_hash(teacher_tok),
                                         vocab_map_hash(student_tok), V_T=V_T)
-        _align.save_tables(out, tables)
     else:
         tables = get_tables(teacher_tok, student_tok, Path(opts.tables) if opts.tables else None, out,
-                            V_T=V_T, V_S=V_S)
+                            V_T=V_T, V_S=V_S, save=False)
     loader = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=opts.kprime, identity=identity)
     n = len(reader)
     stats: dict[str, list] = {"J": [], "own": [], "redirect": [], "singleton": [], "dropped": [], "M_K": [],
@@ -350,22 +351,42 @@ def run_align(opts: AlignOptions) -> int:
         f"(on-path in top-K {view['alignment']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
     if not identity and a < REFUSE_A and not opts.force:
-        # refused before the write, so no view is left for train to accept
+        # refused before any write, so an earlier view in the directory
+        # stays as it was and no new one is left for train to accept
         log(f"[align] refuse: own-group fraction a={a:.3f} < {REFUSE_A}, the tokenizers diverge too far. "
             f"Pick a student from the teacher's family, or pass --force and expect a weaker result")
         return 3
+    staged = None
+    if opts.materialize:
+        # shards go to a staging directory first, so a materialization
+        # that fails leaves an earlier view untouched
+        loader2 = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=int(Kp), identity=identity)
+        t1 = time.perf_counter()
+        staging = out / "materialize.tmp"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            nsh = loader2.materialize(staging, opts.max_disk_gb)
+        except (RuntimeError, OSError) as e:
+            shutil.rmtree(staging, ignore_errors=True)
+            log(f"[align] refuse: {e}, the partial view was removed")
+            return 2
+        staged = (staging, nsh, time.perf_counter() - t1)
+    # every refusal is behind: a view directory is rewritten whole, since
+    # shards of an earlier align over another student or other knobs
+    # would otherwise be reused by train
+    stale = sorted(out.glob("view-*.safetensors")) + [p for p in (out / "view.json",) if p.exists()]
+    for p in stale:
+        p.unlink()
+    if stale:
+        log(f"[align] removed {len(stale)} files of an earlier view in {out}")
+    _align.save_tables(out, tables)
+    if staged is not None:
+        staging, nsh, wall_m = staged
+        for p in sorted(staging.glob("view-*.safetensors")):
+            os.replace(p, out / p.name)
+        shutil.rmtree(staging, ignore_errors=True)
+        log(f"[align] materialized {nsh} view shards in {wall_m:.1f}s")
     write_json_atomic(out / "view.json", view)
     if not identity and (a < WARN_A or s < WARN_S):
         log(f"[align] warn: own-group fraction a={a:.3f} (< {WARN_A}) or singleton fraction s={s:.3f} (< {WARN_S})")
-    if opts.materialize:
-        loader2 = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=int(Kp), identity=identity)
-        t1 = time.perf_counter()
-        try:
-            nsh = loader2.materialize(out, opts.max_disk_gb)
-        except (RuntimeError, OSError) as e:
-            for p in sorted(out.glob("view-*.safetensors")) + [out / "view.json"]:
-                p.unlink(missing_ok=True)
-            log(f"[align] refuse: {e}, the partial view was removed")
-            return 2
-        log(f"[align] materialized {nsh} view shards in {time.perf_counter() - t1:.1f}s")
     return 0

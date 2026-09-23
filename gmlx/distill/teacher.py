@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from gmlx.load.tokenizer import (
-    hf_inner,
+    special_ids,
     token_bytes,
     vocab_map_hash,
     whitespace_start_mask,
@@ -238,12 +238,20 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
     return rows, n_tokens, corpus_hash.hexdigest(), flagged, tb, ws, source, info
 
 
-def row_meta(r, source: str, frame: str, generator_id: str = "") -> _format.RowMeta:
+def row_meta(r, source: str, frame: str, generator_id: str = "", special: set[int] | None = None) -> _format.RowMeta:
     """Row sidecar entry; framed rows carry their messages, teacher-render
     spans and the frame length as the prefix fields, plus the student's
-    own message list when the corpus row had one."""
+    own message list when the corpus row had one. A token that spans no
+    bytes after a special (the dummy prefix of a Llama-2 style tokenizer
+    after a mid-row marker) is listed under zero_width for the
+    validator."""
     meta = _format.RowMeta(row_id=r[0], doc_id=str(r[1]), window=r[2], n_tokens=len(r[3]), source=source,
                            generator_id=generator_id)
+    if special:
+        ids, ends = np.asarray(r[3]), np.asarray(r[4], dtype=np.int64)
+        zw = [i for i in range(1, len(ids)) if ends[i] == ends[i - 1] and ends[i] > 0 and int(ids[i - 1]) in special]
+        if zw:
+            meta.zero_width = zw
     if r[6] is not None:
         tm = _frames.target_mask(r[4].astype(np.int64), r[7])
         first = int(np.argmax(tm)) if tm.any() else len(r[3]) - 1
@@ -343,15 +351,15 @@ def head_logits(head: HeadSpec, h):
 
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw,
-                    tokenizer=None) -> dict:
+                    tokenizer=None, source: str | None = None) -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
     and row options, the teacher by size and leading bytes (its path may
     be spelled another way), its vocabulary and, when rows are framed, its
     chat template (a directory checkpoint keeps both outside the hashed
     files), the hidden sketch and the render kwargs. Any difference
     refuses the resume."""
-    template = (getattr(hf_inner(tokenizer), "chat_template", "") or "") if tokenizer is not None else ""
-    return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens,
+    template = _frames.template_text(tokenizer) if tokenizer is not None else ""
+    return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
             "tokenizer_hash": vocab_map_hash(tokenizer) if tokenizer is not None else None,
             "template_sha256": hashlib.sha256(template.encode()).hexdigest() if opts.frame != "none" else None,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
@@ -502,8 +510,13 @@ def run_cache(opts: CacheOptions) -> int:
     except ValueError as e:
         log(f"[cache] refuse: {e}")
         return 2
-    generator, generator_id = _corpus.generator_sidecar(opts.corpus)
+    try:
+        generator, generator_id = _corpus.generator_sidecar(opts.corpus)
+    except ValueError as e:
+        log(f"[cache] refuse: {e}")
+        return 2
     source = opts.source or ("synthetic" if generator else "human")
+    special = special_ids(tokenizer)
     if generator:
         log(f"[cache] generator sidecar: {generator.get('model')} filter_version "
             f"{generator.get('filter_version')} ({generator_id})")
@@ -539,7 +552,7 @@ def run_cache(opts: CacheOptions) -> int:
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
     # must continue the same run
-    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer)
+    run = run_fingerprint(opts, corpus_sha, len(rows), int(n_tokens), render_kw, tokenizer, source=source)
     prev = writer.progress.get("run")
     if opts.resume and prev is not None and prev != run:
         diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
@@ -748,7 +761,7 @@ def run_cache(opts: CacheOptions) -> int:
                 reduced.append((r, rr))
                 off += m
         packed = _format.pack_shard([rr for _, rr in reduced], [r[5] for r, _ in reduced], opts.top_k, opts.floor)
-        metas = [row_meta(r, source, opts.frame, generator_id) for r, _ in reduced]
+        metas = [row_meta(r, source, opts.frame, generator_id, special) for r, _ in reduced]
         wall = time.perf_counter() - ts
         try:
             entry = writer.write(si, packed, metas, wall_s=wall, step=step, trunk_chunk=T,
@@ -776,7 +789,7 @@ def run_cache(opts: CacheOptions) -> int:
     # float16 log-probs can sum past 1, and the top bin would drop them
     hist = np.histogram(np.minimum(captured, 1.0), bins=edges)[0].tolist() if captured.size else []
     wall_total = time.perf_counter() - t0
-    template = getattr(hf_inner(tokenizer), "chat_template", "") or ""
+    template = _frames.template_text(tokenizer)
     teacher_abs = str(Path(opts.teacher).expanduser().absolute())
     _format.write_manifest(
         out, teacher_path=teacher_abs, dataset=opts.corpus, num_samples=len(rows),

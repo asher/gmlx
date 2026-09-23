@@ -132,6 +132,15 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     return out
 
 
+def sorted_keys(keys) -> list:
+    """(key, window) pairs with numeric ids in numeric order, so --max-rows
+    takes the first rows as the corpus numbered them."""
+    def order(kw):
+        key = str(kw[0])
+        return ((0, int(key)) if key.isdigit() else (1, key)), int(kw[1])
+    return sorted(keys, key=order)
+
+
 def walk_order(reader, rows: dict, keys: list) -> list:
     """keys reordered by the shard and slot of their base row, so a walk
     loads each shard once; the rows of a cache are sorted by length
@@ -146,7 +155,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     common = set(base_rows)
     for _r, rows in ctx:
         common &= set(rows)
-    keys = sorted(common)
+    keys = sorted_keys(common)
     # a document's positions map is its last window's, the final turn on a
     # per-turn cache and the one eval's reply slice scores; a document cut
     # by max_rows before its last window gets no map

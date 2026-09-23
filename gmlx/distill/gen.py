@@ -320,7 +320,7 @@ def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOption
     trace re-tokenized with ``tokenizer``. None without a budget or a
     way to count."""
     t0 = time.perf_counter()
-    body = dict(_sampling(opts, seed), model=model_id, messages=messages, max_tokens=opts.max_tokens)
+    body = dict(_sampling(opts, seed), model=model_id, messages=messages, max_tokens=answer_budget(opts))
     obj = _post_json(base_url + "/chat/completions", body, timeout=opts.timeout)
     ch = obj["choices"][0]
     msg = ch.get("message") or {}
@@ -358,6 +358,14 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 # ---------------------------------------------------------------------------
 # the run
 # ---------------------------------------------------------------------------
+
+def answer_budget(opts: GenOptions) -> int:
+    """max_tokens for a request: the server counts the reasoning trace in
+    it, so a thinking budget is added on top and the answer keeps the
+    --max-tokens budget. A thinking reply without a budget shares
+    --max-tokens with its trace."""
+    return opts.max_tokens + (opts.thinking_budget or 0) if opts.thinking else opts.max_tokens
+
 
 def row_totals(out: Path) -> dict:
     """The run totals of every reply row in ``out``, read from the rows'

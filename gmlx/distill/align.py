@@ -179,7 +179,7 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
         u1[v] = r
 
     # Role map for specials.
-    roles: dict[str, Any] = {}
+    roles: dict[str, Any] = special_roles(teacher_tok, student_tok)
     t_eos, s_eos = eos_ids(teacher_tok), eos_ids(student_tok)
     t_bos, s_bos = bos_id(teacher_tok), bos_id(student_tok)
     t_special = special_ids(teacher_tok)
@@ -190,14 +190,17 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
         for u in s_eos:
             if u < V_S:
                 v1[u] = t_eos[0]
-        roles["eos"] = {"teacher": t_eos, "student": s_eos}
     if s_bos is not None and t_bos is not None and s_bos < V_S and s_bos not in s_eos:
         v1[s_bos] = t_bos
-        roles["bos"] = {"teacher": t_bos, "student": s_bos}
     same_added = []
     for v, s in t_str.items():
         u = s_str.get(s)
-        if u is not None and v < V_T and u < V_S and v not in t_eos and v != t_bos:
+        # a special with a role on either side keeps its role: the
+        # student's EOS string may exist as a plain added token on the
+        # teacher, and mapping it by string would drop the teacher's EOS
+        # target
+        if u is not None and v < V_T and u < V_S and v not in t_eos and v != t_bos \
+                and u not in s_eos and u != s_bos:
             v1[u] = v
             same_added.append([v, u])
     roles["identical_added"] = same_added
@@ -244,6 +247,24 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
                   group_size=group_size, nonsingleton_ids=nonsingleton_ids, bmask_S=bmask,
                   own=own, roles=roles, teacher_hash=th, student_hash=sh, V_T=V_T, V_S=V_S,
                   identity=False)
+
+
+def special_roles(teacher_tok, student_tok) -> dict[str, Any]:
+    """The EOS and BOS ids of a pair, the part of a tables artifact the
+    vocab hash does not cover (special ids are left out of it), so a
+    tables artifact is reused only for a student with the same roles."""
+    roles: dict[str, Any] = {}
+    t_eos, s_eos = eos_ids(teacher_tok), eos_ids(student_tok)
+    t_bos, s_bos = bos_id(teacher_tok), bos_id(student_tok)
+    if s_eos and t_eos:
+        roles["eos"] = {"teacher": [int(v) for v in t_eos], "student": [int(u) for u in s_eos]}
+    if s_bos is not None and t_bos is not None and s_bos not in s_eos:
+        roles["bos"] = {"teacher": int(t_bos), "student": int(s_bos)}
+    return roles
+
+
+def same_roles(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in ("eos", "bos"))
 
 
 def save_tables(dirpath: Path, t: Tables) -> None:

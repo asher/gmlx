@@ -5422,10 +5422,11 @@ def test_get_tables_rebuilds_an_older_version_without_reading_its_arrays(tmp_pat
 
 
 
-def _spm_prefix_tokenizer(pieces, merges):
+def _spm_prefix_tokenizer(pieces, merges, scheme="first", specials=()):
     """An SPM-like tokenizer with a dummy prefix (Llama-2, Mistral): every
     text segment starts with U+2581, so token byte lengths overshoot the
-    text by one byte per segment."""
+    text by one byte per segment. ``scheme`` "always" opens the segment
+    after every special with one too."""
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
     vocab = {"<pad>": 0, "<eos>": 1, "<bos>": 2}
@@ -5439,10 +5440,11 @@ def _spm_prefix_tokenizer(pieces, merges):
             if piece not in vocab:
                 vocab[piece] = len(vocab)
     tok = Tokenizer(models.BPE(vocab=vocab, merges=merges, byte_fallback=True, unk_token=None))
-    tok.pre_tokenizer = pre_tokenizers.Metaspace(replacement="\u2581", prepend_scheme="first")
-    tok.decoder = decoders.Sequence([decoders.Metaspace(replacement="\u2581", prepend_scheme="first"),
+    tok.pre_tokenizer = pre_tokenizers.Metaspace(replacement="\u2581", prepend_scheme=scheme)
+    tok.decoder = decoders.Sequence([decoders.Metaspace(replacement="\u2581", prepend_scheme=scheme),
                                      decoders.ByteFallback()])
-    return PreTrainedTokenizerFast(tokenizer_object=tok, eos_token="<eos>", bos_token="<bos>", pad_token="<pad>")
+    return PreTrainedTokenizerFast(tokenizer_object=tok, eos_token="<eos>", bos_token="<bos>", pad_token="<pad>",
+                                   additional_special_tokens=list(specials))
 
 
 def test_byte_ends_of_a_dummy_prefix_tokenizer_stay_on_the_fast_path_and_split_byte_fallback(tmp_path):
@@ -5647,3 +5649,159 @@ def test_hs_resume_reads_the_map_width_from_the_checkpoint(tmp_path, tok_bl, mon
     hh.save(d)
     assert _hidden.hs_head_width(d) == 6
     assert _hidden.hs_head_width(tmp_path / "none") is None
+
+
+def test_dummy_prefix_after_a_mid_row_special_is_zero_width_and_the_cache_validates(tmp_path):
+    """Metaspace prepend_scheme "always" (Llama-2, Mistral) opens the
+    segment after a special with a bare U+2581 the text does not hold; the
+    token spans no bytes and shares the special's end. The row sidecar
+    records it as zero_width, and the validator exempts exactly those
+    indices from the strict-increase rule instead of rejecting the cache
+    after the whole pass."""
+    from gmlx.distill import format as _format
+    from gmlx.distill import teacher as _teacher
+
+    pieces = ["\u2581", "t", "h", "e", "a", "\u2581t", "\u2581th", "\u2581the", "\u2581a"]
+    merges = [("\u2581", "t"), ("\u2581t", "h"), ("\u2581th", "e"), ("\u2581", "a")]
+    tok = _spm_prefix_tokenizer(pieces, merges, scheme="always", specials=("<sep>",))
+    tb = dl.token_bytes(tok)
+    text = "the<sep>\u20ac a"
+    ids, ends, flagged = dl.encode_with_byte_ends(tok, text.encode(), tb, add_special_tokens=False)
+    assert tok.convert_ids_to_tokens(ids.tolist()) == ["\u2581the", "<sep>", "\u2581", "<0xE2>", "<0x82>",
+                                                       "<0xAC>", "\u2581a"]
+    assert ends.tolist() == [3, 8, 8, 9, 10, 11, 13] and not flagged
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": text}) + "\n" for _ in range(2)), encoding="utf-8")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out),
+                                                    top_k=8, max_len=64)) == 0
+    assert dl.validate_cache(out) == []
+    rows = _format.read_rows_jsonl(out / "rows-00000.jsonl")
+    assert rows[0]["zero_width"] == [2]
+    # the exemption is exact: an index that is not zero width is a problem
+    rows[0]["zero_width"] = [3]
+    (out / "rows-00000.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert any("zero_width" in p for p in dl.validate_cache(out, check_sha=False))
+
+
+def test_tables_keep_the_teacher_eos_target_when_the_student_names_eos_differently(tmp_path, capsys):
+    """Both vocabularies carry <|im_end|> and <|endoftext|>, the teacher
+    ends on the first and the student on the second: the teacher's EOS
+    must land in the student's EOS group, not be dropped because the
+    student's EOS string also exists as a plain added token on the
+    teacher. A tables artifact built for a student with other special
+    roles is rebuilt, not reused, since the vocab hash leaves specials
+    out."""
+    from gmlx.distill import view as _view
+    from gmlx.load.tokenizer import eos_ids
+
+    def mk(eos, extra=()):
+        t = _bytelevel_tokenizer(_BL_MERGES)
+        t.add_special_tokens({"additional_special_tokens": ["<|im_end|>", "<|endoftext|>"]})
+        if extra:
+            t.add_tokens(list(extra))
+        t.eos_token = eos
+        return t
+
+    teacher = mk("<|im_end|>", extra=("zz",))     # an extra token keeps the pair off the identity path
+    base, inst = mk("<|endoftext|>"), mk("<|im_end|>")
+    t_eos = eos_ids(teacher)[0]
+    for student in (base, inst):
+        t = dl.build_tables(teacher, student)
+        s_eos = eos_ids(student)[0]
+        assert t.target_g[t_eos] >= 0 and t.target_g[t_eos] == t.group_of[s_eos]
+        assert t.roles["eos"] == {"teacher": eos_ids(teacher), "student": eos_ids(student)}
+    _view.get_tables(teacher, base, None, tmp_path / "a", V_T=None, V_S=None)
+    capsys.readouterr()
+    got = _view.get_tables(teacher, inst, tmp_path / "a", tmp_path / "b", V_T=None, V_S=None)
+    assert "other special roles" in capsys.readouterr().err
+    assert got.roles["eos"]["student"] == eos_ids(inst)
+    assert got.target_g[t_eos] == got.group_of[eos_ids(inst)[0]]
+
+
+def test_a_refused_re_align_leaves_the_earlier_view_in_place(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """A working view directory re-aligned with a student that fails the
+    own-group gate, or with a materialization that runs out of its disk
+    budget, keeps every file of the earlier view byte for byte."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    tok_spm.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    opts = dict(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"), out=str(out), materialize=True)
+    assert _view.run_align(_view.AlignOptions(**opts)) == 0
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    assert "view.json" in before and "tables.json" in before and any(n.startswith("view-") for n in before)
+    monkeypatch.setattr(_view, "REFUSE_A", 1.01)
+    assert _view.run_align(_view.AlignOptions(**opts)) == 3
+    assert sorted(p.name for p in out.iterdir()) == sorted(before)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+    monkeypatch.setattr(_view, "REFUSE_A", 0.0)
+    assert _view.run_align(_view.AlignOptions(**dict(opts, max_disk_gb=1e-12))) == 2
+    assert sorted(p.name for p in out.iterdir()) == sorted(before)
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+
+def test_cache_refuses_a_torn_generator_sidecar_with_exit_2(tmp_path, tok_bl, capsys):
+    """gen and filter refuse a sidecar that is not a JSON object with exit
+    2; cache reads the same file for its generator block and must not
+    exit 1 with a traceback on it."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    side = tmp_path / "c.jsonl.gen.json"
+    side.write_text('{"model": "m", ', encoding="utf-8")
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                    out=str(tmp_path / "cache"), top_k=8, max_len=64)) == 2
+    assert f"[cache] refuse: {side} is not a JSON object" in capsys.readouterr().err
+
+
+def test_a_named_chat_template_set_is_hashed_and_read_for_its_kwargs(tmp_path):
+    """transformers stores several named templates as a dict; the resume
+    fingerprint and the manifest hash it as text, and the render kwargs
+    see date_string inside any of the named templates."""
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(_bytelevel_tokenizer(_BL_MERGES),
+                         {"default": _TEMPLATE_B, "rag": "{{ date_string }}" + _TEMPLATE_B})
+    text = _frames.template_text(tok)
+    assert isinstance(text, str) and "date_string" in text and "[/u]" in text
+    assert _frames.template_text(_with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_B)) == _TEMPLATE_B
+    assert "date_string" in _frames.default_render_kwargs(tok)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus="c", out="o", frame="reply")
+    fp = _teacher.run_fingerprint(opts, "sha", 1, 1, {}, tok)
+    assert len(fp["template_sha256"]) == 64
+
+
+def test_cache_resume_refuses_another_source_label(tmp_path, tok_bl, capsys):
+    """eval and census count rows by source, so a resume cannot relabel
+    the rows it adds."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl", n=4)
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=2)
+    assert _teacher.run_cache(opts) == 0
+    assert json.loads((out / "progress.json").read_text())["run"]["source"] == "human"
+    (out / "batch-00001.safetensors").unlink()
+    (out / "manifest.json").unlink()
+    capsys.readouterr()
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True, source="synthetic"))) == 2
+    err = capsys.readouterr().err
+    assert "[cache] refuse: --resume with other inputs" in err and "source" in err
+
+
+def test_census_orders_numeric_row_ids_numerically():
+    """--max-rows takes the first rows as the corpus numbered them, not in
+    string order ("0", "1", "10", "2")."""
+    from gmlx.distill import census as _census
+
+    keys = [("10", 0), ("2", 1), ("2", 0), ("a", 0), ("1", 0)]
+    assert _census.sorted_keys(keys) == [("1", 0), ("2", 0), ("2", 1), ("10", 0), ("a", 0)]

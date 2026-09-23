@@ -1281,3 +1281,71 @@ def test_filter_refuses_a_corpus_without_gen_blocks(tmp_path, capsys):
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 2
     assert f"[filter] refuse: no row of {a} carries a gen block" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_gen_adds_the_thinking_budget_to_the_answer_budget(tmp_path, stub_server, monkeypatch):
+    """The server counts the reasoning trace in max_tokens, so with a
+    thinking budget the request carries answer budget plus trace budget
+    and the answer keeps the budget --max-tokens names. Without thinking
+    the request carries --max-tokens as given."""
+    import gmlx.distill.tokens as tokens_mod
+    monkeypatch.setattr(tokens_mod, "load_tokenizer", lambda path: _WordTokenizer())
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "q"}]}])
+    assert gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
+                                      thinking=True, thinking_budget=5, max_tokens=7,
+                                      tokenizer="teacher.gguf")) == 0
+    sent = [c["max_tokens"] for c in _Handler.calls if "messages" in c and c.get("max_tokens") != 1]
+    assert sent == [12]
+    _Handler.calls = []
+    assert gen.run_gen(gen.GenOptions(out=str(tmp_path / "b.jsonl"), prompts=prompts, base_url=stub_server,
+                                      max_tokens=7)) == 0
+    sent = [c["max_tokens"] for c in _Handler.calls if "messages" in c and c.get("max_tokens") != 1]
+    assert sent == [7]
+
+
+def test_filter_join_refuses_other_filter_settings_and_sums_the_run_totals(tmp_path, capsys):
+    """Two filtered inputs joined under one sidecar must have been filtered
+    with the same settings, and the joined sidecar's prompt count, run
+    totals and prompt fields cover every input, not the first alone."""
+    def gen_file(name, n, wall):
+        p = tmp_path / f"{name}.jsonl"
+        p.write_text("".join(json.dumps(_row(f"{name}{i}", GOOD, tokens=10)) + "\n" for i in range(n)))
+        (tmp_path / f"{name}.jsonl.gen.json").write_text(json.dumps({
+            "gen_version": "3", "model": "m", "prompts": n, "prompt_source": f"{name}-prompts.jsonl",
+            "prompt_set_sha256": name * 4, "run": {"completed": n, "failed": 1, "wall_s": wall,
+                                                   "tok_s_aggregate": 9.0, "concurrency": 2}}))
+        return p
+
+    a, b = gen_file("a", 2, 3.0), gen_file("b", 3, 4.0)
+    fa, fb = tmp_path / "fa.jsonl", tmp_path / "fb.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(fa), min_words=4)) == 0
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(fb), min_words=5)) == 0
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(fa), str(fb)], out=str(tmp_path / "j.jsonl"))) == 2
+    err = capsys.readouterr().err
+    assert f"[filter] refuse: {fb} was filtered with other settings than {fa} (min_words)" in err
+    assert not (tmp_path / "j.jsonl").exists()
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(fb), min_words=4)) == 0
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(fa), str(fb)], out=str(tmp_path / "j.jsonl"))) == 0
+    side = json.loads((tmp_path / "j.jsonl.gen.json").read_text())
+    assert side["prompts"] == 5 and side["prompt_source"] == ["a-prompts.jsonl", "b-prompts.jsonl"]
+    assert side["joined"] == [str(fa), str(fb)]
+    assert side["prompt_set_sha256"] not in ("aaaa", "bbbb") and len(side["prompt_set_sha256"]) == 64
+    run = side["run"]
+    assert run["completed"] == 5 and run["generated_tokens"] == 50 and run["failed"] == 2
+    assert run["wall_s"] == 7.0
+    assert run["concurrency"] == 2 and "tok_s_aggregate" not in run
+    # a single input keeps its gen run block as it was
+    single = json.loads((tmp_path / "fa.jsonl.gen.json").read_text())
+    assert single["run"]["tok_s_aggregate"] == 9.0 and single["prompts"] == 2 and "joined" not in single
+
+
+def test_filter_accepts_an_empty_input(tmp_path, capsys):
+    """A corpus with no rows (every gen request failed, or an earlier pass
+    kept nothing) is not "not a generated corpus": the filter writes an
+    empty output and exits 0."""
+    a = tmp_path / "a.jsonl"
+    a.write_text("")
+    out = tmp_path / "o.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out))) == 0
+    assert out.exists() and out.read_text() == ""
+    assert "[filter] kept 0" in capsys.readouterr().err
