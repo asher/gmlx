@@ -122,6 +122,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
             while msgs and msgs[-1].get("role") != "assistant":
                 msgs = msgs[:-1]
             corpus_hash.update(json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode())
+            variants = _corpus.per_turn_rows(msgs) if per_turn else [msgs]
             if st is not None:
                 corpus_hash.update(json.dumps(st, sort_keys=True, ensure_ascii=False).encode())
                 if not reply_kind:
@@ -130,12 +131,12 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                 while st and st[-1].get("role") != "assistant":
                     st = st[:-1]
                 if not _corpus.same_reply(msgs, st):
-                    mismatch += 1
+                    # counted in rows, the unit of every other counter
+                    mismatch += len(variants)
                     continue
-            variants = _corpus.per_turn_rows(msgs) if per_turn else [msgs]
             st_variants = (_corpus.per_turn_rows(st) if per_turn else [st]) if st is not None else None
             if st_variants is not None and len(st_variants) != len(variants):
-                mismatch += 1
+                mismatch += len(variants)
                 continue
             for w, m in enumerate(variants):
                 # per-turn rows pair by position: the pair must end on the
@@ -269,22 +270,37 @@ def forward_trunk(model, inputs):
     return _student.trunk_hidden(inner, inputs)
 
 
+def _manifest_aside(out: Path, problems: list[str]) -> int:
+    """Log the validator's problems, move the manifest to
+    manifest.invalid.json so no view or resume takes the cache as
+    finished, and return the pass's exit code."""
+    for x in problems[:10]:
+        log("[cache] validate: " + x)
+    bad = out / "manifest.invalid.json"
+    os.replace(out / "manifest.json", bad)
+    log(f"[cache] error: validator failed with {len(problems)} problems, manifest moved to {bad}")
+    return 4
+
+
 def teacher_head(model) -> HeadSpec:
     inner = getattr(model, "language_model", model)
     return head_spec_from_model(inner)
 
 
 IDENTITY_HEAD_BYTES = 16 * 1024 * 1024
+IDENTITY_BLOCK_BYTES = 1024 * 1024
+IDENTITY_BLOCKS = 64
 
 
 def teacher_identity(path: str) -> dict:
     """What a resume compares to know it continues on the same teacher:
     the absolute path as named (symlinks kept, so a Hugging Face snapshot
     keeps its shard names and its .gguf suffix), the size and a hash over
-    the leading bytes of a GGUF file and its split shards, or of a
-    directory checkpoint's config and each weight file, in order. The same
-    bytes written again, touched, or reached by another name still
-    match; a resume compares the size and the hash, not the path."""
+    the leading bytes plus 64 one-mebibyte blocks spread through the rest
+    of a GGUF file and its split shards, or of a directory checkpoint's
+    config and each weight file, in order. The same bytes written again,
+    touched, or reached by another name still match; a resume compares
+    the size and the hash, not the path."""
     from gmlx.load.preflight import find_split_shards
 
     p = Path(path).expanduser().absolute()
@@ -303,6 +319,11 @@ def teacher_identity(path: str) -> dict:
         h.update(f"{j}:{n}:".encode())
         with open(f, "rb") as fh:
             h.update(fh.read(IDENTITY_HEAD_BYTES))
+            if n > IDENTITY_HEAD_BYTES + IDENTITY_BLOCK_BYTES:
+                starts = np.linspace(IDENTITY_HEAD_BYTES, n - IDENTITY_BLOCK_BYTES, IDENTITY_BLOCKS)
+                for off in sorted(set(int(x) for x in starts)):
+                    fh.seek(off)
+                    h.update(fh.read(IDENTITY_BLOCK_BYTES))
     return {"path": str(p), "size": size, "sha256_head": h.hexdigest()}
 
 
@@ -484,8 +505,8 @@ def run_cache(opts: CacheOptions) -> int:
         f"({flagged} rows on the offsets fallback)")
     if opts.frame != "none":
         log(f"[cache] frame {opts.frame}: {frame_info['frame_tokens']} frame tokens, "
-            f"{frame_info['dropped']} conversations dropped, {frame_info['student_rows']} rows with a "
-            f"student list, {frame_info['reply_mismatch']} dropped for a reply mismatch")
+            f"{frame_info['dropped']} rows dropped, {frame_info['student_rows']} rows with a "
+            f"student list, {frame_info['reply_mismatch']} rows dropped for a reply mismatch")
     if not rows:
         log(f"[cache] refuse: {opts.corpus} yields no rows (blank texts and conversations without an "
             "assistant turn are skipped)")
@@ -520,8 +541,12 @@ def run_cache(opts: CacheOptions) -> int:
     shards = [rows[i:i + opts.rows_per_shard] for i in range(0, len(rows), opts.rows_per_shard)]
     log(f"[cache] {len(shards)} shards of {opts.rows_per_shard} rows, {done} verified already")
     if opts.resume and done == len(shards) and (out / "manifest.json").is_file():
-        # a rewritten manifest would change the hash every view carries
-        log(f"[cache] nothing to do: all {done} shards verified and the manifest is present")
+        # a rewritten manifest would change the hash every view carries,
+        # so a finished cache is validated as it stands and left alone
+        problems = _format.validate_cache(out)
+        if problems:
+            return _manifest_aside(out, problems)
+        log(f"[cache] nothing to do: all {done} shards verified, the manifest is present and the validator passed")
         return 0
     if opts.resume and (out / "manifest.json").is_file():
         # the manifest describes shards this run rewrites; without it a
@@ -635,6 +660,10 @@ def run_cache(opts: CacheOptions) -> int:
                 if routes_blt.shape[:2] != inputs.shape:
                     log(f"[cache] refuse: routes recorded as {routes_blt.shape[:2]} for a {inputs.shape} chunk")
                     return 3
+                if routes_blt.shape[2] != len(recorder.layers):
+                    log(f"[cache] refuse: routes recorded for {routes_blt.shape[2]} layers, "
+                        f"{len(recorder.layers)} MoE layers installed")
+                    return 3
                 if routing["k"] is None:
                     routing["k"] = int(routes_blt.shape[-1])
                     writer.progress["routing"] = routing
@@ -725,7 +754,9 @@ def run_cache(opts: CacheOptions) -> int:
             f"({rate:.0f} tok/s) {entry['bytes'] / GB:.3f} GB peak {mx.get_peak_memory() / GB:.1f} GB")
 
     captured = []
-    for e in writer.progress["shards"][:8]:
+    entries = writer.progress["shards"]
+    spread = sorted(set(int(x) for x in np.linspace(0, len(entries) - 1, 8))) if entries else []
+    for e in (entries[k] for k in spread):
         sh = _format.load_shard(writer.shard_path(e["index"]))
         m = sh["attention_mask"]
         lp = sh["top_k_log_softmax"].astype(np.float32)[m]
@@ -758,7 +789,7 @@ def run_cache(opts: CacheOptions) -> int:
                 "kind": opts.frame,
                 "instruction": opts.frame_instruction if opts.frame == "continue" else None,
                 "frame_tokens": frame_info["frame_tokens"],
-                "conversations_dropped": frame_info["dropped"],
+                "rows_dropped": frame_info["dropped"],
                 "close_final_windows": bool(opts.close_final_windows) if opts.frame == "continue" else None,
                 "closed_rows": frame_info.get("closed_rows", 0),
                 "per_turn": bool(opts.per_turn),
@@ -788,9 +819,6 @@ def run_cache(opts: CacheOptions) -> int:
         })
     problems = _format.validate_cache(out)
     if problems:
-        for x in problems[:10]:
-            log("[cache] validate: " + x)
-        log(f"[cache] error: validator failed with {len(problems)} problems")
-        return 4
+        return _manifest_aside(out, problems)
     log(f"[cache] done: {tokens_done} tokens, {writer.progress['bytes'] / GB:.2f} GB, validator passed")
     return 0

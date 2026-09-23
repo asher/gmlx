@@ -91,6 +91,8 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
     if opts.context and not Path(opts.context).expanduser().is_file():
         raise ValueError(f"no context file at {opts.context}")
     shared = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
+    if shared is not None and not shared.strip():
+        raise ValueError(f"context file {opts.context} is blank")
     rows: list[dict] = []
     if opts.prompts:
         path = Path(opts.prompts).expanduser()
@@ -106,6 +108,8 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
                 raise ValueError(f"{where}: not JSON ({e})") from None
             if not isinstance(r, dict):
                 raise ValueError(f"{where}: not a JSON object")
+            if "student_messages" in r:
+                raise ValueError(f"{where}: student_messages is written by gen, not read")
             msgs = _corpus.message_list(r, "messages", where)
             if not msgs or msgs[-1].get("role") != "user":
                 raise ValueError(f"{where}: messages must end on a user turn")

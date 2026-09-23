@@ -663,10 +663,10 @@ def test_gen_resume_compares_the_context_format_as_recorded(tmp_path, stub_serve
     out2 = tmp_path / "corpus2.jsonl"
     plain = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
     p3 = _prompts(tmp_path / "p3.jsonl", plain)
-    p4 = _prompts(tmp_path / "p4.jsonl", plain + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
-    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=p3, base_url=stub_server, context=str(empty))) == 0
-    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=p4, base_url=stub_server, context=str(empty))) == 0
-    assert sorted(r["id"] for r in _rows(out2)) == ["a", "b"]
+    # a blank context file is a mistake, not a run without a context
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=p3, base_url=stub_server, context=str(empty))) == 2
+    assert f"[gen] refuse: context file {empty} is blank" in capsys.readouterr().err
+    assert not out2.exists()
 
 
 def test_gen_keeps_a_bounded_window_of_requests_in_flight(tmp_path, stub_server, monkeypatch):
@@ -1116,3 +1116,73 @@ def test_prompt_rows_refuse_a_blank_or_non_string_context(tmp_path):
     rows = gen.prompt_rows(gen.GenOptions(out="o.jsonl", prompts=str(p), context=str(shared)))
     assert "shared context" in rows[0]["messages"][-1]["content"]
     assert rows[1]["messages"][-1]["content"].startswith("own")
+
+
+
+def test_gen_refuses_a_blank_context_file_and_a_prompt_row_carrying_student_messages(tmp_path, stub_server, capsys):
+    """A blank --context is a mistake, not a run without a context, and a
+    prompt row that already carries student_messages would be overwritten
+    silently; both refuse before the output is touched."""
+    blank = tmp_path / "blank.txt"
+    blank.write_text(" \n", encoding="utf-8")
+    p = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=p, base_url=stub_server, context=str(blank))) == 2
+    assert f"[gen] refuse: context file {blank} is blank" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="is blank"):
+        gen.prompt_rows(gen.GenOptions(out=str(out), prompts=p, context=str(blank)))
+    q = _prompts(tmp_path / "q.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}],
+                                        "student_messages": [{"role": "user", "content": "alpha"}]}])
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=q, base_url=stub_server)) == 2
+    assert "prompt 0 of q.jsonl: student_messages is written by gen, not read" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_filter_refuses_a_blank_context_file(tmp_path, capsys):
+    blank = tmp_path / "blank.txt"
+    blank.write_text("\n\n", encoding="utf-8")
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({"gen_version": "3", "model": "student"}))
+    out = tmp_path / "o.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(out), context=str(blank))) == 2
+    assert f"[filter] refuse: context file {blank} is blank" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_line_run_check_skips_lines_without_a_letter_or_digit():
+    """Nested code and JSON close with the same bracket line several times
+    in a row; those lines are structure, not a loop."""
+    opts = flt.FilterOptions(inputs=[], out="o.jsonl")
+    nested = GOOD + "\n{\n  \"a\": {\n    \"b\": {\n      \"c\": {}\n    }\n  }\n}\n"
+    assert flt.max_line_run(nested) == 1
+    assert flt.reason(_row("j", nested), opts) is None
+    assert flt.max_line_run("x\n---\n---\n---\nyes\nyes\nyes\n") == 3
+    assert flt.reason(_row("k", GOOD + "\nyes\nyes\nyes\n"), opts) == "repeat"
+
+
+def test_repeat_and_word_checks_count_characters_on_cjk_text():
+    """CJK prose has no spaces, so whitespace n-grams never repeat and the
+    word count is one; both checks count characters there."""
+    opts = flt.FilterOptions(inputs=[], out="o.jsonl")
+    phrase = "\u4eca\u5929\u5929\u6c14\u5f88\u597d"
+    looping = phrase * 12
+    distinct = "".join(chr(0x4E00 + 7 * i) for i in range(60))
+    assert flt.repeat_fraction(looping, 8) > 0.5
+    assert flt.repeat_fraction(distinct, 8) == 0.0
+    assert flt.word_count(distinct) == 60 and flt.word_count(GOOD) == 40
+    assert flt.reason(_row("cjk", looping), opts) == "repeat"
+    assert flt.reason(_row("ok", distinct), opts) is None
+    assert flt.reason(_row("short", phrase), opts) == "empty"
+
+
+def test_trace_repeat_threshold_is_its_own_flag():
+    """A reasoning trace restates and rechecks, so its repeat threshold is
+    looser than the answer's and set on its own."""
+    trace = ("let me check this again and again for the answer " * 4) + " ".join(f"step{i}" for i in range(60))
+    frac = flt.repeat_fraction(trace, 8)
+    assert 0.2 < frac < 0.5
+    assert flt.reason(_row("a", GOOD, reasoning=trace), flt.FilterOptions(inputs=[], out="o.jsonl")) is None
+    assert flt.reason(_row("a", GOOD, reasoning=trace),
+                      flt.FilterOptions(inputs=[], out="o.jsonl", max_trace_repeat=0.2)) == "repeat"
+    assert flt.reason(_row("b", trace), flt.FilterOptions(inputs=[], out="o.jsonl")) == "repeat"

@@ -301,6 +301,25 @@ class CacheReader:
                 self._shards.pop(old, None)
         return sh
 
+    def token_ids(self, rows: list[int]) -> dict[int, np.ndarray]:
+        """The cached token ids of the given rows, read shard by shard
+        through the safetensors header (token_ids and attention_mask
+        only), so a check over many rows never loads a shard's top-K
+        arrays or touches the shard cache."""
+        from safetensors import safe_open
+        by_shard: dict[int, list[tuple[int, int]]] = {}
+        for r in rows:
+            i, slot = self.index[r]
+            by_shard.setdefault(i, []).append((r, slot))
+        out: dict[int, np.ndarray] = {}
+        for i, items in sorted(by_shard.items()):
+            with safe_open(str(self.dir / f"batch-{i:05d}.safetensors"), framework="np") as f:
+                ids = f.get_tensor("token_ids")
+                am = f.get_tensor("attention_mask")
+            for r, slot in items:
+                out[r] = ids[slot, :int(am[slot].sum())]
+        return out
+
     def row(self, r: int) -> tuple[dict[str, np.ndarray], bytes, dict]:
         i, slot = self.index[r]
         sh = self.shard(i)

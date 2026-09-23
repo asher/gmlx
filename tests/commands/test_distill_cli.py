@@ -268,3 +268,9 @@ def test_cache_counts_take_positive_integers():
     for flag in ("--max-tokens", "--trunk"):
         rc, out = _run(["distill", "cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", flag, "0"])
         assert rc == 2 and "a positive integer is required, got 0" in out
+
+
+
+def test_filter_help_names_the_trace_repeat_threshold():
+    rc, out = _run(["distill", "filter", "--help"])
+    assert rc == 0 and "--max-trace-repeat" in out

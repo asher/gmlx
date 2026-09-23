@@ -118,9 +118,10 @@ def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
     """Write a model's trained LoRA layers as a llama.cpp GGUF adapter.
     ``alpha`` is stored as ``scale * rank`` so the loader's ``alpha / rank``
     recomputes the trained ``scale``; the rank is the factors' own, and a
-    ``rank`` given that differs from it is refused. Returns the module
-    count."""
-    modules = lora_modules_to_gguf(model, keys)
+    ``rank`` given that differs from it is refused. A multimodal wrapper
+    is read at its ``language_model``, so the module paths match the text
+    base the adapter loads onto. Returns the module count."""
+    modules = lora_modules_to_gguf(getattr(model, "language_model", model), keys)
     if not modules:
         raise ValueError("model has no trained LoRA layers to save")
     trained = int(modules[0][1].shape[0])

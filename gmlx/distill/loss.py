@@ -206,7 +206,8 @@ def gather_positions(hidden_btd, positions):
 
 
 def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log_bmask, knobs: dict,
-              B: int, Tm1: int, C: int = 512, head_trainable: bool = True, params_static=None):
+              B: int, Tm1: int, C: int = 512, head_trainable: bool = True, params_static=None,
+              want_grad: bool = True):
     """The head half of a training step, run outside any function
     transformation: forward chunk by chunk over the gathered hidden states
     hg [N, d], the small loss in the head's outputs and its gradient, then
@@ -214,7 +215,9 @@ def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log
     and aux evaluated scalars, dh [N, d] float32, dparams the head's
     parameter gradients (None when the head is frozen). Every chunk is
     evaluated before the next, so the live set is one chunk's logits,
-    softmax and cotangent plus the slot map.
+    softmax and cotangent plus the slot map. want_grad False stops after
+    the loss (validation): dh and dparams are None and no chunk runs
+    backward.
 
     Call it outside mx.value_and_grad: inside a transform every array a
     chunk creates stays referenced until the outer eval, and the pass
@@ -238,7 +241,7 @@ def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log
                                            mx.zeros((0, Kp + 1), dtype=mx.float32),
                                            mx.zeros((0,), dtype=mx.float32), batch, knobs=knobs, B=B, Tm1=Tm1)
         mx.eval(loss, *aux.values())
-        return loss, aux, mx.zeros(hg.shape, dtype=mx.float32), None
+        return loss, aux, (mx.zeros(hg.shape, dtype=mx.float32) if want_grad else None), None
     hg_d = detached(hg)
     if params_static is not None:
         params_d = params_static
@@ -247,6 +250,9 @@ def head_pass(hg, batch: dict, head: HeadSpec, *, group_of, G: int, Kp: int, log
         params_d = tree_map(detached, params) if head_trainable else params
     onpath, Q_slot, log_bm = chunked_head(hg_d, head, next_ids, params=params_d, **kw)
     loss, aux = loss_from_head_outputs(onpath, Q_slot, log_bm, batch, knobs=knobs, B=B, Tm1=Tm1)
+    if not want_grad:
+        mx.eval(loss, *aux.values())
+        return detached(loss), {k: detached(v) for k, v in aux.items()}, None, None
     _, d_outs = mx.vjp(
         lambda o, q, b: loss_from_head_outputs(o, q, b, batch, knobs=knobs, B=B, Tm1=Tm1)[0],
         [onpath, Q_slot, log_bm], [mx.array(1.0, dtype=mx.float32)])
@@ -268,14 +274,9 @@ def trunk_surrogate(hidden_btd, positions, head: HeadSpec, loss_value, dh, dpara
     """Inside the trunk's transform: a scalar equal to loss_value whose
     gradient is dh at the gathered hidden states and dparams at the head's
     live parameters (read through head.current(), so under
-    nn.value_and_grad they are the traced arrays). positions None means
-    every compute position in flat order."""
+    nn.value_and_grad they are the traced arrays)."""
     from mlx.utils import tree_flatten
-    if positions is None:
-        B, T, d = hidden_btd.shape
-        hg = hidden_btd[:, :-1, :].reshape(B * (T - 1), d)
-    else:
-        hg = gather_positions(hidden_btd, positions)
+    hg = gather_positions(hidden_btd, positions)
     pairs = [(hg, dh)]
     if dparams is not None:
         lp = dict(tree_flatten(head.current()))

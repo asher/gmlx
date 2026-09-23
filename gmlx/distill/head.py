@@ -265,8 +265,7 @@ def _head_chunks(N: int, n_bnd: int, C: int) -> list[tuple[int, int, bool]]:
 
 
 def chunked_head(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid,
-                 group_of, G: int, Kp: int, log_bmask, C: int = 512, params=None,
-                 eval_each: bool = True):
+                 group_of, G: int, Kp: int, log_bmask, C: int = 512, params=None):
     """Per-chunk head forward, each chunk evaluated before the next is
     built, so no [C, V] array outlives its chunk (one lazy graph over all
     chunks would hold every chunk's logits at once).
@@ -293,8 +292,7 @@ def chunked_head(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid,
         else:
             (o,) = _plain_chunk_fn(head, next_ids[s:e])(params, hidden[s:e])
         onpath_parts.append(o)
-        if eval_each:
-            mx.eval(o, *((qs, bm) if is_bnd else ()))
+        mx.eval(o, *((qs, bm) if is_bnd else ()))
     onpath = mx.concatenate(onpath_parts) if onpath_parts else mx.zeros((0,), dtype=mx.float32)
     Q_slot = mx.concatenate(q_parts) if q_parts else mx.zeros((0, Kp + 1), dtype=mx.float32)
     log_bm = mx.concatenate(bm_parts) if bm_parts else mx.zeros((0,), dtype=mx.float32)

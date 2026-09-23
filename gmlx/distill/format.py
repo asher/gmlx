@@ -299,9 +299,10 @@ class ShardWriter:
         if free_bytes(self.dir) < 2 * len(data):
             raise RuntimeError(f"free space under two shards ({free_bytes(self.dir) / GB:.2f} GB)")
         write_bytes_atomic(self.shard_path(i), data)
-        write_bytes_atomic(self.rows_path(i), ("".join(
-            json.dumps(r.as_dict(), sort_keys=True) + "\n" for r in rows)).encode())
+        rows_data = ("".join(json.dumps(r.as_dict(), sort_keys=True) + "\n" for r in rows)).encode()
+        write_bytes_atomic(self.rows_path(i), rows_data)
         entry = {"index": i, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                 "rows_sha256": hashlib.sha256(rows_data).hexdigest(),
                  "rows": len(rows), "tokens": int(sum(r.n_tokens for r in rows)),
                  "wall_s": wall_s}
         self.progress["shards"].append(entry)
@@ -325,13 +326,16 @@ class ShardWriter:
         write_json_atomic(self.progress_path, self.progress)
 
     def verified_shards(self) -> int:
-        """Shards whose file exists with the recorded sha256; progress is
-        truncated to that prefix. Resume continues after it."""
+        """Shards whose file and rows sidecar exist with the recorded
+        sha256 (a sidecar written before the sidecar hash existed is taken
+        as it is); progress is truncated to that prefix. Resume continues
+        after it."""
         good = []
         for e in self.progress["shards"]:
             p = self.shard_path(e["index"])
-            if p.exists() and self.rows_path(e["index"]).exists() \
-                    and sha256_file(p) == e["sha256"]:
+            rp = self.rows_path(e["index"])
+            if p.exists() and rp.exists() and sha256_file(p) == e["sha256"] \
+                    and (not e.get("rows_sha256") or sha256_file(rp) == e["rows_sha256"]):
                 good.append(e)
             else:
                 break
@@ -409,6 +413,8 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
                 problems.append(f"shard {i} not in progress.json")
             elif sha256_file(sp) != e["sha256"]:
                 problems.append(f"shard {i} sha256 mismatch")
+            elif e.get("rows_sha256") and sha256_file(rp) != e["rows_sha256"]:
+                problems.append(f"rows sidecar {i} sha256 mismatch")
         sh = load_shard(sp)
         rows = read_rows_jsonl(rp)
         B, L = sh["token_ids"].shape

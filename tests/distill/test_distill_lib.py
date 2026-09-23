@@ -4807,6 +4807,9 @@ class _LongCache:
             arrs["token_ids"] = arrs["token_ids"][::-1].copy()
         return arrs, text, meta
 
+    def token_ids(self, rows):
+        return {r: self.row(r)[0]["token_ids"] for r in rows}
+
 
 def test_same_render_samples_the_long_rows_too(tmp_path, tok_bl):
     """Rows are length-sorted, so a check limited to the first rows never
@@ -5013,7 +5016,7 @@ def test_reply_rows_drop_a_final_turn_without_content(tmp_path, tok_bl, capsys):
                                                   max_len=256, frame="reply"))
     err = capsys.readouterr().err
     assert rc == 0, err
-    assert "1 conversations dropped" in err
+    assert "1 rows dropped," in err
     reader = dl.CacheReader(out)
     assert len(reader) == 1 and reader.rows_meta[0]["doc_id"].endswith(":0")
 
@@ -5134,7 +5137,7 @@ def test_per_turn_rows_with_a_student_list_pair_on_the_same_reply(tmp_path, tok_
                                                   max_len=256, frame="reply", per_turn=True))
     err = capsys.readouterr().err
     assert rc == 0, err
-    assert "1 dropped for a reply mismatch" in err
+    assert "1 rows dropped for a reply mismatch" in err
     reader = dl.CacheReader(out)
     assert len(reader) == 3
     assert all(_corpus_same(reader.rows_meta[r]) for r in range(3))
@@ -5206,3 +5209,189 @@ def test_eval_refuses_a_slice_named_twice(tmp_path, capsys):
     rc = _ev.run_eval(_ev.EvalOptions(student="none.gguf", md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
                                       slices=["a=x", "a=y"]))
     assert rc == 2 and "[eval] refuse: slice 'a' is named twice" in capsys.readouterr().err
+
+
+
+def test_align_checks_every_framed_row_from_the_token_ids_alone(tmp_path, tok_bl, capsys):
+    """The identity path forwards the cached render, so one row whose
+    student render differs (a template that trims content, on a prompt
+    with a trailing space) sends the whole cache to the general path.
+    The check reads token ids and the attention mask from each shard's
+    header and never loads a shard's top-K arrays."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import view as _view
+
+    tok = _with_template(tok_bl, _TEMPLATE_B)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
+        {"role": "user", "content": f"the cat {i}" + (" " if i == 4 else "")},
+        {"role": "assistant", "content": "the cat is the cat 123 " * (1 + i % 3)}]}) + "\n" for i in range(10)),
+        encoding="utf-8")
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                    top_k=8, max_len=256, rows_per_shard=3, frame="reply")) == 0
+    reader = dl.CacheReader(cache)
+    assert len(reader) == 10
+
+    def never(self, i):
+        raise AssertionError(f"shard {i} loaded for the render check")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dl.CacheReader, "shard", never)
+        same, why = _view.same_render(reader, tok, "reply", n_check=None)
+        assert same and why == "10 rows checked"
+        tok.chat_template = _TEMPLATE_B.replace("{{ m['content'] }}", "{{ m['content'] | trim }}")
+        same, why = _view.same_render(reader, tok, "reply", n_check=None)
+        assert not same and "student tokens vs" in why
+    student = _tiny_mlx_teacher(tmp_path / "student", tok)
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "view")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "[align] framed cache (reply): student render differs (row " in err
+    assert json.loads((tmp_path / "view" / "view.json").read_text())["identity"] is False
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "view2")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "[align] framed cache (reply): student render matches (10 rows checked)" in err
+    assert json.loads((tmp_path / "view2" / "view.json").read_text())["identity"] is True
+
+
+def test_cache_moves_a_rejected_manifest_aside_and_validates_a_finished_resume(tmp_path, tok_bl, capsys):
+    """A manifest the validator rejects is moved to manifest.invalid.json,
+    so no view or resume takes the cache as finished; a resume that finds
+    every shard verified runs the validator before it declares nothing to
+    do."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=2)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_teacher._format, "validate_cache", lambda d: ["forced problem"])
+        assert _teacher.run_cache(opts) == 4
+    err = capsys.readouterr().err
+    assert "[cache] validate: forced problem" in err and "manifest moved to" in err
+    assert not (out / "manifest.json").exists() and (out / "manifest.invalid.json").is_file()
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+    assert (out / "manifest.json").is_file() and dl.validate_cache(out) == []
+    man = json.loads((out / "manifest.json").read_text())
+    man["top_k"] = 7
+    (out / "manifest.json").write_text(json.dumps(man))
+    capsys.readouterr()
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 4
+    err = capsys.readouterr().err
+    assert "nothing to do" not in err and "top-K shapes inconsistent" in err
+    assert not (out / "manifest.json").exists() and (out / "manifest.invalid.json").is_file()
+
+
+def test_rows_sidecar_is_hashed_and_a_changed_one_fails_verification(tmp_path, tok_bl):
+    """The rows sidecar carries doc ids, sources and the frame kind; a
+    sidecar edited after the pass fails the validator and the resume
+    check the way an edited shard does."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_text_corpus(tmp_path / "c.jsonl")),
+                                                    out=str(out), top_k=8, max_len=64)) == 0
+    prog = json.loads((out / "progress.json").read_text())
+    assert prog["shards"] and all(len(e["rows_sha256"]) == 64 for e in prog["shards"])
+    assert dl.validate_cache(out) == []
+    rp = out / "rows-00000.jsonl"
+    lines = rp.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    first["doc_id"] = "other:0"
+    rp.write_text("\n".join([json.dumps(first, sort_keys=True)] + lines[1:]) + "\n", encoding="utf-8")
+    assert "rows sidecar 0 sha256 mismatch" in dl.validate_cache(out)
+    assert dl.ShardWriter(out, 8, False).verified_shards() == 0
+
+
+def test_head_pass_without_gradients_returns_the_same_loss_and_no_cotangent():
+    """Validation wants the loss alone; the pass stops after the forward
+    and returns no hidden-state cotangent."""
+    from gmlx.distill import loss as _loss
+
+    V_T, V_S, d, K = 10, 12, 8, 3
+    tables = dl.identity_tables(V_S, np.zeros(V_S, bool), "t", "s", V_T=V_T)
+    rng = np.random.default_rng(0)
+    head = dl.linear_head(mx.array(rng.standard_normal((V_S, d)).astype(np.float32)))
+    T = 6
+    ids = np.arange(1, T + 1, dtype=np.int32)
+    row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
+           "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
+           "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
+                        teacher_special=set(), student_special=set(), identity=True)
+    b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
+    h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
+    hg = _loss.gather_positions(h, b["positions"])
+    kw = dict(group_of=None, G=tables.G, Kp=K, log_bmask=dl.log_bmask_from(tables.bmask_S),
+              knobs=dict(KNOBS, lambda_alm=0.0), B=1, Tm1=31)
+    loss, aux, dh, _dp = _loss.head_pass(hg, b, head, head_trainable=False, **kw)
+    loss0, aux0, dh0, dp0 = _loss.head_pass(hg, b, head, want_grad=False, **kw)
+    assert dh is not None and dh0 is None and dp0 is None
+    assert float(loss0) == pytest.approx(float(loss))
+    assert int(aux0["ntoks"]) == int(aux["ntoks"])
+
+
+def test_reply_mismatch_counts_rows_when_a_whole_conversation_is_dropped(tmp_path, tok_bl):
+    """Per-turn rows are the unit of every cache counter, so a two-turn
+    conversation whose lists end on different replies counts two."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_B)
+    u1 = {"role": "user", "content": "one"}
+    a1 = {"role": "assistant", "content": "first reply"}
+    u2 = {"role": "user", "content": "two"}
+    a2 = {"role": "assistant", "content": "second reply"}
+    a3 = {"role": "assistant", "content": "another reply"}
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"messages": [u1, a1, u2, a2], "student_messages": [u1, a1, u2, a3]}) + "\n"
+                      + json.dumps({"messages": [u1, a1, u2, a2], "student_messages": [u1, a1, u2, a2]}) + "\n",
+                      encoding="utf-8")
+    res = _teacher.build_rows(tok, str(corpus), max_len=80, text_key="text", max_rows=None, max_tokens=None,
+                              source=None, hf_split="train", limit_docs=None, frame="reply", per_turn=True)
+    rows, info = res[0], res[7]
+    assert len(rows) == 2 and info["reply_mismatch"] == 2 and info["student_rows"] == 2
+
+
+def test_teacher_identity_hashes_blocks_beyond_the_file_head(tmp_path):
+    """A resume compares the teacher's bytes beyond the leading 16 MiB
+    too, so a checkpoint rewritten with another tail does not pass as
+    the same teacher."""
+    from gmlx.distill import teacher as _teacher
+
+    d = tmp_path / "ckpt"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    w = d / "model.safetensors"
+    size = _teacher.IDENTITY_HEAD_BYTES + 6 * 1024 * 1024
+    w.write_bytes(bytes(size))
+    a = _teacher.teacher_identity(str(d))
+    assert _teacher.teacher_identity(str(d)) == a
+    data = bytearray(size)
+    data[_teacher.IDENTITY_HEAD_BYTES + 3 * 1024 * 1024] = 1
+    w.write_bytes(bytes(data))
+    assert _teacher.teacher_identity(str(d)) != a
+
+
+def test_get_tables_rebuilds_an_older_version_without_reading_its_arrays(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """A tables.json of another version is rebuilt before its arrays are
+    read, so an artifact whose layout changed cannot fail the load."""
+    from gmlx.load.tokenizer import vocab_map_hash
+    from gmlx.distill import view as _view
+
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "tables.json").write_text(json.dumps({"tables_version": 1}))
+
+    def never(d):
+        raise AssertionError("old tables loaded")
+
+    monkeypatch.setattr(_view._align, "load_tables", never)
+    t = _view.get_tables(tok_bl, tok_spm, old, tmp_path / "out", V_T=None, V_S=None)
+    assert (tmp_path / "out" / "tables.json").is_file() and t.teacher_hash == vocab_map_hash(tok_bl)

@@ -253,3 +253,28 @@ def test_train_rank_below_one_is_refused_at_parse_time(tmp_path, capsys):
         train.cmd_train([str(tmp_path / "m.gguf"), "--data", str(tmp_path), "--adapter-out",
                          str(tmp_path / "a.gguf"), "--rank", "0"])
     assert e.value.code == 2 and "at least 1" in capsys.readouterr().err
+
+
+
+def test_adapter_export_reads_the_text_model_under_a_multimodal_wrapper(tmp_path):
+    """A wrapper that nests the text model under language_model (the
+    mlx-vlm layout) exports the same module paths as the text model
+    alone, so the adapter loads onto its base."""
+    class _Wrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = _Model()
+
+    model = _Wrapper()
+    model.freeze()
+    model.apply_to_modules(
+        lambda _k, m: m.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+        if isinstance(m, LoRALinear) else None)
+    out = str(tmp_path / "wrapped.gguf")
+    assert train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=out, rank=R, scale=S) == 3
+    plan = adapter.load_lora_adapter(out)
+    assert set(plan.modules) == {
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.mlp.down_proj",
+    }

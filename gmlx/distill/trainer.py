@@ -333,8 +333,8 @@ def run_train(opts: TrainOptions) -> int:
             diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
             log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
                 "a resume repeats the views, batch size, seed, step count, validation sample size, learning "
-                "rate, loss knobs, gradient clip, weight decay, LoRA rank, multiplier, keys and dropout, "
-                "hidden-state term and student")
+                "rate, warmup, loss knobs, gradient clip, weight decay, LoRA rank, multiplier, keys and "
+                "dropout, hidden-state term and student")
             return 2
     if opts.adapter_out:
         from gmlx.tune.lora import probe_writable
@@ -494,26 +494,31 @@ def run_train(opts: TrainOptions) -> int:
                 mx.random.seed(cur_seed[0])
             return _student.trunk_hidden(inner, ids)
 
-        def head_stage(batch):
+        def head_stage(batch, want_grad: bool = True):
             """Trunk forward and the head pass, outside any transform. Returns
             (loss, aux, positions, dh, dparams); see loss.head_pass for why the
-            head never runs inside the trunk's transform."""
+            head never runs inside the trunk's transform. Validation passes
+            want_grad False and gets the loss alone, dh None."""
             hidden = seeded_trunk(batch["student_ids"])
             mx.eval(hidden)
             B, T, _d = hidden.shape
             hg = _loss.gather_positions(hidden, batch["positions"])
             loss, aux, dh, dparams = _loss.head_pass(hg, batch, head, group_of=group_of, G=G, Kp=Kp,
                                                      log_bmask=log_bmask, knobs=knobs, B=B, Tm1=T - 1, C=opts.chunk,
-                                                     head_trainable=False)
+                                                     head_trainable=False, want_grad=want_grad)
             n_bnd = int(batch["n_bnd"])
             if opts.hs and n_bnd > 0 and "hidden_target" in batch:
                 hh = hs_head_for(int(hg.shape[-1]))
-                hs_val, dh_b, dW = _hidden.hs_pass(hg[:n_bnd], batch["hidden_target"], hh, opts.hs_loss)
-                dh = mx.concatenate([dh[:n_bnd] + opts.hs * dh_b.astype(dh.dtype), dh[n_bnd:]], axis=0)
+                if want_grad:
+                    hs_val, dh_b, dW = _hidden.hs_pass(hg[:n_bnd], batch["hidden_target"], hh, opts.hs_loss)
+                    dh = mx.concatenate([dh[:n_bnd] + opts.hs * dh_b.astype(dh.dtype), dh[n_bnd:]], axis=0)
+                    aux["_hs_grads"] = tree_map(lambda g: opts.hs * g, dW)
+                else:
+                    hs_val = _hidden.hs_loss(hh.module(hg[:n_bnd].astype(mx.float32)), batch["hidden_target"],
+                                             opts.hs_loss)
                 loss = loss + opts.hs * hs_val
-                mx.eval(loss, dh)
+                mx.eval(loss, *([dh] if dh is not None else []))
                 aux["hs"] = hs_val
-                aux["_hs_grads"] = tree_map(lambda g: opts.hs * g, dW)
             else:
                 aux["hs"] = mx.zeros((), dtype=mx.float32)
             return loss, aux, batch["positions"], dh, dparams
@@ -534,7 +539,7 @@ def run_train(opts: TrainOptions) -> int:
                 if b is None:
                     continue
                 bm = _data.batch_to_mx({k: v for k, v in b.items() if not k.startswith("_")})
-                loss, aux, _pos, _dh, _dp = head_stage(bm)
+                loss, aux, _pos, _dh, _dp = head_stage(bm, want_grad=False)
                 n = int(aux["ntoks"])
                 tot += float(loss) * n
                 ntok += n

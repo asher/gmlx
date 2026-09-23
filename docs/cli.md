@@ -888,8 +888,9 @@ a problem.
 
 The prompt file holds one `{"id", "messages", "context"}` object per line
 whose messages end on a user turn. A row's context, or the file given by
-`--context`, goes in front of the last user turn for the teacher. A row
-that took a context is written with the teacher's list under `messages`
+`--context`, goes in front of the last user turn for the teacher, and
+either one must hold text. A row that took a context is written with the
+teacher's list under `messages`
 and the prompt as given under `student_messages`, and a row without one
 carries `messages` alone. Prompt ids already in the output are skipped,
 so a run resumes where it stopped. A resume checks that each skipped id
@@ -921,7 +922,7 @@ block as it found it.
 | `--docs N` | all | with `--corpus`, prompts to build |
 | `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
 | `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
-| `--context FILE` | none | text the teacher reads for every prompt without its own context field |
+| `--context FILE` | none | text the teacher reads for every prompt without its own context field, refused when blank |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
 | `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
@@ -957,15 +958,16 @@ carries `student_messages`, since that row was generated with a context.
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
 | `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
-| `--min-words N` | `16` | drop replies whose answer has fewer whitespace-separated words, the reasoning trace not counted. `--min-tokens` is the same flag |
+| `--min-words N` | `16` | drop replies whose answer has fewer words (characters, for CJK text), trace not counted. `--min-tokens` is the same flag |
 | `--ngram N` | `8` | n-gram size of the repetition check |
 | `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
-| `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row |
+| `--max-trace-repeat F` | `0.5` | drop replies whose reasoning trace's repeated n-grams exceed this fraction |
+| `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row, lines without a letter or digit skipped |
 | `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
 | `--max-reply-tokens N` | off | drop replies longer than this many tokens, reasoning trace included |
 | `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
 | `--verify CMD` | none | shell command of your checker, which reads the survivors on stdin and prints `ok` or a reason per row |
-| `--context FILE` | none | put this text on the teacher's side of every kept row |
+| `--context FILE` | none | put this text on the teacher's side of every kept row, refused when blank |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
 
 ### distill cache

@@ -7,9 +7,11 @@ Checks run in a fixed order and the first failure names the reason:
     length   the reply did not reach its end of turn (finish_reason is not stop)
     budget   the thinking budget cut the trace (the gen block says so)
     empty    the answer has fewer than min_words whitespace-separated words
-    marker   a template marker string leaked into the reply
-    repeat   repeated n-grams cover more than max_repeat of the reply, or one
-             line repeats more than max_line_repeats times in a row
+             (characters, when the text is mostly CJK)
+    marker   a template marker string leaked into the reply or its trace
+    repeat   repeated n-grams cover more than max_repeat of the reply or
+             max_trace_repeat of the trace, or one line with a letter or
+             digit repeats more than max_line_repeats times in a row
     ascii    non-ASCII characters above max_non_ascii (off unless set)
     tokens   the reply is longer than max_reply_tokens completion tokens
     verify   an external command rejected the row
@@ -54,6 +56,7 @@ class FilterOptions:
     min_words: int = 16
     ngram: int = 8
     max_repeat: float = 0.2
+    max_trace_repeat: float = 0.5
     max_line_repeats: int = 2
     max_non_ascii: float | None = None
     max_reply_tokens: int | None = None
@@ -63,10 +66,25 @@ class FilterOptions:
     context_format: str = DEFAULT_CONTEXT_FORMAT
 
 
+def _units(text: str) -> list[str]:
+    """Whitespace tokens, or the non-space characters when at least half
+    of them are CJK (U+2E80 and up, scripts written without spaces), so
+    the word count and the repeat check see units of one size either
+    way."""
+    chars = [ch for ch in text if not ch.isspace()]
+    if chars and 2 * sum(1 for ch in chars if ord(ch) >= 0x2E80) >= len(chars):
+        return chars
+    return text.split()
+
+
+def word_count(text: str) -> int:
+    return len(_units(text))
+
+
 def repeat_fraction(text: str, n: int) -> float:
-    """Fraction of the reply's whitespace-token n-grams that repeat an
-    earlier n-gram."""
-    toks = text.split()
+    """Fraction of the text's n-grams (over whitespace tokens, or over
+    characters for CJK text) that repeat an earlier n-gram."""
+    toks = _units(text)
     if len(toks) < n + 1:
         return 0.0
     grams = [tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)]
@@ -76,10 +94,13 @@ def repeat_fraction(text: str, n: int) -> float:
 
 
 def max_line_run(text: str) -> int:
+    """The longest run of one line repeated back to back, over lines that
+    hold a letter or digit (closing brackets of nested code and JSON
+    repeat without being a loop)."""
     run = best = 0
     prev = None
     for line in (ln.strip() for ln in text.splitlines()):
-        if not line:
+        if not line or not any(ch.isalnum() for ch in line):
             continue
         run = run + 1 if line == prev else 1
         best = max(best, run)
@@ -97,13 +118,12 @@ def reason(row: dict, opts: FilterOptions) -> str | None:
         return "length"
     if g.get("budget_hit") and not opts.keep_budget_hit:
         return "budget"
-    if len(reply.split()) < opts.min_words:
+    if word_count(reply) < opts.min_words:
         return "empty"
     if any(m in reply for m in MARKERS) or any(m in trace for m in TRACE_MARKERS):
         return "marker"
-    for text in (reply, trace):
-        if text and (repeat_fraction(text, opts.ngram) > opts.max_repeat
-                     or max_line_run(text) > opts.max_line_repeats):
+    for text, cap in ((reply, opts.max_repeat), (trace, opts.max_trace_repeat)):
+        if text and (repeat_fraction(text, opts.ngram) > cap or max_line_run(text) > opts.max_line_repeats):
             return "repeat"
     if opts.max_non_ascii is not None and reply:
         na = sum(1 for ch in reply if ord(ch) > 126) / len(reply)
@@ -229,6 +249,9 @@ def run_filter(opts: FilterOptions) -> int:
     out = Path(opts.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
+    if context is not None and not context.strip():
+        print(f"[filter] refuse: context file {opts.context} is blank", file=sys.stderr)
+        return 2
     counts: Counter = Counter()
     rejects: list[dict] = []
     survivors: list[dict] = []

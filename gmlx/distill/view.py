@@ -74,20 +74,21 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
         version = read_json(tables_dir / "tables.json").get("tables_version")
-        t = _align.load_tables(tables_dir)
         if version != TABLES_VERSION:
             log(f"[align] tables at {tables_dir} are version {version}, this build writes {TABLES_VERSION}, "
                 "rebuilding")
-        elif t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
-                and (V_S is None or t.V_S == V_S):
-            log(f"[align] tables from {tables_dir} (pair hashes and widths match)")
-            if tables_dir.resolve() != out_dir.resolve():
-                _align.save_tables(out_dir, t)
-            return t
-        elif t.teacher_hash == th and t.student_hash == sh:
-            log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
         else:
-            log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
+            t = _align.load_tables(tables_dir)
+            if t.teacher_hash == th and t.student_hash == sh and (V_T is None or t.V_T == V_T) \
+                    and (V_S is None or t.V_S == V_S):
+                log(f"[align] tables from {tables_dir} (pair hashes and widths match)")
+                if tables_dir.resolve() != out_dir.resolve():
+                    _align.save_tables(out_dir, t)
+                return t
+            elif t.teacher_hash == th and t.student_hash == sh:
+                log(f"[align] tables at {tables_dir} are for other head widths ({t.V_T}, {t.V_S}), rebuilding")
+            else:
+                log(f"[align] tables at {tables_dir} are for another pair, rebuilding")
     t0 = time.perf_counter()
     t = _align.build_tables(teacher_tok, student_tok, V_T=V_T, V_S=V_S)
     log(f"[align] tables built in {time.perf_counter() - t0:.1f}s: G={t.G} "
@@ -96,12 +97,14 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     return t
 
 
-def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -> tuple[bool, str]:
+def same_render(reader: CacheReader, student_tok, kind: str, n_check: int | None = 8) -> tuple[bool, str]:
     """Whether the student's chat template reproduces the cached token ids
-    on n_check framed rows of every conversation shape (the sequence of
-    roles, and which turns carry a reasoning trace or tool calls), spread
-    over the cache, since a template can agree on plain exchanges and
-    differ on a system turn or a tool call. Never when any row of the cache
+    on the framed rows: n_check rows of every conversation shape (the
+    sequence of roles, and which turns carry a reasoning trace or tool
+    calls), spread over the cache, or every framed row when n_check is
+    None. A template can agree on plain exchanges and differ on a system
+    turn, a tool call, or one row's content (a template that trims), so
+    the identity path checks every row. Never when any row of the cache
     carries a student message list of its own: such a row renders for the
     student without the teacher's context, so the cached ids cannot be
     the student's input."""
@@ -115,22 +118,27 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
         if msgs:
             key = tuple((m.get("role"), bool(m.get("reasoning_content")), bool(m.get("tool_calls"))) for m in msgs)
             shapes.setdefault(key, []).append(r)
-    checked = 0
+    picked: list[int] = []
     for framed in shapes.values():
-        # rows are length-sorted, so the sample spans short and long rows
-        picks = sorted(set(int(x) for x in np.linspace(0, len(framed) - 1, n_check)))
-        for r in (framed[k] for k in picks):
-            meta = reader.rows_meta[r]
-            arrs, _text, _ = reader.row(r)
-            try:
-                stext, _spans = _frames.render_row(student_tok, meta["messages"],
-                                                   **_frames.row_render_args(meta.get("frame") or kind))
-            except ValueError as e:
-                return False, f"row {r}: {e}"
-            ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, stext, stb, add_special_tokens=False)
-            if len(ids) != len(arrs["token_ids"]) or not np.array_equal(ids, arrs["token_ids"]):
-                return False, f"row {r}: {len(ids)} student tokens vs {len(arrs['token_ids'])} cached"
-            checked += 1
+        if n_check is None:
+            picked.extend(framed)
+        else:
+            # rows are length-sorted, so the sample spans short and long rows
+            picked.extend(framed[k] for k in sorted(set(int(x) for x in np.linspace(0, len(framed) - 1, n_check))))
+    picked.sort()
+    cached = reader.token_ids(picked)
+    checked = 0
+    for r in picked:
+        meta = reader.rows_meta[r]
+        try:
+            stext, _spans = _frames.render_row(student_tok, meta["messages"],
+                                               **_frames.row_render_args(meta.get("frame") or kind))
+        except ValueError as e:
+            return False, f"row {r}: {e}"
+        ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, stext, stb, add_special_tokens=False)
+        if len(ids) != len(cached[r]) or not np.array_equal(ids, cached[r]):
+            return False, f"row {r}: {len(ids)} student tokens vs {len(cached[r])} cached"
+        checked += 1
     if len(shapes) > 1:
         return checked > 0, f"{checked} rows checked over {len(shapes)} conversation shapes"
     return checked > 0, f"{checked} rows checked"
@@ -230,9 +238,9 @@ def run_align(opts: AlignOptions) -> int:
         log(f"[align] identity maps but student head is narrower ({V_S} < {V_T}), general path")
     if identity and frame:
         # the identity path forwards the cached render, so the student's own
-        # template must produce the same tokens; otherwise the general path
-        # re-renders every row with the student's template
-        same, why_f = same_render(reader, student_tok, frame["kind"])
+        # template must produce the same tokens on every row; otherwise the
+        # general path re-renders every row with the student's template
+        same, why_f = same_render(reader, student_tok, frame["kind"], n_check=None)
         log(f"[align] framed cache ({frame['kind']}): student render {'matches' if same else 'differs'} ({why_f})")
         identity = same
     elif identity and prefixed:

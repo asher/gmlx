@@ -130,6 +130,9 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--ngram", type=_positive_int, default=8, help="N-gram size of the repetition check (default 8).")
     p.add_argument("--max-repeat", type=float, default=0.2,
                    help="Drop replies whose repeated n-grams exceed this fraction (default 0.2).")
+    p.add_argument("--max-trace-repeat", type=float, default=0.5,
+                   help="Drop replies whose reasoning trace's repeated n-grams exceed this fraction "
+                        "(default 0.5).")
     p.add_argument("--max-line-repeats", type=_positive_int, default=2,
                    help="Drop replies with a line repeated more than this many times in a row (default 2).")
     p.add_argument("--max-non-ascii", type=float, default=None,

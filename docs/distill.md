@@ -433,7 +433,8 @@ fails, with one reason word per dropped row:
 - `empty`, the answer has fewer than `--min-words` words.
 - `marker`, a marker of the chat template leaked into the reply or its
   reasoning trace.
-- `repeat`, lines or phrases repeat in the reply or its reasoning trace.
+- `repeat`, lines or phrases repeat in the reply or its reasoning trace,
+  the trace under its own `--max-trace-repeat`.
 - `ascii`, too many non-ASCII characters, only with `--max-non-ascii`.
 - `tokens`, the reply is over `--max-reply-tokens`.
 - `verify`, your checker said no, with its word under `detail` in the
