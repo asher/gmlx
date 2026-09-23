@@ -1527,3 +1527,25 @@ def test_gen_refuses_a_thinking_budget_with_a_drafter_and_flags_a_budget_the_ser
     assert [r["id"] for r in _rows(kept)] == ["long"]
     fside = json.loads((tmp_path / "kept.jsonl.gen.json").read_text())
     assert fside["filter"]["budget_unenforced"] == 1 and fside["filter"]["dropped"] == {"budget": 2}
+
+
+def test_the_close_allowance_matches_the_spawned_server_and_a_base_url_takes_the_drafted_close():
+    """The server gen spawns closes a cut trace with mlx-vlm's criteria,
+    a newline and the end marker: CLOSE_ALLOWANCE is that sequence plus
+    the over-budget token and an opening marker. A server behind
+    --base-url may be drafted, so its close is the wrap phrase plus the
+    marker as the tokenizer counts them."""
+    from gmlx.gen.thinking_budget import BUDGET_WRAP_PHRASE
+    from gmlx.serve.patches import chat_behavior as cb
+
+    class _IdTokenizer:
+        def encode(self, text, add_special_tokens=False):
+            return [abs(hash(w)) % 1000 for w in text.split()] or [7]
+
+    crit = cb._armed_thinking_budget_criteria_cls()(
+        tokenizer=_IdTokenizer(), thinking_budget=5, thinking_end_token="</think>",
+        thinking_start_token="<think>", enable_thinking=True, prompt_open_thinking=False)
+    assert gen.CLOSE_ALLOWANCE == len(crit._forced_sequence) + 2
+    assert gen.close_tokens(_ThinkTokenizer(), spawned=True) == gen.CLOSE_ALLOWANCE
+    assert gen.close_tokens(_ThinkTokenizer(), spawned=False) == len(BUDGET_WRAP_PHRASE.split()) + 1
+    assert gen.close_tokens(_WordTokenizer(), spawned=False) == gen.CLOSE_ALLOWANCE

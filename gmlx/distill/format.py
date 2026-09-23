@@ -518,9 +518,11 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
                     if not same_reply(r["messages"], st):
                         problems.append(f"shard {i} row {b}: student_messages end on a different reply")
             t = r.get("turns") if r else None
-            if t is not None and (not isinstance(t, int) or isinstance(t, bool) or t < 1
-                                  or not 0 <= int(r.get("window", 0) or 0) < t):
-                problems.append(f"shard {i} row {b}: window {r.get('window')} outside its turns {t}")
+            if t is not None:
+                w = r.get("window", 0)
+                if not (isinstance(t, int) and not isinstance(t, bool) and isinstance(w, int)
+                        and not isinstance(w, bool) and 0 <= w < t):
+                    problems.append(f"shard {i} row {b}: window {w!r} outside its turns {t!r}")
             if r and r.get("n_tokens") != n:
                 problems.append(f"shard {i} row {b}: n_tokens {r.get('n_tokens')} != {n}")
     return problems

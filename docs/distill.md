@@ -114,8 +114,9 @@ Its corpus is a jsonl file, one JSON object per line, of 24
 `{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
 so `train` needs at least that many training rows. `align` also holds
 back about one row in fifty for validation, whole documents at a time and
-at least one row, and never trains on them. A cache made from one
-document splits that document. Here 24 rows leave 23 for a batch of 4.
+at least one row of a cache with two or more, and never trains on them.
+A cache made from one document splits that document. Here 24 rows leave
+23 for a batch of 4.
 `eval --slice` reads plain text, so the second line writes the same rows
 to `smoke.txt`:
 
@@ -492,8 +493,9 @@ alone does not fit. 2560 holds a 1180-token reply behind a prompt.
 
 `align` runs on the CPU with the two tokenizers only and writes the view
 into `view-r1/`. It holds back about one row in fifty for validation,
-whole documents at a time and at least one row, and the rest are training
-rows. A cache made from one document splits that document instead. Its
+whole documents at a time and at least one row of a cache with two or
+more, and the rest are training rows. A cache made from one document
+splits that document instead. Its
 summary line reports `a` and `s`, the own-group and singleton fractions
 explained under [Advanced settings](#advanced-settings), and the other
 fields on that line are diagnostics. On the worked pair every teacher
@@ -780,8 +782,9 @@ steps and at the last step. These are the round-one lines at step 200:
 ```
 
 Every later validation line adds the best earlier value in parentheses.
-A validation line that reads `val none` means no validation row held a
-scored position, and the best checkpoint stays as it was.
+A validation line that reads `val none` means the view holds no
+validation row or none held a scored position, and the best checkpoint
+stays as it was.
 The train lines that print `knobs=` or `blocked attention` are
 diagnostics, like the `plan:` line of `cache`. The train line has these
 fields.

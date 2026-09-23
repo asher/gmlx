@@ -294,12 +294,17 @@ def save_tables(dirpath: Path, t: Tables) -> None:
 
 
 def load_tables(dirpath: Path) -> Tables:
-    """The tables under dirpath; ValueError when tables.json does not name
-    the tables.safetensors beside it."""
+    """The tables under dirpath; ValueError when a file is missing or
+    unreadable, or tables.json does not name the tables.safetensors
+    beside it."""
     from safetensors.numpy import load_file
     dirpath = Path(dirpath)
-    m = read_json(dirpath / "tables.json")
-    if m.get("safetensors_sha256") != sha256_file(dirpath / "tables.safetensors"):
+    try:
+        m = read_json(dirpath / "tables.json")
+        digest = sha256_file(dirpath / "tables.safetensors")
+    except (OSError, ValueError) as e:
+        raise ValueError(f"the tables under {dirpath} are unreadable ({e})") from None
+    if m.get("safetensors_sha256") != digest:
         raise ValueError(f"the tables under {dirpath} are torn (tables.safetensors is not the one "
                          "tables.json names)")
     a = load_file(str(dirpath / "tables.safetensors"))

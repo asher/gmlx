@@ -329,10 +329,16 @@ def wrap_closed(reasoning: str) -> bool:
     return bool(reasoning) and reasoning.rstrip().endswith(BUDGET_WRAP_PHRASE.strip())
 
 
-def close_tokens(tokenizer) -> int:
-    """Tokens the server's forced close spends inside the trace (the wrap
-    phrase and the closing marker), CLOSE_ALLOWANCE when the tokenizer
-    resolves no thinking marker."""
+def close_tokens(tokenizer, *, spawned: bool) -> int:
+    """Tokens the request budget leaves for a forced close. The server gen
+    spawns is never drafted (run_gen refuses that) and closes a cut trace
+    with a newline and the end marker, which CLOSE_ALLOWANCE covers with
+    the over-budget token and an opening marker. A server behind
+    --base-url may be drafted, and a drafted close is the wrap phrase plus
+    the marker, so that count is used there and an answer from a plain
+    server can run that many tokens past --max-tokens."""
+    if spawned:
+        return CLOSE_ALLOWANCE
     from ..gen.thinking_budget import budget_close_tokens
     return max(budget_close_tokens(tokenizer), CLOSE_ALLOWANCE)
 
@@ -360,9 +366,10 @@ def complete(base_url: str, model_id: str, messages: list[dict], opts: GenOption
     budget_hit: bool | None = None
     unenforced = False
     if opts.thinking_budget and rt is not None:
-        # a gmlx server ends every trace it cuts with its wrap phrase, so
-        # that alone marks a hit whatever the count (a drafter overshoots
-        # by a draft block). Elsewhere the count decides: the server forces
+        # a drafted gmlx server ends every trace it cuts with its wrap
+        # phrase, so that alone marks a hit whatever the count (it
+        # overshoots by a draft block). Elsewhere the count decides: the
+        # plain path closes with a newline and the marker, the server forces
         # the close once the count reaches the budget, its own count is
         # exact, a trace re-tokenized here can come out a merge or two
         # short, and a trace far past the budget plus its close was never
@@ -583,9 +590,9 @@ def run_gen(opts: GenOptions) -> int:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
         return 2
     if opts.thinking_budget and any(a == f or a.startswith(f + "=") for a in opts.serve_arg for f in DRAFTER_FLAGS):
-        # a drafted teacher closes a cut trace with a sentence-long phrase
-        # the answer budget is not sized for, and drops the budget when
-        # requests batch
+        # a drafted teacher overshoots the budget by a draft block and
+        # drops it when requests batch, so its cut is not the one the
+        # sidecar records
         print("[gen] refuse: --thinking-budget with a drafter (--mtp, --speculative or --draft-gguf in --serve-arg) "
               "is not enforced per request, serve the teacher without the drafter", file=sys.stderr)
         return 2
@@ -608,7 +615,7 @@ def run_gen(opts: GenOptions) -> int:
         except (FileNotFoundError, OSError, ValueError) as e:
             print(f"[gen] refuse: cannot load the tokenizer from {tok_path}: {e}", file=sys.stderr)
             return 2
-        opts.close_tokens = close_tokens(tokenizer)
+        opts.close_tokens = close_tokens(tokenizer, spawned=not opts.base_url)
     if opts.corpus is not None:
         c = opts.corpus
         if (c.endswith((".jsonl", ".txt")) or c.startswith((".", "/", "~"))) and not Path(c).expanduser().exists():

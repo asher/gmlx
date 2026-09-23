@@ -248,6 +248,24 @@ def _ref_bucketed(target_log_p, log_M, Q_slot, weight, mode="bucketed"):
     return tot / max(weight.sum(), 1.0)
 
 
+def _ref_renorm_tempered(target_log_p, Q_slot, weight, T):
+    """float64 reference of the renorm mode: support-only softmaxes on
+    both sides, both tempered by T."""
+    def lse(a):
+        m = a.max()
+        return m + math.log(np.exp(a - m).sum())
+    Nb, Kp = target_log_p.shape
+    tot = 0.0
+    for j in range(Nb):
+        valid = target_log_p[j] != -np.inf
+        a = target_log_p[j][valid].astype(np.float64) / T
+        a = a - lse(a)
+        q = np.log(np.maximum(Q_slot[j, :Kp][valid].astype(np.float64), 2.0 ** -126)) / T
+        q = q - lse(q)
+        tot += weight[j] * float(np.sum(np.exp(a) * (a - q)))
+    return tot / max(weight.sum(), 1.0)
+
+
 def _dense_group_masses(q, gid_row, group_of, G, Kp):
     """[Kp+1] slot masses from a dense q [V] in float64."""
     Qs = np.zeros(Kp + 1)
@@ -353,6 +371,11 @@ def test_bucketed_kl_matches_reference_and_modes():
         Qr[j, Kp] = 0.5
     lr, _ = dl.bucketed_kl(mx.array(lpr), mx.array(log_M), mx.array(Qr), mx.array(w), mode="renorm")
     assert abs(float(lr)) < 1e-5
+    # renorm tempers both support softmaxes by T_dk like the conditional factor
+    lt, _ = dl.bucketed_kl(mx.array(lp), mx.array(log_M), mx.array(Q), mx.array(w), mode="renorm", T_dk=2.0)
+    l1, _ = dl.bucketed_kl(mx.array(lp), mx.array(log_M), mx.array(Q), mx.array(w), mode="renorm")
+    assert abs(float(lt) - _ref_renorm_tempered(lp, Q, w, 2.0)) < 1e-5
+    assert abs(float(l1) - _ref_renorm_tempered(lp, Q, w, 1.0)) < 1e-5 and abs(float(lt) - float(l1)) > 1e-3
 
 
 def test_nan_list():
@@ -6122,7 +6145,8 @@ def test_validator_refuses_a_window_outside_its_turn_count(tmp_path, tok_bl):
     _tiny_reply_cache(tmp_path / "c", tok, [(msgs, msgs)])
     rows_path = tmp_path / "c" / "rows-00000.jsonl"
     rows = dl.read_rows_jsonl(rows_path)
-    for turns, window, bad in ((1, 1, True), (2, 1, False), (True, 0, True), (0, 0, True), (2, 0, False)):
+    for turns, window, bad in ((1, 1, True), (2, 1, False), (True, 0, True), (0, 0, True), (2, 0, False),
+                               (2, "x", True), (2, 1.5, True), (2, True, True)):
         rows_path.write_text(json.dumps(dict(rows[0], turns=turns, window=window)) + "\n")
         found = any("outside its turns" in p for p in dl.validate_cache(tmp_path / "c", check_sha=False))
         assert found == bad, (turns, window)
@@ -6151,3 +6175,118 @@ def test_a_torn_tables_pair_is_rebuilt_by_align_and_refused_by_train(tmp_path, t
                                                     no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
                                                     ckpt_dir=str(tmp_path / "ck"))) == 2
     assert f"[train] refuse: the tables under {v1} are torn" in capsys.readouterr().err
+
+
+def test_corpus_hash_sees_document_boundaries(tmp_path, tok_bl):
+    """Two corpora holding the same bytes split at other document
+    boundaries hash apart, so a resume over the second is refused."""
+    from gmlx.distill import teacher as _teacher
+
+    def corpus(name, docs):
+        p = tmp_path / name
+        p.write_text("".join(json.dumps({"text": d}) + "\n" for d in docs))
+        return p
+
+    a = corpus("a.jsonl", ["the cat sat on the mat today", " and the dog ran far away from home"])
+    b = corpus("b.jsonl", ["the cat sat on the mat today and the dog", " ran far away from home"])
+    kw = dict(max_len=64, text_key="text", max_rows=None, max_tokens=None, source=None, hf_split="train",
+              limit_docs=None)
+    ha = _teacher.build_rows(tok_bl, str(a), **kw)[2]
+    hb = _teacher.build_rows(tok_bl, str(b), **kw)[2]
+    assert ha != hb and ha == _teacher.build_rows(tok_bl, str(a), **kw)[2]
+
+
+def test_train_on_a_one_row_view_names_the_empty_split_and_clears_an_earlier_best(tmp_path, tok_bl, monkeypatch,
+                                                                                capsys):
+    """A one-row cache holds no validation row: train says so on its
+    validation line and writes no best; a fresh run into a ckpt-dir also
+    removes the best checkpoint an earlier run left there."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", n_rows=1)
+    assert json.loads((v1 / "view.json").read_text())["index"][0]["split"] == "train"
+    ck = tmp_path / "ck"
+    (ck / "best").mkdir(parents=True)
+    (ck / "best" / "state.json").write_text("{}")
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=1, batch_size=1,
+                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                    ckpt_dir=str(ck))) == 0
+    err = capsys.readouterr().err
+    assert f"[train] removed the earlier run's best checkpoint under {ck}" in err
+    assert "val none: the view holds no validation rows, best unchanged" in err
+    assert (ck / "last").is_dir() and not (ck / "best").exists()
+
+
+def test_train_counts_a_skipped_batch_in_the_schedules(tmp_path, tok_bl, monkeypatch):
+    """A batch that compiles to nothing still advances the optimizer's
+    step, so the schedule ends where the step count says."""
+    import mlx.core as mx
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1")
+    orig = _view.ViewLoader.compile
+    calls = {"n": 0}
+
+    def first_batch_empty(self, row):
+        calls["n"] += 1
+        return None if calls["n"] <= 2 else orig(self, row)
+
+    monkeypatch.setattr(_view.ViewLoader, "compile", first_batch_empty)
+    ck = tmp_path / "ck"
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=2, batch_size=2,
+                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                    warmup=0.0, ckpt_dir=str(ck))) == 0
+    ostate = mx.load(str(ck / "last" / "optimizer.safetensors"))
+    assert int(ostate["step"]) == 2
+
+
+def test_missing_tables_arrays_rebuild_on_align_and_refuse_train(tmp_path, tok_bl, tok_spm, capsys, monkeypatch):
+    """tables.json beside a deleted tables.safetensors is unreadable, not a
+    traceback: align rebuilds and train refuses."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", student_tok=tok_spm)
+    (v1 / "tables.safetensors").unlink()
+    with pytest.raises(ValueError, match="unreadable"):
+        dl.load_tables(v1)
+    capsys.readouterr()
+    t = _view.get_tables(tok_bl, tok_spm, v1, tmp_path / "fresh", V_T=None, V_S=None)
+    assert f"[align] the tables under {v1} are unreadable" in capsys.readouterr().err
+    assert t.student_hash == dl.vocab_map_hash(tok_spm)
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=1, batch_size=2,
+                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                    ckpt_dir=str(tmp_path / "ck"))) == 2
+    assert f"[train] refuse: the tables under {v1} are unreadable" in capsys.readouterr().err
+    (v1 / "tables.json").write_text("{not json")
+    with pytest.raises(ValueError, match="unreadable"):
+        dl.load_tables(v1)
+    capsys.readouterr()
+    _view.get_tables(tok_bl, tok_spm, v1, tmp_path / "fresh2", V_T=None, V_S=None)
+    assert "are version unreadable" in capsys.readouterr().err
+
+
+def test_identity_compile_drops_a_row_with_no_on_path_position():
+    """An identity row whose on-path mask is all false carries no target
+    and is dropped like a general row with too few boundaries."""
+    from types import SimpleNamespace
+
+    from gmlx.distill import data as _data
+
+    n, K = 6, 4
+    row = {"token_end_byte": np.arange(n, dtype=np.uint32) * 2,
+           "onpath_mask": np.zeros(n, dtype=bool),
+           "top_k_indices": np.zeros((n, K), dtype=np.int32),
+           "top_k_log_softmax": np.full((n, K), -1.5, dtype=np.float32)}
+    ids = np.arange(n, dtype=np.int32)
+    tables = SimpleNamespace(G=16)
+    assert _data.compile_row(row, b"x" * (2 * n), ids, row["token_end_byte"].astype(np.int64), tables, Kp=K,
+                             knobs={}, teacher_special=set(), student_special=set(), identity=True) is None
+    row["onpath_mask"][:3] = True
+    rv = _data.compile_row(row, b"x" * (2 * n), ids, row["token_end_byte"].astype(np.int64), tables, Kp=K,
+                           knobs={}, teacher_special=set(), student_special=set(), identity=True)
+    assert rv is not None and rv.stats["J"] == 3

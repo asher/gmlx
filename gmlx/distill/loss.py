@@ -68,8 +68,15 @@ def bucketed_kl(target_log_p, log_M, Q_slot, weight, *, mode: str = "bucketed",
     pad_fill = mx.full(lp.shape, PAD_FILL, dtype=mx.float32)
     if mode == "renorm":
         lq_valid = mx.where(pad, pad_fill, logQ_g)
+        if T_dk != 1.0:
+            # support-only softmax on both sides, tempered like the
+            # conditional factor below
+            lq_valid = lq_valid / T_dk
+            lp_valid = mx.where(pad, pad_fill, lp) / T_dk
+            log_p_t = lp_valid - mx.logsumexp(lp_valid, axis=-1, keepdims=True)
+        else:
+            log_p_t = lp - mx.maximum(log_M, mx.array(LOG_FLOOR, dtype=mx.float32))[:, None]
         log_q_t = lq_valid - mx.logsumexp(lq_valid, axis=-1, keepdims=True)
-        log_p_t = lp - mx.maximum(log_M, mx.array(LOG_FLOOR, dtype=mx.float32))[:, None]
         per = mx.sum(mx.where(pad, mx.zeros_like(lp), mx.exp(log_p_t) * (log_p_t - log_q_t)), axis=-1)
     elif T_dk != 1.0:
         # conditional factor over groups, tempered on both sides

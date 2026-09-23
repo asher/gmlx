@@ -344,6 +344,14 @@ def run_train(opts: TrainOptions) -> int:
 
     ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if not opts.resume:
+        # a fresh run replaces last at its first save; an earlier run's best
+        # would otherwise stand beside it as if this run had scored it
+        for stale in ("best", "best.tmp", "best.old"):
+            if (ckpt_dir / stale).exists():
+                shutil.rmtree(ckpt_dir / stale)
+                if stale == "best":
+                    log(f"[train] removed the earlier run's best checkpoint under {ckpt_dir}")
     run = resume_fingerprint(views, opts, knobs, scale)
     if opts.resume:
         last = checkpoint_dir(ckpt_dir, "last")
@@ -462,6 +470,7 @@ def run_train(opts: TrainOptions) -> int:
                    for rd, v, d in zip(readers, views, view_dirs)]
         train_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "train"]
         val_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "val"]
+        view_has_val = bool(val_rows)
         lengths = {(vi, e["row"]): e["n_student_tokens"] for vi, v in enumerate(views) for e in v["index"]}
         # one seeded draw across the val rows of every view, so validation
         # scores the same rows at every cadence and not the shortest rows of
@@ -606,7 +615,8 @@ def run_train(opts: TrainOptions) -> int:
                 log_rows.append({"it": it_idx + 1, "val": v})
                 best = state['best_val']
                 if v is None:
-                    log(f"[train] it {it_idx + 1} val none: no validation position scored, best unchanged")
+                    why = "no validation position scored" if view_has_val else "the view holds no validation rows"
+                    log(f"[train] it {it_idx + 1} val none: {why}, best unchanged")
                 else:
                     log(f"[train] it {it_idx + 1} val {v:.4f} (best {best:.4f})" if best is not None
                         else f"[train] it {it_idx + 1} val {v:.4f}")
@@ -623,7 +633,12 @@ def run_train(opts: TrainOptions) -> int:
             b = batch_rows([train_rows[i] for i in rows])
             load_walls.append(time.perf_counter() - tl0)
             if b is None or int(b["positions"].shape[0]) == 0:
+                # the schedules count the step the batch did not run, so
+                # the run still ends at the rate the step count names
                 skipped += 1
+                opt.state["step"] = opt.step + 1
+                if hs_state["head"] is not None:
+                    hs_state["head"].advance()
                 state["iteration"] = it_idx + 1
                 checkpoints_due(it_idx)
                 continue

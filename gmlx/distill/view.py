@@ -77,7 +77,10 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
     th, sh = vocab_map_hash(teacher_tok), vocab_map_hash(student_tok)
     roles = _align.special_roles(teacher_tok, student_tok)
     if tables_dir and (tables_dir / "tables.json").exists():
-        version = read_json(tables_dir / "tables.json").get("tables_version")
+        try:
+            version = read_json(tables_dir / "tables.json").get("tables_version")
+        except (OSError, ValueError) as e:
+            version = f"unreadable ({e})"
         if version != TABLES_VERSION:
             log(f"[align] tables at {tables_dir} are version {version}, this build writes {TABLES_VERSION}, "
                 "rebuilding")

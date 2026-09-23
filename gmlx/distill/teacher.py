@@ -193,6 +193,9 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
             tbytes = text.encode("utf-8")
             if not tbytes.strip():
                 continue
+            # length-prefixed, so two corpora that split the same bytes at
+            # other document boundaries hash apart
+            corpus_hash.update(len(tbytes).to_bytes(8, "little"))
             corpus_hash.update(tbytes)
             ids, ends, flag = _tokens.encode_with_byte_ends(tokenizer, tbytes, tb, add_special_tokens=False)
             flagged += int(flag)

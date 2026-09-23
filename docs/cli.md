@@ -912,7 +912,7 @@ block as it found it.
 | `--prompts PATH` | none | a jsonl of prompt rows ending on a user turn |
 | `--corpus PATH_OR_ID` | none | a text corpus to build continuation prompts from, instead of `--prompts` |
 | `--teacher GGUF` | none | GGUF served for the run, the teacher or, for a measurement, the student. `--model` is the same flag |
-| `--base-url URL` | none | a running server's `/v1` base, instead of serving `--teacher` |
+| `--base-url URL` | none | a running server's `/v1` base, instead of serving `--teacher`. With `--thinking-budget` the close is sized for a drafted server |
 | `--host HOST` | `127.0.0.1` | bind host of the served teacher |
 | `--port N` | `8093` | port of the served teacher |
 | `--text-key KEY` | `text` | with `--corpus`, text column of a jsonl or dataset row |
@@ -1032,7 +1032,7 @@ Alignment flags, in the order `--help` prints them.
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
 | `--force` | off | keep a view the own-group check would refuse |
-| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row; a one-document cache splits it |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row of a cache with two. A one-document cache splits it |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
 | `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this, positive |

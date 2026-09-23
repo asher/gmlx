@@ -59,7 +59,8 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
     cache_row holds the unpadded per-position teacher arrays (token_ids,
     token_end_byte, top_k_log_softmax, top_k_indices, onpath_log_p,
     onpath_mask, log_boundary_mass). Returns None for rows with fewer than
-    two shared boundaries (counted by the caller)."""
+    two shared boundaries, or no on-path position on the identity path
+    (counted by the caller)."""
     t_ends = cache_row["token_end_byte"].astype(np.int64)
     Ts = len(student_ids)
     if identity:
@@ -69,6 +70,8 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
         compute_mask = onm.copy()
         pos = np.nonzero(onm)[0].astype(np.int32)
         J = len(pos)
+        if J == 0:
+            return None
         gid = cache_row["top_k_indices"][pos].astype(np.int32)
         lp = cache_row["top_k_log_softmax"][pos].astype(np.float32)
         gid = np.where(gid >= 0, gid, tables.G)
