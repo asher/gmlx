@@ -445,6 +445,9 @@ def run_gen(opts: GenOptions) -> int:
             proc = spawn_server(opts, out.with_suffix(out.suffix + ".server.log"))
         model_id = wait_ready(base_url, proc, opts.startup_timeout)
         log(f"[gen] server ready: model {model_id}")
+        if done and not side.exists():
+            log(f"[gen] warn: {len(done)} rows in {out} without a sidecar, this run's settings are recorded "
+                "for them as well")
         if not done or not side.exists():
             # the settings land before the first request, so a run cut
             # short still leaves what a resume compares against; a sidecar

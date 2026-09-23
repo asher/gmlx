@@ -259,10 +259,19 @@ IDENTITY_HEAD_BYTES = 16 * 1024 * 1024
 def teacher_identity(path: str) -> dict:
     """What a resume compares to know it continues on the same teacher:
     the resolved path, the size and a hash over the leading bytes of a
-    GGUF file, or of a directory checkpoint's config and each weight
-    file. The same bytes written again, or touched, still match."""
+    GGUF file and its split shards, or of a directory checkpoint's
+    config and each weight file. The same bytes written again, or
+    touched, still match."""
+    from gmlx.load.preflight import find_split_shards
+
     p = Path(path).expanduser().resolve()
-    files = [p] if p.is_file() else sorted(list(p.glob("config.json")) + list(p.glob("*.safetensors")))
+    if p.is_file():
+        try:
+            files = [Path(f) for f in find_split_shards(str(p))]
+        except FileNotFoundError:
+            files = [p]     # the load names the missing shard
+    else:
+        files = sorted(list(p.glob("config.json")) + list(p.glob("*.safetensors")) + list(p.glob("*.gguf")))
     h = hashlib.sha256()
     size = 0
     for f in files:

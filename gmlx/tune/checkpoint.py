@@ -47,27 +47,32 @@ def layer_list(model):
 
 def checkpoint_layers(model, replay_dropout: bool = False) -> int:
     """Install ``mx.checkpoint`` around every decoder-layer class of
-    ``model``. Returns the number of classes rewritten; a class already
-    rewritten is left alone, so the call is idempotent, and it takes the
-    ``replay_dropout`` of the latest call. With ``replay_dropout`` a layer
-    that draws dropout masks draws one seed per call and replays it in
-    the backward recompute. The draw evaluates an array, so it serves
-    eager training loops only: a step under ``mx.compile`` cannot use
-    it."""
+    ``model`` and mark its layers to take it. Returns the number of
+    classes rewritten; a class already rewritten is left alone, so the
+    call is idempotent. The mark lives on the layer instances: a layer
+    of the same class in a model this was never asked for runs its
+    original forward, and a marked layer takes the ``replay_dropout`` of
+    the latest call for its model. With ``replay_dropout`` a layer that
+    draws dropout masks draws one seed per call and replays it in the
+    backward recompute. The draw evaluates an array, so it serves eager
+    training loops only: a step under ``mx.compile`` cannot use it."""
     n = 0
     for layer in layer_list(model):
+        layer._gmlx_ckpt = True
+        layer._gmlx_replay_dropout = bool(replay_dropout)
         cls = type(layer)
-        cls._gmlx_replay_dropout = bool(replay_dropout)
         if getattr(cls.__call__, "_gmlx_checkpointed", False):
             continue
         fn = cls.__call__
 
         def make(fn):
             def checkpointed(self, *args, **kwargs):
+                if not getattr(self, "_gmlx_ckpt", False):
+                    return fn(self, *args, **kwargs)
                 # the backward recomputes the layer, and a dropout inside it
                 # would draw fresh masks from the global stream by then: the
                 # layer's seed is drawn once here and replayed in the recompute
-                replay = getattr(type(self), "_gmlx_replay_dropout", False)
+                replay = getattr(self, "_gmlx_replay_dropout", False)
                 seed = layer_seed() if (replay and draws_random(self)) else None
 
                 def inner(params, *args, **kwargs):

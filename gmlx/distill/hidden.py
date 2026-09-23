@@ -66,6 +66,12 @@ class HsHead:
         self.opt.update(self.module, grads)
         mx.eval(self.module.parameters(), self.opt.state)
 
+    def advance(self) -> None:
+        """Count a trunk step the map did not train on (a batch with no
+        boundary or no sketch), so its schedule keeps step with the
+        trunk's optimizer."""
+        self.opt.state["step"] = self.opt.step + 1
+
     def save(self, d) -> None:
         import mlx.core as mx
         from mlx.utils import tree_flatten

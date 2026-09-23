@@ -520,3 +520,55 @@ def test_filter_refuses_a_json_line_that_is_not_a_row(tmp_path, capsys):
     p.write_text(json.dumps(_row("a", "fine " * 20)) + "\n" + json.dumps({"id": "b"}) + "\n")
     rc = flt.run_filter(flt.FilterOptions(inputs=[str(p)], out=str(tmp_path / "o.jsonl")))
     assert rc == 2 and "not a corpus row" in capsys.readouterr().err
+
+
+def test_gen_warns_on_rows_found_without_a_sidecar(tmp_path, stub_server, capsys):
+    """An output with rows and no sidecar is continued under this run's
+    settings, with a warning that names the rows it labels."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+            {"id": "b", "messages": [{"role": "user", "content": "beta"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    out.write_text(json.dumps({"id": "a", "messages": rows[0]["messages"] + [{"role": "assistant", "content": "x"}],
+                               "gen": {"finish_reason": "stop"}}) + "\n")
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 0 and "[gen] warn: 1 rows in" in err and "without a sidecar" in err
+    assert out.with_suffix(out.suffix + ".gen.json").exists()
+    assert [r["id"] for r in _rows(out)] == ["a", "b"]
+
+
+def test_filter_refuses_a_row_whose_message_is_not_an_object(tmp_path, capsys):
+    p = tmp_path / "in.jsonl"
+    p.write_text(json.dumps(_row("a", "fine " * 20)) + "\n"
+                 + json.dumps({"id": "b", "messages": ["not a message"]}) + "\n")
+    with pytest.raises(ValueError, match="line 2: not a corpus row"):
+        flt._read_rows(p)
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(p)], out=str(tmp_path / "o.jsonl")))
+    assert rc == 2 and "not a corpus row" in capsys.readouterr().err
+
+
+def test_filter_names_the_sidecar_it_compares_against_and_warns_on_a_missing_one(tmp_path, capsys):
+    """The refusal names the first input that carries a sidecar, and an
+    input without one is joined under that sidecar with a warning."""
+    def corpus(name, thinking):
+        p = tmp_path / name
+        p.write_text(json.dumps(_row(name, "fine " * 20)) + "\n")
+        if thinking is not None:
+            side = {"gen_version": gen.GEN_VERSION, "model": "t.gguf", "seed": 1, "thinking": thinking,
+                    "thinking_budget": None, "chat_template_kwargs": None,
+                    "sampling": {"temperature": 0.7, "top_p": 0.95, "top_k": 0, "min_p": 0.0, "max_tokens": 64},
+                    "run": {"completed": 1}}
+            p.with_suffix(p.suffix + ".gen.json").write_text(json.dumps(side))
+        return str(p)
+
+    plain, a, b = corpus("plain.jsonl", None), corpus("a.jsonl", True), corpus("b.jsonl", False)
+    out = tmp_path / "out.jsonl"
+    rc = flt.run_filter(flt.FilterOptions(inputs=[plain, a, b], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"than {a}" in err and "warn" not in err
+    rc = flt.run_filter(flt.FilterOptions(inputs=[plain, a], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 0 and "[filter] warn:" in err and "plain.jsonl has no sidecar" in err and "a.jsonl" in err
+    side = json.loads(out.with_suffix(out.suffix + ".gen.json").read_text())
+    assert side["thinking"] is True and side["filter"]["inputs"] == [plain, a]

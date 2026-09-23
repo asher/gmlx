@@ -106,15 +106,18 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
     KL stays exact. With ``replay_layers`` (the cache's MoE layer list, for
     the cache's own teacher) every row forwarded on its cached ids replays
     the cached routes, so the KL measures elementwise noise only; a
-    re-rendered row cannot replay and is counted. Returns the position
-    mean, a clustered SE over rows, top-1 agreement, the counts, the rows
-    re-rendered and the rows replayed."""
+    re-rendered row cannot replay and is counted. Returns the mean over
+    positions, its cluster-robust SE with rows as the clusters, top-1
+    agreement over positions, the counts, the rows re-rendered and the
+    rows replayed."""
     import mlx.core as mx
     n_rows = len(reader) if max_rows is None else min(max_rows, len(reader))
     replayed = 0
     frame = (reader.manifest.get("gmlx_distill") or {}).get("frame") if tokenizer is not None else None
     stb = token_bytes(tokenizer, int(reader.manifest["vocab_size"])) if frame else None
-    row_means, row_top1, n_pos, rerendered = [], [], 0, 0
+    # per-row KL sums, top-1 hits and position counts: the means are over
+    # positions, the SE clusters by row
+    row_kl, row_hits, row_n, rerendered = [], [], [], 0
     for r in range(n_rows):
         arrs, _text, meta = reader.row(r)
         t_ids = arrs["token_ids"].astype(np.int32)
@@ -127,17 +130,21 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
         # training scored the student on, without the teacher's context
         msgs = meta.get("student_messages") or meta.get("messages")
         if frame and msgs:
+            # a row whose render or span alignment fails is skipped, not
+            # scored on the cached ids
             try:
                 stext, s_spans = render_row(tokenizer, msgs, **row_render_args(meta.get("frame")))
+                assert stb is not None
+                s_ids, s_ends, _flag = encode_with_byte_ends(tokenizer, stext, stb, add_special_tokens=False)
+                s_ids = s_ids.astype(np.int32)
+                al = None
+                if len(s_ids) != n or not np.array_equal(s_ids, t_ids):
+                    t_spans = [tuple(x) for x in meta["spans"]]
+                    al = shared_boundaries_spans(arrs["token_end_byte"].astype(np.int64),
+                                                 s_ends.astype(np.int64), t_spans, s_spans)
             except ValueError:
                 continue
-            assert stb is not None
-            s_ids, s_ends, _flag = encode_with_byte_ends(tokenizer, stext, stb, add_special_tokens=False)
-            s_ids = s_ids.astype(np.int32)
-            if len(s_ids) != n or not np.array_equal(s_ids, t_ids):
-                t_spans = [tuple(x) for x in meta["spans"]]
-                al = shared_boundaries_spans(arrs["token_end_byte"].astype(np.int64), s_ends.astype(np.int64),
-                                             t_spans, s_spans)
+            if al is not None:
                 tp, sp = al.t_pos, al.s_pos
                 keep = (tp + 1 < n) & (sp + 1 < len(s_ids))
                 tp, sp = tp[keep], sp[keep]
@@ -181,15 +188,29 @@ def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
         with np.errstate(divide="ignore", invalid="ignore"):
             tail = np.where(rest > 0, rest * (np.log(rest) - np.log(q_tail)), 0.0)
         kl = kl + tail
-        row_means.append(float(kl.mean()))
-        row_top1.append(float((np.asarray(top1) == arrs["top_k_indices"][pos, 0]).mean()))
-        n_pos += len(pos)
-    rm = np.array(row_means)
-    return {"mean_kld_nats": float(rm.mean()) if rm.size else None,
-            "clustered_se": float(rm.std(ddof=1) / np.sqrt(rm.size)) if rm.size > 1 else None,
-            "top1_agreement": float(np.mean(row_top1)) if row_top1 else None,
-            "rows": int(rm.size), "positions": int(n_pos), "K": int(reader.manifest["top_k"]),
+        row_kl.append(float(kl.sum()))
+        row_hits.append(int((np.asarray(top1) == arrs["top_k_indices"][pos, 0]).sum()))
+        row_n.append(len(pos))
+    n_pos = int(sum(row_n))
+    mean = float(sum(row_kl) / n_pos) if n_pos else None
+    return {"mean_kld_nats": mean,
+            "clustered_se": ratio_cluster_se(np.array(row_kl), np.array(row_n, dtype=np.float64)),
+            "top1_agreement": float(sum(row_hits) / n_pos) if n_pos else None,
+            "rows": len(row_n), "positions": n_pos, "K": int(reader.manifest["top_k"]),
             "rerendered_rows": int(rerendered), "replayed_rows": int(replayed)}
+
+
+def ratio_cluster_se(num: np.ndarray, den: np.ndarray) -> float | None:
+    """Standard error of ``num.sum() / den.sum()`` with each entry a
+    cluster (a row): the linearized ratio estimator, so a long row counts
+    for its weight and the spread between rows is what varies. None
+    under two clusters or a zero denominator."""
+    n = int(num.shape[0])
+    if n < 2 or float(den.sum()) <= 0:
+        return None
+    r = float(num.sum() / den.sum())
+    resid = num - r * den
+    return float(np.sqrt((resid ** 2).sum() / (n - 1)) / np.sqrt(n) / den.mean())
 
 
 def bits_per_byte(model, tokenizer, text: str, *, max_len: int = 512, batch_size: int = 8,
@@ -331,7 +352,6 @@ def _score_span_rows(model, rows: list, *, batch_tokens: int) -> dict:
     nll = 0.0
     ntok = 0
     nbytes_total = 0
-    per_row = []
     items = []
     batches = []
     cur: list = []
@@ -359,13 +379,14 @@ def _score_span_rows(model, rows: list, *, batch_tokens: int) -> dict:
             nll += s
             ntok += int(m.sum())
             nbytes_total += nb
-            per_row.append(s / ln2 / nb)
             items.append({"id": rid, "nll": s, "tokens": int(m.sum()), "bytes": nb})
-    n = len(per_row)
+    # bpb weights every row by its bytes, so its SE is the cluster-robust
+    # one over rows, not the spread of the per-row ratios
+    se = ratio_cluster_se(np.array([it["nll"] for it in items]) / ln2,
+                          np.array([it["bytes"] for it in items], dtype=np.float64))
     return {"bpb": nll / ln2 / nbytes_total if nbytes_total else None,
             "nll_per_token": nll / ntok if ntok else None,
-            "row_bpb_se": float(np.std(per_row) / math.sqrt(n)) if n > 1 else None,
-            "tokens": ntok, "bytes": nbytes_total, "rows": n, "items": items}
+            "row_bpb_se": se, "tokens": ntok, "bytes": nbytes_total, "rows": len(items), "items": items}
 
 
 def chat_slice_nll(model, tokenizer, convs: list[list[dict]], *, max_len: int = 2048,
@@ -377,7 +398,7 @@ def chat_slice_nll(model, tokenizer, convs: list[list[dict]], *, max_len: int = 
     With per_turn each assistant turn is scored as the final turn of its
     own prefix (the reply-row render), and a row that does not fit loses
     leading turns instead. Batches hold at most batch_tokens padded
-    tokens, so a long conversation runs alone. The SE is over rows."""
+    tokens, so a long conversation runs alone. The SE clusters by row."""
     rows, dropped = _span_rows(tokenizer, convs, max_len=max_len, per_turn=per_turn)
     r = _score_span_rows(model, rows, batch_tokens=batch_tokens)
     r.pop("items")
@@ -419,14 +440,16 @@ def chat_sanity(model, tokenizer, items: list[dict], *, refs: dict | None = None
     inner = hf_inner(tokenizer)
     sampler = make_sampler(temp=0.0)
     per = []
-    for it in items:
+    for i, it in enumerate(items):
         msgs = it["messages"]
         kind = it.get("kind", "task")
         # tokenize=False then encode: some tokenizer wrappers return text
         # for tokenize=True; the template text carries its own BOS
         prompt_text = render_frame(tokenizer, msgs)
         prefix = [int(t) for t in inner.encode(prompt_text, add_special_tokens=False)]
-        rec = {"id": it.get("id"), "kind": kind, "n_prefix": len(prefix)}
+        # an item without an id is named by its index, in the record and
+        # in the reference lookup alike
+        rec = {"id": str(it.get("id", i)), "kind": kind, "n_prefix": len(prefix)}
         text, finish = "", None
         for resp in stream_generate(model, tokenizer, prompt=prefix, max_tokens=max_tokens, sampler=sampler):
             text += resp.text
@@ -441,7 +464,7 @@ def chat_sanity(model, tokenizer, items: list[dict], *, refs: dict | None = None
         rec["repetitive"] = _is_repetitive(text)
         rec["compliant"] = finish == "stop" or (finish == "length" and not rec["leaked"] and not rec["repetitive"])
         rec["refused"] = bool(_REFUSAL_RE.search(text))
-        ref = (refs or {}).get(it.get("id"))
+        ref = (refs or {}).get(rec["id"])
         if ref:
             ref_ids = inner.encode(ref, add_special_tokens=False)
             if ref_ids:
@@ -474,7 +497,8 @@ def continuation_logprob(model, tokenizer, context: str, continuations: list[str
     for cont in continuations:
         full = inner.encode(context + cont, add_special_tokens=True)
         n_ctx = len(ctx_ids)
-        # tokens may merge across the boundary; score from the first differing id
+        # tokens may merge across the boundary; score from the first
+        # differing id, and from the first target when nothing precedes it
         k = 0
         while k < min(n_ctx, len(full)) and full[k] == ctx_ids[k]:
             k += 1
@@ -483,7 +507,7 @@ def continuation_logprob(model, tokenizer, context: str, continuations: list[str
         if hasattr(logits, "logits"):
             logits = logits.logits
         lp = _target_logprobs(logits, arr[:, 1:])[0]
-        out.append(float(lp[k - 1:].sum()))
+        out.append(float(lp[max(k - 1, 0):].sum()))
     return out
 
 

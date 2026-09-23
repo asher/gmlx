@@ -252,3 +252,38 @@ def test_corpus_ids_keep_unicode_line_separators(tmp_path):
     corpus.write_text(json.dumps({"id": "a", "text": "x\u2028y"}, ensure_ascii=False) + "\n"
                       + json.dumps({"id": "b", "text": "z"}) + "\n", encoding="utf-8")
     assert cs.corpus_ids(corpus, "line") == {"0": "a", "1": "b"}
+
+
+def test_census_records_the_frame_and_eval_refuses_a_mismatch(tmp_path, tok, capsys):
+    """The positions map says which frame measured it, since its byte
+    ranges start at the trace on a reply-think cache and at the reply
+    otherwise; eval refuses the map under the other setting."""
+    from gmlx.distill import evaluate as _ev
+
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with context {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl")
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl", boost={0: 6.0})
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["frame"] == "reply"
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+    reply = tmp_path / "reply.jsonl"
+    reply.write_text(json.dumps({"id": "a.jsonl:0", "messages": convs_without[0]}) + "\n")
+
+    def run(**kw):
+        opts = _ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
+                               reply_positions=str(out), reply_slices=[f"held={reply}"], **kw)
+        return _ev.run_eval(opts), capsys.readouterr().err
+
+    rc, err = run(reply_think=True)
+    assert rc == 2 and "measured on a reply cache" in err and "--reply-think" in err
+    s["frame"] = "reply-think"
+    out.write_text(json.dumps(s))
+    rc, err = run()
+    assert rc == 2 and "measured on a reply-think cache" in err
+    (tmp_path / "nocache").mkdir()
+    rc, err = run(reply_think=True, cache=str(tmp_path / "nocache"))
+    assert rc == 2 and "unreadable input" in err and "measured on a" not in err

@@ -180,3 +180,44 @@ def test_checkpoint_layers_takes_the_latest_replay_setting(monkeypatch):
         assert len(draws) == 2
     finally:
         cls.__call__ = orig
+
+
+def test_checkpoint_layers_marks_the_instances_not_the_class(monkeypatch):
+    """Checkpointing asked for one model leaves a later model of the same
+    layer class on its original forward: no seed draw, so a compiled
+    step with dropout runs, and no checkpoint at all."""
+    from functools import partial
+
+    import gmlx.tune.checkpoint as ck
+
+    a = _model()
+    b = _model(1)
+    for layer in b.layers:
+        layer.self_attn.q_proj = nn.Sequential(layer.self_attn.q_proj, nn.Dropout(0.5))
+    b.train()
+    ids = mx.array([[1, 5, 9, 2, 7, 3]])
+    cls = type(a.layers[0])
+    orig = cls.__call__
+    draws = []
+    monkeypatch.setattr(ck, "layer_seed", lambda: draws.append(1) or 7)
+    try:
+        assert checkpoint_layers(a, replay_dropout=True) == 1
+        assert all(getattr(layer, "_gmlx_ckpt", False) for layer in a.layers)
+        assert not any(getattr(layer, "_gmlx_ckpt", False) for layer in b.layers)
+        lvg = nn.value_and_grad(b, _loss)
+        state = [b.state, mx.random.state]
+
+        @partial(mx.compile, inputs=state, outputs=state)
+        def step(batch):
+            return lvg(b, batch)
+        loss, grads = step(ids)
+        mx.eval(loss, grads)
+        assert not draws
+        for layer in a.layers:
+            layer.self_attn.q_proj = nn.Sequential(layer.self_attn.q_proj, nn.Dropout(0.5))
+        a.train()
+        mx.eval(a(ids))
+        assert len(draws) == 2
+    finally:
+        cls.__call__ = orig
+    assert np.isfinite(float(loss))

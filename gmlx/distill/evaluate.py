@@ -276,9 +276,9 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                     max_tokens=opts.gsm8k_max_tokens)
         else:
             per = _eval.score_multiple_choice(model, tokenizer, items["items"])
-        acc = float(np.mean([p["correct"] for p in per])) if per else float("nan")
+        acc = float(np.mean([p["correct"] for p in per])) if per else None
         res["tasks"][tname] = {"acc": acc, "n": len(per), "items": per, "wall_s": time.perf_counter() - t0}
-        log(f"[eval] {tname}: acc {acc:.4f} on {len(per)} items ({res['tasks'][tname]['wall_s']:.0f}s)")
+        log(f"[eval] {tname}: acc {_fmt(acc)} on {len(per)} items ({res['tasks'][tname]['wall_s']:.0f}s)")
     return res
 
 
@@ -319,7 +319,7 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
         for t in report["after"]["tasks"]:
             a = report["after"]["tasks"][t]["acc"]
             b = before.get("tasks", {}).get(t, {}).get("acc")
-            md.append(f"| {t} | {a:.4f} | {_fmt(b)} | {report['after']['tasks'][t]['n']} |")
+            md.append(f"| {t} | {_fmt(a)} | {_fmt(b)} | {report['after']['tasks'][t]['n']} |")
     if opts.kld_cache:
         ka = report["after"]["kld"]
         kb = before.get("kld")
@@ -402,7 +402,16 @@ def run_eval(opts: EvalOptions) -> int:
         reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
         positions = None
         if opts.reply_positions:
-            positions = read_report(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
+            census = read_report(Path(opts.reply_positions).expanduser())
+            positions = census.get("high_delta") or {}
+            # the map's byte ranges start at the trace on a reply-think
+            # cache and at the reply otherwise, so the eval must score
+            # the reply under the same frame
+            measured = census.get("frame")
+            if measured in ("reply", "reply-think") and (measured == "reply-think") != bool(opts.reply_think):
+                log(f"[eval] refuse: --reply-positions {opts.reply_positions} was measured on a {measured} cache, "
+                    f"{'pass' if measured == 'reply-think' else 'drop'} --reply-think to score the same positions")
+                return 2
         chat_items = (check_keys(Path(opts.chat_sanity), read_jsonl(Path(opts.chat_sanity)), ("messages",))
                       if opts.chat_sanity else [])
         refs_before = chat_refs(Path(opts.chat_refs)) if opts.chat_refs else None

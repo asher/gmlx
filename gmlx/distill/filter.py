@@ -144,7 +144,8 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 
 def _read_rows(path: Path) -> list[dict]:
     """The corpus rows of a jsonl file, or a ValueError naming the first
-    line that is not JSON or not a row (an object with a messages list)."""
+    line that is not JSON or not a row (an object with a non-empty list
+    of message objects)."""
     rows = []
     for n, ln in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not ln.strip():
@@ -153,8 +154,9 @@ def _read_rows(path: Path) -> list[dict]:
             obj = json.loads(ln)
         except json.JSONDecodeError as e:
             raise ValueError(f"{path} line {n}: not JSON ({e.msg})") from None
-        if not isinstance(obj, dict) or not isinstance(obj.get("messages"), list) or not obj["messages"]:
-            raise ValueError(f"{path} line {n}: not a corpus row (an object with a messages list)")
+        if (not isinstance(obj, dict) or not isinstance(obj.get("messages"), list) or not obj["messages"]
+                or not all(isinstance(m, dict) for m in obj["messages"])):
+            raise ValueError(f"{path} line {n}: not a corpus row (an object with a list of message objects)")
         rows.append(obj)
     return rows
 
@@ -185,13 +187,20 @@ def run_filter(opts: FilterOptions) -> int:
             print(f"[filter] refuse: no such file: {p}", file=sys.stderr)
             return 2
     sides = [_read_sidecar(p) for p in inputs]
-    first = next((s for s in sides if s is not None), None)
+    first_i = next((i for i, s in enumerate(sides) if s is not None), None)
+    first = sides[first_i] if first_i is not None else None
+    first_path = inputs[first_i] if first_i is not None else None
     for p, s in zip(inputs, sides):
         if s is not None and first is not None and _gen_settings(s) != _gen_settings(first):
             diff = ", ".join(k for k in _GEN_KEYS if s.get(k) != first.get(k))
-            print(f"[filter] refuse: {p} was generated with other settings than {inputs[0]} ({diff}), "
+            print(f"[filter] refuse: {p} was generated with other settings than {first_path} ({diff}), "
                   "filter each file on its own", file=sys.stderr)
             return 2
+    for p, s in zip(inputs, sides):
+        if s is None and first is not None:
+            # the output sidecar labels every row it holds
+            print(f"[filter] warn: {p} has no sidecar, its rows are written under the settings of {first_path}",
+                  file=sys.stderr)
     if opts.context and not Path(opts.context).expanduser().is_file():
         print(f"[filter] refuse: no such file: {opts.context}", file=sys.stderr)
         return 2

@@ -2440,3 +2440,370 @@ def test_head_logits_applies_the_softcap_for_the_pass_and_the_probes():
     assert float(mx.abs(z.astype(mx.float32)).max()) <= 2.0
     plain = _teacher.head_logits(dl.linear_head(W), h)
     assert float(mx.abs(plain.astype(mx.float32) - h @ W.T).max()) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# review round six: header back-off, EOS roles, resume fingerprint, the
+# patch restore, position-weighted KL, id-less chat items, the first
+# continuation token, the hidden-state map's step, the teacher identity
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_THINK = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+                   "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n{% endif %}")
+
+
+def test_render_row_backs_the_header_end_off_a_generation_prompt_suffix(tok_bl):
+    """A generation prompt that opens a think block after the turn header
+    shares its "<" with a reply that starts with a tag; the reply search
+    starts where the header ends, not one character into the reply, and
+    a reply the header contains is still found after it."""
+    tok = _with_template(tok_bl, _TEMPLATE_THINK)
+    for first in ("<b>the</b> cat", "<table>the cat", "the cat", "assistant"):
+        msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": first},
+                {"role": "user", "content": "why <b>the</b> cat"}, {"role": "assistant", "content": "done"}]
+        text, spans = dl.render_row(tok, msgs, open_tail=False)
+        got = [text[a:b].decode() for a, b, _c in spans]
+        assert got == [first, "done"], first
+        assert text[:spans[0][0]].endswith(b"assistant\n")
+
+
+def test_every_teacher_eos_maps_into_the_student_eos_group():
+    """A teacher with two end-of-sequence ids (gemma-4's eos and end of
+    turn) sends both into the student's EOS group, as own mass, and the
+    student's second EOS id joins that group."""
+    import string
+
+    t = _bytelevel_tokenizer(_BL_MERGES)
+    t.add_special_tokens({"additional_special_tokens": ["<eot>"]})
+    eot = t.convert_tokens_to_ids("<eot>")
+    t._gguf_eos_token_ids = [t.eos_token_id, eot]
+    s = _spm_tokenizer(["\u2581"] + list(string.ascii_letters), [])
+    s.add_special_tokens({"additional_special_tokens": ["<|im_end|>"]})
+    ie = s.convert_tokens_to_ids("<|im_end|>")
+    s._gguf_eos_token_ids = [ie, s.eos_token_id]
+    tb = dl.build_tables(t, s)
+    g = tb.group_of[ie]
+    assert tb.group_of[s.eos_token_id] == g
+    assert tb.target_g[eot] == g and tb.target_g[t.eos_token_id] == g
+    assert tb.own[eot] and tb.own[t.eos_token_id]
+    assert tb.roles["eos"] == {"teacher": [t.eos_token_id, eot], "student": [ie, s.eos_token_id]}
+
+
+def test_train_resume_survives_a_realigned_view_and_refuses_a_changed_term(tmp_path, tok_bl, capsys, monkeypatch):
+    """The fingerprint reads what decides the batches, not the timing or
+    the student path align also writes: a re-aligned view resumes, a
+    changed row index, clip, weight decay or dropout is refused, and the
+    validation rows come from one seeded draw."""
+    from gmlx.distill import data as _data
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    draws = []
+    orig = _data.sample_rows
+
+    def record(pairs, lengths, n, seed):
+        draws.append((n, seed))
+        return orig(pairs, lengths, n, seed)
+
+    monkeypatch.setattr(_data, "sample_rows", record)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    assert draws == [(2, 1)]
+    run = json.loads((ck / "last" / "state.json").read_text())["run"]
+    assert run["clip"] == 1.0 and run["lora_dropout"] == 0.0 and run["hs"] == 0.0
+    vj = view / "view.json"
+    v = json.loads(vj.read_text())
+    v["alignment"]["loader_ms_per_row"] = 999.0
+    v["student"] = "elsewhere/student"
+    vj.write_text(json.dumps(v))
+    capsys.readouterr()
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
+    assert "resumed at step 2" in capsys.readouterr().err
+    for change in (dict(clip=0.5), dict(weight_decay=0.1), dict(lora_dropout=0.1)):
+        rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True, **change)))
+        err = capsys.readouterr().err
+        assert rc == 2 and "other settings than the run" in err and next(iter(change)) in err, change
+    v["index"][0]["split"] = "val" if v["index"][0]["split"] == "train" else "train"
+    vj.write_text(json.dumps(v))
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True)))
+    assert rc == 2 and "views" in capsys.readouterr().err
+
+
+def test_train_pads_a_narrow_view_into_the_wide_batch(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """Rows compiled at K' 4 collate into a batch at K' 8 with sentinel
+    group ids and -inf targets in the padding, on the compiled and the
+    materialized path alike."""
+    from gmlx.distill import data as _data
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", kprime=4, student_tok=tok_spm)
+    v2, _ = _cpu_view(tmp_path, tok_bl, "v2", kprime=8, student_tok=tok_spm)
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(student),
+                                              out=str(tmp_path / "v1m"), kprime=4, materialize=True)) == 0
+    assert list((tmp_path / "v1m").glob("view-*.safetensors"))
+    seen = []
+    orig = _data.collate
+
+    def record(rows, Kp, G, pad_to=32):
+        out = orig(rows, Kp, G, pad_to)
+        seen.append(([int(r.target_gid.shape[1]) for r in rows], Kp, G, out))
+        return out
+
+    monkeypatch.setattr(_data, "collate", record)
+    for narrow in (v1, tmp_path / "v1m"):
+        seen.clear()
+        rc = _trainer.run_train(_trainer.TrainOptions(views=[str(narrow), str(v2)], student=str(student), iters=4,
+                                                      batch_size=4, no_wired_limit=True, lora_rank=2, chunk=16,
+                                                      val_batches=1, ckpt_dir=str(tmp_path / "ck")))
+        assert rc == 0
+        widths = {w for ws, _kp, _g, _o in seen for w in ws}
+        assert widths == {4, 8}, (narrow, widths)
+        for ws, kp, G, out in seen:
+            assert kp == 8 and out["target_gid"].shape[1] == 8 and out["target_log_p"].shape[1] == 8
+            n4 = sum(1 for w in ws if w == 4)
+            if n4:
+                pad_g = out["target_gid"][:, 4:]
+                pad_lp = out["target_log_p"][:, 4:]
+                assert (pad_g == G).sum() >= 4 * n4 and np.isneginf(pad_lp[pad_g == G]).all()
+
+
+def test_train_restores_the_attention_patch_when_it_refuses(tmp_path, tok_bl, capsys, monkeypatch):
+    """A run refused after the training patches went in leaves the
+    module's attention as it found it."""
+    import mlx_lm.models.llama as llama_mod
+
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    before = llama_mod.scaled_dot_product_attention
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=2, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                  ckpt_dir=str(tmp_path / "none"), resume=True))
+    assert rc == 2 and "no checkpoint" in capsys.readouterr().err
+    assert llama_mod.scaled_dot_product_attention is before
+    assert not getattr(llama_mod.scaled_dot_product_attention, "_gmlx_training_attention", False)
+
+
+class _RowSubset:
+    """A reader over a subset of another reader's rows."""
+
+    def __init__(self, reader, rows):
+        self.reader, self.rows, self.manifest = reader, rows, reader.manifest
+
+    def __len__(self):
+        return len(self.rows)
+
+    def row(self, r):
+        return self.reader.row(self.rows[r])
+
+
+def test_cache_kld_weights_positions_not_rows(tmp_path, tok_bl):
+    """The mean KL is over positions, so a long row counts for every
+    position it holds; the SE clusters by row."""
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=4)
+    reader = dl.CacheReader(tmp_path / "c")
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    full = dl.cache_kld(Stub(), reader)
+    parts = [dl.cache_kld(Stub(), _RowSubset(reader, [r])) for r in range(len(reader))]
+    counts = np.array([p["positions"] for p in parts], dtype=np.float64)
+    means = np.array([p["mean_kld_nats"] for p in parts])
+    top1 = np.array([p["top1_agreement"] for p in parts])
+    assert len(set(counts.tolist())) > 1 and full["positions"] == counts.sum()
+    assert full["mean_kld_nats"] == pytest.approx(float((means * counts).sum() / counts.sum()))
+    assert full["top1_agreement"] == pytest.approx(float((top1 * counts).sum() / counts.sum()))
+    assert full["mean_kld_nats"] != pytest.approx(float(means.mean()))
+    sums = means * counts
+    resid = sums - full["mean_kld_nats"] * counts
+    n = len(sums)
+    se = float(np.sqrt((resid ** 2).sum() / (n - 1)) / np.sqrt(n) / counts.mean())
+    assert full["clustered_se"] == pytest.approx(se)
+
+
+def test_cache_kld_skips_a_row_whose_spans_do_not_align(tmp_path, tok_bl, monkeypatch):
+    """A re-rendered row whose span alignment raises is skipped like a
+    row whose render fails, not propagated."""
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    reply = {"role": "assistant", "content": "the cat is the cat 123"}
+    t_msgs = [{"role": "user", "content": "the cat is 123 the cat the cat\n\nwhat is it"}, reply]
+    s_msgs = [{"role": "user", "content": "what is it"}, reply]
+    _tiny_reply_cache(tmp_path / "c", teacher, [(t_msgs, s_msgs), (t_msgs, None)])
+    reader = dl.CacheReader(tmp_path / "c")
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    def boom(*a, **k):
+        raise ValueError("spans do not line up")
+
+    monkeypatch.setattr(dl_eval, "shared_boundaries_spans", boom)
+    res = dl.cache_kld(Stub(), reader, tokenizer=teacher)
+    assert res["rows"] == 1 and res["rerendered_rows"] == 0
+
+
+def test_chat_sanity_keys_id_less_items_by_index(tmp_path, tok_bl):
+    """Items without an id are named by their index in the records and
+    in the reference lookup, so a drift reference reaches every item."""
+    from gmlx.distill import student as _student
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    model, _cfg, tokenizer = _student.load_mlx_student(str(_tiny_mlx_teacher(tmp_path / "m", tok)))
+    items = [{"messages": [{"role": "user", "content": "the cat"}]},
+             {"messages": [{"role": "user", "content": "is the cat"}]}]
+    before = dl.chat_sanity(model, tokenizer, items, max_tokens=3)
+    assert [r["id"] for r in before["items"]] == ["0", "1"]
+    refs = {r["id"]: "the cat is" for r in before["items"]}
+    after = dl.chat_sanity(model, tokenizer, items, refs=refs, max_tokens=3)
+    assert all("ref_nll_nats" in r for r in after["items"]) and after["ref_nll_nats"] is not None
+
+
+def test_continuation_logprob_scores_every_token_without_a_bos(tok_bl):
+    """With no BOS and an empty context the first continuation token is
+    the first target, not the last one."""
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    inner = dl.hf_inner(tok_bl)
+    assert inner.encode("", add_special_tokens=True) == []
+    ids = inner.encode("the cat is", add_special_tokens=True)
+    assert len(ids) >= 3
+    arr = np.array([ids], dtype=np.int32)
+    lp = dl_eval._target_logprobs(W[mx.array(arr)], arr[:, 1:])[0]
+    got = dl.continuation_logprob(Stub(), tok_bl, "", ["the cat is"])[0]
+    assert got == pytest.approx(float(lp.sum()))
+
+
+def test_reply_slice_se_weights_rows_by_their_bytes(tok_bl):
+    """The SE of a byte-weighted bpb is the cluster-robust one over rows,
+    not the spread of the per-row ratios."""
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    V = len(dl.token_bytes(tok))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    rows = [{"id": f"r{i}", "messages": [{"role": "user", "content": "say it"},
+                                          {"role": "assistant", "content": "the cat is the cat 123 " * (i + 1)}]}
+            for i in range(3)]
+    r = dl.reply_slice_nll(Stub(), tok, rows, max_len=256)
+    s = np.array([it["nll"] for it in r["items"]]) / math.log(2)
+    b = np.array([it["bytes"] for it in r["items"]], dtype=np.float64)
+    assert len(set(b.tolist())) == 3 and r["bpb"] == pytest.approx(float(s.sum() / b.sum()))
+    resid = s - r["bpb"] * b
+    se = float(np.sqrt((resid ** 2).sum() / 2) / np.sqrt(3) / b.mean())
+    assert r["row_bpb_se"] == pytest.approx(se)
+    assert r["row_bpb_se"] != pytest.approx(float(np.std(s / b) / np.sqrt(3)))
+
+
+def test_eval_reports_an_empty_task_as_none(tmp_path, tok_bl, capsys):
+    """A task file with no items reports None, not NaN, in the JSON and
+    the table."""
+    from gmlx.distill import evaluate as _ev
+
+    class Stub:
+        def eval(self):
+            pass
+
+    opts = _ev.EvalOptions(student="s.gguf", md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"))
+    res = _ev.run_arm(Stub(), tok_bl, opts, {}, {"arc_easy": {"items": []}})
+    assert res["tasks"]["arc_easy"]["acc"] is None and res["tasks"]["arc_easy"]["n"] == 0
+    assert "acc None" in capsys.readouterr().err
+    report = {"after": res, "before": {}, "reply_positions": None}
+    md = _ev.report_markdown(opts, report, {}, {}, {}, set())
+    assert "| arc_easy | None | None | 0 |" in md
+    assert "nan" not in json.dumps(res).lower()
+
+
+def test_hidden_state_map_keeps_step_with_the_trunk(tmp_path, tok_bl, monkeypatch, capsys):
+    """A batch trained before the first boundary batch counts on the
+    map's schedule too: the map's optimizer step equals the trunk's at
+    every checkpoint, and a resume without a saved map says so."""
+    from gmlx.distill import data as _data
+    from gmlx.distill import hidden as _hidden
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    from .test_distill_hidden import _hidden_cache
+
+    hh = _hidden.HsHead(4, 3, 1, 1e-3)
+    assert int(hh.opt.step) == 0
+    hh.advance()
+    assert int(hh.opt.step) == 1
+    _mlx_students(monkeypatch)
+    cache = tmp_path / "cache"
+    _hidden_cache(cache, tok_bl, n_rows=8)
+    tok_bl.save_pretrained(cache / "tokenizer")
+    student = _tiny_mlx_teacher(tmp_path / "student", tok_bl)
+    view = tmp_path / "view"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(view))) == 0
+    orig = _data.collate
+    calls = []
+
+    def drop_first(rows, Kp, G, pad_to=32):
+        out = orig(rows, Kp, G, pad_to)
+        calls.append(1)
+        if len(calls) == 1:
+            out.pop("hidden_target", None)
+        return out
+
+    monkeypatch.setattr(_data, "collate", drop_first)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=3, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=3, val_every=3, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16, hs=0.5)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    main = mx.load(str(ck / "last" / "optimizer.safetensors"))
+    hs = mx.load(str(ck / "last" / "hs_optimizer.safetensors"))
+    assert isinstance(main, dict) and isinstance(hs, dict)
+    assert int(main["step"]) == 3 and int(hs["step"]) == 3
+    (ck / "last" / "hs_head.safetensors").unlink()
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, iters=4, resume=True)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "iters" in err
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
+    assert "hidden-state map not in the last checkpoint" in capsys.readouterr().err
+
+
+def test_teacher_identity_covers_split_shards_and_gguf_directories(tmp_path):
+    """The identity of a split GGUF hashes every shard, and a directory
+    of GGUF files hashes them, so a re-quantized second shard or a
+    swapped file is not the same teacher."""
+    from gmlx.distill import teacher as _teacher
+
+    d = tmp_path / "split"
+    d.mkdir()
+    a = d / "m-00001-of-00002.gguf"
+    b = d / "m-00002-of-00002.gguf"
+    a.write_bytes(b"GGUF" + bytes(64))
+    b.write_bytes(b"GGUF" + bytes(64))
+    ident = _teacher.teacher_identity(str(a))
+    assert ident["size"] == 2 * 68
+    b.write_bytes(b"GGUF" + bytes(63) + b"\x01")
+    assert _teacher.teacher_identity(str(a)) != ident
+    e = tmp_path / "dir"
+    e.mkdir()
+    (e / "one.gguf").write_bytes(b"GGUF" + bytes(8))
+    ident_dir = _teacher.teacher_identity(str(e))
+    assert ident_dir["size"] == 12
+    (e / "one.gguf").write_bytes(b"GGUF" + bytes(7) + b"\x01")
+    assert _teacher.teacher_identity(str(e)) != ident_dir

@@ -16,8 +16,10 @@ contexts the residual is the mean KL of each context's distribution
 against their mixture at the same position, the part no training
 recovers. The JSON carries per-row means, a delta histogram, the
 teacher's on-path nats over the high-delta positions with and without
-the context, and ``high_delta``, byte ranges per row id above the
-threshold, which ``distill eval --reply-positions`` reads."""
+the context, ``high_delta``, byte ranges per row id above the
+threshold, which ``distill eval --reply-positions`` reads, and
+``frame``, the reply frame of the cache without context, which fixes
+where those ranges start."""
 from __future__ import annotations
 
 import json
@@ -209,9 +211,10 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         res_all += row_res
     deltas = np.array(deltas_all)
     hist = np.histogram(deltas, bins=HIST_BINS)[0].tolist() if deltas.size else []
+    frame = ((base_reader.manifest.get("gmlx_distill") or {}).get("frame") or {}).get("kind")
     return {
         "rows": len(per_row), "rows_mismatched": mismatch, "positions": int(deltas.size),
-        "delta_threshold": delta_threshold,
+        "delta_threshold": delta_threshold, "frame": frame,
         "distillable_effect_kl_nats": float(np.mean(kl_all)) if kl_all else None,
         "mean_onpath_delta_nats": float(deltas.mean()) if deltas.size else None,
         "high_delta_fraction": float((deltas > delta_threshold).mean()) if deltas.size else None,

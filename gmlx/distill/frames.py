@@ -292,8 +292,9 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
 def _header_end(tokenizer, prior: list[dict], rendered: str) -> int:
     """Where the assistant turn after ``prior`` can start in ``rendered``:
     the length of the longest common prefix of the render and the
-    generation prompt for ``prior``, 0 when the template cannot render
-    that prefix."""
+    generation prompt for ``prior``, backed off to the last whitespace
+    or marker close inside it, 0 when the template cannot render that
+    prefix."""
     try:
         if has_chat_template(tokenizer):
             gen = apply_template(tokenizer, prior, add_generation_prompt=True)
@@ -301,7 +302,13 @@ def _header_end(tokenizer, prior: list[dict], rendered: str) -> int:
             gen = _plain_render(tokenizer, prior, gen_prompt=True)
     except ValueError:
         return 0
-    return len(os.path.commonprefix([gen, rendered]))
+    h = len(os.path.commonprefix([gen, rendered]))
+    # a generation prompt can run past the header (a think block it opens
+    # for the reply), and the common prefix then ends inside a reply that
+    # starts with a tag: back off to the last boundary the header renders
+    while h > 0 and not (rendered[h - 1].isspace() or rendered[h - 1] == ">"):
+        h -= 1
+    return h
 
 
 def _tail_end(rendered: str, end: int, tails: list[str]) -> int | None:

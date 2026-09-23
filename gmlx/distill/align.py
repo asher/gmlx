@@ -229,9 +229,14 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
         u = int(u1[v])
         if u >= 0:
             target_g[v] = group_of[u]
+    # every teacher end-of-sequence id (a model can carry an end-of-turn
+    # id beside its eos) lands in the student's EOS group by role, as own
+    # mass: only the first is a group key, and the rest would otherwise
+    # reach the group through a byte prefix or not at all
+    eos_group = key_to_group.get(int(t_eos[0])) if t_eos else None
     for v in t_eos:
-        if v < V_T and v in key_to_group:
-            target_g[v] = key_to_group[v]
+        if v < V_T and eos_group is not None:
+            target_g[v] = eos_group
             own[v] = True
     bmask = whitespace_start_mask(student_tok, V_S, stb)
     return Tables(v1=v1, u1=u1, group_of=group_of, target_g=target_g, group_key=group_key,

@@ -875,7 +875,8 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
 success. A refused input or setting exits 2, and so does a missing
 required flag, with argparse's usage message, a missing input file, and
-`filter` when its `--verify` command fails. `gen` exits 1 when some
+`filter` when its `--verify` command fails. `cache` exits 2 when a shard
+cannot be written and keeps the verified shards. `gen` exits 1 when some
 requests failed and their prompts remain to be rerun, and 2 when its
 server fails to start. `align` exits 3 when the own-group check refuses
 the pair, and writes no view. `cache` exits 3 when its memory probe
@@ -1058,7 +1059,7 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
-| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none or the views, batch size, seed, step count, learning rate or loss knobs changed |
+| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none or the views, batch, seed, steps, lr, knobs, clip, decay, dropout or `--hs` changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |
@@ -1099,7 +1100,7 @@ examples shown before each question.
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
-| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions, refused when it names none of their rows |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts the reply slices, refused when it names none of their rows or its frame differs from `--reply-think` |
 | `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a cached id beyond the student's head |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
