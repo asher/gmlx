@@ -408,6 +408,11 @@ models. An explicit `chat_template_kwargs` entry passes through verbatim and
 overrides the profile. On `run` and `chat` the same controls are `--thinking`
 and `--reasoning-effort`.
 
+On each request, `enable_thinking` in the request body wins. A request's own
+`thinking` or `reasoning_effort` field comes next and is mapped the same way.
+The profile or `MLX_VLM_ENABLE_THINKING` value applies after that, and the
+template's own default applies when none of them is set.
+
 ```yaml
 profiles:
   quick:
