@@ -103,7 +103,7 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
     if with_list:
         return False, f"{with_list} rows carry their own student message list"
     checked = 0
-    framed = [r for r in range(min(len(reader), 4096)) if reader.rows_meta[r].get("messages")]
+    framed = [r for r in range(len(reader)) if reader.rows_meta[r].get("messages")]
     # rows are length-sorted, so the sample spans short and long rows
     picks = sorted(set(int(x) for x in np.linspace(0, len(framed) - 1, n_check))) if framed else []
     for r in (framed[k] for k in picks):

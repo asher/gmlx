@@ -33,14 +33,15 @@ class HeadSpec:
 
     def dense_weight(self, params=None):
         """W [V, d] for the closed-form backward (dz @ W). A float weight in
-        params wins (trainable heads read the live tree); quantized heads
-        dequantize once and cache."""
+        params wins (trainable heads read the live tree), an f16 one cast
+        to bf16 on every call since the softmax cotangents underflow f16;
+        quantized heads dequantize once and cache."""
         if params is not None and isinstance(params, dict) and "weight" in params:
             w = params["weight"]
             if w.dtype in (_MX().float32, _MX().bfloat16):
                 return w
-            if w.dtype == _MX().float16 and self.weight is None:
-                return w
+            if w.dtype == _MX().float16:
+                return w.astype(_MX().bfloat16)
         if self.weight is not None:
             return self.weight()
         return self.params["weight"]
@@ -65,17 +66,18 @@ def head_weight_fn(mod) -> Callable:
     cache: dict[str, Any] = {}
 
     def get():
-        if "w" in cache:
-            return cache["w"]
         w = mod.weight
         if w.dtype in (mx.float32, mx.bfloat16):
-            cache["w"] = w
             return w
         if w.dtype == mx.float16:
             # bf16, never f16: the backward casts dz to this dtype and the
-            # softmax cotangents (about q / N) underflow f16
-            cache["w"] = w.astype(mx.bfloat16)
-            mx.eval(cache["w"])
+            # softmax cotangents (about q / N) underflow f16. The copy
+            # follows the module's array, so a trained head is never stale
+            if cache.get("src") is not w:
+                cache["w"], cache["src"] = w.astype(mx.bfloat16), w
+                mx.eval(cache["w"])
+            return cache["w"]
+        if "w" in cache:
             return cache["w"]
         mode = getattr(mod, "mode", "affine")
         rows = int(w.shape[0])

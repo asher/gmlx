@@ -335,6 +335,32 @@ def reply_row(r: dict, c: dict, seed: int) -> dict:
 # the run
 # ---------------------------------------------------------------------------
 
+def row_totals(out: Path) -> dict:
+    """The run totals of every reply row in ``out``, read from the rows'
+    ``gen`` blocks, so the totals describe the file after any number of
+    resumes and interrupts rather than the runs that wrote it."""
+    completed = stops = tokens = budget_hits = longest = 0
+    if out.exists():
+        with open(out, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    g = json.loads(line).get("gen") or {}
+                except (ValueError, AttributeError):
+                    continue
+                completed += 1
+                ct = int(g.get("completion_tokens") or 0)
+                tokens += ct
+                budget_hits += int(bool(g.get("budget_hit")))
+                if g.get("finish_reason") == "stop":
+                    stops += 1
+                    longest = max(longest, ct)
+    return {"completed": completed, "generated_tokens": tokens, "stops": stops,
+            "stop_fraction": stops / max(completed, 1), "budget_hits": budget_hits,
+            "longest_stopped_reply_tokens": longest}
+
+
 def _done_ids(out: Path) -> dict[str, list | None]:
     """The ids already in ``out`` with the prompt each one answered (its
     messages without the reply, None when the row has none). A torn
@@ -627,24 +653,15 @@ def run_gen(opts: GenOptions) -> int:
             "context": shared_context(opts) or ("per-prompt" if with_context else None),
             "shared_context": shared_context(opts),
             "context_format": opts.context_format if with_context else None,
-            "run": {"completed": n_ok, "failed": n_err, "generated_tokens": gen_tokens, "wall_s": el,
-                    "tok_s_aggregate": gen_tokens / max(el, 1e-9), "stop_fraction": stops / max(n_ok, 1),
-                    "stops": stops, "budget_hits": budget_hits, "longest_stopped_reply_tokens": longest,
+            # the totals come from the rows, so they cover every run that
+            # wrote to the file; failed is this run's, since a resume
+            # retries every earlier failure; wall_s adds up over the runs
+            # the sidecar saw, and tok_s_aggregate is this run's rate
+            "run": {**row_totals(out), "failed": n_err, "wall_s": el, "tok_s_aggregate": gen_tokens / max(el, 1e-9),
                     "concurrency": opts.concurrency}}
         prev = json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
         if prev and prev.get("prompt_set_sha256") == prompt_hash and isinstance(prev.get("run"), dict):
-            pr = prev["run"]
-            for k in ("completed", "generated_tokens", "wall_s", "budget_hits"):
-                sidecar["run"][k] += pr.get(k, 0)
-            # a sidecar from before the stops count carries the fraction only
-            sidecar["run"]["stops"] += pr.get("stops", round(pr.get("stop_fraction", 0.0) * pr.get("completed", 0)))
-            sidecar["run"]["stop_fraction"] = sidecar["run"]["stops"] / max(sidecar["run"]["completed"], 1)
-            # every prompt that failed before was retried now, so the
-            # outstanding failures are this run's
-            sidecar["run"]["failed"] = n_err
-            sidecar["run"]["longest_stopped_reply_tokens"] = max(
-                longest, prev["run"].get("longest_stopped_reply_tokens", 0))
-            sidecar["run"]["tok_s_aggregate"] = sidecar["run"]["generated_tokens"] / max(sidecar["run"]["wall_s"], 1e-9)
+            sidecar["run"]["wall_s"] += prev["run"].get("wall_s", 0)
         write_json_atomic(side, sidecar)
         log(f"[gen] done: {n_ok} replies, {gen_tokens} tokens, {gen_tokens / max(el, 1e-9):.0f} tok/s aggregate, "
             f"stop fraction {stops / max(n_ok, 1):.3f}, {budget_hits} budget hits, {n_err} failed, sidecar {side}")

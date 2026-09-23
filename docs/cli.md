@@ -1123,9 +1123,10 @@ rows in one or more caches made with one. It reports how much more
 likely the context makes each token the teacher wrote, the distance
 between the two stored top-k distributions with everything outside the
 top-k pooled, and, with several contexts, the part no single adapter can
-learn. With several `--with` caches the effect, the histogram and the
-positions map come from the first, and the others enter the residual
-only. Runs on the CPU. Exits 2 when a cache has no manifest, when a
+learn. With several `--with` caches, every cache decides which rows
+pair and which positions count, while the effect, the histogram and
+the positions map come from the first. Runs on the CPU. Exits 2 when a
+cache has no manifest, when a
 reply-think cache records no `content_start` (one written before rows
 carried it), or when no rows pair.
 

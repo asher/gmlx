@@ -253,3 +253,12 @@ def test_distill_paths_expand_a_home_relative_argument(tmp_path, monkeypatch):
     rc, out = _run(["distill", "eval", "--student", "~/nope.gguf", "--md", "~/r.md", "--json", "~/r.json"])
     assert rc == 2 and str(tmp_path / "nope.gguf") in out and "~/" not in out
     assert not (tmp_path / "~").exists()
+
+
+def test_distill_gen_tokenizer_expands_a_home_relative_argument(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = tmp_path / "p.jsonl"
+    p.write_text('{"id": "a", "messages": [{"role": "user", "content": "hi"}]}\n')
+    rc, out = _run(["distill", "gen", "--base-url", "http://127.0.0.1:9/v1", "--prompts", str(p), "--out",
+                    str(tmp_path / "o.jsonl"), "--thinking", "--thinking-budget", "40", "--tokenizer", "~/t.gguf"])
+    assert rc == 2 and f"cannot load the tokenizer from {tmp_path / 't.gguf'}" in out and "~/" not in out

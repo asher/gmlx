@@ -351,11 +351,12 @@ An effect under about 0.05 nats, or a high-delta share under 0.01,
 means the document changes little that a student could learn, and the
 run is not worth its hours. The other rows are diagnostics. The
 `paired reply rows` row also counts reply mismatches skipped, rows whose
-reply bytes differed between the two caches. `residual across contexts`
-matters only with several documents, and is the one row that reads
-every `--with` cache, since the effect, the histogram and the positions
-map come from the first. Keep the census JSON, which the evaluation
-reads to score the adapter at those positions.
+reply bytes differed between the two caches. With several `--with`
+caches, every cache decides which rows pair and which positions count,
+the effect, the histogram and the positions map come from the first,
+and `residual across contexts` alone reads them all. Keep the census
+JSON, which the evaluation reads to score the adapter at those
+positions.
 
 The same replies give the teacher's own pass rate, computed as under
 [Use and measure the adapter](#use-and-measure-the-adapter). A teacher
@@ -723,7 +724,8 @@ values during training instead of keeping them, are the two levers when
 the student does not fit, each at some cost in time.
 
 A teacher that does not fit is a different problem, and the first answer
-is a smaller quantization of it.
+is a smaller quantization of it. `cache` refuses a dense teacher over
+the wired budget rather than run it resident.
 
 MoE models, mixture-of-experts models, have layers split into experts of
 which a few run per token, and
@@ -770,6 +772,8 @@ steps and at the last step. These are the round-one lines at step 200:
 ```
 
 Every later validation line adds the best earlier value in parentheses.
+A validation line that reads `val none` means no validation row held a
+scored position, and the best checkpoint stays as it was.
 The train lines that print `knobs=` or `blocked attention` are
 diagnostics, like the `plan:` line of `cache`. The train line has these
 fields.
@@ -841,7 +845,8 @@ The other tables follow the same after and before pattern.
   student refused, and `task_refusal_rate` the share of task prompts it
   refused. `ref_nll_nats` is the student's surprise at the replies of an
   earlier report given by `--chat-refs`, or under `--before` at the
-  adapter-off replies, which then win.
+  adapter-off replies, which then win. `refs_source` in the JSON names
+  which, the report path or `before`.
 - The KL table gives the KL divergence, a distance between the student's
   next-token probabilities and the teacher's stored ones, in nats.
   `clustered se` is its standard error over rows, and `top-1` the share

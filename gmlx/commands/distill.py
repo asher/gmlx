@@ -90,7 +90,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--thinking-budget", type=_positive_int, default=None,
                    help="With --thinking, cap the reasoning trace at this many tokens per request. The trace is "
                         "counted with the teacher's tokenizer to mark the replies it cut.")
-    p.add_argument("--tokenizer", default=None, metavar="GGUF|DIR",
+    p.add_argument("--tokenizer", type=_path, default=None, metavar="GGUF|DIR",
                    help="Tokenizer for the reasoning trace count with --base-url (default: read from --teacher).")
     p.add_argument("--serve-arg", action="append", default=[], metavar="ARG",
                    help="Extra gmlx serve argument, repeatable.")

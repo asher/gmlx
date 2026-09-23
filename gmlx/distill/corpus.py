@@ -17,6 +17,29 @@ def nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+def text_value(row, key: str, where: str) -> str:
+    """The string under key in a corpus row, else a ValueError naming the
+    row: a missing key, a null and a number are all refused, since the
+    caller treats every ValueError as a bad input."""
+    if not isinstance(row, dict) or key not in row:
+        raise ValueError(f"{where}: no {key!r} key")
+    v = row[key]
+    if not isinstance(v, str):
+        raise ValueError(f"{where}: {key!r} is not a string")
+    return v
+
+
+def message_list(row, key: str, where: str) -> list:
+    """The list of message dicts under key in a corpus row, else a
+    ValueError naming the row."""
+    if not isinstance(row, dict) or key not in row:
+        raise ValueError(f"{where}: no {key!r} key")
+    v = row[key]
+    if not isinstance(v, list) or not all(isinstance(m, dict) for m in v):
+        raise ValueError(f"{where}: {key!r} is not a list of messages")
+    return v
+
+
 def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 hf_split: str = "train", prefix: str | None = None) -> Iterator[tuple[str, str]]:
     """(doc_id, text) from a jsonl file, a directory of text files, or an
@@ -32,9 +55,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 if not line:
                     continue
                 obj = json.loads(line)
-                if not isinstance(obj, dict) or text_key not in obj:
-                    raise ValueError(f"{p.name} line {i + 1}: no {text_key!r} key")
-                yield f"{prefix or p.name}:{i}", nfc(obj[text_key])
+                yield f"{prefix or p.name}:{i}", nfc(text_value(obj, text_key, f"{p.name} line {i + 1}"))
                 n += 1
                 if limit and n >= limit:
                     return
@@ -58,7 +79,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
     name, _, config = spec.partition("@")
     ds = datasets.load_dataset(name, config or None, split=hf_split, streaming=True)
     for i, row in enumerate(ds):
-        yield f"{spec}:{i}", nfc(row[text_key])
+        yield f"{spec}:{i}", nfc(text_value(row, text_key, f"{spec} row {i}"))
         n += 1
         if limit and n >= limit:
             return
@@ -99,10 +120,11 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
     view of the conversation; None when the row has none). Contents are
     NFC-normalized (norm_messages)."""
     def one(row, doc):
-        if not isinstance(row, dict) or key not in row:
-            raise ValueError(f"{doc}: no {key!r} key")
+        msgs = message_list(row, key, doc)
         st = row.get(student_key) if student_key else None
-        return doc, norm_messages(row[key]), (norm_messages(st) if st else None)
+        if st is not None:
+            st = message_list(row, student_key, doc)
+        return doc, norm_messages(msgs), (norm_messages(st) if st else None)
     p = Path(spec).expanduser()
     n = 0
     if p.is_file():

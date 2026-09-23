@@ -332,19 +332,42 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None}
 
 
-def teacher_over_budget(model, budget: int | None = None) -> bool:
-    """Whether the model's parameters exceed the wired budget, nine
-    tenths of the recommended working set as the expert streaming
-    installer reads it. False when no device reports one."""
+def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, int]:
+    """(over, parameter bytes, budget): whether the model's parameters
+    exceed the wired budget, nine tenths of the recommended working set
+    as the expert streaming installer reads it. Never over when no
+    device reports one."""
     import mlx.core as mx
     from mlx.utils import tree_flatten
+    flat: Any = tree_flatten(model.parameters())
+    total = sum(int(a.nbytes) for _k, a in flat)
     if budget is None:
         try:
             budget = int(0.9 * int(mx.device_info()["max_recommended_working_set_size"]))
         except Exception:  # noqa: BLE001
-            return False
-    flat: Any = tree_flatten(model.parameters())
-    return sum(int(a.nbytes) for _k, a in flat) > budget
+            return False, total, 0
+    return total > budget, total, budget
+
+
+def stream_over_budget(model, gguf_path: str, total: int, budget: int) -> tuple[int, int]:
+    """Place a teacher that is over the wired budget: the installer
+    streams its experts, or a table that alone brings it under. Returns
+    (expert stacks wrapped, expert bytes streamed), the bytes zero when
+    the experts stay resident. A teacher with nothing to stream is
+    refused, since a resident load would pin it under the wired limit."""
+    from gmlx.load.loader import moe_streaming_active
+    from gmlx.stream.expert_streaming import install_expert_streaming
+    for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
+        os.environ.setdefault(var, "0")
+    n, offloaded = install_expert_streaming(model, gguf_path=gguf_path)
+    if n == 0:
+        raise ValueError(f"the teacher is {total / GB:.1f} GB against a wired budget of {budget / GB:.1f} GB and "
+                         "has no expert stacks to stream; use a smaller quantization")
+    if moe_streaming_active(model):
+        log(f"[cache] teacher over the wired budget: {n} expert stacks stream from disk")
+        return n, offloaded
+    log("[cache] teacher over the wired budget: a streamed table brings it under, the experts stay resident")
+    return n, 0
 
 
 def load_teacher(opts: CacheOptions):
@@ -374,15 +397,10 @@ def load_teacher(opts: CacheOptions):
             n, offloaded = install_expert_streaming(model, gguf_path=opts.teacher, force_stream=True)
             if n == 0:
                 raise ValueError("--stream-experts on a teacher with no expert stacks")
-        elif teacher_over_budget(model):
-            # a resident load would pin the whole model under the wired
-            # limit set below; the installer streams what is over budget
-            from gmlx.stream.expert_streaming import install_expert_streaming
-            for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
-                os.environ.setdefault(var, "0")
-            n, offloaded = install_expert_streaming(model, gguf_path=opts.teacher)
-            log("[cache] teacher over the wired budget: " + (f"{n} expert stacks stream from disk" if n
-                                                             else "no expert stacks to stream"))
+        else:
+            over, total, budget = teacher_over_budget(model)
+            if over:
+                _n, offloaded = stream_over_budget(model, opts.teacher, total, budget)
         streaming = bool(moe_streaming_active(model))
     else:
         model, config, _tok = _student.load_mlx_student(opts.teacher)

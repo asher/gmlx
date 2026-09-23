@@ -157,7 +157,8 @@ def test_gen_resumes_by_prompt_id_and_accumulates_the_run(tmp_path, stub_server)
     assert [r["id"] for r in _rows(out)] == ["a", "b"]
     assert len(_Handler.calls) == 2                  # the readiness probe and one reply
     side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
-    assert side["run"]["completed"] == 1
+    # the totals describe the file: the row found before the run counts
+    assert side["run"]["completed"] == 2 and side["run"]["stops"] == 1
     # everything done: no server contact at all
     _Handler.calls = []
     assert gen.run_gen(opts) == 0
@@ -988,3 +989,40 @@ def test_gen_refuses_a_corpus_row_without_the_text_key(tmp_path, stub_server, ca
     rc = gen.run_gen(gen.GenOptions(out=str(out), corpus=str(corpus), base_url=stub_server))
     err = capsys.readouterr().err
     assert rc == 2 and "c.jsonl line 1: no 'text' key" in err
+
+
+def test_gen_sidecar_totals_survive_an_interrupted_run(tmp_path, stub_server, monkeypatch):
+    """An interrupt leaves the sidecar with no run block; the resume's
+    totals still cover every row in the file, since they are read from
+    the rows."""
+    prompts = _prompts(tmp_path / "p.jsonl", [
+        {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
+        {"id": "b", "messages": [{"role": "user", "content": "beta"}]},
+    ])
+    out = tmp_path / "corpus.jsonl"
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, concurrency=1)
+    real = gen.reply_row
+
+    def interrupt_on_b(r, c, seed):
+        if r["id"] == "b":
+            raise KeyboardInterrupt
+        return real(r, c, seed)
+
+    monkeypatch.setattr(gen, "reply_row", interrupt_on_b)
+    with pytest.raises(KeyboardInterrupt):
+        gen.run_gen(opts)
+    assert [r["id"] for r in _rows(out)] == ["a"]
+    assert json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())["run"] is None
+    monkeypatch.setattr(gen, "reply_row", real)
+    assert gen.run_gen(opts) == 0
+    run = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())["run"]
+    assert [r["id"] for r in _rows(out)] == ["a", "b"]
+    assert run["completed"] == 2 and run["stops"] == 2 and run["stop_fraction"] == 1.0 and run["failed"] == 0
+
+
+def test_gen_refuses_a_corpus_row_whose_text_is_not_a_string(tmp_path, stub_server, capsys):
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"text": None}) + "\n")
+    rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), corpus=str(corpus), base_url=stub_server))
+    err = capsys.readouterr().err
+    assert rc == 2 and "c.jsonl line 1: 'text' is not a string" in err

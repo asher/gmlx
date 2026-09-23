@@ -4601,9 +4601,10 @@ def test_teacher_over_budget_compares_the_parameter_bytes_with_the_budget():
 
     m = nn.Linear(8, 8)
     nbytes = 8 * 8 * 4 + 8 * 4
-    assert _teacher.teacher_over_budget(m, budget=nbytes - 1)
-    assert not _teacher.teacher_over_budget(m, budget=nbytes)
-    assert isinstance(_teacher.teacher_over_budget(m), bool)
+    assert _teacher.teacher_over_budget(m, budget=nbytes - 1) == (True, nbytes, nbytes - 1)
+    assert _teacher.teacher_over_budget(m, budget=nbytes) == (False, nbytes, nbytes)
+    over, total, budget = _teacher.teacher_over_budget(m)
+    assert isinstance(over, bool) and total == nbytes and budget >= 0
 
 
 def test_head_logits_keep_f16_and_cast_the_rest_to_bf16():
@@ -4656,6 +4657,33 @@ def test_corpus_readers_refuse_a_row_without_the_key(tmp_path):
         list(_corpus.iter_corpus(str(tmp_path / "c.jsonl")))
     with pytest.raises(ValueError, match="no 'messages' key"):
         list(_corpus.iter_conversations(str(tmp_path / "m.jsonl")))
+    for bad in (None, 5, ["the cat"]):
+        (tmp_path / "v.jsonl").write_text(json.dumps({"text": bad}) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="v.jsonl line 1: 'text' is not a string"):
+            list(_corpus.iter_corpus(str(tmp_path / "v.jsonl")))
+    for bad in (None, "hi", [1]):
+        (tmp_path / "n.jsonl").write_text(json.dumps({"messages": bad}) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="'messages' is not a list of messages"):
+            list(_corpus.iter_conversations(str(tmp_path / "n.jsonl")))
+    (tmp_path / "s.jsonl").write_text(json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                                                  "student_messages": "hi"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="'student_messages' is not a list of messages"):
+        list(_corpus.iter_conversations(str(tmp_path / "s.jsonl")))
+
+
+def test_hf_corpus_rows_are_refused_like_jsonl_rows(monkeypatch):
+    """The Hugging Face readers apply the same value checks, naming the
+    dataset and the row."""
+    import datasets
+
+    from gmlx.distill import corpus as _corpus
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: iter([{"text": "ok"}, {"text": None}]))
+    with pytest.raises(ValueError, match="someorg/ds row 1: 'text' is not a string"):
+        list(_corpus.iter_corpus("someorg/ds"))
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: iter([{"msgs": []}]))
+    with pytest.raises(ValueError, match="someorg/ds:0: no 'messages' key"):
+        list(_corpus.iter_conversations("someorg/ds"))
 
 
 def test_train_logs_an_unscored_validation_as_none_and_keeps_no_best(tmp_path, tok_bl, monkeypatch, capsys):
@@ -4718,3 +4746,143 @@ def test_adapter_disabled_restores_a_module_reached_under_two_names():
     with dl.adapter_disabled(model) as off:
         assert m.scale == 0.0 and len(off.saved) == 1
     assert m.scale == 2.0
+
+
+# ---------------------------------------------------------------------------
+# a trained f16 head is never stale, the over-budget placement, the
+# render check past the shortest rows, the drift reference in the report
+# ---------------------------------------------------------------------------
+
+def test_f16_head_weight_follows_the_module_and_the_params():
+    """The bf16 copy of an f16 head tracks the module's array, and a
+    trainable f16 params weight is cast on every call, so a head under
+    the optimizer never yields gradients from its step-one weight."""
+    import mlx.nn as nn
+
+    lin = nn.Linear(8, 32, bias=False)
+    lin.weight = (mx.random.normal((32, 8)) * 0.3).astype(mx.float16)
+    getter = dl.head_weight_fn(lin)
+    w0 = getter()
+    assert w0.dtype == mx.bfloat16 and getter() is w0
+    lin.weight = lin.weight * 2
+    w1 = getter()
+    assert w1 is not w0
+    f32 = lambda a: np.asarray(a.astype(mx.float32))  # noqa: E731
+    assert np.allclose(f32(w1), 2 * f32(w0), rtol=1e-2)
+    head = dl.HeadSpec(fn=lambda params, h: lin(h), params=lin.parameters(), softcap=None, V=32, weight=getter)
+    live = head.dense_weight({"weight": lin.weight})
+    assert live.dtype == mx.bfloat16
+    assert np.allclose(f32(live), f32(lin.weight), rtol=1e-2)
+
+
+def test_stream_over_budget_refuses_nothing_to_stream_and_reports_resident_experts(monkeypatch, capsys):
+    """The over-budget placement streams the experts, or a table that
+    brings the model under budget with the experts resident, and refuses
+    a teacher with no expert stacks rather than pin it under the wired
+    limit."""
+    import mlx.nn as nn
+
+    import gmlx.load.loader as _loader
+    import gmlx.stream.expert_streaming as _es
+    from gmlx.distill import teacher as _teacher
+
+    m = nn.Linear(4, 4)
+    GB = 10 ** 9
+    # the placement pins the arena env vars for the pass; setenv then
+    # delenv records their absence, so the undo removes what setdefault adds
+    for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
+        monkeypatch.setenv(var, "256")
+        monkeypatch.delenv(var)
+    monkeypatch.setattr(_es, "install_expert_streaming", lambda model, gguf_path=None, **k: (0, 0))
+    with pytest.raises(ValueError, match=r"the teacher is 120\.0 GB against a wired budget of 100\.0 GB and has "
+                                         r"no expert stacks to stream; use a smaller quantization"):
+        _teacher.stream_over_budget(m, "t.gguf", 120 * GB, 100 * GB)
+    monkeypatch.setattr(_es, "install_expert_streaming", lambda model, gguf_path=None, **k: (3, 999))
+    monkeypatch.setattr(_loader, "moe_streaming_active", lambda model: True)
+    capsys.readouterr()
+    assert _teacher.stream_over_budget(m, "t.gguf", 120 * GB, 100 * GB) == (3, 999)
+    assert "[cache] teacher over the wired budget: 3 expert stacks stream from disk" in capsys.readouterr().err
+    monkeypatch.setattr(_loader, "moe_streaming_active", lambda model: False)
+    assert _teacher.stream_over_budget(m, "t.gguf", 120 * GB, 100 * GB) == (3, 0)
+    assert "a streamed table brings it under, the experts stay resident" in capsys.readouterr().err
+
+
+class _LongCache:
+    """A reader that presents one reply cache as five thousand rows, the
+    last of which carries other ids than its rendering."""
+
+    def __init__(self, reader, n=5000):
+        self.reader, self.n, self.manifest, self.K = reader, n, reader.manifest, reader.K
+        self.rows_meta = [reader.rows_meta[i % len(reader)] for i in range(n)]
+
+    def __len__(self):
+        return self.n
+
+    def row(self, r):
+        arrs, text, meta = self.reader.row(r % len(self.reader))
+        if r == self.n - 1:
+            arrs = dict(arrs)
+            arrs["token_ids"] = arrs["token_ids"][::-1].copy()
+        return arrs, text, meta
+
+
+def test_same_render_samples_the_long_rows_too(tmp_path, tok_bl):
+    """Rows are length-sorted, so a check limited to the first rows never
+    sees a long one; the sample spans every framed row."""
+    from gmlx.distill import view as _view
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    msgs = [{"role": "user", "content": "the cat"}, {"role": "assistant", "content": "is the cat 123"}]
+    _tiny_reply_cache(tmp_path / "c", teacher, [(msgs, None)] * 3)
+    reader = dl.CacheReader(tmp_path / "c")
+    same, why = _view.same_render(_LongCache(reader), teacher, "reply")
+    assert not same and why.startswith("row 4999: ")
+
+
+def test_eval_chat_report_names_the_drift_reference(tmp_path, monkeypatch, capsys):
+    """Under --before the adapter-off replies anchor the drift score and
+    the JSON says so; without it the --chat-refs report is named."""
+    from mlx_lm.tuner.lora import LoRALinear
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import student as _student
+
+    tok = _with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    model, cfg, tokenizer = _student.load_mlx_student(str(teacher))
+    linear_to_lora_layers(model, 2, {"rank": 2, "scale": 4.0, "dropout": 0.0,
+                                     "keys": ["self_attn.q_proj", "mlp.down_proj"]})
+    mx.random.seed(7)
+
+    def seed_b(_k, m):
+        if isinstance(m, LoRALinear):
+            m.lora_b = mx.random.normal(m.lora_b.shape) * 0.5
+
+    model.apply_to_modules(seed_b)
+    mx.eval(model.parameters())
+    monkeypatch.setattr(_ev, "load_student", lambda p, a, h: (model, cfg, tokenizer, "mlx"))
+    adapter = tmp_path / "adapter.gguf"
+    adapter.write_bytes(b"GGUF")
+    sanity = tmp_path / "sanity.jsonl"
+    sanity.write_text("".join(json.dumps({"id": f"s{i}", "messages": [{"role": "user", "content": q}], "kind": k})
+                              + "\n" for i, (q, k) in enumerate([("the cat", "task"), ("the hat", "refuse")])))
+
+    def ev(tag, **kw):
+        js = tmp_path / f"{tag}.json"
+        opts = _ev.EvalOptions(student=str(teacher), adapter=str(adapter), md=str(tmp_path / f"{tag}.md"),
+                               json=str(js), max_len=16, batch_size=2, chat_max_tokens=6,
+                               chat_sanity=str(sanity), **kw)
+        assert _ev.run_eval(opts) == 0, capsys.readouterr().err
+        return js, json.loads(js.read_text())
+
+    js1, r1 = ev("r1", before=True)
+    assert r1["after"]["chat"]["refs_source"] == "before" and r1["before"]["chat"]["items"]
+    _js2, r2 = ev("r2", chat_refs=str(js1))
+    assert r2["after"]["chat"]["refs_source"] == str(js1)
+    capsys.readouterr()
+    _js3, r3 = ev("r3", chat_refs=str(js1), before=True)
+    assert r3["after"]["chat"]["refs_source"] == "before"
+    assert f"[eval] --chat-refs {js1} ignored" in capsys.readouterr().err
+    _js4, r4 = ev("r4")
+    assert r4["after"]["chat"]["refs_source"] is None

@@ -528,6 +528,7 @@ def run_eval(opts: EvalOptions) -> int:
         t0 = time.perf_counter()
         after = _eval.chat_sanity(model, tokenizer, items, refs=refs, max_tokens=opts.chat_max_tokens)
         after["wall_s"] = time.perf_counter() - t0
+        after["refs_source"] = "before" if opts.before else opts.chat_refs
         report["after"]["chat"] = after
         log(chat_line("after", after))
     if teacher_bpb is not None:
