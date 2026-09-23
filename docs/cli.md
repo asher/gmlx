@@ -908,7 +908,7 @@ so a run resumes where it stopped.
 | `--min-chars N` | `2000` | with `--corpus`, skip documents shorter than this |
 | `--docs N` | all | with `--corpus`, prompts to build |
 | `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
-| `--chat-template-kwargs JSON` | none | passed to `gmlx serve --chat-template-config` for the teacher's render |
+| `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to `gmlx serve --chat-template-config` |
 | `--context FILE` | none | text the teacher reads for every prompt without its own context field |
 | `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine |
 | `--thinking` | off | thinking on, with the reasoning trace kept as `reasoning_content` on the reply |

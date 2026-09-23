@@ -137,7 +137,8 @@ training text on purpose, so `bpb after` in `smoke.md`, the student's
 bits per byte with the adapter, must come out below `bpb before`. The
 run passes when the `[train] it` lines show the loss, the figure
 training drives down, falling, and `eval` writes both reports.
-`--top-k` and `--max-len` shrink the cache for a quick run, and
+`--top-k` and `--max-len` on `cache` shrink the cache for a quick run,
+`--max-len` on `eval` scores the slice in 128-token windows, and
 `--before` also scores the student with the adapter off.
 
 The served path is checked the same way, since `gen` and `filter` run on
@@ -411,11 +412,11 @@ gives varied replies that stay on task.
 
 A teacher without a thinking mode runs without `--thinking` and
 `--thinking-budget`, since `gen` refuses a budget on its own. The caches
-below then take `--frame reply` instead of `reply-think`,
-`filter --max-reply-tokens` is sized from the answers alone, and `eval`
+below then take `--frame reply` instead of `reply-think`, and `eval`
 under [Use and measure the adapter](#use-and-measure-the-adapter) drops
 `--reply-think`. Pair a thinking teacher with a student that has a
-thinking mode of its own, or run the teacher without `--thinking`.
+thinking mode of its own, or run the teacher without `--thinking` and
+`--thinking-budget`.
 
 `filter` runs its checks in a fixed order and names the first one a row
 fails, with one reason word per dropped row:
@@ -773,8 +774,10 @@ fields.
   pair the two models share a vocabulary, so `a` is 1.000, but every
   reply row carries `student_messages`, the prompt without the document,
   so the student reads other tokens than the teacher did. `align`
-  therefore logged `path=general`, which is expected for any run with a
-  document, and `alm` is nonzero there.
+  therefore logged
+  `student render differs (row 0: the student has its own message list)`
+  and `path=general`, which is expected for any run with a document, and
+  `alm` is nonzero there.
 - `ce` is a third term that is measured but not trained on unless `--ce`
   is set.
 - `floored` counts positions whose probability was clamped at the
@@ -915,7 +918,8 @@ round is unchanged.
 
 The filter dropped most rows. The rejects file names the reason per row.
 `budget` means the reasoning trace hit `--thinking-budget`, so raise it
-or drop `--thinking`. `length` means the answer hit `--max-tokens`.
+or drop both `--thinking` and `--thinking-budget`. `length` means the
+answer hit `--max-tokens`.
 `verify` with your own reason words means the teacher got the task wrong
 with the document in view, and a teacher that fails most of a task
 cannot teach it.
