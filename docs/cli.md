@@ -1017,7 +1017,7 @@ Alignment flags, in the order `--help` prints them.
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
 | `--force` | off | keep a view the own-group check would refuse |
-| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time, at least one row and never every row |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
 | `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this |
@@ -1035,7 +1035,7 @@ Training flags, in the order `--help` prints them.
 |------|---------|---------|
 | `--view DIR` | required | a view directory, repeatable to mix views aligned alike over one tokenizer pair |
 | `--student GGUF` | required | the student GGUF, sharded ok |
-| `--adapter-out PATH` | required | where to write the GGUF adapter |
+| `--adapter-out PATH` | required | where to write the GGUF adapter, refused before the load when it is a directory or cannot be written |
 | `--iters N` | required | training steps |
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly |
@@ -1119,8 +1119,9 @@ rows in one or more caches made with one. It reports how much more
 likely the context makes each token the teacher wrote, the distance
 between the two stored top-k distributions with everything outside the
 top-k pooled, and, with several contexts, the part no single adapter can
-learn. Runs on the CPU. Exits 2 when a cache has no manifest or no rows
-pair.
+learn. Runs on the CPU. Exits 2 when a cache has no manifest, when a
+reply-think cache records no `content_start` (one written before rows
+carried it), or when no rows pair.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

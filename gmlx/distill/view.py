@@ -125,7 +125,11 @@ def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -
 def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
     """Row indexes held for validation: whole documents in a seeded order
     until at least max(1, fraction * rows) rows are held, so a document's
-    windows, and a conversation's turns, never sit on both sides."""
+    windows, and a conversation's turns, never sit on both sides. A
+    document that would carry the held count past twice that budget is
+    passed over while other documents exist; when none fits, or the held
+    rows would be every row, the last rows of the smallest document are
+    held, so at least one row trains."""
     if not doc_ids:
         return set()
     docs: dict = {}
@@ -138,7 +142,13 @@ def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
     for j in order:
         if len(val) >= want:
             break
-        val.update(docs[names[int(j)]])
+        rows = docs[names[int(j)]]
+        if len(names) > 1 and len(val) + len(rows) > 2 * want:
+            continue
+        val.update(rows)
+    if not val or len(val) >= len(doc_ids):
+        smallest = min(docs.values(), key=len)
+        val = set(smallest[-max(1, min(want, len(doc_ids) - 1)):])
     return val
 
 
@@ -246,10 +256,12 @@ def run_align(opts: AlignOptions) -> int:
     a = float(np.mean(stats["own"])) if stats["own"] else 1.0
     s = float(np.mean(stats["singleton"])) if stats["singleton"] else 1.0
     red = float(np.mean(stats["redirect"])) if stats["redirect"] else 0.0
-    val = val_split([str(reader.rows_meta[e["row"]].get("doc_id", e["row"])) for e in index],
-                    opts.val_fraction, opts.seed)
+    doc_ids = [str(reader.rows_meta[e["row"]].get("doc_id", e["row"])) for e in index]
+    val = val_split(doc_ids, opts.val_fraction, opts.seed)
     for i, e in enumerate(index):
         e["split"] = "val" if i in val else "train"
+    log(f"[align] validation: {len(val)} of {len(index)} rows from {len({doc_ids[i] for i in val})} of "
+        f"{len(set(doc_ids))} documents")
     retained = [1.0 - d for d in stats["dropped"]]
     jw = np.array(stats["J"], dtype=np.float64) * np.array(stats["bias_cov"], dtype=np.float64) \
         if stats["bias_ok"] else np.zeros(0)

@@ -202,3 +202,11 @@ def test_adapter_export_is_atomic(tmp_path, monkeypatch):
     monkeypatch.setattr(lora, "save_lora_adapter", real)
     assert train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=str(out), scale=S) == 3
     assert out.exists() and [p.name for p in tmp_path.iterdir()] == ["trained.gguf"]
+
+
+def test_probe_writable_refuses_a_directory(tmp_path):
+    """A path that names an existing directory cannot take the adapter
+    file, and the probe says so rather than passing it to the export."""
+    assert train.probe_writable(str(tmp_path / "new" / "a.gguf")) is None
+    err = train.probe_writable(str(tmp_path))
+    assert err and "directory" in err

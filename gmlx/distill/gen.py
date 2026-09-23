@@ -367,10 +367,22 @@ def run_settings(opts: GenOptions) -> dict:
             "thinking": bool(opts.thinking), "thinking_budget": opts.thinking_budget}
 
 
+def teacher_name(opts: GenOptions) -> str | None:
+    """The teacher file as an absolute path, or None when a server is
+    named instead."""
+    return str(Path(opts.teacher).expanduser().absolute()) if opts.teacher else None
+
+
+def shared_context(opts: GenOptions) -> str | None:
+    """The --context file as an absolute path, or None."""
+    return str(Path(opts.context).expanduser().absolute()) if opts.context else None
+
+
 def model_label(opts: GenOptions) -> str:
     """What the sidecar records as the model: the teacher file, else the
     server the replies came from."""
-    return opts.teacher or (opts.base_url.rstrip("/") if opts.base_url else f"http://{opts.host}:{opts.port}/v1")
+    return teacher_name(opts) or (opts.base_url.rstrip("/") if opts.base_url
+                                  else f"http://{opts.host}:{opts.port}/v1")
 
 
 def _same_name(a, b) -> bool:
@@ -392,10 +404,13 @@ def resume_conflict(prev: dict, opts: GenOptions, *, with_context: bool = False)
     the rows carry themselves is recorded as per-prompt and is not a flag
     to compare."""
     now: dict = dict(run_settings(opts), context_format=opts.context_format if with_context else None)
-    if prev.get("context") != "per-prompt":
+    if "shared_context" in prev:
+        now["shared_context"] = shared_context(opts)
+    elif prev.get("context") != "per-prompt":
         now["context"] = opts.context
     diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in now.items()
-             if k in prev and prev.get(k) != v and not (k == "context" and _same_name(prev.get(k), v))]
+             if k in prev and prev.get(k) != v
+             and not (k in ("context", "shared_context") and _same_name(prev.get(k), v))]
     if "model" in prev and not _same_name(prev["model"], model_label(opts)):
         diffs.append(f"model {prev['model']!r} -> {model_label(opts)!r}")
     return ", ".join(diffs) or None
@@ -480,9 +495,10 @@ def run_gen(opts: GenOptions) -> int:
             # short still leaves what a resume compares against; a sidecar
             # beside a deleted output is replaced, one beside rows already
             # generated is kept for its run totals
-            write_json_atomic(side, {"gen_version": GEN_VERSION, "model": opts.teacher or base_url,
+            write_json_atomic(side, {"gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url,
                                      "served_model_id": model_id, **run_settings(opts),
-                                     "context": opts.context or ("per-prompt" if with_context else None),
+                                     "context": shared_context(opts) or ("per-prompt" if with_context else None),
+                                     "shared_context": shared_context(opts),
                                      "context_format": opts.context_format if with_context else None,
                                      "prompt_set_sha256": prompt_hash, "run": None})
         lock = threading.Lock()
@@ -543,13 +559,14 @@ def run_gen(opts: GenOptions) -> int:
             ex.shutdown(wait=True)
         el = time.perf_counter() - t0
         sidecar = {
-            "gen_version": GEN_VERSION, "model": opts.teacher or base_url, "served_model_id": model_id,
+            "gen_version": GEN_VERSION, "model": teacher_name(opts) or base_url, "served_model_id": model_id,
             **run_settings(opts),
             "serve_args": list(opts.serve_arg), "prompt_source": opts.prompts or opts.corpus,
             "prompt_set_sha256": prompt_hash, "prompts": len(rows),
             "instruction": opts.instruction if opts.corpus else None,
             "prefix_chars": opts.prefix_chars if opts.corpus else None, "filter_version": None,
-            "context": opts.context or ("per-prompt" if with_context else None),
+            "context": shared_context(opts) or ("per-prompt" if with_context else None),
+            "shared_context": shared_context(opts),
             "context_format": opts.context_format if with_context else None,
             "run": {"completed": n_ok, "failed": n_err, "generated_tokens": gen_tokens, "wall_s": el,
                     "tok_s_aggregate": gen_tokens / max(el, 1e-9), "stop_fraction": stops / max(n_ok, 1),

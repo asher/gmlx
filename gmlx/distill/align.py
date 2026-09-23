@@ -251,11 +251,20 @@ def save_tables(dirpath: Path, t: Tables) -> None:
     dirpath = Path(dirpath)
     dirpath.mkdir(parents=True, exist_ok=True)
     tmp = dirpath / "tables.safetensors.tmp"
-    save_file({"v1": t.v1, "u1": t.u1, "group_of": t.group_of, "target_g": t.target_g,
-               "group_key": t.group_key, "group_size": t.group_size,
-               "nonsingleton_ids": t.nonsingleton_ids, "bmask_S": t.bmask_S,
-               "own": t.own}, str(tmp))
-    os.replace(tmp, dirpath / "tables.safetensors")
+    try:
+        save_file({"v1": t.v1, "u1": t.u1, "group_of": t.group_of, "target_g": t.target_g,
+                   "group_key": t.group_key, "group_size": t.group_size,
+                   "nonsingleton_ids": t.nonsingleton_ids, "bmask_S": t.bmask_S,
+                   "own": t.own}, str(tmp))
+        with open(tmp, "rb") as fh:
+            os.fsync(fh.fileno())
+        os.replace(tmp, dirpath / "tables.safetensors")
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     write_json_atomic(dirpath / "tables.json", t.meta())
 
 

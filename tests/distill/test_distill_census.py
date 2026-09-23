@@ -30,7 +30,8 @@ def tok():
 
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
                  K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None,
-                 boost_rows: set[int] | None = None, content_offset: int = 0):
+                 boost_rows: set[int] | None = None, content_offset: int = 0, frame: str = "reply",
+                 record_content_start: bool = True):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -74,10 +75,10 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
         rows.append(red)
         tbytes.append(text)
         doc_id, window = docs[r] if docs else (f"{doc_prefix}:{r}", 0)
-        metas.append(dl.RowMeta(row_id=r, doc_id=doc_id, window=window, n_tokens=n, frame="reply",
+        metas.append(dl.RowMeta(row_id=r, doc_id=doc_id, window=window, n_tokens=n, frame=frame,
                                 messages=msgs, spans=[list(s) for s in spans],
                                 prefix_n_tokens=int(np.argmax(tm)) + 1, suffix_start_byte=b0,
-                                content_start=b0 + content_offset))
+                                content_start=b0 + content_offset if record_content_start else None))
     writer.write(0, dl.pack_shard(rows, tbytes, K, False), metas, wall_s=0.01, step=64)
     dl.write_manifest(tmp, teacher_path="synthetic", dataset="synthetic", num_samples=len(rows),
                       max_seq_len=64, seed=seed, top_k=K, vocab_size=V, config_vocab_size=V,
@@ -348,3 +349,22 @@ def test_eval_reply_rows_apply_trace_and_content_ranges_from_their_own_anchors(t
     only_trace, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
                                        positions={}, trace_positions={"p0": [[0, 3]]})
     assert len(only_trace) == 1
+
+
+def test_census_refuses_a_reply_think_cache_without_content_starts(tmp_path, tok, capsys):
+    """A reply-think cache written before rows recorded content_start
+    cannot say where the trace ends, so the census refuses it instead of
+    keying trace positions as content."""
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with context {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl", frame="reply-think",
+                           record_content_start=False)
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl", frame="reply-think",
+                         boost={7: 6.0}, boost_rows={0})
+    out = tmp_path / "census.json"
+    rc = cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[census] refuse:" in err and "content_start" in err and str(without) in err
+    assert not out.exists()
+    plain = _reply_cache(tmp_path / "plain", tok, convs_without, doc_prefix="a.jsonl", record_content_start=False)
+    assert cs.run_census(cs.CensusOptions(without=str(plain), with_=[str(with_)], out=str(out))) == 0

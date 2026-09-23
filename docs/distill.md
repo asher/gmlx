@@ -112,10 +112,11 @@ and trains for 80 steps.
 
 Its corpus is a jsonl file, one JSON object per line, of 24
 `{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
-so `train` needs at least that many training rows. `align` also sets one
-row in fifty aside for validation, at least one, and never trains on it,
-so 24 rows leave 23 for a batch of 4. `eval --slice` reads plain text,
-so the second line writes the same rows to `smoke.txt`:
+so `train` needs at least that many training rows. `align` also holds
+back about one row in fifty for validation, whole documents at a time and
+at least one row, and never trains on them, so 24 rows leave 23 for a
+batch of 4. `eval --slice` reads plain text, so the second line writes
+the same rows to `smoke.txt`:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --to .
@@ -477,8 +478,9 @@ how many next-token candidates are stored per position, 256 by default,
 and is unrelated to the sampler's `--top-k` on `gen`.
 
 `align` runs on the CPU with the two tokenizers only and writes the view
-into `view-r1/`. It holds back one row in fifty for validation, at least
-one, and the rest are training rows. Its summary line reports `a` and
+into `view-r1/`. It holds back about one row in fifty for validation,
+whole documents at a time and at least one row, and the rest are training
+rows. Its summary line reports `a` and
 `s`, the own-group and singleton fractions explained under
 [Advanced settings](#advanced-settings), and the other fields on that
 line are diagnostics. On the worked pair every teacher token has a
@@ -777,10 +779,9 @@ fields.
   pair the two models share a vocabulary, so `a` is 1.000, but every
   reply row carries `student_messages`, the prompt without the document,
   so the student reads other tokens than the teacher did. `align`
-  therefore logged
-  `student render differs (row 0: the student has its own message list)`
-  and `path=general`, which is expected for any run with a document, and
-  `alm` is nonzero there.
+  therefore logged `student render differs`, with the count of rows that
+  carry their own student message list, and `path=general`, which is
+  expected for any run with a document, and `alm` is nonzero there.
 - `ce` is a third term that is measured but not trained on unless `--ce`
   is set.
 - `floored` counts positions whose probability was clamped at the

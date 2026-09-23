@@ -162,8 +162,8 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                         "(id[@config], which needs the datasets package).")
     p.add_argument("--out", metavar="DIR", help="Cache directory to write.")
     p.add_argument("--validate", metavar="DIR", help="Validate an existing cache and exit.")
-    p.add_argument("--top-k", type=int, default=256, help="Log-probabilities kept per position (default 256).")
-    p.add_argument("--max-len", type=int, default=2048,
+    p.add_argument("--top-k", type=_positive_int, default=256, help="Log-probabilities kept per position (default 256).")
+    p.add_argument("--max-len", type=_positive_int, default=2048,
                    help="Teacher tokens per window including the start token (default 2048).")
     p.add_argument("--max-disk-gb", type=float, default=None,
                    help="Refuse when the size estimate exceeds this (default none).")
@@ -220,7 +220,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--hidden", action="store_true",
                    help="Also store a seeded random sketch of the teacher's final hidden state per position "
                         "(the hidden field, float16), for train --hs.")
-    p.add_argument("--hidden-dim", type=int, default=256, help="Width of the hidden sketch (default 256).")
+    p.add_argument("--hidden-dim", type=_positive_int, default=256, help="Width of the hidden sketch (default 256).")
     p.add_argument("--hidden-seed", type=int, default=1, help="Seed of the sketch matrix (default 1).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
@@ -239,7 +239,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, metavar="DIR", help="View directory to write.")
     p.add_argument("--tables", default=None, metavar="DIR",
                    help="An earlier view directory whose tokenizer tables are reused when the pair matches.")
-    p.add_argument("--kprime", type=int, default=None,
+    p.add_argument("--kprime", type=_positive_int, default=None,
                    help="Cap on distinct student-token groups kept per boundary (default: the maximum seen).")
     p.add_argument("--materialize", action="store_true",
                    help="Also write the batch tensors as view shards, for a pair whose loader is slow.")
@@ -278,7 +278,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                         "tokenizer pair.")
     p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
     p.add_argument("--adapter-out", required=True, metavar="PATH", help="Output path for the .gguf adapter.")
-    p.add_argument("--iters", type=int, required=True, help="Training steps.")
+    p.add_argument("--iters", type=_positive_int, required=True, help="Training steps.")
     p.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (default 16).")
     p.add_argument("--lora-scale", type=float, default=None,
                    help="LoRA multiplier applied directly (default 2.0 unless --lora-alpha is given).")
@@ -317,7 +317,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--resume", action="store_true", help="Continue from the last checkpoint.")
     p.add_argument("--save-every", type=_positive_int, default=200, help="Checkpoint interval in steps (default 200).")
     p.add_argument("--val-every", type=_positive_int, default=200, help="Validation interval in steps (default 200).")
-    p.add_argument("--val-batches", type=int, default=16, help="Validation batches per pass (default 16).")
+    p.add_argument("--val-batches", type=_positive_int, default=16, help="Validation batches per pass (default 16).")
     p.add_argument("--report-every", type=_positive_int, default=10, help="Train-loss report interval (default 10).")
     p.add_argument("--report", default=None, metavar="JSON", help="Write the run log here.")
     p.add_argument("--hf-source", default=None, metavar="ID", help="Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them.")
@@ -359,7 +359,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--chat-refs", default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score. Ignored with --before, "
                         "which anchors on the adapter-off replies.")
-    p.add_argument("--chat-max-len", type=int, default=2048, help="Longest conversation scored (default 2048).")
+    p.add_argument("--chat-max-len", type=_positive_int, default=2048, help="Longest conversation scored (default 2048).")
     p.add_argument("--chat-per-turn", action="store_true", help="Score every assistant turn as its own row.")
     p.add_argument("--reply-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of conversations scored on the final reply, repeatable.")
@@ -373,11 +373,11 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--kld-rows", type=int, default=None, help="Rows of the KL cache to score (default all).")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every render, as a JSON object or a file.")
-    p.add_argument("--max-len", type=int, default=512, help="Window length for bits per byte (default 512).")
+    p.add_argument("--max-len", type=_positive_int, default=512, help="Window length for bits per byte (default 512).")
     p.add_argument("--bpb-prefix", default=None,
                    help="Text placed before every window, or @FRAME (such as @continue) for that frame's "
                         "template prefix.")
-    p.add_argument("--batch-size", type=int, default=8, help="Windows per batch (default 8).")
+    p.add_argument("--batch-size", type=_positive_int, default=8, help="Windows per batch (default 8).")
     p.add_argument("--cache-limit-gb", type=float, default=4.0, help="MLX buffer cache cap (default 4).")
     p.add_argument("--decontam-threshold", type=float, default=0.01,
                    help="Slice window fraction found in the corpus above which its gate is void (default 0.01).")

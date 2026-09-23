@@ -186,6 +186,16 @@ def test_filter_refuses_a_malformed_jsonl_line(tmp_path, capsys):
     ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--concurrency", "0"],
     ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--report-every", "0"],
     ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--rows-per-shard", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--top-k", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--max-len", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--hidden-dim", "0"],
+    ["align", "--cache", "c", "--student", "s.gguf", "--out", "v", "--kprime", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1",
+     "--val-batches", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--batch-size", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--max-len", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--chat-max-len", "0"],
 ])
 def test_zero_cadence_and_size_flags_are_refused_at_parse_time(argv):
     """A zero interval would divide the loop by zero after the load; the

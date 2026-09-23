@@ -170,7 +170,11 @@ def resolve_model_arg(base: str, config: str | None = None) -> tuple[str, str | 
 
 def probe_writable(path: str) -> str | None:
     """Create the parent directory of ``path`` and prove a file can be
-    written there. Returns the OS error message, or None when writable."""
+    written there. Returns the OS error message, or None when writable.
+    A path that names a directory is refused, since the file's own write
+    would fail only after the run."""
+    if os.path.isdir(path):
+        return "it is a directory"
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         probe = path + ".probe"

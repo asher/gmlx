@@ -708,3 +708,59 @@ def test_filter_keeps_the_old_corpus_when_the_write_fails(tmp_path, capsys):
         assert out.read_text(encoding="utf-8") == "earlier rows\n"
     finally:
         os.chmod(outdir, stat.S_IRWXU)
+
+
+def test_filter_and_tables_leave_no_temp_file_when_the_move_fails(tmp_path, monkeypatch):
+    """A write that fails after its temp file exists removes the temp
+    file, so a rerun does not find a stale `.tmp` beside the output."""
+    import numpy as np
+
+    from gmlx.distill import align as _align
+
+    src = tmp_path / "gen.jsonl"
+    src.write_text(json.dumps(_row("ok", GOOD)) + "\n")
+    out = tmp_path / "corpus.jsonl"
+
+    def fail(*a, **k):
+        raise OSError("moved nothing")
+
+    monkeypatch.setattr(flt.os, "replace", fail)
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(out))) == 2
+    assert not out.exists() and not list(tmp_path.glob("*.tmp"))
+    monkeypatch.undo()
+    t = _align.identity_tables(8, np.zeros(8, dtype=bool), "t", "s")
+    monkeypatch.setattr(_align.os, "replace", fail)
+    with pytest.raises(OSError, match="moved nothing"):
+        _align.save_tables(tmp_path / "tables", t)
+    assert not list((tmp_path / "tables").glob("*.tmp"))
+
+
+def test_gen_records_absolute_names_and_refuses_a_shared_context_added_to_per_prompt_rows(tmp_path, stub_server,
+                                                                                         capsys, monkeypatch):
+    """The sidecar records the teacher and the context file as absolute
+    paths, and a rerun that adds --context to rows that carried their
+    own context is another run, since rows without one would now get
+    it."""
+    monkeypatch.chdir(tmp_path)
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_text("shared context", encoding="utf-8")
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}], "context": "own context"}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts="p.jsonl", base_url=stub_server, teacher="t.gguf")) == 0
+    side = json.loads((tmp_path / "corpus.jsonl.gen.json").read_text())
+    assert side["model"] == str(tmp_path / "t.gguf") and side["context"] == "per-prompt"
+    assert side["shared_context"] is None
+    more = _prompts(tmp_path / "p2.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=more, base_url=stub_server, teacher="t.gguf",
+                                    context="ctx.txt"))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "shared_context" in err
+    out2 = tmp_path / "c2.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=prompts, base_url=stub_server, teacher="t.gguf",
+                                      context="ctx.txt")) == 0
+    side = json.loads((tmp_path / "c2.jsonl.gen.json").read_text())
+    assert side["context"] == str(ctx) and side["shared_context"] == str(ctx)
+    assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=more, base_url=stub_server, teacher=str(tmp_path / "t.gguf"),
+                                      context=str(ctx))) == 0
+    assert sorted(r["id"] for r in _rows(out2)) == ["a", "b"]

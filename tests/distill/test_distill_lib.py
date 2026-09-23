@@ -3370,4 +3370,143 @@ def test_val_split_holds_whole_documents(tmp_path, tok_bl):
         assert len(val) >= 3
     assert len(_view.val_split(["a", "b", "c"], 0.02, 1)) == 1
     assert _view.val_split([], 0.02, 1) == set()
-    assert _view.val_split(["only"] * 5, 0.5, 1) == set(range(5))
+    assert _view.val_split(["only"] * 5, 0.5, 1) == {3, 4}
+
+
+# ---------------------------------------------------------------------------
+# review round eleven: few-document corpora keep training rows, a directory
+# or a non-GGUF student refuses --adapter-out before the load, the resumed
+# tok/s counts this run's tokens, content_start on reply-think rows
+# ---------------------------------------------------------------------------
+
+
+def test_val_split_keeps_training_rows_on_few_documents():
+    """One long document, or two that both overshoot the budget, still
+    leaves training rows: a document that would overshoot twice the
+    budget is skipped, and when nothing fits the smallest document's last
+    rows are held."""
+    from gmlx.distill import view as _view
+
+    book = _view.val_split(["book.txt"] * 400, 0.02, 1)
+    assert book == set(range(392, 400))
+    two = _view.val_split(["a.txt"] * 300 + ["b.txt"] * 100, 0.02, 1)
+    assert two == set(range(392, 400))
+    many = ["d%d" % (i // 3) for i in range(300)] + ["big"] * 100
+    val = _view.val_split(many, 0.02, 1)
+    assert 8 <= len(val) <= 16 and not any(many[i] == "big" for i in val)
+    assert _view.val_split(["x"], 0.02, 1) == {0}
+    assert _view.val_split(["x", "x"], 0.9, 1) == {1}
+
+
+def test_align_holds_back_part_of_a_one_document_cache(tmp_path, tok_bl, capsys):
+    """A cache whose windows all come from one document gets a validation
+    split that leaves training rows, and align says how many rows and
+    documents it held."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import view as _view
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = tmp_path / "one.jsonl"
+    corpus.write_text(json.dumps({"text": "the cat is the cat " * 60}) + "\n")
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                    top_k=8, max_len=24)) == 0
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "v"))) == 0
+    index = json.loads((tmp_path / "v" / "view.json").read_text())["index"]
+    assert len(index) > 2
+    assert {e["split"] for e in index} == {"train", "val"}
+    n_val = sum(1 for e in index if e["split"] == "val")
+    assert f"[align] validation: {n_val} of {len(index)} rows from 1 of 1 documents" in capsys.readouterr().err
+
+
+def test_train_refuses_a_directory_or_a_non_gguf_student_for_the_adapter_before_the_load(tmp_path, tok_bl, capsys,
+                                                                                         monkeypatch):
+    """--adapter-out naming a directory, or a student with no GGUF file to
+    take the architecture from, is refused before the student loads
+    rather than after the last step."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+
+    def never(*a, **k):
+        raise AssertionError("the student loaded before the adapter path was checked")
+
+    monkeypatch.setattr(_trainer, "load_student", never)
+    adir = tmp_path / "adapters"
+    adir.mkdir()
+    rc = _trainer.run_train(_trainer.TrainOptions(adapter_out=str(adir), **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "cannot write --adapter-out" in err and "directory" in err
+    rc = _trainer.run_train(_trainer.TrainOptions(adapter_out=str(tmp_path / "a.gguf"), **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "--adapter-out needs a GGUF student" in err and str(student) in err
+
+
+def test_train_reports_the_resumed_runs_own_throughput(tmp_path, tok_bl, capsys, monkeypatch):
+    """After --resume the tok/s on the report line counts the tokens of
+    this run against its own wall, not the checkpoint's tokens too."""
+    import re
+
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ck"
+    base = dict(views=[str(view)], student=str(student), batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16,
+                val_batches=1, ckpt_dir=str(ck), save_every=2, report_every=1, seed=1, iters=4)
+    real = _trainer._data.batch_to_mx
+    calls = [0]
+
+    def two_steps_then_crash(batch):
+        calls[0] += 1
+        if calls[0] > 2:
+            raise RuntimeError("crashed after the second step")
+        return real(batch)
+
+    monkeypatch.setattr(_trainer._data, "batch_to_mx", two_steps_then_crash)
+    with pytest.raises(RuntimeError, match="second step"):
+        _trainer.run_train(_trainer.TrainOptions(**base))
+    monkeypatch.setattr(_trainer._data, "batch_to_mx", real)
+    before = json.loads((ck / "last" / "state.json").read_text())["tokens"]
+    assert before > 0
+    capsys.readouterr()
+    report = tmp_path / "run.json"
+    assert _trainer.run_train(_trainer.TrainOptions(resume=True, report=str(report), **base)) == 0
+    err = capsys.readouterr().err
+    recs = {r["it"]: r for r in json.loads(report.read_text())["log"] if "tokens" in r}
+    lines = {int(m.group(1)): int(m.group(2)) for m in re.finditer(r"\[train\] it (\d+) .* (\d+) tok/s", err)}
+    assert set(lines) == {3, 4}
+    for it, tps in lines.items():
+        rec = recs[it]
+        assert rec["tokens"] > before
+        assert tps == int(f"{(rec['tokens'] - before) / max(rec['wall_s'], 1e-9):.0f}")
+
+
+def test_row_meta_records_the_content_start_of_a_reply_think_row(tok_bl):
+    """A reply-think row's target span opens at the reasoning trace; its
+    content_start is where the reply's own content begins, so the census
+    keys content positions from the content on both frames."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n"
+                                  "{% if m['role'] == 'assistant' and m['reasoning_content'] %}<think>"
+                                  "{{ m['reasoning_content'] }}</think>\n{% endif %}{{ m['content'] }}<|im_end|>\n"
+                                  "{% endfor %}"))
+    msgs = [{"role": "user", "content": "hi"},
+            {"role": "assistant", "reasoning_content": "let me think", "content": "the cat is the cat"}]
+    for frame in ("reply", "reply-think"):
+        text, spans = dl.render_row(tok, msgs, open_tail=False, last_only=True, reason_target=frame == "reply-think")
+        tb = dl.token_bytes(tok)
+        ids, ends, _ = dl.encode_with_byte_ends(tok, text, tb, add_special_tokens=False)
+        row = (0, "d", 0, ids, ends, text, msgs, spans, frame)
+        meta = _teacher.row_meta(row, "human", frame).as_dict()
+        b0, b1, _b2 = spans[-1]
+        assert meta["content_start"] == b1 - len(b"the cat is the cat")
+        assert text[meta["content_start"]:b1] == b"the cat is the cat"
+        if frame == "reply-think":
+            assert meta["content_start"] > b0 and b"let me think" in text[b0:meta["content_start"]]
+        else:
+            assert meta["content_start"] == b0

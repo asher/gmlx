@@ -334,6 +334,12 @@ def run_train(opts: TrainOptions) -> int:
         if err:
             log(f"[train] refuse: cannot write --adapter-out {opts.adapter_out}: {err}")
             return 2
+        try:
+            gguf_file(opts.student)
+        except IndexError:
+            log(f"[train] refuse: --adapter-out needs a GGUF student to take the architecture from, none under "
+                f"{opts.student}")
+            return 2
     if opts.report:
         Path(opts.report).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
@@ -515,6 +521,7 @@ def run_train(opts: TrainOptions) -> int:
             log(f"[train] resumed at step {state['iteration']}")
             if opts.hs and last is not None and not (last / "hs_head.safetensors").exists():
                 log("[train] hidden-state map not in the last checkpoint, a fresh map starts at the resumed step")
+        tokens0 = int(state["tokens"])
         est_ckpt = 2 * trainable_count(model) * 4 * 3
         if free_bytes(ckpt_dir) < 2 * est_ckpt:
             log(f"[train] refuse: free space under two checkpoints ({free_bytes(ckpt_dir) / GB:.2f} GB)")
@@ -582,7 +589,7 @@ def run_train(opts: TrainOptions) -> int:
                 log(f"[train] it {rec['it']} loss {rec['loss']:.4f} dk {rec['dk']:.4f} alm {rec['alm']:.4f} "
                     f"ce {rec['ce']:.4f}" + (f" hs {rec['hs']:.4f}" if opts.hs else "") + " "
                     f"floored {rec['floored']} lr {rec['lr']:.2e} "
-                    f"{rec['tokens'] / max(rec['wall_s'], 1e-9):.0f} tok/s step {rec['step_ms']:.0f} ms "
+                    f"{(rec['tokens'] - tokens0) / max(rec['wall_s'], 1e-9):.0f} tok/s step {rec['step_ms']:.0f} ms "
                     f"load {rec['load_ms']:.0f} ms peak {rec['peak_gb']:.1f} GB "
                     f"active {rec['active_gb']:.1f} cache {rec['cache_gb']:.1f}")
             checkpoints_due(it_idx)

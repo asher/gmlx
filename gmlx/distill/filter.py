@@ -256,6 +256,10 @@ def run_filter(opts: FilterOptions) -> int:
         os.replace(tmp, out)
     except OSError as e:
         print(f"[filter] refuse: cannot write {out}: {e}", file=sys.stderr)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         return 2
     kept = len(survivors)
     sidecar: dict = dict(first) if first is not None else {"gen_version": None}

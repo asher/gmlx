@@ -281,6 +281,15 @@ def run_census(opts: CensusOptions) -> int:
             return 2
     base = reply_rows(caches[0], opts.pair_by)
     ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]
+    for c, (reader, rows) in zip(caches, [base] + ctx):
+        # a reply-think row keys its content positions from content_start;
+        # without it the trace would be measured as content
+        stale = sum(1 for r in rows.values() if reader.rows_meta[r].get("frame") == "reply-think"
+                    and reader.rows_meta[r].get("content_start") is None)
+        if stale:
+            print(f"[census] refuse: {stale} reply-think rows of {c} record no content_start (the cache was written "
+                  f"before rows carried it); rerun gmlx distill cache", file=sys.stderr)
+            return 2
     if opts.corpus and not Path(opts.corpus).expanduser().is_file():
         print(f"[census] refuse: no corpus at {opts.corpus}", file=sys.stderr)
         return 2
