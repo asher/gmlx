@@ -102,6 +102,8 @@ class Tables:
     V_T: int
     V_S: int
     identity: bool
+    t_len: np.ndarray | None = None   # [V_T] int32 bytes each teacher token spells, -1 for a special or hole
+    s_len: np.ndarray | None = None   # [V_S] int32 the same for the student
 
     @property
     def G(self) -> int:
@@ -114,8 +116,18 @@ class Tables:
                 "identity": self.identity, "roles": self.roles}
 
 
+def token_lengths(tb: list[bytes | None], V: int) -> np.ndarray:
+    """[V] int32 byte length of each token, -1 for a special or a hole."""
+    out = np.full(V, -1, dtype=np.int32)
+    for i, b in enumerate(tb[:V]):
+        if b is not None:
+            out[i] = len(b)
+    return out
+
+
 def identity_tables(V: int, bmask: np.ndarray, teacher_hash: str, student_hash: str, *,
-                    V_T: int | None = None) -> Tables:
+                    V_T: int | None = None, t_len: np.ndarray | None = None,
+                    s_len: np.ndarray | None = None) -> Tables:
     """Identity tables at the student width V. A teacher head narrower than
     the student's (V_T < V, pad-style surplus ids on the student) keeps its
     ids as a prefix, so the teacher-side arrays run to V_T only."""
@@ -129,7 +141,7 @@ def identity_tables(V: int, bmask: np.ndarray, teacher_hash: str, student_hash: 
                   nonsingleton_ids=np.zeros(0, dtype=np.int32), bmask_S=bmask.astype(bool),
                   own=np.ones(V_T, dtype=bool), roles={"identity": True},
                   teacher_hash=teacher_hash, student_hash=student_hash, V_T=V_T, V_S=V,
-                  identity=True)
+                  identity=True, t_len=t_len, s_len=s_len)
 
 
 def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
@@ -148,7 +160,8 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
     th, sh = vocab_map_hash(ti), vocab_map_hash(si)
     ident, _why = identity_pair(ti, si)
     if ident and V_T == V_S:
-        return identity_tables(V_S, whitespace_start_mask(student_tok, V_S, stb), th, sh)
+        return identity_tables(V_S, whitespace_start_mask(student_tok, V_S, stb), th, sh,
+                               t_len=token_lengths(ttb, V_T), s_len=token_lengths(stb, V_S))
 
     t_bytelevel, s_bytelevel = is_bytelevel(teacher_tok), is_bytelevel(student_tok)
     t_byte_ids = {} if t_bytelevel else _byte_token_ids(teacher_tok, ttb)
@@ -248,7 +261,7 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
     return Tables(v1=v1, u1=u1, group_of=group_of, target_g=target_g, group_key=group_key,
                   group_size=group_size, nonsingleton_ids=nonsingleton_ids, bmask_S=bmask,
                   own=own, roles=roles, teacher_hash=th, student_hash=sh, V_T=V_T, V_S=V_S,
-                  identity=False)
+                  identity=False, t_len=token_lengths(ttb, V_T), s_len=token_lengths(stb, V_S))
 
 
 def special_roles(teacher_tok, student_tok) -> dict[str, Any]:
@@ -280,7 +293,8 @@ def save_tables(dirpath: Path, t: Tables) -> None:
         save_file({"v1": t.v1, "u1": t.u1, "group_of": t.group_of, "target_g": t.target_g,
                    "group_key": t.group_key, "group_size": t.group_size,
                    "nonsingleton_ids": t.nonsingleton_ids, "bmask_S": t.bmask_S,
-                   "own": t.own}, str(tmp))
+                   "own": t.own, **({"t_len": t.t_len, "s_len": t.s_len}
+                                    if t.t_len is not None and t.s_len is not None else {})}, str(tmp))
         with open(tmp, "rb") as fh:
             os.fsync(fh.fileno())
         os.replace(tmp, dirpath / "tables.safetensors")
@@ -317,7 +331,8 @@ def load_tables(dirpath: Path) -> Tables:
                   nonsingleton_ids=a["nonsingleton_ids"], bmask_S=a["bmask_S"].astype(bool),
                   own=a["own"].astype(bool), roles=m.get("roles", {}),
                   teacher_hash=m["teacher_hash"], student_hash=m["student_hash"],
-                  V_T=m["V_T"], V_S=m["V_S"], identity=bool(m["identity"]))
+                  V_T=m["V_T"], V_S=m["V_S"], identity=bool(m["identity"]),
+                  t_len=a.get("t_len"), s_len=a.get("s_len"))
 
 
 def ends_from_ids(ids: np.ndarray, tb: list[bytes | None], special: set[int]) -> np.ndarray:

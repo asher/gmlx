@@ -6740,3 +6740,166 @@ def test_chunk_loglik_sums_each_chunk_exactly_at_depth():
     ll0 = np.asarray(chunk_loglik(mx.array(on), mx.array(np.array([[0, T - 2]], np.int32)), mx.array(np.array([[0, T + 5]], np.int32)),
                                   8))
     assert np.isclose(ll0[0, 0], on[0, 0]) and np.isfinite(ll0[0, 1])
+
+
+def test_the_unframed_encoding_check_reads_token_ids_and_text_only(tmp_path, tok_bl, monkeypatch):
+    """align's encoding check runs over every row of the cache, so it reads
+    each shard's token ids and text through the safetensors header and
+    never loads a shard's top-K arrays."""
+    from gmlx.distill import view as _view
+    _tiny_cache(tmp_path / "c", tok_bl, K=8)
+    reader = dl.CacheReader(tmp_path / "c")
+    rows = [reader.row(r) for r in range(len(reader))]
+
+    def no_full_shard(self, i):
+        raise AssertionError(f"shard {i} loaded in full")
+
+    monkeypatch.setattr(dl.CacheReader, "shard", no_full_shard)
+    fresh = dl.CacheReader(tmp_path / "c")
+    got = list(fresh.ids_and_texts())
+    assert [r for r, _ids, _text in got] == list(range(len(reader)))
+    for (_r, ids, text), (arrs, text0, _meta) in zip(got, rows):
+        assert np.array_equal(ids, arrs["token_ids"]) and text == text0
+    assert _view.same_encoding(fresh, tok_bl) == (True, f"{len(reader)} rows")
+
+
+def test_train_hs_compares_the_teacher_by_content_not_by_path_or_serving(tmp_path, tok_bl, capsys, monkeypatch):
+    """Two hidden caches of one teacher share a sketch space although one
+    named the file through another path and streamed its experts;
+    caches whose runs recorded another teacher under the same path and
+    arch do not."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    from .test_distill_hidden import _hidden_cache
+
+    _mlx_students(monkeypatch)
+    student = _tiny_mlx_teacher(tmp_path / "student", tok_bl)
+
+    def view_of(name, path, streaming, sha):
+        cache = tmp_path / f"cache-{name}"
+        _hidden_cache(cache, tok_bl, n_rows=8, seed=11)
+        tok_bl.save_pretrained(cache / "tokenizer")
+        man = json.loads((cache / "manifest.json").read_text())
+        man.setdefault("gmlx_distill", {})["teacher"] = {"arch": "qwen3", "path": path,
+                                                         "feeder_installed": streaming, "streaming": streaming}
+        (cache / "manifest.json").write_text(json.dumps(man))
+        prog = json.loads((cache / "progress.json").read_text())
+        prog["run"] = {"teacher": {"size": 1000, "sha256_head": sha}}
+        (cache / "progress.json").write_text(json.dumps(prog))
+        view = tmp_path / f"view-{name}"
+        assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(view))) == 0
+        return str(view)
+
+    a = view_of("a", "/models/t.gguf", False, "aa")
+    b = view_of("b", "/snapshots/t.gguf", True, "aa")
+    c = view_of("c", "/models/t.gguf", False, "cc")
+    base = dict(student=str(student), iters=1, batch_size=2, seed=1, val_batches=1,
+                no_wired_limit=True, lora_rank=2, chunk=16, hs=0.5)
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[a, b], ckpt_dir=str(tmp_path / "ck1"), **base))
+    assert rc == 0, capsys.readouterr().err
+    capsys.readouterr()
+    assert _trainer.run_train(_trainer.TrainOptions(views=[a, c], ckpt_dir=str(tmp_path / "ck2"), **base)) == 2
+    assert "hidden sketches come from other spaces" in capsys.readouterr().err
+
+
+def test_a_boundary_where_one_side_spells_a_dummy_space_gets_no_weight(tmp_path, tok_bl):
+    """A dummy-prefix tokenizer (Llama-2, Mistral) opens a segment with a
+    space the text lacks. Paired with a byte-level one, the teacher's
+    mass at the segment start lands in groups the student does not emit
+    there, in either direction, so that boundary gets no weight. Two
+    dummy-prefix sides line up and keep it."""
+    import dataclasses
+    import string
+    pieces = ["\u2581"] + list(string.ascii_letters + string.digits + ".,!?\n") + \
+        ["\u2581" + c for c in string.ascii_lowercase] + ["\u2581the", "\u2581cat", "\u2581is"]
+    merges = [("\u2581", "t"), ("\u2581t", "h"), ("\u2581th", "e"), ("\u2581", "c"), ("\u2581c", "a"),
+              ("\u2581ca", "t"), ("\u2581", "i"), ("\u2581i", "s")]
+    spm = _spm_prefix_tokenizer(pieces, merges)
+    spm2 = _spm_prefix_tokenizer(pieces + ["\u2581dog"], merges)
+    text = b"the cat is"
+
+    def encode(tok):
+        ids, ends, _ = dl.encode_with_byte_ends(tok, text, dl.token_bytes(tok), add_special_tokens=False)
+        return (np.concatenate([[tok.bos_token_id], ids]).astype(np.int32),
+                np.concatenate([[0], ends]).astype(np.int64))
+
+    def weights(t_tok, s_tok, tables):
+        t_ids, t_ends = encode(t_tok)
+        s_ids, s_ends = encode(s_tok)
+        T, K = len(t_ids), 4
+        top = np.zeros((T, K), dtype=np.int32)
+        for t in range(T):
+            nxt = int(t_ids[t + 1]) if t + 1 < T else int(t_ids[t])
+            others = [v for v in range(5, 5 + 2 * K) if v != nxt][:K - 1]
+            top[t] = [nxt] + others
+        row = {"token_ids": t_ids, "token_end_byte": t_ends, "top_k_indices": top,
+               "top_k_log_softmax": np.tile(np.log([0.6, 0.2, 0.1, 0.05]), (T, 1)).astype(np.float32),
+               "onpath_log_p": np.full(T, np.log(0.6), np.float32), "onpath_mask": np.arange(T) < T - 1,
+               "log_boundary_mass": np.full(T, np.log(0.5), np.float32),
+               "tail_log_mass": np.full(T, np.log(0.05), np.float32)}
+        rv = dl.compile_row(row, text, s_ids, s_ends, tables, Kp=K, knobs=dict(KNOBS),
+                            teacher_special=set(), student_special=set())
+        return rv.bnd_pos, rv.bnd_weight
+
+    for t_tok, s_tok, zeroed in ((tok_bl, spm, True), (spm, tok_bl, True), (spm, spm2, False)):
+        tables = dl.build_tables(t_tok, s_tok)
+        assert not tables.identity and tables.t_len is not None and tables.s_len is not None
+        pos, w = weights(t_tok, s_tok, tables)
+        pos0, w0 = weights(t_tok, s_tok, dataclasses.replace(tables, t_len=None, s_len=None))
+        assert np.array_equal(pos, pos0) and pos[0] == 0 and w0[0] > 0
+        assert w[0] == (0.0 if zeroed else w0[0]) and np.array_equal(w[1:], w0[1:]), (w, w0)
+    dl.save_tables(tmp_path / "t", tables)
+    got = dl.load_tables(tmp_path / "t")
+    assert np.array_equal(got.t_len, tables.t_len) and np.array_equal(got.s_len, tables.s_len)
+
+
+def test_a_module_head_under_value_and_grad_gets_its_gradient_and_keeps_its_weights():
+    """head_spec_from_model's head points the module at the parameters it
+    is handed and puts the module's own back afterwards, so the surrogate
+    pairs the head gradient with the arrays nn.value_and_grad traces, and
+    the model holds its own weights after a loss call."""
+    from types import SimpleNamespace
+
+    import mlx.nn as nn
+
+    from gmlx.distill.head import head_spec_from_model
+
+    rng = np.random.default_rng(7)
+    B, T, d, V, G, Kp = 2, 14, 8, 64, 30, 4
+    group_of = rng.integers(0, G, V).astype(np.int32)
+    bmask = rng.random(V) < 0.25
+    batch = _synthetic_batch(rng, B, T, V, G, group_of, Kp, bmask)
+    bm = dl.batch_to_mx(batch)
+    hidden = mx.array(rng.standard_normal((B, int(batch["student_ids"].shape[1]), d)).astype(np.float32))
+    knobs = dict(KNOBS, lambda_ce=0.5)
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.args = SimpleNamespace(tie_word_embeddings=False)
+            self.model = nn.Module()
+            self.model.embed_tokens = nn.Embedding(V, d)
+            self.lm_head = nn.Linear(d, V, bias=False)
+
+    m = Model()
+    mx.eval(m.parameters())
+    head = head_spec_from_model(m)
+    W0 = m.lm_head.weight
+
+    def loss_of(_model):
+        loss, _ = dl.distill_loss(hidden, bm, head, group_of=mx.array(group_of), G=G, Kp=Kp,
+                                  log_bmask=dl.log_bmask_from(bmask), knobs=knobs, C=5)
+        return loss
+
+    mx.eval(loss_of(m))
+    assert m.lm_head.weight is W0
+    m.freeze()
+    m.lm_head.unfreeze()
+    _loss, grads = nn.value_and_grad(m, loss_of)(m)
+    ref = mx.grad(lambda w: _dense_loss_mx(hidden, w, bm, mx.array(group_of), G, Kp, bmask, knobs))(W0)
+    mx.eval(grads, ref)
+    got = np.array(grads["lm_head"]["weight"])
+    assert np.abs(got).max() > 0 and np.allclose(got, np.array(ref), atol=2e-4, rtol=2e-3), \
+        np.abs(got - np.array(ref)).max()

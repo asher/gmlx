@@ -608,3 +608,30 @@ def test_census_keeps_the_closing_markup_out_of_the_trace_ranges(tmp_path, tok):
     assert all(v == [[4, 7]] for v in s["high_delta_trace"].values()), s["high_delta_trace"]
     assert all(len(v) == 1 and v[0][0] == 0 for v in s["high_delta"].values()), s["high_delta"]
     assert s["teacher_high_delta"]["positions"] == 2 * len(REPLIES)
+
+
+def test_census_keeps_the_closing_markup_out_when_the_trace_carries_newlines(tmp_path, tok):
+    """A server returns the reasoning with newlines around it, and the row
+    renders it that way. render_row anchors the trace at its stripped
+    text, so the census measures the trace the same way, and a
+    high-delta position in the closing markup stays out of the map."""
+    tk = _with_template(tok, _TEMPLATE_TRACE)
+    trace = "\nthe cat\n"
+    closing = "\n</think>\n"
+    convs = [[{"role": "user", "content": f"say it {i}"},
+              {"role": "assistant", "content": r, "reasoning_content": trace}] for i, r in enumerate(REPLIES)]
+    off = len(trace.strip()) + len(closing)
+    common = dict(frame="reply-think", reason_target=True, content_offset=off)
+    without = _reply_cache(tmp_path / "without", tk, convs, doc_prefix="a.jsonl", **common)
+    # 4 starts "cat" inside the trace, 8 starts "<" inside the markup, off starts the content
+    with_ = _reply_cache(tmp_path / "with", tk, convs, doc_prefix="a.jsonl", boost={4: 6.0, 8: 6.0, off: 6.0},
+                         seed=5, **common)
+    text, spans = dl.render_row(tk, convs[0], open_tail=False, last_only=True, reason_target=True)
+    b0 = spans[-1][0]
+    assert text[b0:b0 + off] == (trace.strip() + closing).encode()
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert len(s["high_delta_trace"]) == len(REPLIES)
+    assert all(v == [[4, 7]] for v in s["high_delta_trace"].values()), s["high_delta_trace"]
+    assert s["teacher_high_delta"]["positions"] == 2 * len(REPLIES)

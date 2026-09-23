@@ -33,7 +33,7 @@ import numpy as np
 
 from .constants import log
 from .data import CacheReader
-from .format import write_json_atomic
+from .format import teacher_fingerprint, write_json_atomic
 
 FLOOR = 1e-12
 HIST_BINS = [-math.inf, -1, -0.1, 0.1, 0.5, 1, 2, 4, math.inf]
@@ -207,8 +207,10 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         trace_len = None
         msgs0 = meta0.get("messages") or []
         rc = msgs0[-1].get("reasoning_content") if msgs0 and isinstance(msgs0[-1], dict) else None
-        if isinstance(rc, str) and rc:
-            tb = rc.encode("utf-8")
+        if isinstance(rc, str) and rc.strip():
+            # render_row anchors the trace at its stripped text, and a
+            # server returns it with the newlines around it
+            tb = rc.strip().encode("utf-8")
             if text0[b0:b0 + len(tb)] == tb:
                 trace_len = len(tb)
         sides = []
@@ -349,21 +351,10 @@ def cache_mismatch(base_dir: Path, base: dict, other_dir: Path, other: dict) -> 
     tb = (other.get("gmlx_distill") or {}).get("teacher") or {}
     if ta.get("arch") != tb.get("arch"):
         return f"teacher arch ({ta.get('arch')!r} vs {tb.get('arch')!r})"
-    fa, fb = _teacher_fingerprint(base_dir), _teacher_fingerprint(other_dir)
+    fa, fb = teacher_fingerprint(base_dir), teacher_fingerprint(other_dir)
     if fa and fb and fa != fb:
         return "teacher (by size and content hash)"
     return None
-
-
-def _teacher_fingerprint(cache_dir: Path) -> dict | None:
-    """The teacher block of the cache's run fingerprint, None when the
-    cache has no progress.json or it records none."""
-    try:
-        run = json.loads((cache_dir / "progress.json").read_text(encoding="utf-8")).get("run") or {}
-    except (OSError, ValueError, AttributeError):
-        return None
-    t = run.get("teacher") if isinstance(run, dict) else None
-    return dict(t) if isinstance(t, dict) else None
 
 
 def run_census(opts: CensusOptions) -> int:

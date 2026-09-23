@@ -276,24 +276,30 @@ def pick_model_id(ids: list[str], teacher: str | None) -> str:
 
 def wait_ready(base_url: str, proc, timeout: float, teacher: str | None = None) -> str:
     """Poll ``/models`` until it lists a model, then require one 1-token
-    completion (the model list answers while the model still preloads).
-    Returns the served model id, chosen by ``pick_model_id`` when the
-    server lists several."""
+    completion (the model list answers while the model still preloads,
+    and a server still loading answers the completion with an HTTP error,
+    which is polled again). Returns the served model id, chosen by
+    ``pick_model_id`` when the server lists several; a list in which none
+    or several match the teacher ends the wait at once."""
     deadline = time.time() + timeout
+    last = ""
     while time.time() < deadline:
         if proc is not None and proc.poll() is not None:
             raise ServerError(f"server exited with code {proc.returncode} before becoming ready")
         try:
-            data = _get_json(base_url + "/models", timeout=3).get("data") or []
-            if data:
-                model_id = pick_model_id([str(d["id"]) for d in data], teacher)
-                body = {"model": model_id, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+            ids = [str(d["id"]) for d in _get_json(base_url + "/models", timeout=3).get("data") or []]
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            ids, last = [], f"GET /models: {e}"
+        if ids:
+            model_id = pick_model_id(ids, teacher)
+            body = {"model": model_id, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+            try:
                 _post_json(base_url + "/chat/completions", body, timeout=120)
                 return model_id
-        except (urllib.error.URLError, OSError, ValueError, KeyError):
-            pass
+            except (ServerError, urllib.error.URLError, OSError, ValueError, KeyError) as e:
+                last = str(e)
         time.sleep(2)
-    raise ServerError(f"server not ready after {timeout:.0f}s")
+    raise ServerError(f"server not ready after {timeout:.0f}s" + (f" (last error: {last})" if last else ""))
 
 
 def stop_server(opts: GenOptions, proc) -> None:

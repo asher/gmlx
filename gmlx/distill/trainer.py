@@ -20,6 +20,7 @@ from gmlx.tune.lora import LORA_KEYS, lora_scale, prepare_lora_student
 
 from . import align as _align
 from . import data as _data
+from . import format as _format
 from . import frames as _frames
 from . import hidden as _hidden
 from . import loss as _loss
@@ -472,9 +473,13 @@ def run_train(opts: TrainOptions) -> int:
             if len(dims) != 1:
                 log(f"[train] refuse: the views' hidden sketches differ in width {sorted(dims)}")
                 return 2
-            spaces = [(dict(b or {}), (rd.manifest.get("gmlx_distill") or {}).get("teacher")) for b, rd in
-                      zip(blocks, readers)]
-            if any(sp != spaces[0] for sp in spaces[1:]):
+            # the teacher compares by arch and by the size and content hash
+            # its run recorded, never by the path it was named with or by
+            # whether it streamed its experts
+            spaces = [(dict(b or {}), ((rd.manifest.get("gmlx_distill") or {}).get("teacher") or {}).get("arch"),
+                       _format.teacher_fingerprint(rd.dir)) for b, rd in zip(blocks, readers)]
+            base = spaces[0]
+            if any(sp[:2] != base[:2] or (sp[2] and base[2] and sp[2] != base[2]) for sp in spaces[1:]):
                 # a sketch is a projection of one teacher's states by one
                 # seeded matrix; targets from two of them share no map
                 log("[train] refuse: the views' hidden sketches come from other spaces (layer, width, seed or "

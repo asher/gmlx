@@ -155,6 +155,18 @@ def read_json(path: Path) -> Any:
         return json.load(fh)
 
 
+def teacher_fingerprint(cache_dir: Path) -> dict | None:
+    """The size and content hash of the teacher a cache was made with, the
+    teacher block of the run fingerprint in progress.json; None when the
+    cache has no progress.json or it records none."""
+    try:
+        run = read_json(Path(cache_dir) / "progress.json").get("run") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    t = run.get("teacher") if isinstance(run, dict) else None
+    return dict(t) if isinstance(t, dict) else None
+
+
 def free_bytes(path: Path) -> int:
     st = os.statvfs(str(path))
     return st.f_bavail * st.f_frsize

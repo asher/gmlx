@@ -9,7 +9,7 @@ from typing import Any
 
 GB = 1e9
 FORMAT_VERSION = 1
-TABLES_VERSION = 6
+TABLES_VERSION = 7
 LOG_FLOOR = math.log(2.0 ** -126)   # the f32 min-normal underflow floor
 NEG_INF = float("-inf")
 

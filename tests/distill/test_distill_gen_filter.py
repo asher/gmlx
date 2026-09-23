@@ -1684,3 +1684,58 @@ def test_filter_counts_an_input_whose_sidecar_has_no_run_block_from_its_rows(tmp
         run = json.loads((tmp_path / "j.jsonl.gen.json").read_text())["run"]
         assert run["completed"] == 5 and run["generated_tokens"] == 50 and run["wall_s"] == 4.0
         assert run["kept"]["completed"] == 5
+
+
+def test_gen_waits_through_a_readiness_completion_that_fails_while_the_server_loads(stub_server, monkeypatch):
+    """A server lists its model while it still loads it and answers the
+    one-token readiness completion with an HTTP error (a 503 while the
+    load is deferred) until the load is done; gen polls again instead of
+    ending the run. A server that never gets ready names its last error
+    in the timeout."""
+    _Handler.fail_once = {"hi"}
+    assert gen.wait_ready(stub_server, None, 30) == "stub-teacher"
+    assert [c["messages"][-1]["content"] for c in _Handler.calls] == ["hi", "hi"]
+
+    def always_503(url, body, timeout):
+        raise gen.ServerError("HTTP 503 from x: loading")
+
+    monkeypatch.setattr(gen, "_post_json", always_503)
+    with pytest.raises(gen.ServerError, match=r"not ready after 0s \(last error: HTTP 503 from x: loading\)"):
+        gen.wait_ready(stub_server, None, 0.5)
+
+
+def test_filter_joins_a_rerun_sidecar_that_never_saw_the_server(tmp_path, stub_server, capsys):
+    """A gen rerun that finds every prompt answered and no sidecar writes
+    one without the served model id, since it contacted no server. That
+    file joins another gen output of the same settings, while two
+    sidecars naming different served models still refuse."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}])
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": "alpha"},
+                                                     {"role": "assistant", "content": GOOD}],
+                             "gen": {"finish_reason": "stop", "completion_tokens": 30}}) + "\n")
+    assert gen.run_gen(gen.GenOptions(out=str(a), prompts=prompts, base_url=stub_server)) == 0
+    assert _Handler.calls == []
+    side_a = json.loads((tmp_path / "a.jsonl.gen.json").read_text())
+    assert side_a["served_model_id"] is None
+    b = tmp_path / "b.jsonl"
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    (tmp_path / "b.jsonl.gen.json").write_text(json.dumps({**side_a, "served_model_id": "stub-teacher"}))
+    out = tmp_path / "joined.jsonl"
+    capsys.readouterr()
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(out))) == 0, capsys.readouterr().err
+    assert [r["id"] for r in _rows(out)] == ["a", "b"]
+    assert json.loads((tmp_path / "joined.jsonl.gen.json").read_text())["served_model_id"] == "stub-teacher"
+    # the sidecar without the id sits first, so the two that name one
+    # are still checked against each other
+    c = tmp_path / "c.jsonl"
+    c.write_text(json.dumps(_row("c", GOOD)) + "\n")
+    (tmp_path / "c.jsonl.gen.json").write_text(json.dumps({**side_a, "served_model_id": "other-model"}))
+    capsys.readouterr()
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b), str(c)], out=str(out))) == 2
+    err = capsys.readouterr().err
+    assert "served_model_id" in err and str(b) in err, err
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({**side_a, "served_model_id": "other-model"}))
+    capsys.readouterr()
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(out))) == 2
+    assert "served_model_id" in capsys.readouterr().err

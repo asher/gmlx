@@ -220,10 +220,12 @@ def _read_sidecar(path: Path) -> dict | None:
 
 def _settings_diff(a: dict, b: dict) -> list[str]:
     """The keys of _GEN_KEYS on which two sidecars disagree; a model or
-    context named two ways for one file agrees."""
+    context named two ways for one file agrees, and so does a served
+    model id one side does not know (a rerun that contacted no server)."""
     from .gen import same_name
     return [k for k in _GEN_KEYS if a.get(k) != b.get(k)
-            and not (k in ("model", "context") and same_name(a.get(k), b.get(k)))] + \
+            and not (k in ("model", "context") and same_name(a.get(k), b.get(k)))
+            and not (k == "served_model_id" and None in (a.get(k), b.get(k)))] + \
         [k for k in _GEN_KEYS_IF_PRESENT if k in a and k in b and a[k] != b[k]]
 
 
@@ -246,7 +248,17 @@ def run_filter(opts: FilterOptions) -> int:
     first_i = next((i for i, s in enumerate(sides) if s is not None), None)
     first = sides[first_i] if first_i is not None else None
     first_path = inputs[first_i] if first_i is not None else None
+    # a sidecar without a served model id agrees with any, so the id is
+    # checked against the first sidecar that names one
+    served: tuple[str, Path] | None = None
     for p, s in zip(inputs, sides):
+        sid = s.get("served_model_id") if s is not None else None
+        if sid is not None and served is not None and sid != served[0]:
+            print(f"[filter] refuse: {p} was generated with other settings than {served[1]} (served_model_id), "
+                  "filter each file on its own", file=sys.stderr)
+            return 2
+        if sid is not None and served is None:
+            served = (sid, p)
         if s is not None and first is not None and _settings_diff(s, first):
             diff = ", ".join(_settings_diff(s, first))
             print(f"[filter] refuse: {p} was generated with other settings than {first_path} ({diff}), "
@@ -358,6 +370,8 @@ def run_filter(opts: FilterOptions) -> int:
         return 2
     kept = len(survivors)
     sidecar: dict = dict(first) if first is not None else {"gen_version": None}
+    if served is not None:
+        sidecar["served_model_id"] = served[0]
     prev = sidecar.get("filter_version")
     sidecar["filter_version"] = f"{prev}+{FILTER_VERSION}" if prev else FILTER_VERSION
     params = {k: getattr(opts, k) for k in ("min_words", "ngram", "max_repeat", "max_trace_repeat",

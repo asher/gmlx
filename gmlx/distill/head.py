@@ -141,16 +141,26 @@ def head_spec_from_model(model) -> HeadSpec:
         mod = head
 
         def fn(params, h):
+            # the module gets its own parameters back, so a caller's traced
+            # arrays (nn.value_and_grad) stay in place for the surrogate
+            prev = mod.parameters()
             mod.update(params)
-            return mod(h) * scale if scale != 1.0 else mod(h)
+            try:
+                return mod(h) * scale if scale != 1.0 else mod(h)
+            finally:
+                mod.update(prev)
         V = int(mod.weight.shape[0]) if hasattr(mod, "weight") else int(mod(mx_zeros(1, h_dim(inner))).shape[-1])
         return HeadSpec(fn=fn, params=mod.parameters(), softcap=softcap, V=V, live=mod.parameters,
                         weight=head_weight_fn(mod), scale=scale)
     emb = inner.embed_tokens
 
     def fn2(params, h):
+        prev = emb.parameters()
         emb.update(params)
-        return emb.as_linear(h) * scale if scale != 1.0 else emb.as_linear(h)
+        try:
+            return emb.as_linear(h) * scale if scale != 1.0 else emb.as_linear(h)
+        finally:
+            emb.update(prev)
     return HeadSpec(fn=fn2, params=emb.parameters(), softcap=softcap,
                     V=int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1]),
                     live=emb.parameters, weight=head_weight_fn(emb), scale=scale)

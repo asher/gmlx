@@ -49,6 +49,28 @@ class RowView:
     hidden_target: np.ndarray | None = None   # [J, dim] f16 sketch at the boundaries' teacher positions
 
 
+def phantom_space_mismatch(tables: Tables, t_next, t_span, s_next, s_span) -> np.ndarray:
+    """[J] bool: the boundaries where exactly one side's next token spells
+    more bytes than it covers. A dummy prefix (Llama-2 and Mistral SPM)
+    adds a space the text does not hold at a segment start, so that
+    side's distribution there is over tokens that begin with a space
+    while the other side's is not, and the projection pairs the wrong
+    groups. Two sides that both add the space line up. A special token
+    on either side, and tables without token lengths, mark nothing."""
+    s_next = np.asarray(s_next, dtype=np.int64)
+    if tables.t_len is None or tables.s_len is None:
+        return np.zeros(len(s_next), dtype=bool)
+
+    def phantom(lens: np.ndarray, ids, span) -> tuple[np.ndarray, np.ndarray]:
+        ids = np.asarray(ids, dtype=np.int64)
+        n = np.where(ids < len(lens), lens[np.minimum(ids, len(lens) - 1)], -1)
+        return n >= 0, (n >= 0) & (np.asarray(span, dtype=np.int64) < n)
+
+    t_known, t_ph = phantom(tables.t_len, t_next, t_span)
+    s_known, s_ph = phantom(tables.s_len, s_next, s_span)
+    return t_known & s_known & (t_ph != s_ph)
+
+
 def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.ndarray,
                 student_ends: np.ndarray, tables: Tables, *, Kp: int | None,
                 knobs: dict, teacher_special: set[int], student_special: set[int],
@@ -103,9 +125,12 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
     word_initial = tables.bmask_S[nxt]
     w = np.where(word_initial, 1.0, knobs["w_mid"]).astype(np.float32)
     w = np.where(proj["redirect"] > knobs["redirect_cut"], 0.0, w).astype(np.float32)
+    t_next = cache_row["token_ids"][al.t_pos + 1]
+    s_e = np.asarray(student_ends, dtype=np.int64)
+    w = np.where(phantom_space_mismatch(tables, t_next, t_ends[al.t_pos + 1] - t_ends[al.t_pos], nxt,
+                                        s_e[al.s_pos + 1] - s_e[al.s_pos]), 0.0, w).astype(np.float32)
     # tokenization-bias diagnostic: mass projected onto the student's next-token group
     # against the teacher's on-path probability at the same boundary
-    t_next = cache_row["token_ids"][al.t_pos + 1]
     in_topk = (cache_row["top_k_indices"][al.t_pos] == t_next[:, None]).any(axis=1)
     bias_ok, bias_cov = tokenization_bias_check(proj, tables.group_of[nxt].astype(np.int32),
                                                 cache_row["onpath_log_p"][al.t_pos].astype(np.float32), in_topk)
@@ -323,6 +348,23 @@ class CacheReader:
             for r, slot in items:
                 out[r] = ids[slot, :int(am[slot].sum())]
         return out
+
+    def ids_and_texts(self) -> Iterator[tuple[int, np.ndarray, bytes]]:
+        """(row, cached token ids, row bytes) for every row in order, read
+        shard by shard through the safetensors header (token ids,
+        attention mask and text only), so a pass over the whole cache
+        never loads a shard's top-K arrays or touches the shard cache."""
+        from safetensors import safe_open
+        by_shard: dict[int, list[tuple[int, int]]] = {}
+        for r, (i, slot) in enumerate(self.index):
+            by_shard.setdefault(i, []).append((r, slot))
+        for i, items in sorted(by_shard.items()):
+            with safe_open(str(self.dir / f"batch-{i:05d}.safetensors"), framework="np") as f:
+                ids = f.get_tensor("token_ids")
+                am = f.get_tensor("attention_mask")
+                texts = shard_texts({k: f.get_tensor(k) for k in ("text_bytes", "text_offsets")})
+            for r, slot in items:
+                yield r, ids[slot, :int(am[slot].sum())], texts[slot]
 
     def row(self, r: int) -> tuple[dict[str, np.ndarray], bytes, dict]:
         i, slot = self.index[r]

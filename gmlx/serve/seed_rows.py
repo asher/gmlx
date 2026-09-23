@@ -18,9 +18,12 @@ seeded B=1 request come from the same per-request key stream, so a
 same-setting replay matches; replays across different speculation
 settings do not.
 
-Wiring: the request's seed is stashed when the engine builds the
-request's per-row hooks (the last per-request step before insert on the
-single GPU thread) and bound to the uid insert returns. The decode step
+Wiring: the request's seed is stashed when the engine thread builds the
+request's logits processors, which it does as an argument of that
+request's insert, and bound to the uid insert returns. The thinking
+budget criteria are no place for it: mlx-vlm builds them on the
+request's own thread when the request arrives, so requests queued while
+the engine decodes would each replace the one before. The decode step
 and the speculative round both publish their row uids on the sampler
 around each draw.
 """
@@ -28,15 +31,17 @@ around each draw.
 from __future__ import annotations
 
 import logging
+import threading
 
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_seed_rows"
 _MAX_SEEDS = 1024
 
-# Single-slot handoff between the per-request argument hook and the
-# insert that follows it on the GPU thread.
-_PENDING: list = []
+# Handoff from the logits-processors hook to the insert that takes its
+# result as an argument: both run on the engine thread, back to back for
+# one request, so the slot is keyed by thread and holds one seed.
+_PENDING: dict[int, int] = {}
 
 
 def register_row_seed(sampler, uid, seed) -> None:
@@ -56,19 +61,21 @@ def install_per_request_seed() -> None:
     if getattr(_ar.BatchGenerator.insert, _INSTALLED_FLAG, False):
         return
 
-    _orig_criteria = ResponseGenerator._make_thinking_budget_criteria
+    _orig_procs = ResponseGenerator._make_logits_processors
 
-    def _criteria_with_seed(self, args, input_ids):
-        _PENDING.clear()
+    def _procs_with_seed(self, args, *rest, **kwargs):
+        key = threading.get_ident()
         seed = getattr(args, "seed", None)
         if seed is not None and getattr(args, "temperature", 1.0) != 0:
-            _PENDING.append(int(seed))
-        return _orig_criteria(self, args, input_ids)
+            _PENDING[key] = int(seed)
+        else:
+            _PENDING.pop(key, None)
+        return _orig_procs(self, args, *rest, **kwargs)
 
     _orig_insert = _ar.BatchGenerator.insert
 
     def _insert_with_seed(self, *args, **kwargs):
-        seed = _PENDING.pop() if _PENDING else None
+        seed = _PENDING.pop(threading.get_ident(), None)
         uids = _orig_insert(self, *args, **kwargs)
         if seed is not None and getattr(self, "sampler", None) is not None:
             for uid in uids:
@@ -112,13 +119,13 @@ def install_per_request_seed() -> None:
 
     # Carry the wrapped method's flags forward so an earlier installer's
     # idempotency guard still sees its flag through this wrapper.
-    _criteria_with_seed.__dict__.update(getattr(_orig_criteria, "__dict__", {}))
-    _criteria_with_seed.__dict__[_INSTALLED_FLAG] = True
+    _procs_with_seed.__dict__.update(getattr(_orig_procs, "__dict__", {}))
+    _procs_with_seed.__dict__[_INSTALLED_FLAG] = True
     _insert_with_seed.__dict__[_INSTALLED_FLAG] = True
     _step_with_rows.__dict__[_INSTALLED_FLAG] = True
     _generate_with_rows.__dict__[_INSTALLED_FLAG] = True
     _next_with_rows.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator._make_thinking_budget_criteria = _criteria_with_seed
+    ResponseGenerator._make_logits_processors = _procs_with_seed
     _ar.BatchGenerator.insert = _insert_with_seed
     _ar.GenerationBatch._step = _step_with_rows
     _ar.PromptProcessingBatch.generate = _generate_with_rows

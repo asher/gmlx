@@ -136,12 +136,11 @@ def same_encoding(reader: CacheReader, student_tok) -> tuple[bool, str]:
     added (the BOS policies were compared before). An equal vocabulary
     with other merges or another pre-tokenizer segments the same bytes
     differently, and the identity path would train the student on ids
-    it never produces."""
+    it never produces. The rows are read from their token ids and text
+    alone, so the top-K arrays stay on disk."""
     stb = token_bytes(student_tok)
-    for r in range(len(reader)):
-        arrs, text, _meta = reader.row(r)
+    for r, cached, text in reader.ids_and_texts():
         ids, _ends, _f = _tokens.encode_with_byte_ends(student_tok, text, stb, add_special_tokens=True)
-        cached = arrs["token_ids"]
         if len(ids) != len(cached) or not np.array_equal(ids, cached):
             return False, f"row {r}: {len(ids)} student tokens vs {len(cached)} cached"
     return True, f"{len(reader)} rows"

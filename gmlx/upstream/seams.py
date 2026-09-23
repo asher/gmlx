@@ -237,8 +237,14 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.generation",
          "ResponseGenerator._make_thinking_budget_criteria",
          "chat_behavior.install_thinking_budget_fix (rebind); "
-         "seed_rows.install_per_request_seed; server_patches.mtp_thinking "
-         "(restore + hook attach; runtime chain mtp -> seed -> tbfix)",
+         "server_patches.mtp_thinking (restore + hook attach; runtime "
+         "chain mtp -> tbfix)",
+         critical=True),
+    Seam("mlx_vlm.server.generation",
+         "ResponseGenerator._make_logits_processors",
+         "seed_rows.install_per_request_seed; lora_rows.install_row_channel "
+         "(engine-thread handoff to the insert that takes the result as "
+         "an argument)",
          critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
          "server_patches.row_failed (permanently failed rows delivered "
