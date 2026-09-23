@@ -425,3 +425,18 @@ def test_per_layer_checkpointing_refuses_the_residual_bank():
         checkpoint_layers(model)
     assert KimiK3DecoderLayer.__call__ is orig
     assert not any(getattr(ly, "_gmlx_ckpt", False) for ly in model.layers)
+
+
+def test_router_ids_carry_no_gradient():
+    """The router gathers its weights at the ids it picked from the scores
+    it differentiates. The ids leave the gradient, so the block's input
+    gradient is defined without any training patch."""
+    from gmlx.models.kimi_k3 import KimiK3MoE
+
+    mx.random.seed(2)
+    block = KimiK3MoE(_tiny_args())
+    mx.eval(block.parameters())
+    x = mx.random.normal((2, 5, 64)) * 0.1
+    g = mx.grad(lambda x: (block(x).astype(mx.float32) ** 2).sum())(x)
+    mx.eval(g)
+    assert bool(mx.isfinite(g).all()) and float(mx.abs(g).sum()) > 0

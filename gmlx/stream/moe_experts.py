@@ -65,7 +65,7 @@ def _mass_filter_fn(p: float):
     # shape, which is noise next to the expert GEMMs.
     @mx.compile
     def _filter(inds, weights):
-        order = mx.argsort(-weights, axis=-1)
+        order = mx.stop_gradient(mx.argsort(-weights, axis=-1))
         w = mx.take_along_axis(weights, order, axis=-1)
         e = mx.take_along_axis(inds, order, axis=-1)
         total = w.sum(axis=-1, keepdims=True)
@@ -277,7 +277,7 @@ def _qwen3_moe_forward(mod, x):
             scores = scores / mx.sum(scores, axis=-1, keepdims=True)
         return scores
 
-    inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+    inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
     inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
@@ -303,7 +303,7 @@ def qwen3_next_moe_forward(mod, x):
             scores = scores / scores.sum(axis=-1, keepdims=True)
         return scores
 
-    inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+    inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
     inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
@@ -331,7 +331,7 @@ def _minimax_forward(mod, x):
         w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
         return w.astype(x.dtype)
 
-    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+    inds = mx.stop_gradient(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
     inds, scores = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * scores[..., None]).sum(axis=-2)
@@ -352,7 +352,7 @@ def _minimax_m3_forward(mod, x):
         w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
         return (w * mod.routed_scaling_factor).astype(x.dtype)
 
-    inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+    inds = mx.stop_gradient(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
     inds, weights = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.switch_mlp(x, inds)
     y = (y * weights[..., None]).sum(axis=-2)
@@ -375,7 +375,7 @@ def gptoss_moe_forward(mod, x):
         return mx.softmax(
             mx.take_along_axis(g, inds, axis=-1), axis=-1, precise=True)
 
-    inds = mx.argpartition(g, kth=-k, axis=-1)[..., -k:]
+    inds = mx.stop_gradient(mx.argpartition(g, kth=-k, axis=-1)[..., -k:])
     inds, weights = _apply_expert_controls(mod, inds, weights_at(inds), weights_at)
     y = mod.experts(x, inds)
     y = (y * mx.expand_dims(weights, axis=-1)).sum(axis=-2)

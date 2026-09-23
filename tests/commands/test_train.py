@@ -330,3 +330,38 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
                           "--grad-checkpoint"])
     assert rc == 2
     assert "error: --grad-checkpoint: per-layer checkpointing cannot run _Layer" in capsys.readouterr().err
+
+
+def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_path):
+    """mlx-lm's train loop runs with argpartition and its siblings detached,
+    so a MoE base's router has a backward, and train_lora puts the
+    originals back when the loop ends."""
+    import contextlib
+
+    import mlx_lm.tuner.datasets as datasets
+    import mlx_lm.tuner.trainer as trainer
+    import mlx_kquant.mlx_lm_patch as patch
+
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+    import gmlx.tune.attention as attention
+    import gmlx.tune.gdn as gdn
+
+    seen = []
+    model = _Model()
+    orig = mx.argpartition
+    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
+    monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: None))
+    monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
+    monkeypatch.setattr(trainer, "train",
+                        lambda *a, **k: seen.append(getattr(mx.argpartition, "_gmlx_index_stop_gradient", False)))
+    monkeypatch.setattr(train, "save_trained_adapter", lambda *a, **k: 0)
+    train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
+    assert seen == [True]
+    assert mx.argpartition is orig

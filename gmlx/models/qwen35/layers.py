@@ -153,7 +153,7 @@ def _moe_layer_classes():
             gates = mx.softmax(gates, axis=-1, precise=True)
 
             k = self.top_k
-            inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+            inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
             scores = mx.take_along_axis(gates, inds, axis=-1)
             scores = scores / scores.sum(axis=-1, keepdims=True)
 

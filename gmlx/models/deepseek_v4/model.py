@@ -724,7 +724,7 @@ def _expert_select(
     logits = logits.astype(mx.float32)
     scores = _score_func(logits, scoring_func)
     biased = scores + e_score_correction_bias
-    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
+    inds = mx.stop_gradient(mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k])
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -771,7 +771,7 @@ def _expert_select_vl(
         image_mask[..., None], e_score_correction_bias_vl, e_score_correction_bias
     )
     biased = scores + bias
-    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
+    inds = mx.stop_gradient(mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k])
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -798,9 +798,9 @@ def _hash_expert_select_vl(
     logits = logits.astype(mx.float32)
     scores = _score_func(logits, scoring_func)
     text_inds = tid2eid[input_ids]
-    image_inds = mx.argpartition(
+    image_inds = mx.stop_gradient(mx.argpartition(
         -(scores + e_score_correction_bias_vl), kth=top_k - 1, axis=-1
-    )[..., :top_k].astype(text_inds.dtype)
+    )[..., :top_k].astype(text_inds.dtype))
     inds = mx.where(image_mask[..., None], image_inds, text_inds)
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:

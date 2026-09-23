@@ -179,7 +179,7 @@ def expert_select(
     orig_scores = scores
     scores = scores + expert_bias
 
-    inds = mx.argpartition(scores, kth=-top_k, axis=-1)[..., -top_k:]
+    inds = mx.stop_gradient(mx.argpartition(scores, kth=-top_k, axis=-1)[..., -top_k:])
     scores = mx.take_along_axis(orig_scores, inds, axis=-1)
     if top_k > 1 and norm_topk_prob:
         scores = scores / (scores.sum(axis=-1, keepdims=True) + 1e-20)

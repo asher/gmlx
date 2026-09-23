@@ -2048,6 +2048,26 @@ def _tiny_mlx_teacher(tmp: Path, tok, seed=0) -> Path:
     return d
 
 
+def _tiny_mlx_moe_student(tmp: Path, tok, seed=0) -> Path:
+    """A two-layer qwen3_moe checkpoint over tok's vocabulary, each layer
+    routing its tokens to two of four experts."""
+    from mlx.utils import tree_flatten
+    from mlx_lm.models import qwen3_moe
+
+    tmp.mkdir(parents=True, exist_ok=True)
+    tok.save_pretrained(tmp)
+    cfg = dict(model_type="qwen3_moe", hidden_size=32, num_hidden_layers=2, intermediate_size=64,
+               num_attention_heads=4, num_key_value_heads=2, head_dim=8, rms_norm_eps=1e-5,
+               vocab_size=len(dl.token_bytes(tok)), num_experts=4, num_experts_per_tok=2, decoder_sparse_step=1,
+               mlp_only_layers=[], moe_intermediate_size=16, norm_topk_prob=True, tie_word_embeddings=True,
+               max_position_embeddings=512, rope_theta=10000.0)
+    mx.random.seed(seed)
+    model = qwen3_moe.Model(qwen3_moe.ModelArgs.from_dict(cfg))
+    mx.save_safetensors(str(tmp / "model.safetensors"), dict(tree_flatten(model.parameters())))
+    (tmp / "config.json").write_text(json.dumps(cfg))
+    return tmp
+
+
 def _text_corpus(path: Path, n=3) -> Path:
     path.write_text("".join(json.dumps({"text": "the cat is the cat " * 4}) + "\n" for _ in range(n)))
     return path
@@ -6970,3 +6990,23 @@ def test_train_refuses_grad_checkpoint_on_a_layer_class_that_shares_state(tmp_pa
             "its layers share a bank") in capsys.readouterr().err
     assert llama.TransformerBlock.__call__ is orig
     assert not (tmp_path / "ck" / "last").exists()
+
+
+def test_train_runs_a_moe_student(tmp_path, tok_bl, capsys, monkeypatch):
+    """A stock MoE student gathers its routing weights at argpartition ids
+    that carry a gradient, which MLX cannot differentiate. The run keeps
+    the ids off the gradient, trains, and puts argpartition back."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, _ = _cpu_view(tmp_path, tok_bl)
+    student = _tiny_mlx_moe_student(tmp_path / "moe", tok_bl)
+    ck = tmp_path / "ck"
+    orig = mx.argpartition
+    rc = _trainer.run_train(_trainer.TrainOptions(
+        views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+        no_wired_limit=True, lora_rank=2, chunk=16))
+    assert rc == 0, capsys.readouterr().err
+    assert mx.argpartition is orig
+    state = json.loads((ck / "last" / "state.json").read_text())
+    assert state["iteration"] == 2

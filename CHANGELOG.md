@@ -50,6 +50,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fused gate-up or q-k-v projections.
 - A request's `seed` could be applied to another request that arrived
   while the server was busy, so a seeded reply did not repeat.
+- `gmlx train` on a MoE GGUF failed at the first step with
+  `Cannot calculate VJP with respect to indices`.
 
 ## [0.4.14] - 2026-09-18
 

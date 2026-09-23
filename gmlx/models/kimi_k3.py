@@ -200,7 +200,7 @@ class KimiK3MoE(nn.Module):
                 w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
             return (w * self.args.routed_scaling_factor).astype(x.dtype)
 
-        inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+        inds = mx.stop_gradient(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
         weights = weights_at(inds)
 
         # Expert-controls seam (probe / expert-mass / route record and

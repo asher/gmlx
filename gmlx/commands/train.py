@@ -57,6 +57,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from gmlx.tune.attention import install_training_attention
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
+    from gmlx.tune.indices import install_index_stop_gradient
 
     mx.random.seed(seed)
     patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
@@ -95,6 +96,9 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
             restore_attention()
             raise TrainRefused(f"--grad-checkpoint: {e}") from None
         print(f"[train] per-layer checkpointing on {n_ck} layer classes")
+    # a router gathers its weights at ids it picked from trained scores,
+    # and MLX has no backward for a gather at ids that carry a gradient
+    restore_ids = install_index_stop_gradient()
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(
@@ -105,6 +109,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                 adapter_file=os.path.join(scratch, "mlx_lm_final.safetensors"))
             train(model, opt, CacheDataset(train_set), CacheDataset(val_set), args=args)
     finally:
+        restore_ids()
         restore_attention()
 
     n = save_trained_adapter(model, config, base_arch=base_arch,

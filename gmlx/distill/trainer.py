@@ -431,6 +431,7 @@ def run_train(opts: TrainOptions) -> int:
     from gmlx.tune.attention import install_training_attention
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
+    from gmlx.tune.indices import install_index_stop_gradient
     if n_adapted == 0:
         log(f"[train] refuse: no module of the student matched the LoRA keys ({', '.join(LORA_KEYS)}), "
             "nothing would train")
@@ -450,6 +451,9 @@ def run_train(opts: TrainOptions) -> int:
         log(f"[train] per-layer checkpointing on {n_ck} layer classes")
     restore_attn = install_training_attention(model)
     log(f"[train] blocked attention: {getattr(restore_attn, 'count', 0)} attention modules patched")
+    # a router gathers its weights at ids it picked from trained scores,
+    # and MLX has no backward for a gather at ids that carry a gradient
+    restore_ids = install_index_stop_gradient()
     try:
         gdn_install = install_training_gdn(model)
         if gdn_install.count:
@@ -725,4 +729,5 @@ def run_train(opts: TrainOptions) -> int:
                            "peak_gb": mx.get_peak_memory() / GB}})
         return 0
     finally:
+        restore_ids()
         restore_attn()
