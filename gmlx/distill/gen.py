@@ -662,11 +662,14 @@ def run_gen(opts: GenOptions) -> int:
             # the totals come from the rows, so they cover every run that
             # wrote to the file; failed is this run's, since a resume
             # retries every earlier failure; wall_s adds up over the runs
-            # the sidecar saw, and tok_s_aggregate is this run's rate
+            # that ended (an interrupted run records none), and
+            # tok_s_aggregate is this run's rate
             "run": {**row_totals(out), "failed": n_err, "wall_s": el, "tok_s_aggregate": gen_tokens / max(el, 1e-9),
                     "concurrency": opts.concurrency}}
         prev = json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
-        if prev and prev.get("prompt_set_sha256") == prompt_hash and isinstance(prev.get("run"), dict):
+        # a resume already matched the settings; prompts added since the
+        # last run change the prompt set but not what the wall time counts
+        if prev and isinstance(prev.get("run"), dict):
             sidecar["run"]["wall_s"] += prev["run"].get("wall_s", 0)
         write_json_atomic(side, sidecar)
         log(f"[gen] done: {n_ok} replies, {gen_tokens} tokens, {gen_tokens / max(el, 1e-9):.0f} tok/s aggregate, "

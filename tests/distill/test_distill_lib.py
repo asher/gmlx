@@ -4979,3 +4979,131 @@ def test_materialize_compiles_each_row_once_in_shard_order(tmp_path, tok_bl, tok
     assert loader.materialize(tmp_path / "v") == reader.n_shards
     assert len(seen) == len(reader) == len(set(seen))
     assert seen == [r for i in range(reader.n_shards) for r, (si, _s) in enumerate(reader.index) if si == i]
+
+
+# ---------------------------------------------------------------------------
+# round eighteen: a tool-call final turn, a null student list in eval,
+# the framed identity align, the eval slices in process
+# ---------------------------------------------------------------------------
+
+def test_reply_rows_drop_a_final_turn_without_content(tmp_path, tok_bl, capsys):
+    """A conversation whose final assistant turn is a tool call (null
+    content) has no reply to target: fit_reply, the eval span rows and
+    the cache pass drop it instead of targeting the earlier turn with a
+    content start computed on empty content."""
+    from gmlx.distill import eval as _eval
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    tb = dl.token_bytes(tok)
+    good = [{"role": "user", "content": "the cat"}, {"role": "assistant", "content": "the cat is the cat 123"}]
+    tool = good + [{"role": "user", "content": "the hat"},
+                   {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function"}]}]
+    assert dl.fit_reply(tok, good, 256, tb) is not None
+    assert dl.fit_reply(tok, tool, 256, tb) is None
+    assert dl.fit_reply(tok, tool[:-1] + [{"role": "assistant", "content": "  "}], 256, tb) is None
+    rows, dropped = _eval._span_rows(tok, [good, tool], max_len=256, last_only=True)
+    assert len(rows) == 1 and dropped == 1
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"id": "g", "messages": good}) + "\n" + json.dumps({"id": "t", "messages": tool})
+                      + "\n", encoding="utf-8")
+    out = tmp_path / "cache"
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8,
+                                                  max_len=256, frame="reply"))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "1 conversations dropped" in err
+    reader = dl.CacheReader(out)
+    assert len(reader) == 1 and reader.rows_meta[0]["doc_id"].endswith(":0")
+
+
+def test_read_jsonl_takes_a_null_student_list_as_absent(tmp_path):
+    from gmlx.distill import evaluate as _ev
+
+    p = tmp_path / "s.jsonl"
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
+    p.write_text(json.dumps({"id": "a", "messages": msgs, "student_messages": None}) + "\n", encoding="utf-8")
+    rows = _ev.read_jsonl(p)
+    assert rows[0]["student_messages"] is None and rows[0]["messages"] == msgs
+    p.write_text(json.dumps({"id": "a", "messages": None}) + "\n", encoding="utf-8")
+    with pytest.raises(_ev.UnreadableInput, match="'messages' is not a list of messages"):
+        _ev.read_jsonl(p)
+
+
+def test_align_runs_the_render_check_on_a_framed_identity_pair_and_refuses_a_bad_student(tmp_path, tok_bl,
+                                                                                         capsys):
+    """The identity path over a framed cache proves the student's template
+    reproduces the cached ids before it forwards them; a student
+    directory without a tokenizer refuses with exit 2."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import view as _view
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
+        {"role": "user", "content": f"the cat {i}"},
+        {"role": "assistant", "content": "the cat is the cat 123 " * (1 + i % 2)}]}) + "\n" for i in range(4)),
+        encoding="utf-8")
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                    top_k=8, max_len=256, frame="reply")) == 0
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "view")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "[align] framed cache (reply): student render matches (4 rows checked)" in err
+    assert json.loads((tmp_path / "view" / "view.json").read_text())["identity"] is True
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(empty), out=str(tmp_path / "view2")))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"[align] refuse: cannot load the student tokenizer at {empty}:" in err
+    assert not (tmp_path / "view2").exists()
+
+
+def test_eval_scores_chat_reply_and_kld_slices_in_process(tmp_path, tok_bl, monkeypatch, capsys):
+    """The chat and reply slices and the cache KL run inside run_eval on
+    the CPU fixture: the teacher scored against its own cache reads a
+    KL of zero with full top-1 agreement, the reply slice takes the
+    census positions, and the report renders the three tables."""
+    from gmlx.distill import census as _census
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import student as _student
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
+        {"role": "user", "content": f"the cat {i}"},
+        {"role": "assistant", "content": "the cat is the cat 123 " * (1 + i % 3)}]}) + "\n" for i in range(6)),
+        encoding="utf-8")
+    caches = []
+    for name in ("without", "with"):
+        c = tmp_path / name
+        assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(c),
+                                                        top_k=8, max_len=256, frame="reply")) == 0
+        caches.append(c)
+    census = tmp_path / "census.json"
+    assert _census.run_census(_census.CensusOptions(without=str(caches[0]), with_=[str(caches[1])],
+                                                    out=str(census), corpus=str(corpus),
+                                                    delta_threshold=-100.0)) == 0
+    model, cfg, tokenizer = _student.load_mlx_student(str(teacher))
+    monkeypatch.setattr(_ev, "load_student", lambda p, a, h: (model, cfg, tokenizer, "mlx"))
+    md, js = tmp_path / "r.md", tmp_path / "r.json"
+    opts = _ev.EvalOptions(student=str(teacher), md=str(md), json=str(js), max_len=16, batch_size=2,
+                           reply_slices=[f"held={corpus}"], chat_slices=[f"chat={corpus}"],
+                           kld_cache=str(caches[0]), reply_positions=str(census))
+    assert _ev.run_eval(opts) == 0, capsys.readouterr().err
+    after = json.loads(js.read_text())["after"]
+    assert after["kld"]["mean_kld_nats"] < 1e-4 and after["kld"]["top1_agreement"] == 1.0
+    assert after["kld"]["rows"] == 6 and after["kld"]["K"] == 8
+    held = after["reply_bpb"]["held"]
+    assert held["rows"] == 6 and held["dropped"] == 0 and held["restricted"] is True
+    assert sorted(it["id"] for it in held["items"]) == [f"r{i}" for i in range(6)]
+    assert after["chat_bpb"]["chat"]["rows"] == 6 and after["chat_bpb"]["chat"]["bpb"] > 0
+    text = md.read_text()
+    for head in ("| chat slice |", "| reply slice |", "| kld vs cache K=8 |"):
+        assert head in text

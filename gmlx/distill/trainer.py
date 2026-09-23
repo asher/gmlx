@@ -440,6 +440,9 @@ def run_train(opts: TrainOptions) -> int:
         # scores the same rows at every cadence and not the shortest rows of
         # the first view
         val_rows = _data.sample_rows(val_rows, lengths, opts.val_batches * opts.batch_size, opts.seed)
+        # shard order: the reader keeps a few shards, and the draw spans
+        # every shard of a large cache
+        val_rows.sort(key=lambda vr: (vr[0], tuple(int(x) for x in readers[vr[0]].index[vr[1]])))
         if len(views) > 1:
             counts = [sum(1 for vi, _ in train_rows if vi == i) for i in range(len(views))]
             log(f"[train] {len(views)} views mixed: train rows {counts} from {[str(d) for d in view_dirs]}")

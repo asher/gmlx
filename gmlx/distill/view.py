@@ -178,9 +178,10 @@ def run_align(opts: AlignOptions) -> int:
     try:
         reader = CacheReader(cache)
         manifest = reader.manifest
+        V_T = int(manifest["vocab_size"])
         teacher_tok = _tokens.load_tokenizer(str(cache / "tokenizer")) if (cache / "tokenizer").exists() \
             else _tokens.load_tokenizer(manifest["teacher_path"])
-    except (OSError, KeyError, ValueError) as e:
+    except (OSError, KeyError, TypeError, ValueError) as e:
         log(f"[align] refuse: cannot read the cache at {cache}: {e}")
         return 2
     try:
@@ -197,7 +198,6 @@ def run_align(opts: AlignOptions) -> int:
         p.unlink()
     if stale:
         log(f"[align] removed {len(stale)} files of an earlier view in {out}")
-    V_T = int(manifest["vocab_size"])
     V_S = student_width(opts.student) or len(hf_inner(student_tok))
     knobs = dict(DEFAULT_KNOBS, w_mid=opts.w_mid, gamma=opts.gamma, tau_alm=opts.tau_alm,
                  T_dk=opts.T_dk, max_chunk_len=opts.max_chunk_len)

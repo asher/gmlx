@@ -527,10 +527,14 @@ def fit_reply(tokenizer, msgs: list[dict], max_len: int, tb, reason_target: bool
     the only target and is never dropped; leading turns after a system
     message are dropped, oldest first and up to the next user turn, until
     the render fits. Returns (ids, ends, text, messages, spans, flagged)
-    or None when the last exchange alone does not fit or the template
-    cannot locate the reply."""
+    or None when the last exchange alone does not fit, the template
+    cannot locate the reply, or the final turn carries no content (a
+    tool-call turn), since the render would then target an earlier
+    turn."""
     msgs = list(msgs)
     if not msgs or msgs[-1].get("role") != "assistant":
+        return None
+    if not (msgs[-1].get("content") or "").strip():
         return None
     while True:
         try:

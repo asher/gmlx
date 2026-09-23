@@ -899,10 +899,11 @@ An interrupt cancels the queued requests and stops the server, and the
 run ends when the requests in flight have failed or returned.
 
 Beside the output, `<out>.gen.json` holds the settings a resume must
-match and is written before the first request. When the run ends it
+match and is written before the first request. When a run ends it
 gains a `run` block with the reply and token totals read from the output
-rows, the failed requests, the wall time summed over resumes and the
-aggregate token rate.
+rows, the wall time summed over the runs that ended, and this run's
+failed requests and aggregate token rate. An interrupted run leaves the
+block as it found it.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -972,7 +973,9 @@ carries `student_messages`, since that row was generated with a context.
 The flags of the teacher pass, in the order `--help` prints them.
 `--messages-key` picks which list of a row the teacher reads, and
 `--student-messages-key` only names the list the student's render reads
-later, in `align` and `eval`.
+later, in `align` and `eval`. A reply or reply-think row whose final
+turn has no content, such as a tool call, has nothing to target and is
+dropped, counted in the `[cache] done:` line.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

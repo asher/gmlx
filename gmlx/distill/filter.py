@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import log
+from .corpus import message_list
 from .format import write_json_atomic
 from .gen import DEFAULT_CONTEXT_FORMAT, apply_context, context_format_error
 
@@ -146,7 +147,7 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 def _read_rows(path: Path) -> list[dict]:
     """The corpus rows of a jsonl file, or a ValueError naming the first
     line that is not JSON or not a row (an object with a non-empty list
-    of message objects)."""
+    of message objects whose contents are strings)."""
     rows = []
     for n, ln in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not ln.strip():
@@ -158,6 +159,9 @@ def _read_rows(path: Path) -> list[dict]:
         if (not isinstance(obj, dict) or not isinstance(obj.get("messages"), list) or not obj["messages"]
                 or not all(isinstance(m, dict) for m in obj["messages"])):
             raise ValueError(f"{path} line {n}: not a corpus row (an object with a list of message objects)")
+        message_list(obj, "messages", f"{path} line {n}")
+        if obj.get("student_messages") is not None:
+            message_list(obj, "student_messages", f"{path} line {n}")
         rows.append(obj)
     return rows
 

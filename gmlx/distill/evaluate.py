@@ -81,7 +81,8 @@ def read_jsonl(path: Path) -> list[dict]:
         raise UnreadableInput(f"{path}: every line must be a JSON object")
     for n, r in rows:
         for key in ("messages", "student_messages"):
-            if key in r:
+            # a null student list means the row has none, as cache reads it
+            if key in r and not (key == "student_messages" and r[key] is None):
                 try:
                     r[key] = norm_messages(message_list(r, key, f"{path.name} line {n}"))
                 except ValueError as e:

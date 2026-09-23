@@ -1048,3 +1048,39 @@ def test_prompt_rows_name_the_line_of_a_bad_prompt(tmp_path, capsys):
     p.write_text("[1, 2]\n", encoding="utf-8")
     rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), prompts=str(p), base_url="http://127.0.0.1:1"))
     assert rc == 2 and "[gen] refuse: prompt 0 of p.jsonl: not a JSON object" in capsys.readouterr().err
+
+
+def test_filter_refuses_a_message_whose_content_is_not_a_string(tmp_path, capsys):
+    """A reply whose content is a list of parts, or a user turn with null
+    content, is refused by the reader with its line, so filter exits 2
+    instead of crashing on the word count."""
+    p = tmp_path / "in.jsonl"
+    p.write_text(json.dumps(_row("a", "fine " * 20)) + "\n" + json.dumps({"id": "b", "messages": [
+        {"role": "user", "content": "q"}, {"role": "assistant", "content": ["fine " * 20]}]}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="line 2: message 1 of 'messages' content is not a string"):
+        flt._read_rows(p)
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(p)], out=str(tmp_path / "o.jsonl")))
+    assert rc == 2 and "[filter] refuse:" in capsys.readouterr().err
+    p.write_text(json.dumps({"id": "b", "messages": [{"role": "user", "content": None},
+                                                     {"role": "assistant", "content": "fine " * 20}]}) + "\n",
+                 encoding="utf-8")
+    with pytest.raises(ValueError, match="line 1: message 0 of 'messages' has no content"):
+        flt._read_rows(p)
+
+
+def test_gen_sidecar_wall_time_carries_over_a_resume_with_added_prompts(tmp_path, stub_server):
+    """Prompts appended to the file change the prompt set, not the runs
+    the wall time counts."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    side = out.with_suffix(out.suffix + ".gen.json")
+    first = json.loads(side.read_text())
+    rows.append({"id": "b", "messages": [{"role": "user", "content": "beta"}]})
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    second = json.loads(side.read_text())
+    assert second["prompt_set_sha256"] != first["prompt_set_sha256"]
+    assert second["run"]["completed"] == 2 and second["run"]["wall_s"] > first["run"]["wall_s"] > 0
