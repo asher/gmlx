@@ -510,7 +510,7 @@ def _synthetic_batch(rng, B, T, V, G, group_of, Kp, bmask, n_chunks=3):
 
 
 @pytest.mark.parametrize("V,C,softcap,scale", [(64, 5, None, 1.0), (64, 64, 30.0, 1.0), (151936, 7, None, 1.0),
-                                                (64, 9, None, 0.125)])
+                                                (64, 9, None, 0.125), (64, 16, 3.0, 1.0)])
 def test_distill_loss_gradient_vs_dense(V, C, softcap, scale):
     rng = np.random.default_rng(7)
     B, T, d, G, Kp = 2, 14, 8, min(V, 30), 4
@@ -3853,3 +3853,167 @@ def test_materialized_views_keep_a_few_shards_in_memory(tmp_path, tok_bl, tok_sp
     for r in (0, 2, 4, 0, 2, 4, 1, 3, 5):
         assert mat.compile(r) is not None
     assert len(loads) == 3, loads
+
+
+# ---------------------------------------------------------------------------
+# the dequantized head cache and its VJP, chunks and weights against a
+# reference, collate positions, a resumed run against a straight one, a
+# corpus path under ~
+# ---------------------------------------------------------------------------
+
+def test_quantized_head_cache_is_bf16_and_its_vjp_keeps_the_softmax_term():
+    """A quantized head with f16 scales dequantizes to f16; the cache
+    keeps it in bf16, since the closed-form backward casts dz to the
+    cache's dtype and softmax cotangents of 1e-9 flush to zero in f16."""
+    import mlx.nn as nn
+
+    rng = np.random.default_rng(9)
+    V, d, N = 32768, 32, 6
+    lin = nn.Linear(d, V, bias=False)
+    lin.weight = mx.array((rng.standard_normal((V, d)) * 0.3).astype(np.float32)).astype(mx.float16)
+    mod = nn.QuantizedLinear.from_linear(lin, group_size=32, bits=8)
+    assert mod.scales.dtype == mx.float16
+    getter = dl.head_weight_fn(mod)
+    assert getter().dtype == mx.bfloat16
+    W32 = mx.dequantize(mod.weight, mod.scales, mod.biases, mod.group_size, mod.bits).astype(mx.float32)
+    head = dl.HeadSpec(fn=lambda params, h: mod(h), params=mod.parameters(), softcap=None, V=V, weight=getter)
+    h = mx.array(rng.standard_normal((N, d)).astype(np.float32))
+    next_ids = mx.array(rng.integers(0, V, N).astype(np.int32))
+    d_onpath = mx.full((N,), -1.0 / 8192, dtype=mx.float32)
+    dh, _ = dl.chunked_head_vjp(h, head, next_ids, n_bnd=0, target_gid=mx.zeros((0, 4), dtype=mx.int32),
+                                group_of=None, G=V, Kp=4, log_bmask=dl.log_bmask_from(np.zeros(V, bool)), C=4,
+                                params=None, d_onpath=d_onpath, d_Qslot=mx.zeros((0, 5)), d_logbm=mx.zeros((0,)),
+                                want_params=False)
+
+    def f(hid):
+        z = (hid @ W32.T).astype(mx.float32)
+        logq = z - mx.logsumexp(z, axis=-1, keepdims=True)
+        return mx.sum(d_onpath * mx.take_along_axis(logq, next_ids[:, None], axis=1)[:, 0])
+    ref = mx.grad(f)(h)
+    mx.eval(dh, ref)
+    a, b = np.asarray(dh, dtype=np.float64), np.asarray(ref, dtype=np.float64)
+    # bf16 rounds the backward matmul to about 0.5 percent; an f16 cache errs by 5 percent
+    assert np.abs(a - b).max() < 2e-2 * np.abs(b).max(), np.abs(a - b).max() / np.abs(b).max()
+
+
+def test_compile_row_chunks_and_weights_match_a_reference(tmp_path, tok_bl):
+    """On a self pair every boundary is shared, so the chunks are the
+    spans between consecutive boundaries: a chunk keeps the teacher's
+    on-path sum over its tokens and the boundary mass at its end, is
+    dropped over the chunk length or under gamma, and a boundary weighs
+    1 before a word-initial token and w_mid otherwise."""
+    _tiny_cache(tmp_path / "c", tok_bl, K=8, n_rows=8)
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(tok_bl, tok_bl)
+    knobs = dict(KNOBS, gamma=0.04)
+    comp = dl.ViewLoader(reader, tok_bl, tables, knobs=knobs, Kp=8, identity=False,
+                         student_tb=dl.token_bytes(tok_bl))
+    seen_mid = seen_gamma = kept = 0
+    for r in range(len(reader)):
+        rv = comp.compile(r)
+        if rv is None:
+            continue
+        arrs, _text, _meta = reader.row(r)
+        ids = arrs["token_ids"]
+        onp = arrs["onpath_log_p"].astype(np.float64)
+        lbm = arrs["log_boundary_mass"].astype(np.float32)
+        pos = rv.bnd_pos
+        want_w = np.where(tables.bmask_S[ids[pos + 1]], 1.0, knobs["w_mid"]).astype(np.float32)
+        assert np.array_equal(rv.bnd_weight, want_w)
+        seen_mid += int((want_w < 1.0).sum())
+        chunks = []
+        for j in range(1, len(pos)):
+            s0, s1 = int(pos[j - 1]), int(pos[j])
+            if s1 - s0 > knobs["max_chunk_len"]:
+                continue
+            if lbm[s1] <= math.log(knobs["gamma"]):
+                seen_gamma += 1
+                continue
+            chunks.append((s0, s1 - 1, float(onp[s0:s1].sum()), float(lbm[s1])))
+        got = list(zip(rv.chunk_start.tolist(), rv.chunk_end.tolist(), rv.chunk_teacher_ll.tolist(),
+                       rv.chunk_teacher_log_bm.tolist()))
+        assert len(got) == len(chunks)
+        kept += len(got)
+        for g, w in zip(got, chunks):
+            assert g[0] == w[0] and g[1] == w[1]
+            assert abs(g[2] - w[2]) < 1e-5 and abs(g[3] - w[3]) < 1e-6
+    assert seen_mid > 0 and seen_gamma > 0 and kept > 0
+
+
+def test_collate_positions_index_the_flat_b_times_t_minus_one_grid(tmp_path, tok_bl, tok_spm):
+    """The boundary positions come first and each is b * (T - 1) + its
+    row position, the index the head gather and the scatter back use."""
+    _tiny_cache(tmp_path / "c", tok_bl, K=8, n_rows=8)
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(tok_bl, tok_spm)
+    loader = dl.ViewLoader(reader, tok_spm, tables, knobs=KNOBS, Kp=8, identity=False)
+    rows = [0, 3, 5]
+    views = [loader.compile(r) for r in rows]
+    assert all(v is not None for v in views)
+    batch = dl.collate(views, 8, tables.G)
+    T = int(batch["student_ids"].shape[1])
+    n_bnd = int(batch["n_bnd"])
+    want = np.concatenate([b * (T - 1) + v.bnd_pos.astype(np.int64) for b, v in enumerate(views)])
+    assert n_bnd == len(want) and np.array_equal(batch["positions"][:n_bnd], want)
+    rest = batch["positions"][n_bnd:]
+    cm = batch["compute_mask"].reshape(-1)
+    assert np.all(cm[rest]) and not np.isin(rest, want).any()
+    assert np.all(cm[want])
+
+
+def test_train_resume_reaches_the_weights_of_a_straight_run(tmp_path, tok_bl, monkeypatch):
+    """Two steps, a crash, a resume and two more give the factors of four
+    straight steps: the checkpoint restores the model, the optimizer and
+    the batch order, and with no dropout the CPU run is deterministic."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), batch_size=2, seed=1, iters=4, save_every=2,
+                val_every=4, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    straight = tmp_path / "straight"
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(straight)))) == 0
+    split = tmp_path / "split"
+    real = _trainer._data.batch_to_mx
+    calls = [0]
+
+    def two_steps_then_crash(batch):
+        calls[0] += 1
+        if calls[0] > 2:
+            raise RuntimeError("crashed after the second step")
+        return real(batch)
+    monkeypatch.setattr(_trainer._data, "batch_to_mx", two_steps_then_crash)
+    with pytest.raises(RuntimeError, match="second step"):
+        _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(split))))
+    monkeypatch.setattr(_trainer._data, "batch_to_mx", real)
+    two = mx.load(str(split / "last" / "trainable.safetensors"))
+    assert json.loads((split / "last" / "state.json").read_text())["iteration"] == 2
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(split), resume=True))) == 0
+    a = mx.load(str(straight / "last" / "trainable.safetensors"))
+    b = mx.load(str(split / "last" / "trainable.safetensors"))
+    assert isinstance(a, dict) and isinstance(b, dict) and isinstance(two, dict) and a.keys() == b.keys()
+    moved = False
+    for k in a:
+        assert np.allclose(np.asarray(a[k], dtype=np.float64), np.asarray(b[k], dtype=np.float64), atol=1e-6), k
+        if not np.allclose(np.asarray(a[k]), np.asarray(two[k])):
+            moved = True
+    assert moved
+    sa = json.loads((straight / "last" / "state.json").read_text())
+    sb = json.loads((split / "last" / "state.json").read_text())
+    assert sa["iteration"] == sb["iteration"] == 4
+
+
+def test_corpus_readers_expand_a_home_relative_path(tmp_path, monkeypatch):
+    """A quoted ~ reaches the readers unexpanded; both expand it rather
+    than treating the path as a Hugging Face dataset id."""
+    from gmlx.distill import corpus as _corpus
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / "c.jsonl").write_text(json.dumps({"text": "the cat is the cat"}) + "\n", encoding="utf-8")
+    (home / "m.jsonl").write_text(json.dumps({"messages": [{"role": "user", "content": "hi"},
+                                                            {"role": "assistant", "content": "the cat"}]}) + "\n",
+                                  encoding="utf-8")
+    assert [t for _i, t in _corpus.iter_corpus("~/c.jsonl")] == ["the cat is the cat"]
+    assert [m[-1]["content"] for _i, m, _s in _corpus.iter_conversations("~/m.jsonl")] == ["the cat"]

@@ -23,7 +23,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
     HF dataset id (streamed). Text is NFC-normalized here, once. ``prefix``
     names a jsonl file inside a directory corpus in its ids by relative
     path, so two files with one basename never share an id."""
-    p = Path(spec)
+    p = Path(spec).expanduser()
     n = 0
     if p.is_file():
         with open(p, encoding="utf-8") as fh:
@@ -99,7 +99,7 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
     def one(row, doc):
         st = row.get(student_key) if student_key else None
         return doc, norm_messages(row[key]), (norm_messages(st) if st else None)
-    p = Path(spec)
+    p = Path(spec).expanduser()
     n = 0
     if p.is_file():
         with open(p, encoding="utf-8") as fh:

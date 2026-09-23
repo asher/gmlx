@@ -1000,7 +1000,7 @@ later, in `align` and `eval`.
 | `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
 | `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
-| `--expert-bytes-gb F` | measured | expert bytes read per forward, for the read-traffic report |
+| `--expert-bytes-gb F` | the streamed expert bytes | expert bytes read per forward, for the read-traffic report; 0 for a resident teacher |
 | `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval` |
 | `--hidden` | off | also store a seeded random sketch of the teacher's final hidden state per position, for `train --hs` |
 | `--hidden-dim N` | `256` | width of the hidden sketch |

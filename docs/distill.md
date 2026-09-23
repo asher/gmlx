@@ -474,10 +474,12 @@ for a Qwen teacher. `align` reads the switch from the cache, so it needs
 no flag of its own.
 
 `--max-len` is the longest window, the stretch of a row cached as one
-piece, in teacher tokens, and a longer row is cut into windows at word
-boundaries. 2560 holds a 1180-token reply behind a prompt. `--top-k` is
-how many next-token candidates are stored per position, 256 by default,
-and is unrelated to the sampler's `--top-k` on `gen`.
+piece, in teacher tokens. A longer text row is cut into windows at word
+boundaries. A longer reply row loses its oldest turns first, and is
+dropped and counted on the `[cache] frame` line when the last exchange
+alone does not fit. 2560 holds a 1180-token reply behind a prompt.
+`--top-k` is how many next-token candidates are stored per position,
+256 by default, and is unrelated to the sampler's `--top-k` on `gen`.
 
 `align` runs on the CPU with the two tokenizers only and writes the view
 into `view-r1/`. It holds back about one row in fifty for validation,
@@ -963,7 +965,7 @@ it with `gmlx stop --port 8093`, or the port you gave `--port`.
 
 `train` runs out of memory. Lower `--batch-size` to 1, add
 `--grad-checkpoint`, or cache with a shorter `--max-len` so the rows are
-shorter.
+shorter (with a reply frame that drops the replies that no longer fit).
 
 A refused view means the cache it was built from changed, or the
 tokenizer tables do not match the student, so rerun `align`. A refusal
@@ -1006,9 +1008,10 @@ trace onward, and `continue` wraps plain text in an assistant turn.
 `--per-turn` makes one row per assistant turn with the history before
 it. `--context-format` on `gen` and
 `filter` decides how the document and the question combine in the
-teacher's prompt, and a row's own `context` field takes precedence over
-`--context`. That is how several documents share one run, and how one
-document too long for the context window is split into sections.
+teacher's prompt, and a prompt row's own `context` field takes
+precedence over `gen --context`. That is how several documents share
+one run, and how one document too long for the context window is split
+into sections.
 
 `align` writes `view.json`, with the row index and the train and
 validation split, and `tables.safetensors`, which depends only on the

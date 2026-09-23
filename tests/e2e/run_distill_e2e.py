@@ -128,14 +128,23 @@ def main() -> int:
         slice_path = Path(tmp) / "heldout.txt"
         slice_path.write_text("\n\n".join(PARAGRAPHS[:4]))
         md, js = os.path.join(tmp, "eval.md"), os.path.join(tmp, "eval.json")
+        # the KLD arm scores the cache's own ids, so it needs a view on the identity path
+        identity = bool(json.loads(Path(view, "view.json").read_text()).get("identity"))
+        kld_args = ["--kld-cache", cache, "--kld-rows", "8"] if identity else []
         if _run([gmlx, "distill", "eval", "--student", student, "--adapter", adapter, "--before",
-                 "--slice", f"heldout={slice_path}", "--kld-cache", cache, "--kld-rows", "8",
+                 "--slice", f"heldout={slice_path}", *kld_args,
                  "--max-len", str(a.max_len), "--md", md, "--json", js], os.path.join(tmp, "eval.log")):
             return 1
+        if not Path(md).is_file() or "bpb" not in Path(md).read_text():
+            print(f"FAIL: no Markdown report at {md}")
+            return 1
         ev = json.loads(Path(js).read_text())
-        print(f"[e2e] bpb after {ev['after']['bpb']['heldout']['bpb']:.4f} "
-              f"before {ev['before']['bpb']['heldout']['bpb']:.4f}; "
-              f"kld after {ev['after']['kld']['mean_kld_nats']:.4f} before {ev['before']['kld']['mean_kld_nats']:.4f}")
+        line = (f"[e2e] bpb after {ev['after']['bpb']['heldout']['bpb']:.4f} "
+                f"before {ev['before']['bpb']['heldout']['bpb']:.4f}")
+        if identity:
+            line += (f"; kld after {ev['after']['kld']['mean_kld_nats']:.4f} "
+                     f"before {ev['before']['kld']['mean_kld_nats']:.4f}")
+        print(line)
         # generation: the teacher continues each paragraph's opening through a served copy
         prompts = Path(tmp) / "prompts.jsonl"
         prompts.write_text("".join(json.dumps({"id": f"p{i}", "messages": [
@@ -143,7 +152,7 @@ def main() -> int:
             for i, p in enumerate(PARAGRAPHS[:6])))
         replies, corpus_gen = Path(tmp) / "replies.jsonl", Path(tmp) / "corpus-gen.jsonl"
         if _run([gmlx, "distill", "gen", "--teacher", teacher, "--prompts", str(prompts), "--out", str(replies),
-                 "--port", str(a.gen_port), "--max-tokens", "48", "--concurrency", "2",
+                 "--port", str(a.gen_port), "--max-tokens", "256", "--concurrency", "2",
                  "--chat-template-kwargs", '{"enable_thinking": false}'], os.path.join(tmp, "gen.log")):
             return 1
         gen_rows = [json.loads(ln) for ln in replies.read_text().splitlines() if ln.strip()]

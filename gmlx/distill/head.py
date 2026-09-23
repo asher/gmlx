@@ -80,7 +80,9 @@ def head_weight_fn(mod) -> Callable:
                 block = mx.dequantize(w[r:r + step], mod.scales[r:r + step],
                                       mod.biases[r:r + step] if getattr(mod, "biases", None) is not None else None,
                                       mod.group_size, mod.bits)
-            parts.append(block if block.dtype == mx.float16 else block.astype(mx.bfloat16))
+            # bf16, never f16: the backward casts dz to this dtype and the
+            # softmax cotangents (about q / N) underflow f16
+            parts.append(block.astype(mx.bfloat16))
             mx.eval(parts[-1])
         cache["w"] = mx.concatenate(parts, axis=0)
         mx.eval(cache["w"])
