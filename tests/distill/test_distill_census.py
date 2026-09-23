@@ -386,3 +386,59 @@ def test_eval_reply_rows_apply_trace_ranges_only_when_a_trace_is_rendered(tok):
     content, _ = dl_eval._span_rows(tk, [row], max_len=256, last_only=True, reason_target=True,
                                     positions={"p0": [[0, 3]]}, trace_positions={"p0": [[0, 3]]})
     assert len(content) == 1
+
+
+def _kl_rest(p_ids, p_lp, q_ids, q_lp) -> float:
+    """KL(p || q) over the shared ids plus one rest bucket, by dict."""
+    q = {int(i): float(v) for i, v in zip(q_ids, q_lp)}
+    kl, p_in, q_in = 0.0, 0.0, 0.0
+    for i, v in zip(p_ids, p_lp):
+        if int(i) in q:
+            kl += math.exp(v) * (v - q[int(i)])
+            p_in += math.exp(v)
+            q_in += math.exp(q[int(i)])
+    p_rest, q_rest = max(1 - p_in, cs.FLOOR), max(1 - q_in, cs.FLOOR)
+    return kl + p_rest * (math.log(p_rest) - math.log(q_rest))
+
+
+def test_census_kl_runs_from_the_context_cache_and_counts_a_moved_top1(tmp_path, tok):
+    """The distillable effect is KL(with || without) at every paired
+    position, here nonzero at the boosted first reply token only, and a
+    position counts as moved when the two caches' first ids differ."""
+    convs_without = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    convs_with = [_conv(f"with the long context text here {i}, say it {i}", r) for i, r in enumerate(REPLIES)]
+    without = _reply_cache(tmp_path / "without", tok, convs_without, doc_prefix="a.jsonl")
+    with_ = _reply_cache(tmp_path / "with", tok, convs_with, doc_prefix="b.jsonl", boost={0: 6.0})
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    r0, r1 = dl.CacheReader(without), dl.CacheReader(with_)
+    by_line = {}
+    for reader, side in ((r0, 0), (r1, 1)):
+        for r in range(len(reader)):
+            arrs, _text, meta = reader.row(r)
+            by_line.setdefault(meta["doc_id"].split(":")[1], {})[side] = cs.sparse(arrs, meta["prefix_n_tokens"] - 1)
+    fwd = rev = 0.0
+    moved = 0
+    for pair in by_line.values():
+        (i0, l0), (i1, l1) = pair[0], pair[1]
+        fwd += _kl_rest(i1, l1, i0, l0)
+        rev += _kl_rest(i0, l0, i1, l1)
+        moved += int(i1[0] != i0[0])
+    assert len(by_line) == 3 and abs(fwd - rev) > 1e-3 and moved > 0
+    assert s["distillable_effect_kl_nats"] == pytest.approx(fwd / s["positions"], rel=1e-6)
+    assert s["top1_moved_fraction"] == pytest.approx(moved / s["positions"])
+    per = {row["id"]: row for row in s["per_row"]}
+    assert all(per[f"a.jsonl:{k}"]["top1_moved"] == pytest.approx(int(pair[1][0][0] != pair[0][0][0])
+                                                                  / per[f"a.jsonl:{k}"]["positions"])
+               for k, pair in by_line.items())
+
+
+def test_residual_kl_counts_the_mass_outside_the_top_k_as_rest():
+    ids = np.array([3, 7])
+    lp_a, lp_b = np.log(np.array([0.5, 0.3])), np.log(np.array([0.2, 0.4]))
+    P = np.array([[0.5, 0.3, 0.2], [0.2, 0.4, 0.4]])
+    m = P.mean(axis=0)
+    ref = float(np.mean((P * np.log(P / m)).sum(axis=1)))
+    assert ref > 0.05
+    assert cs.residual_kl([(ids, lp_a), (ids, lp_b)]) == pytest.approx(ref, rel=1e-9)

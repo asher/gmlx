@@ -4017,3 +4017,449 @@ def test_corpus_readers_expand_a_home_relative_path(tmp_path, monkeypatch):
                                   encoding="utf-8")
     assert [t for _i, t in _corpus.iter_corpus("~/c.jsonl")] == ["the cat is the cat"]
     assert [m[-1]["content"] for _i, m, _s in _corpus.iter_conversations("~/m.jsonl")] == ["the cat"]
+
+
+# ---------------------------------------------------------------------------
+# the numbers the reports carry, each against its own reference: the loss
+# modes with P != Q, the ALM temperature, a boundary mass under the floor,
+# the redirect cut, bits per byte, reply rows, the cache KL, the chat drift
+# reference, Holm and the bootstrap tail, the schedule, validation and
+# clipping, the before arm, the render check
+# ---------------------------------------------------------------------------
+
+def test_bucketed_kl_renorm_and_tempered_modes_match_a_reference():
+    """renorm is the KL of the support-only conditionals when P != Q; the
+    tempered branch divides both sides' conditionals by T_dk and keeps
+    the Bernoulli term on the untempered masses."""
+    rng = np.random.default_rng(21)
+    Nb, Kp = 5, 4
+    lp = np.full((Nb, Kp), dl.NEG_INF, dtype=np.float32)
+    for j in range(Nb):
+        k = int(rng.integers(2, Kp + 1))
+        raw = rng.standard_normal(k) * 1.5
+        lp[j, :k] = raw - np.logaddexp.reduce(raw) + math.log(0.7)
+    log_M = np.log(np.exp(lp.astype(np.float64)).sum(axis=1)).astype(np.float32)
+    Q = rng.dirichlet(np.ones(Kp + 1), size=Nb).astype(np.float32)
+    Q[:, :Kp][lp == dl.NEG_INF] = 0.0
+    Q[:, Kp] = 1.0 - Q[:, :Kp].sum(axis=1)
+    w = rng.uniform(0.5, 1.0, Nb).astype(np.float32)
+    lp64, Q64, w64 = lp.astype(np.float64), Q.astype(np.float64), w.astype(np.float64)
+    ref_renorm = ref_temp = 0.0
+    T = 2.0
+    for j in range(Nb):
+        valid = lp64[j] != -np.inf
+        p, q = np.exp(lp64[j][valid]), Q64[j, :Kp][valid]
+        pt, qt = p / p.sum(), q / q.sum()
+        ref_renorm += w64[j] * float((pt * (np.log(pt) - np.log(qt))).sum())
+        ptT, qtT = p ** (1 / T) / (p ** (1 / T)).sum(), q ** (1 / T) / (q ** (1 / T)).sum()
+        M, QS, Qt = p.sum(), q.sum(), max(float(Q64[j, Kp]), 2.0 ** -126)
+        per = M * float((ptT * (np.log(ptT) - np.log(qtT))).sum()) + M * (math.log(M) - math.log(QS))
+        per += (1 - M) * (math.log1p(-M) - math.log(Qt))
+        ref_temp += w64[j] * per
+    ref_renorm /= w64.sum()
+    ref_temp /= w64.sum()
+    lr, _ = dl.bucketed_kl(mx.array(lp), mx.array(log_M), mx.array(Q), mx.array(w), mode="renorm")
+    lt, _ = dl.bucketed_kl(mx.array(lp), mx.array(log_M), mx.array(Q), mx.array(w), T_dk=T)
+    mx.eval(lr, lt)
+    assert ref_renorm > 1e-2 and abs(float(lr) - ref_renorm) < 1e-5
+    assert abs(float(lt) - ref_temp) < 1e-5
+
+
+def test_alm_term_tempers_both_sides_by_tau():
+    rng = np.random.default_rng(8)
+    B, Tm1, tau = 2, 10, 2.0
+    on = -rng.uniform(0.1, 3.0, (B, Tm1)).astype(np.float32)
+    bm = -rng.uniform(0.1, 3.0, (B, Tm1)).astype(np.float32)
+    starts = np.array([[0, 4, 0], [2, 0, 0]], dtype=np.int32)
+    ends = np.array([[2, 7, 0], [5, 0, 0]], dtype=np.int32)
+    mask = np.array([[1, 1, 0], [1, 0, 0]], dtype=bool)
+    tll = -rng.uniform(0.5, 4.0, (B, 3)).astype(np.float32)
+    tbm = -rng.uniform(0.1, 1.0, (B, 3)).astype(np.float32)
+    alm, n = dl.alm_term(mx.array(on), mx.array(bm), mx.array(starts), mx.array(ends), mx.array(tll),
+                         mx.array(tbm), mx.array(mask), tau=tau)
+    mx.eval(alm)
+    tot, cnt = 0.0, 0
+    for b in range(B):
+        for c in range(3):
+            if not mask[b, c]:
+                continue
+            lb = (on[b, starts[b, c]:ends[b, c] + 1].sum() + bm[b, ends[b, c] + 1]) / tau
+            la = (tll[b, c] + tbm[b, c]) / tau
+            a, bb = math.exp(la), math.exp(lb)
+            tot += a * (la - lb) + (1 - a) * (math.log1p(-a) - math.log1p(-bb))
+            cnt += 1
+    assert int(n) == cnt and abs(float(alm) - tot / cnt) < 1e-4
+
+
+def test_chunked_head_vjp_stays_finite_when_the_boundary_mass_underflows():
+    """A boundary chunk whose student puts about e^-200 on every
+    whitespace-initial token has a boundary mass below the f32 floor; its
+    reciprocal is clamped, so the cotangent stays finite."""
+    V, d, N, Kp = 16, 4, 3, 2
+    W = np.zeros((V, d), dtype=np.float32)
+    W[5, 0] = -200.0
+    h = np.zeros((N, d), dtype=np.float32)
+    h[:, 0] = 1.0
+    bmask = np.zeros(V, dtype=bool)
+    bmask[5] = True
+    head = dl.linear_head(mx.array(W))
+    gid = np.tile(np.array([[0, 1]], dtype=np.int32), (N, 1))
+    dh, dW = dl.chunked_head_vjp(mx.array(h), head, mx.array([1, 2, 3], dtype=mx.int32), n_bnd=N,
+                                 target_gid=mx.array(gid), group_of=None, G=V, Kp=Kp,
+                                 log_bmask=dl.log_bmask_from(bmask), C=2, params=head.params,
+                                 d_onpath=mx.full((N,), -0.125), d_Qslot=mx.full((N, Kp + 1), 0.1),
+                                 d_logbm=mx.full((N,), 0.3), want_params=True)
+    mx.eval(dh, dW)
+    assert isinstance(dW, dict) and np.isfinite(np.asarray(dW["weight"])).all()
+    assert np.isfinite(np.asarray(dh)).all()
+
+
+def test_compile_row_zeroes_the_weight_of_a_heavily_redirected_boundary(tmp_path, tok_bl, tok_spm, monkeypatch):
+    from gmlx.distill import data as _data
+
+    _tiny_cache(tmp_path / "c", tok_bl, K=8, n_rows=4)
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(tok_bl, tok_spm)
+    real = _data.project_topk
+
+    def spike(top_log_p, top_idx, tables, Kp=None):
+        out = real(top_log_p, top_idx, tables, Kp)
+        out["redirect"] = np.zeros_like(out["redirect"])
+        out["redirect"][0] = 1.0
+        return out
+
+    monkeypatch.setattr(_data, "project_topk", spike)
+    loader = dl.ViewLoader(reader, tok_spm, tables, knobs=KNOBS, Kp=8, identity=False)
+    seen = 0
+    for r in range(len(reader)):
+        rv = loader.compile(r)
+        if rv is None:
+            continue
+        seen += 1
+        assert rv.bnd_weight[0] == 0.0 and (rv.bnd_weight[1:] > 0).all()
+    assert seen > 0
+
+
+def test_bits_per_byte_matches_a_per_window_reference(tok_bl):
+    """Every window token is scored behind the prefix, the first one
+    against the prefix's last token and for the bytes since the previous
+    window's end; without a prefix or BOS a window's first token has
+    nothing before it and is context only."""
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+    logW = np.asarray(W).astype(np.float64)
+    logW = logW - np.logaddexp.reduce(logW, axis=1, keepdims=True)
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    text = "the cat is the cat 123 that hat ! " * 6
+    text_b = text.encode("utf-8")
+    tb = dl.token_bytes(tok_bl)
+    inner = dl.hf_inner(tok_bl)
+    assert not dl.adds_bos(tok_bl)
+    ids, ends, _ = dl.encode_with_byte_ends(tok_bl, text_b, tb, add_special_tokens=True)
+    ws = dl.whitespace_start_mask(tok_bl, len(tb), tb)
+    windows = dl.cut_windows(ids, ws, 8, 0, text=text_b, ends=ends)
+    assert len(windows) > 2
+    for prefix in ("P: ", None):
+        head = [int(t) for t in inner.encode(prefix, add_special_tokens=False)] if prefix else []
+        nll, nbytes, ntok = 0.0, 0, 0
+        for s, e in windows:
+            prev_end = int(ends[s - 1]) if s > 0 else 0
+            for k in range(s, e):
+                prev = head[-1] if k == s and head else (int(ids[k - 1]) if k > s else None)
+                if prev is None:
+                    continue
+                nll -= logW[prev, int(ids[k])]
+                nbytes += int(ends[k]) - (int(ends[k - 1]) if k > s else prev_end)
+                ntok += 1
+        r = dl_eval.bits_per_byte(Stub(), tok_bl, text, max_len=8, batch_size=3, window_prefix=prefix)
+        assert (r["tokens"], r["bytes"]) == (ntok, nbytes), prefix
+        assert r["nll_nats"] == pytest.approx(nll, rel=1e-5)
+        assert r["bpb"] == pytest.approx(nll / nbytes / math.log(2), rel=1e-5)
+        if prefix:
+            assert nbytes == len(text_b)
+        else:
+            assert nbytes == len(text_b) - sum(int(ends[s]) - (int(ends[s - 1]) if s else 0) for s, _e in windows)
+
+
+_TEMPLATE_END = ("{% for m in messages %}{% if m['role'] == 'user' %}<bos>User: {{ m['content'] | trim }}\n"
+                 "{% else %}Model:\n{{ m['content'] | trim }}<end>{% endif %}{% endfor %}"
+                 "{% if add_generation_prompt %}Model:\n{% endif %}")
+
+
+@pytest.mark.parametrize("special_end", [False, True])
+def test_reply_slice_nll_matches_a_per_token_reference(tok_bl, special_end):
+    """A reply row scores the tokens inside the reply span (content and
+    the turn-end marker) for their own bytes, each under the token before
+    it. The second template ends the turn on a five-byte special token
+    behind a one-byte header, so a byte count shifted by one token
+    shows."""
+    if special_end:
+        tok = _bytelevel_tokenizer(_BL_MERGES)
+        tok.add_special_tokens({"additional_special_tokens": ["<end>"]})
+        tok = _with_template(tok, _TEMPLATE_END)
+    else:
+        tok = _with_template(tok_bl, _TEMPLATE_A)
+    V = len(dl.token_bytes(tok))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+    logW = np.asarray(W).astype(np.float64)
+    logW = logW - np.logaddexp.reduce(logW, axis=1, keepdims=True)
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    rows = [{"id": f"r{i}", "messages": [{"role": "user", "content": f"say it {i}"},
+                                          {"role": "assistant", "content": "the cat is the cat 123 " * (i + 1)}]}
+            for i in range(3)]
+    r = dl.reply_slice_nll(Stub(), tok, rows, max_len=256)
+    items = {it["id"]: it for it in r["items"]}
+    tb = dl.token_bytes(tok)
+    tot_nll, tot_bytes = 0.0, 0
+    for row in rows:
+        text, spans = dl.render_row(tok, row["messages"], **dl.row_render_args("reply"))
+        ids, ends, _ = dl.encode_with_byte_ends(tok, text, tb, add_special_tokens=False)
+        b0, _b1, b2 = spans[-1]
+        nll, nbytes, ntok = 0.0, 0, 0
+        for k in range(1, len(ids)):
+            if int(ends[k - 1]) >= b0 and int(ends[k]) <= b2:
+                nll -= logW[int(ids[k - 1]), int(ids[k])]
+                nbytes += int(ends[k]) - int(ends[k - 1])
+                ntok += 1
+        it = items[row["id"]]
+        assert (it["tokens"], it["bytes"]) == (ntok, nbytes), row["id"]
+        assert it["nll"] == pytest.approx(nll, rel=1e-5)
+        tot_nll += nll
+        tot_bytes += nbytes
+    assert r["bpb"] == pytest.approx(tot_nll / math.log(2) / tot_bytes, rel=1e-5)
+
+
+def test_cache_kld_matches_a_per_position_reference(tmp_path, tok_bl):
+    """The KL at a position is the top-K sum of p (log p - log q) plus the
+    rest mass against the student's mass outside the top-K; the top-1
+    agreement compares the student's argmax with the cache's first id."""
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=4)
+    reader = dl.CacheReader(tmp_path / "c")
+    V = len(dl.token_bytes(tok_bl))
+    W = mx.array(np.random.default_rng(3).standard_normal((V, V)).astype(np.float32))
+    logW = np.asarray(W).astype(np.float64)
+    logW = logW - np.logaddexp.reduce(logW, axis=1, keepdims=True)
+
+    class Stub:
+        def __call__(self, ids):
+            return W[ids]
+
+    res = dl.cache_kld(Stub(), reader)
+    tot, npos, hits, tails = 0.0, 0, 0, 0.0
+    for r in range(len(reader)):
+        arrs, _text, _meta = reader.row(r)
+        ids = arrs["token_ids"]
+        n = len(ids)
+        for t in np.nonzero(arrs["onpath_mask"][:n - 1])[0]:
+            idx = arrs["top_k_indices"][t]
+            lp = arrs["top_k_log_softmax"][t].astype(np.float64)
+            keep = idx >= 0
+            p, lq = np.exp(lp[keep]), logW[int(ids[t])][idx[keep]]
+            kl = float((p * (lp[keep] - lq)).sum())
+            rest = max(1.0 - p.sum(), 0.0)
+            q_tail = max(1.0 - np.exp(lq).sum(), 2.0 ** -126)
+            tail = rest * (math.log(rest) - math.log(q_tail)) if rest > 0 else 0.0
+            tot += kl + tail
+            tails += abs(tail)
+            hits += int(np.argmax(logW[int(ids[t])]) == idx[0])
+            npos += 1
+    assert res["positions"] == npos and tails / npos > 1e-3
+    assert res["mean_kld_nats"] == pytest.approx(tot / npos, rel=1e-5)
+    assert res["top1_agreement"] == pytest.approx(hits / npos)
+
+
+def test_chat_sanity_reference_nll_scores_every_reference_token(tmp_path, tok_bl):
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import student as _student
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    model, _cfg, tokenizer = _student.load_mlx_student(str(_tiny_mlx_teacher(tmp_path / "m", tok)))
+    items = [{"id": "a", "messages": [{"role": "user", "content": "the cat"}]}]
+    out = dl.chat_sanity(model, tokenizer, items, refs={"a": "the cat is"}, max_tokens=2)
+    rec = out["items"][0]
+    inner = dl.hf_inner(tokenizer)
+    prefix = [int(t) for t in inner.encode(_frames.render_frame(tokenizer, items[0]["messages"]),
+                                           add_special_tokens=False)]
+    ref_ids = [int(t) for t in inner.encode("the cat is", add_special_tokens=False)]
+    arr = prefix + ref_ids
+    logits = model(mx.array([arr]))
+    logits = logits.logits if hasattr(logits, "logits") else logits
+    z = np.asarray(logits[0].astype(mx.float32)).astype(np.float64)
+    lsm = z - np.logaddexp.reduce(z, axis=1, keepdims=True)
+    want = float(np.mean([-lsm[j - 1, arr[j]] for j in range(len(prefix), len(arr))]))
+    assert rec["n_prefix"] == len(prefix) and rec["n_ref_tokens"] == len(ref_ids) > 1
+    assert rec["ref_nll_nats"] == pytest.approx(want, rel=1e-4)
+
+
+def test_holm_steps_down_and_the_bootstrap_p_is_the_regression_tail():
+    # Holm admits b at 0.02 against 0.05 / 2; Bonferroni would not
+    assert dl.holm({"a": 0.01, "b": 0.02, "c": 0.03}) == {"a": True, "b": True, "c": True}
+    # the first failure stops the walk: c would pass 0.05 / 1 on its own
+    assert dl.holm({"a": 0.03, "b": 0.001, "c": 0.04}) == {"a": False, "b": True, "c": False}
+    a, b = np.array([2.0, 3.0, 4.0, 5.0]), np.array([1.0, 1.0, 1.0, 1.0])
+    up, down = dl.paired_bootstrap(a, b), dl.paired_bootstrap(b, a)
+    assert up["diff"] == 2.5 and down["diff"] == -2.5
+    assert up["p_one_sided_regress"] == 1.0 and down["p_one_sided_regress"] == 0.0
+    assert up["ci_lo"] > 0 > down["ci_hi"]
+
+
+def test_train_schedule_warms_up_linearly_then_decays():
+    from gmlx.distill import trainer as _trainer
+
+    s = _trainer.make_schedule(1e-3, 100, 0.1)
+    vals = [float(s(i)) for i in (0, 5, 10, 50, 99)]
+    assert vals[0] == 0.0 and vals[1] == pytest.approx(5e-4) and vals[2] == pytest.approx(1e-3)
+    assert vals[2] > vals[3] > vals[4] >= 0.0
+
+
+def test_train_validation_weights_tokens_and_clips_and_best_tracks_the_lowest(tmp_path, tok_bl, monkeypatch):
+    """The logged validation loss is the token-weighted mean over the
+    validation batches, the grads reaching the optimizer have at most the
+    clip norm, an identity view trains with the ALM term off, and the
+    best checkpoint is the lowest validation loss."""
+    import mlx.optimizers as optim
+    from mlx.utils import tree_flatten
+
+    from gmlx.distill import loss as _loss
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    cache = tmp_path / "cache"
+    _tiny_cache(cache, tok_bl, n_rows=8)
+    tok_bl.save_pretrained(cache / "tokenizer")
+    student = _tiny_mlx_teacher(tmp_path / "student", tok_bl)
+    view = tmp_path / "view"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(view),
+                                              val_fraction=0.5)) == 0
+    assert json.loads((view / "view.json").read_text())["identity"]
+    calls = []
+    real_head = _loss.head_pass
+
+    def head_spy(hg, batch, head, **kw):
+        out = real_head(hg, batch, head, **kw)
+        calls.append((float(out[0]), int(out[1]["ntoks"]), float(kw["knobs"]["lambda_alm"])))
+        return out
+
+    monkeypatch.setattr(_trainer._loss, "head_pass", head_spy)
+    norms = []
+
+    class SpyAdamW(optim.AdamW):
+        def update(self, model, grads):
+            norms.append(math.sqrt(sum(float(mx.sum(g.astype(mx.float32) ** 2)) for _k, g in tree_flatten(grads))))
+            return super().update(model, grads)
+
+    monkeypatch.setattr(optim, "AdamW", SpyAdamW)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=1, seed=1, save_every=1, val_every=1,
+                val_batches=4, no_wired_limit=True, lora_rank=2, chunk=16, alm=1.0, report_every=1)
+    rep = tmp_path / "rep.json"
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(tmp_path / "ck1"), clip=1e-3,
+                                                           report=str(rep)))) == 0
+    r = json.loads(rep.read_text())
+    train_recs = [x for x in r["log"] if "loss" in x]
+    val_recs = [x for x in r["log"] if "val" in x]
+    assert len(train_recs) == 1 and len(val_recs) == 1
+    assert all(c[2] == 0.0 for c in calls) and r["state"]["knobs"]["lambda_alm"] == 0.0
+    assert train_recs[0]["alm"] == 0.0
+    vals = calls[1:]
+    assert len(vals) >= 2 and len({n for _l, n, _a in vals}) > 1
+    weighted = sum(loss * n for loss, n, _a in vals) / sum(n for _l, n, _a in vals)
+    assert val_recs[0]["val"] == pytest.approx(weighted, rel=1e-6)
+    assert val_recs[0]["val"] != pytest.approx(sum(loss for loss, _n, _a in vals) / len(vals), rel=1e-6)
+    assert len(norms) == 1 and norms[0] <= 1e-3 * (1 + 1e-4)
+    calls.clear()
+    norms.clear()
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(tmp_path / "ck2"), clip=0.0))) == 0
+    assert len(norms) == 1 and norms[0] > 1e-3
+    rep3 = tmp_path / "rep3.json"
+    ck3 = tmp_path / "ck3"
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, ckpt_dir=str(ck3), iters=4, batch_size=2,
+                                                           val_batches=2, save_every=4, val_every=1,
+                                                           report=str(rep3)))) == 0
+    vals3 = [x["val"] for x in json.loads(rep3.read_text())["log"] if "val" in x]
+    assert len(vals3) == 4 and len(set(vals3)) > 1
+    best = json.loads((ck3 / "best" / "state.json").read_text())
+    assert best["best_val"] == pytest.approx(min(vals3)) and best["iteration"] == vals3.index(min(vals3)) + 1
+    assert json.loads((ck3 / "last" / "state.json").read_text())["best_val"] == pytest.approx(min(vals3))
+
+
+def test_eval_before_arm_scores_the_adapter_off_and_reports_decontam_and_teacher_bpb(tmp_path, tok_bl,
+                                                                                      monkeypatch, capsys):
+    """--before scores the same weights with the LoRA factors off, the
+    Markdown table carries both arms and the teacher's figure, and a slice
+    whose 64-byte windows sit in the cached corpus voids its gate."""
+    from mlx_lm.tuner.lora import LoRALinear
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import student as _student
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    long_text = "the cat is the cat 123 that hat ! " * 6
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text(json.dumps({"text": long_text}) + "\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                    top_k=8, max_len=256)) == 0
+    model, cfg, tokenizer = _student.load_mlx_student(str(teacher))
+    linear_to_lora_layers(model, 2, {"rank": 2, "scale": 4.0, "dropout": 0.0,
+                                     "keys": ["self_attn.q_proj", "mlp.down_proj"]})
+    mx.random.seed(7)
+
+    def seed_b(_k, m):
+        if isinstance(m, LoRALinear):
+            m.lora_b = mx.random.normal(m.lora_b.shape) * 0.5
+
+    model.apply_to_modules(seed_b)
+    mx.eval(model.parameters())
+    monkeypatch.setattr(_ev, "load_student", lambda p, a, h: (model, cfg, tokenizer, "mlx"))
+    adapter = tmp_path / "adapter.gguf"
+    adapter.write_bytes(b"GGUF")
+    clean_text = "a hat is a hat ! " * 8
+    clean, dirty = tmp_path / "clean.txt", tmp_path / "dirty.txt"
+    clean.write_text(clean_text, encoding="utf-8")
+    dirty.write_text(long_text, encoding="utf-8")
+    tmap = tmp_path / "teacher.json"
+    tmap.write_text(json.dumps({"clean": 0.25, "dirty": 0.5}))
+    md, js = tmp_path / "r.md", tmp_path / "r.json"
+    opts = _ev.EvalOptions(student=str(teacher), adapter=str(adapter), md=str(md), json=str(js), before=True,
+                           cache=str(cache), slices=[f"clean={clean}", f"dirty={dirty}"], teacher_bpb=str(tmap),
+                           max_len=16, batch_size=2)
+    assert _ev.run_eval(opts) == 0, capsys.readouterr().err
+    rep = json.loads(js.read_text())
+    after, before = rep["after"]["bpb"]["clean"]["bpb"], rep["before"]["bpb"]["clean"]["bpb"]
+    on = dl_eval.bits_per_byte(model, tokenizer, clean_text, max_len=16, batch_size=2)["bpb"]
+    with _student.adapter_disabled(model):
+        off = dl_eval.bits_per_byte(model, tokenizer, clean_text, max_len=16, batch_size=2)["bpb"]
+    assert abs(on - off) > 1e-3
+    assert after == pytest.approx(on, rel=1e-6) and before == pytest.approx(off, rel=1e-6)
+    assert rep["teacher_bpb"] == {"clean": 0.25, "dirty": 0.5}
+    assert rep["contaminated_slices"] == ["dirty"]
+    assert rep["decontam"]["clean"] == 0.0 and rep["decontam"]["dirty"] > 0.5
+    text = md.read_text()
+    assert f"| clean | {after:.4f} | {before:.4f} | 0.2500 | 0.00000 | ok |" in text
+    d_after, d_before = rep["after"]["bpb"]["dirty"]["bpb"], rep["before"]["bpb"]["dirty"]["bpb"]
+    assert f"| dirty | {d_after:.4f} | {d_before:.4f} | 0.5000 | {rep['decontam']['dirty']:.5f} | void |" in text
+
+
+def test_same_render_rejects_a_student_template_that_renders_other_ids(tmp_path, tok_bl):
+    from gmlx.distill import view as _view
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    msgs = [{"role": "user", "content": "the cat"}, {"role": "assistant", "content": "is the cat 123"}]
+    _tiny_reply_cache(tmp_path / "c", teacher, [(msgs, None)] * 3)
+    reader = dl.CacheReader(tmp_path / "c")
+    same, why = _view.same_render(reader, teacher, "reply")
+    assert same and why == "3 rows checked"
+    student = _with_template(_bytelevel_tokenizer(_BL_MERGES), _TEMPLATE_B)
+    same, why = _view.same_render(reader, student, "reply")
+    assert not same and "student tokens vs" in why
