@@ -253,27 +253,50 @@ def teacher_head(model) -> HeadSpec:
     return head_spec_from_model(inner)
 
 
+IDENTITY_HEAD_BYTES = 16 * 1024 * 1024
+
+
 def teacher_identity(path: str) -> dict:
     """What a resume compares to know it continues on the same teacher:
-    the resolved path and, for a file, its size and mtime (a directory
-    checkpoint's config file stands in for it)."""
+    the resolved path, the size and a hash over the leading bytes of a
+    GGUF file, or of a directory checkpoint's config and each weight
+    file. The same bytes written again, or touched, still match."""
     p = Path(path).expanduser().resolve()
-    probe = p if p.is_file() else (p / "config.json" if (p / "config.json").is_file() else p)
-    st = probe.stat()
-    return {"path": str(p), "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+    files = [p] if p.is_file() else sorted(list(p.glob("config.json")) + list(p.glob("*.safetensors")))
+    h = hashlib.sha256()
+    size = 0
+    for f in files:
+        n = int(f.stat().st_size)
+        size += n
+        h.update(f"{f.name}:{n}:".encode())
+        with open(f, "rb") as fh:
+            h.update(fh.read(IDENTITY_HEAD_BYTES))
+    return {"path": str(p), "size": size, "sha256_head": h.hexdigest()}
+
+
+def head_logits(head: HeadSpec, h):
+    """The teacher's bf16 logits for hidden states ``h``: the projection,
+    then the softcap when the head carries one. The pass and both memory
+    probes go through here, so they measure the same graph."""
+    import mlx.core as mx
+    z = head.fn(head.params, h)
+    if head.softcap:
+        z = head.softcap * mx.tanh(z / head.softcap)
+    return z.astype(mx.bfloat16)
 
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw) -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
-    and row options, the teacher, the hidden sketch and the render kwargs.
-    Any difference refuses the resume."""
+    and row options, the teacher, the hidden sketch and, when rows are
+    framed, the render kwargs. Any difference refuses the resume."""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens,
             "max_len": opts.max_len, "rows_per_shard": opts.rows_per_shard, "top_k": opts.top_k,
             "floor": bool(opts.floor), "frame": opts.frame, "routes": bool(opts.routes),
             "hidden": bool(opts.hidden), "teacher": teacher_identity(opts.teacher),
             "hidden_dim": opts.hidden_dim if opts.hidden else None,
             "hidden_seed": opts.hidden_seed if opts.hidden else None,
-            "render_kwargs": render_kw or None, "per_turn": bool(opts.per_turn),
+            "render_kwargs": (render_kw or None) if opts.frame != "none" else None,
+            "per_turn": bool(opts.per_turn),
             "close_final_windows": bool(opts.close_final_windows),
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None}
 
@@ -315,8 +338,9 @@ def load_teacher(opts: CacheOptions):
 
 def run_cache(opts: CacheOptions) -> int:
     """The pass. Returns 0 on a validated cache, 2 on a refusal before the
-    teacher runs, 3 when the memory probe fails twice, 4 when the validator
-    finds a problem in what was written."""
+    teacher runs or on a shard the writer could not put down, 3 when the
+    memory probe fails twice, 4 when the validator finds a problem in
+    what was written."""
     import mlx.core as mx
 
     out = Path(opts.out)
@@ -339,7 +363,12 @@ def run_cache(opts: CacheOptions) -> int:
         log("[cache] refuse: --stream-experts needs a GGUF teacher")
         return 2
     tokenizer = _tokens.load_tokenizer(opts.teacher)
-    render_kw = _frames.resolve_render_kwargs(tokenizer, override=_frames.parse_render_kwargs(opts.frame_kwargs))
+    # a resume renders as the first run did: the stored kwargs carry the
+    # date a template reads, which would otherwise move to today
+    stored = _format.read_json(out / "progress.json").get("run") \
+        if opts.resume and (out / "progress.json").is_file() else None
+    render_kw = _frames.resolve_render_kwargs(tokenizer, inherit=(stored or {}).get("render_kwargs"),
+                                              override=_frames.parse_render_kwargs(opts.frame_kwargs))
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
         if not _frames.has_chat_template(tokenizer):
@@ -528,10 +557,7 @@ def run_cache(opts: CacheOptions) -> int:
                 e = min(s + step, n)
                 if not probed:
                     mx.reset_peak_memory()
-                logits = head.fn(head.params, flat_h[s:e])
-                if head.softcap:
-                    logits = head.softcap * mx.tanh(logits / head.softcap)
-                logits = logits.astype(mx.bfloat16)
+                logits = head_logits(head, flat_h[s:e])
                 mx.eval(logits)
                 red = _cache.reduce_logits(logits, mx.array(nxt[s:e]), K=opts.top_k, log_bmask=log_bmask,
                                            onpath_valid=valid[s:e], floor=opts.floor)
@@ -548,7 +574,7 @@ def run_cache(opts: CacheOptions) -> int:
                         # second probe on the next sub-chunk confirms; a second failure refuses
                         mx.reset_peak_memory()
                         e2 = min(s + step, n)
-                        logits = head.fn(head.params, flat_h[s:e2]).astype(mx.bfloat16)
+                        logits = head_logits(head, flat_h[s:e2])
                         mx.eval(logits)
                         _ = _cache.reduce_logits(logits, mx.array(nxt[s:e2]), K=opts.top_k, log_bmask=log_bmask,
                                                  onpath_valid=valid[s:e2], floor=opts.floor)
@@ -584,7 +610,7 @@ def run_cache(opts: CacheOptions) -> int:
         try:
             entry = writer.write(si, packed, metas, wall_s=wall, step=step, trunk_chunk=T,
                                  max_id=int(packed["top_k_indices"].max()))
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             log(f"[cache] refuse: {e}, the {writer.n_done} verified shards stay for --resume")
             return 2
         tokens_done += entry["tokens"]

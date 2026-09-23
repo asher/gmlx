@@ -426,13 +426,97 @@ def test_gen_resume_drops_a_torn_last_line_and_refuses_other_settings(tmp_path, 
     with open(out, "a", encoding="utf-8") as fh:
         fh.write('{"id": "c", "mess')
     prompts = _prompts(tmp_path / "p.jsonl", rows + [{"id": "c", "messages": [{"role": "user", "content": "gamma"}]}])
+    # the settings check runs before the cut, so a refused resume leaves the file as it was
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, temperature=0.2))
+    assert rc == 2 and out.read_text(encoding="utf-8").endswith('{"id": "c", "mess')
+    capsys.readouterr()
     assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
     assert "dropped a torn last line" in capsys.readouterr().err
-    assert [r["id"] for r in _rows(out)] == ["a", "b", "c"]
+    assert sorted(r["id"] for r in _rows(out)) == ["a", "b", "c"]
     rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server, temperature=0.2))
     err = capsys.readouterr().err
     assert rc == 2 and "generated with other settings" in err and "sampling" in err
     text = out.read_text(encoding="utf-8")
     out.write_text(text.replace('"id": "b"', 'oops', 1), encoding="utf-8")
     rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
-    assert rc == 2 and "line 2 is not a JSON row" in capsys.readouterr().err
+    assert rc == 2 and "is not a JSON row" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# prompt ids, the start sidecar, several inputs, rows that are not rows
+# ---------------------------------------------------------------------------
+
+
+def test_directory_corpus_ids_carry_the_relative_path_and_prompt_ids_are_unique(tmp_path, capsys):
+    from gmlx.distill import corpus as _corpus
+
+    for sub in ("a", "b"):
+        (tmp_path / "dc" / sub).mkdir(parents=True)
+        (tmp_path / "dc" / sub / "data.jsonl").write_text(json.dumps({"text": f"doc {sub}"}) + "\n")
+    ids = [did for did, _ in _corpus.iter_corpus(str(tmp_path / "dc"))]
+    assert ids == ["a/data.jsonl:0", "b/data.jsonl:0"]
+    rows = [{"id": "x", "messages": [{"role": "user", "content": "one"}]},
+            {"id": "x", "messages": [{"role": "user", "content": "two"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    with pytest.raises(ValueError, match="appears twice"):
+        gen.prompt_rows(gen.GenOptions(out="o.jsonl", prompts=prompts))
+    rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), prompts=prompts, base_url="http://127.0.0.1:1"))
+    assert rc == 2 and "appears twice" in capsys.readouterr().err
+
+
+def test_gen_start_sidecar_replaces_a_stale_one(tmp_path, stub_server, monkeypatch):
+    """A sidecar left beside a deleted output is replaced by this run's
+    settings before the first request, so a run cut short leaves what a
+    resume must compare against."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}]}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    side = out.with_suffix(out.suffix + ".gen.json")
+    stale = {"gen_version": gen.GEN_VERSION, "model": "old", "seed": 9, "thinking": True, "thinking_budget": None,
+             "sampling": {"temperature": 0.2, "top_p": 1.0, "top_k": 0, "min_p": 0.0, "max_tokens": 8},
+             "chat_template_kwargs": None, "run": {"completed": 5}}
+    side.write_text(json.dumps(stale), encoding="utf-8")
+
+    def cut(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gen, "complete", cut)
+    opts = gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)
+    with pytest.raises(KeyboardInterrupt):
+        gen.run_gen(opts)
+    got = json.loads(side.read_text(encoding="utf-8"))
+    assert got["run"] is None and got["seed"] == opts.seed
+    assert {k: got[k] for k in gen.run_settings(opts)} == gen.run_settings(opts)
+
+
+def test_filter_refuses_inputs_generated_with_other_settings(tmp_path, capsys):
+    def corpus(name, thinking):
+        p = tmp_path / name
+        p.write_text(json.dumps(_row(name, "one two three four five six seven eight nine ten eleven twelve "
+                                     "thirteen fourteen fifteen sixteen seventeen")) + "\n")
+        side = {"gen_version": gen.GEN_VERSION, "model": "t.gguf", "seed": 1, "thinking": thinking,
+                "thinking_budget": None, "chat_template_kwargs": None,
+                "sampling": {"temperature": 0.7, "top_p": 0.95, "top_k": 0, "min_p": 0.0, "max_tokens": 64},
+                "run": {"completed": 1}}
+        p.with_suffix(p.suffix + ".gen.json").write_text(json.dumps(side))
+        return str(p)
+
+    a, b, c = corpus("a.jsonl", True), corpus("b.jsonl", False), corpus("c.jsonl", True)
+    out = tmp_path / "out.jsonl"
+    rc = flt.run_filter(flt.FilterOptions(inputs=[a, b], out=str(out)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "thinking" in err
+    assert not out.exists()
+    assert flt.run_filter(flt.FilterOptions(inputs=[a, c], out=str(out))) == 0
+    side = json.loads(out.with_suffix(out.suffix + ".gen.json").read_text())
+    assert side["thinking"] is True and side["filter"]["inputs"] == [a, c]
+
+
+def test_filter_refuses_a_json_line_that_is_not_a_row(tmp_path, capsys):
+    p = tmp_path / "in.jsonl"
+    p.write_text(json.dumps(_row("a", "fine " * 20)) + "\n[1, 2]\n")
+    with pytest.raises(ValueError, match="line 2: not a corpus row"):
+        flt._read_rows(p)
+    p.write_text(json.dumps(_row("a", "fine " * 20)) + "\n" + json.dumps({"id": "b"}) + "\n")
+    rc = flt.run_filter(flt.FilterOptions(inputs=[str(p)], out=str(tmp_path / "o.jsonl")))
+    assert rc == 2 and "not a corpus row" in capsys.readouterr().err

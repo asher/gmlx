@@ -18,9 +18,11 @@ def nfc(text: str) -> str:
 
 
 def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
-                hf_split: str = "train") -> Iterator[tuple[str, str]]:
+                hf_split: str = "train", prefix: str | None = None) -> Iterator[tuple[str, str]]:
     """(doc_id, text) from a jsonl file, a directory of text files, or an
-    HF dataset id (streamed). Text is NFC-normalized here, once."""
+    HF dataset id (streamed). Text is NFC-normalized here, once. ``prefix``
+    names a jsonl file inside a directory corpus in its ids by relative
+    path, so two files with one basename never share an id."""
     p = Path(spec)
     n = 0
     if p.is_file():
@@ -30,7 +32,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 if not line:
                     continue
                 obj = json.loads(line)
-                yield f"{p.name}:{i}", nfc(obj[text_key])
+                yield f"{prefix or p.name}:{i}", nfc(obj[text_key])
                 n += 1
                 if limit and n >= limit:
                     return
@@ -39,7 +41,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
         for f in sorted(p.rglob("*")):
             if f.is_file() and f.suffix in (".txt", ".md", ".py", ".json", ".jsonl"):
                 if f.suffix == ".jsonl":
-                    for did, t in iter_corpus(str(f), text_key):
+                    for did, t in iter_corpus(str(f), text_key, prefix=str(f.relative_to(p))):
                         yield did, t
                         n += 1
                         if limit and n >= limit:

@@ -941,7 +941,7 @@ carries `student_messages`, since that row was generated with a context.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order |
+| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the files' sidecars record other generator settings than each other |
 | `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
 | `--report JSON` | none | write the kept and dropped counts here |
 | `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
@@ -1058,10 +1058,10 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
-| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none |
+| `--resume` | off | continue from the last checkpoint, refused when `--ckpt-dir` holds none or the views, batch size, seed, step count, learning rate or loss knobs changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
-| `--val-batches N` | `16` | validation batches per pass |
+| `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |
 | `--report-every N` | `10` | train-loss report interval |
 | `--report JSON` | none | write the run log here |
 | `--hf-source ID` | none | Hugging Face repo id to read the tokenizer and config from when the GGUF lacks them |

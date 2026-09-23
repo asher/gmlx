@@ -171,7 +171,7 @@ def test_bad_render_kwargs_refuse(tmp_path, capsys):
 def test_filter_refuses_a_malformed_jsonl_line(tmp_path, capsys):
     from gmlx.commands.distill import cmd_filter
     bad = tmp_path / "in.jsonl"
-    bad.write_text('{"id": "a", "messages": []}\nnot json\n')
+    bad.write_text('{"id": "a", "messages": [{"role": "user", "content": "hi"}]}\nnot json\n')
     rc = cmd_filter(["--in", str(bad), "--out", str(tmp_path / "out.jsonl")])
     err = capsys.readouterr().err
     assert rc == 2 and "[filter] refuse:" in err and "line 2" in err

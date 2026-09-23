@@ -151,3 +151,32 @@ def test_checkpointed_layers_run_under_a_compiled_step():
     finally:
         cls.__call__ = orig
     assert np.isfinite(float(loss))
+
+
+def test_checkpoint_layers_takes_the_latest_replay_setting(monkeypatch):
+    """A rewritten class follows the replay setting of the latest call,
+    so a trainer that wants replay after another installed without it
+    gets it."""
+    import gmlx.tune.checkpoint as ck
+
+    model = _model()
+    for layer in model.layers:
+        layer.self_attn.q_proj = nn.Sequential(layer.self_attn.q_proj, nn.Dropout(0.5))
+    model.train()
+    ids = mx.array([[1, 5, 9, 2, 7, 3]])
+    cls = type(model.layers[0])
+    orig = cls.__call__
+    draws = []
+    monkeypatch.setattr(ck, "layer_seed", lambda: draws.append(1) or 7)
+    try:
+        assert checkpoint_layers(model) == 1
+        mx.eval(model(ids))
+        assert not draws
+        assert checkpoint_layers(model, replay_dropout=True) == 0
+        mx.eval(model(ids))
+        assert len(draws) == 2
+        assert checkpoint_layers(model, replay_dropout=False) == 0
+        mx.eval(model(ids))
+        assert len(draws) == 2
+    finally:
+        cls.__call__ = orig

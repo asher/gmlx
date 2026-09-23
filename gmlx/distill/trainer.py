@@ -4,6 +4,7 @@ transform, checkpoints, and the adapter export. ``run_train`` is what
 ``gmlx distill train`` calls."""
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import time
@@ -76,6 +77,17 @@ def is_gguf(path: str) -> bool:
 def gguf_file(path: str) -> str:
     p = Path(path)
     return str(p if p.is_file() else sorted(p.glob("*.gguf"))[0])
+
+
+def resume_fingerprint(view_dirs: list[Path], opts: TrainOptions, knobs: dict) -> dict:
+    """What a resumed run must share with the run that wrote the
+    checkpoint, else the batches it skips are not the ones already
+    trained on and the schedule moves: the views by view.json hash, the
+    batch size, the seed, the step count, the learning-rate settings and
+    the loss knobs."""
+    return {"views": [hashlib.sha256((d / "view.json").read_bytes()).hexdigest() for d in view_dirs],
+            "batch_size": int(opts.batch_size), "seed": int(opts.seed), "iters": int(opts.iters),
+            "lr": float(opts.lr), "warmup": float(opts.warmup), "knobs": dict(knobs)}
 
 
 def load_student(path: str, adapter: str | None, hf_source: str | None):
@@ -263,6 +275,7 @@ def run_train(opts: TrainOptions) -> int:
     log(f"[train] {kind} student, LoRA {n_adapted} modules, "
         f"{trainable_count(model) / 1e6:.2f}M trainable, path={'identity' if view['identity'] else 'general'}, knobs={knobs}")
 
+    # the batch pads to the widest view's K'; each loader compiles at its own
     G, Kp = tables.G, max(int(v["Kp"]) for v in views)
     readers = [_data.CacheReader(Path(v["cache_dir"])) for v in views]
     hidden_dim = None
@@ -281,12 +294,16 @@ def run_train(opts: TrainOptions) -> int:
             return 2
         hidden_dim = dims.pop()
         log(f"[train] hidden-state term: weight {opts.hs}, {opts.hs_loss} loss on a {hidden_dim}-dim sketch")
-    loaders = [_data.ViewLoader(rd, tokenizer, tables, knobs=knobs, Kp=Kp, identity=bool(v["identity"]),
+    loaders = [_data.ViewLoader(rd, tokenizer, tables, knobs=knobs, Kp=int(v["Kp"]), identity=bool(v["identity"]),
                                 view_dir=d if any(d.glob("view-*.safetensors")) else None)
                for rd, v, d in zip(readers, views, view_dirs)]
     train_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "train"]
     val_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "val"]
     lengths = {(vi, e["row"]): e["n_student_tokens"] for vi, v in enumerate(views) for e in v["index"]}
+    # one seeded draw across the val rows of every view, so validation
+    # scores the same rows at every cadence and not the shortest rows of
+    # the first view
+    val_rows = _data.sample_rows(val_rows, lengths, opts.val_batches * opts.batch_size, opts.seed)
     if len(views) > 1:
         counts = [sum(1 for vi, _ in train_rows if vi == i) for i in range(len(views))]
         log(f"[train] {len(views)} views mixed: train rows {counts} from {[str(d) for d in view_dirs]}")
@@ -358,7 +375,7 @@ def run_train(opts: TrainOptions) -> int:
         model.eval()
         cur_seed[0] = None
         tot, ntok = 0.0, 0
-        for i in range(0, min(len(val_rows), opts.val_batches * opts.batch_size), opts.batch_size):
+        for i in range(0, len(val_rows), opts.batch_size):
             b = batch_rows(val_rows[i:i + opts.batch_size])
             if b is None:
                 continue
@@ -372,11 +389,19 @@ def run_train(opts: TrainOptions) -> int:
 
     ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    run = resume_fingerprint(view_dirs, opts, knobs)
     state = {"iteration": 0, "tokens": 0, "seed": opts.seed, "lr": opts.lr, "best_val": None,
-             "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}}
+             "knobs": knobs, "options": {k: v for k, v in vars(opts).items() if k != "extra"}, "run": run}
     if opts.resume:
-        if checkpoint_dir(ckpt_dir, "last") is None:
+        last = checkpoint_dir(ckpt_dir, "last")
+        if last is None:
             log(f"[train] refuse: --resume and no checkpoint under {ckpt_dir}/last (--ckpt-dir names it)")
+            return 2
+        prev = read_json(last / "state.json").get("run")
+        if prev is not None and prev != run:
+            diff = ", ".join(f"{k} {prev.get(k)!r} -> {run[k]!r}" for k in run if prev.get(k) != run[k])
+            log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
+                "a resume repeats the views, batch size, seed, step count, learning rate and loss knobs")
             return 2
         state = load_checkpoint(ckpt_dir, "last", model, opt)
         log(f"[train] resumed at step {state['iteration']}")

@@ -1481,7 +1481,7 @@ def test_align_refusal_leaves_no_view(tmp_path, tok_bl, tok_spm, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# review fixes: identity width, stale views, checkpoints, loss modes, hashing
+# identity width, stale views, checkpoints, loss modes, hashing
 # ---------------------------------------------------------------------------
 
 def test_identity_tables_at_a_wider_student_head():
@@ -1640,7 +1640,7 @@ def test_window_hashes_blocked_equals_whole():
 
 
 # ---------------------------------------------------------------------------
-# review round two: expert adapters, dropout seeds, scorer memory, refusals
+# expert adapters, dropout seeds, scorer memory, refusals
 # ---------------------------------------------------------------------------
 
 def test_align_identity_path_at_a_wider_student_head(tmp_path, tok_bl):
@@ -1803,7 +1803,7 @@ def test_assistant_tails_cache_lives_on_the_tokenizer(tok_bl):
 
 
 # ---------------------------------------------------------------------------
-# review round three: ids by index, None-safe lines, pre-load checks, views
+# ids by index, None-safe lines, pre-load checks, views
 # ---------------------------------------------------------------------------
 
 def test_report_lines_survive_none_aggregates():
@@ -1939,7 +1939,7 @@ def test_align_materialize_over_the_disk_cap_leaves_no_view(tmp_path, tok_bl, to
 
 
 # ---------------------------------------------------------------------------
-# review round four: head scale and parity, the teacher pass end to end,
+# head scale and parity, the teacher pass end to end,
 # readers, the kld cache before the load
 # ---------------------------------------------------------------------------
 
@@ -2057,6 +2057,16 @@ def test_cache_pass_refuses_a_writer_error_and_a_head_that_misses_the_logits(tmp
     assert rc == 2 and "[cache] refuse: --max-disk-gb 0.0 would be exceeded" in err
     assert not list((tmp_path / "c1").glob("batch-*.safetensors"))
     monkeypatch.undo()
+
+    def full(self, *a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(dl.ShardWriter, "write", full)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                  out=str(tmp_path / "c3"), top_k=8, max_len=64))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[cache] refuse: [Errno 28] No space left on device" in err
+    monkeypatch.undo()
     orig = llama.Model.__call__
     monkeypatch.setattr(llama.Model, "__call__", lambda self, inputs, cache=None: orig(self, inputs, cache) * 3.0)
     rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
@@ -2155,3 +2165,278 @@ def test_cache_kld_scores_the_students_own_list(tmp_path, tok_bl):
     res = dl.cache_kld(Stub(), reader, tokenizer=teacher)
     assert res["rows"] == 2 and res["rerendered_rows"] == 1 and res["positions"] > 0
     assert np.isfinite(res["mean_kld_nats"])
+
+
+# ---------------------------------------------------------------------------
+# chat-frame spans, resume contracts, batching and validation
+# ---------------------------------------------------------------------------
+
+_TEMPLATE_DATE = "{% if date_string %}Date: {{ date_string }}\n{% endif %}" + _TEMPLATE_A
+_TEMPLATE_SWITCH = ("{% if enable_thinking %}<think>{% endif %}{% if date_string %}{{ date_string }}{% endif %}"
+                    + _TEMPLATE_A)
+
+
+def _chat_corpus(path: Path, n=4) -> Path:
+    rows = [{"messages": [{"role": "user", "content": f"the cat {i}"},
+                          {"role": "assistant", "content": "the cat is the cat " * (i + 1)}]} for i in range(n)]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+def _cpu_view(tmp: Path, tok, name="view", n_rows=8, kprime=None, student_tok=None) -> tuple[Path, Path]:
+    """(view dir, MLX student dir): a plain cache over tok, aligned to a
+    two-layer llama student over student_tok (tok itself by default, the
+    identity path), so train runs on the CPU end to end through the
+    library's MLX loader."""
+    from gmlx.distill import view as _view
+
+    cache = tmp / "cache"
+    if not (cache / "manifest.json").exists():
+        _tiny_cache(cache, tok, n_rows=n_rows)
+        tok.save_pretrained(cache / "tokenizer")
+    student = tmp / "student"
+    if not (student / "config.json").exists():
+        _tiny_mlx_teacher(student, student_tok or tok)
+    out = tmp / name
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(out),
+                                              kprime=kprime)) == 0
+    return out, student
+
+
+def test_render_row_starts_the_reply_search_after_the_turn_header(tok_bl):
+    """A reply of one letter that the turn header also contains ("d" in
+    "Model:") is found after the header, never inside it."""
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    for reply in ("d", "e", "Model"):
+        msgs = [{"role": "user", "content": "Pick one: d or e?"}, {"role": "assistant", "content": reply}]
+        text, spans = dl.render_row(tok, msgs, open_tail=False)
+        b0, b1, b2 = spans[0]
+        assert text[b0:b1] == reply.encode() and text[:b0].endswith(b"Model:\n")
+        assert text[b1:b2] == b"\n<end>\n"
+
+
+def test_render_row_finds_the_turn_end_marker_after_trailing_whitespace(tok_bl):
+    """A reply ending in a newline keeps the marker after it as a target,
+    on a template that renders the content as given."""
+    tok = _with_template(tok_bl, _TEMPLATE_B)
+    tails = dl.assistant_tails(tok)
+    assert tails
+    for reply in ("Paris", "Paris\n", "Paris \n\n"):
+        msgs = [{"role": "user", "content": "capital of France"}, {"role": "assistant", "content": reply}]
+        text, spans = dl.render_row(tok, msgs, open_tail=False)
+        b0, b1, b2 = spans[0]
+        assert text[b0:b1] == b"Paris"
+        assert b2 > b1 and text[b1:b2].endswith(tails[0].encode()), reply
+
+
+def test_identity_path_refuses_a_cache_with_any_student_list(tmp_path, tok_bl):
+    """One row with its own student list anywhere in the cache rules out
+    the identity path, however many plain rows come before it."""
+    from gmlx.distill import view as _view
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    reply = {"role": "assistant", "content": "the cat is the cat"}
+    plain = [{"role": "user", "content": "the cat"}, reply]
+    ctx = [{"role": "user", "content": "the cat is 123 the cat the cat the cat\n\nthe cat"}, reply]
+    pairs = [(plain, None)] * 10 + [(ctx, plain)]
+    _tiny_reply_cache(tmp_path / "c", tok, pairs)
+    reader = dl.CacheReader(tmp_path / "c")
+    same, why = _view.same_render(reader, tok, "reply")
+    assert not same and "student message list" in why
+    same, why = _view.same_render(dl.CacheReader(tmp_path / "c"), tok, "reply", n_check=64)
+    assert not same
+
+
+def test_cache_resume_pins_the_date_and_the_teacher_identity_survives_a_touch(tmp_path, tok_bl, monkeypatch,
+                                                                              capsys):
+    """A template that reads date_string renders a resume with the first
+    run's date, an unframed run records no render kwargs, and the teacher
+    identity holds the bytes, not the mtime."""
+    import os
+
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_DATE)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = _chat_corpus(tmp_path / "chat.jsonl")
+    out = tmp_path / "cache"
+    monkeypatch.setattr(_frames, "today_string", lambda: "22 Sep 2026")
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=256,
+                                 rows_per_shard=2, frame="reply")
+    assert _teacher.run_cache(opts) == 0
+    run = json.loads((out / "progress.json").read_text())["run"]
+    assert run["render_kwargs"] == {"date_string": "22 Sep 2026"}
+    assert "mtime_ns" not in run["teacher"] and run["teacher"]["sha256_head"]
+    (out / "batch-00001.safetensors").unlink()
+    monkeypatch.setattr(_frames, "today_string", lambda: "23 Sep 2026")
+    for f in teacher.iterdir():
+        os.utime(f, (1, 1))
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8,
+                                                  max_len=256, rows_per_shard=2, frame="reply", resume=True))
+    assert rc == 0, capsys.readouterr().err
+    assert json.loads((out / "progress.json").read_text())["run"]["render_kwargs"] == {"date_string": "22 Sep 2026"}
+    assert dl.validate_cache(out) == []
+    reader = dl.CacheReader(out)
+    assert all(b"Date: 22 Sep 2026" in reader.row(r)[1] for r in range(len(reader)))
+    a = _teacher.teacher_identity(str(teacher))
+    for f in teacher.iterdir():
+        os.utime(f, (2, 2))
+    assert _teacher.teacher_identity(str(teacher)) == a
+    w = teacher / "model.safetensors"
+    data = bytearray(w.read_bytes())
+    data[-1] ^= 0xFF
+    w.write_bytes(bytes(data))
+    assert _teacher.teacher_identity(str(teacher)) != a
+    plain = tmp_path / "plain"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_text_corpus(tmp_path / "t.jsonl")),
+                                                    out=str(plain), top_k=8, max_len=64)) == 0
+    assert json.loads((plain / "progress.json").read_text())["run"]["render_kwargs"] is None
+
+
+def _mlx_students(monkeypatch):
+    """Let run_train take the MLX directory student the CPU tests build
+    (the CLI admits GGUF students only)."""
+    from gmlx.distill import student as _student
+    from gmlx.distill import trainer as _trainer
+
+    monkeypatch.setattr(_trainer, "is_gguf", lambda p: True)
+    monkeypatch.setattr(_trainer, "load_student",
+                        lambda p, adapter, hf: (*_student.load_mlx_student(p, adapter_path=adapter), "mlx"))
+
+
+def test_train_resume_refuses_other_settings_and_scores_a_fixed_val_sample(tmp_path, tok_bl, capsys, monkeypatch):
+    """A checkpoint records the run it belongs to; a resume under another
+    batch size or seed is refused, the same settings continue."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    state = json.loads((ck / "last" / "state.json").read_text())
+    assert state["iteration"] == 2 and state["run"]["batch_size"] == 2 and len(state["run"]["views"]) == 1
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, batch_size=4, iters=3, resume=True)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "other settings than the run that wrote the checkpoint" in err and "batch_size" in err
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, seed=2, resume=True)))
+    assert rc == 2 and "seed" in capsys.readouterr().err
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
+    assert "resumed at step 2" in capsys.readouterr().err
+
+
+def test_train_compiles_each_view_at_its_own_kprime(tmp_path, tok_bl, tok_spm, monkeypatch):
+    """Two views over one cross-tokenizer pair with different K' each get
+    a loader at their own width; the batch pads to the widest."""
+    from gmlx.distill import data as _data
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", kprime=4, student_tok=tok_spm)
+    v2, _ = _cpu_view(tmp_path, tok_bl, "v2", kprime=8, student_tok=tok_spm)
+    seen = []
+    orig = _data.ViewLoader.__init__
+
+    def record(self, *a, **k):
+        seen.append(k.get("Kp"))
+        orig(self, *a, **k)
+
+    monkeypatch.setattr(_data.ViewLoader, "__init__", record)
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(v2)], student=str(student), iters=1,
+                                                  batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16,
+                                                  val_batches=1, ckpt_dir=str(tmp_path / "ck")))
+    assert rc == 0 and seen == [4, 8]
+
+
+def test_batch_iterator_keeps_the_final_short_batch():
+    """Ten rows at batch size four make three batches an epoch, the last
+    one holding the two longest rows."""
+    lengths = [3, 9, 1, 7, 5, 8, 2, 6, 4, 10]
+    it = dl.BatchIterator(lengths, 4, seed=0)
+    assert it.per_epoch == 3
+    epoch = [rows for _, rows in zip(range(3), (r for _, r in it.iterate()))]
+    assert sorted(sum(epoch, [])) == list(range(10))
+    short = [b for b in it.batches if len(b) == 2]
+    assert short == [[1, 9]]
+
+
+def test_sample_rows_draws_once_across_views():
+    from gmlx.distill import data as _data
+
+    pairs = [(0, i) for i in range(10)] + [(1, i) for i in range(10)]
+    lengths = {p: 100 - 5 * p[1] + p[0] for p in pairs}
+    a = _data.sample_rows(pairs, lengths, 8, seed=1)
+    b = _data.sample_rows(pairs, lengths, 8, seed=1)
+    c = _data.sample_rows(pairs, lengths, 8, seed=2)
+    assert a == b and a != c and len(a) == 8
+    assert {p[0] for p in a} == {0, 1}
+    assert [lengths[p] for p in a] == sorted(lengths[p] for p in a)
+    assert _data.sample_rows(pairs, lengths, 40, seed=1) == sorted(pairs, key=lambda p: lengths[p])
+
+
+def test_render_kwargs_inherit_every_variable_the_template_reads(tok_bl):
+    from gmlx.distill import frames as _frames
+
+    tok = _with_template(tok_bl, _TEMPLATE_SWITCH)
+    kw = dl.resolve_render_kwargs(tok, inherit={"enable_thinking": False, "date_string": "1 Jan 2026", "x": 1})
+    assert kw == {"enable_thinking": False, "date_string": "1 Jan 2026"}
+    assert dl.resolve_render_kwargs(tok, inherit={"enable_thinking": False}, override={"enable_thinking": True}) \
+        == {"enable_thinking": True, "date_string": _frames.today_string()}
+    plain = _with_template(tok_bl, _TEMPLATE_A)
+    assert dl.resolve_render_kwargs(plain, inherit={"enable_thinking": False, "date_string": "1 Jan 2026"}) == {}
+
+
+def test_parse_render_kwargs_takes_a_long_inline_object():
+    spec = json.dumps({"enable_thinking": False, "pad": "x" * 400})
+    assert dl.parse_render_kwargs(spec) == {"enable_thinking": False, "pad": "x" * 400}
+    assert dl.parse_render_kwargs("  " + spec) == json.loads(spec)
+
+
+def test_head_scale_skips_the_tied_minicpm_head_and_reads_config():
+    """mlx-lm's tied MiniCPM path applies no scale, so the head carries
+    none there; a language model that keeps its arguments under config
+    (mlx-vlm) is read like one that keeps them under args."""
+    import types
+
+    from mlx_lm.models import granite, minicpm
+
+    from gmlx.distill import head as _head
+
+    ids = mx.arange(1, 9)[None]
+    for tie, want in ((False, 0.25), (True, 1.0)):
+        mx.random.seed(0)
+        a = minicpm.ModelArgs(model_type="minicpm", hidden_size=64, dim_model_base=16, num_hidden_layers=2,
+                              intermediate_size=128, num_attention_heads=4, rms_norm_eps=1e-5, vocab_size=100,
+                              num_key_value_heads=4, scale_depth=1.4, scale_emb=12, tie_word_embeddings=tie)
+        m = minicpm.Model(a)
+        spec = _head.head_spec_from_model(m)
+        assert spec.scale == pytest.approx(want), tie
+        assert _head.head_parity_gap(m, spec, ids) < 1e-4, tie
+    ga = granite.ModelArgs(model_type="granite", hidden_size=32, num_hidden_layers=1, intermediate_size=64,
+                           num_attention_heads=4, rms_norm_eps=1e-5, vocab_size=64, logits_scaling=8.0,
+                           attention_multiplier=0.125, embedding_multiplier=1.0, residual_multiplier=1.0,
+                           max_position_embeddings=512, num_key_value_heads=2, attention_bias=False,
+                           mlp_bias=False, rope_theta=10000.0, tie_word_embeddings=False)
+    g = granite.Model(ga)
+    w = types.SimpleNamespace(config=ga, model=g.model, lm_head=g.lm_head, __call__=g.__call__)
+    spec = _head.head_spec_from_model(w)
+    assert spec.scale == pytest.approx(0.125)
+    assert _head.h_dim(types.SimpleNamespace(config=ga, embed_tokens=types.SimpleNamespace())) == 32
+
+
+def test_head_logits_applies_the_softcap_for_the_pass_and_the_probes():
+    from gmlx.distill import teacher as _teacher
+
+    rng = np.random.default_rng(3)
+    W = mx.array((rng.standard_normal((16, 4)) * 3).astype(np.float32))
+    h = mx.array(rng.standard_normal((5, 4)).astype(np.float32))
+    z = _teacher.head_logits(dl.linear_head(W, softcap=2.0), h)
+    assert z.dtype == mx.bfloat16
+    want = 2.0 * mx.tanh((h @ W.T) / 2.0)
+    assert float(mx.abs(z.astype(mx.float32) - want).max()) < 0.05
+    assert float(mx.abs(z.astype(mx.float32)).max()) <= 2.0
+    plain = _teacher.head_logits(dl.linear_head(W), h)
+    assert float(mx.abs(plain.astype(mx.float32) - h @ W.T).max()) < 0.1

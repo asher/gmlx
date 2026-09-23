@@ -126,7 +126,7 @@ gmlx distill cache --teacher Qwen3-0.6B-Q8_0.gguf --corpus smoke.jsonl --out smo
     --top-k 64 --max-len 128
 gmlx distill align --cache smoke-cache/ --student Qwen3-0.6B-Q4_K_M.gguf --out smoke-view/
 gmlx distill train --view smoke-view/ --student Qwen3-0.6B-Q4_K_M.gguf --adapter-out smoke.gguf \
-    --iters 40 --batch-size 4
+    --iters 80 --batch-size 4
 gmlx distill eval --student Qwen3-0.6B-Q4_K_M.gguf --adapter smoke.gguf --before \
     --slice smoke=smoke.txt --max-len 128 --md smoke.md --json smoke.json
 ```
@@ -401,7 +401,8 @@ when rerun, since prompt ids already in the output are skipped.
 `cache --resume` continues after the last shard, a file of 64 cached
 rows, that it wrote and verified, and refuses when the corpus or the row
 flags differ from the first run. `train --resume` continues from the
-last checkpoint under `--ckpt-dir` and refuses when there is none.
+last checkpoint under `--ckpt-dir` and refuses when there is none or
+when the run's settings changed since the checkpoint was written.
 
 `--thinking` turns the teacher's thinking on, so each reply carries its
 reasoning trace under `reasoning_content` and the student learns the
@@ -790,12 +791,13 @@ fields.
 - `peak`, `active` and `cache` are memory in GB, the high-water mark, the
   arrays in use and MLX's buffer cache, memory kept for reuse.
 
-`val` is the loss on the rows `align` set aside for validation, scored
-but never trained on, and `best` is the lowest of the earlier
-validations, so a `val` below it is a new best. The first validation
-line has no `best` yet. A validation loss that rises while the training
-loss keeps falling means the adapter is memorizing the rows, and fewer
-steps or a lower rank fix it.
+`val` is the loss on a fixed sample of the validation rows, the rows
+`align` set aside and `train` never trains on, drawn once across every
+view. `best` is the lowest of the earlier validations, so a `val` below
+it is a new best, and the first validation line has no `best` yet. A
+validation loss that rises while the training loss keeps falling means
+the adapter is memorizing the rows, and fewer steps or a lower rank fix
+it.
 
 `eval` writes a Markdown report with one table per kind of measurement,
 each row a slice, one held-out file. The reply table is the one this

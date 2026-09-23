@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +28,10 @@ def parse_render_kwargs(spec: str | None) -> dict:
     """--frame-kwargs value: a JSON object, or a path to a JSON file."""
     if not spec:
         return {}
-    p = Path(spec).expanduser()
-    text = p.read_text(encoding="utf-8") if p.is_file() else spec
+    text = spec
+    if not spec.lstrip().startswith("{"):
+        p = Path(spec).expanduser()
+        text = p.read_text(encoding="utf-8") if p.is_file() else spec
     kw = json.loads(text)
     if not isinstance(kw, dict):
         raise ValueError("--frame-kwargs must be a JSON object")
@@ -52,10 +55,13 @@ def render_kwargs(tokenizer) -> dict:
 
 
 def resolve_render_kwargs(tokenizer, inherit: dict | None = None, override: dict | None = None) -> dict:
-    """A side's render settings: the stable defaults for its template, with
-    the date pinned to the other side's when both templates read one,
-    then the user's overrides."""
+    """A side's render settings: the stable defaults for its template, then
+    every inherited setting this template reads (the thinking switch a
+    cache was rendered with, the date pinned to the other side's), then
+    the user's overrides."""
     kw = default_render_kwargs(tokenizer, date=(inherit or {}).get("date_string"))
+    tpl = getattr(hf_inner(tokenizer), "chat_template", None) or ""
+    kw.update({k: v for k, v in (inherit or {}).items() if k in tpl})
     kw.update(override or {})
     return kw
 
@@ -68,9 +74,14 @@ def default_render_kwargs(tokenizer, date: str | None = None) -> dict:
     tpl = getattr(hf_inner(tokenizer), "chat_template", None) or ""
     kw: dict = {}
     if "date_string" in tpl:
-        import datetime
-        kw["date_string"] = date or datetime.date.today().strftime("%d %b %Y")
+        kw["date_string"] = date or today_string()
     return kw
+
+
+def today_string() -> str:
+    """Today in the Llama date format."""
+    import datetime
+    return datetime.date.today().strftime("%d %b %Y")
 
 
 def _fold_system(messages: list[dict]) -> list[dict] | None:
@@ -233,7 +244,7 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
     tails = assistant_tails(tokenizer)
     spans = []
     cursor = 0
-    for m in messages:
+    for i, m in enumerate(messages):
         c = (m.get("content") or "")
         if m.get("role") != "assistant":
             if c.strip():
@@ -244,6 +255,10 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
         cs = c.strip()
         if not cs:
             continue   # a tool-call-only turn: context, not a target
+        # the turn header before this reply can contain the reply's own
+        # characters (a reply of "a" sits inside "assistant"), so the search
+        # starts where the header the template renders for the turn ends
+        cursor = max(cursor, _header_end(tokenizer, messages[:i], rendered))
         rc = (m.get("reasoning_content") or "").strip()
         k0 = None
         if rc:
@@ -258,14 +273,12 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
         end = k + len(cs)
         b0 = len(rendered[:k if k0 is None else k0].encode("utf-8"))
         b1 = len(rendered[:end].encode("utf-8"))
-        for tail in tails:
-            if tail and rendered.startswith(tail, end):
-                end += len(tail)
-                break
-        else:
-            if end == len(rendered) and tails:
-                rendered = rendered + tails[-1]
-                end += len(tails[-1])
+        te = _tail_end(rendered, end, tails)
+        if te is not None:
+            end = te
+        elif tails and not rendered[end:].strip():
+            rendered = rendered + tails[-1]
+            end = len(rendered)
         b2 = len(rendered[:end].encode("utf-8"))
         spans.append((b0, b1, b2))
         cursor = end
@@ -274,6 +287,35 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
     if last_only:
         spans = spans[-1:]
     return rendered.encode("utf-8"), spans
+
+
+def _header_end(tokenizer, prior: list[dict], rendered: str) -> int:
+    """Where the assistant turn after ``prior`` can start in ``rendered``:
+    the length of the longest common prefix of the render and the
+    generation prompt for ``prior``, 0 when the template cannot render
+    that prefix."""
+    try:
+        if has_chat_template(tokenizer):
+            gen = apply_template(tokenizer, prior, add_generation_prompt=True)
+        else:
+            gen = _plain_render(tokenizer, prior, gen_prompt=True)
+    except ValueError:
+        return 0
+    return len(os.path.commonprefix([gen, rendered]))
+
+
+def _tail_end(rendered: str, end: int, tails: list[str]) -> int | None:
+    """Where the turn-end marker after a content ending at ``end`` stops,
+    or None when no marker follows: the marker sits right after the
+    content, or after the whitespace the content ended in."""
+    j = end
+    while j < len(rendered) and rendered[j].isspace():
+        j += 1
+    for pos in range(end, j + 1):
+        for tail in tails:
+            if tail and rendered.startswith(tail, pos):
+                return pos + len(tail)
+    return None
 
 
 

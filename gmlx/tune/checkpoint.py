@@ -48,14 +48,16 @@ def layer_list(model):
 def checkpoint_layers(model, replay_dropout: bool = False) -> int:
     """Install ``mx.checkpoint`` around every decoder-layer class of
     ``model``. Returns the number of classes rewritten; a class already
-    rewritten is left alone, so the call is idempotent. With
-    ``replay_dropout`` a layer that draws dropout masks draws one seed per
-    call and replays it in the backward recompute. The draw evaluates an
-    array, so it serves eager training loops only: a step under
-    ``mx.compile`` cannot use it."""
+    rewritten is left alone, so the call is idempotent, and it takes the
+    ``replay_dropout`` of the latest call. With ``replay_dropout`` a layer
+    that draws dropout masks draws one seed per call and replays it in
+    the backward recompute. The draw evaluates an array, so it serves
+    eager training loops only: a step under ``mx.compile`` cannot use
+    it."""
     n = 0
     for layer in layer_list(model):
         cls = type(layer)
+        cls._gmlx_replay_dropout = bool(replay_dropout)
         if getattr(cls.__call__, "_gmlx_checkpointed", False):
             continue
         fn = cls.__call__
@@ -65,7 +67,8 @@ def checkpoint_layers(model, replay_dropout: bool = False) -> int:
                 # the backward recomputes the layer, and a dropout inside it
                 # would draw fresh masks from the global stream by then: the
                 # layer's seed is drawn once here and replayed in the recompute
-                seed = layer_seed() if (replay_dropout and draws_random(self)) else None
+                replay = getattr(type(self), "_gmlx_replay_dropout", False)
+                seed = layer_seed() if (replay and draws_random(self)) else None
 
                 def inner(params, *args, **kwargs):
                     if seed is not None:

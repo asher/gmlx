@@ -219,16 +219,18 @@ def batch_to_mx(batch: dict[str, np.ndarray]) -> dict:
 class BatchIterator:
     """mlx-lm's batching semantics with our own unconditional seeding.
 
-    Rows are sorted by length and cut into consecutive batches; each epoch
-    permutes the batch order with np.random.default_rng([seed, epoch]), so
-    seed 0 is a seed and resume re-derives the permutation and skips the
-    first `skip` batches without loading them."""
+    Rows are sorted by length and cut into consecutive batches, the last
+    one short when the count does not divide (it holds the longest rows,
+    which are never dropped); each epoch permutes the batch order with
+    np.random.default_rng([seed, epoch]), so seed 0 is a seed and resume
+    re-derives the permutation and skips the first `skip` batches without
+    loading them."""
 
     def __init__(self, lengths: list[int], batch_size: int, seed: int):
         if len(lengths) < batch_size:
             raise ValueError(f"need at least batch_size={batch_size} rows, have {len(lengths)}")
         idx = sorted(range(len(lengths)), key=lambda i: lengths[i])
-        self.batches = [idx[i:i + batch_size] for i in range(0, len(idx) - batch_size + 1, batch_size)]
+        self.batches = [idx[i:i + batch_size] for i in range(0, len(idx), batch_size)]
         self.seed = int(seed)
 
     @property
@@ -250,6 +252,16 @@ class BatchIterator:
                     yield it, self.batches[int(bi)]
                 it += 1
             epoch += 1
+
+
+def sample_rows(pairs: list, lengths: dict, n: int, seed: int) -> list:
+    """At most ``n`` of ``pairs`` drawn once with ``seed``, sorted by
+    length so each batch pads little: the validation rows, taken across
+    every view rather than the shortest rows of the first."""
+    if len(pairs) > n:
+        rng = np.random.default_rng([int(seed), 7])
+        pairs = [pairs[i] for i in sorted(rng.choice(len(pairs), size=n, replace=False))]
+    return sorted(pairs, key=lambda p: lengths[p])
 
 
 class CacheReader:

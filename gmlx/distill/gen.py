@@ -111,7 +111,7 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
                 row = {"id": row["id"], "messages": apply_context(msgs, ctx, opts.context_format),
                        "student_messages": msgs, **extra}
             rows.append(row)
-        return rows
+        return _unique_ids(rows)
     assert opts.corpus is not None
     n = 0
     for doc_id, text in _corpus.iter_corpus(opts.corpus, text_key=opts.text_key, limit=None,
@@ -133,6 +133,17 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
         n += 1
         if opts.docs and n >= opts.docs:
             break
+    return _unique_ids(rows)
+
+
+def _unique_ids(rows: list[dict]) -> list[dict]:
+    """The rows, or a ValueError naming the first id two rows share: a
+    resume skips rows by id, so a shared id would drop one of them."""
+    seen: set[str] = set()
+    for r in rows:
+        if r["id"] in seen:
+            raise ValueError(f"prompt id {r['id']!r} appears twice, ids must be unique")
+        seen.add(r["id"])
     return rows
 
 
@@ -408,18 +419,20 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
-    try:
-        done = _done_ids(out)
-    except ValueError as e:
-        print(f"[gen] refuse: {e}", file=sys.stderr)
-        return 2
     side = out.with_suffix(out.suffix + ".gen.json")
-    if done and side.exists():
+    # the settings check comes before the torn-line cut, so a refused
+    # resume leaves the file as it found it
+    if out.exists() and out.stat().st_size > 0 and side.exists():
         conflict = resume_conflict(json.loads(side.read_text(encoding="utf-8")), opts)
         if conflict:
             print(f"[gen] refuse: {out} was generated with other settings ({conflict}), pass a fresh --out",
                   file=sys.stderr)
             return 2
+    try:
+        done = _done_ids(out)
+    except ValueError as e:
+        print(f"[gen] refuse: {e}", file=sys.stderr)
+        return 2
     todo = [(i, r) for i, r in enumerate(rows) if r["id"] not in done]
     log(f"[gen] {len(rows)} prompts (sha256 {prompt_hash[:12]}), {len(done)} done, {len(todo)} to run at "
         f"concurrency {opts.concurrency}, max_tokens {opts.max_tokens}, T {opts.temperature} top_p {opts.top_p}")
@@ -432,9 +445,11 @@ def run_gen(opts: GenOptions) -> int:
             proc = spawn_server(opts, out.with_suffix(out.suffix + ".server.log"))
         model_id = wait_ready(base_url, proc, opts.startup_timeout)
         log(f"[gen] server ready: model {model_id}")
-        if not side.exists():
+        if not done or not side.exists():
             # the settings land before the first request, so a run cut
-            # short still leaves what a resume compares against
+            # short still leaves what a resume compares against; a sidecar
+            # beside a deleted output is replaced, one beside rows already
+            # generated is kept for its run totals
             write_json_atomic(side, {"gen_version": GEN_VERSION, "model": opts.teacher or base_url,
                                      "served_model_id": model_id, **run_settings(opts),
                                      "prompt_set_sha256": prompt_hash, "run": None})

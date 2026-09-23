@@ -92,7 +92,8 @@ def head_scale(args) -> float:
     """The factor an mlx-lm model applies to its logits after the
     projection: Granite divides by logits_scaling, Cohere multiplies by
     logit_scale, MiniCPM divides the hidden states by hidden_size over
-    dim_model_base. 1.0 for every other model."""
+    dim_model_base on an untied head (its tied path applies no scale).
+    1.0 for every other model."""
     s = 1.0
     ls = getattr(args, "logits_scaling", None)
     if ls:
@@ -102,7 +103,7 @@ def head_scale(args) -> float:
         s *= float(lg)
     dmb = getattr(args, "dim_model_base", None)
     hs = getattr(args, "hidden_size", None)
-    if dmb and hs:
+    if dmb and hs and not getattr(args, "tie_word_embeddings", False):
         s /= float(hs) / float(dmb)
     return s
 
@@ -110,8 +111,9 @@ def head_scale(args) -> float:
 def head_spec_from_model(model) -> HeadSpec:
     """mlx-lm style models: lm_head when present, else the tied embedding
     as_linear; softcap from args.final_logit_softcapping through the
-    text_config fallback; the post-projection scale from head_scale."""
-    args = getattr(model, "args", None)
+    text_config fallback; the post-projection scale from head_scale. An
+    mlx-vlm language model keeps its arguments under config."""
+    args = model_args(model)
     cfg = getattr(args, "__dict__", {}) if args is not None else {}
     cfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
     softcap = cfg.get("final_logit_softcapping") if isinstance(cfg, dict) else None
@@ -169,7 +171,14 @@ def h_dim(inner) -> int:
     w = getattr(emb, "weight", None)
     if w is not None:
         return int(w.shape[1])
-    return int(getattr(emb, "dims", 0) or getattr(inner.args, "hidden_size"))
+    return int(getattr(emb, "dims", 0) or getattr(model_args(inner), "hidden_size"))
+
+
+def model_args(model):
+    """The model's argument object: ``args`` on mlx-lm models, ``config``
+    on mlx-vlm language models."""
+    args = getattr(model, "args", None)
+    return args if args is not None else getattr(model, "config", None)
 
 
 def linear_head(weight, softcap: float | None = None, scale: float = 1.0) -> HeadSpec:

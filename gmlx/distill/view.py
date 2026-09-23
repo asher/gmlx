@@ -94,15 +94,19 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
 
 def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -> tuple[bool, str]:
     """Whether the student's chat template reproduces the cached token ids
-    on the first n_check framed rows."""
+    on the first n_check framed rows. Never when any row of the cache
+    carries a student message list of its own: such a row renders for the
+    student without the teacher's context, so the cached ids cannot be
+    the student's input."""
     stb = token_bytes(student_tok)
+    with_list = sum(1 for m in reader.rows_meta if m.get("student_messages"))
+    if with_list:
+        return False, f"{with_list} rows carry their own student message list"
     checked = 0
     for r in range(min(len(reader), 4096)):
         meta = reader.rows_meta[r]
         if not meta.get("messages"):
             continue
-        if meta.get("student_messages"):
-            return False, f"row {r}: the student has its own message list"
         arrs, _text, _ = reader.row(r)
         try:
             stext, _spans = _frames.render_row(student_tok, meta["messages"],

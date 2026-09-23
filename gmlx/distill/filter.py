@@ -143,25 +143,54 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 
 
 def _read_rows(path: Path) -> list[dict]:
+    """The corpus rows of a jsonl file, or a ValueError naming the first
+    line that is not JSON or not a row (an object with a messages list)."""
     rows = []
     for n, ln in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not ln.strip():
             continue
         try:
-            rows.append(json.loads(ln))
+            obj = json.loads(ln)
         except json.JSONDecodeError as e:
             raise ValueError(f"{path} line {n}: not JSON ({e.msg})") from None
+        if not isinstance(obj, dict) or not isinstance(obj.get("messages"), list) or not obj["messages"]:
+            raise ValueError(f"{path} line {n}: not a corpus row (an object with a messages list)")
+        rows.append(obj)
     return rows
+
+
+_GEN_KEYS = ("model", "sampling", "seed", "chat_template_kwargs", "thinking", "thinking_budget",
+             "context", "context_format")
+
+
+def _read_sidecar(path: Path) -> dict | None:
+    side = path.with_suffix(path.suffix + ".gen.json")
+    return json.loads(side.read_text(encoding="utf-8")) if side.exists() else None
+
+
+def _gen_settings(side: dict) -> dict:
+    """The generator settings every row of a file shares, which two inputs
+    must agree on before their rows are joined under one sidecar."""
+    return {k: side.get(k) for k in _GEN_KEYS}
 
 
 def run_filter(opts: FilterOptions) -> int:
     """Filter the inputs in order into ``out`` with its sidecar. Returns 0,
-    or 2 when an input is missing, a row cannot take the context, or the
+    or 2 when an input is missing, the inputs were generated with other
+    settings than each other, a row cannot take the context, or the
     verify command fails."""
     inputs = [Path(p).expanduser() for p in opts.inputs]
     for p in inputs:
         if not p.is_file():
             print(f"[filter] refuse: no such file: {p}", file=sys.stderr)
+            return 2
+    sides = [_read_sidecar(p) for p in inputs]
+    first = next((s for s in sides if s is not None), None)
+    for p, s in zip(inputs, sides):
+        if s is not None and first is not None and _gen_settings(s) != _gen_settings(first):
+            diff = ", ".join(k for k in _GEN_KEYS if s.get(k) != first.get(k))
+            print(f"[filter] refuse: {p} was generated with other settings than {inputs[0]} ({diff}), "
+                  "filter each file on its own", file=sys.stderr)
             return 2
     if opts.context and not Path(opts.context).expanduser().is_file():
         print(f"[filter] refuse: no such file: {opts.context}", file=sys.stderr)
@@ -209,8 +238,7 @@ def run_filter(opts: FilterOptions) -> int:
         for row in survivors:
             ofh.write(json.dumps(row, ensure_ascii=False) + "\n")
     kept = len(survivors)
-    side_in = inputs[0].with_suffix(inputs[0].suffix + ".gen.json")
-    sidecar: dict = json.loads(side_in.read_text(encoding="utf-8")) if side_in.exists() else {"gen_version": None}
+    sidecar: dict = dict(first) if first is not None else {"gen_version": None}
     prev = sidecar.get("filter_version")
     sidecar["filter_version"] = f"{prev}+{FILTER_VERSION}" if prev else FILTER_VERSION
     params = {k: getattr(opts, k) for k in ("min_words", "ngram", "max_repeat", "max_line_repeats",
