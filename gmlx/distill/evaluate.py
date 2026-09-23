@@ -19,7 +19,7 @@ from . import eval as _eval
 from . import frames as _frames
 from . import tokens as _tokens
 from .constants import GB, log
-from .corpus import nfc, norm_messages
+from .corpus import message_list, nfc, norm_messages
 from .data import CacheReader
 from .format import read_json, replay_layers_for, shard_texts, write_bytes_atomic, write_json_atomic
 from .student import adapter_disabled
@@ -67,18 +67,26 @@ class UnreadableInput(Exception):
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """The rows of a jsonl file; a ``messages`` or ``student_messages``
+    list is checked message by message and NFC-normalized."""
+    rows: list[tuple[int, dict]] = []
     try:
         # newlines only: a row may hold U+2028 or another line separator
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
+        for n, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+            if line.strip():
+                rows.append((n, json.loads(line)))
     except (OSError, ValueError) as e:
         raise UnreadableInput(f"{path}: {e}") from e
-    if not all(isinstance(r, dict) for r in rows):
+    if not all(isinstance(r, dict) for _n, r in rows):
         raise UnreadableInput(f"{path}: every line must be a JSON object")
-    for r in rows:
+    for n, r in rows:
         for key in ("messages", "student_messages"):
-            if isinstance(r.get(key), list) and all(isinstance(m, dict) for m in r[key]):
-                r[key] = norm_messages(r[key])
-    return rows
+            if key in r:
+                try:
+                    r[key] = norm_messages(message_list(r, key, f"{path.name} line {n}"))
+                except ValueError as e:
+                    raise UnreadableInput(str(e)) from None
+    return [r for _n, r in rows]
 
 
 def read_conversations(path: Path) -> list:

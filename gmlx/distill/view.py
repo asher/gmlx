@@ -94,7 +94,7 @@ def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path,
 
 def same_render(reader: CacheReader, student_tok, kind: str, n_check: int = 8) -> tuple[bool, str]:
     """Whether the student's chat template reproduces the cached token ids
-    on the first n_check framed rows. Never when any row of the cache
+    on n_check framed rows spread over the cache. Never when any row of the cache
     carries a student message list of its own: such a row renders for the
     student without the teacher's context, so the cached ids cannot be
     the student's input."""
@@ -173,6 +173,21 @@ def run_align(opts: AlignOptions) -> int:
     except ValueError as e:
         log(f"[align] refuse: --frame-kwargs is not a JSON object: {e}")
         return 2
+    # every input is read before an earlier view is removed, so a refusal
+    # leaves the view directory as it found it
+    try:
+        reader = CacheReader(cache)
+        manifest = reader.manifest
+        teacher_tok = _tokens.load_tokenizer(str(cache / "tokenizer")) if (cache / "tokenizer").exists() \
+            else _tokens.load_tokenizer(manifest["teacher_path"])
+    except (OSError, KeyError, ValueError) as e:
+        log(f"[align] refuse: cannot read the cache at {cache}: {e}")
+        return 2
+    try:
+        student_tok = _tokens.load_tokenizer(opts.student)
+    except (OSError, KeyError, ValueError) as e:
+        log(f"[align] refuse: cannot load the student tokenizer at {opts.student}: {e}")
+        return 2
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
     # a view directory is rewritten whole: shards of an earlier align over
@@ -182,11 +197,6 @@ def run_align(opts: AlignOptions) -> int:
         p.unlink()
     if stale:
         log(f"[align] removed {len(stale)} files of an earlier view in {out}")
-    reader = CacheReader(cache)
-    manifest = reader.manifest
-    teacher_tok = _tokens.load_tokenizer(str(cache / "tokenizer")) if (cache / "tokenizer").exists() \
-        else _tokens.load_tokenizer(manifest["teacher_path"])
-    student_tok = _tokens.load_tokenizer(opts.student)
     V_T = int(manifest["vocab_size"])
     V_S = student_width(opts.student) or len(hf_inner(student_tok))
     knobs = dict(DEFAULT_KNOBS, w_mid=opts.w_mid, gamma=opts.gamma, tau_alm=opts.tau_alm,

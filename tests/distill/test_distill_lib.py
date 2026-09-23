@@ -846,12 +846,6 @@ def test_decontam_and_stats():
     # every slice from one pass over the corpus, the same numbers
     both = dl_eval.decontam_fractions({"clean": clean, "dirty": dirty, "short": b"x"}, corpus)
     assert both == {"clean": 0.0, "dirty": f, "short": 0.0}
-    r = dl.paired_bootstrap(np.array([1, 2, 3, 4.0]), np.array([1, 1, 1, 1.0]))
-    assert r["diff"] == 1.5
-    t = dl.welch_one_sided(np.array([1.0, 1.1, 0.9]), np.array([0.2, 0.3]))
-    assert t["dof"] == 3 and t["p"] < 0.05
-    h = dl.holm({"a": 0.001, "b": 0.03, "c": 0.5})
-    assert h["a"] and not h["c"]
 
 
 def test_adapter_disabled_drops_cached_lora_tables():
@@ -4375,18 +4369,6 @@ def test_chat_sanity_reference_nll_scores_every_reference_token(tmp_path, tok_bl
     assert rec["ref_nll_nats"] == pytest.approx(want, rel=1e-4)
 
 
-def test_holm_steps_down_and_the_bootstrap_p_is_the_regression_tail():
-    # Holm admits b at 0.02 against 0.05 / 2; Bonferroni would not
-    assert dl.holm({"a": 0.01, "b": 0.02, "c": 0.03}) == {"a": True, "b": True, "c": True}
-    # the first failure stops the walk: c would pass 0.05 / 1 on its own
-    assert dl.holm({"a": 0.03, "b": 0.001, "c": 0.04}) == {"a": False, "b": True, "c": False}
-    a, b = np.array([2.0, 3.0, 4.0, 5.0]), np.array([1.0, 1.0, 1.0, 1.0])
-    up, down = dl.paired_bootstrap(a, b), dl.paired_bootstrap(b, a)
-    assert up["diff"] == 2.5 and down["diff"] == -2.5
-    assert up["p_one_sided_regress"] == 1.0 and down["p_one_sided_regress"] == 0.0
-    assert up["ci_lo"] > 0 > down["ci_hi"]
-
-
 def test_train_schedule_warms_up_linearly_then_decays():
     from gmlx.distill import trainer as _trainer
 
@@ -4886,3 +4868,114 @@ def test_eval_chat_report_names_the_drift_reference(tmp_path, monkeypatch, capsy
     assert f"[eval] --chat-refs {js1} ignored" in capsys.readouterr().err
     _js4, r4 = ev("r4")
     assert r4["after"]["chat"]["refs_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# round seventeen: message lists checked message by message, align reads
+# its inputs before it removes a view, the installer's own streaming
+# verdict, materialize walks the index once
+# ---------------------------------------------------------------------------
+
+def test_message_lists_are_checked_message_by_message(tmp_path):
+    """A user turn with null or non-string content would render as the
+    text "None" or crash the frame; every reader refuses it naming the
+    message, and an assistant turn alone may carry null content."""
+    import re
+
+    from gmlx.distill import corpus as _corpus
+    from gmlx.distill import evaluate as _ev
+
+    ok = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": None, "tool_calls": []}]
+    assert _corpus.message_list({"messages": ok}, "messages", "r") == ok
+    cases = (([{"role": "user", "content": None}], "message 0 of 'messages' has no content"),
+             ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+              "message 0 of 'messages' content is not a string"),
+             ([{"role": "user", "content": "hi"}, {"role": "assistant", "content": 5}],
+              "message 1 of 'messages' content is not a string"),
+             ([{"role": "assistant", "content": "x", "reasoning_content": ["t"]}],
+              "message 0 of 'messages' reasoning_content is not a string"),
+             ([{"content": "hi"}], "'messages' is not a list of messages"),
+             ([{"role": None, "content": "hi"}], "'messages' is not a list of messages"))
+    for bad, why in cases:
+        with pytest.raises(ValueError, match=re.escape(f"r: {why}")):
+            _corpus.message_list({"messages": bad}, "messages", "r")
+    p = tmp_path / "s.jsonl"
+    p.write_text(json.dumps({"messages": ok}) + "\n\n"
+                 + json.dumps({"messages": [{"role": "user", "content": None}]}) + "\n", encoding="utf-8")
+    with pytest.raises(_ev.UnreadableInput, match=re.escape("s.jsonl line 3: message 0 of 'messages' has no content")):
+        _ev.read_jsonl(p)
+    with pytest.raises(ValueError, match=re.escape("s.jsonl:2: message 0 of 'messages' has no content")):
+        list(_corpus.iter_conversations(str(p)))
+    p.write_text(json.dumps({"messages": ok, "student_messages": [{"role": "user", "content": 7}]}) + "\n",
+                 encoding="utf-8")
+    with pytest.raises(_ev.UnreadableInput, match=re.escape("message 0 of 'student_messages' content is not a string")):
+        _ev.read_jsonl(p)
+
+
+def test_align_reads_its_inputs_before_removing_an_earlier_view(tmp_path, tok_bl, capsys):
+    """A cache that cannot be read refuses with exit 2 and the earlier
+    view in the output directory survives."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=4)
+    (tmp_path / "c" / "manifest.json").write_text("{not json", encoding="utf-8")
+    out = tmp_path / "v"
+    out.mkdir()
+    (out / "view.json").write_text("{}", encoding="utf-8")
+    (out / "view-00000.safetensors").write_bytes(b"old")
+    rc = _view.run_align(_view.AlignOptions(cache=str(tmp_path / "c"), student=str(tmp_path), out=str(out)))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert f"[align] refuse: cannot read the cache at {tmp_path / 'c'}:" in err
+    assert "removed" not in err
+    assert (out / "view.json").read_text() == "{}" and (out / "view-00000.safetensors").read_bytes() == b"old"
+
+
+def test_stream_over_budget_reads_the_installers_streaming_verdict(monkeypatch, capsys):
+    """A CPU-only expert codec marks its modules the way streaming does;
+    the placement reads the verdict the installer records on the model,
+    so a table stream that keeps such experts resident reports them
+    resident and the pass does not demand a feeder."""
+    import mlx.nn as nn
+
+    import gmlx.stream.expert_streaming as _es
+    from gmlx.distill import teacher as _teacher
+    from gmlx.load.loader import moe_streaming_active
+
+    class _M(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [nn.Linear(2, 2)]
+
+    m = _M()
+    GB = 10 ** 9
+    for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
+        monkeypatch.setenv(var, "256")
+        monkeypatch.delenv(var)
+
+    def install(model, gguf_path=None, **k):
+        model.layers[0]._kq_cpu_only = True
+        model._kq_streaming = False
+        return 3, 999
+
+    monkeypatch.setattr(_es, "install_expert_streaming", install)
+    assert _teacher.stream_over_budget(m, "t.gguf", 120 * GB, 100 * GB) == (3, 0)
+    assert "a streamed table brings it under, the experts stay resident" in capsys.readouterr().err
+    assert moe_streaming_active(m) and not _teacher.experts_streaming(m)
+    m._kq_streaming = True
+    assert _teacher.experts_streaming(m)
+    del m._kq_streaming
+    assert _teacher.experts_streaming(m)
+
+
+def test_materialize_compiles_each_row_once_in_shard_order(tmp_path, tok_bl, tok_spm, monkeypatch):
+    _tiny_cache(tmp_path / "c", tok_bl, n_rows=6)
+    reader = dl.CacheReader(tmp_path / "c")
+    tables = dl.build_tables(tok_bl, tok_spm)
+    loader = dl.ViewLoader(reader, tok_spm, tables, knobs=KNOBS, Kp=8, identity=False)
+    seen = []
+    real = loader.compile
+    monkeypatch.setattr(loader, "compile", lambda r: (seen.append(r), real(r))[1])
+    assert loader.materialize(tmp_path / "v") == reader.n_shards
+    assert len(seen) == len(reader) == len(set(seen))
+    assert seen == [r for i in range(reader.n_shards) for r, (si, _s) in enumerate(reader.index) if si == i]

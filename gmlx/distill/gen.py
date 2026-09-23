@@ -99,10 +99,16 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
         for i, line in enumerate(path.read_text(encoding="utf-8").split("\n")):
             if not line.strip():
                 continue
-            r = json.loads(line)
-            msgs = r.get("messages")
+            where = f"prompt {i} of {path.name}"
+            try:
+                r = json.loads(line)
+            except ValueError as e:
+                raise ValueError(f"{where}: not JSON ({e})") from None
+            if not isinstance(r, dict):
+                raise ValueError(f"{where}: not a JSON object")
+            msgs = _corpus.message_list(r, "messages", where)
             if not msgs or msgs[-1].get("role") != "user":
-                raise ValueError(f"prompt {i} of {path.name}: messages must end on a user turn")
+                raise ValueError(f"{where}: messages must end on a user turn")
             own = r.get("context")
             ctx = own if isinstance(own, str) and own.strip() else shared
             extra = {k: v for k, v in r.items() if k not in ("id", "messages", "context", "student_messages")}

@@ -1026,3 +1026,25 @@ def test_gen_refuses_a_corpus_row_whose_text_is_not_a_string(tmp_path, stub_serv
     rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), corpus=str(corpus), base_url=stub_server))
     err = capsys.readouterr().err
     assert rc == 2 and "c.jsonl line 1: 'text' is not a string" in err
+
+
+def test_prompt_rows_name_the_line_of_a_bad_prompt(tmp_path, capsys):
+    """A prompt line that is not an object, or whose messages are not a
+    list of messages, is refused with its line rather than a crash."""
+    import re
+
+    p = tmp_path / "p.jsonl"
+    cases = (("[1, 2]", "prompt 0 of p.jsonl: not a JSON object"),
+             ('{"messages": "hi"}', "prompt 0 of p.jsonl: 'messages' is not a list of messages"),
+             ('{"messages": [{"role": "user", "content": null}]}',
+              "prompt 0 of p.jsonl: message 0 of 'messages' has no content"),
+             ('{"messages": [{"role": "user", "content": "hi"}]}\n{"messages": [{"role": "assistant", "content": "x"}]}',
+              "prompt 1 of p.jsonl: messages must end on a user turn"),
+             ("{not json", "prompt 0 of p.jsonl: not JSON ("))
+    for text, why in cases:
+        p.write_text(text + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape(why)):
+            gen.prompt_rows(gen.GenOptions(out="o.jsonl", prompts=str(p)))
+    p.write_text("[1, 2]\n", encoding="utf-8")
+    rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "o.jsonl"), prompts=str(p), base_url="http://127.0.0.1:1"))
+    assert rc == 2 and "[gen] refuse: prompt 0 of p.jsonl: not a JSON object" in capsys.readouterr().err

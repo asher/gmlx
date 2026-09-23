@@ -31,12 +31,23 @@ def text_value(row, key: str, where: str) -> str:
 
 def message_list(row, key: str, where: str) -> list:
     """The list of message dicts under key in a corpus row, else a
-    ValueError naming the row."""
+    ValueError naming the row and the message. Every message carries a
+    role and a string content; an assistant turn may carry null content
+    (a tool-call turn), and a reasoning_content is a string when present."""
     if not isinstance(row, dict) or key not in row:
         raise ValueError(f"{where}: no {key!r} key")
     v = row[key]
-    if not isinstance(v, list) or not all(isinstance(m, dict) for m in v):
+    if not isinstance(v, list) or not all(isinstance(m, dict) and isinstance(m.get("role"), str) for m in v):
         raise ValueError(f"{where}: {key!r} is not a list of messages")
+    for j, m in enumerate(v):
+        c = m.get("content")
+        if c is None and m["role"] != "assistant":
+            raise ValueError(f"{where}: message {j} of {key!r} has no content")
+        if c is not None and not isinstance(c, str):
+            raise ValueError(f"{where}: message {j} of {key!r} content is not a string")
+        rc = m.get("reasoning_content")
+        if rc is not None and not isinstance(rc, str):
+            raise ValueError(f"{where}: message {j} of {key!r} reasoning_content is not a string")
     return v
 
 

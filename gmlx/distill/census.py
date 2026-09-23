@@ -119,9 +119,15 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     n = 0
     for i, line in enumerate(corpus.read_text(encoding="utf-8").split("\n")):
         if line.strip():
+            try:
+                row = json.loads(line)
+            except ValueError as e:
+                raise ValueError(f"{corpus.name} line {i + 1}: not JSON ({e})") from None
+            if not isinstance(row, dict):
+                raise ValueError(f"{corpus.name} line {i + 1}: not a JSON object")
             # the fallback id counts rows the way eval's reply slice does,
             # blank lines skipped; the pairing key is the cache's line number
-            out[row_key(f"{corpus.name}:{i}", pair_by)] = str(json.loads(line).get("id", n))
+            out[row_key(f"{corpus.name}:{i}", pair_by)] = str(row.get("id", n))
             n += 1
     return out
 
@@ -293,7 +299,11 @@ def run_census(opts: CensusOptions) -> int:
     if opts.corpus and not Path(opts.corpus).expanduser().is_file():
         print(f"[census] refuse: no corpus at {opts.corpus}", file=sys.stderr)
         return 2
-    id_of = corpus_ids(Path(opts.corpus).expanduser(), opts.pair_by) if opts.corpus else {}
+    try:
+        id_of = corpus_ids(Path(opts.corpus).expanduser(), opts.pair_by) if opts.corpus else {}
+    except (OSError, ValueError) as e:
+        print(f"[census] refuse: {e}", file=sys.stderr)
+        return 2
     log(f"[census] {len(base[1])} reply rows without, {[len(r) for _x, r in ctx]} with, "
         f"paired by {opts.pair_by}")
     s = census(base, ctx, delta_threshold=opts.delta_threshold, id_of=id_of, max_rows=opts.max_rows)

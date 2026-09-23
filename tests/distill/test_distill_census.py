@@ -463,3 +463,22 @@ def test_residual_kl_counts_the_mass_outside_the_top_k_as_rest():
     ref = float(np.mean((P * np.log(P / m)).sum(axis=1)))
     assert ref > 0.05
     assert cs.residual_kl([(ids, lp_a), (ids, lp_b)]) == pytest.approx(ref, rel=1e-9)
+
+
+def test_census_refuses_a_corpus_line_that_is_not_an_object(tmp_path, tok, capsys):
+    """A corpus line that is not JSON, or not an object, refuses with its
+    line number and exit 2 instead of a traceback."""
+    convs = [_conv(f"say it {i}", r) for i, r in enumerate(REPLIES)]
+    a = _reply_cache(tmp_path / "a", tok, convs, doc_prefix="a.jsonl")
+    b = _reply_cache(tmp_path / "b", tok, convs, doc_prefix="a.jsonl")
+    corpus = tmp_path / "a.jsonl"
+    corpus.write_text(json.dumps({"id": "x", "messages": []}) + "\n[1, 2]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="a.jsonl line 2: not a JSON object"):
+        cs.corpus_ids(corpus, "line")
+    corpus.write_text(json.dumps({"id": "x", "messages": []}) + "\n\n{not json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"a.jsonl line 3: not JSON \("):
+        cs.corpus_ids(corpus, "line")
+    out = tmp_path / "c.json"
+    rc = cs.run_census(cs.CensusOptions(without=str(a), with_=[str(b)], out=str(out), corpus=str(corpus)))
+    assert rc == 2 and "[census] refuse: a.jsonl line 3: not JSON (" in capsys.readouterr().err
+    assert not out.exists()

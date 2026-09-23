@@ -398,6 +398,9 @@ def install_expert_streaming(
         deduct_untracked_weights(table_offloaded, key)
 
     streaming = force_stream or over_budget
+    # the verdict itself: a CPU-only expert codec marks its modules the way
+    # streaming does, so a module scan cannot tell the two apart
+    model._kq_streaming = bool(streaming)
     prefetcher = None
     cast_dead_bytes = 0
     held_wired = 0

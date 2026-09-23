@@ -65,12 +65,9 @@ from .eval import (  # noqa: F401
     decontam_fraction,
     generate_guard,
     gsm8k_extract,
-    holm,
-    paired_bootstrap,
     reply_slice_nll,
     score_gsm8k,
     score_multiple_choice,
-    welch_one_sided,
     window_hashes,
 )
 from .format import (  # noqa: F401
@@ -301,7 +298,4 @@ __all__ = [
     "gsm8k_extract",
     "generate_guard",
     "score_gsm8k",
-    "paired_bootstrap",
-    "holm",
-    "welch_one_sided",
 ]

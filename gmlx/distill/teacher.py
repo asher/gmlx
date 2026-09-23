@@ -349,13 +349,22 @@ def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, in
     return total > budget, total, budget
 
 
+def experts_streaming(model) -> bool:
+    """Whether the expert streaming installer put this model's experts in
+    streaming mode. Reads the verdict the installer records on the model;
+    a model without one reports through ``moe_streaming_active``, which
+    also counts experts a CPU-only codec keeps resident."""
+    from gmlx.load.loader import moe_streaming_active
+    flag = getattr(model, "_kq_streaming", None)
+    return bool(flag) if flag is not None else bool(moe_streaming_active(model))
+
+
 def stream_over_budget(model, gguf_path: str, total: int, budget: int) -> tuple[int, int]:
     """Place a teacher that is over the wired budget: the installer
     streams its experts, or a table that alone brings it under. Returns
     (expert stacks wrapped, expert bytes streamed), the bytes zero when
     the experts stay resident. A teacher with nothing to stream is
     refused, since a resident load would pin it under the wired limit."""
-    from gmlx.load.loader import moe_streaming_active
     from gmlx.stream.expert_streaming import install_expert_streaming
     for var in ("GMLX_ARENA_SPLIT_MAX_TOKENS", "GMLX_ARENA_STAGE_MAX_TOKENS"):
         os.environ.setdefault(var, "0")
@@ -363,7 +372,7 @@ def stream_over_budget(model, gguf_path: str, total: int, budget: int) -> tuple[
     if n == 0:
         raise ValueError(f"the teacher is {total / GB:.1f} GB against a wired budget of {budget / GB:.1f} GB and "
                          "has no expert stacks to stream; use a smaller quantization")
-    if moe_streaming_active(model):
+    if experts_streaming(model):
         log(f"[cache] teacher over the wired budget: {n} expert stacks stream from disk")
         return n, offloaded
     log("[cache] teacher over the wired budget: a streamed table brings it under, the experts stay resident")
@@ -380,7 +389,7 @@ def load_teacher(opts: CacheOptions):
     offloaded = 0
     if teacher_is_gguf:
         import gmlx.load.loadlog as loadlog
-        from gmlx.load.loader import load_model, moe_streaming_active
+        from gmlx.load.loader import load_model
         from gmlx.load.preflight import preflight
         with loadlog.load_ui(False, opts.teacher):
             model, config, _tok = load_model(opts.teacher, hf_source=opts.hf_source)
@@ -401,7 +410,7 @@ def load_teacher(opts: CacheOptions):
             over, total, budget = teacher_over_budget(model)
             if over:
                 _n, offloaded = stream_over_budget(model, opts.teacher, total, budget)
-        streaming = bool(moe_streaming_active(model))
+        streaming = experts_streaming(model)
     else:
         model, config, _tok = _student.load_mlx_student(opts.teacher)
         arch = config.get("model_type", "mlx")

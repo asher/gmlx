@@ -392,12 +392,13 @@ class ViewLoader:
         out_dir.mkdir(parents=True, exist_ok=True)
         written = 0
         total = 0
+        by_shard: dict[int, list[tuple[int, int]]] = {}
+        for r, (si, slot) in enumerate(self.reader.index):
+            by_shard.setdefault(int(si), []).append((r, int(slot)))
         for i in range(self.reader.n_shards):
             p = out_dir / f"view-{i:05d}.safetensors"
             arrays: dict[str, np.ndarray] = {}
-            for r, (si, slot) in enumerate(self.reader.index):
-                if si != i:
-                    continue
+            for r, slot in by_shard.get(i, ()):
                 rv = self.compile(r)
                 if rv is None:
                     continue

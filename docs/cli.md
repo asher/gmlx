@@ -898,6 +898,12 @@ gone, since ids taken from line numbers shift when a line is inserted.
 An interrupt cancels the queued requests and stops the server, and the
 run ends when the requests in flight have failed or returned.
 
+Beside the output, `<out>.gen.json` holds the settings a resume must
+match and is written before the first request. When the run ends it
+gains a `run` block with the reply and token totals read from the output
+rows, the failed requests, the wall time summed over resumes and the
+aggregate token rate.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--out PATH` | required | corpus jsonl to write, with `<out>.gen.json` beside it |
@@ -1126,9 +1132,10 @@ top-k pooled, and, with several contexts, the part no single adapter can
 learn. With several `--with` caches, every cache decides which rows
 pair and which positions count, while the effect, the histogram and
 the positions map come from the first. Runs on the CPU. Exits 2 when a
-cache has no manifest, when a
-reply-think cache records no `content_start` (one written before rows
-carried it), or when no rows pair.
+cache has no manifest, when a reply-think cache records no
+`content_start` (one written before rows carried it), or when no rows
+pair. A `--corpus` that names no file, or holds a line that is not a
+JSON object, also exits 2.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
