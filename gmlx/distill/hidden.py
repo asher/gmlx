@@ -13,6 +13,7 @@ teacher reproduces the same sketch. The learned map is a training-time
 head: it lives in the checkpoint directory and never in the adapter."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -49,8 +50,14 @@ class HsHead:
         import mlx.core as mx
         import mlx.nn as nn
         import mlx.optimizers as optim
-        mx.random.seed(seed + 7919)
-        self.module = nn.Linear(d_student, dim, bias=False)
+        # the map is built at the first --hs step, on a fresh run or a
+        # resume, so its weights come from their own key and the run's
+        # RNG stream is neither reseeded nor advanced
+        self.module = nn.Linear.__new__(nn.Linear)
+        nn.Module.__init__(self.module)
+        bound = math.sqrt(1.0 / d_student)
+        self.module.weight = mx.random.uniform(low=-bound, high=bound, shape=(dim, d_student),
+                                               key=mx.random.key(seed + 7919))
         self.opt = optim.AdamW(learning_rate=lr, weight_decay=weight_decay)
         self.dim = dim
 

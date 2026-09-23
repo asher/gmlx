@@ -963,6 +963,13 @@ tokenizer tables do not match the student, so rerun `align`. A refusal
 naming fewer train rows than `--batch-size` means the corpus is too
 small for that batch.
 
+`eval` refuses `--reply-positions` when the census map names none of
+the reply rows. The census keys its map by the corpus ids it was given
+`--corpus`, so run it with the same corpus file the reply slice was
+drawn from. A reply table showing `None` scored no row at all: every
+row was dropped as too long for `--chat-max-len`, or had no target
+bytes.
+
 Other failures are in [troubleshooting](troubleshooting.md).
 
 ## Advanced settings

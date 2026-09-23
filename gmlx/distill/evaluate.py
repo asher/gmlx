@@ -16,6 +16,7 @@ from gmlx.load.tokenizer import token_bytes, vocab_map_hash
 
 from . import eval as _eval
 from . import frames as _frames
+from . import tokens as _tokens
 from .constants import GB, log
 from .corpus import nfc
 from .data import CacheReader
@@ -58,8 +59,42 @@ class EvalOptions:
     hf_source: str | None = None
 
 
+class UnreadableInput(Exception):
+    """A slice, task or report file that cannot be read as what it should be."""
+
+
 def read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError) as e:
+        raise UnreadableInput(f"{path}: {e}") from e
+    if not all(isinstance(r, dict) for r in rows):
+        raise UnreadableInput(f"{path}: every line must be a JSON object")
+    return rows
+
+
+def read_conversations(path: Path) -> list:
+    """The ``messages`` list of every row of a chat-slice jsonl."""
+    try:
+        return [r["messages"] for r in read_jsonl(path)]
+    except KeyError as e:
+        raise UnreadableInput(f"{path}: a row has no {e} key") from e
+
+
+def read_report(path: Path) -> dict:
+    try:
+        d = read_json(path)
+    except (OSError, ValueError) as e:
+        raise UnreadableInput(f"{path}: {e}") from e
+    if not isinstance(d, dict):
+        raise UnreadableInput(f"{path}: not a JSON object")
+    return d
+
+
+def reply_row_ids(reply_slices: dict) -> set[str]:
+    """The ids of every reply-slice row, the keys a census high_delta map
+    must share with them for ``--reply-positions`` to score anything."""
+    return {str(r["id"]) for rows in reply_slices.values() for r in rows if r.get("id") is not None}
 
 
 def corpus_texts(cache: Path):
@@ -98,7 +133,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                  batch_tokens=opts.batch_size * opts.max_len, per_turn=opts.chat_per_turn)
         r["wall_s"] = time.perf_counter() - t0
         res["chat_bpb"][name] = r
-        log(f"[eval] {name}: assistant-turn bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
+        log(f"[eval] {name}: assistant-turn bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
             f"{r['rows']} {'turns' if opts.chat_per_turn else 'conversations'}, {r['dropped']} dropped "
             f"({r['wall_s']:.0f}s)")
     for name, rows in (reply_slices or {}).items():
@@ -109,7 +144,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                   reason_target=opts.reply_think)
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
-        log(f"[eval] {name}: reply bpb {r['bpb']:.4f} ({r['nll_per_token']:.4f} nats/token) over "
+        log(f"[eval] {name}: reply bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
             f"{r['rows']} rows{' at the high-delta positions' if positions is not None else ''}, "
             f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
     if opts.kld_cache:
@@ -135,7 +170,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                 window_prefix=prefix)
         r["wall_s"] = time.perf_counter() - t0
         res["bpb"][name] = r
-        log(f"[eval] {name}: bpb {r['bpb']:.4f} over {r['bytes']} bytes ({r['wall_s']:.0f}s)")
+        log(f"[eval] {name}: bpb {_fmt(r['bpb'])} over {r['bytes']} bytes ({r['wall_s']:.0f}s)")
     model.eval()
     for tname, items in tasks.items():
         t0 = time.perf_counter()
@@ -166,21 +201,21 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
             b = before.get("bpb", {}).get(name, {}).get("bpb")
             t = report.get("teacher_bpb", {}).get(name)
             d = report["decontam"].get(name)
-            md.append(f"| {name} | {a:.4f} | {_fmt(b)} | {_fmt(t)} | {_fmt(d, 5)} | "
+            md.append(f"| {name} | {_fmt(a)} | {_fmt(b)} | {_fmt(t)} | {_fmt(d, 5)} | "
                       f"{'void' if name in contaminated else 'ok'} |")
     if chat_slices:
         md += ["", "| chat slice | bpb after | bpb before | se | conversations |", "|---|---|---|---|---|"]
         for name in chat_slices:
             a = report["after"]["chat_bpb"][name]
             b = before.get("chat_bpb", {}).get(name, {}).get("bpb")
-            md.append(f"| {name} | {a['bpb']:.4f} | {_fmt(b)} | {_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
+            md.append(f"| {name} | {_fmt(a['bpb'])} | {_fmt(b)} | {_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
     if reply_slices:
         md += ["", "| reply slice | bpb after | bpb before | nats/token after | nats/token before | se | rows |",
                "|---|---|---|---|---|---|---|"]
         for name in reply_slices:
             a = report["after"]["reply_bpb"][name]
             b = before.get("reply_bpb", {}).get(name, {})
-            md.append(f"| {name} | {a['bpb']:.4f} | {_fmt(b.get('bpb'))} | {a['nll_per_token']:.4f} | "
+            md.append(f"| {name} | {_fmt(a['bpb'])} | {_fmt(b.get('bpb'))} | {_fmt(a['nll_per_token'])} | "
                       f"{_fmt(b.get('nll_per_token'))} | {_fmt(a.get('row_bpb_se'))} | {a['rows']} |")
     if report["after"]["tasks"]:
         md += ["", "| task | acc after | acc before | n |", "|---|---|---|---|"]
@@ -207,8 +242,11 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
 
 
 def run_eval(opts: EvalOptions) -> int:
-    """Returns 0 with both reports written, 2 on a refusal before the load
-    or when a chat instrument is asked of a student without a template."""
+    """Returns 0 with both reports written, 2 on a refusal: before the
+    load, a missing or unreadable input, ``--before`` without ``--adapter``
+    or a positions map naming none of the reply rows; after it, a kld cache
+    over another tokenizer or a chat instrument asked of a student without
+    a template."""
     import mlx.core as mx
     # batch shapes differ per slice, item and conversation, so freed buffers
     # of many sizes would otherwise accumulate in MLX's cache
@@ -237,75 +275,95 @@ def run_eval(opts: EvalOptions) -> int:
         if path and not Path(path).expanduser().exists():
             log(f"[eval] refuse: {label}: nothing at {path}")
             return 2
-    slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
-              for name, path in slice_specs}
+    if opts.before and not opts.adapter:
+        log("[eval] refuse: --before scores the adapter disabled in process, so it needs --adapter")
+        return 2
+    # every input is read before the load, so a malformed file is refused
+    # in seconds and never after minutes of scoring
+    tasks: dict = {}
+    kld_manifest: dict = {}
+    try:
+        slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
+                  for name, path in slice_specs}
+        if opts.tasks:
+            td = Path(opts.tasks_dir or ".")
+            for t in opts.tasks.split(","):
+                t = t.strip()
+                if not t:
+                    continue
+                items = read_jsonl(td / f"{t}.jsonl")
+                if opts.task_limit:
+                    items = items[:opts.task_limit]
+                tasks[t] = {"items": items}
+                if t == "gsm8k":
+                    tasks[t]["shots"] = read_jsonl(td / "gsm8k_shots.jsonl")[:8]
+        chat_slices = {name: read_conversations(Path(path).expanduser()) for name, path in chat_specs}
+        reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
+        positions = None
+        if opts.reply_positions:
+            positions = read_report(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
+        chat_items = read_jsonl(Path(opts.chat_sanity)) if opts.chat_sanity else []
+        ref_items = ((read_report(Path(opts.chat_refs)).get("after") or {}).get("chat", {}).get("items", [])
+                     if opts.chat_refs else [])
+        teacher_bpb = read_report(Path(opts.teacher_bpb)) if opts.teacher_bpb else None
+        if opts.kld_cache:
+            kld_manifest = read_report(Path(opts.kld_cache) / "manifest.json")
+    except UnreadableInput as e:
+        log(f"[eval] refuse: unreadable input {e}")
+        return 2
+    if positions is not None and reply_slices and not (set(positions) & reply_row_ids(reply_slices)):
+        log(f"[eval] refuse: --reply-positions {opts.reply_positions} names none of the reply-slice rows "
+            "(a census run without --corpus keys its positions by cache row, not by corpus id)")
+        return 2
     report: dict = {"student": opts.student, "adapter": opts.adapter, "slices": {}, "decontam": {},
                     "bpb_prefix": opts.bpb_prefix}
     contaminated = set()
     if opts.cache and slices:
-        texts = list(corpus_texts(Path(opts.cache)))
-        for name, text in slices.items():
-            f = _eval.decontam_fraction(text.encode("utf-8"), texts)
+        fractions = _eval.decontam_fractions({name: text.encode("utf-8") for name, text in slices.items()},
+                                             corpus_texts(Path(opts.cache)))
+        for name, f in fractions.items():
             report["decontam"][name] = f
             if f > opts.decontam_threshold:
                 contaminated.add(name)
                 log(f"[eval] warn: {name}: {f:.4f} of 64-byte windows in the cached corpus, bpb gate void")
             else:
                 log(f"[eval] {name}: decontam fraction {f:.5f}")
-    tasks: dict = {}
-    if opts.tasks:
-        td = Path(opts.tasks_dir or ".")
-        for t in opts.tasks.split(","):
-            t = t.strip()
-            if not t:
-                continue
-            items = read_jsonl(td / f"{t}.jsonl")
-            if opts.task_limit:
-                items = items[:opts.task_limit]
-            tasks[t] = {"items": items}
-            if t == "gsm8k":
-                tasks[t]["shots"] = read_jsonl(td / "gsm8k_shots.jsonl")[:8]
     model, _cfg, tokenizer, _kind = load_student(opts.student, opts.adapter, opts.hf_source)
-    if opts.kld_cache:
-        kld_manifest = read_json(Path(opts.kld_cache) / "manifest.json")
-        if kld_manifest.get("tokenizer_hash") != vocab_map_hash(tokenizer):
+    if opts.kld_cache and kld_manifest.get("tokenizer_hash") != vocab_map_hash(tokenizer):
+        # the hash is the fast path; a same-vocabulary pair whose maps differ
+        # by pad-style surplus ids is what align accepts as identity too
+        kld_dir = Path(opts.kld_cache)
+        cache_tok = _tokens.load_tokenizer(str(kld_dir / "tokenizer")) if (kld_dir / "tokenizer").exists() \
+            else _tokens.load_tokenizer(kld_manifest["teacher_path"])
+        same, why = _tokens.identity_pair(cache_tok, tokenizer)
+        if not same:
             log(f"[eval] refuse: --kld-cache {opts.kld_cache} was cached with another tokenizer than the "
-                "student's, the sparse KL is defined on a same-tokenizer cache only")
+                f"student's ({why}), the sparse KL is defined on a same-tokenizer cache only")
             return 2
     if (opts.chat_sanity or chat_specs) and not _frames.has_chat_template(tokenizer):
         # a checkpoint without its template renders every conversation as
         # plain text, and the chat numbers then measure another prompt format
         log(f"[eval] refuse: {opts.student} carries no chat template, drop --chat-sanity and --chat-slice")
         return 2
-    inherit = None
-    if opts.kld_cache:
-        inherit = ((read_json(Path(opts.kld_cache) / "manifest.json").get("gmlx_distill") or {})
-                   .get("frame") or {}).get("render_kwargs")
+    inherit = ((kld_manifest.get("gmlx_distill") or {}).get("frame") or {}).get("render_kwargs")
     _frames.set_render_kwargs(tokenizer, _frames.resolve_render_kwargs(
         tokenizer, inherit=inherit, override=_frames.parse_render_kwargs(opts.frame_kwargs)))
     model.eval()
-    chat_slices = {name: [json.loads(line)["messages"] for line in
-                          Path(path).expanduser().read_text(encoding="utf-8").splitlines() if line.strip()]
-                   for name, path in chat_specs}
-    reply_slices = {name: read_jsonl(Path(path).expanduser()) for name, path in reply_specs}
-    positions = None
-    if opts.reply_positions:
-        positions = read_json(Path(opts.reply_positions).expanduser()).get("high_delta") or {}
+    if positions is not None:
         report["reply_positions"] = opts.reply_positions
         log(f"[eval] reply slices restricted to the high-delta positions of {len(positions)} rows")
     report["after"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices, positions)
-    if opts.before and opts.adapter:
+    if opts.before:
         with adapter_disabled(model):
             report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices,
                                        positions)
     if opts.chat_sanity:
-        items = read_jsonl(Path(opts.chat_sanity))
+        items = chat_items
         refs = None
         if opts.chat_refs:
-            ref_items = (read_json(Path(opts.chat_refs)).get("after") or {}).get("chat", {}).get("items", [])
             refs = {r["id"]: r["reply"] for r in ref_items if r["compliant"] and r["reply"].strip()}
             log(f"[eval] chat drift references: {len(refs)} replies from {opts.chat_refs}")
-        if opts.before and opts.adapter:
+        if opts.before:
             t0 = time.perf_counter()
             with adapter_disabled(model):
                 before = _eval.chat_sanity(model, tokenizer, items, max_tokens=opts.chat_max_tokens)
@@ -322,8 +380,8 @@ def run_eval(opts: EvalOptions) -> int:
         log(f"[eval] chat after: compliance {after['compliance']:.3f} truncated {after['truncated_rate']:.3f} "
             f"refusal {after['refusal_rate']} task refusal {after['task_refusal_rate']} "
             f"ref nll {after['ref_nll_nats']} ({after['wall_s']:.0f}s)")
-    if opts.teacher_bpb:
-        report["teacher_bpb"] = read_json(Path(opts.teacher_bpb))
+    if teacher_bpb is not None:
+        report["teacher_bpb"] = teacher_bpb
     report["contaminated_slices"] = sorted(contaminated)
     if opts.cache:
         reader = CacheReader(Path(opts.cache), keep=1)

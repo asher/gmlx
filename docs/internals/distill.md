@@ -58,6 +58,14 @@ surrogate loss carries those cotangents back through the trunk. MLX keeps
 every intermediate of a transform alive until the outer evaluation, so a
 head inside the trunk's transform would pin every chunk's logits at once.
 
+The trunk therefore runs twice per step, once for the head pass and once
+under the transform. Both forwards are seeded with the step's seed right
+before they run, so LoRA dropout draws the same mask in both and the
+cotangents land on the hidden states they were computed from. The
+hidden-state map of `--hs` draws its initial weights from its own key,
+so building it at the first step of a run or a resume leaves the run's
+random stream where it was.
+
 ## Why the defaults are what they are
 
 The guide's settings come from a schema task on a Qwen3.6-27B

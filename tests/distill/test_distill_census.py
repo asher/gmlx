@@ -29,7 +29,7 @@ def tok():
 
 
 def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, boost: dict | None = None,
-                 K: int = 8, seed: int = 5):
+                 K: int = 8, seed: int = 5, docs: list[tuple[str, int]] | None = None):
     """A reply-frame cache over convs (each ending with the assistant reply)
     from a synthetic head. boost maps a reply-relative byte offset (one at
     which every row has a token boundary, 0 is always one) to the nats
@@ -37,7 +37,8 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
     token starting there, so a context cache can be made to move the
     teacher at chosen positions. Hidden states depend on the byte offset
     from the reply start only, so two caches with the same seed agree
-    wherever no boost applies."""
+    wherever no boost applies. docs, when given, names each row's (doc_id,
+    window) instead of one window-0 document per row."""
     tb = dl.token_bytes(tok)
     V = len(tb)
     log_bmask = dl.log_bmask_from(dl.whitespace_start_mask(tok, V, tb))
@@ -70,7 +71,8 @@ def _reply_cache(tmp: Path, tok, convs: list[list[dict]], *, doc_prefix: str, bo
         red["token_end_byte"] = ends
         rows.append(red)
         tbytes.append(text)
-        metas.append(dl.RowMeta(row_id=r, doc_id=f"{doc_prefix}:{r}", window=0, n_tokens=n, frame="reply",
+        doc_id, window = docs[r] if docs else (f"{doc_prefix}:{r}", 0)
+        metas.append(dl.RowMeta(row_id=r, doc_id=doc_id, window=window, n_tokens=n, frame="reply",
                                 messages=msgs, spans=[list(s) for s in spans],
                                 prefix_n_tokens=int(np.argmax(tm)) + 1, suffix_start_byte=b0))
     writer.write(0, dl.pack_shard(rows, tbytes, K, False), metas, wall_s=0.01, step=64)
@@ -192,3 +194,20 @@ def test_eval_reply_rows_restricted_to_census_positions(tok):
     # a row the map does not name scores nothing and is left out
     none, _ = dl_eval._span_rows(tok, [row], max_len=64, last_only=True, positions={})
     assert none == []
+
+
+def test_high_delta_keeps_the_last_window_of_a_document(tmp_path, tok):
+    """A per-turn cache holds several windows of one document under one
+    id; the high_delta map keeps the last window's ranges, the final turn
+    that eval's reply slice scores, whatever order the rows were cached in."""
+    # window 1 is cached first; its reply opens with a 3-byte token where
+    # window 0's opens with a 1-byte one, so the kept range tells them apart
+    convs = [_conv("second turn", "cat is cat"), _conv("first turn", "the cat")]
+    docs = [("a.jsonl:0", 1), ("a.jsonl:0", 0)]
+    without = _reply_cache(tmp_path / "without", tok, convs, doc_prefix="a.jsonl", docs=docs)
+    with_ = _reply_cache(tmp_path / "with", tok, convs, doc_prefix="b.jsonl", docs=docs, boost={0: 6.0})
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert s["rows"] == 2 and [r["high_delta_positions"] for r in s["per_row"]] == [1, 1]
+    assert s["high_delta"] == {"a.jsonl:0": [[0, 3]]}

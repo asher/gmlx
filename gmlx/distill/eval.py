@@ -52,17 +52,45 @@ def window_hashes(data: bytes, w: int = 64, block: int = 1 << 20) -> np.ndarray:
     return np.concatenate(out) if len(out) > 1 else out[0]
 
 
-def decontam_fraction(slice_bytes: bytes, corpus_texts: Iterable[bytes], w: int = 64) -> float:
-    """Fraction of the slice's w-byte windows present in the corpus."""
-    sh = np.unique(window_hashes(slice_bytes, w))
-    if sh.size == 0:
-        return 0.0
-    hit = np.zeros(sh.shape[0], dtype=bool)
+def decontam_fractions(slices: dict[str, bytes], corpus_texts: Iterable[bytes], w: int = 64) -> dict[str, float]:
+    """Per slice, the fraction of its w-byte windows present in the corpus,
+    from one pass over the corpus texts: each text is hashed once and its
+    windows looked up in every slice's sorted window hashes."""
+    sh = {name: np.unique(window_hashes(b, w)) for name, b in slices.items()}
+    hit = {name: np.zeros(h.shape[0], dtype=bool) for name, h in sh.items()}
     for t in corpus_texts:
         ch = window_hashes(t, w)
-        if ch.size:
-            hit |= np.isin(sh, ch)
-    return float(hit.mean())
+        if ch.size == 0:
+            continue
+        for name, h in sh.items():
+            if h.size == 0:
+                continue
+            pos = np.searchsorted(h, ch)
+            pos[pos == h.size] = 0
+            hit[name][pos[h[pos] == ch]] = True
+    return {name: (float(hit[name].mean()) if sh[name].size else 0.0) for name in slices}
+
+
+def decontam_fraction(slice_bytes: bytes, corpus_texts: Iterable[bytes], w: int = 64) -> float:
+    """Fraction of the slice's w-byte windows present in the corpus."""
+    return decontam_fractions({"slice": slice_bytes}, corpus_texts, w)["slice"]
+
+
+def _target_logprobs(logits, targets: np.ndarray) -> np.ndarray:
+    """[B, T-1] float32 log-probabilities of targets[b, t] (the token at
+    t + 1) under logits[b, t], one row at a time: the target logit is
+    gathered before the row's log-sum-exp, so no full-vocabulary float32
+    array outlives its row."""
+    import mlx.core as mx
+    tgt = mx.array(np.asarray(targets, dtype=np.int32))
+    rows = []
+    for b in range(int(logits.shape[0])):
+        row = logits[b, :-1]
+        zt = mx.take_along_axis(row, tgt[b][:, None], axis=-1)[:, 0].astype(mx.float32)
+        lp = zt - mx.logsumexp(row.astype(mx.float32), axis=-1)
+        mx.eval(lp)
+        rows.append(np.asarray(lp))
+    return np.stack(rows)
 
 
 def cache_kld(model, reader, *, max_rows: int | None = None, tokenizer=None,
@@ -169,7 +197,8 @@ def bits_per_byte(model, tokenizer, text: str, *, max_len: int = 512, batch_size
     the prefix tokens are context only, excluded from the NLL and the byte
     count. A window's first token is scored when something precedes it
     (BOS or the prefix), so for a tokenizer without BOS the prefix adds one
-    scored token per window. Returns nll_nats, bytes, tokens, bpb."""
+    scored token per window. Returns nll_nats, bytes, tokens, bpb (None
+    when no byte was scored)."""
     import mlx.core as mx
     inner = hf_inner(tokenizer)
     text_b = nfc(text).encode("utf-8")
@@ -207,12 +236,8 @@ def bits_per_byte(model, tokenizer, text: str, *, max_len: int = 512, batch_size
         logits = model(mx.array(arr))
         if hasattr(logits, "logits"):
             logits = logits.logits
-        lf = logits.astype(mx.float32)
-        lsm = lf - mx.logsumexp(lf, axis=-1, keepdims=True)
-        tgt = mx.array(arr[:, 1:])
-        lp = mx.take_along_axis(lsm[:, :-1, :], tgt[:, :, None], axis=-1)[:, :, 0]
-        mx.eval(lp)
-        lp = np.asarray(lp)
+        lp = _target_logprobs(logits, arr[:, 1:])
+        del logits
         for j, (seq, ends_j, n_head) in enumerate(chunk):
             n = len(seq)
             for t in range(max(n_head, 1), n):
@@ -222,7 +247,7 @@ def bits_per_byte(model, tokenizer, text: str, *, max_len: int = 512, batch_size
                 total_nll += -float(lp[j, t - 1])
                 total_bytes += nb
                 total_tokens += 1
-    bpb = total_nll / max(total_bytes, 1) / math.log(2.0)
+    bpb = total_nll / total_bytes / math.log(2.0) if total_bytes else None
     return {"nll_nats": total_nll, "bytes": total_bytes, "tokens": total_tokens, "bpb": bpb}
 
 
@@ -295,7 +320,8 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
 
 def _score_span_rows(model, rows: list, *, batch_tokens: int) -> dict:
     """Sum of negative log-likelihood over each row's target mask; batches
-    hold at most batch_tokens padded tokens so a long row runs alone."""
+    hold at most batch_tokens padded tokens so a long row runs alone. bpb
+    and nll_per_token are None when nothing was scored."""
     import mlx.core as mx
     rows = sorted(rows, key=lambda r: len(r[0]))
     ln2 = math.log(2)
@@ -322,13 +348,8 @@ def _score_span_rows(model, rows: list, *, batch_tokens: int) -> dict:
         logits = model(mx.array(arr))
         if hasattr(logits, "logits"):
             logits = logits.logits
-        lf = logits.astype(mx.float32)
-        lsm = lf - mx.logsumexp(lf, axis=-1, keepdims=True)
-        tgt = mx.array(arr[:, 1:])
-        lp = mx.take_along_axis(lsm[:, :-1, :], tgt[:, :, None], axis=-1)[:, :, 0]
-        mx.eval(lp)
-        lp = np.array(lp)
-        del logits, lf, lsm
+        lp = _target_logprobs(logits, arr[:, 1:])
+        del logits
         for j, (ids, tm, nb, rid) in enumerate(chunk):
             m = tm[:len(ids) - 1]
             s = -float(lp[j, :len(ids) - 1][m].sum())
@@ -338,7 +359,8 @@ def _score_span_rows(model, rows: list, *, batch_tokens: int) -> dict:
             per_row.append(s / ln2 / nb)
             items.append({"id": rid, "nll": s, "tokens": int(m.sum()), "bytes": nb})
     n = len(per_row)
-    return {"bpb": nll / ln2 / max(nbytes_total, 1), "nll_per_token": nll / max(ntok, 1),
+    return {"bpb": nll / ln2 / nbytes_total if nbytes_total else None,
+            "nll_per_token": nll / ntok if ntok else None,
             "row_bpb_se": float(np.std(per_row) / math.sqrt(n)) if n > 1 else None,
             "tokens": ntok, "bytes": nbytes_total, "rows": n, "items": items}
 
@@ -423,11 +445,7 @@ def chat_sanity(model, tokenizer, items: list[dict], *, refs: dict | None = None
                 arr = np.array([prefix + list(ref_ids)], dtype=np.int32)
                 out = model(mx.array(arr))
                 out = out.logits if hasattr(out, "logits") else out
-                lf = out.astype(mx.float32)
-                lsm = lf - mx.logsumexp(lf, axis=-1, keepdims=True)
-                lp = mx.take_along_axis(lsm[:, :-1, :], mx.array(arr[:, 1:])[:, :, None], axis=-1)[0, :, 0]
-                mx.eval(lp)
-                lpv = np.asarray(lp)[len(prefix) - 1:]
+                lpv = _target_logprobs(out, arr[:, 1:])[0, len(prefix) - 1:]
                 rec["ref_nll_nats"] = float(-lpv.mean())
                 rec["n_ref_tokens"] = int(len(lpv))
         per.append(rec)
@@ -457,14 +475,12 @@ def continuation_logprob(model, tokenizer, context: str, continuations: list[str
         k = 0
         while k < min(n_ctx, len(full)) and full[k] == ctx_ids[k]:
             k += 1
-        logits = model(mx.array(np.array([full], dtype=np.int32)))
+        arr = np.array([full], dtype=np.int32)
+        logits = model(mx.array(arr))
         if hasattr(logits, "logits"):
             logits = logits.logits
-        lf = logits[0].astype(mx.float32)
-        lsm = lf - mx.logsumexp(lf, axis=-1, keepdims=True)
-        tgt = mx.array(np.array(full[k:], dtype=np.int32))
-        lp = mx.take_along_axis(lsm[k - 1:len(full) - 1], tgt[:, None], axis=-1)[:, 0]
-        out.append(float(mx.sum(lp)))
+        lp = _target_logprobs(logits, arr[:, 1:])[0]
+        out.append(float(lp[k - 1:].sum()))
     return out
 
 

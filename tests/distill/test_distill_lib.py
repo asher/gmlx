@@ -75,12 +75,14 @@ def _spm_tokenizer(pieces, merges):
     return fast
 
 
+_BL_MERGES = [("\u0120", "t"), ("h", "e"), ("\u0120t", "he"), ("1", "2"), ("12", "3"), ("\u0120", "a"),
+              ("i", "s"), ("\u0120", "is"), ("c", "a"), ("ca", "t")]
+
+
 @pytest.fixture(scope="module")
 def tok_bl():
     # teacher: byte-level with a few merges
-    return _bytelevel_tokenizer([("\u0120", "t"), ("h", "e"), ("\u0120t", "he"), ("1", "2"),
-                                 ("12", "3"), ("\u0120", "a"), ("i", "s"), ("\u0120", "is"),
-                                 ("c", "a"), ("ca", "t")])
+    return _bytelevel_tokenizer(_BL_MERGES)
 
 
 @pytest.fixture(scope="module")
@@ -840,6 +842,9 @@ def test_decontam_and_stats():
     dirty = clean[:1000] + corpus[1][100:1100] + clean[1000:]
     f = dl.decontam_fraction(dirty, corpus)
     assert 0.2 < f < 0.4
+    # every slice from one pass over the corpus, the same numbers
+    both = dl_eval.decontam_fractions({"clean": clean, "dirty": dirty, "short": b"x"}, corpus)
+    assert both == {"clean": 0.0, "dirty": f, "short": 0.0}
     r = dl.paired_bootstrap(np.array([1, 2, 3, 4.0]), np.array([1, 1, 1, 1.0]))
     assert r["diff"] == 1.5
     t = dl.welch_one_sided(np.array([1.0, 1.1, 0.9]), np.array([0.2, 0.3]))
@@ -1631,3 +1636,166 @@ def test_window_hashes_blocked_equals_whole():
     assert whole.shape == (5000 - 63,)
     assert np.array_equal(whole, blocked)
     assert dl_eval.window_hashes(data[:70], 64, block=3).shape == (7,)
+
+
+# ---------------------------------------------------------------------------
+# review round two: expert adapters, dropout seeds, scorer memory, refusals
+# ---------------------------------------------------------------------------
+
+def test_align_identity_path_at_a_wider_student_head(tmp_path, tok_bl):
+    """A same-vocabulary student whose head carries pad-style surplus ids
+    aligns on the identity path with tables at its own width, and the
+    materialized view compiles every row at that width."""
+    from gmlx.distill import view as _view
+
+    _tiny_cache(tmp_path / "cache", tok_bl)
+    tok_bl.save_pretrained(tmp_path / "cache" / "tokenizer")
+    student = _bytelevel_tokenizer(_BL_MERGES)
+    student.add_tokens(["<pad0>", "<pad1>"], special_tokens=True)
+    student.save_pretrained(tmp_path / "student")
+    out = tmp_path / "view"
+    rc = _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"),
+                                            out=str(out), materialize=True))
+    assert rc == 0
+    v = json.loads((out / "view.json").read_text())
+    t = dl.load_tables(out)
+    assert v["identity"] and v["V_S"] == v["V_T"] + 2
+    assert t.G == t.V_S == v["V_S"] and t.V_T == v["V_T"]
+    assert sorted(out.glob("view-*.safetensors"))
+
+
+def test_adapter_disabled_reaches_expert_lora_stamps():
+    """Expert adapters are objects stamped on the expert-stack leaf outside
+    the module tree; the before-score toggle zeroes every slot's scale,
+    drops their folded tables, and restores both on exit."""
+    import mlx.nn as nn
+    gm = pytest.importorskip("gmlx.load.modules")
+    leaf = nn.Linear(4, 4)
+    model = nn.Sequential(leaf)
+    lo = gm.ExpertLoRA(mx.zeros((2, 4, 1)), mx.ones((2, 1, 4)), 2.0, slot=0)
+    lo2 = gm.ExpertLoRA(mx.zeros((2, 4, 1)), mx.ones((2, 1, 4)), 3.0, slot=1)
+    object.__setattr__(leaf, "_kq_lora", lo)
+    object.__setattr__(leaf, "_kq_lora_extra", [lo2])
+    assert float(lo.tables(mx.float32)[1].sum()) == 16.0
+    with dl.adapter_disabled(model):
+        assert lo.scale == 0.0 and lo2.scale == 0.0
+        assert float(lo.tables(mx.float32)[1].sum()) == 0.0
+        assert float(lo2.tables(mx.float32)[1].sum()) == 0.0
+    assert lo.scale == 2.0 and lo2.scale == 3.0
+    assert not lo._tables and not lo2._tables
+    assert float(lo2.tables(mx.float32)[1].sum()) == 24.0
+
+
+def test_step_seed_gives_both_trunk_forwards_one_dropout_mask():
+    """LoRA dropout draws from the global stream, so the two trunk forwards
+    of a step agree only when both are seeded with the step's seed."""
+    import mlx.nn as nn
+    from mlx_lm.tuner.lora import LoRALinear
+
+    from gmlx.distill import trainer as _trainer
+
+    m = LoRALinear.from_base(nn.Linear(16, 16), r=4, dropout=0.5)
+    m.lora_b = mx.random.normal(m.lora_b.shape)
+    m.train()
+    x = mx.random.normal((3, 16))
+    s = _trainer.step_seed(1, 0)
+    mx.random.seed(s)
+    a = m(x)
+    mx.random.seed(s)
+    b = m(x)
+    c = m(x)
+    mx.eval(a, b, c)
+    assert np.array_equal(np.asarray(a), np.asarray(b))
+    assert not np.array_equal(np.asarray(a), np.asarray(c))
+    assert len({_trainer.step_seed(seed, i) for seed in (0, 1, 2) for i in range(3)}) == 9
+
+
+def test_target_logprobs_match_the_dense_log_softmax():
+    rng = np.random.default_rng(1)
+    z = rng.standard_normal((2, 5, 7)).astype(np.float32)
+    tgt = rng.integers(0, 7, (2, 4))
+    lp = dl_eval._target_logprobs(mx.array(z), tgt)
+    lsm = z - np.log(np.exp(z).sum(-1, keepdims=True))
+    ref = np.take_along_axis(lsm[:, :-1], tgt[..., None], -1)[..., 0]
+    assert lp.shape == (2, 4) and lp.dtype == np.float32
+    assert np.allclose(lp, ref, atol=1e-5)
+
+
+def test_scorers_report_none_when_nothing_scored(tok_bl):
+    """Nothing scored is None in every scorer, never a perfect 0.0."""
+    r = dl_eval._score_span_rows(None, [], batch_tokens=64)
+    assert r["bpb"] is None and r["nll_per_token"] is None and r["rows"] == 0
+    r = dl_eval.bits_per_byte(None, tok_bl, "")
+    assert r["bpb"] is None and r["bytes"] == 0
+
+
+def test_eval_refuses_bad_inputs_before_the_load(tmp_path, capsys):
+    """--before without --adapter, a positions map naming no reply row and
+    an unreadable slice file exit 2 before any model load."""
+    from gmlx.distill import evaluate as _ev
+
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+
+    def run(**kw):
+        opts = _ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"),
+                               **kw)
+        return _ev.run_eval(opts), capsys.readouterr().err
+
+    rc, err = run(before=True)
+    assert rc == 2 and "needs --adapter" in err
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps({"id": "a", "messages": []}) + "\n")
+    pos = tmp_path / "census.json"
+    pos.write_text(json.dumps({"high_delta": {"b": [[0, 1]]}}))
+    rc, err = run(reply_slices=["h=" + str(rows)], reply_positions=str(pos))
+    assert rc == 2 and "names none of the reply-slice rows" in err
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    rc, err = run(reply_slices=["h=" + str(bad)])
+    assert rc == 2 and "unreadable input" in err
+    nomsg = tmp_path / "nomsg.jsonl"
+    nomsg.write_text(json.dumps({"id": "a"}) + "\n")
+    rc, err = run(chat_slices=["c=" + str(nomsg)])
+    assert rc == 2 and "no 'messages' key" in err
+    assert _ev.reply_row_ids({"h": [{"id": "a"}, {"id": 3}, {"x": 1}]}) == {"a", "3"}
+
+
+def test_save_checkpoint_extra_lands_inside_the_swap(tmp_path):
+    """What the extra writer puts in the checkpoint arrives with the rest,
+    never after the directory swap."""
+    import mlx.nn as nn
+    import mlx.optimizers as optim
+
+    from gmlx.distill import trainer as _trainer
+
+    model = nn.Linear(4, 3)
+    opt = optim.AdamW(learning_rate=1e-3)
+    opt.init(model.trainable_parameters())
+    ck = tmp_path / "ckpt"
+    seen = []
+
+    def extra(d):
+        seen.append(d.name)
+        (d / "hs_head.safetensors").write_bytes(b"x")
+
+    _trainer.save_checkpoint(ck, "last", model, opt, {"iteration": 1}, extra=extra)
+    assert seen == ["last.tmp"] and (ck / "last" / "hs_head.safetensors").exists()
+
+
+def test_assistant_tails_cache_lives_on_the_tokenizer(tok_bl):
+    """The turn-end markers are cached on the tokenizer object under its
+    template, so a copy given another template answers for itself."""
+    import copy
+
+    from gmlx.load.tokenizer import hf_inner
+
+    from gmlx.distill import frames as _frames
+
+    a = _with_template(copy.deepcopy(tok_bl), _TEMPLATE_A)
+    ta = _frames.assistant_tails(a)
+    assert ta and hf_inner(a)._gmlx_tails
+    b = _with_template(copy.deepcopy(a), _TEMPLATE_B)
+    tb = _frames.assistant_tails(b)
+    assert tb != ta and _frames.assistant_tails(a) == ta
+    assert not hasattr(_frames, "_TAIL_CACHE")

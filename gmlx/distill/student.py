@@ -15,7 +15,8 @@ from .tokens import llamacpp_bos_default
 
 class adapter_disabled:
     """Context manager: LoRA contribution off in process (scale 0), the
-    untouched-student reference without a second load."""
+    untouched-student reference without a second load. Covers the dense
+    LoRA modules and the expert adapters stamped on expert-stack leaves."""
 
     def __init__(self, model):
         self.model = model
@@ -29,6 +30,14 @@ class adapter_disabled:
                 self.saved.append((m, m.scale))
                 m.scale = 0.0
                 self._drop_tables(m)
+            # an expert adapter is an object stamped on the expert-stack
+            # leaf outside the module tree, one per adapter slot
+            first = getattr(m, "_kq_lora", None)
+            if first is not None:
+                for e in [first, *(getattr(m, "_kq_lora_extra", None) or [])]:
+                    self.saved.append((e, e.scale))
+                    e.scale = 0.0
+                    self._drop_tables(e)
         self.model.apply_to_modules(off)
         return self
 
@@ -41,11 +50,13 @@ class adapter_disabled:
 
     @staticmethod
     def _drop_tables(m):
-        # gmlx's live LoRA module folds the scale into per-dtype factor
-        # tables on first use; a scale change is invisible until they go
-        t = getattr(m, "_kq_tables", None)
-        if isinstance(t, dict):
-            t.clear()
+        # gmlx's live LoRA modules fold the scale into per-dtype factor
+        # tables on first use (_kq_tables on a dense wrapper, _tables on
+        # an expert stamp); a scale change is invisible until they go
+        for name in ("_kq_tables", "_tables"):
+            t = getattr(m, name, None)
+            if isinstance(t, dict):
+                t.clear()
 
 
 def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str | None = None):

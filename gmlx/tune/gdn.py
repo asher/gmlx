@@ -357,7 +357,7 @@ _QWEN3NEXT_PATCHES: dict = {}
 
 
 def _qwen3next_gdn_call(self, inputs, mask=None, cache=None):
-    if self.training and cache is None:
+    if self.training and cache is None and getattr(self, "sharding_group", None) is None:
         return _qwen3next_gdn_training_call(self, inputs, mask)
     for cls in type(self).__mro__:
         patch = _QWEN3NEXT_PATCHES.get(cls)

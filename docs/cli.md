@@ -1039,7 +1039,7 @@ Training flags, in the order `--help` prints them.
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly |
 | `--lora-alpha F` | none | LoRA multiplier as alpha over rank, instead of `--lora-scale` |
-| `--lora-dropout F` | `0.0` | LoRA dropout |
+| `--lora-dropout F` | `0.0` | LoRA dropout, one mask per step |
 | `--grad-checkpoint` | off | recompute each layer's activations in the backward pass |
 | `--lr F` | `1e-4` | peak learning rate |
 | `--batch-size N` | `8` | rows per step |
@@ -1090,7 +1090,7 @@ examples shown before each question.
 | `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
 | `--task-limit N` | all | items per task |
 | `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
-| `--before` | off | also score with the adapter disabled in process |
+| `--before` | off | also score with the adapter disabled in process, needs `--adapter` |
 | `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, repeatable |
 | `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies |
 | `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
@@ -1099,8 +1099,8 @@ examples shown before each question.
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
-| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions |
-| `--kld-cache DIR` | none | same-tokenizer cache to score sparse KL against, refused on another tokenizer |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` map restricts every reply slice to the high-delta positions, refused when it names none of their rows |
+| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer |
 | `--kld-rows N` | all | rows of the KL cache to score |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every render |
 | `--max-len N` | `512` | window length for bits per byte |

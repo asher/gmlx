@@ -1,7 +1,7 @@
-"""The trainer driver: the student load, LoRA or full-parameter setup, the
-seeded batch iterator over one or more views, the head stage outside the
-trunk's transform, checkpoints, and the adapter or checkpoint export.
-``run_train`` is what ``gmlx distill train`` calls."""
+"""The trainer driver: the student load, the LoRA setup, the seeded batch
+iterator over one or more views, the head stage outside the trunk's
+transform, checkpoints, and the adapter export. ``run_train`` is what
+``gmlx distill train`` calls."""
 from __future__ import annotations
 
 import os
@@ -102,10 +102,21 @@ def trainable_count(model) -> int:
     return sum(int(np.prod(a.shape)) for _, a in flat)
 
 
-def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict) -> None:
+def step_seed(seed: int, it_idx: int) -> int:
+    """The RNG seed of one training step. Both trunk forwards of a step,
+    the head stage and the surrogate under the gradient transform, are
+    seeded with it right before they run, so LoRA dropout draws the same
+    mask in both and the cotangents land on the states they were computed
+    from."""
+    return (int(seed) + 1) * 1_000_003 + int(it_idx)
+
+
+def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict, extra=None) -> None:
     """Trainable parameters, optimizer state and the run state under
     ckpt_dir/tag. The previous checkpoint moves to tag.old until the new one
-    is in place, so a crash mid-save leaves one of the two loadable."""
+    is in place, so a crash mid-save leaves one of the two loadable. extra,
+    when given, is called with the directory being written before the swap,
+    so what it writes (the hidden-state map) lands with the rest."""
     import mlx.core as mx
     from mlx.utils import tree_flatten
     d = ckpt_dir / tag
@@ -119,6 +130,8 @@ def save_checkpoint(ckpt_dir: Path, tag: str, model, opt, state: dict) -> None:
     mx.save_safetensors(str(tmp / "trainable.safetensors"), params)
     mx.save_safetensors(str(tmp / "optimizer.safetensors"), dict(tree_flatten(opt.state)))
     write_json_atomic(tmp / "state.json", state)
+    if extra is not None:
+        extra(tmp)
     if d.exists():
         os.replace(d, old)
     os.replace(tmp, d)
@@ -293,12 +306,19 @@ def run_train(opts: TrainOptions) -> int:
             hs_state["head"] = hh
         return hs_state["head"]
     log_bmask = log_bmask_from(tables.bmask_S)
+    # the seed of the step in flight, None outside a training step
+    cur_seed: list[int | None] = [None]
+
+    def seeded_trunk(ids):
+        if cur_seed[0] is not None:
+            mx.random.seed(cur_seed[0])
+        return _student.trunk_hidden(inner, ids)
 
     def head_stage(batch):
         """Trunk forward and the head pass, outside any transform. Returns
         (loss, aux, positions, dh, dparams); see loss.head_pass for why the
         head never runs inside the trunk's transform."""
-        hidden = _student.trunk_hidden(inner, batch["student_ids"])
+        hidden = seeded_trunk(batch["student_ids"])
         mx.eval(hidden)
         B, T, _d = hidden.shape
         hg = _loss.gather_positions(hidden, batch["positions"])
@@ -319,7 +339,7 @@ def run_train(opts: TrainOptions) -> int:
         return loss, aux, batch["positions"], dh, dparams
 
     def trunk_loss(mdl, batch):
-        hidden = _student.trunk_hidden(inner, batch["student_ids"])
+        hidden = seeded_trunk(batch["student_ids"])
         return _loss.trunk_surrogate(hidden, batch["_positions"], head, batch["_loss"], batch["_dh"],
                                      batch["_dparams"])
 
@@ -327,6 +347,7 @@ def run_train(opts: TrainOptions) -> int:
 
     def validate() -> float:
         model.eval()
+        cur_seed[0] = None
         tot, ntok = 0.0, 0
         for i in range(0, min(len(val_rows), opts.val_batches * opts.batch_size), opts.batch_size):
             b = batch_rows(val_rows[i:i + opts.batch_size])
@@ -363,6 +384,7 @@ def run_train(opts: TrainOptions) -> int:
     def checkpoints_due(it_idx: int) -> None:
         """Validation and the best/last saves on their cadence and at the
         final step, whether or not the step's batch ran."""
+        hs_save = hs_state["head"].save if hs_state["head"] is not None else None
         if (it_idx + 1) % opts.val_every == 0 or it_idx + 1 == opts.iters:
             v = validate()
             log_rows.append({"it": it_idx + 1, "val": v})
@@ -371,13 +393,9 @@ def run_train(opts: TrainOptions) -> int:
                 else f"[train] it {it_idx + 1} val {v:.4f}")
             if state["best_val"] is None or v < state["best_val"]:
                 state["best_val"] = v
-                save_checkpoint(ckpt_dir, "best", model, opt, state)
-                if hs_state["head"] is not None:
-                    hs_state["head"].save(ckpt_dir / "best")
+                save_checkpoint(ckpt_dir, "best", model, opt, state, extra=hs_save)
         if (it_idx + 1) % opts.save_every == 0 or it_idx + 1 == opts.iters:
-            save_checkpoint(ckpt_dir, "last", model, opt, state)
-            if hs_state["head"] is not None:
-                hs_state["head"].save(ckpt_dir / "last")
+            save_checkpoint(ckpt_dir, "last", model, opt, state, extra=hs_save)
 
     for it_idx, rows in it.iterate(skip=state["iteration"]):
         if it_idx >= opts.iters:
@@ -392,6 +410,7 @@ def run_train(opts: TrainOptions) -> int:
             continue
         bm = _data.batch_to_mx({k: v for k, v in b.items() if not k.startswith("_")})
         ts0 = time.perf_counter()
+        cur_seed[0] = step_seed(opts.seed, it_idx)
         loss, aux, bm["_positions"], bm["_dh"], bm["_dparams"] = head_stage(bm)
         bm["_loss"] = loss
         _value, grads = vg(model, bm)

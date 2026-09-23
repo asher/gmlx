@@ -1,6 +1,6 @@
-"""Cross-tokenizer alignment: the tables built once per tokenizer pair, the
-group projection of a teacher top-K onto student groups at a shared
-boundary, and the tokenizer-only census that gates a pair."""
+"""Cross-tokenizer alignment: the tables built once per tokenizer pair and
+the group projection of a teacher top-K onto student groups at a shared
+boundary."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -415,9 +415,4 @@ def tokenization_bias_check(proj: dict[str, np.ndarray], onpath_gid: np.ndarray,
     cov = onpath_in_topk.astype(bool)
     n_cov = int(cov.sum())
     return (float(ok[cov].mean()) if n_cov else 1.0), (n_cov / len(ok) if len(ok) else 1.0)
-
-
-# ---------------------------------------------------------------------------
-# census (tokenizer only, no cache)
-# ---------------------------------------------------------------------------
 

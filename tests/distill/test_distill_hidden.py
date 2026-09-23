@@ -215,3 +215,23 @@ def test_hs_pass_gradients_and_a_step_reduces_the_loss():
         assert other.load(Path(d))
         assert np.array_equal(np.asarray(other.module.weight), np.asarray(head.module.weight))
         assert not hs.HsHead(d_s, DIM, seed=9, lr=0.05).load(Path(d) / "nope")
+
+
+def test_hs_head_init_is_keyed_and_leaves_the_stream_alone():
+    """The map's initial weights come from their own key: two heads at one
+    seed agree, and building one neither reseeds nor advances the global
+    random stream."""
+    mx.random.seed(3)
+    a = mx.random.normal((4,))
+    mx.random.seed(3)
+    h1 = hs.HsHead(6, DIM, seed=1, lr=0.1)
+    b = mx.random.normal((4,))
+    mx.eval(a, b)
+    assert np.array_equal(np.asarray(a), np.asarray(b))
+    h2 = hs.HsHead(6, DIM, seed=1, lr=0.1)
+    h3 = hs.HsHead(6, DIM, seed=2, lr=0.1)
+    assert np.array_equal(np.asarray(h1.module.weight), np.asarray(h2.module.weight))
+    assert not np.array_equal(np.asarray(h1.module.weight), np.asarray(h3.module.weight))
+    y = h1.module(mx.ones((2, 6)))
+    mx.eval(y)
+    assert y.shape == (2, DIM) and h1.module.weight.shape == (DIM, 6)

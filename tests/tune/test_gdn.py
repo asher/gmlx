@@ -544,3 +544,20 @@ def test_chunk_gradients_match_scan_with_grouped_heads(tiled):
         a, b = np.array(a)[m], np.array(b)[m]
         scale = max(np.abs(a).max(), 1e-6)
         assert np.allclose(a, b, atol=2e-3 * scale, rtol=2e-3), (name, tiled)
+
+
+def test_qwen3next_training_forward_stays_stock_under_sharding(monkeypatch):
+    """A sharded module keeps mlx-lm's forward under training, as the
+    text-only route does, so the sharded gradients are still summed."""
+    from mlx_lm.models.qwen3_next import Qwen3NextGatedDeltaNet
+
+    mx.random.seed(6)
+    mod = Qwen3NextGatedDeltaNet(_qwen3next_args())
+    mx.eval(mod.parameters())
+    assert tg.install_training_gdn(mod).count == 1
+    calls = _spy(monkeypatch, tg, "training_gated_delta_update")
+    mod.sharding_group = object()
+    mod.train()
+    y = mod(mx.random.normal((2, 37, 64)))
+    mx.eval(y)
+    assert calls == []

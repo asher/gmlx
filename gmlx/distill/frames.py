@@ -296,7 +296,21 @@ def row_render_args(kind: str | None) -> dict:
 
 
 _PROBE = "zqxj"
-_TAIL_CACHE: dict[tuple, list[str]] = {}
+
+
+def _tails_cache(inner) -> dict:
+    """The tail cache on the tokenizer object itself (a module-level map
+    keyed by id() would outlive the tokenizer and could answer for another
+    one at the same address); a throwaway dict on an object that refuses
+    new attributes."""
+    cache = getattr(inner, "_gmlx_tails", None)
+    if cache is None:
+        cache = {}
+        try:
+            inner._gmlx_tails = cache
+        except AttributeError:
+            pass
+    return cache
 
 
 def _special_strings(inner) -> list[str]:
@@ -322,13 +336,17 @@ def assistant_tails(tokenizer) -> list[str]:
     tokenizer's render settings; an empty list for a template that marks
     nothing."""
     inner = hf_inner(tokenizer)
-    key = (id(inner), json.dumps(render_kwargs(tokenizer), sort_keys=True), has_chat_template(tokenizer))
-    if key in _TAIL_CACHE:
-        return _TAIL_CACHE[key]
+    cache = _tails_cache(inner)
+    # the template is part of the key: a copied tokenizer given another
+    # template carries the copy's cache along
+    key = (json.dumps(render_kwargs(tokenizer), sort_keys=True), has_chat_template(tokenizer),
+           str(getattr(inner, "chat_template", None)))
+    if key in cache:
+        return cache[key]
     if not has_chat_template(tokenizer):
         eos = getattr(inner, "eos_token", None) or ""
-        _TAIL_CACHE[key] = [eos] if eos else []
-        return _TAIL_CACHE[key]
+        cache[key] = [eos] if eos else []
+        return cache[key]
     tails: list[str] = []
     probe = [{"role": "user", "content": "q"}, {"role": "assistant", "content": _PROBE}]
     try:
@@ -357,7 +375,7 @@ def assistant_tails(tokenizer) -> list[str]:
             tails.append(multi)
     except ValueError:
         pass
-    _TAIL_CACHE[key] = tails
+    cache[key] = tails
     return tails
 
 

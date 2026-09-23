@@ -135,6 +135,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     res_all: list[float] = []
     top1_all: list[bool] = []
     high: dict[str, list] = {}
+    high_window: dict[str, int] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
     for key, window in keys:
@@ -186,8 +187,11 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
                 hd["bytes"] += nbytes
                 hd["positions"] += 1
         rid = id_of.get(key, doc_id)
-        if ranges:
+        # one map per row id, the last window's: on a per-turn cache that
+        # is the final turn, the one eval's reply slice scores
+        if ranges and window >= high_window.get(rid, -1):
             high[rid] = ranges
+            high_window[rid] = window
         per_row.append({"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
                         "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
                         "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),
