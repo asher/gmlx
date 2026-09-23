@@ -427,10 +427,16 @@ def validate_cache(cache_dir: Path, check_sha: bool = True) -> list[str]:
                 problems.append(f"shard {i} not in progress.json")
             elif sha256_file(sp) != e["sha256"]:
                 problems.append(f"shard {i} sha256 mismatch")
+                continue
             elif e.get("rows_sha256") and sha256_file(rp) != e["rows_sha256"]:
                 problems.append(f"rows sidecar {i} sha256 mismatch")
-        sh = load_shard(sp)
-        rows = read_rows_jsonl(rp)
+                continue
+        try:
+            sh = load_shard(sp)
+            rows = read_rows_jsonl(rp)
+        except Exception as e:  # noqa: BLE001 - a torn file raises the loader's own type
+            problems.append(f"shard {i} unreadable ({e})")
+            continue
         B, L = sh["token_ids"].shape
         if len(rows) != B:
             problems.append(f"shard {i}: {len(rows)} rows in sidecar, {B} in shard")

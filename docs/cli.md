@@ -927,7 +927,7 @@ block as it found it.
 | `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
-| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, recorded and compared on a resume. Refused: `--thinking-budget` here, or a drafter flag beside `--thinking-budget` |
+| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, compared on a resume. Refused: `--thinking-budget`, or `--native-mtp`, `--speculative` or `--draft-gguf` beside it |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
 | `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close on top, without one the trace shares this budget |
@@ -1037,7 +1037,7 @@ Alignment flags, in the order `--help` prints them.
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
 | `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this, positive |
 | `--tau-alm F` | `1.0` | temperature on the chunk term (ALM), positive |
-| `--T-dk F` | `1.0` | temperature on the conditional factor of the bucketed KL, positive |
+| `--T-dk F` | `1.0` | temperature on the group softmaxes of the KL term, positive, under every `--loss` form |
 | `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side, at least 1 |
 | `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view |
 | `--cpu` | off | run on the CPU device, for smoke tests |
@@ -1073,7 +1073,7 @@ Training flags, in the order `--help` prints them.
 | `--chunk N` | `512` | positions per head chunk |
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
-| `--ckpt-dir DIR` | `./ckpt` | checkpoint directory |
+| `--ckpt-dir DIR` | `./ckpt` | checkpoint directory. A fresh run refuses one that holds an earlier run's checkpoints |
 | `--resume` | off | resume from `--ckpt-dir`, refused when none exists or views, student, LoRA, batch, seed, steps, val batches, lr, warmup, knobs, clip, decay or hs changed |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |

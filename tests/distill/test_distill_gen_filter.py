@@ -466,6 +466,15 @@ def test_gen_resume_drops_a_torn_last_line_and_refuses_other_settings(tmp_path, 
     out.write_text(text.replace('"id": "b"', 'oops', 1), encoding="utf-8")
     rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server))
     assert rc == 2 and "is not a JSON row" in capsys.readouterr().err
+    # a kill inside a multi-byte character leaves bytes no text read decodes
+    out.write_text(text, encoding="utf-8")
+    with open(out, "ab") as fh:
+        fh.write(b'{"id": "d", "messages": [{"role": "user", "content": "\xe4\xb8')
+    prompts = _prompts(tmp_path / "p.jsonl", rows + [{"id": "c", "messages": [{"role": "user", "content": "gamma"}]},
+                                                     {"id": "d", "messages": [{"role": "user", "content": "delta"}]}])
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    assert "dropped a torn last line" in capsys.readouterr().err
+    assert sorted(r["id"] for r in _rows(out)) == ["a", "b", "c", "d"]
 
 
 # ---------------------------------------------------------------------------
@@ -1496,12 +1505,14 @@ def test_gen_refuses_a_thinking_budget_with_a_drafter_and_flags_a_budget_the_ser
         {"id": "short", "messages": [{"role": "user", "content": "brief"}]},
         {"id": "wrap", "messages": [{"role": "user", "content": "LONG WRAP"}]},
     ])
-    for flag in (["--mtp"], ["--draft-gguf", "d.gguf"], ["--speculative=1"]):
+    for flag in (["--native-mtp"], ["--draft-gguf", "d.gguf"], ["--speculative=1"], ["--spec"],
+                 ["--draft=d.gguf"], ["--native"]):
         rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
                                         thinking=True, thinking_budget=40, tokenizer="teacher.gguf",
                                         serve_arg=flag))
         err = capsys.readouterr().err
-        assert rc == 2 and "[gen] refuse: --thinking-budget with a drafter" in err, err
+        assert rc == 2 and "[gen] refuse: --thinking-budget with a drafter (--native-mtp, --speculative" in err, err
+    assert not gen.drafter_flag("--mtp") and not gen.drafter_flag("--no-speculative") and not gen.drafter_flag("--d")
     monkeypatch.setattr(tokens_mod, "load_tokenizer", lambda path: _WordTokenizer())
     monkeypatch.setattr(gen, "_reasoning_tokens", lambda obj: None)
     monkeypatch.setattr(gen, "trace_tokens", lambda tok, text: len(text.split()) * 3)

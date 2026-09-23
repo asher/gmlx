@@ -31,7 +31,10 @@ def parse_render_kwargs(spec: str | None) -> dict:
     text = spec
     if not spec.lstrip().startswith("{"):
         p = Path(spec).expanduser()
-        text = p.read_text(encoding="utf-8") if p.is_file() else spec
+        try:
+            text = p.read_text(encoding="utf-8") if p.is_file() else spec
+        except OSError as e:
+            raise ValueError(f"--frame-kwargs {spec}: {e}") from None
     kw = json.loads(text)
     if not isinstance(kw, dict):
         raise ValueError("--frame-kwargs must be a JSON object")

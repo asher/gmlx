@@ -51,6 +51,13 @@ def message_list(row, key: str, where: str) -> list:
     return v
 
 
+def _json_line(line: str, p: Path, i: int):
+    try:
+        return json.loads(line)
+    except ValueError as e:
+        raise ValueError(f"{p.name} line {i + 1}: not JSON ({e})") from None
+
+
 def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 hf_split: str = "train", prefix: str | None = None) -> Iterator[tuple[str, str]]:
     """(doc_id, text) from a jsonl file, a directory of text files, or an
@@ -65,7 +72,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = _json_line(line, p, i)
                 yield f"{prefix or p.name}:{i}", nfc(text_value(obj, text_key, f"{p.name} line {i + 1}"))
                 n += 1
                 if limit and n >= limit:
@@ -150,7 +157,7 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
                 line = line.strip()
                 if not line:
                     continue
-                yield one(json.loads(line), f"{p.name}:{i}")
+                yield one(_json_line(line, p, i), f"{p.name}:{i}")
                 n += 1
                 if limit and n >= limit:
                     return

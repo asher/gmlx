@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from gmlx.load.tokenizer import (
+    eos_ids,
     hf_inner,
     token_bytes,
     vocab_map_hash,
@@ -66,6 +67,20 @@ def student_width(path: str) -> int | None:
     except (OSError, ValueError, KeyError) as e:
         log(f"[align] warn: student width not read: {e}")
     return None
+
+
+def student_identity(tokenizer) -> dict:
+    """The student's fields the vocab hash leaves out and a view depends
+    on: its end and start ids, whether it adds a start token, and its chat
+    template's digest. train refuses a student whose values differ."""
+    import hashlib
+    import json
+    tpl = getattr(tokenizer, "chat_template", None)
+    if isinstance(tpl, dict):
+        tpl = json.dumps(tpl, sort_keys=True)
+    return {"eos": [int(v) for v in eos_ids(tokenizer)], "bos": _tokens.bos_id(tokenizer),
+            "adds_bos": bool(_tokens.adds_bos(tokenizer)),
+            "chat_template_sha256": hashlib.sha256(tpl.encode("utf-8")).hexdigest() if isinstance(tpl, str) else None}
 
 
 def get_tables(teacher_tok, student_tok, tables_dir: Path | None, out_dir: Path, *,
@@ -207,7 +222,7 @@ def run_align(opts: AlignOptions) -> int:
         log(f"[align] refuse: no tables.json in {opts.tables}")
         return 2
     try:
-        _frames.parse_render_kwargs(opts.frame_kwargs)
+        frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
         log(f"[align] refuse: --frame-kwargs is not a JSON object: {e}")
         return 2
@@ -243,7 +258,7 @@ def run_align(opts: AlignOptions) -> int:
                  T_dk=opts.T_dk, max_chunk_len=opts.max_chunk_len)
     frame = (manifest.get("gmlx_distill", {}) or {}).get("frame")
     student_kw = _frames.resolve_render_kwargs(student_tok, inherit=(frame or {}).get("render_kwargs"),
-                                               override=_frames.parse_render_kwargs(opts.frame_kwargs))
+                                               override=frame_kwargs)
     _frames.set_render_kwargs(student_tok, student_kw)
     if frame:
         why = _frames.template_problem(student_tok)
@@ -290,7 +305,8 @@ def run_align(opts: AlignOptions) -> int:
                             V_T=V_T, V_S=V_S, save=False)
     loader = ViewLoader(reader, student_tok, tables, knobs=knobs, Kp=opts.kprime, identity=identity)
     n = len(reader)
-    stats: dict[str, list] = {"J": [], "own": [], "redirect": [], "singleton": [], "dropped": [], "M_K": [],
+    stats: dict[str, list] = {"J": [], "own": [], "redirect": [], "singleton": [], "dropped": [], "capped": [],
+                              "M_K": [],
                               "n_groups_max": [], "bias_ok": [], "bias_cov": [], "n_chunks": [], "n_student": []}
     index = []
     chunk_hist: dict[int, int] = {}
@@ -335,7 +351,7 @@ def run_align(opts: AlignOptions) -> int:
     n_docs = len(set(doc_ids))
     log(f"[align] validation: {len(val)} of {len(index)} rows from {len({doc_ids[i] for i in val})} of "
         f"{n_docs} documents" + (", the only document is split" if n_docs == 1 and 0 < len(val) < len(index) else ""))
-    retained = [1.0 - d for d in stats["dropped"]]
+    retained = [1.0 - d - c for d, c in zip(stats["dropped"], stats["capped"])]
     jw = np.array(stats["J"], dtype=np.float64) * np.array(stats["bias_cov"], dtype=np.float64) \
         if stats["bias_ok"] else np.zeros(0)
     view = {
@@ -343,6 +359,7 @@ def run_align(opts: AlignOptions) -> int:
         "teacher_hash": tables.teacher_hash, "student_hash": tables.student_hash,
         "V_T": V_T, "V_S": V_S, "tables_version": TABLES_VERSION, "identity": identity,
         "K": reader.K, "Kp": int(Kp), "knobs": knobs, "student": opts.student,
+        "student_identity": student_identity(student_tok),
         "student_render_kwargs": student_kw, "student_render_failures": loader.render_failures,
         "alignment": {
             "rows": n, "rows_kept": len(index), "rows_dropped_lt2": loader.dropped,
@@ -350,6 +367,7 @@ def run_align(opts: AlignOptions) -> int:
             "redirected_mass_fraction": red,
             "singleton_mass_fraction": s,
             "dropped_mass_mean": float(np.mean(stats["dropped"])) if stats["dropped"] else 0.0,
+            "capped_mass_mean": float(np.mean(stats["capped"])) if stats["capped"] else 0.0,
             "retained_fraction_r": {"mean": float(np.mean(retained)) if retained else 1.0,
                                     "p05": float(np.percentile(retained, 5)) if retained else 1.0},
             "captured_mass_M_K_mean": float(np.mean(stats["M_K"])) if stats["M_K"] else None,

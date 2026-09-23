@@ -87,7 +87,7 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
                        chunk_teacher_ll=np.zeros(0, np.float32),
                        chunk_teacher_log_bm=np.zeros(0, np.float32),
                        stats={"J": J, "own": 1.0, "redirect": 0.0, "singleton": 1.0,
-                              "dropped": 0.0, "bias_ok": 1.0, "bias_cov": 1.0, "n_chunks": 0})
+                              "dropped": 0.0, "capped": 0.0, "bias_ok": 1.0, "bias_cov": 1.0, "n_chunks": 0})
     if t_spans is not None:
         al = shared_boundaries_spans(t_ends, student_ends.astype(np.int64), t_spans, s_spans)
         compute_mask = target_mask(student_ends.astype(np.int64), s_spans)[:max(Ts - 1, 0)]
@@ -141,6 +141,7 @@ def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.n
                           "redirect": float(proj["redirect"].mean()),
                           "singleton": float(proj["singleton"].mean()),
                           "dropped": float(proj["dropped"].mean()),
+                          "capped": float(proj["capped"].mean()),
                           "M_K": float(proj["M_K"].mean()),
                           "n_groups_max": int(proj["n_groups"].max()),
                           "bias_ok": bias_ok, "bias_cov": bias_cov,

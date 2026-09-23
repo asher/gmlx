@@ -24,6 +24,7 @@ from . import frames as _frames
 from . import hidden as _hidden
 from . import loss as _loss
 from . import student as _student
+from . import view as _view
 from .constants import DEFAULT_KNOBS, GB, TABLES_VERSION, log
 from .format import free_bytes, manifest_sha256, read_json, write_json_atomic
 from .teacher import teacher_identity
@@ -82,7 +83,7 @@ def gguf_file(path: str) -> str:
 
 
 VIEW_FINGERPRINT_KEYS = ("cache_manifest_sha256", "teacher_hash", "student_hash", "V_T", "V_S", "identity",
-                         "K", "Kp", "knobs", "student_render_kwargs", "index")
+                         "K", "Kp", "knobs", "student_render_kwargs", "student_identity", "index")
 
 
 def view_fingerprint(view: dict) -> str:
@@ -345,13 +346,13 @@ def run_train(opts: TrainOptions) -> int:
     ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     if not opts.resume:
-        # a fresh run replaces last at its first save; an earlier run's best
-        # would otherwise stand beside it as if this run had scored it
-        for stale in ("best", "best.tmp", "best.old"):
-            if (ckpt_dir / stale).exists():
-                shutil.rmtree(ckpt_dir / stale)
-                if stale == "best":
-                    log(f"[train] removed the earlier run's best checkpoint under {ckpt_dir}")
+        # a fresh run would replace last at its first save and leave an
+        # earlier run's best beside it; a forgotten --resume must lose nothing
+        held = [n for n in ("last", "last.old", "best", "best.old") if (ckpt_dir / n).exists()]
+        if held:
+            log(f"[train] refuse: {ckpt_dir} holds checkpoints of an earlier run ({', '.join(held)}); --resume "
+                "continues it, another --ckpt-dir or removing them starts fresh")
+            return 2
     run = resume_fingerprint(views, opts, knobs, scale)
     if opts.resume:
         last = checkpoint_dir(ckpt_dir, "last")
@@ -388,6 +389,14 @@ def run_train(opts: TrainOptions) -> int:
     _frames.set_render_kwargs(tokenizer, view.get("student_render_kwargs") or {})
     if vocab_map_hash(tokenizer) != view["student_hash"]:
         log("[train] refuse: student tokenizer hash does not match the view")
+        return 2
+    want = view.get("student_identity")
+    have = _view.student_identity(tokenizer) if want is not None else None
+    if want is not None and want != have:
+        # the vocab hash leaves the special ids and the template out, and a
+        # base and an instruct student of one family share it
+        diff = ", ".join(k for k in want if want.get(k) != (have or {}).get(k))
+        log(f"[train] refuse: the student's {diff} differ from the view's student, align again with this student")
         return 2
     inner = getattr(model, "language_model", model)
     head = head_spec_from_model(inner)
@@ -584,6 +593,11 @@ def run_train(opts: TrainOptions) -> int:
             last = checkpoint_dir(ckpt_dir, "last")
             state = load_checkpoint(ckpt_dir, "last", model, opt)
             log(f"[train] resumed at step {state['iteration']}")
+            if state.get("best_val") is not None and checkpoint_dir(ckpt_dir, "best") is None:
+                # the value would otherwise bar every later validation from
+                # writing the best checkpoint that is not there
+                state["best_val"] = None
+                log(f"[train] no best checkpoint under {ckpt_dir}, the next scored validation writes one")
             if opts.hs and last is not None and not (last / "hs_head.safetensors").exists():
                 log("[train] hidden-state map not in the last checkpoint, a fresh map starts at the resumed step")
         tokens0 = int(state["tokens"])

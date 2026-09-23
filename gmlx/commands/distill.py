@@ -265,7 +265,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--tau-alm", type=_positive_float, default=DEFAULT_KNOBS["tau_alm"],
                    help="Temperature on the chunk term (ALM) (default 1.0).")
     p.add_argument("--T-dk", type=_positive_float, default=DEFAULT_KNOBS["T_dk"],
-                   help="Temperature on the conditional factor of the bucketed KL (default 1.0).")
+                   help="Temperature on the group softmaxes of the KL term, every --loss form (default 1.0).")
     p.add_argument("--max-chunk-len", type=_positive_int, default=DEFAULT_KNOBS["max_chunk_len"],
                    help="Longest ALM chunk in tokens on either side (default 8).")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",

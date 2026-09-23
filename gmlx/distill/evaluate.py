@@ -128,6 +128,21 @@ TASK_KEYS = {"gsm8k": ("id", "question", "answer")}
 MC_KEYS = ("id", "query", "choices", "gold")
 
 
+def check_mc_items(path, rows: list) -> list:
+    """rows of a multiple-choice task: choices is a non-empty list of
+    strings and gold an index into it, else UnreadableInput (the scorer
+    would raise after the slices ran)."""
+    for r in check_keys(path, rows, MC_KEYS):
+        ch = r["choices"]
+        if not isinstance(ch, list) or not ch or not all(isinstance(c, str) for c in ch):
+            raise UnreadableInput(f"{path}: item {r.get('id')!r} has no list of choice strings")
+        g = r["gold"]
+        if isinstance(g, bool) or not isinstance(g, int) or not 0 <= g < len(ch):
+            raise UnreadableInput(f"{path}: item {r.get('id')!r} gold {g!r} is not an index into its "
+                                  f"{len(ch)} choices")
+    return rows
+
+
 def teacher_bpb_map(path) -> dict:
     """{slice: bpb} from a --teacher-bpb file: a plain map, or an eval
     report whose after.bpb block is read."""
@@ -318,7 +333,7 @@ def report_markdown(opts: EvalOptions, report: dict, slices: dict, chat_slices: 
             t = report.get("teacher_bpb", {}).get(name)
             d = report["decontam"].get(name)
             md.append(f"| {name} | {_fmt(a)} | {_fmt(b)} | {_fmt(t)} | {_fmt(d, 5)} | "
-                      f"{'void' if name in contaminated else 'ok'} |")
+                      f"{'void' if name in contaminated else 'ok' if d is not None else 'unchecked'} |")
     if chat_slices:
         md += ["", "| chat slice | bpb after | bpb before | se | conversations |", "|---|---|---|---|---|"]
         for name in chat_slices:
@@ -383,7 +398,7 @@ def run_eval(opts: EvalOptions) -> int:
         slice_specs = _named(opts.slices)
         chat_specs = _named(opts.chat_slices)
         reply_specs = _named(opts.reply_slices)
-        _frames.parse_render_kwargs(opts.frame_kwargs)
+        frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
         log(f"[eval] refuse: {e}")
         return 2
@@ -424,7 +439,9 @@ def run_eval(opts: EvalOptions) -> int:
                 t = t.strip()
                 if not t:
                     continue
-                items = check_keys(td / f"{t}.jsonl", read_jsonl(td / f"{t}.jsonl"), TASK_KEYS.get(t, MC_KEYS))
+                items = read_jsonl(td / f"{t}.jsonl")
+                items = check_keys(td / f"{t}.jsonl", items, TASK_KEYS[t]) if t in TASK_KEYS \
+                    else check_mc_items(td / f"{t}.jsonl", items)
                 if opts.task_limit:
                     items = items[:opts.task_limit]
                 tasks[t] = {"items": items}
@@ -512,7 +529,7 @@ def run_eval(opts: EvalOptions) -> int:
         return 2
     inherit = ((kld_manifest.get("gmlx_distill") or {}).get("frame") or {}).get("render_kwargs")
     _frames.set_render_kwargs(tokenizer, _frames.resolve_render_kwargs(
-        tokenizer, inherit=inherit, override=_frames.parse_render_kwargs(opts.frame_kwargs)))
+        tokenizer, inherit=inherit, override=frame_kwargs))
     model.eval()
     if positions is not None:
         report["reply_positions"] = opts.reply_positions

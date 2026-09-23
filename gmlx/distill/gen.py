@@ -42,7 +42,14 @@ RETOKENIZE_SLACK = 2
 # a trace this far past the budget was never cut: the server ignored it
 UNENFORCED_MARGIN = 32
 # serve flags that install a drafter, whose budget close differs
-DRAFTER_FLAGS = ("--mtp", "--speculative", "--draft-gguf")
+DRAFTER_FLAGS = ("--native-mtp", "--speculative", "--draft-gguf")
+
+
+def drafter_flag(arg: str) -> bool:
+    """True for a serve argument that installs a drafter, by its full
+    spelling, an abbreviation argparse accepts, or either with =value."""
+    name = arg.split("=", 1)[0]
+    return len(name) > 3 and any(f.startswith(name) for f in DRAFTER_FLAGS)
 DEFAULT_CONTEXT_FORMAT = "{context}\n\n{prompt}"
 
 
@@ -422,7 +429,7 @@ def row_totals(out: Path) -> dict:
     resumes and interrupts rather than the runs that wrote it."""
     completed = stops = tokens = budget_hits = longest = unenforced = 0
     if out.exists():
-        with open(out, encoding="utf-8") as fh:
+        with open(out, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.strip():
                     continue
@@ -451,19 +458,21 @@ def _done_ids(out: Path) -> dict[str, list | None]:
     done: dict[str, list | None] = {}
     if not out.exists():
         return done
-    text = out.read_text(encoding="utf-8")
-    lines = text.split("\n")
+    # bytes, not text: a kill mid-write can leave a partial multi-byte
+    # character, which a text read would raise on before the cut
+    data = out.read_bytes()
+    lines = data.split(b"\n")
     for k, line in enumerate(lines):
         if not line.strip():
             continue
         try:
-            row = json.loads(line)
+            row = json.loads(line.decode("utf-8"))
             msgs = row.get("messages")
             done[str(row["id"])] = list(msgs[:-1]) if isinstance(msgs, list) and msgs else None
         except (ValueError, KeyError, TypeError, AttributeError) as e:
             if k == len(lines) - 1:
-                write_bytes_atomic(out, text[:len(text) - len(line)].encode("utf-8"))
-                log(f"[gen] dropped a torn last line of {out} ({len(line)} chars)")
+                write_bytes_atomic(out, data[:len(data) - len(line)])
+                log(f"[gen] dropped a torn last line of {out} ({len(line)} bytes)")
                 break
             raise ValueError(f"{out}: line {k + 1} is not a JSON row with an id ({e})") from e
     return done
@@ -589,11 +598,12 @@ def run_gen(opts: GenOptions) -> int:
     if opts.thinking_budget and not opts.thinking:
         print("[gen] refuse: --thinking-budget needs --thinking", file=sys.stderr)
         return 2
-    if opts.thinking_budget and any(a == f or a.startswith(f + "=") for a in opts.serve_arg for f in DRAFTER_FLAGS):
+    if opts.thinking_budget and any(drafter_flag(a) for a in opts.serve_arg):
         # a drafted teacher overshoots the budget by a draft block and
         # drops it when requests batch, so its cut is not the one the
         # sidecar records
-        print("[gen] refuse: --thinking-budget with a drafter (--mtp, --speculative or --draft-gguf in --serve-arg) "
+        print("[gen] refuse: --thinking-budget with a drafter (--native-mtp, --speculative or --draft-gguf in "
+              "--serve-arg) "
               "is not enforced per request, serve the teacher without the drafter", file=sys.stderr)
         return 2
     if any(a == "--thinking-budget" or a.startswith("--thinking-budget=") for a in opts.serve_arg):

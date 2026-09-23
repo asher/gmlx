@@ -74,6 +74,16 @@ class CacheOptions:
     extra: dict = field(default_factory=dict)
 
 
+def _hash_doc(h, doc_id: str, payload: bytes) -> None:
+    """One document into the corpus hash: its id and its bytes, each
+    length-prefixed, so a corpus re-split at other document boundaries or
+    renumbered by an inserted line hashes apart and a resume over it is
+    refused (rows are keyed by doc id downstream)."""
+    for part in (doc_id.encode("utf-8"), payload):
+        h.update(len(part).to_bytes(8, "little"))
+        h.update(part)
+
+
 def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows: int | None,
                max_tokens: int | None, source: str | None, hf_split: str, limit_docs: int | None,
                frame: str = "none", instruction: str = CONTINUE_INSTRUCTION, messages_key: str = "messages",
@@ -120,7 +130,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                                                            limit=limit_docs, hf_split=hf_split):
             while msgs and msgs[-1].get("role") != "assistant":
                 msgs = msgs[:-1]
-            corpus_hash.update(json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode())
+            _hash_doc(corpus_hash, doc_id, json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode())
             variants = _corpus.per_turn_rows(msgs) if per_turn else [msgs]
             if st is not None:
                 corpus_hash.update(json.dumps(st, sort_keys=True, ensure_ascii=False).encode())
@@ -193,10 +203,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
             tbytes = text.encode("utf-8")
             if not tbytes.strip():
                 continue
-            # length-prefixed, so two corpora that split the same bytes at
-            # other document boundaries hash apart
-            corpus_hash.update(len(tbytes).to_bytes(8, "little"))
-            corpus_hash.update(tbytes)
+            _hash_doc(corpus_hash, doc_id, tbytes)
             ids, ends, flag = _tokens.encode_with_byte_ends(tokenizer, tbytes, tb, add_special_tokens=False)
             flagged += int(flag)
             if len(ids) == 0:
@@ -479,7 +486,7 @@ def run_cache(opts: CacheOptions) -> int:
     out = Path(opts.out)
     t0 = time.perf_counter()
     try:
-        _frames.parse_render_kwargs(opts.frame_kwargs)
+        frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
         log(f"[cache] refuse: --frame-kwargs is not a JSON object: {e}")
         return 2
@@ -501,7 +508,7 @@ def run_cache(opts: CacheOptions) -> int:
     stored = _format.read_json(out / "progress.json").get("run") \
         if opts.resume and (out / "progress.json").is_file() else None
     render_kw = _frames.resolve_render_kwargs(tokenizer, inherit=(stored or {}).get("render_kwargs"),
-                                              override=_frames.parse_render_kwargs(opts.frame_kwargs))
+                                              override=frame_kwargs)
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
         why = _frames.template_problem(tokenizer)
@@ -605,6 +612,9 @@ def run_cache(opts: CacheOptions) -> int:
             "the model changes its logits after the projection in a way the distill head does not carry")
         return 2
     V = head.V
+    if opts.top_k >= V:
+        log(f"[cache] refuse: --top-k {opts.top_k} is not below the head width {V}")
+        return 2
     hidden_blk = writer.progress.get("hidden") if opts.hidden else None
     R_hidden = None   # the sketch matrix, built from the first trunk chunk's width
     recorder, routing = None, None
@@ -756,8 +766,13 @@ def run_cache(opts: CacheOptions) -> int:
                             log(f"[cache] refuse: peak still over the cap at step {step} "
                                 f"({again:.1f} B per V-element)")
                             return 3
-                    writer.set_constant("bytes_per_v_element", float(constant))
-                    writer.set_constant("bytes_per_v_measured", float(measured))
+                    try:
+                        writer.set_constant("bytes_per_v_element", float(constant))
+                        writer.set_constant("bytes_per_v_measured", float(measured))
+                    except OSError as e:
+                        log(f"[cache] refuse: cannot write progress.json: {e}, the {writer.n_done} verified "
+                            "shards stay for --resume")
+                        return 2
                     probed = True
                 parts.append(red)
                 s = e
@@ -807,56 +822,60 @@ def run_cache(opts: CacheOptions) -> int:
     wall_total = time.perf_counter() - t0
     template = _frames.template_text(tokenizer)
     teacher_abs = str(Path(opts.teacher).expanduser().absolute())
-    _format.write_manifest(
-        out, teacher_path=teacher_abs, dataset=opts.corpus, num_samples=len(rows),
-        max_seq_len=opts.max_len, seed=0, top_k=opts.top_k, vocab_size=V,
-        config_vocab_size=(cfg.get("vocab_size") if isinstance(cfg, dict) else None),
-        tokenizer_hash=tokenizer_hash, batch_size=opts.rows_per_shard,
-        gmlx_distill={
-            "teacher": {"arch": arch, "path": teacher_abs, "feeder_installed": bool(feeder),
-                        "streaming": streaming},
-            "corpus": {"spec": opts.corpus, "rows": len(rows), "tokens": n_tokens,
-                       "window_policy": "last whitespace-initial boundary",
-                       "normalization": "NFC", "rows_offset_fallback": flagged,
-                       "boundary_byte_set": " \\t\\n\\r\\x0b\\x0c", "source": source,
-                       "zero_width_rows": int(zero_width_rows)},
-            "corpus_sha256": corpus_sha,
-            "generator": generator,
-            "mlx_kld_compatible": opts.frame == "none" and not zero_width_rows,
-            "routing": routing,
-            "hidden": hidden_blk,
-            "frame": None if opts.frame == "none" else {
-                "kind": opts.frame,
-                "instruction": opts.frame_instruction if opts.frame == "continue" else None,
-                "frame_tokens": frame_info["frame_tokens"],
-                "rows_dropped": frame_info["dropped"],
-                "close_final_windows": bool(opts.close_final_windows) if opts.frame == "continue" else None,
-                "closed_rows": frame_info.get("closed_rows", 0),
-                "per_turn": bool(opts.per_turn),
-                "student_messages_key": opts.student_messages_key,
-                "student_rows": frame_info.get("student_rows", 0),
-                "reply_mismatch": frame_info.get("reply_mismatch", 0),
-                "target_positions": targets_total,
-                "render_kwargs": render_kw,
-                "turn_end_markers": _frames.assistant_tails(tokenizer),
-                "has_template": _frames.has_chat_template(tokenizer),
-                "render_date": datetime.date.today().isoformat(),
-                "template_sha256": hashlib.sha256(template.encode()).hexdigest()},
-            "prefill_plan": dict(plan, step_final=step, bytes_per_v_in_force=constant),
-            "throughput": {"tok_s": tokens_done / max(writer.progress["wall_s"], 1e-9),
-                           "wall_s": wall_total, "gb_written": writer.progress["bytes"] / GB,
-                           "tb_read": reads_bytes / 1e12, "tokens_this_run": tokens_run,
-                           "trunk_forwards": trunk_forwards, "trunk_wall_s": trunk_wall,
-                           "trunk_tok_s": tokens_run / max(trunk_wall, 1e-9),
-                           "expert_bytes_gb": E_bytes / GB,
-                           "stream_bandwidth_gb_s": (E_bytes * trunk_forwards / max(trunk_wall, 1e-9) / GB)
-                           if streaming and E_bytes else None},
-            "peak_memory": {"peak_gb": mx.get_peak_memory() / GB,
-                            "active_gb": mx.get_active_memory() / GB},
-            "captured_mass_histogram": {"edges": edges[:-1] + [1.0], "counts": hist,
-                                        "mean": float(captured.mean()) if captured.size else None},
-            "serves": "any student tokenizer",
-        })
+    try:
+        _format.write_manifest(
+            out, teacher_path=teacher_abs, dataset=opts.corpus, num_samples=len(rows),
+            max_seq_len=opts.max_len, seed=0, top_k=opts.top_k, vocab_size=V,
+            config_vocab_size=(cfg.get("vocab_size") if isinstance(cfg, dict) else None),
+            tokenizer_hash=tokenizer_hash, batch_size=opts.rows_per_shard,
+            gmlx_distill={
+                "teacher": {"arch": arch, "path": teacher_abs, "feeder_installed": bool(feeder),
+                            "streaming": streaming},
+                "corpus": {"spec": opts.corpus, "rows": len(rows), "tokens": n_tokens,
+                           "window_policy": "last whitespace-initial boundary",
+                           "normalization": "NFC", "rows_offset_fallback": flagged,
+                           "boundary_byte_set": " \\t\\n\\r\\x0b\\x0c", "source": source,
+                           "zero_width_rows": int(zero_width_rows)},
+                "corpus_sha256": corpus_sha,
+                "generator": generator,
+                "mlx_kld_compatible": opts.frame == "none" and not zero_width_rows,
+                "routing": routing,
+                "hidden": hidden_blk,
+                "frame": None if opts.frame == "none" else {
+                    "kind": opts.frame,
+                    "instruction": opts.frame_instruction if opts.frame == "continue" else None,
+                    "frame_tokens": frame_info["frame_tokens"],
+                    "rows_dropped": frame_info["dropped"],
+                    "close_final_windows": bool(opts.close_final_windows) if opts.frame == "continue" else None,
+                    "closed_rows": frame_info.get("closed_rows", 0),
+                    "per_turn": bool(opts.per_turn),
+                    "student_messages_key": opts.student_messages_key,
+                    "student_rows": frame_info.get("student_rows", 0),
+                    "reply_mismatch": frame_info.get("reply_mismatch", 0),
+                    "target_positions": targets_total,
+                    "render_kwargs": render_kw,
+                    "turn_end_markers": _frames.assistant_tails(tokenizer),
+                    "has_template": _frames.has_chat_template(tokenizer),
+                    "render_date": datetime.date.today().isoformat(),
+                    "template_sha256": hashlib.sha256(template.encode()).hexdigest()},
+                "prefill_plan": dict(plan, step_final=step, bytes_per_v_in_force=constant),
+                "throughput": {"tok_s": tokens_done / max(writer.progress["wall_s"], 1e-9),
+                               "wall_s": wall_total, "gb_written": writer.progress["bytes"] / GB,
+                               "tb_read": reads_bytes / 1e12, "tokens_this_run": tokens_run,
+                               "trunk_forwards": trunk_forwards, "trunk_wall_s": trunk_wall,
+                               "trunk_tok_s": tokens_run / max(trunk_wall, 1e-9),
+                               "expert_bytes_gb": E_bytes / GB,
+                               "stream_bandwidth_gb_s": (E_bytes * trunk_forwards / max(trunk_wall, 1e-9) / GB)
+                               if streaming and E_bytes else None},
+                "peak_memory": {"peak_gb": mx.get_peak_memory() / GB,
+                                "active_gb": mx.get_active_memory() / GB},
+                "captured_mass_histogram": {"edges": edges[:-1] + [1.0], "counts": hist,
+                                            "mean": float(captured.mean()) if captured.size else None},
+                "serves": "any student tokenizer",
+            })
+    except OSError as e:
+        log(f"[cache] refuse: cannot write the manifest under {out}: {e}, the shards stay for --resume")
+        return 2
     problems = _format.validate_cache(out)
     if problems:
         return _manifest_aside(out, problems)

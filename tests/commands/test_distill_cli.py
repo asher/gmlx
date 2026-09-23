@@ -83,6 +83,11 @@ def test_cache_validate_runs_the_validator(tmp_path):
     _tiny_cache(tmp_path / "c", tok)
     rc, out = _run(["distill", "cache", "--validate", str(tmp_path / "c")])
     assert rc == 0 and out.strip().endswith("valid")
+    # a shard cut short by a kill is reported, not raised on
+    shard = tmp_path / "c" / "batch-00000.safetensors"
+    shard.write_bytes(shard.read_bytes()[:100])
+    rc, out = _run(["distill", "cache", "--validate", str(tmp_path / "c")])
+    assert rc == 1 and "shard 0 sha256 mismatch" in out
     (tmp_path / "c" / "manifest.json").write_text("{}")
     rc, out = _run(["distill", "cache", "--validate", str(tmp_path / "c")])
     assert rc == 1

@@ -231,7 +231,9 @@ def build_tables(teacher_tok, student_tok, *, V_T: int | None = None,
         if v in t_special:
             continue    # specials only by role (handled through key_to_group above)
         u = int(u1[v])
-        if u >= 0:
+        if u >= 0 and group_key[group_of[u]] >= 0:
+            # a student special with no role keys no group; a teacher
+            # token spelling it stays dropped rather than targeting group 0
             target_g[v] = group_of[u]
     # every teacher end-of-sequence id (a model can carry an end-of-turn
     # id beside its eos) lands in the student's EOS group by role, as own
@@ -382,7 +384,9 @@ def project_topk(top_log_p: np.ndarray, top_idx: np.ndarray, tables: Tables,
     P x K entries keyed by boundary * (G + 1) + gid and logaddexp.reduceat.
     Returns gid [P, Kp] (sentinel G at pads), log_p [P, Kp] (-inf pads),
     log_M [P], n_groups [P], and per-boundary mass fractions own, redirect,
-    singleton, dropped (all in [0, 1], relative to the captured mass M_K)."""
+    singleton, dropped and capped (all in [0, 1], relative to the captured
+    mass M_K; own + redirect + dropped = 1, and capped is the mass of the
+    mapped groups a Kp cap left out of the target)."""
     P, K = top_log_p.shape
     G = tables.G
     lp = top_log_p.astype(np.float64)
@@ -396,6 +400,7 @@ def project_topk(top_log_p: np.ndarray, top_idx: np.ndarray, tables: Tables,
     MKs = np.maximum(MK, 1e-300)
     kept = valid & (gid >= 0)
     dropped = (pw * (valid & ~kept)).sum(axis=1) / MKs
+    capped = np.zeros(P)
     own_frac = (pw * (own & kept)).sum(axis=1) / MKs
     redirect_frac = (pw * (~own & kept)).sum(axis=1) / MKs
     single_frac = (pw * (single & kept)).sum(axis=1) / MKs
@@ -434,16 +439,18 @@ def project_topk(top_log_p: np.ndarray, top_idx: np.ndarray, tables: Tables,
         keep = rank < Kp
         out_gid[srow2[keep], rank[keep]] = sg2[keep]
         out_lp[srow2[keep], rank[keep]] = sums2[keep].astype(np.float32)
-        capped_mass = np.zeros(P)
         if np.any(~keep):
-            np.add.at(capped_mass, srow2[~keep], np.exp(sums2[~keep]))
-        dropped = dropped + capped_mass / MKs
+            np.add.at(capped, srow2[~keep], np.exp(sums2[~keep]))
+    # own, redirect and dropped partition the captured mass whatever the
+    # cap: own and redirect are properties of the tokenizer pair, which
+    # the align gate reads, and the cap's loss is reported on its own
+    capped = capped / MKs
     with np.errstate(divide="ignore"):
         log_M = np.log(np.exp(out_lp.astype(np.float64)).sum(axis=1)).astype(np.float32)
     return {"gid": out_gid, "log_p": out_lp, "log_M": log_M, "n_groups": n_groups,
             "own": own_frac.astype(np.float32), "redirect": redirect_frac.astype(np.float32),
             "singleton": single_frac.astype(np.float32), "dropped": dropped.astype(np.float32),
-            "M_K": MK.astype(np.float32)}
+            "capped": capped.astype(np.float32), "M_K": MK.astype(np.float32)}
 
 
 def tokenization_bias_check(proj: dict[str, np.ndarray], onpath_gid: np.ndarray,

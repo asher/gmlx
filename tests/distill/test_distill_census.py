@@ -147,7 +147,8 @@ def test_census_pairs_rows_and_writes_high_delta(tmp_path, tok):
         assert row["high_delta_positions"] == 1 and row["id"].startswith("p")
     text = md.read_text()
     assert s["rows_without_positions"] == 0
-    assert "| paired reply rows | 3 (0 reply mismatches skipped, 0 pairs with no shared position) |" in text
+    assert "| paired reply rows | 3 (0 reply mismatches skipped, 0 history mismatches skipped, " \
+           "0 pairs with no shared position) |" in text
     assert "Delta histogram" in text
     # a second context identical to the first: residual zero, mismatch counted
     # for a row whose reply differs
@@ -527,3 +528,23 @@ def test_census_gives_no_positions_map_when_every_cache_dropped_the_final_turn(t
     out2 = tmp_path / "census2.json"
     assert cs.run_census(cs.CensusOptions(without=str(final), with_=[str(final_ctx)], out=str(out2))) == 0
     assert set(json.loads(out2.read_text())["high_delta"]) == {"a.jsonl:0"}
+
+
+def test_census_skips_a_context_row_that_lost_its_history(tmp_path, tok):
+    """A context row whose render dropped the leading turns the bare row
+    kept (the context ran long) has the same reply but another history,
+    and a pair over it would measure the history, not the context. It
+    is skipped and counted apart from reply mismatches."""
+    hist = [{"role": "user", "content": "the cat"}, {"role": "assistant", "content": "is a cat"}]
+    bare = [hist + _conv("say it", REPLIES[0]), _conv("say it 1", REPLIES[1])]
+    ctx = [_conv("with the long context text here, say it", REPLIES[0]),
+           _conv("with the long context text here, say it 1", REPLIES[1])]
+    w = _reply_cache(tmp_path / "w", tok, bare, doc_prefix="a.jsonl")
+    c = _reply_cache(tmp_path / "c", tok, ctx, doc_prefix="a.jsonl", boost={0: 6.0})
+    out, md = tmp_path / "o.json", tmp_path / "o.md"
+    assert cs.run_census(cs.CensusOptions(without=str(w), with_=[str(c)], out=str(out), md=str(md))) == 0
+    s = json.loads(out.read_text())
+    assert s["rows"] == 1 and s["rows_mismatched"] == 0 and s["rows_history_mismatched"] == 1
+    assert set(s["high_delta"]) == {"a.jsonl:1"}
+    assert "| paired reply rows | 1 (0 reply mismatches skipped, 1 history mismatches skipped, " \
+           "0 pairs with no shared position) |" in md.read_text()

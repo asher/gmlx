@@ -351,11 +351,13 @@ makes the token the teacher wrote more likely by more than one nat.
 An effect under about 0.05 nats, or a high-delta share under 0.01,
 means the document changes little that a student could learn, and the
 run is not worth its hours. The other rows are diagnostics. The
-`paired reply rows` row also counts reply mismatches skipped, rows whose
-reply bytes differed between the two caches. With several `--with`
-caches, every cache decides which rows pair and which positions count,
-the effect, the histogram and the positions map come from the first,
-and `residual across contexts` alone reads them all. Keep the census
+`paired reply rows` row also counts two kinds of skipped row. A reply
+mismatch is a row whose reply bytes differed between the two caches,
+and a history mismatch is one whose context render dropped turns the
+bare row kept. With several `--with` caches, every cache decides which
+rows pair and which positions count, the effect, the histogram and the
+positions map come from the first, and `residual across contexts`
+alone reads them all. Keep the census
 JSON, which the evaluation reads to score the adapter at those
 positions.
 
@@ -519,8 +521,10 @@ python3 -c 'import json,math,sys; n=sum(e["split"]=="train" for v in sys.argv[1:
 strongly the adapter's change is applied, and `--lr` the peak learning
 rate, how far each step moves the adapter.
 `--ckpt-dir` is where the run keeps its checkpoints, saved states it
-can resume from, `./ckpt` by default. These values come from the worked
-task, and [Advanced settings](#advanced-settings) says what each one
+can resume from, `./ckpt` by default. A new run refuses a directory
+that already holds checkpoints, so a second run either resumes them
+or names another directory. These values come from the worked task,
+and [Advanced settings](#advanced-settings) says what each one
 changes.
 
 Training prints the loss, the figure it drives down, every ten steps.
@@ -692,9 +696,10 @@ for `filter --context`, so it stops after round one.
 first adapter, so `--iters` grows with the rows. The one-liner under
 Round one counts them when given both view directories, and 678 is its
 figure for the 450 rows of round one plus the 566 of round two.
-`--ckpt-dir` keeps the two rounds' checkpoints apart, since both would
-write to `./ckpt` without it. Measure `r2.gguf` the same way as round
-one, with new output names.
+`--ckpt-dir` keeps the two rounds' checkpoints apart. Without it the
+second run would find round one's checkpoints under `./ckpt` and
+refuse. Measure `r2.gguf` the same way as round one, with new output
+names.
 
 ## What each step costs
 

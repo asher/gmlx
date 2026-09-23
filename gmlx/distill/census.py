@@ -188,6 +188,7 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     high_trace: dict[str, list] = {}
     hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
     mismatch = 0
+    history_mismatch = 0
     no_positions = 0
     for key, window in order:
         arrs0, text0, meta0 = base_reader.row(base_rows[(key, window)])
@@ -200,15 +201,25 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         cut = int(meta0.get("content_start", b0)) - b0
         sides = []
         ok = True
+        history = None
         for reader, rows in ctx:
             arrs1, text1, meta1 = reader.row(rows[(key, window)])
             k1, c0, _c2 = reply_positions(arrs1, meta1)
             if text1[c0:int(meta1["spans"][-1][1])] != reply0:
                 ok = False
                 break
+            if len(meta1.get("messages") or []) != len(meta0.get("messages") or []):
+                # the context render ran long and the row lost leading turns
+                # the bare row kept: the pair would measure the history, not
+                # the context
+                history = True
+                break
             sides.append((arrs1, k1))
         if not ok:
             mismatch += 1
+            continue
+        if history:
+            history_mismatch += 1
             continue
         shared = set(keys0)
         for _a, k1 in sides:
@@ -269,7 +280,8 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
     hist = np.histogram(deltas, bins=HIST_BINS)[0].tolist() if deltas.size else []
     frame = ((base_reader.manifest.get("gmlx_distill") or {}).get("frame") or {}).get("kind")
     return {
-        "rows": len(per_row), "rows_mismatched": mismatch, "rows_without_positions": no_positions,
+        "rows": len(per_row), "rows_mismatched": mismatch, "rows_history_mismatched": history_mismatch,
+        "rows_without_positions": no_positions,
         "positions": int(deltas.size),
         "delta_threshold": delta_threshold, "frame": frame,
         "distillable_effect_kl_nats": float(np.mean(kl_all)) if kl_all else None,
@@ -290,6 +302,7 @@ def report_markdown(opts: CensusOptions, s: dict) -> str:
              f"Caches: without `{opts.without}`, with {', '.join(f'`{c}`' for c in opts.with_)}.", "",
              "| measure | value |", "|---|---|",
              f"| paired reply rows | {s['rows']} ({s['rows_mismatched']} reply mismatches skipped, "
+             f"{s.get('rows_history_mismatched', 0)} history mismatches skipped, "
              f"{s.get('rows_without_positions', 0)} pairs with no shared position) |",
              f"| reply positions compared | {s['positions']} |",
              f"| distillable effect, mean coarsened KL (nats) | {s['distillable_effect_kl_nats']} |",

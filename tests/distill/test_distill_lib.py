@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from pathlib import Path
 
 import mlx.core as mx
@@ -216,10 +217,19 @@ def test_project_topk_matches_float64(tok_bl, tok_spm):
             assert abs(got[g] - acc[g]) < 1e-5
         assert abs(float(proj["log_M"][j]) - np.logaddexp.reduce(list(acc.values()))) < 1e-5
     assert np.all(proj["own"] + proj["redirect"] + proj["dropped"] <= 1.0 + 1e-5)
-    # cap keeps the heaviest groups
+    assert np.allclose(proj["own"] + proj["redirect"] + proj["dropped"], 1.0, atol=1e-5)
+    assert np.all(proj["capped"] == 0)
+    # cap keeps the heaviest groups; own, redirect and dropped describe the
+    # pair as before, and the capped groups' mass is reported on its own
     proj2 = dl.project_topk(lp, idx, t, Kp=2)
     assert proj2["gid"].shape[1] == 2
     assert np.all(proj2["log_p"][:, 0] >= proj2["log_p"][:, 1])
+    for k in ("own", "redirect", "singleton", "dropped"):
+        assert np.array_equal(proj2[k], proj[k])
+    assert np.all(proj2["capped"] >= 0) and np.any(proj2["capped"] > 1e-3)
+    for j in range(P):
+        assert abs(float(proj2["capped"][j]) - (1.0 - float(proj2["dropped"][j])
+                                                 - float(np.exp(proj2["log_M"][j])) / float(proj2["M_K"][j]))) < 1e-4
     assert np.all(proj2["dropped"] >= proj["dropped"] - 1e-6)
 
 
@@ -1839,6 +1849,13 @@ def test_report_lines_survive_none_aggregates():
               "decontam": {}, "contaminated_slices": []}
     md = _ev.report_markdown(opts, report, {}, {}, {}, set())
     assert "| after | 0.50000 | None | 0.9000 |" in md and "| before | 0.50000 | None |" in md
+    # a slice with no decontamination figure (no --corpus) is unchecked, not ok
+    report["after"]["bpb"] = {"prose": {"bpb": 1.5}}
+    md = _ev.report_markdown(opts, report, {"prose": "p.txt"}, {}, {}, set())
+    assert "| prose | 1.5000 | None | None | None | unchecked |" in md
+    report["decontam"] = {"prose": 0.0}
+    md = _ev.report_markdown(opts, report, {"prose": "p.txt"}, {}, {}, set())
+    assert "| prose | 1.5000 | None | None | 0.00000 | ok |" in md
 
 
 def test_reply_rows_without_ids_are_named_by_index(tok_bl):
@@ -1885,6 +1902,16 @@ def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
     (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": "q", "choices": ["x", "y"]}) + "\n")
     rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
     assert rc == 2 and "no 'gold' key" in err
+    for choices, gold, why in ((["x", "y"], 2, "gold 2 is not an index into its 2 choices"),
+                               (["x", "y"], True, "gold True is not an index"),
+                               (["x", "y"], "1", "gold '1' is not an index"),
+                               ([], 0, "has no list of choice strings"),
+                               ("xy", 0, "has no list of choice strings"),
+                               (["x", 3], 0, "has no list of choice strings")):
+        (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": "q", "choices": choices,
+                                                          "gold": gold}) + "\n")
+        rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
+        assert rc == 2 and "unreadable input" in err and why in err, (why, err)
     (tasks / "gsm8k.jsonl").write_text(json.dumps({"id": "a", "question": "q", "answer": "1"}) + "\n")
     (tasks / "gsm8k_shots.jsonl").write_text(json.dumps({"question": "q"}) + "\n")
     rc, err = run(tasks="gsm8k", tasks_dir=str(tasks))
@@ -2573,7 +2600,7 @@ def test_train_pads_a_narrow_view_into_the_wide_batch(tmp_path, tok_bl, tok_spm,
         seen.clear()
         rc = _trainer.run_train(_trainer.TrainOptions(views=[str(narrow), str(v2)], student=str(student), iters=4,
                                                       batch_size=4, no_wired_limit=True, lora_rank=2, chunk=16,
-                                                      val_batches=1, ckpt_dir=str(tmp_path / "ck")))
+                                                      val_batches=1, ckpt_dir=str(tmp_path / f"ck-{narrow.name}")))
         assert rc == 0
         widths = {w for ws, _kp, _g, _o in seen for w in ws}
         assert widths == {4, 8}, (narrow, widths)
@@ -2899,7 +2926,8 @@ def test_train_refuses_views_with_other_knobs_and_a_gamma_override_on_a_material
     err = capsys.readouterr().err
     assert rc == 2 and "materialized" in err and "--gamma" in err
     assert _trainer.run_train(_trainer.TrainOptions(views=[str(tmp_path / "v3")], gamma=0.001, **base)) == 0
-    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v3")], **base)) == 0
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(tmp_path / "v3")],
+                                                    **dict(base, ckpt_dir=str(tmp_path / "ck2")))) == 0
 
 
 def test_teacher_identity_and_path_keep_symlinks(tmp_path, tok_bl):
@@ -6194,28 +6222,72 @@ def test_corpus_hash_sees_document_boundaries(tmp_path, tok_bl):
     ha = _teacher.build_rows(tok_bl, str(a), **kw)[2]
     hb = _teacher.build_rows(tok_bl, str(b), **kw)[2]
     assert ha != hb and ha == _teacher.build_rows(tok_bl, str(a), **kw)[2]
+    # the same documents under another file name, or shifted one line by
+    # a blank line in front, carry other doc ids and hash apart too
+    c = corpus("c.jsonl", ["the cat sat on the mat today", " and the dog ran far away from home"])
+    assert _teacher.build_rows(tok_bl, str(c), **kw)[2] != ha
+    a.write_text("\n" + a.read_text())
+    assert _teacher.build_rows(tok_bl, str(a), **kw)[2] != ha
 
 
-def test_train_on_a_one_row_view_names_the_empty_split_and_clears_an_earlier_best(tmp_path, tok_bl, monkeypatch,
-                                                                                capsys):
+def test_train_on_a_one_row_view_names_the_empty_split_and_refuses_a_held_ckpt_dir(tmp_path, tok_bl, monkeypatch,
+                                                                                 capsys):
     """A one-row cache holds no validation row: train says so on its
-    validation line and writes no best; a fresh run into a ckpt-dir also
-    removes the best checkpoint an earlier run left there."""
+    validation line and writes no best. A fresh run into a ckpt-dir that
+    holds an earlier run's checkpoints is refused with them named, and
+    nothing under it is touched, so a forgotten --resume loses nothing."""
     from gmlx.distill import trainer as _trainer
 
     _mlx_students(monkeypatch)
     v1, student = _cpu_view(tmp_path, tok_bl, "v1", n_rows=1)
     assert json.loads((v1 / "view.json").read_text())["index"][0]["split"] == "train"
     ck = tmp_path / "ck"
-    (ck / "best").mkdir(parents=True)
-    (ck / "best" / "state.json").write_text("{}")
-    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1)], student=str(student), iters=1, batch_size=1,
-                                                    no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
-                                                    ckpt_dir=str(ck))) == 0
+    for held in ("best", "last.old"):
+        (ck / held).mkdir(parents=True)
+        (ck / held / "state.json").write_text("{}")
+    opts = dict(views=[str(v1)], student=str(student), iters=1, batch_size=1, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(ck))
+    assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 2
     err = capsys.readouterr().err
-    assert f"[train] removed the earlier run's best checkpoint under {ck}" in err
+    assert f"[train] refuse: {ck} holds checkpoints of an earlier run (last.old, best); --resume continues it" in err
+    assert (ck / "best" / "state.json").read_text() == "{}" and not (ck / "last").exists()
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(opts, ckpt_dir=str(tmp_path / "ck2")))) == 0
+    err = capsys.readouterr().err
     assert "val none: the view holds no validation rows, best unchanged" in err
-    assert (ck / "last").is_dir() and not (ck / "best").exists()
+    assert (tmp_path / "ck2" / "last").is_dir() and not (tmp_path / "ck2" / "best").exists()
+
+
+def test_train_resume_without_the_best_checkpoint_forgets_its_value(tmp_path, tok_bl, monkeypatch, capsys):
+    """A resume whose last checkpoint records a best value but whose best
+    directory is gone forgets the value, so the next scored validation
+    writes best again instead of comparing against a checkpoint that is
+    not there."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ck"
+    base = dict(views=[str(view)], student=str(student), iters=4, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16, lr=1e-12)
+    orig_save = _trainer.save_checkpoint
+
+    def stop_after_2(ckpt_dir, tag, model, opt, state, extra=None):
+        orig_save(ckpt_dir, tag, model, opt, state, extra=extra)
+        if tag == "last" and state["iteration"] == 2:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(_trainer, "save_checkpoint", stop_after_2)
+    with pytest.raises(KeyboardInterrupt):
+        _trainer.run_train(_trainer.TrainOptions(**base))
+    monkeypatch.setattr(_trainer, "save_checkpoint", orig_save)
+    assert (ck / "best").is_dir()
+    assert json.loads((ck / "last" / "state.json").read_text())["best_val"] is not None
+    shutil.rmtree(ck / "best")
+    capsys.readouterr()
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, resume=True))) == 0
+    err = capsys.readouterr().err
+    assert f"[train] no best checkpoint under {ck}, the next scored validation writes one" in err
+    assert (ck / "best").is_dir()
+    assert json.loads((ck / "best" / "state.json").read_text())["iteration"] == 3
 
 
 def test_train_counts_a_skipped_batch_in_the_schedules(tmp_path, tok_bl, monkeypatch):
@@ -6290,3 +6362,128 @@ def test_identity_compile_drops_a_row_with_no_on_path_position():
     rv = _data.compile_row(row, b"x" * (2 * n), ids, row["token_end_byte"].astype(np.int64), tables, Kp=K,
                            knobs={}, teacher_special=set(), student_special=set(), identity=True)
     assert rv is not None and rv.stats["J"] == 3
+
+
+def test_validator_reports_a_torn_shard_without_raising(tmp_path, tok_bl):
+    """A shard cut short by a kill fails its sha256 and is not opened; a
+    shard whose sha256 still matches but whose bytes the loader rejects is
+    reported as unreadable. Neither raises out of the validator."""
+    _tiny_cache(tmp_path / "c", tok_bl)
+    shard = tmp_path / "c" / "batch-00000.safetensors"
+    shard.write_bytes(shard.read_bytes()[:100])
+    problems = dl.validate_cache(tmp_path / "c")
+    assert problems == ["shard 0 sha256 mismatch"]
+    prog = dl.read_json(tmp_path / "c" / "progress.json")
+    prog["shards"][0]["sha256"] = dl.sha256_file(shard)
+    dl.write_json_atomic(tmp_path / "c" / "progress.json", prog)
+    problems = dl.validate_cache(tmp_path / "c")
+    assert len(problems) == 1 and problems[0].startswith("shard 0 unreadable (")
+
+
+def test_a_teacher_token_spelling_a_student_special_never_targets_the_unmapped_group():
+    """A student special with no role (a pad) keys no group. A teacher
+    token that spells its text would reach group 0 through the prefix
+    rule and be trained toward the pad; it is dropped instead."""
+    import string
+
+    merges = list(_BL_MERGES) + [("<", "p"), ("<p", "a"), ("<pa", "d"), ("<pad", ">")]
+    teacher = _bytelevel_tokenizer(merges)
+    pieces = ["\u2581"] + list(string.ascii_letters + string.digits + ".,!?\n<>") \
+        + ["\u2581" + c for c in string.ascii_lowercase]
+    student = _spm_tokenizer(pieces, [])
+    tables = dl.build_tables(teacher, student)
+    v = teacher.convert_tokens_to_ids("<pad>")
+    assert isinstance(v, int) and v >= 0 and tables.group_key[0] == -1
+    assert tables.target_g[v] == -1
+    assert not np.any(tables.group_key[tables.target_g[tables.target_g >= 0]] == -1)
+
+
+def test_train_refuses_a_student_whose_template_or_ids_differ_from_the_views(tmp_path, tok_bl, monkeypatch, capsys):
+    """The vocab hash leaves the end and start ids and the chat template
+    out, and a base and an instruct student of one family share it. The
+    view records those fields, and train refuses a student whose values
+    differ, naming the fields."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    meta = json.loads((view / "view.json").read_text())
+    assert meta["student_identity"] == _view.student_identity(tok_bl)
+    # transformers saves a template as chat_template.jinja, which the loader
+    # prefers over the config key; write the new one wherever it is read
+    other = "{{ messages[0]['content'] }} other template"
+    cfg_path = student / "tokenizer_config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["chat_template"] = other
+    cfg_path.write_text(json.dumps(cfg))
+    (student / "chat_template.jinja").write_text(other)
+    opts = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 2
+    err = capsys.readouterr().err
+    assert "[train] refuse: the student's chat_template_sha256 differ from the view's student, align again" in err
+    # a view written before the field existed still trains
+    del meta["student_identity"]
+    dl.write_json_atomic(view / "view.json", meta)
+    assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 0
+
+
+def test_cache_refuses_a_top_k_at_the_head_width_and_a_manifest_it_cannot_write(tmp_path, tok_bl, monkeypatch,
+                                                                                 capsys):
+    """--top-k at or above the head width is refused before the pass. A
+    manifest or a progress file the writer cannot put down refuses with
+    exit 2 and the shards kept."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    V = len(dl.token_bytes(tok_bl))
+    base = dict(teacher=str(teacher), corpus=str(corpus), max_len=64, rows_per_shard=2)
+    rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "a"), top_k=V, **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and f"[cache] refuse: --top-k {V} is not below the head width {V}" in err
+
+    def fail(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(_teacher._format, "write_manifest", fail)
+    rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "b"), top_k=8, **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[cache] refuse: cannot write the manifest under" in err and "shards stay for --resume" in err
+    assert (tmp_path / "b" / "batch-00000.safetensors").is_file() and not (tmp_path / "b" / "manifest.json").exists()
+    monkeypatch.undo()
+    monkeypatch.setattr(_teacher._format.ShardWriter, "set_constant", fail)
+    rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "c"), top_k=8, **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "[cache] refuse: cannot write progress.json: disk full" in err
+
+
+def test_frame_kwargs_file_that_cannot_be_read_is_a_value_error(tmp_path):
+    """An unreadable --frame-kwargs file refuses like a malformed one,
+    through the callers' ValueError check, instead of raising OSError."""
+    import os
+
+    from gmlx.distill import frames as _frames
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    p = tmp_path / "kw.json"
+    p.write_text("{}")
+    p.chmod(0)
+    try:
+        with pytest.raises(ValueError, match="--frame-kwargs .*kw.json: "):
+            _frames.parse_render_kwargs(str(p))
+    finally:
+        p.chmod(0o600)
+    assert _frames.parse_render_kwargs(str(p)) == {}
+
+
+def test_corpus_readers_name_a_line_that_is_not_json(tmp_path):
+    from gmlx.distill import corpus as _corpus
+
+    (tmp_path / "c.jsonl").write_text(json.dumps({"text": "the cat"}) + "\n{not json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"c.jsonl line 2: not JSON \("):
+        list(_corpus.iter_corpus(str(tmp_path / "c.jsonl")))
+    (tmp_path / "m.jsonl").write_text('{"messages": [{"role": "user", "content": "hi"}]}\n[\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"m.jsonl line 2: not JSON \("):
+        list(_corpus.iter_conversations(str(tmp_path / "m.jsonl")))
