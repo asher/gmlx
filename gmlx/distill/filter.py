@@ -177,6 +177,14 @@ def _gen_settings(side: dict) -> dict:
     return {k: side.get(k) for k in _GEN_KEYS}
 
 
+def _settings_diff(a: dict, b: dict) -> list[str]:
+    """The keys of _GEN_KEYS on which two sidecars disagree; a model or
+    context named two ways for one file agrees."""
+    from .gen import same_name
+    return [k for k in _GEN_KEYS if a.get(k) != b.get(k)
+            and not (k in ("model", "context") and same_name(a.get(k), b.get(k)))]
+
+
 def run_filter(opts: FilterOptions) -> int:
     """Filter the inputs in order into ``out`` with its sidecar. Returns 0,
     or 2 when an input is missing, the inputs were generated with other
@@ -192,8 +200,8 @@ def run_filter(opts: FilterOptions) -> int:
     first = sides[first_i] if first_i is not None else None
     first_path = inputs[first_i] if first_i is not None else None
     for p, s in zip(inputs, sides):
-        if s is not None and first is not None and _gen_settings(s) != _gen_settings(first):
-            diff = ", ".join(k for k in _GEN_KEYS if s.get(k) != first.get(k))
+        if s is not None and first is not None and _settings_diff(s, first):
+            diff = ", ".join(_settings_diff(s, first))
             print(f"[filter] refuse: {p} was generated with other settings than {first_path} ({diff}), "
                   "filter each file on its own", file=sys.stderr)
             return 2
@@ -270,7 +278,8 @@ def run_filter(opts: FilterOptions) -> int:
     sidecar["filter"] = {"params": params, "verify": opts.verify, "kept": kept, "dropped": dict(counts),
                          "inputs": [str(p) for p in inputs]}
     if opts.context is not None:
-        sidecar.update({"context": str(Path(opts.context).expanduser()), "context_format": opts.context_format,
+        ctx_name = str(Path(opts.context).expanduser().absolute())
+        sidecar.update({"context": ctx_name, "shared_context": ctx_name, "context_format": opts.context_format,
                         "recontext_from": [str(p) for p in inputs], "prompts": kept})
     write_json_atomic(out.with_suffix(out.suffix + ".gen.json"), sidecar)
     summary = {"inputs": [str(p) for p in inputs], "out": str(out), "kept": kept, "dropped": dict(counts),

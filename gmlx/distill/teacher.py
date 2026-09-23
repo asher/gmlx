@@ -428,15 +428,17 @@ def run_cache(opts: CacheOptions) -> int:
         log(f"[cache] refuse: estimate exceeds --max-disk-gb {opts.max_disk_gb}")
         return 2
     out.mkdir(parents=True, exist_ok=True)
-    fb = _format.free_bytes(out)
-    if est > fb * 0.9:
-        log(f"[cache] refuse: estimate {est / GB:.2f} GB against {fb / GB:.2f} GB free")
-        return 2
-
     writer = _format.ShardWriter(out, opts.top_k, opts.floor, opts.max_disk_gb)
     done = writer.verified_shards() if opts.resume else 0
     if not opts.resume and writer.n_done:
         log(f"[cache] refuse: {out} already has {writer.n_done} shards, pass --resume or a fresh --out")
+        return 2
+    # the space still needed: a resume has the verified shards on disk
+    fb = _format.free_bytes(out)
+    need = max(est - writer.progress["bytes"], 0)
+    if need > fb * 0.9:
+        log(f"[cache] refuse: estimate {est / GB:.2f} GB ({need / GB:.2f} GB still to write) against "
+            f"{fb / GB:.2f} GB free")
         return 2
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
@@ -450,6 +452,10 @@ def run_cache(opts: CacheOptions) -> int:
     writer.progress["run"] = run
     shards = [rows[i:i + opts.rows_per_shard] for i in range(0, len(rows), opts.rows_per_shard)]
     log(f"[cache] {len(shards)} shards of {opts.rows_per_shard} rows, {done} verified already")
+    if opts.resume and done == len(shards) and (out / "manifest.json").is_file():
+        # a rewritten manifest would change the hash every view carries
+        log(f"[cache] nothing to do: all {done} shards verified and the manifest is present")
+        return 0
 
     try:
         model, config, arch, streaming, offloaded = load_teacher(opts)
@@ -517,6 +523,7 @@ def run_cache(opts: CacheOptions) -> int:
     probed = False
     tokenizer_hash = vocab_map_hash(tokenizer)
     tokens_done = writer.progress["tokens"]
+    tokens_run = 0
     reads_bytes = 0.0
     E_bytes = opts.expert_bytes_gb * GB if opts.expert_bytes_gb else float(offloaded)
     row_len = opts.max_len
@@ -639,6 +646,7 @@ def run_cache(opts: CacheOptions) -> int:
             log(f"[cache] refuse: {e}, the {writer.n_done} verified shards stay for --resume")
             return 2
         tokens_done += entry["tokens"]
+        tokens_run += entry["tokens"]
         rate = entry["tokens"] / max(wall, 1e-9)
         log(f"[cache] shard {si + 1}/{len(shards)}: {entry['tokens']} tokens {wall:.1f}s "
             f"({rate:.0f} tok/s) {entry['bytes'] / GB:.3f} GB peak {mx.get_peak_memory() / GB:.1f} GB")
@@ -693,9 +701,9 @@ def run_cache(opts: CacheOptions) -> int:
             "prefill_plan": dict(plan, step_final=step, bytes_per_v_in_force=constant),
             "throughput": {"tok_s": tokens_done / max(writer.progress["wall_s"], 1e-9),
                            "wall_s": wall_total, "gb_written": writer.progress["bytes"] / GB,
-                           "tb_read": reads_bytes / 1e12,
+                           "tb_read": reads_bytes / 1e12, "tokens_this_run": tokens_run,
                            "trunk_forwards": trunk_forwards, "trunk_wall_s": trunk_wall,
-                           "trunk_tok_s": tokens_done / max(trunk_wall, 1e-9),
+                           "trunk_tok_s": tokens_run / max(trunk_wall, 1e-9),
                            "expert_bytes_gb": E_bytes / GB,
                            "stream_bandwidth_gb_s": (E_bytes * trunk_forwards / max(trunk_wall, 1e-9) / GB)
                            if streaming and E_bytes else None},

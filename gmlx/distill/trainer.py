@@ -330,6 +330,8 @@ def run_train(opts: TrainOptions) -> int:
             return 2
     if opts.adapter_out:
         from gmlx.tune.lora import probe_writable
+        if not opts.adapter_out.endswith(os.sep):
+            opts.adapter_out = os.path.abspath(os.path.expanduser(opts.adapter_out))
         err = probe_writable(opts.adapter_out)
         if err:
             log(f"[train] refuse: cannot write --adapter-out {opts.adapter_out}: {err}")
@@ -413,6 +415,14 @@ def run_train(opts: TrainOptions) -> int:
             dims = {int(b["dim"]) for b in blocks}
             if len(dims) != 1:
                 log(f"[train] refuse: the views' hidden sketches differ in width {sorted(dims)}")
+                return 2
+            spaces = [(dict(b or {}), (rd.manifest.get("gmlx_distill") or {}).get("teacher")) for b, rd in
+                      zip(blocks, readers)]
+            if any(sp != spaces[0] for sp in spaces[1:]):
+                # a sketch is a projection of one teacher's states by one
+                # seeded matrix; targets from two of them share no map
+                log("[train] refuse: the views' hidden sketches come from other spaces (layer, width, seed or "
+                    "teacher differ), one map cannot fit both")
                 return 2
             hidden_dim = dims.pop()
             log(f"[train] hidden-state term: weight {opts.hs}, {opts.hs_loss} loss on a {hidden_dim}-dim sketch")
@@ -522,6 +532,12 @@ def run_train(opts: TrainOptions) -> int:
             if opts.hs and last is not None and not (last / "hs_head.safetensors").exists():
                 log("[train] hidden-state map not in the last checkpoint, a fresh map starts at the resumed step")
         tokens0 = int(state["tokens"])
+        if opts.resume and opts.hs and hs_state["head"] is None:
+            # restored now, so a checkpoint written before the next boundary
+            # batch still carries the map
+            hcfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
+            if isinstance(hcfg, dict) and hcfg.get("hidden_size"):
+                hs_head_for(int(hcfg["hidden_size"]))
         est_ckpt = 2 * trainable_count(model) * 4 * 3
         if free_bytes(ckpt_dir) < 2 * est_ckpt:
             log(f"[train] refuse: free space under two checkpoints ({free_bytes(ckpt_dir) / GB:.2f} GB)")

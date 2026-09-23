@@ -14,6 +14,7 @@ head: it lives in the checkpoint directory and never in the adapter."""
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import numpy as np
@@ -77,6 +78,9 @@ class HsHead:
         from mlx.utils import tree_flatten
         mx.save_safetensors(str(d / "hs_head.safetensors"), dict(tree_flatten(self.module.parameters())))
         mx.save_safetensors(str(d / "hs_optimizer.safetensors"), dict(tree_flatten(self.opt.state)))
+        for name in ("hs_head.safetensors", "hs_optimizer.safetensors"):
+            with open(d / name, "rb") as fh:
+                os.fsync(fh.fileno())
 
     def load(self, d) -> bool:
         import mlx.core as mx

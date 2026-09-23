@@ -29,6 +29,8 @@ def lora_scale(rank: int, scale: float | None = None, alpha: float | None = None
     given (the PEFT convention, so the update norm does not grow with the
     rank), else ``scale`` as is (mlx-lm's convention; the GGUF adapter stores
     ``alpha = scale * rank``). Exactly one of the two must be given."""
+    if rank < 1:
+        raise ValueError(f"LoRA rank must be at least 1, got {rank}")
     if (alpha is None) == (scale is None):
         raise ValueError("give exactly one of scale and alpha")
     if alpha is not None:
@@ -173,7 +175,7 @@ def probe_writable(path: str) -> str | None:
     written there. Returns the OS error message, or None when writable.
     A path that names a directory is refused, since the file's own write
     would fail only after the run."""
-    if os.path.isdir(path):
+    if os.path.isdir(path) or path.endswith(os.sep):
         return "it is a directory"
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

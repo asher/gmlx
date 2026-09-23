@@ -127,9 +127,9 @@ def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
     until at least max(1, fraction * rows) rows are held, so a document's
     windows, and a conversation's turns, never sit on both sides. A
     document that would carry the held count past twice that budget is
-    passed over while other documents exist; when none fits, or the held
-    rows would be every row, the last rows of the smallest document are
-    held, so at least one row trains."""
+    passed over while other documents exist; when none fits, the smallest
+    document is held whole. A corpus of one document holds that document's
+    last rows, so at least one row trains."""
     if not doc_ids:
         return set()
     docs: dict = {}
@@ -146,9 +146,11 @@ def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
         if len(names) > 1 and len(val) + len(rows) > 2 * want:
             continue
         val.update(rows)
-    if not val or len(val) >= len(doc_ids):
-        smallest = min(docs.values(), key=len)
-        val = set(smallest[-max(1, min(want, len(doc_ids) - 1)):])
+    if len(names) > 1 and (not val or len(val) >= len(doc_ids)):
+        val = set(min(docs.values(), key=len))
+    elif len(names) == 1:
+        only = docs[names[0]]
+        val = set(only[-max(1, min(want, len(only) - 1)):])
     return val
 
 
@@ -260,8 +262,9 @@ def run_align(opts: AlignOptions) -> int:
     val = val_split(doc_ids, opts.val_fraction, opts.seed)
     for i, e in enumerate(index):
         e["split"] = "val" if i in val else "train"
+    n_docs = len(set(doc_ids))
     log(f"[align] validation: {len(val)} of {len(index)} rows from {len({doc_ids[i] for i in val})} of "
-        f"{len(set(doc_ids))} documents")
+        f"{n_docs} documents" + (", the only document is split" if n_docs == 1 and len(val) < len(index) else ""))
     retained = [1.0 - d for d in stats["dropped"]]
     jw = np.array(stats["J"], dtype=np.float64) * np.array(stats["bias_cov"], dtype=np.float64) \
         if stats["bias_ok"] else np.zeros(0)
@@ -308,7 +311,7 @@ def run_align(opts: AlignOptions) -> int:
         t1 = time.perf_counter()
         try:
             nsh = loader2.materialize(out, opts.max_disk_gb)
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             for p in sorted(out.glob("view-*.safetensors")) + [out / "view.json"]:
                 p.unlink(missing_ok=True)
             log(f"[align] refuse: {e}, the partial view was removed")

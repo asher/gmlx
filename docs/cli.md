@@ -978,7 +978,7 @@ later, in `align` and `eval`.
 | `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
 | `--rows-per-shard N` | `64` | rows per shard file |
 | `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
-| `--resume` | off | continue after the last verified shard, refused when the corpus, the teacher or the row options changed |
+| `--resume` | off | continue after the last verified shard, refused when the corpus, the teacher or the row options changed; a finished cache exits 0 untouched |
 | `--max-rows N` | none | stop after this many rows |
 | `--max-tokens N` | none | stop after this many teacher tokens |
 | `--limit-docs N` | none | read at most this many documents |
@@ -1017,7 +1017,7 @@ Alignment flags, in the order `--help` prints them.
 | `--materialize` | off | also write the batch tensors as view shards |
 | `--max-disk-gb F` | none | refuse to materialize past this size |
 | `--force` | off | keep a view the own-group check would refuse |
-| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time, at least one row and never every row |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row; a one-document cache splits it |
 | `--seed N` | `1` | seed of the validation split |
 | `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
 | `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this |

@@ -1,4 +1,4 @@
-"""CPU tests for gmlx.distill, ported from the lab's Phase 1 suite: the
+"""CPU tests for gmlx.distill: the
 NaN list, slot masses against float64, the fused head against a dense
 reference, the losses and their gradients, alignment tables and projection
 on two minted tokenizers, the cache format and validator, the view loader
@@ -747,7 +747,7 @@ def test_cache_validator_resume_and_s2_rules(tmp_path, tok_bl):
     _tiny_cache(tmp_path / "c", tok_bl)
     assert p2.read_bytes() == orig
     assert dl.validate_cache(tmp_path / "c") == []
-    # S2 rules: a nonzero prefix field with mlx_kld_compatible true is a problem
+    # a nonzero prefix field with mlx_kld_compatible true is a problem
     rp = tmp_path / "c" / "rows-00000.jsonl"
     rows = dl.read_rows_jsonl(rp)
     rows[0]["prefix_n_tokens"] = 1
@@ -1236,7 +1236,7 @@ def test_view_loader_counts_student_render_failures(tmp_path, tok_bl):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8: reply rows, two message lists, census, LoRA alpha
+# reply rows, two message lists, census, LoRA alpha
 # ---------------------------------------------------------------------------
 
 def test_reply_rows_last_only_and_reasoning_skipped(tok_bl):
@@ -2440,7 +2440,7 @@ def test_head_logits_applies_the_softcap_for_the_pass_and_the_probes():
 
 
 # ---------------------------------------------------------------------------
-# review round six: header back-off, EOS roles, resume fingerprint, the
+# header back-off, EOS roles, resume fingerprint, the
 # patch restore, position-weighted KL, id-less chat items, the first
 # continuation token, the hidden-state map's step, the teacher identity
 # ---------------------------------------------------------------------------
@@ -2807,7 +2807,7 @@ def test_teacher_identity_covers_split_shards_and_gguf_directories(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# review round seven: headers that end in a marker, the LoRA and student
+# headers that end in a marker, the LoRA and student
 # fingerprint, per-view knobs, symlinked teachers, hard cuts inside a
 # character, a student that adapts nothing
 # ---------------------------------------------------------------------------
@@ -2955,7 +2955,7 @@ def test_train_refuses_a_student_that_adapts_nothing_and_warns_on_a_partial_matc
 
 
 # ---------------------------------------------------------------------------
-# review round eight: a short reply behind a reasoning trace, a teacher
+# a short reply behind a reasoning trace, a teacher
 # named another way on resume, LoRA key coverage, the shard LRU, loss-only
 # knobs across views, the resume check before the load, eval windows
 # ---------------------------------------------------------------------------
@@ -3126,7 +3126,7 @@ def test_bits_per_byte_windows_stay_on_character_boundaries(tmp_path, tok_bl, mo
 
 
 # ---------------------------------------------------------------------------
-# review round nine: LoRA keys over the layers that hold them, the model
+# LoRA keys over the layers that hold them, the model
 # frame prefix, the bpb prefix refusals, a BOS that is also an EOS, the
 # GSM8K answer, shard order in the teacher identity
 # ---------------------------------------------------------------------------
@@ -3250,7 +3250,7 @@ def test_teacher_identity_refuses_reordered_shards(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# review round ten: LoRA keys over parents of one class, outputs proven
+# LoRA keys over parents of one class, outputs proven
 # writable before the load, a corpus with no rows, atomic writes under a
 # missing directory, a validation split by document
 # ---------------------------------------------------------------------------
@@ -3374,7 +3374,7 @@ def test_val_split_holds_whole_documents(tmp_path, tok_bl):
 
 
 # ---------------------------------------------------------------------------
-# review round eleven: few-document corpora keep training rows, a directory
+# few-document corpora keep training rows, a directory
 # or a non-GGUF student refuses --adapter-out before the load, the resumed
 # tok/s counts this run's tokens, content_start on reply-think rows
 # ---------------------------------------------------------------------------
@@ -3390,7 +3390,7 @@ def test_val_split_keeps_training_rows_on_few_documents():
     book = _view.val_split(["book.txt"] * 400, 0.02, 1)
     assert book == set(range(392, 400))
     two = _view.val_split(["a.txt"] * 300 + ["b.txt"] * 100, 0.02, 1)
-    assert two == set(range(392, 400))
+    assert two == set(range(300, 400))
     many = ["d%d" % (i // 3) for i in range(300)] + ["big"] * 100
     val = _view.val_split(many, 0.02, 1)
     assert 8 <= len(val) <= 16 and not any(many[i] == "big" for i in val)
@@ -3416,7 +3416,9 @@ def test_align_holds_back_part_of_a_one_document_cache(tmp_path, tok_bl, capsys)
     assert len(index) > 2
     assert {e["split"] for e in index} == {"train", "val"}
     n_val = sum(1 for e in index if e["split"] == "val")
-    assert f"[align] validation: {n_val} of {len(index)} rows from 1 of 1 documents" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"[align] validation: {n_val} of {len(index)} rows from 1 of 1 documents" in err
+    assert "the only document is split" in err
 
 
 def test_train_refuses_a_directory_or_a_non_gguf_student_for_the_adapter_before_the_load(tmp_path, tok_bl, capsys,
@@ -3510,3 +3512,184 @@ def test_row_meta_records_the_content_start_of_a_reply_think_row(tok_bl):
             assert meta["content_start"] > b0 and b"let me think" in text[b0:meta["content_start"]]
         else:
             assert meta["content_start"] == b0
+
+
+# ---------------------------------------------------------------------------
+# the validation fallback holds a whole document, the adapter path is
+# normalized before the probe, cache resume needs the remaining space only
+# and does nothing on a finished cache, the hidden-state map survives a
+# resume of skipped batches and refuses sketches from other spaces, a
+# materialize write error removes the partial view
+# ---------------------------------------------------------------------------
+
+
+def test_val_split_holds_a_whole_document_when_every_document_is_long():
+    """When every document is longer than twice the budget, one whole
+    document is held rather than the tail of one; only a one-document
+    corpus is split."""
+    from gmlx.distill import view as _view
+
+    docs = [f"d{i // 5}" for i in range(100)]
+    val = _view.val_split(docs, 0.02, 1)
+    assert len({docs[i] for i in val}) == 1 and len(val) == 5
+    assert val == {i for i, d in enumerate(docs) if d == docs[next(iter(val))]}
+    assert _view.val_split(["x"] * 5, 0.02, 1) == {4}
+
+
+def test_train_normalizes_the_adapter_path_before_the_probe(tmp_path, tok_bl, capsys, monkeypatch):
+    """A path with a trailing slash names a directory the export could
+    not replace; it is refused before the load."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+
+    def never(*a, **k):
+        raise AssertionError("the student loaded before the adapter path was checked")
+
+    monkeypatch.setattr(_trainer, "load_student", never)
+    rc = _trainer.run_train(_trainer.TrainOptions(adapter_out=str(tmp_path / "out") + "/", **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "cannot write --adapter-out" in err and "directory" in err
+
+
+def test_cache_resume_needs_the_remaining_space_only(tmp_path, tok_bl, monkeypatch):
+    """A cache stopped short of its last shard resumes when the space
+    left covers the missing shards, and the manifest's throughput counts
+    the tokens of the run that finished it."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl", n=8)
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=1)
+    assert _teacher.run_cache(opts) == 0
+    prog = json.loads((out / "progress.json").read_text())
+    assert len(prog["shards"]) == 8
+    est = dl.estimate_cache_bytes(prog["tokens"], 8, False)
+    shard = prog["shards"][0]["bytes"]
+    # free space that the whole estimate would not fit in, while the one
+    # missing shard and the writer's two-shard floor do
+    free = int(est * 0.5 + 2 * shard)
+    assert est > free * 0.9
+    (out / "batch-00007.safetensors").unlink()
+    (out / "manifest.json").unlink()
+    monkeypatch.setattr(_teacher._format, "free_bytes", lambda p: free)
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+    prog = json.loads((out / "progress.json").read_text())
+    man = json.loads((out / "manifest.json").read_text())
+    tp = man["gmlx_distill"]["throughput"]
+    assert tp["tokens_this_run"] == prog["shards"][7]["tokens"] < prog["tokens"]
+    assert prog["wall_s"] == pytest.approx(sum(e["wall_s"] for e in prog["shards"]))
+
+
+def test_cache_resume_on_a_finished_cache_leaves_the_manifest_alone(tmp_path, tok_bl, capsys, monkeypatch):
+    """A resume that finds every shard verified and the manifest present
+    exits 0 before the teacher loads, so the manifest hash the views
+    carry stays valid."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=64,
+                                 rows_per_shard=2)
+    assert _teacher.run_cache(opts) == 0
+    before = (out / "manifest.json").read_bytes()
+
+    def never(*a, **k):
+        raise AssertionError("the teacher loaded for a finished cache")
+
+    monkeypatch.setattr(_teacher, "load_teacher", never)
+    capsys.readouterr()
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 0
+    assert (out / "manifest.json").read_bytes() == before
+    assert "[cache] nothing to do" in capsys.readouterr().err
+
+
+def test_train_refuses_views_whose_hidden_sketches_come_from_other_spaces(tmp_path, tok_bl, capsys, monkeypatch):
+    """Two views whose caches sketched the teacher with other seeds hold
+    targets from different projections; one map cannot fit both."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    from .test_distill_hidden import _hidden_cache
+
+    _mlx_students(monkeypatch)
+    student = _tiny_mlx_teacher(tmp_path / "student", tok_bl)
+    views = []
+    for name, seed in (("a", 11), ("b", 12), ("c", 11)):
+        cache = tmp_path / f"cache-{name}"
+        _hidden_cache(cache, tok_bl, n_rows=8, seed=seed)
+        tok_bl.save_pretrained(cache / "tokenizer")
+        view = tmp_path / f"view-{name}"
+        assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(view))) == 0
+        views.append(str(view))
+    base = dict(student=str(student), iters=1, batch_size=2, seed=1, ckpt_dir=str(tmp_path / "ck"), val_batches=1,
+                no_wired_limit=True, lora_rank=2, chunk=16, hs=0.5)
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=views[:2], **base))
+    err = capsys.readouterr().err
+    assert rc == 2 and "hidden sketches" in err and "seed" in err
+    assert _trainer.run_train(_trainer.TrainOptions(views=[views[0], views[2]], **base)) == 0
+
+
+def test_hidden_state_map_survives_a_resume_of_skipped_batches(tmp_path, tok_bl, monkeypatch):
+    """The map is restored right after the resume, so a checkpoint written
+    before the next boundary batch still carries it."""
+    from gmlx.distill import data as _data
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    from .test_distill_hidden import _hidden_cache
+
+    _mlx_students(monkeypatch)
+    cache = tmp_path / "cache"
+    _hidden_cache(cache, tok_bl, n_rows=8)
+    tok_bl.save_pretrained(cache / "tokenizer")
+    student = _tiny_mlx_teacher(tmp_path / "student", tok_bl)
+    view = tmp_path / "view"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(view))) == 0
+    ck = tmp_path / "ck"
+    base = dict(views=[str(view)], student=str(student), iters=4, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=2, val_every=4, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16, hs=0.5)
+    real = _data.batch_to_mx
+    calls = [0]
+
+    def two_steps_then_crash(batch):
+        calls[0] += 1
+        if calls[0] > 2:
+            raise RuntimeError("crashed after the second step")
+        return real(batch)
+
+    monkeypatch.setattr(_data, "batch_to_mx", two_steps_then_crash)
+    with pytest.raises(RuntimeError, match="second step"):
+        _trainer.run_train(_trainer.TrainOptions(**base))
+    monkeypatch.setattr(_data, "batch_to_mx", real)
+    assert (ck / "last" / "hs_head.safetensors").exists()
+    monkeypatch.setattr(_data, "collate", lambda *a, **k: None)
+    assert _trainer.run_train(_trainer.TrainOptions(resume=True, **base)) == 0
+    state = json.loads((ck / "last" / "state.json").read_text())
+    assert state["iteration"] == 4
+    assert (ck / "last" / "hs_head.safetensors").exists()
+
+
+def test_align_materialize_removes_the_partial_view_on_a_write_error(tmp_path, tok_bl, capsys, monkeypatch):
+    from gmlx.distill import view as _view
+
+    view, student = _cpu_view(tmp_path, tok_bl)
+    cache = tmp_path / "cache"
+
+    def full(self, out_dir, max_disk_gb=None):
+        (Path(out_dir) / "view-00000.safetensors").write_bytes(b"partial")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_view.ViewLoader, "materialize", full)
+    out = tmp_path / "v-full"
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(out), materialize=True))
+    err = capsys.readouterr().err
+    assert rc == 2 and "partial view was removed" in err
+    assert not (out / "view.json").exists() and not list(out.glob("view-*.safetensors"))

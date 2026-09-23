@@ -196,9 +196,37 @@ def test_filter_refuses_a_malformed_jsonl_line(tmp_path, capsys):
     ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--batch-size", "0"],
     ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--max-len", "0"],
     ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--chat-max-len", "0"],
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1",
+     "--lora-rank", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--gsm8k-max-tokens", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--chat-max-tokens", "-1"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--task-limit", "0"],
+    ["eval", "--student", "s.gguf", "--md", "r.md", "--json", "r.json", "--kld-rows", "0"],
+    ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--thinking-budget", "0"],
+    ["gen", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "o.jsonl", "--prefix-chars", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--limit-docs", "0"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--max-rows", "0"],
+    ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--ngram", "0"],
+    ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--max-line-repeats", "0"],
+    ["census", "--without", "a", "--with", "b", "--out", "c.json", "--max-rows", "0"],
 ])
 def test_zero_cadence_and_size_flags_are_refused_at_parse_time(argv):
     """A zero interval would divide the loop by zero after the load; the
     parser refuses it."""
     rc, out = _run(["distill", *argv])
     assert rc == 2 and "positive" in out, out
+
+
+@pytest.mark.parametrize("argv", [
+    ["train", "--view", "v", "--student", "s.gguf", "--adapter-out", "a.gguf", "--iters", "1", "--seed", "-1"],
+    ["align", "--cache", "c", "--student", "s.gguf", "--out", "v", "--seed", "-1"],
+    ["gen", "--teacher", "t.gguf", "--prompts", "p.jsonl", "--out", "o.jsonl", "--seed", "-1"],
+    ["gen", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "o.jsonl", "--docs", "-1"],
+    ["gen", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "o.jsonl", "--min-chars", "-1"],
+    ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--hidden", "--hidden-seed", "-1"],
+])
+def test_negative_seeds_and_counts_are_refused_at_parse_time(argv):
+    """A negative seed would fail in the generator after the load; the
+    parser refuses it, and zero stays valid where it means all."""
+    rc, out = _run(["distill", *argv])
+    assert rc == 2 and "at least 0" in out, out

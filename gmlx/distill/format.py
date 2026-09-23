@@ -339,6 +339,7 @@ class ShardWriter:
             self.progress["shards"] = good
             self.progress["tokens"] = int(sum(e["tokens"] for e in good))
             self.progress["bytes"] = int(sum(e["bytes"] for e in good))
+            self.progress["wall_s"] = float(sum(float(e.get("wall_s", 0.0)) for e in good))
             write_json_atomic(self.progress_path, self.progress)
         return len(good)
 

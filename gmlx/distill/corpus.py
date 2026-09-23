@@ -64,7 +64,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
 
 def generator_sidecar(corpus: str) -> tuple[dict | None, str]:
     """The generator sidecar beside a synthetic corpus file (<corpus>.gen.json)
-    as the manifest's generator block, with its S1 fingerprint (sha256 of
+    as the manifest's generator block, with its fingerprint (sha256 of
     the block, 12 hex chars); (None, "") for a corpus without one."""
     p = Path(corpus).expanduser()
     side = p.with_suffix(p.suffix + ".gen.json") if p.is_file() else None

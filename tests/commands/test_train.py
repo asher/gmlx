@@ -210,3 +210,16 @@ def test_probe_writable_refuses_a_directory(tmp_path):
     assert train.probe_writable(str(tmp_path / "new" / "a.gguf")) is None
     err = train.probe_writable(str(tmp_path))
     assert err and "directory" in err
+
+
+def test_lora_rank_below_one_and_a_slash_terminated_adapter_path_are_refused(tmp_path):
+    """Rank 0 would write factors no loader can scale; a path ending in a
+    separator names a directory the export could not replace."""
+    from gmlx.tune.lora import lora_scale
+
+    with pytest.raises(ValueError, match="rank"):
+        lora_scale(0, 2.0)
+    with pytest.raises(ValueError, match="rank"):
+        lora_scale(-1, None, 4.0)
+    err = train.probe_writable(str(tmp_path / "new") + "/")
+    assert err and "directory" in err

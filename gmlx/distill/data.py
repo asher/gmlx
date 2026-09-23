@@ -388,8 +388,6 @@ class ViewLoader:
         total = 0
         for i in range(self.reader.n_shards):
             p = out_dir / f"view-{i:05d}.safetensors"
-            if p.exists():
-                continue
             arrays: dict[str, np.ndarray] = {}
             for r, (si, slot) in enumerate(self.reader.index):
                 if si != i:

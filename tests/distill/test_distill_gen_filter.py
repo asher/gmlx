@@ -575,7 +575,7 @@ def test_filter_names_the_sidecar_it_compares_against_and_warns_on_a_missing_one
 
 
 # ---------------------------------------------------------------------------
-# review round nine: an interrupt stops the queue, a resume compares the
+# an interrupt stops the queue, a resume compares the
 # teacher and the context
 # ---------------------------------------------------------------------------
 
@@ -764,3 +764,48 @@ def test_gen_records_absolute_names_and_refuses_a_shared_context_added_to_per_pr
     assert gen.run_gen(gen.GenOptions(out=str(out2), prompts=more, base_url=stub_server, teacher=str(tmp_path / "t.gguf"),
                                       context=str(ctx))) == 0
     assert sorted(r["id"] for r in _rows(out2)) == ["a", "b"]
+
+
+def test_gen_refuses_a_context_added_to_an_older_per_prompt_run(tmp_path, stub_server, capsys):
+    """A sidecar written before the shared-context key existed recorded
+    per-prompt when no --context was given, so adding one now is another
+    run."""
+    rows = [{"id": "a", "messages": [{"role": "user", "content": "alpha"}], "context": "own context"}]
+    prompts = _prompts(tmp_path / "p.jsonl", rows)
+    out = tmp_path / "corpus.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, base_url=stub_server)) == 0
+    side_path = tmp_path / "corpus.jsonl.gen.json"
+    side = json.loads(side_path.read_text())
+    del side["shared_context"]
+    side_path.write_text(json.dumps(side))
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_text("shared", encoding="utf-8")
+    more = _prompts(tmp_path / "p2.jsonl", rows + [{"id": "b", "messages": [{"role": "user", "content": "beta"}]}])
+    rc = gen.run_gen(gen.GenOptions(out=str(out), prompts=more, base_url=stub_server, context=str(ctx)))
+    err = capsys.readouterr().err
+    assert rc == 2 and "generated with other settings" in err and "per-prompt" in err
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=more, base_url=stub_server)) == 0
+
+
+def test_filter_joins_files_whose_sidecars_name_one_teacher_two_ways(tmp_path, monkeypatch):
+    """A sidecar with relative names and one with absolute names for the
+    same teacher and context file join; the filter's own context lands
+    as an absolute path on both context keys."""
+    monkeypatch.chdir(tmp_path)
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_text("CREATE TABLE crews (id INT);\n")
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    b.write_text(json.dumps(_row("b", GOOD)) + "\n")
+    common = {"gen_version": "3", "seed": 1, "thinking": False}
+    (tmp_path / "a.jsonl.gen.json").write_text(json.dumps({**common, "model": "t.gguf", "context": "ctx.txt"}))
+    (tmp_path / "b.jsonl.gen.json").write_text(json.dumps({**common, "model": str(tmp_path / "t.gguf"),
+                                                            "context": str(ctx), "shared_context": str(ctx)}))
+    out = tmp_path / "joined.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(out))) == 0
+    assert [r["id"] for r in _rows(out)] == ["a", "b"]
+    out2 = tmp_path / "ctx.jsonl"
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(b)], out=str(out2), context="ctx.txt")) == 0
+    side = json.loads((tmp_path / "ctx.jsonl.gen.json").read_text())
+    assert side["context"] == str(ctx) and side["shared_context"] == str(ctx)

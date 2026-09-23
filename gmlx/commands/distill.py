@@ -67,11 +67,11 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8093, help="Port of the served teacher (default 8093).")
     p.add_argument("--text-key", default="text", help="With --corpus: text column of a jsonl or dataset row (default text).")
     p.add_argument("--hf-split", default="train", help="With --corpus: dataset split for a Hugging Face id (default train).")
-    p.add_argument("--prefix-chars", type=int, default=1500,
+    p.add_argument("--prefix-chars", type=_positive_int, default=1500,
                    help="With --corpus: document prefix quoted in the user turn (default 1500).")
-    p.add_argument("--min-chars", type=int, default=2000,
+    p.add_argument("--min-chars", type=_nonneg_int, default=2000,
                    help="With --corpus: skip documents shorter than this (default 2000).")
-    p.add_argument("--docs", type=int, default=0, help="With --corpus: prompts to build (default all).")
+    p.add_argument("--docs", type=_nonneg_int, default=0, help="With --corpus: prompts to build (default all).")
     p.add_argument("--instruction", default=CONTINUE_INSTRUCTION,
                    help="With --corpus: the user turn placed before the document prefix "
                         "(default 'Continue the following text.').")
@@ -86,7 +86,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
                         "(default '{context}\\n\\n{prompt}').")
     p.add_argument("--thinking", action="store_true",
                    help="Turn the teacher's thinking on. The reasoning trace is kept as reasoning_content on the reply.")
-    p.add_argument("--thinking-budget", type=int, default=None,
+    p.add_argument("--thinking-budget", type=_positive_int, default=None,
                    help="With --thinking, cap the reasoning trace at this many tokens per request. The trace is "
                         "counted with the teacher's tokenizer to mark the replies it cut.")
     p.add_argument("--tokenizer", default=None, metavar="GGUF|DIR",
@@ -101,7 +101,7 @@ def _gen_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--top-p", type=float, default=0.9, help="Keep the most likely tokens whose probabilities add to this (default 0.9).")
     p.add_argument("--top-k", type=int, default=None, help="Top-k cutoff (default the server's).")
     p.add_argument("--min-p", type=float, default=None, help="Minimum-probability cutoff (default the server's).")
-    p.add_argument("--seed", type=int, default=1,
+    p.add_argument("--seed", type=_nonneg_int, default=1,
                    help="Base seed, and each request uses it plus the prompt index (default 1).")
     p.add_argument("--timeout", type=float, default=1800.0, help="Per-request timeout in seconds (default 1800).")
     p.add_argument("--report-every", type=_positive_int, default=50, help="Progress line interval in replies (default 50).")
@@ -126,10 +126,10 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
                    help="Drop replies whose answer has fewer whitespace-separated words than this, the reasoning "
                         "trace not counted (default 16). Set 1 when a right answer can be a few words. "
                         "--min-tokens is the same flag.")
-    p.add_argument("--ngram", type=int, default=8, help="N-gram size of the repetition check (default 8).")
+    p.add_argument("--ngram", type=_positive_int, default=8, help="N-gram size of the repetition check (default 8).")
     p.add_argument("--max-repeat", type=float, default=0.2,
                    help="Drop replies whose repeated n-grams exceed this fraction (default 0.2).")
-    p.add_argument("--max-line-repeats", type=int, default=2,
+    p.add_argument("--max-line-repeats", type=_positive_int, default=2,
                    help="Drop replies with a line repeated more than this many times in a row (default 2).")
     p.add_argument("--max-non-ascii", type=float, default=None,
                    help="Drop replies whose non-ASCII character fraction exceeds this (default off).")
@@ -177,9 +177,9 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--trunk", type=int, default=None,
                    help="Trunk chunk in tokens (default 512 for a teacher that fits in memory, 8192 streaming).")
     p.add_argument("--resume", action="store_true", help="Continue after the last verified shard.")
-    p.add_argument("--max-rows", type=int, default=None, help="Stop after this many rows.")
+    p.add_argument("--max-rows", type=_positive_int, default=None, help="Stop after this many rows.")
     p.add_argument("--max-tokens", type=int, default=None, help="Stop after this many teacher tokens.")
-    p.add_argument("--limit-docs", type=int, default=None, help="Read at most this many documents.")
+    p.add_argument("--limit-docs", type=_positive_int, default=None, help="Read at most this many documents.")
     p.add_argument("--text-key", default="text", help="Text column of a jsonl or dataset row (default text).")
     p.add_argument("--hf-split", default="train", help="Dataset split for a Hugging Face id (default train).")
     p.add_argument("--source", default=None,
@@ -221,7 +221,7 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
                    help="Also store a seeded random sketch of the teacher's final hidden state per position "
                         "(the hidden field, float16), for train --hs.")
     p.add_argument("--hidden-dim", type=_positive_int, default=256, help="Width of the hidden sketch (default 256).")
-    p.add_argument("--hidden-seed", type=int, default=1, help="Seed of the sketch matrix (default 1).")
+    p.add_argument("--hidden-seed", type=_nonneg_int, default=1, help="Seed of the sketch matrix (default 1).")
     p.add_argument("--cpu", action="store_true", help="Run on the CPU device (smoke tests).")
     return p
 
@@ -248,7 +248,7 @@ def _align_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="Keep a view the own-group check would refuse.")
     p.add_argument("--val-fraction", type=float, default=0.02,
                    help="Fraction of rows held for validation (default 0.02).")
-    p.add_argument("--seed", type=int, default=1, help="Seed of the validation split (default 1).")
+    p.add_argument("--seed", type=_nonneg_int, default=1, help="Seed of the validation split (default 1).")
     p.add_argument("--w-mid", type=float, default=DEFAULT_KNOBS["w_mid"],
                    help="Weight of an intra-word shared boundary (default 0.5).")
     p.add_argument("--gamma", type=float, default=DEFAULT_KNOBS["gamma"],
@@ -279,7 +279,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--student", required=True, metavar="GGUF", help="Student GGUF (sharded ok).")
     p.add_argument("--adapter-out", required=True, metavar="PATH", help="Output path for the .gguf adapter.")
     p.add_argument("--iters", type=_positive_int, required=True, help="Training steps.")
-    p.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (default 16).")
+    p.add_argument("--lora-rank", type=_positive_int, default=16, help="LoRA rank (default 16).")
     p.add_argument("--lora-scale", type=float, default=None,
                    help="LoRA multiplier applied directly (default 2.0 unless --lora-alpha is given).")
     p.add_argument("--lora-alpha", type=float, default=None,
@@ -293,7 +293,7 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="Warmup as a fraction of the steps, then cosine decay (default 0.05).")
     p.add_argument("--weight-decay", type=float, default=None, help="AdamW weight decay (default 0 for LoRA).")
     p.add_argument("--clip", type=float, default=1.0, help="Gradient norm clip (default 1.0).")
-    p.add_argument("--seed", type=int, default=1, help="Data order and LoRA init (default 1).")
+    p.add_argument("--seed", type=_nonneg_int, default=1, help="Data order and LoRA init (default 1).")
     p.add_argument("--loss", choices=["bucketed", "paper", "renorm"], default="bucketed",
                    help="bucketed: sparse KL with the tail bucket. paper: the top-k term alone, no tail bucket. renorm: both distributions rescaled to sum to one over the top-k.")
     p.add_argument("--dk", type=float, default=DEFAULT_KNOBS["lambda_dk"],
@@ -346,8 +346,8 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                    help="Directory of task files: arc_easy.jsonl, hellaswag.jsonl, gsm8k.jsonl, gsm8k_shots.jsonl "
                         "(default the working directory).")
     p.add_argument("--tasks", default="", help="Comma list of arc_easy, hellaswag, gsm8k.")
-    p.add_argument("--task-limit", type=int, default=None, help="Items per task (default all).")
-    p.add_argument("--gsm8k-max-tokens", type=int, default=384, help="Generation budget per GSM8K item (default 384).")
+    p.add_argument("--task-limit", type=_positive_int, default=None, help="Items per task (default all).")
+    p.add_argument("--gsm8k-max-tokens", type=_positive_int, default=384, help="Generation budget per GSM8K item (default 384).")
     p.add_argument("--before", action="store_true",
                    help="Also score with the adapter disabled in process.")
     p.add_argument("--chat-slice", action="append", default=[], metavar="NAME=PATH",
@@ -355,7 +355,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--chat-sanity", default=None, metavar="PATH",
                    help="A jsonl of {id, messages, kind} chat prompts, kind being task or refuse, scored for "
                         "template compliance and drift, how far the replies moved from an earlier report's.")
-    p.add_argument("--chat-max-tokens", type=int, default=256, help="Reply budget for the chat sanity set (default 256).")
+    p.add_argument("--chat-max-tokens", type=_positive_int, default=256, help="Reply budget for the chat sanity set (default 256).")
     p.add_argument("--chat-refs", default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score. Ignored with --before, "
                         "which anchors on the adapter-off replies.")
@@ -370,7 +370,7 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
                         "high-delta positions.")
     p.add_argument("--kld-cache", default=None, metavar="DIR",
                    help="Same-tokenizer cache to score sparse KL against.")
-    p.add_argument("--kld-rows", type=int, default=None, help="Rows of the KL cache to score (default all).")
+    p.add_argument("--kld-rows", type=_positive_int, default=None, help="Rows of the KL cache to score (default all).")
     p.add_argument("--frame-kwargs", default=None, metavar="JSON",
                    help="Chat-template kwargs for every render, as a JSON object or a file.")
     p.add_argument("--max-len", type=_positive_int, default=512, help="Window length for bits per byte (default 512).")
@@ -404,7 +404,7 @@ def _census_parser(prog: str) -> argparse.ArgumentParser:
                    help="Nats gained at the token the teacher wrote that make a position high-delta (default 1.0).")
     p.add_argument("--pair-by", choices=("line", "doc"), default="line",
                    help="Pair rows across caches by corpus line (default) or by the full doc_id.")
-    p.add_argument("--max-rows", type=int, default=None, help="Paired rows to measure (default all).")
+    p.add_argument("--max-rows", type=_positive_int, default=None, help="Paired rows to measure (default all).")
     return p
 
 
@@ -420,6 +420,16 @@ def _positive_int(text: str) -> int:
         raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"a positive integer is required, got {n}")
+    return n
+
+
+def _nonneg_int(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"an integer of at least 0 is required, got {n}")
     return n
 
 

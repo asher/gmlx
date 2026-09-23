@@ -114,9 +114,10 @@ Its corpus is a jsonl file, one JSON object per line, of 24
 `{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
 so `train` needs at least that many training rows. `align` also holds
 back about one row in fifty for validation, whole documents at a time and
-at least one row, and never trains on them, so 24 rows leave 23 for a
-batch of 4. `eval --slice` reads plain text, so the second line writes
-the same rows to `smoke.txt`:
+at least one row, and never trains on them. A cache made from one
+document splits that document. Here 24 rows leave 23 for a batch of 4.
+`eval --slice` reads plain text, so the second line writes the same rows
+to `smoke.txt`:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --to .
@@ -480,10 +481,11 @@ and is unrelated to the sampler's `--top-k` on `gen`.
 `align` runs on the CPU with the two tokenizers only and writes the view
 into `view-r1/`. It holds back about one row in fifty for validation,
 whole documents at a time and at least one row, and the rest are training
-rows. Its summary line reports `a` and
-`s`, the own-group and singleton fractions explained under
-[Advanced settings](#advanced-settings), and the other fields on that
-line are diagnostics. On the worked pair every teacher token has a
+rows. A cache made from one document splits that document instead. Its
+summary line reports `a` and `s`, the own-group and singleton fractions
+explained under [Advanced settings](#advanced-settings), and the other
+fields on that line are diagnostics. On the worked pair every teacher
+token has a
 student token of its own, `a=1.000`, which is the ideal, and a lower
 value means a weaker result.
 

@@ -385,7 +385,7 @@ def model_label(opts: GenOptions) -> str:
                                   else f"http://{opts.host}:{opts.port}/v1")
 
 
-def _same_name(a, b) -> bool:
+def same_name(a, b) -> bool:
     """Two model or context names agree when they are one URL or one
     file under two spellings of its path."""
     def norm(s):
@@ -410,8 +410,12 @@ def resume_conflict(prev: dict, opts: GenOptions, *, with_context: bool = False)
         now["context"] = opts.context
     diffs = [f"{k} {prev.get(k)!r} -> {v!r}" for k, v in now.items()
              if k in prev and prev.get(k) != v
-             and not (k in ("context", "shared_context") and _same_name(prev.get(k), v))]
-    if "model" in prev and not _same_name(prev["model"], model_label(opts)):
+             and not (k in ("context", "shared_context") and same_name(prev.get(k), v))]
+    if "shared_context" not in prev and prev.get("context") == "per-prompt" and opts.context:
+        # a sidecar from before the shared-context key recorded per-prompt
+        # only when no --context was given
+        diffs.append(f"context 'per-prompt' -> {opts.context!r}")
+    if "model" in prev and not same_name(prev["model"], model_label(opts)):
         diffs.append(f"model {prev['model']!r} -> {model_label(opts)!r}")
     return ", ".join(diffs) or None
 
