@@ -86,7 +86,8 @@ def _blocked_transform(xf: mx.array, block: int) -> mx.array:
 
 
 # The last rotation a fused op produced: (source row, fold key, rotated
-# row). One slot per thread, replaced by the next offer.
+# row). One slot per thread, replaced by the next offer and emptied when
+# the projection takes it, so no row outlives its use.
 _offer = threading.local()
 
 
@@ -99,6 +100,7 @@ def offer_rotation(x: mx.array, fold: _Fold, rotated: mx.array) -> None:
 def _offered(x: mx.array, fold: _Fold) -> mx.array | None:
     item = getattr(_offer, "item", None)
     if item is not None and item[0] is x and item[1] == fold.key:
+        _offer.item = None
         return item[2]
     return None
 

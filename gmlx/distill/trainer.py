@@ -29,7 +29,7 @@ from . import view as _view
 from .constants import DEFAULT_KNOBS, GB, TABLES_VERSION, log
 from .format import free_bytes, manifest_sha256, output_error, read_json, removes_empty_output, write_json_atomic
 from .teacher import teacher_identity
-from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
+from .head import HEAD_PARITY_TOL, head_backward_gap, head_parity_gap, head_spec_from_model, log_bmask_from
 
 
 @dataclass
@@ -510,6 +510,12 @@ def run_train(opts: TrainOptions) -> int:
     if gap > HEAD_PARITY_TOL:
         log(f"[train] refuse: the head does not reproduce the student's own logits (relative gap {gap:.3f}), "
             "the model changes its logits after the projection in a way the distill head does not carry")
+        return 2
+    gap = head_backward_gap(model, head, mx.arange(1, 9)[None])
+    if gap > HEAD_PARITY_TOL:
+        log(f"[train] refuse: the head's closed-form gradient differs from the gradient of its own forward "
+            f"(relative gap {gap:.3f}), the head changes its input before the projection in a way the distill "
+            "head does not carry")
         return 2
     if head.V != view["V_S"]:
         log(f"[train] refuse: student head width {head.V} != view V_S {view['V_S']}")

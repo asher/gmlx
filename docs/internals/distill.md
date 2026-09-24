@@ -64,6 +64,16 @@ pair. A chunk with no boundaries holds 12. At the default 512 positions
 and a 262144-token student vocabulary that is 3.2 GB, which `--chunk`
 scales linearly.
 
+The closed form takes the cotangent of the logits back to the hidden
+states through the dequantized head weight. A Hadamard-folded head
+rotates its input before that weight, so the closed form also takes the
+cotangent back through the rotation, in the MLX-op form that has a
+backward. Beside the logit check described under the teacher pass,
+`train` compares the closed form with the gradient of the head's own
+forward on the same eight tokens. A student where the two differ is
+refused, so a head that changes its input before the projection never
+trains on a wrong cotangent.
+
 No head pass runs inside the trunk's gradient transform. The trunk
 forward is evaluated first, the head pass computes the loss and the
 cotangents of the gathered hidden states outside any transform, and a

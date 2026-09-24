@@ -92,6 +92,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   concat had been built, since the copy is expert-ordered while the
   decode arena binds slot bytes and slot ids. Feeder-swapped calls now
   gather from the bound bytes, and streamed stacks never build the copy.
+- A Hadamard-folded model kept the last layer's gated activation in memory
+  after a forward until its next one.
+
 ## [0.4.15] - 2026-09-22
 
 ### Added

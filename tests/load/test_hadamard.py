@@ -646,6 +646,22 @@ def test_glu_rotate_unfused_is_the_plain_product(monkeypatch, activation):
         assert mx.array_equal(glu_rotate(x, g, f, activation=activation), want)
 
 
+def test_a_taken_rotation_offer_is_emptied():
+    """The projection that takes an offered rotation empties the slot, so
+    the offered row is not held past its use, and a second rotation of the
+    same row computes it afresh."""
+    import gmlx.load.hadamard_modules as hm
+
+    rng = np.random.default_rng(18)
+    fold = _fold(FoldTarget(width=512, block=256, signs=_signs(rng, 512)))
+    x = mx.array(rng.standard_normal((2, 512)).astype(np.float32))
+    stand_in = mx.zeros((2, 512))
+    hm.offer_rotation(x, fold, stand_in)
+    assert rotate(x, fold) is stand_in
+    assert getattr(hm._offer, "item", None) is None
+    assert rotate(x, fold) is not stand_in
+
+
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
 def test_glu_rotate_fused_offers_its_rotation(monkeypatch, activation):
     """The fused row is the rotated product, and the folded projection's

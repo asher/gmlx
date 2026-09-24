@@ -4637,6 +4637,66 @@ def test_alm_term_tempers_both_sides_by_tau():
     assert int(n) == cnt and abs(float(alm) - tot / cnt) < 1e-4
 
 
+def test_chunked_head_vjp_carries_the_heads_input_transform():
+    """A head that transforms its input before the projection gets both
+    cotangents through the transform: dh back through it and dW against
+    the transformed rows. Coverage for HeadSpec.pre; the tiny-arch test in
+    tests/tune checks a real folded head."""
+    rng = np.random.default_rng(3)
+    V, d, N = 48, 16, 6
+    W = mx.array(rng.standard_normal((V, d)).astype(np.float32) * 0.3)
+    signs = mx.array(np.where(rng.random(d) < 0.5, -1.0, 1.0).astype(np.float32))
+
+    def pre(h):
+        return (h * signs)[:, ::-1]
+
+    def fn(params, h):
+        return pre(h) @ params["weight"].T
+    head = dl.HeadSpec(fn=fn, params={"weight": W}, softcap=None, V=V, pre=pre)
+    h = mx.array(rng.standard_normal((N, d)).astype(np.float32))
+    nxt = mx.array(rng.integers(0, V, N).astype(np.int32))
+    a = mx.array(rng.standard_normal(N).astype(np.float32))
+
+    def onpath(hh, w):
+        z = fn({"weight": w}, hh)
+        return mx.take_along_axis(z - mx.logsumexp(z, axis=-1, keepdims=True), nxt[:, None], axis=1)[:, 0]
+    _, (want_h, want_w) = mx.vjp(onpath, [h, W], [a])
+    dh, dparams = dl.chunked_head_vjp(h, head, nxt, n_bnd=0, target_gid=None, group_of=None, G=1, Kp=1,
+                                      log_bmask=mx.zeros((V,)), C=4, params={"weight": W}, d_onpath=a,
+                                      d_Qslot=None, d_logbm=None, want_params=True)
+    assert np.allclose(np.array(dh), np.array(want_h), atol=1e-5)
+    assert np.allclose(np.array(dparams["weight"]), np.array(want_w), atol=1e-5)
+
+
+def test_train_refuses_a_head_whose_backward_is_not_the_gradient_of_its_forward(tmp_path, tok_bl, monkeypatch,
+                                                                                 capsys):
+    """A head whose forward reproduces the student's logits but whose
+    closed-form backward is not their gradient would train the trunk on a
+    wrong cotangent with no other sign; train refuses it before the first
+    step."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    real = _trainer.head_spec_from_model
+
+    def forward_right_backward_wrong(inner):
+        spec = real(inner)
+        true = spec.current()
+        wrong = {"weight": true["weight"] * 2}
+        # the forward reads the student's own weight, the closed form the doubled one
+        return dataclasses.replace(spec, fn=lambda _p, h: spec.fn(true, h), params=wrong, live=lambda: wrong)
+    monkeypatch.setattr(_trainer, "head_spec_from_model", forward_right_backward_wrong)
+    ck = tmp_path / "ck"
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=2, batch_size=2,
+                                                  seed=1, ckpt_dir=str(ck), no_wired_limit=True, lora_rank=2,
+                                                  chunk=16))
+    assert rc == 2
+    assert "[train] refuse: the head's closed-form gradient differs from the gradient of its own forward" in \
+        capsys.readouterr().err
+    assert not (ck / "last").exists()
+
+
 def test_chunked_head_vjp_stays_finite_when_the_boundary_mass_underflows():
     """A boundary chunk whose student puts about e^-200 on every
     whitespace-initial token has a boundary mass below the f32 floor; its

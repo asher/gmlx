@@ -30,6 +30,7 @@ class HeadSpec:
     live: Callable | None = None   # () -> the module's current parameter tree
     weight: Callable | None = None  # () -> W [V, d] in a float dtype (dequantized once)
     scale: float = 1.0             # the factor fn applies after the projection (Granite, Cohere, MiniCPM)
+    pre: Callable | None = None    # h -> the input fn projects, where the head transforms it first (a Hadamard fold)
 
     def dense_weight(self, params=None):
         """W [V, d] for the closed-form backward (dz @ W). A float weight in
@@ -102,6 +103,16 @@ def head_weight_fn(mod) -> Callable:
     return get
 
 
+def _input_transform(mod) -> Callable | None:
+    """The rotation a Hadamard-folded head applies to its input before
+    the projection, in the MLX-op form that has a backward, or None."""
+    fold = getattr(mod, "_hadamard", None)
+    if fold is None:
+        return None
+    from gmlx.load.hadamard_modules import rotate
+    return lambda h: rotate(h, fold, kernel=False)
+
+
 def head_scale(args) -> float:
     """The factor a model applies to its logits after the projection:
     Granite divides by logits_scaling, Cohere multiplies by logit_scale,
@@ -154,7 +165,7 @@ def head_spec_from_model(model) -> HeadSpec:
                 mod.update(prev)
         V = int(mod.weight.shape[0]) if hasattr(mod, "weight") else int(mod(mx_zeros(1, h_dim(inner))).shape[-1])
         return HeadSpec(fn=fn, params=mod.parameters(), softcap=softcap, V=V, live=mod.parameters,
-                        weight=head_weight_fn(mod), scale=scale)
+                        weight=head_weight_fn(mod), scale=scale, pre=_input_transform(mod))
     emb = inner.embed_tokens
 
     def fn2(params, h):
@@ -166,7 +177,7 @@ def head_spec_from_model(model) -> HeadSpec:
             emb.update(prev)
     return HeadSpec(fn=fn2, params=emb.parameters(), softcap=softcap,
                     V=int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1]),
-                    live=emb.parameters, weight=head_weight_fn(emb), scale=scale)
+                    live=emb.parameters, weight=head_weight_fn(emb), scale=scale, pre=_input_transform(emb))
 
 
 HEAD_PARITY_TOL = 0.05
@@ -184,6 +195,33 @@ def head_parity_gap(model, head: HeadSpec, ids) -> float:
     ref = getattr(ref, "logits", ref)[0].astype(mx.float32)
     z = _head_logits_f32(head, head.current(), trunk_hidden(inner, ids)[0])
     gap = mx.abs(z - ref).max() / mx.maximum(mx.abs(ref).max(), 1.0)
+    mx.eval(gap)
+    return float(gap)
+
+
+def head_backward_gap(model, head: HeadSpec, ids) -> float:
+    """The largest difference between the head's closed-form input
+    cotangent and the gradient of its own function, for a fixed on-path
+    cotangent at the trunk's hidden states on ``ids`` [1, T], relative to
+    the largest gradient entry. A head that changes its input before the
+    projection in a way the closed form does not carry shows up here."""
+    import mlx.core as mx
+    from .student import trunk_hidden
+    inner = getattr(model, "language_model", model)
+    h = trunk_hidden(inner, ids)[0].astype(mx.float32)
+    T = int(h.shape[0])
+    params = head.current()
+    nxt = mx.arange(T, dtype=mx.int32) % head.V
+    a = mx.linspace(-1.0, 1.0, T) + 0.5
+
+    def onpath(hh):
+        z = _head_logits_f32(head, params, hh)
+        return mx.take_along_axis(z - mx.logsumexp(z, axis=-1, keepdims=True), nxt[:, None], axis=1)[:, 0]
+    _, (ref,) = mx.vjp(onpath, [h], [a])
+    dh, _ = chunked_head_vjp(h, head, nxt, n_bnd=0, target_gid=None, group_of=None, G=1, Kp=1,
+                             log_bmask=mx.zeros((head.V,)), C=T, params=params, d_onpath=a,
+                             d_Qslot=None, d_logbm=None, want_params=False)
+    gap = mx.abs(dh - ref).max() / mx.maximum(mx.abs(ref).max(), 1e-12)
     mx.eval(gap)
     return float(gap)
 
@@ -320,7 +358,8 @@ def chunked_head_vjp(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid
     dL/dW summed over chunks when want_params) from the cotangents of its
     three outputs. Per chunk: recompute z, q and the slot map, form
     dL/dz in one expression (softmax and slot-sum Jacobians applied by
-    hand, softcap by its derivative), then dh = dz @ W and dW += dz^T h.
+    hand, softcap by its derivative), then dh = dz @ W and dW += dz^T h,
+    with h taken through the head's input transform when it has one.
     Forward ops only, each chunk evaluated before the next, so no
     transform is nested and no [C, V] array outlives its chunk."""
     import mlx.core as mx
@@ -370,8 +409,12 @@ def chunked_head_vjp(hidden, head: HeadSpec, next_ids, *, n_bnd: int, target_gid
         if head.scale != 1.0:
             dz = dz * head.scale                    # fn scales the projection, so dh and dW scale too
         dh_c = (dz.astype(W.dtype) @ W).astype(mx.float32)
+        if head.pre is not None:
+            # z = pre(h) @ W.T: the cotangent reaches h through the transform
+            _, (dh_c,) = mx.vjp(head.pre, [h_c.astype(mx.float32)], [dh_c])
         if want_params:
-            dW_c = dz.T @ h_c.astype(mx.float32)
+            h_in = head.pre(h_c) if head.pre is not None else h_c
+            dW_c = dz.T @ h_in.astype(mx.float32)
             dW = dW_c if dW is None else dW + dW_c
             mx.eval(dh_c, dW)
         else:
