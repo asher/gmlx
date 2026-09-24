@@ -42,6 +42,7 @@ _VERB_DESC = {
     "profiles": "show per-family sampling defaults + @intents",
     "doctor": "check the runtime, config, models, and services",
     "train": "finetune a LoRA adapter on a GGUF base",
+    "distill": "offline distillation: gen, filter, cache, align, train, eval, census",
     "completion": "print a shell completion script",
 }
 
@@ -50,6 +51,7 @@ _MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
 # Verbs whose first positional is a path / remote ref (no config lookup).
 _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
+_DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 
 
 def _canon(verb: str) -> str:
@@ -78,6 +80,8 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
     if verb == "service":
         verb = "serve"
     text = _capture_help(verb)
+    if verb.startswith("distill ") and not text.strip():
+        return ()
     out: list[list[str]] = []
     pending: list[int] = []                  # out indices awaiting wrapped help
     for line in text.splitlines():
@@ -117,7 +121,7 @@ def _capture_help(verb: str) -> str:
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
-            umbrella_main([verb, flag])
+            umbrella_main([*verb.split(), flag])
     except SystemExit:
         pass
     except Exception:  # noqa: BLE001 - a broken verb help must not break completion
@@ -152,7 +156,7 @@ def _named_value_candidates(flag: str) -> list[str]:
 
 def _is_pathish(metavar: str) -> bool:
     mv = (metavar or "").upper()
-    return any(k in mv for k in ("PATH", "FILE", "DIR"))
+    return any(k in mv for k in ("PATH", "FILE", "DIR", "GGUF"))
 
 
 def _option_for(verb: str, flag: str) -> tuple[str, str, str] | None:
@@ -288,6 +292,8 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
         return [] if filled else _harness_candidates()
     if verb == "service":
         return [] if filled else [f"{a}\tlaunchd action" for a in _SERVICE_ACTIONS]
+    if verb == "distill":
+        return [] if filled else [f"{a}\tdistill action" for a in _DISTILL_ACTIONS]
     return []
 
 
@@ -310,6 +316,10 @@ def _complete(argv: list[str]) -> list[str]:
     verb = _canon(pre[0])
     if verb not in _known_verbs():
         return []
+    if verb == "distill" and len(pre) > 1 and pre[1] in _DISTILL_ACTIONS:
+        # the action's own parser carries the flags: scrape `distill <action> --help`
+        verb = f"distill {pre[1]}"
+        pre = [verb, *pre[2:]]
 
     if cur.startswith("-"):                  # completing a flag
         return [f"{opt}\t{h}" if h else opt for opt, _mv, h in _verb_options(verb)]

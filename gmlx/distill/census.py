@@ -1,0 +1,426 @@
+"""Context-delta census: how much a context the student never sees moves
+the teacher's reply distribution, measured between two or more caches
+over the same reply rows.
+
+Every cache is cut with ``distill cache --frame reply`` (or reply-think)
+from the same prompts, once without the context and once per context.
+Rows pair by corpus line and window (``pair_by`` line, the default, since
+the corpora hold the same prompts in the same order under different file
+names) or by the full doc_id, and the reply bytes must agree. Positions
+inside the reply line up by the byte offset of the predicted token from
+the reply's content start. Per position the census records the on-path
+delta (log p with the context minus without), the coarsened KL between
+the two stored top-K distributions over the ids both hold plus one
+bucket for everything else, and whether the top-1 moved. With several
+contexts the residual is the mean KL of each context's distribution
+against their mixture at the same position, the part no training
+recovers. The JSON carries per-row means, a delta histogram, the
+teacher's on-path nats over the high-delta positions with and without
+the context, ``high_delta``, byte ranges per row id above the
+threshold relative to the reply's content start, ``high_delta_trace``,
+the ranges inside a reasoning trace relative to the trace start (a
+reply-think cache), both of which ``distill eval --reply-positions``
+reads, and ``frame``, the reply frame of the cache without context."""
+from __future__ import annotations
+
+import json
+import math
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from .constants import log
+from .corpus import read_utf8
+from .data import CacheReader
+from .format import output_error, teacher_fingerprint, write_json_atomic
+from .frames import reply_trace
+
+FLOOR = 1e-12
+HIST_BINS = [-math.inf, -1, -0.1, 0.1, 0.5, 1, 2, 4, math.inf]
+
+
+@dataclass
+class CensusOptions:
+    without: str
+    with_: list[str]
+    out: str
+    md: str | None = None
+    corpus: str | None = None
+    delta_threshold: float = 1.0
+    pair_by: str = "line"
+    max_rows: int | None = None
+
+
+def row_key(doc_id: str, pair_by: str) -> str:
+    """The pairing key of a row: its corpus line for ``line``, else the
+    whole doc_id."""
+    return doc_id.rsplit(":", 1)[-1] if pair_by == "line" else doc_id
+
+
+def reply_rows(cache: Path, pair_by: str) -> tuple[CacheReader, dict]:
+    """(reader, {(key, window): row index}) over the cache's reply rows."""
+    reader = CacheReader(cache, keep=2)
+    out = {}
+    for r, meta in enumerate(reader.rows_meta):
+        if meta.get("frame") in ("reply", "reply-think") and meta.get("spans"):
+            out[(row_key(str(meta["doc_id"]), pair_by), int(meta.get("window", 0)))] = r
+    return reader, out
+
+
+def reply_positions(arrs: dict, meta: dict) -> tuple[dict[int, int], int, int]:
+    """{start byte of the predicted token relative to the reply's content
+    start: position} over on-path positions, plus the reply's content
+    start and target end."""
+    b0, _b1, b2 = (int(x) for x in meta["spans"][-1])
+    ends = arrs["token_end_byte"].astype(np.int64)
+    om = arrs["onpath_mask"].astype(bool)
+    keys = {}
+    for t in range(len(ends) - 1):
+        if om[t] and b0 <= ends[t] < b2:
+            keys[int(ends[t] - b0)] = t
+    return keys, b0, b2
+
+
+def sparse(arrs: dict, t: int) -> tuple[np.ndarray, np.ndarray]:
+    """The stored top-K ids and log-probs at position t, pads dropped."""
+    ids = arrs["top_k_indices"][t].astype(np.int64)
+    lp = arrs["top_k_log_softmax"][t].astype(np.float64)
+    keep = ids >= 0
+    return ids[keep], lp[keep]
+
+
+def coarsened_kl(p_ids: np.ndarray, p_lp: np.ndarray, q_ids: np.ndarray, q_lp: np.ndarray) -> float:
+    """KL(p || q) over the partition {ids both hold} + {everything else}."""
+    _shared, pi, qi = np.intersect1d(p_ids, q_ids, assume_unique=True, return_indices=True)
+    p = np.exp(p_lp[pi])
+    kl = float(np.sum(p * (p_lp[pi] - q_lp[qi])))
+    p_rest = max(1.0 - float(p.sum()), FLOOR)
+    q_rest = max(1.0 - float(np.exp(q_lp[qi]).sum()), FLOOR)
+    return kl + p_rest * (math.log(p_rest) - math.log(q_rest))
+
+
+def residual_kl(dists: list[tuple[np.ndarray, np.ndarray]]) -> float:
+    """Mean over contexts of KL(p_d || mixture) on the union support plus
+    a rest bucket. A context's mass outside its top-K counts as rest."""
+    union = np.unique(np.concatenate([ids for ids, _ in dists]))
+    P = np.zeros((len(dists), len(union) + 1))
+    for d, (ids, lp) in enumerate(dists):
+        P[d, np.searchsorted(union, ids)] = np.exp(lp)
+        P[d, -1] = max(1.0 - P[d, :-1].sum(), FLOOR)
+    m = np.maximum(P.mean(axis=0), FLOOR)
+    Pc = np.maximum(P, FLOOR)
+    return float(np.mean(np.sum(np.where(P > 0, P * (np.log(Pc) - np.log(m)), 0.0), axis=1)))
+
+
+def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
+    """{pairing key: the corpus row's id} so high_delta is keyed the way
+    the eval's reply slice names its rows."""
+    out = {}
+    n = 0
+    for i, line in enumerate(read_utf8(corpus).split("\n")):
+        if line.strip():
+            try:
+                row = json.loads(line)
+            except ValueError as e:
+                raise ValueError(f"{corpus.name} line {i + 1}: not JSON ({e})") from None
+            if not isinstance(row, dict):
+                raise ValueError(f"{corpus.name} line {i + 1}: not a JSON object")
+            # the fallback id counts rows the way eval's reply slice does,
+            # blank lines skipped; the pairing key is the cache's line number
+            out[row_key(f"{corpus.name}:{i}", pair_by)] = str(row.get("id", n))
+            n += 1
+    return out
+
+
+def sorted_keys(keys) -> list:
+    """(key, window) pairs with numeric ids in numeric order, and "file:N"
+    keys (--pair-by doc) by file then N as a number, so --max-rows takes
+    the first rows as the corpus numbered them."""
+    def order(kw):
+        key = str(kw[0])
+        head, _sep, tail = key.rpartition(":")
+        if key.isdigit():
+            rank: tuple = (0, "", int(key))
+        elif tail.isdigit():
+            rank = (1, head, int(tail))
+        else:
+            rank = (2, key, 0)
+        return rank, int(kw[1])
+    return sorted(keys, key=order)
+
+
+def walk_order(reader, rows: dict, keys: list) -> list:
+    """keys reordered by the shard and slot of their base row, so a walk
+    loads each shard once; the rows of a cache are sorted by length
+    across shards while the keys sort by id."""
+    return sorted(keys, key=lambda k: reader.index[rows[k]])
+
+
+def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], *,
+           delta_threshold: float, id_of: dict[str, str], max_rows: int | None = None) -> dict:
+    """The summary dict over the rows every cache holds."""
+    base_reader, base_rows = base
+    common = set(base_rows)
+    for _r, rows in ctx:
+        common &= set(rows)
+    keys = sorted_keys(common)
+    # a document's positions map is its last window's, the final turn on a
+    # per-turn cache and the one eval's reply slice scores. The last window
+    # is read over every cache's rows, not the common ones: a cache that
+    # dropped the final turn leaves the pair over an earlier turn, and that
+    # pair must not be stored as the document's map. A document cut by
+    # max_rows before its last window gets no map either
+    every = set(base_rows)
+    for _r, rows in ctx:
+        every |= set(rows)
+    last_window: dict[str, int] = {}
+    for key, window in every:
+        last_window[key] = max(window, last_window.get(key, -1))
+    if max_rows:
+        keys = keys[:max_rows]
+    order = walk_order(base_reader, base_rows, keys)
+    by_key: dict = {}
+    deltas_all: list[float] = []
+    kl_all: list[float] = []
+    res_all: list[float] = []
+    top1_all: list[bool] = []
+    high: dict[str, list] = {}
+    high_trace: dict[str, list] = {}
+    hd = {"without": 0.0, "with": 0.0, "bytes": 0, "positions": 0}
+    mismatch = 0
+    history_mismatch = 0
+    no_positions = 0
+    for key, window in order:
+        arrs0, text0, meta0 = base_reader.row(base_rows[(key, window)])
+        doc_id = str(meta0["doc_id"])
+        keys0, b0, _b2 = reply_positions(arrs0, meta0)
+        reply0 = text0[b0:int(meta0["spans"][-1][1])]
+        # positions from the content start are keyed from it, so the map
+        # survives a student template that frames the trace differently;
+        # the trace's own positions stay relative to the trace start
+        cut = int(meta0.get("content_start", b0)) - b0
+        # the trace's own bytes when the row renders one: the positions
+        # after them and before the content are the template's closing
+        # markup, which eval cannot anchor on a student whose markup
+        # differs. A trace the row's messages do not spell as rendered
+        # keeps every position before the content
+        trace_len = None
+        msgs0 = meta0.get("messages") or []
+        # render_row anchors the trace at its stripped text, and a server
+        # returns it with the newlines around it
+        tb = (reply_trace(msgs0[-1]) if msgs0 and isinstance(msgs0[-1], dict) else "").encode("utf-8")
+        if tb and text0[b0:b0 + len(tb)] == tb:
+            trace_len = len(tb)
+        sides = []
+        ok = True
+        history = None
+        for reader, rows in ctx:
+            arrs1, text1, meta1 = reader.row(rows[(key, window)])
+            k1, c0, _c2 = reply_positions(arrs1, meta1)
+            if text1[c0:int(meta1["spans"][-1][1])] != reply0:
+                ok = False
+                break
+            if len(meta1.get("messages") or []) != len(meta0.get("messages") or []):
+                # the context render ran long and the row lost leading turns
+                # the bare row kept: the pair would measure the history, not
+                # the context
+                history = True
+                break
+            sides.append((arrs1, k1))
+        if not ok:
+            mismatch += 1
+            continue
+        if history:
+            history_mismatch += 1
+            continue
+        shared = set(keys0)
+        for _a, k1 in sides:
+            shared &= set(k1)
+        rel = sorted(shared)
+        if not rel:
+            no_positions += 1
+            continue
+        ends0 = arrs0["token_end_byte"].astype(np.int64)
+        row_delta, row_kl, row_res, row_top1 = [], [], [], []
+        ranges = []
+        tranges = []
+        for r in rel:
+            t0 = keys0[r]
+            p0_ids, p0_lp = sparse(arrs0, t0)
+            on0 = float(arrs0["onpath_log_p"][t0])
+            arrs1, k1 = sides[0]
+            t1 = k1[r]
+            p1_ids, p1_lp = sparse(arrs1, t1)
+            on1 = float(arrs1["onpath_log_p"][t1])
+            delta = on1 - on0
+            row_delta.append(delta)
+            row_kl.append(coarsened_kl(p1_ids, p1_lp, p0_ids, p0_lp))
+            row_top1.append(bool(len(p1_ids) and len(p0_ids) and int(p1_ids[0]) != int(p0_ids[0])))
+            if len(sides) > 1:
+                dists = [(p1_ids, p1_lp)] + [sparse(a, k[r]) for a, k in sides[1:]]
+                row_res.append(residual_kl(dists))
+            if delta > delta_threshold:
+                nbytes = int(ends0[t0 + 1] - ends0[t0])
+                if r >= cut:
+                    ranges.append([r - cut, r - cut + nbytes])
+                elif trace_len is None or r + nbytes <= trace_len:
+                    tranges.append([r, r + nbytes])
+                else:
+                    continue
+                hd["without"] += -on0
+                hd["with"] += -on1
+                hd["bytes"] += nbytes
+                hd["positions"] += 1
+        rid = id_of.get(key, doc_id)
+        # a per-turn cache records the turn count, so a final turn every
+        # cache dropped is told apart from the last turn they hold
+        turns = meta0.get("turns")
+        is_last = window == int(turns) - 1 if turns else window == last_window[key]
+        if (ranges or tranges) and is_last:
+            high[rid] = ranges
+            if tranges:
+                high_trace[rid] = tranges
+        by_key[(key, window)] = {"doc_id": doc_id, "window": window, "id": rid, "positions": len(rel),
+                                 "mean_delta": float(np.mean(row_delta)), "sum_delta": float(np.sum(row_delta)),
+                                 "mean_kl": float(np.mean(row_kl)), "top1_moved": float(np.mean(row_top1)),
+                                 "mean_residual": float(np.mean(row_res)) if row_res else None,
+                                 "high_delta_positions": len(ranges) + len(tranges)}
+        deltas_all += row_delta
+        kl_all += row_kl
+        top1_all += row_top1
+        res_all += row_res
+    per_row = [by_key[k] for k in keys if k in by_key]
+    deltas = np.array(deltas_all)
+    hist = np.histogram(deltas, bins=HIST_BINS)[0].tolist() if deltas.size else []
+    frame = ((base_reader.manifest.get("gmlx_distill") or {}).get("frame") or {}).get("kind")
+    return {
+        "rows": len(per_row), "rows_mismatched": mismatch, "rows_history_mismatched": history_mismatch,
+        "rows_without_positions": no_positions,
+        "positions": int(deltas.size),
+        "delta_threshold": delta_threshold, "frame": frame,
+        "distillable_effect_kl_nats": float(np.mean(kl_all)) if kl_all else None,
+        "mean_onpath_delta_nats": float(deltas.mean()) if deltas.size else None,
+        "high_delta_fraction": float((deltas > delta_threshold).mean()) if deltas.size else None,
+        "top1_moved_fraction": float(np.mean(top1_all)) if top1_all else None,
+        "residual_kl_nats": float(np.mean(res_all)) if res_all else None,
+        "delta_histogram": {"bins": [str(b) for b in HIST_BINS], "counts": hist},
+        "teacher_high_delta": {"nll_nats_without": hd["without"], "nll_nats_with": hd["with"],
+                               "bytes": hd["bytes"], "positions": hd["positions"]},
+        "per_row": per_row, "high_delta": high, "high_delta_trace": high_trace}
+
+
+def report_markdown(opts: CensusOptions, s: dict) -> str:
+    hd = s["teacher_high_delta"]
+    hist = s["delta_histogram"]["counts"]
+    lines = ["# Context-delta census", "",
+             f"Caches: without `{opts.without}`, with {', '.join(f'`{c}`' for c in opts.with_)}.", "",
+             "| measure | value |", "|---|---|",
+             f"| paired reply rows | {s['rows']} ({s['rows_mismatched']} reply mismatches skipped, "
+             f"{s.get('rows_history_mismatched', 0)} history mismatches skipped, "
+             f"{s.get('rows_without_positions', 0)} pairs with no shared position) |",
+             f"| reply positions compared | {s['positions']} |",
+             f"| distillable effect, mean coarsened KL (nats) | {s['distillable_effect_kl_nats']} |",
+             f"| mean on-path delta (nats) | {s['mean_onpath_delta_nats']} |",
+             f"| high-delta positions (above {opts.delta_threshold} nats) | {s['high_delta_fraction']} |",
+             f"| top-1 moved | {s['top1_moved_fraction']} |",
+             f"| residual across contexts (nats) | {s['residual_kl_nats']} |",
+             f"| teacher nats per token on high-delta positions, without / with | "
+             f"{hd['nll_nats_without'] / max(hd['positions'], 1):.2f} / "
+             f"{hd['nll_nats_with'] / max(hd['positions'], 1):.2f} over {hd['positions']} positions |", ""]
+    if hist:
+        lines.append("Delta histogram (nats): " + ", ".join(
+            f"{HIST_BINS[i]}..{HIST_BINS[i + 1]}: {c}" for i, c in enumerate(hist)))
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def cache_mismatch(base_dir: Path, base: dict, other_dir: Path, other: dict) -> str | None:
+    """What keeps two caches from being compared position by position:
+    another tokenizer (the stored ids would index two vocabularies),
+    another top-k or head width (the pooled tail would differ by
+    construction), or another teacher (the delta would measure the
+    teacher change, not the context). The teacher compares by the size
+    and content hash progress.json records when both caches have one,
+    and by the manifest's arch otherwise."""
+    for key, name in (("tokenizer_hash", "tokenizer"), ("top_k", "top-k"), ("vocab_size", "head width")):
+        if base.get(key) != other.get(key):
+            return f"{name} ({base.get(key)!r} vs {other.get(key)!r})"
+    ta = (base.get("gmlx_distill") or {}).get("teacher") or {}
+    tb = (other.get("gmlx_distill") or {}).get("teacher") or {}
+    if ta.get("arch") != tb.get("arch"):
+        return f"teacher arch ({ta.get('arch')!r} vs {tb.get('arch')!r})"
+    fa, fb = teacher_fingerprint(base_dir), teacher_fingerprint(other_dir)
+    if fa and fb and fa != fb:
+        return "teacher (by size and content hash)"
+    return None
+
+
+def run_census(opts: CensusOptions) -> int:
+    """Pair the caches, measure, and write the JSON (and Markdown).
+    Returns 0, or 2 when a cache directory has no manifest or an
+    unreadable one, a --with cache was made by another teacher,
+    tokenizer, top-k or head width than --without, or no rows pair
+    across the caches, or an output it cannot write."""
+    for label, path in (("--out", opts.out), ("--md", opts.md)):
+        err = output_error(path) if path else None
+        if err:
+            print(f"[census] refuse: cannot write {label} {path}: {err}", file=sys.stderr)
+            return 2
+    caches = [Path(opts.without).expanduser()] + [Path(c).expanduser() for c in opts.with_]
+    manifests = []
+    for c in caches:
+        if not (c / "manifest.json").is_file():
+            print(f"[census] refuse: no manifest in {c}", file=sys.stderr)
+            return 2
+        try:
+            manifests.append(json.loads((c / "manifest.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            print(f"[census] refuse: cannot read the manifest in {c} ({e})", file=sys.stderr)
+            return 2
+    for c, m in zip(caches[1:], manifests[1:]):
+        diff = cache_mismatch(caches[0], manifests[0], c, m)
+        if diff:
+            print(f"[census] refuse: {c} was made with another {diff} than {caches[0]}. The census pairs caches "
+                  "of one teacher, tokenizer, top-k and head width", file=sys.stderr)
+            return 2
+    base = reply_rows(caches[0], opts.pair_by)
+    ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]
+    for c, (reader, rows) in zip(caches, [base] + ctx):
+        # a reply-think row keys its content positions from content_start;
+        # without it the trace would be measured as content
+        stale = sum(1 for r in rows.values() if reader.rows_meta[r].get("frame") == "reply-think"
+                    and reader.rows_meta[r].get("content_start") is None)
+        if stale:
+            print(f"[census] refuse: {stale} reply-think rows of {c} record no content_start (the cache was written "
+                  f"before rows carried it); rerun gmlx distill cache", file=sys.stderr)
+            return 2
+    if opts.corpus and not Path(opts.corpus).expanduser().is_file():
+        print(f"[census] refuse: no corpus at {opts.corpus}", file=sys.stderr)
+        return 2
+    try:
+        id_of = corpus_ids(Path(opts.corpus).expanduser(), opts.pair_by) if opts.corpus else {}
+    except (OSError, ValueError) as e:
+        print(f"[census] refuse: {e}", file=sys.stderr)
+        return 2
+    log(f"[census] {len(base[1])} reply rows without, {[len(r) for _x, r in ctx]} with, "
+        f"paired by {opts.pair_by}")
+    s = census(base, ctx, delta_threshold=opts.delta_threshold, id_of=id_of, max_rows=opts.max_rows)
+    if s["rows"] == 0:
+        print("[census] refuse: no reply rows pair across the caches (same prompts, --frame reply or reply-think, "
+              "matching reply bytes)", file=sys.stderr)
+        return 2
+    summary = {"caches": {"without": str(caches[0]), "with": [str(c) for c in caches[1:]]},
+               "pair_by": opts.pair_by, "corpus": opts.corpus, **s}
+    out = Path(opts.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(out, summary)
+    if opts.md:
+        md = Path(opts.md).expanduser()
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text(report_markdown(opts, s), encoding="utf-8")
+    log(f"[census] effect {s['distillable_effect_kl_nats']} nats, delta {s['mean_onpath_delta_nats']}, "
+        f"high-delta fraction {s['high_delta_fraction']}, residual {s['residual_kl_nats']}")
+    log(f"[census] wrote {out}")
+    return 0

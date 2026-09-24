@@ -460,8 +460,9 @@ _EXP2_TABLE = mx.array([2.0**i for i in range(-126, 128)], dtype=mx.float32)
 
 
 def _exp2i(e: mx.array) -> mx.array:
-    """2**e for integer-valued float e in [-126, 127], exactly."""
-    return mx.take(_EXP2_TABLE, e.astype(mx.int32) + 126)
+    """2**e for integer-valued float e in [-126, 127], exactly. The
+    exponent is a rounded value and carries no gradient."""
+    return mx.take(_EXP2_TABLE, mx.stop_gradient(e.astype(mx.int32) + 126))
 
 
 def _e4m3_round(v: mx.array) -> mx.array:
@@ -534,10 +535,21 @@ def _fp4_e2m1_roundtrip(x: mx.array, block: int = 32) -> mx.array:
     return mx.flatten(_fp4_block_core(v), -2).astype(orig_dtype)
 
 
-def _kv_qat_roundtrip(kv: mx.array, n_rot: int) -> mx.array:
+def _ste(x: mx.array, q: mx.array) -> mx.array:
+    """``q`` in the forward, the identity's gradient in the backward. The
+    rounding ladders have a zero derivative and the fused kernels have no
+    backward, so a training step passes the gradient straight through.
+    ``x - x`` is zero for finite x, so the forward value is ``q``."""
+    return mx.stop_gradient(q) + (x - mx.stop_gradient(x))
+
+
+def _kv_qat_roundtrip(kv: mx.array, n_rot: int, training: bool = False) -> mx.array:
     """Main-attention KV row round-trip, applied after RoPE and before the
     cache update: FP8 on the leading non-RoPE dims, FP16 on the whole row.
+    ``training`` passes the gradient straight through.
     (ds4.c forward site: dsv4_fp8_kv_quantize_row + f16_round)"""
+    if training:
+        return _ste(kv, _kv_qat_roundtrip(kv, n_rot))
     if (kv.shape[-1] - n_rot) % 64 == 0 and kv.shape[-1] > n_rot and _dsa_probe(
         "kv_qat"
     ):
@@ -579,11 +591,14 @@ def _emit_qat_disarm(exc: Exception) -> None:
     )
 
 
-def _compressor_fp8_qat(x: mx.array, n_rot: int) -> mx.array:
+def _compressor_fp8_qat(x: mx.array, n_rot: int, training: bool = False) -> mx.array:
     """Compressor emit-path row round-trip: FP8 on the leading non-RoPE
     dims, RoPE tail untouched, and no f16 round -- pooled rows feed the
     indexer pool and the compressed keys, never the f16 KV cache.
+    ``training`` passes the gradient straight through.
     (ds4.c compressor site: dsv4_fp8_kv_quantize_row, no f16_round)"""
+    if training:
+        return _ste(x, _compressor_fp8_qat(x, n_rot))
     d = x.shape[-1]
     if (
         _EMIT_QAT_NATIVE["on"]
@@ -605,11 +620,14 @@ def _compressor_fp8_qat(x: mx.array, n_rot: int) -> mx.array:
     )
 
 
-def _indexer_qat_roundtrip(x: mx.array) -> mx.array:
+def _indexer_qat_roundtrip(x: mx.array, training: bool = False) -> mx.array:
     """Indexer activation round-trip: 128-wide Hadamard (scale 1/sqrt(128),
     mx.hadamard_transform's default) then the FP4 round-trip. Applies to
     indexer queries and indexer compressed-pool rows; the top-k selection
-    is not the model's graph without it. (ds4.c dsv4_indexer_qat_row)"""
+    is not the model's graph without it. ``training`` passes the gradient
+    straight through. (ds4.c dsv4_indexer_qat_row)"""
+    if training:
+        return _ste(x, _indexer_qat_roundtrip(x))
     if x.shape[-1] == 128 and _dsa_probe("qat"):
         # Fused kernel, bit-identical to the chain below (pinned by
         # mlx-kquant's test_dsa_qat bit-identity suite).
@@ -724,7 +742,7 @@ def _expert_select(
     logits = logits.astype(mx.float32)
     scores = _score_func(logits, scoring_func)
     biased = scores + e_score_correction_bias
-    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
+    inds = mx.stop_gradient(mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k])
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -771,7 +789,7 @@ def _expert_select_vl(
         image_mask[..., None], e_score_correction_bias_vl, e_score_correction_bias
     )
     biased = scores + bias
-    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
+    inds = mx.stop_gradient(mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k])
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:
         weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
@@ -798,9 +816,9 @@ def _hash_expert_select_vl(
     logits = logits.astype(mx.float32)
     scores = _score_func(logits, scoring_func)
     text_inds = tid2eid[input_ids]
-    image_inds = mx.argpartition(
+    image_inds = mx.stop_gradient(mx.argpartition(
         -(scores + e_score_correction_bias_vl), kth=top_k - 1, axis=-1
-    )[..., :top_k].astype(text_inds.dtype)
+    )[..., :top_k].astype(text_inds.dtype))
     inds = mx.where(image_mask[..., None], image_inds, text_inds)
     weights = mx.take_along_axis(scores, inds, axis=-1)
     if scoring_func != "softmax" and norm_topk_prob:
@@ -1595,7 +1613,10 @@ def _kernel_window_attention(module, q, kv, pooled, sinks, offset, ratio):
     (offset + pos + 1) // ratio reproduces PoolingCache.make_mask exactly,
     so no mask is materialized. pooled=None serves window-only layers: one
     dummy pooled row that a 2**30 ratio keeps invisible at any reachable
-    offset. Returns [B, 64, qL, 512], or None to fall back."""
+    offset. The kernel has no backward, so a training step falls back.
+    Returns [B, 64, qL, 512], or None to fall back."""
+    if module.training:
+        return None
     B, H, L, D = q.shape
     if H != 64 or D != 512 or kv.shape[1] != 1 or kv.shape[2] < L:
         return None
@@ -1675,12 +1696,14 @@ def _kq_skinny_available() -> bool:
     return ok
 
 
-def _skinny_or_matmul(x, w):
+def _skinny_or_matmul(x, w, kernel: bool = True):
     """x @ w.T; token widths 2..16 route around MLX's small-N GEMM cliff
     (the stock path leaves the GEMV specialization at M >= 2 and runs
-    these shapes 4-8x below their bytes)."""
+    these shapes 4-8x below their bytes). ``kernel`` False keeps to the
+    matmul, which has a backward: the kernel has none."""
     if (
-        2 <= x.shape[-2] <= 16
+        kernel
+        and 2 <= x.shape[-2] <= 16
         and x.shape[-1] % 4 == 0
         and x.dtype in (mx.float16, mx.bfloat16, mx.float32)
         and (w.dtype == x.dtype or w.dtype == mx.float32)
@@ -1693,11 +1716,11 @@ def _skinny_or_matmul(x, w):
     return x @ w.T
 
 
-def _skinny_linear(lin, x):
+def _skinny_linear(lin, x, kernel: bool = True):
     """lin(x); dense no-bias Linears at token widths 2..16 take the
     skinny kernel, quantized or biased modules keep their own path."""
     if type(lin) is nn.Linear and "bias" not in lin:
-        return _skinny_or_matmul(x, lin.weight)
+        return _skinny_or_matmul(x, lin.weight, kernel)
     return lin(x)
 
 
@@ -1733,7 +1756,7 @@ class MoEGate(nn.Module):
         input_ids: Optional[mx.array] = None,
         image_mask: Optional[mx.array] = None,
     ):
-        logits = _skinny_or_matmul(x, self.weight)
+        logits = _skinny_or_matmul(x, self.weight, not self.training)
 
         if image_mask is not None:
             if not self.vision_router_bias:
@@ -1958,9 +1981,13 @@ class Compressor(nn.Module):
                 offset=pool_base,
             ).squeeze(1)
             if self._qat == "fp8":
-                new_pooled = _compressor_fp8_qat(new_pooled, self.rope_head_dim)
+                new_pooled = _compressor_fp8_qat(
+                    new_pooled, self.rope_head_dim, training=self.training
+                )
             elif self._qat == "fp4":
-                new_pooled = _indexer_qat_roundtrip(new_pooled)
+                new_pooled = _indexer_qat_roundtrip(
+                    new_pooled, training=self.training
+                )
             if self.overlap and pool_cache is not None:
                 # accumulate_windows prepended the previous completed window
                 # so the kernel's cross-window shift links this call's first
@@ -2014,16 +2041,24 @@ class Indexer(nn.Module):
         # Quantized-operand prefill arm: emit codes+scales from the same QAT
         # core before the fp16 round-trip (bit-consistent by kernel contract:
         # qat_quant(x) == qat_pack(qat(x))). Prefill widths only; decode and
-        # every fallback path keep consuming the round-tripped fp16 q.
+        # every fallback path keep consuming the round-tripped fp16 q. A
+        # training step skips the arm. Its pool grid check evaluates the
+        # pool, which a compiled step refuses, and the fp16 kernel gives
+        # the same scores.
         q_quant = None
-        if L > 4 and _dsa_probe("indexer") and _dsa_probe("indexer_q"):
+        if (
+            L > 4
+            and not self.training
+            and _dsa_probe("indexer")
+            and _dsa_probe("indexer_q")
+        ):
             try:
                 import mlx_kquant as kq
 
                 q_quant = kq.dsa_indexer_qat_quant(q)
             except Exception as exc:  # noqa: BLE001 - permanent fallback
                 _dsa_disable("indexer_q", exc)
-        q = _indexer_qat_roundtrip(q)
+        q = _indexer_qat_roundtrip(q, training=self.training)
 
         pmask = (
             pool_cache.make_mask(L, offset)
@@ -2047,9 +2082,9 @@ class Indexer(nn.Module):
             mx.float32
         )
         scores = mx.maximum(scores, 0) * self.scale
-        weights = _skinny_linear(self.weights_proj, x).astype(mx.float32) * (
-            self.n_heads**-0.5
-        )
+        weights = _skinny_linear(
+            self.weights_proj, x, not self.training
+        ).astype(mx.float32) * (self.n_heads**-0.5)
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         if pmask is not None:
             scores = mx.where(
@@ -2102,9 +2137,9 @@ class Indexer(nn.Module):
                 import mlx_kquant as kq
 
                 if hasattr(kq, "dsa_indexer_score_decode"):
-                    weights = _skinny_linear(self.weights_proj, x) * (
-                        self.n_heads**-0.5
-                    )
+                    weights = _skinny_linear(
+                        self.weights_proj, x, not self.training
+                    ) * (self.n_heads**-0.5)
                     scores = kq.dsa_indexer_score_decode(
                         q,
                         pooled,
@@ -2112,7 +2147,8 @@ class Indexer(nn.Module):
                         offset,
                         self.compressor.compress_ratio,
                     )
-                    return kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0]
+                    return mx.stop_gradient(
+                        kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0])
             except Exception as exc:  # noqa: BLE001 - permanent fallback
                 _dsa_disable("indexer", exc)
                 return None
@@ -2189,7 +2225,8 @@ class Indexer(nn.Module):
                 scores = mx.where(
                     pm[:, None], scores, mx.finfo(scores.dtype).min
                 )
-            return kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0]
+            return mx.stop_gradient(
+                kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0])
         except Exception as exc:  # noqa: BLE001 - permanent fallback
             _dsa_disable("indexer", exc)
             return None
@@ -2263,7 +2300,9 @@ class LocalAttention(nn.Module):
 
         kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
-        kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
+        kv = _kv_qat_roundtrip(
+            kv, self.config.qk_rope_head_dim, training=self.training
+        )
         if cache is not None:
             kv, _ = cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
 
@@ -2398,7 +2437,9 @@ class CompressedAttention(nn.Module):
 
         kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
-        kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
+        kv = _kv_qat_roundtrip(
+            kv, self.config.qk_rope_head_dim, training=self.training
+        )
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
 
@@ -2592,7 +2633,9 @@ class SparseCompressedAttention(nn.Module):
 
         kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
-        kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
+        kv = _kv_qat_roundtrip(
+            kv, self.config.qk_rope_head_dim, training=self.training
+        )
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
 
@@ -2790,7 +2833,10 @@ class SparseCompressedAttention(nn.Module):
         One dispatch replaces _sparse_pooled_attention plus both masks: the
         kernel derives the local window from (localL, qL, local_window) and
         its causal pooled clamp matches the pool cache's visibility mask.
+        The kernel has no backward, so a training step falls back.
         Returns [B, 64, qL, 512], or None to fall back."""
+        if self.training:
+            return None
         B, H, L, D = q.shape
         if H != 64 or D != 512 or kv.shape[1] != 1 or kv.shape[2] < L:
             return None

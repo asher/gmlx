@@ -168,6 +168,12 @@ base can serve several adapters at once, which
 [lora.md](https://github.com/asher/gmlx/blob/main/docs/lora.md) walks through
 end to end.
 
+`distill` teaches a small GGUF what a larger one knows, a document or a
+behavior, by training an adapter on the larger model's outputs without
+running the two at once.
+[distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md)
+walks through it.
+
 ## Performance
 
 Because gmlx and llama.cpp run the same file, the comparison is direct. On an

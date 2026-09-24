@@ -233,3 +233,34 @@ def test_bf16_lever_engages(monkeypatch):
     assert calls["n"] == 1
     mx.eval(vl.verify_linear(plain, xv, False))  # not verify: never claimed
     assert calls["n"] == 1
+
+
+def test_an_adapted_linear_takes_its_own_forward(monkeypatch):
+    """A GGUF adapter wrapper has no weight for the head GEMV to read, so
+    both verify levers call it. Metal is stubbed so this runs on any
+    device."""
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    calls = []
+
+    def gemv(x, w):
+        calls.append(w.shape)
+        return x @ w.T
+
+    monkeypatch.setattr(vl, "gpu_active", lambda: True)
+    monkeypatch.setattr(vl, "_F16_HEAD_GEMV", object())
+    monkeypatch.setattr(vl, "_f16_head_gemv", gemv)
+    monkeypatch.setattr(gp, "_F16_HEAD_GEMV", object())
+    monkeypatch.setattr(gp, "_f16_head_gemv", gemv)
+    mx.random.seed(5)
+    base = nn.Linear(64, 64, bias=False)
+    wrapped = LoRAKQuantLinear(base, mx.random.normal((4, 64)),
+                               mx.random.normal((64, 4)), 0.5)
+    x = mx.random.normal((1, 3, 64))
+    for fn in (lambda m: vl.verify_linear(m, x, True),
+               lambda m: gp._bf16_verify_linear(m, x)):
+        assert mx.allclose(fn(wrapped), wrapped(x))
+        assert calls == []
+        fn(base)
+        assert len(calls) == 1
+        calls.clear()

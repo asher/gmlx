@@ -7,6 +7,7 @@ these tests pin the cheap invariants that need no model.
 
 from __future__ import annotations
 
+import mlx.core as mx
 import mlx.nn as nn
 
 import gmlx.upstream.occupancy_fuse as of
@@ -68,3 +69,33 @@ def test_same_codec_gate_rejects_non_kquant():
     m = _Model()
     projs = [m.attn.q_proj, m.attn.k_proj, m.attn.v_proj]
     assert not of._same_codec_kquant(projs)
+
+
+def _fused(plain_cls, maker, slots):
+    m = plain_cls()
+    m.__class__ = maker(plain_cls)
+    for slot in slots:
+        object.__setattr__(m, slot, None)
+    object.__setattr__(m, "_kq_fuse_off", False)
+    return m
+
+
+def test_adapted_projection_turns_the_fused_wire_off():
+    """An adapter installed after load wraps a projection in
+    LoRAKQuantLinear, which carries no ``weight``; the lazy wire build must
+    hand the module back to the stock path instead of reading it."""
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    def adapt(lin, out):
+        return LoRAKQuantLinear(lin, mx.zeros((2, 8)), mx.zeros((out, 2)), 1.0)
+
+    mlp = _fused(_PlainMLP, of._make_fused_mlp, ("_kq_wgu", "_kq_wdn"))
+    mlp.gate_proj = adapt(mlp.gate_proj, 16)
+    assert mlp._kq_build_fused() is None
+    assert mlp._kq_fuse_off
+
+    for maker in (of._make_fused_attention, of._make_fused_qwen35_attention):
+        attn = _fused(_PlainAttention, maker, ("_kq_wqkv",))
+        attn.q_proj = adapt(attn.q_proj, 8)
+        assert attn._kq_build_fused() is None
+        assert attn._kq_fuse_off

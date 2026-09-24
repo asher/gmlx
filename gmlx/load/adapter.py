@@ -24,6 +24,14 @@ from .remap import RemapDecision, parse_gguf_name
 _A_SUFFIX = ".lora_a"
 _B_SUFFIX = ".lora_b"
 
+# Load-time transforms of a base weight that leave its LoRA factors as they
+# are. The unsqueeze gives a 1-D gate its (1, in) matrix shape, and the
+# factors of that matrix are the ones the GGUF stores.
+_FACTOR_PASSTHROUGH = frozenset({"passthrough", "gate_1d_unsqueeze"})
+# Transforms an adapter pair can follow: the passthroughs, plus the q/k
+# permute, which reorders the rows of ``b``.
+_FACTOR_TRANSFORMS = _FACTOR_PASSTHROUGH | {"qk_permute"}
+
 
 @dataclass
 class LoraModule:
@@ -130,9 +138,10 @@ def build_adapter_plan(meta: dict, arrays: dict,
             rank = int(a.shape[1])
         else:
             rank = _infer_rank(module_path, a, b)
+        transform = "passthrough" if dec.transform in _FACTOR_PASSTHROUGH else dec.transform
         modules[module_path] = LoraModule(
             module_path=module_path, a=a, b=b, rank=rank,
-            scale=alpha / rank, transform=dec.transform, experts=experts)
+            scale=alpha / rank, transform=transform, experts=experts)
 
     if not modules:
         raise ValueError("adapter GGUF contains no lora_a/lora_b tensor pairs")
@@ -173,7 +182,8 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     number of modules installed.
 
     Applies to the *raw* mlx-lm model, whose leaf paths are the HF names the adapter's
-    GGUF-base-name remap targets. Head counts (for the llama-family q/k de-permute of
+    GGUF-base-name remap targets; a base that keeps its text stack under
+    ``language_model`` is entered there. Head counts (for the llama-family q/k de-permute of
     the adapter's ``B``) come from ``config`` (a synthesized dict or a config object,
     with a nested ``text_config`` fallback for multimodal-shaped configs); a
     qk_permute target without them raises in the installer. The adapter GGUF's own
@@ -190,12 +200,102 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
     plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
-    return install_lora_adapter(raw_model, plan, n_head=n_head, n_head_kv=n_head_kv,
-                                slot=slot)
+    return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
+                                n_head_kv=n_head_kv, slot=slot)
+
+
+def _text_root(model, plan):
+    """The module the plan's paths are relative to. A multimodal-shaped base
+    (the Qwen3.5 hybrids among them) keeps its text stack under
+    ``language_model`` while the GGUF name remap writes text paths without
+    that prefix, so the install descends into it unless the plan already
+    names it."""
+    inner = getattr(model, "language_model", None)
+    if inner is None or any(p.startswith("language_model.") for p in plan.modules):
+        return model
+    return inner
+
+
+def base_tensor_names(gguf_path: str) -> list[str]:
+    """Every tensor name of a GGUF, across its shards, read from the
+    headers alone."""
+    from .headerscan import scan_gguf
+    from .preflight import find_split_shards
+
+    return [t.name for shard in find_split_shards(gguf_path)
+            for t in scan_gguf(shard).tensors]
+
+
+def adapter_tensor_names(module_paths, *, base_arch: str,
+                         base_names) -> tuple[dict, dict]:
+    """Resolve in-memory module paths to the base GGUF tensors their LoRA
+    pairs are keyed to. The loader's name remap runs over the base's own
+    tensor names and is inverted, so a written pair is found again by
+    :func:`build_adapter_plan` and by llama.cpp, whatever the architecture.
+
+    Returns ``(names, refused)``: path -> ``(tensor name, transform)`` for
+    the paths an adapter can hold, and path -> reason for the others."""
+    index: dict[str, list] = {}
+    for name in base_names:
+        if not name.endswith(".weight"):
+            continue
+        dec = parse_gguf_name(base_arch, name)
+        if dec.kind != RemapDecision.KIND_MAP or not (dec.hf_name or "").endswith(".weight"):
+            continue
+        index.setdefault(dec.hf_name[: -len(".weight")], []).append((name, dec.transform))
+    names: dict = {}
+    refused: dict = {}
+    for path in module_paths:
+        hits = index.get(path, [])
+        if not hits:
+            refused[path] = "no tensor of the base GGUF loads into it"
+        elif len(hits) > 1:
+            refused[path] = f"{len(hits)} tensors of the base GGUF load into it"
+        elif hits[0][1] not in _FACTOR_TRANSFORMS:
+            refused[path] = (f"its base tensor {hits[0][0]} loads through the {hits[0][1]!r} "
+                             "transform, which a LoRA pair cannot follow")
+        else:
+            names[path] = hits[0]
+    return names, refused
+
+
+def refusal_summary(refused: dict, limit: int = 3) -> str:
+    """One line naming the first few refused paths and their reasons."""
+    items = sorted(refused.items())
+    text = "; ".join(f"{p} ({why})" for p, why in items[:limit])
+    return text + (f", and {len(items) - limit} more" if len(items) > limit else "")
+
+
+def _gguf_py_names(module_paths, *, base_arch: str, n_layers: int) -> tuple[dict, dict]:
+    """The gguf-py tensor-name map, for callers that give no base names.
+    Only architectures gguf-py knows are covered."""
+    import gguf
+
+    arch_enum = {v: k for k, v in gguf.MODEL_ARCH_NAMES.items()}.get(base_arch)
+    if arch_enum is None:
+        raise ValueError(
+            f"base arch {base_arch!r} is not a known gguf MODEL_ARCH, pass the base "
+            f"GGUF's tensor names to map module names to GGUF tensor names")
+    name_map = gguf.get_tensor_name_map(arch_enum, n_layers)
+    names: dict = {}
+    refused: dict = {}
+    for path in module_paths:
+        stem = name_map.get_name(path)
+        if stem is None:
+            refused[path] = f"gguf-py has no tensor name for it on arch {base_arch!r}"
+            continue
+        dec = parse_gguf_name(base_arch, stem + ".weight")
+        if dec.transform not in _FACTOR_TRANSFORMS:
+            refused[path] = (f"its base tensor {stem}.weight loads through the "
+                             f"{dec.transform!r} transform, which a LoRA pair cannot follow")
+            continue
+        names[path] = (stem + ".weight", dec.transform)
+    return names, refused
 
 
 def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
-                      n_head: int, n_head_kv: int, n_layers: int) -> int:
+                      n_head: int, n_head_kv: int, n_layers: int,
+                      base_names=None) -> int:
     """Write a llama.cpp-format GGUF LoRA adapter - the inverse of
     :func:`load_lora_adapter`.
 
@@ -206,21 +306,27 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
     forward-permuted to the wire layout (the inverse of the load-time
     :func:`transforms.qk_permute_wire`) so a reader's de-permute recovers it.
 
-    The module-path -> GGUF-tensor-name map is the canonical llama.cpp one
-    (``gguf.get_tensor_name_map``), and the transform decision mirrors
-    :func:`remap.parse_gguf_name`, so the emitted names + Q/K layout are exactly
-    what this module's loader reads back. Returns the number of pairs written."""
+    ``base_names`` are the base GGUF's tensor names (:func:`base_tensor_names`).
+    With them, each module path maps to the base tensor that loads into it
+    (:func:`adapter_tensor_names`), on any architecture the loader reads.
+    Without them the map is gguf-py's (``gguf.get_tensor_name_map``), which
+    covers the architectures gguf-py knows. Every module is resolved before
+    anything is written, and one that cannot be held raises ``ValueError``
+    naming it. Returns the number of pairs written."""
     import gguf
     import numpy as np
 
     from .transforms import qk_permute_wire_inverse
 
-    arch_enum = {v: k for k, v in gguf.MODEL_ARCH_NAMES.items()}.get(base_arch)
-    if arch_enum is None:
-        raise ValueError(
-            f"base arch {base_arch!r} is not a known gguf MODEL_ARCH - cannot map "
-            f"module names to GGUF tensor names")
-    name_map = gguf.get_tensor_name_map(arch_enum, n_layers)
+    modules = list(modules)
+    paths = [m[0] for m in modules]
+    if base_names is not None:
+        names, refused = adapter_tensor_names(paths, base_arch=base_arch, base_names=base_names)
+    else:
+        names, refused = _gguf_py_names(paths, base_arch=base_arch, n_layers=n_layers)
+    if refused:
+        raise ValueError(f"a GGUF adapter cannot hold {len(refused)} of the "
+                         f"{len(paths)} LoRA modules: {refusal_summary(refused)}")
 
     writer = gguf.GGUFWriter(path, base_arch)
     writer.add_type(gguf.GGUFType.ADAPTER)
@@ -229,19 +335,11 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
 
     n = 0
     for module_path, a, b in modules:
-        stem = name_map.get_name(module_path)
-        if stem is None:
-            raise ValueError(
-                f"{module_path!r} has no GGUF tensor name for arch {base_arch!r}")
-        gguf_base = stem + ".weight"   # convert_lora_to_gguf keys lora_a/b off <name>.weight
-        dec = parse_gguf_name(base_arch, gguf_base)
-        if dec.transform == "qk_permute":
+        # convert_lora_to_gguf keys lora_a/b off <name>.weight
+        gguf_base, transform = names[module_path]
+        if transform == "qk_permute":
             nh = n_head_kv if module_path.endswith("k_proj") else n_head
             b = qk_permute_wire_inverse(b, nh)
-        elif dec.transform != "passthrough":
-            raise NotImplementedError(
-                f"{module_path}: LoRA save for the {dec.transform!r} transform is "
-                f"not supported yet")
         writer.add_tensor(gguf_base + ".lora_a", np.array(a.astype(mx.float32)))
         writer.add_tensor(gguf_base + ".lora_b", np.array(b.astype(mx.float32)))
         n += 1

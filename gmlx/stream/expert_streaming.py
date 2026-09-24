@@ -398,6 +398,9 @@ def install_expert_streaming(
         deduct_untracked_weights(table_offloaded, key)
 
     streaming = force_stream or over_budget
+    # the verdict itself: a CPU-only expert codec marks its modules the way
+    # streaming does, so a module scan cannot tell the two apart
+    model._kq_streaming = bool(streaming)
     prefetcher = None
     cast_dead_bytes = 0
     held_wired = 0
@@ -893,6 +896,9 @@ def install_expert_streaming(
             if streaming:
                 m._kq_cpu_only = True
                 object.__setattr__(m, "_kq_li", li)
+                # A streamed stack is read from its slot per call; a
+                # resident gate+up concat copy would defeat that.
+                object.__setattr__(m, "_kq_gate_up_pending", False)
                 if gpu_ok:
                     moe_modules.setdefault(li, []).append(m)
                 if prefetcher is not None:

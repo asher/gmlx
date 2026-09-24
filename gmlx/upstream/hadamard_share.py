@@ -90,7 +90,8 @@ def _make_shared_attention(base_cls):
             output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
             return self.o_proj(glu_rotate(
-                output, gate, fold_of(self.o_proj), activation="sigmoid"))
+                output, gate, fold_of(self.o_proj), activation="sigmoid",
+                kernel=not self.training))
 
     _SharedQwen35Attention.__name__ = "_SharedQwen35Attention"
     return _SharedQwen35Attention
@@ -100,7 +101,8 @@ def _make_shared_mlp(base_cls):
     class _SharedQwen35MLP(base_cls):
         def __call__(self, x) -> mx.array:
             gate, up = shared_linears((self.gate_proj, self.up_proj), x)
-            return self.down_proj(glu_rotate(up, gate, fold_of(self.down_proj)))
+            return self.down_proj(glu_rotate(up, gate, fold_of(self.down_proj),
+                                             kernel=not self.training))
 
     _SharedQwen35MLP.__name__ = "_SharedQwen35MLP"
     return _SharedQwen35MLP

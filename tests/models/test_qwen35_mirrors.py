@@ -98,11 +98,25 @@ def test_attention_call_mirror():
                 1,
             ),
             ("scaled_dot_product_attention(", "_sdpa(", 2),
+            (
+                # the training route inserted ahead of the plain dispatch
+                "    elif output is None:\n"
+                "        output = _sdpa(queries, keys, values, cache=cache, "
+                "scale=self.scale, mask=mask)",
+                "    elif output is None and cache is None and self.training "
+                "and env_bool('GMLX_TRAIN_BLOCKED_ATTN', True):\n"
+                "        output = blocked_attention(queries, keys, values, "
+                "scale=self.scale, mask=mask)\n"
+                "    elif output is None:\n"
+                "        output = _sdpa(queries, keys, values, cache=cache, "
+                "scale=self.scale, mask=mask)",
+                1,
+            ),
             ("_target_verify_linear(", "verify_linear(", 1),
             (
                 "output * mx.sigmoid(gate)",
                 "glu_rotate(output, gate, fold_of(self.o_proj), "
-                "activation='sigmoid')",
+                "activation='sigmoid', kernel=not self.training)",
                 1,
             ),
         ],
@@ -119,7 +133,8 @@ def test_mlp_call_mirror():
             ("_target_verify_linear(", "verify_linear(", 1),
             (
                 "swiglu(gate, up)",
-                "glu_rotate(up, gate, fold_of(self.down_proj))",
+                "glu_rotate(up, gate, fold_of(self.down_proj), "
+                "kernel=not self.training)",
                 1,
             ),
         ],
@@ -132,7 +147,15 @@ def test_moe_sparse_block_call_mirror():
     _assert_mirror(
         block_cls.__call__,
         _ML.Qwen3_5MoeSparseMoeBlock.__call__,
-        [("_target_verify_linear(", "verify_linear(", 2)],
+        [
+            ("_target_verify_linear(", "verify_linear(", 2),
+            (
+                # the expert ids carry no gradient, so a training step has a backward
+                "inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]",
+                "inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])",
+                1,
+            ),
+        ],
         "Qwen3_5MoeSparseMoeBlock.__call__",
     )
 
@@ -170,8 +193,15 @@ def test_gdn_unfused_chain_mirror():
                 1,
             ),
             (
-                "out, state = gated_delta_update(",
-                "out, state = _gd.gated_delta_update(",
+                # the training route inserted ahead of the plain dispatch
+                "    else:\n"
+                "        out, state = gated_delta_update(",
+                "    elif self.training and cache is None:\n"
+                "        out, state = training_gated_delta_update(q, k, v, "
+                "a, b, self.A_log, self.dt_bias, state, mask)\n"
+                "        intermediate_states = None\n"
+                "    else:\n"
+                "        out, state = _gd.gated_delta_update(",
                 1,
             ),
             ("_target_verify_linear(", "verify_linear(", 1),

@@ -30,6 +30,10 @@ from `tokenizers` primitives.
 
 from __future__ import annotations
 
+import hashlib
+
+import numpy as np
+
 
 from tokenizers import (
     AddedToken,
@@ -861,9 +865,162 @@ def bundled_chat_template(model_type: str | None) -> str | None:
         encoding="utf-8")
 
 
+def finish_gguf_tokenizer(raw, model_type: str | None) -> None:
+    """The per-model transforms a synthesized tokenizer needs after its
+    template is set. The model loader and the header-only readers both
+    call it, so a tokenizer built either way renders the same text."""
+    if model_type == "deepseek_v41":
+        import gmlx.models.deepseek_v41.tools as deepseek_v41_tools
+
+        deepseek_v41_tools.install_message_normalizer(raw)
+
+
 def bundled_chat_template_for_arch(arch: str | None) -> str | None:
     """The same, addressed by GGUF architecture, for the paths that read a
     header rather than a synthesized config."""
     from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
 
     return bundled_chat_template(GGUF_ARCH_TO_MODEL_TYPE.get(arch or ""))
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary bytes, for tools that align two tokenizers over the same text
+# ---------------------------------------------------------------------------
+
+_SPM_SPACE = "\u2581"
+
+
+def hf_inner(tokenizer):
+    """The HF fast tokenizer behind an mlx-lm TokenizerWrapper, else the
+    tokenizer itself."""
+    cand = getattr(tokenizer, "_tokenizer", None)
+    if cand is not None and hasattr(cand, "convert_ids_to_tokens"):
+        return cand
+    return tokenizer
+
+
+def backend(tokenizer):
+    """The Rust ``tokenizers.Tokenizer`` behind a fast tokenizer."""
+    inner = hf_inner(tokenizer)
+    return inner._tokenizer if hasattr(inner, "_tokenizer") else inner
+
+
+def special_ids(tokenizer) -> set[int]:
+    """``all_special_ids`` plus added tokens flagged special. Plain added
+    text tokens are not specials."""
+    inner = hf_inner(tokenizer)
+    out = set(int(i) for i in inner.all_special_ids)
+    for tid, t in getattr(inner, "added_tokens_decoder", {}).items():
+        if getattr(t, "special", False):
+            out.add(int(tid))
+    return out
+
+
+def byte_decoder() -> dict[str, int]:
+    """The GPT-2 byte-level BPE map from vocabulary character to byte:
+    printable ASCII and two Latin-1 ranges map to themselves, the other
+    bytes to code points from 256 up, in byte order."""
+    keep = (list(range(ord("!"), ord("~") + 1))
+            + list(range(0xA1, 0xAC + 1)) + list(range(0xAE, 0xFF + 1)))
+    out = {chr(b): b for b in keep}
+    n = 0
+    for b in range(256):
+        if b not in out.values():
+            out[chr(256 + n)] = b
+            n += 1
+    return out
+
+
+def is_bytelevel(tokenizer) -> bool:
+    b = backend(tokenizer)
+    dec = b.decoder
+    if dec is not None and type(dec).__name__ == "ByteLevel":
+        return True
+    pre = b.pre_tokenizer
+    return "ByteLevel" in (repr(pre) if pre is not None else "")
+
+
+def eos_ids(tokenizer) -> list[int]:
+    inner = hf_inner(tokenizer)
+    ids = list(getattr(inner, "_gguf_eos_token_ids", None) or [])
+    if not ids and inner.eos_token_id is not None:
+        ids = [inner.eos_token_id]
+    return ids
+
+
+def token_bytes(tokenizer, width: int | None = None) -> list[bytes | None]:
+    """The byte string of every id in ``[0, width)``, with ``None`` for
+    specials and for ids the vocabulary does not fill. ``width`` defaults
+    to the tokenizer's length; a wider value (a model head padded past the
+    vocabulary) leaves the surplus ``None``.
+
+    ByteLevel vocabularies map each vocabulary character through the GPT-2
+    byte decoder. SentencePiece vocabularies map U+2581 to a space and
+    ``<0xNN>`` pieces to that byte, and keep everything else as UTF-8.
+    Added tokens that are not specials are literal text either way."""
+    inner = hf_inner(tokenizer)
+    n = len(inner)
+    if width is None:
+        width = n
+    special = special_ids(tokenizer)
+    added_text = {int(tid): str(t)
+                  for tid, t in getattr(inner, "added_tokens_decoder", {}).items()
+                  if not getattr(t, "special", False)}
+    out: list[bytes | None] = [None] * width
+    bytelevel = is_bytelevel(tokenizer)
+    bd = byte_decoder() if bytelevel else None
+    toks = inner.convert_ids_to_tokens(list(range(min(n, width))))
+    for tid, tok in enumerate(toks):
+        if tok is None or tid in special:
+            continue
+        if tid in added_text:
+            out[tid] = added_text[tid].encode("utf-8")
+            continue
+        if bytelevel:
+            try:
+                out[tid] = bytes(bd[ch] for ch in tok)
+            except KeyError:
+                out[tid] = None
+            continue
+        if tok.startswith("<0x") and tok.endswith(">") and len(tok) == 6:
+            try:
+                out[tid] = bytes([int(tok[3:5], 16)])
+                continue
+            except ValueError:
+                pass
+        out[tid] = tok.replace(_SPM_SPACE, " ").encode("utf-8")
+    return out
+
+
+def whitespace_start_mask(tokenizer, width: int,
+                          token_bytes_list: list[bytes | None] | None = None) -> np.ndarray:
+    """A boolean array over ``[0, width)`` that is True for ids whose bytes
+    start with ASCII whitespace and for the end-of-sequence ids. Pass the
+    ``token_bytes`` list to avoid computing it twice."""
+    tb = token_bytes(tokenizer, width) if token_bytes_list is None else token_bytes_list
+    mask = np.zeros(width, dtype=bool)
+    for tid, b in enumerate(tb):
+        if b and b[0] in b" \t\n\r\x0b\x0c":
+            mask[tid] = True
+    for tid in eos_ids(tokenizer):
+        if 0 <= tid < width:
+            mask[tid] = True
+    return mask
+
+
+def vocab_map_hash(tokenizer) -> str:
+    """A 16-hex-digit SHA-256 prefix over the id-to-token map with special
+    ids left out. Equal hashes mean equal id-to-token maps outside the
+    specials, not identical tokenization: merges, the pre-tokenizer, the
+    normalizer and the special ids are not covered, so callers that need
+    the same encoding check that separately. A map that is a prefix of a
+    longer one hashes differently and needs a prefix comparison."""
+    inner = hf_inner(tokenizer)
+    special = set(inner.all_special_ids)
+    h = hashlib.sha256()
+    toks = inner.convert_ids_to_tokens(list(range(len(inner))))
+    for tid, tok in enumerate(toks):
+        if tid in special:
+            continue
+        h.update(f"{tid}\t{tok}\n".encode("utf-8", errors="replace"))
+    return h.hexdigest()[:16]

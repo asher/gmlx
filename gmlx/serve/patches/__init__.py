@@ -202,8 +202,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
-    # Before the seed install: this rebinds the criteria seam without
-    # delegating, so installed after it would clobber the seed wrapper.
+    # This rebinds the criteria seam without delegating, so a wrapper of
+    # that seam (mtp_thinking's restore) installs after it.
     install_thinking_budget_fix()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()

@@ -64,7 +64,8 @@ class OwnedQwen3_5MLP(_L.Qwen3_5MLP):
             (self.gate_proj, self.up_proj), x, target_verify
         )
         return verify_linear(
-            self.down_proj, glu_rotate(up, gate, fold_of(self.down_proj)),
+            self.down_proj,
+            glu_rotate(up, gate, fold_of(self.down_proj), kernel=not self.training),
             target_verify)
 
 
@@ -153,7 +154,7 @@ def _moe_layer_classes():
             gates = mx.softmax(gates, axis=-1, precise=True)
 
             k = self.top_k
-            inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+            inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
             scores = mx.take_along_axis(gates, inds, axis=-1)
             scores = scores / scores.sum(axis=-1, keepdims=True)
 

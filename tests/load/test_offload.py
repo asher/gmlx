@@ -440,6 +440,7 @@ def test_streaming_prefill_default_resolution(monkeypatch):
     n, _ = install_expert_streaming(model)  # tiny model: in-RAM mode
     assert n > 0
     assert not moe_streaming_active(model)
+    assert model._kq_streaming is False
     assert _resolve_prefill_step(model, None) == (None, False)
     assert _resolve_prefill_step(model, 4096) == (4096, False)
 
@@ -451,6 +452,7 @@ def test_streaming_prefill_default_resolution(monkeypatch):
     try:
         install_expert_streaming(model2)
         assert moe_streaming_active(model2)
+        assert model2._kq_streaming is True
         assert _resolve_prefill_step(model2, None) == (8192, True)
         assert _resolve_prefill_step(model2, 4096) == (4096, False)
     finally:

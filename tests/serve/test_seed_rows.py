@@ -119,6 +119,7 @@ def test_seeded_target_draw_unseeded_uses_process_stream():
 @pytest.fixture
 def installed(monkeypatch):
     saved = (gen_mod.ResponseGenerator._make_thinking_budget_criteria,
+             gen_mod.ResponseGenerator._make_logits_processors,
              ar.BatchGenerator.insert, ar.GenerationBatch._step,
              ar.PromptProcessingBatch.generate,
              ar.SpeculativeGenerationBatch.next)
@@ -126,8 +127,12 @@ def installed(monkeypatch):
         gen_mod.ResponseGenerator, "_make_thinking_budget_criteria",
         lambda self, args, input_ids: None)
     monkeypatch.setattr(
+        gen_mod.ResponseGenerator, "_make_logits_processors",
+        lambda self, args, input_ids=None: [])
+    uid_counter = iter(range(100, 10_000))
+    monkeypatch.setattr(
         ar.BatchGenerator, "insert",
-        lambda self, prompts, **kw: list(range(100, 100 + len(prompts))))
+        lambda self, prompts, **kw: [next(uid_counter) for _ in prompts])
     monkeypatch.setattr(ar.GenerationBatch, "_step",
                         lambda self: self.sampler._kq_rows)
     monkeypatch.setattr(ar.PromptProcessingBatch, "generate",
@@ -138,6 +143,7 @@ def installed(monkeypatch):
     sr.install_per_request_seed()
     yield
     (gen_mod.ResponseGenerator._make_thinking_budget_criteria,
+     gen_mod.ResponseGenerator._make_logits_processors,
      ar.BatchGenerator.insert, ar.GenerationBatch._step,
      ar.PromptProcessingBatch.generate,
      ar.SpeculativeGenerationBatch.next) = saved
@@ -146,7 +152,7 @@ def installed(monkeypatch):
 def test_insert_registers_the_request_seed(installed):
     s = _sampler()
     rg = SimpleNamespace()
-    gen_mod.ResponseGenerator._make_thinking_budget_criteria(
+    gen_mod.ResponseGenerator._make_logits_processors(
         rg, SimpleNamespace(seed=42, temperature=1.0), None)
     bg = SimpleNamespace(sampler=s)
     uids = ar.BatchGenerator.insert(bg, [[1, 2, 3]])
@@ -156,7 +162,7 @@ def test_insert_registers_the_request_seed(installed):
 def test_greedy_request_seed_is_ignored(installed):
     s = _sampler()
     rg = SimpleNamespace()
-    gen_mod.ResponseGenerator._make_thinking_budget_criteria(
+    gen_mod.ResponseGenerator._make_logits_processors(
         rg, SimpleNamespace(seed=42, temperature=0), None)
     bg = SimpleNamespace(sampler=s)
     ar.BatchGenerator.insert(bg, [[1, 2, 3]])
@@ -166,7 +172,7 @@ def test_greedy_request_seed_is_ignored(installed):
 def test_unseeded_insert_registers_nothing(installed):
     s = _sampler()
     rg = SimpleNamespace()
-    gen_mod.ResponseGenerator._make_thinking_budget_criteria(
+    gen_mod.ResponseGenerator._make_logits_processors(
         rg, SimpleNamespace(seed=None, temperature=1.0), None)
     bg = SimpleNamespace(sampler=s)
     ar.BatchGenerator.insert(bg, [[1, 2, 3]])
@@ -190,3 +196,54 @@ def test_prompt_generate_and_spec_next_publish_uids(installed):
     sb = SimpleNamespace(sampler=s, _all_uids=[1, 3])
     assert ar.SpeculativeGenerationBatch.next(sb) == [1, 3]
     assert s._kq_rows is None
+
+
+def test_seeds_of_requests_queued_together_reach_their_own_rows(installed):
+    """mlx-vlm builds a request's thinking-budget criteria on the request's
+    own thread when it arrives, and its logits processors on the engine
+    thread as an argument of that request's insert. Two requests queued
+    while the engine decodes build both criteria before either insert,
+    so only the processors hook hands each insert its own seed."""
+    s = _sampler()
+    bg = SimpleNamespace(sampler=s)
+    rg = SimpleNamespace()
+    reqs = [SimpleNamespace(seed=101, temperature=0.7), SimpleNamespace(seed=102, temperature=0.7)]
+    for args in reqs:
+        gen_mod.ResponseGenerator._make_thinking_budget_criteria(rg, args, None)
+    uids = []
+    for args in reqs:
+        gen_mod.ResponseGenerator._make_logits_processors(rg, args, None)
+        uids += ar.BatchGenerator.insert(bg, [[1, 2, 3]])
+    assert s._kq_row_seeds == {uids[0]: 101, uids[1]: 102}
+    assert not sr._PENDING
+
+
+def test_an_unseeded_request_drops_a_seed_left_by_an_earlier_one(installed):
+    """A seeded request whose insert never ran leaves its seed pending on
+    the engine thread. The next request's processors build clears it, so
+    an unseeded request does not take it."""
+    s = _sampler()
+    rg = SimpleNamespace()
+    gen_mod.ResponseGenerator._make_logits_processors(rg, SimpleNamespace(seed=42, temperature=1.0), None)
+    gen_mod.ResponseGenerator._make_logits_processors(rg, SimpleNamespace(seed=None, temperature=1.0), None)
+    ar.BatchGenerator.insert(SimpleNamespace(sampler=s), [[1, 2, 3]])
+    assert s._kq_row_seeds == {}
+
+
+def test_a_seed_stashed_on_another_thread_stays_with_that_thread(installed):
+    """The pending seed is keyed by the thread that built the processors,
+    and an insert on another thread does not read it."""
+    import threading
+
+    s = _sampler()
+    rg = SimpleNamespace()
+    t = threading.Thread(target=gen_mod.ResponseGenerator._make_logits_processors,
+                         args=(rg, SimpleNamespace(seed=7, temperature=1.0), None))
+    t.start()
+    t.join()
+    try:
+        ar.BatchGenerator.insert(SimpleNamespace(sampler=s), [[1, 2, 3]])
+        assert s._kq_row_seeds == {}
+        assert list(sr._PENDING.values()) == [7]
+    finally:
+        sr._PENDING.clear()

@@ -68,9 +68,17 @@ the attention output gate. Where the installed mlx-kquant has
 `glu_hadamard`, `glu_rotate` computes the activation and its rotation in
 one kernel and offers the rotated row, and the projection's own rotation
 returns that row without a dispatch. The offer matches the array object
-and the fold, so any other row still rotates. The stock forwards and the
-owned tree both route the activation through `glu_rotate`, which covers
-80 of the 258 rotations on the 27B.
+and the fold, so any other row still rotates, and the projection empties
+it when it takes the row. The stock forwards and the owned tree both
+route the activation through `glu_rotate`, which covers 80 of the 258
+rotations on the 27B.
+
+A folded projection in training mode keeps to the MLX ops. The kq
+rotation and `glu_hadamard` kernels have no backward, so a training
+forward rotates each projection's input with `mx.hadamard_transform` and
+takes the unfused gated product. The distill head carries a folded
+head's rotation into its closed-form backward through the same MLX-op
+form.
 
 ## Precision
 

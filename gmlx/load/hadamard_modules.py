@@ -86,7 +86,8 @@ def _blocked_transform(xf: mx.array, block: int) -> mx.array:
 
 
 # The last rotation a fused op produced: (source row, fold key, rotated
-# row). One slot per thread, replaced by the next offer.
+# row). One slot per thread, replaced by the next offer and emptied when
+# the projection takes it, so no row outlives its use.
 _offer = threading.local()
 
 
@@ -99,6 +100,7 @@ def offer_rotation(x: mx.array, fold: _Fold, rotated: mx.array) -> None:
 def _offered(x: mx.array, fold: _Fold) -> mx.array | None:
     item = getattr(_offer, "item", None)
     if item is not None and item[0] is x and item[1] == fold.key:
+        _offer.item = None
         return item[2]
     return None
 
@@ -109,19 +111,20 @@ def _trace() -> None:
         _count += 1
 
 
-def rotate(x: mx.array, fold: _Fold) -> mx.array:
+def rotate(x: mx.array, fold: _Fold, kernel: bool = True) -> mx.array:
     """The forward fold of a projection input: permute, sign, transform.
     Returns ``x.dtype``. A rotation a fused op already offered for this
-    ``x`` costs nothing."""
+    ``x`` costs nothing. ``kernel`` False keeps to the MLX ops, which have
+    a backward: the kq kernels have none."""
     if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
         return x
-    offered = _offered(x, fold)
+    offered = _offered(x, fold) if kernel else None
     if offered is not None:
         return offered
     _trace()
-    kernel = _kernel(fold.block)
-    if kernel is not None:
-        return kernel(x, fold.signs, block=fold.block, perm=fold.perm)
+    kq_rotate = _kernel(fold.block) if kernel else None
+    if kq_rotate is not None:
+        return kq_rotate(x, fold.signs, block=fold.block, perm=fold.perm)
     if fold.perm is not None:
         rep, nk, hd = fold.perm
         lead = x.shape[:-1]
@@ -167,12 +170,14 @@ def _fused(fold: _Fold, name: str):
 
 
 def glu_rotate(x: mx.array, gate: mx.array, fold: _Fold | None, *,
-               activation: str = "silu") -> mx.array:
+               activation: str = "silu", kernel: bool = True) -> mx.array:
     """``act(gate) * x`` (silu: swiglu; sigmoid: an output gate) for the
     folded projection whose fold is ``fold``. Fused, the result is the
     rotated row, offered as its own rotation; unfused, the plain
-    product."""
-    if fold is None or (op := _fused(fold, "glu_hadamard")) is None:
+    product. ``kernel`` False keeps to the unfused product, which has a
+    backward: the fused kq op has none."""
+    if (fold is None or not kernel
+            or (op := _fused(fold, "glu_hadamard")) is None):
         if activation == "silu":
             return swiglu(gate, x)
         return x * mx.sigmoid(gate)
@@ -194,7 +199,7 @@ class HadamardKQuantLinear(KQuantLinear):
 
     def __call__(self, x, lora=None, *, pre_rotated=False):
         if not pre_rotated:
-            x = rotate(x, self._hadamard)
+            x = rotate(x, self._hadamard, kernel=not self.training)
         return super().__call__(x, lora=lora)
 
 
@@ -208,7 +213,7 @@ class HadamardKQuantEmbedding(KQuantEmbedding):
         return rotate_inverse(super().__call__(x), self._hadamard)
 
     def as_linear(self, x):
-        return super().as_linear(rotate(x, self._hadamard))
+        return super().as_linear(rotate(x, self._hadamard, kernel=not self.training))
 
 
 def is_folded(module) -> bool:
@@ -236,7 +241,7 @@ def shared_linears(modules, x: mx.array) -> tuple:
             continue
         xr = rotated.get(key)
         if xr is None:
-            xr = rotate(x, f)
+            xr = rotate(x, f, kernel=not m.training)
             rotated[key] = xr
         outs.append(m(xr, pre_rotated=True))
     return tuple(outs)

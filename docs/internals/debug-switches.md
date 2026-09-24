@@ -20,6 +20,9 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
 | `GMLX_GDN_REPLAY=0` | Qwen3.5 and 3.6 verify rounds store the recurrent state after each position instead of records the next step replays. Bit-identical either way. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
+| `GMLX_TRAIN_BLOCKED_ATTN=0` | Run training attention on MLX's unfused path instead of the query-block recompute in `gmlx.tune.attention`. Same numerics to rounding. |
+| `GMLX_TRAIN_GDN_CHUNK=0` | Run the gated delta scan of a training forward on mlx-lm's per-token loop instead of the chunked rule in `gmlx.tune.gdn`. |
+| `MLX_ENABLE_TF32=1` | Keep TF32 float32 matmul in `gmlx train` and `gmlx distill`, which otherwise set it to `0`. The chunked gated delta rule then takes the loop and says so. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Same numerics to one rounding. Set this first when debugging a folded file. |
 | `GMLX_HADAMARD_FUSE=0` | Rotate a folded down or output projection's input as its own dispatch instead of inside the swiglu or output gate kernel. Same numerics to bf16 rounding. |
 | `GMLX_HADAMARD_TRACE=1` | Count rotations per forward on a Hadamard-folded file, read back through `hadamard_modules.rotation_count`. |

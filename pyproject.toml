@@ -173,6 +173,8 @@ markers = [
 # there is nothing to infer from.
 include = [
     "gmlx/cache/apc_manager.py",
+    "gmlx/distill/eval.py",
+    "gmlx/distill/student.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
     "gmlx/load/hadamard_modules.py",
@@ -182,6 +184,8 @@ include = [
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
+    "gmlx/tune/gdn.py",
+    "gmlx/tune/lora.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"

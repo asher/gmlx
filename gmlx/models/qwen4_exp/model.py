@@ -50,6 +50,10 @@ from mlx_lm.models.base import (
 )
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
+
+from gmlx.envflags import env_bool
+from gmlx.tune.attention import blocked_attention
+from gmlx.tune.gdn import training_gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
@@ -184,24 +188,33 @@ class HyperConnection(nn.Module):
 
     def __call__(self, h: mx.array):
         B, T, hc, D = h.shape
-        if B * T <= 8 and self._hclr_ok(h.dtype):
+        # A LoRA wrapper (training, or a served adapter) has no weight of
+        # its own, so the kernels that read one fall back to calling it.
+        down, up = self.down, self.up
+        inject = self.inject if "inject" in self else None
+        plain = ("weight" in down and "weight" in up
+                 and (inject is None or "weight" in inject))
+        # The kernels have no backward: training takes the ops.
+        kern = not self.training
+        if kern and B * T <= 8 and plain and self._hclr_ok(h.dtype):
             norm, front, epi = _kq_hc()
             xn = norm(h, self.norm.weight, self.norm.eps)
-            lo, inj = front(xn, self.down.weight, self.inject.weight,
+            lo, inj = front(xn, down.weight, inject.weight,
                             self.norm.weight.dtype)
-            return epi(lo, self.up.weight, xn), inj
-        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps)
+            return epi(lo, up.weight, xn), inj
+        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps) if kern else None
         if xn is None:
             xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
-        lo = nn.silu(self.down(xf) * (1.0 / hc))
-        up_out = self.up(lo)
-        if "inject" not in self:
+        lo = nn.silu(down(xf) * (1.0 / hc))
+        up_out = up(lo)
+        if inject is None:
             return _hc_mix(up_out, xn)
-        inj_out = _hc_inject_kern(xf, self.inject.weight)
+        inj_out = (_hc_inject_kern(xf, inject.weight)
+                   if kern and "weight" in inject else None)
         if inj_out is None:
-            inj_out = self.inject(xf)
-        r = _hc_epi_kern(up_out, xn, inj_out)
+            inj_out = inject(xf)
+        r = _hc_epi_kern(up_out, xn, inj_out) if kern else None
         if r is not None:
             return r
         # inj stays eager: compiling this sigmoid shifts its fp32 lsb and
@@ -438,8 +451,10 @@ def _hc_combine_ops(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
     return h + out[:, :, None, :] * inject[..., None]
 
 
-def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
-    if h.shape[0] * h.shape[1] > 8:
+def _hc_combine(h: mx.array, out: mx.array, inject: mx.array,
+                kern: bool = True) -> mx.array:
+    """``kern`` False keeps to the ops, which have a backward."""
+    if kern and h.shape[0] * h.shape[1] > 8:
         y = _hc_combine_kern(h, out, inject)
         if y is not None:
             return y
@@ -597,10 +612,15 @@ class GatedDeltaNet(nn.Module):
         state = cache[1] if cache is not None else None
         if state is not None and state.shape[0] != B:
             state = None
-        out, state = gated_delta_update(
-            q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
-            use_kernel=not self.training,
-        )
+        if self.training and cache is None:
+            out, state = training_gated_delta_update(
+                q, k, v, a, b, self.A_log, self.dt_bias, state, mask
+            )
+        else:
+            out, state = gated_delta_update(
+                q, k, v, a, b, self.A_log, self.dt_bias, state, mask,
+                use_kernel=not self.training,
+            )
         if cache is not None:
             cache[1] = state
             if hasattr(cache, "advance"):
@@ -1029,7 +1049,7 @@ class QSAIndexer(nn.Module):
             w = mx.full((B, L, self.n_heads),
                         1.0 / math.sqrt(self.head_dim), dtype=x.dtype)
             s16 = _kq_score()(q, blocks.astype(x.dtype), w, offset, self.ratio)
-            sel = topk(s16, k, True)[:, 0].astype(mx.int64)
+            sel = mx.stop_gradient(topk(s16, k, True)[:, 0].astype(mx.int64))
             return sel, complete
         s = self.scores(x, blocks, offset, cos=cos, sin=sin)
         valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
@@ -1041,7 +1061,7 @@ class QSAIndexer(nn.Module):
             # order-insensitive. Scores narrow to the activation dtype for
             # the kernel's 16-bit wire.
             sel = topk(s.astype(x.dtype)[:, None], k, True)[:, 0]
-            sel = sel.astype(mx.int64)
+            sel = mx.stop_gradient(sel.astype(mx.int64))
         else:
             sel = mx.argpartition(s, kth=-k, axis=-1)[..., -k:]
         return sel, complete
@@ -1104,7 +1124,8 @@ class Attention(nn.Module):
         r, topk = self.ratio, self.indexer.block_topk
         members = (sel[..., None] * r + mx.arange(r)).reshape(B, L, topk * r)
         tail_start = (complete * r)[None, :, None]
-        tail = tail_start + mx.arange(r)[None, None, :]
+        tail = mx.broadcast_to(
+            tail_start + mx.arange(r)[None, None, :], (B, L, r))
         query_ends = (offset + mx.arange(L) + 1)[None, :, None]
         tail_ok = tail < query_ends
         idx = mx.concatenate([members, mx.minimum(tail, query_ends - 1)], axis=-1)
@@ -1250,20 +1271,23 @@ class Attention(nn.Module):
             sel, complete = selection
             key_len = k.shape[2]
             all_sparse = (offset + 1) // self.ratio > self.indexer.block_topk
+            # the kq sparse kernels have no backward: a training forward
+            # takes the token-mask branch
+            kern = not (self.training and cache is None)
             paged = _kq_paged() if (
-                L == 1 and self.ratio == 4 and D == 256
+                kern and L == 1 and self.ratio == 4 and D == 256
                 and q.dtype in (mx.bfloat16, mx.float16)) else None
             if paged is not None and all_sparse and not isinstance(mask, mx.array):
                 out = self._paged_attention(q, k, v, sel, key_len, paged)
-            elif L <= 8 and all_sparse and not isinstance(mask, mx.array):
+            elif kern and L <= 8 and all_sparse and not isinstance(mask, mx.array):
                 out = self._gathered_attention(q, k, v, sel, complete, offset, L)
-            elif (B == 1 and all_sparse and not isinstance(mask, mx.array)
+            elif (kern and B == 1 and all_sparse and not isinstance(mask, mx.array)
                   and L % 4 == 0 and self.ratio == 4 and D == 256
                   and H == 12 * Hkv and q.dtype in (mx.bfloat16, mx.float16)
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._block_sparse_prefill(q, k, v, sel, offset,
                                                  key_len, bs)
-            elif (B == 1 and not all_sparse and L > 8
+            elif (kern and B == 1 and not all_sparse and L > 8
                   and not isinstance(mask, mx.array)
                   and offset % 4 == 0 and L % 4 == 0
                   and self.ratio == 4 and D == 256 and H == 12 * Hkv
@@ -1271,7 +1295,7 @@ class Attention(nn.Module):
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._split_regime_prefill(q, k, v, sel, complete,
                                                  offset, L, key_len, bs)
-            elif (B == 1 and L > 8 and L % 4 != 0
+            elif (kern and B == 1 and L > 8 and L % 4 != 0
                   and not isinstance(mask, mx.array)
                   and (all_sparse or offset % 4 == 0)
                   and self.ratio == 4 and D == 256 and H == 12 * Hkv
@@ -1305,8 +1329,15 @@ class Attention(nn.Module):
                         qsa = qsa & mask
                     else:
                         qsa = mask + mx.where(qsa, 0.0, -mx.inf).astype(mask.dtype)
-                out = mx.fast.scaled_dot_product_attention(
-                    q, k, v, scale=self.scale, mask=qsa)
+                if (self.training and cache is None
+                        and env_bool("GMLX_TRAIN_BLOCKED_ATTN", True)):
+                    # MLX's unfused backward keeps every layer's
+                    # [B, H, L, L] softmax on the tape
+                    out = blocked_attention(q, k, v, scale=self.scale,
+                                            mask=qsa)
+                else:
+                    out = mx.fast.scaled_dot_product_attention(
+                        q, k, v, scale=self.scale, mask=qsa)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(out * mx.sigmoid(gate))
 
@@ -1341,7 +1372,7 @@ class SparseMoeBlock(nn.Module):
         gates = self.gate(x)
         gates = mx.softmax(gates, axis=-1, precise=True)
         k = self.top_k
-        inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+        inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])
         scores = mx.take_along_axis(gates, inds, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
@@ -1656,10 +1687,10 @@ class DecoderLayer(nn.Module):
         else:
             out = self.self_attn(mixed, mask=mask, cache=cache,
                                  positions=positions)
-        h = _hc_combine(h, out, inject)
+        h = _hc_combine(h, out, inject, kern=not self.training)
         mixed, inject = self.hc_ffn(h)
         out = self.mlp(mixed)
-        return _hc_combine(h, out, inject)
+        return _hc_combine(h, out, inject, kern=not self.training)
 
 
 class Qwen4ExpModel(nn.Module):

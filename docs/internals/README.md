@@ -14,3 +14,4 @@ How gmlx works internally, for contributors. Users start at
 | [streaming-measurements.md](streaming-measurements.md) | the measurements behind the streaming guide's lossless and lossy settings tables |
 | [hadamard-fold.md](hadamard-fold.md) | running a GGUF whose weights are stored under a Hadamard rotation: the header contract, module placement and rotation sharing |
 | [debug-switches.md](debug-switches.md) | environment variables for isolating defects |
+| [distill.md](distill.md) | the teacher pass memory arithmetic and the training head's live set |

@@ -54,6 +54,14 @@ def _bare_evals_under_except(path: Path) -> list[str]:
     class V(ast.NodeVisitor):
         def __init__(self):
             self.try_depth = 0
+            self.scope: list[str] = []
+
+        def _scoped(self, node):
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _scoped
 
         def visit_Try(self, node):
             guarded = bool(node.handlers)
@@ -73,19 +81,36 @@ def _bare_evals_under_except(path: Path) -> list[str]:
                     and f.attr in BARE_EVAL
                     and isinstance(f.value, ast.Name)
                     and f.value.id == "mx"):
-                hits.append(f"{path.name}:{node.lineno} mx.{f.attr}")
+                where = ".".join(self.scope) or "<module>"
+                hits.append(f"{path.name}:{where} mx.{f.attr}")
             self.generic_visit(node)
 
     V().visit(tree)
     return hits
 
 
+# Sites that predate the nested scan, keyed by file and enclosing function
+# so an edit elsewhere in the file does not move them. Each is a bare eval
+# under an except-carrying try inside a subpackage; the list shrinks as
+# they are routed through the guard and never grows.
+PRE_EXISTING = {
+    "cache/kvarn_sdpa.py:_probe_tg_limit mx.eval",
+    "cache/kvarn_sdpa.py:_probe_fa mx.eval",
+    "models/deepseek_v4/model.py:_sparse_kernel_wide mx.eval",
+    "models/kda_fused.py:_launches mx.eval",
+}
+
+
 def test_no_bare_eval_under_except_anywhere():
     offenders: list[str] = []
-    for p in sorted(GMLX_DIR.glob("*.py")):
+    for p in sorted(GMLX_DIR.rglob("*.py")):
         if p.name == "eval_guard.py":
             continue  # the guard owns the only sanctioned bare evals
-        offenders += _bare_evals_under_except(p)
+        rel = p.relative_to(GMLX_DIR).as_posix()
+        for hit in _bare_evals_under_except(p):
+            site = rel + hit[len(p.name):]
+            if site not in PRE_EXISTING:
+                offenders.append(site)
     assert not offenders, (
         "bare mx.eval/mx.async_eval under an except-carrying try; route "
         "through gmlx.eval_guard.guard instead:\n  " + "\n  ".join(offenders))
@@ -100,7 +125,7 @@ def test_ban_scanner_sees_the_pattern(tmp_path):
         "        mx.eval(x)\n"
         "    except Exception:\n"
         "        pass\n")
-    assert _bare_evals_under_except(bad) == ["bad.py:4 mx.eval"]
+    assert _bare_evals_under_except(bad) == ["bad.py:f mx.eval"]
     ok = tmp_path / "ok.py"
     ok.write_text(
         "import mlx.core as mx\n"

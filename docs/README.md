@@ -31,6 +31,7 @@ terms the rest of the docs use.
 | build a local RAG pipeline with embeddings and rerank | [rag.md](rag.md) |
 | run a vision or audio model | [vlm.md](vlm.md) |
 | fine-tune with LoRA and serve several adapters on one base | [lora.md](lora.md) |
+| teach a small model a document without pasting it into every prompt, or distill a larger model into it | [distill.md](distill.md) |
 | run a 200B MoE on a 64 GB Mac and pick a lossy setting | [streaming.md](streaming.md) |
 | make it faster and know what each setting costs | [performance.md](performance.md) |
 | fix something that broke | [troubleshooting.md](troubleshooting.md) |

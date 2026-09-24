@@ -25,6 +25,7 @@ explain when to use it.
 | [`gmlx profiles`](#gmlx-profiles) | show the family sampling defaults and intents |
 | [`gmlx talk`](#gmlx-talk) | voice chat with a served model |
 | [`gmlx train`](#gmlx-train) | train a LoRA adapter on a GGUF base |
+| [`gmlx distill`](#gmlx-distill) | distill a teacher GGUF into a student adapter offline |
 | [`gmlx doctor`](#gmlx-doctor) | check the runtime, config, models and services |
 | [`gmlx completion`](#gmlx-completion) | print a shell completion script |
 
@@ -822,14 +823,14 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 |------|---------|---------|
 | `model`, positional | required | the base GGUF, or a config id |
 | `--data PATH_OR_ID` | required | a directory with `train.jsonl` and `valid.jsonl`, or a Hugging Face dataset id |
-| `--adapter-out PATH` | required | where to write the adapter |
+| `--adapter-out PATH` | required | where to write the adapter. A module the adapter cannot hold is refused before the first step |
 | `--config FILE` | the first default location | the config an id is resolved against |
 | `--iters N` | `150` | training iterations |
 | `--batch-size N` | `4` | batch size |
 | `--num-layers N` | `8` | top transformer layers to adapt |
 | `--rank N` | `8` | LoRA rank |
 | `--scale F` | `20.0` | LoRA scale. Alpha is scale times rank |
-| `--dropout F` | `0.0` | LoRA dropout |
+| `--dropout F` | `0.0` | LoRA dropout, below 1 |
 | `--learning-rate F` | `1e-4` | Adam learning rate |
 | `--max-seq-length N` | `2048` | longest training sequence |
 | `--val-batches N` | `25` | validation batches in each evaluation |
@@ -837,9 +838,347 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--steps-per-eval N` | `200` | validation interval |
 | `--seed N` | `0` | RNG seed |
 | `--hf-source ID` | none | tokenizer and config fallback, rarely needed |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass, trading time for memory. Refused with `--dropout` above 0 and on Kimi K3 and DeepSeek-V4.1 |
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
+
+## gmlx distill
+
+`gmlx distill` trains a LoRA adapter for a small GGUF on a larger one's
+outputs in six actions plus one check. The teacher and the student may
+use different tokenizers, and the walkthrough is [distill.md](distill.md).
+
+- `gen` runs a teacher through `gmlx serve` over a prompt set and writes
+  its replies as a corpus.
+- `filter` drops the generated rows a student should not learn from.
+- `cache` runs a teacher GGUF over a corpus once and stores its most
+  likely next tokens and their log-probabilities at every position.
+- `align` maps that cache onto a student tokenizer and writes a view, the
+  positions and values the student trains to match.
+- `train` fits a LoRA adapter on a K-quant GGUF student against the view.
+- `eval` scores the student with and without the adapter.
+- `census` checks, from two reply caches of the same replies, how much
+  a context the student never sees, the document in the guide, moves the
+  teacher.
+
+```sh
+gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
+gmlx distill filter --in replies.jsonl --out corpus.jsonl
+gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --frame reply --out cache/
+gmlx distill align --cache cache/ --student student-Q4_K_M.gguf --out view/
+gmlx distill train --view view/ --student student-Q4_K_M.gguf --adapter-out student-distill.gguf --iters 2000
+gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf --before \
+    --slice prose=heldout.txt --md eval.md --json eval.json
+```
+
+Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
+success. A refused input or setting exits 2, and so does a missing
+required flag, with argparse's usage message, a missing input file, and
+`filter` when its `--verify` command fails. Every output path is checked
+before any model loads, and one the action cannot write exits 2 as well.
+`cache` exits 2 when a shard cannot be written and keeps the verified
+shards. `gen` exits 1 when some requests failed and their prompts remain
+to be rerun, and 2 when its server fails to start. `align` exits 3 when
+the own-group check refuses the pair, and writes no view. `cache` exits
+3 when its memory probe misses twice or a `--routes` recording does not
+match its rows, and 4 when the validator fails on what it wrote.
+`cache --validate` exits 1 on a problem.
+
+### distill gen
+
+The prompt file holds one `{"id", "messages", "context"}` object per line
+whose messages end on a user turn. A row's context, or the file given by
+`--context`, goes in front of the last user turn for the teacher, and
+either one must hold text. A row that took a context is written with the
+teacher's list under `messages`
+and the prompt as given under `student_messages`, and a row without one
+carries `messages` alone. Prompt ids already in the output are skipped,
+so a run resumes where it stopped. A resume checks that each skipped id
+still names the prompt it answered and refuses when one differs or is
+gone, since ids taken from line numbers shift when a line is inserted.
+An interrupt cancels the queued requests and stops the server, and the
+run ends when the requests in flight have failed or returned.
+
+Beside the output, `<out>.gen.json` holds the settings a resume must
+match and is written before the first request. When a run ends it
+gains a `run` block with the reply and token totals read from the output
+rows, the wall time summed over the runs that ended, and this run's
+failed requests and aggregate token rate. An interrupted run leaves the
+block as it found it, and a rerun that finds every prompt answered
+writes the block from the rows when the sidecar has none. A `--base-url`
+server that lists several models serves the run with the one named like
+`--teacher`, and gen refuses when none or several match.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--out PATH` | required | corpus jsonl to write, with `<out>.gen.json` beside it |
+| `--prompts PATH` | none | a jsonl of prompt rows ending on a user turn |
+| `--corpus PATH_OR_ID` | none | a text corpus to build continuation prompts from, instead of `--prompts` |
+| `--teacher GGUF` | none | GGUF served for the run, the teacher or, for a measurement, the student. `--model` is the same flag |
+| `--base-url URL` | none | a running server's `/v1` base, instead of serving `--teacher`. With `--thinking-budget` the close is sized for a drafted server |
+| `--host HOST` | `127.0.0.1` | bind host of the served teacher |
+| `--port N` | `8093` | port of the served teacher |
+| `--text-key KEY` | `text` | with `--corpus`, text column of a jsonl or dataset row |
+| `--hf-split NAME` | `train` | with `--corpus`, dataset split for a Hugging Face id |
+| `--prefix-chars N` | `1500` | with `--corpus`, document prefix quoted in the user turn, cut at a space |
+| `--min-chars N` | `2000` | with `--corpus`, skip documents shorter than this |
+| `--docs N` | all | with `--corpus`, prompts to build |
+| `--instruction TEXT` | `Continue the following text.` | with `--corpus`, the user turn placed before the prefix |
+| `--chat-template-kwargs JSON` | none | chat-template kwargs for every teacher render, a JSON object, passed to serve as `--chat-template-config`; a thinking key is refused, `--thinking` is the switch |
+| `--context FILE` | none | text the teacher reads for every prompt without its own context field, refused when blank |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
+| `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
+| `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
+| `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
+| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, compared on a resume. A flag that changes the prompt or thinking is refused, as is a drafter with `--thinking-budget` |
+| `--startup-timeout S` | `900` | seconds to wait for the served teacher |
+| `--concurrency N` | `8` | requests in flight |
+| `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close on top, without one the trace shares this budget |
+| `--temperature F` | `0.7` | sampling temperature |
+| `--top-p F` | `0.9` | keep the most likely tokens whose probabilities add to this |
+| `--top-k N` | the server's | sampler top-k cutoff |
+| `--min-p F` | the server's | minimum-probability cutoff |
+| `--seed N` | `1` | base seed, and each request uses it plus the prompt index |
+| `--timeout S` | `1800` | per-request timeout |
+| `--report-every N` | `50` | progress line interval in replies |
+
+`--serve-arg` refuses `--thinking`, `--thinking-budget`, `--chat-template`,
+`--chat-template-config`, `--reasoning-effort`, `--system-prompt` and
+`--profile`, in any spelling serve accepts. Each changes what the teacher
+is prompted with, and the rows would not record it. Set the thinking
+switch and budget with gen's own flags, template variables with
+`--chat-template-kwargs`, sampling with gen's sampling flags, and a
+system prompt as a system turn in the prompt rows. A template override
+has no gen form, since `cache` renders the rows with the teacher's own
+template. Beside `--thinking-budget`,
+`--native-mtp`, `--speculative` and `--draft-gguf` are refused too,
+because a drafted server does not hold each request to the budget.
+
+### distill filter
+
+Checks run in a fixed order and the first failure names the reason,
+one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
+`tokens` and `verify`, each defined in
+[Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
+guide. The checker, the `--verify` command, reads the surviving rows as
+jsonl on stdin and prints one line per row, `ok` or a reason word. `--context` rebuilds
+every kept row with the context on the teacher's side and the prompt as
+given under `student_messages`, which prepares a second round from
+replies a student wrote without it. It refuses a row that already
+carries `student_messages`, since that row was generated with a context.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--in PATH` | required | generated corpus jsonl, repeatable, concatenated in order, refused when the sidecars disagree, the inputs were filtered differently or two rows share an id |
+| `--out PATH` | required | filtered corpus to write, with `<out>.gen.json` beside it |
+| `--report JSON` | none | write the kept and dropped counts here |
+| `--rejects PATH` | none | write one `{id, reason}` line per dropped row here, with the checker's word under `detail` |
+| `--min-words N` | `16` | drop replies whose answer has fewer units, a unit being a word or one ideograph or kana character, trace not counted. `--min-tokens` is the same flag |
+| `--ngram N` | `8` | n-gram size of the repetition check, in the units of `--min-words` |
+| `--max-repeat F` | `0.2` | drop replies whose repeated n-grams exceed this fraction |
+| `--max-trace-repeat F` | `0.5` | drop replies whose reasoning trace's repeated n-grams exceed this fraction |
+| `--max-line-repeats N` | `2` | drop replies with a line repeated more than this many times in a row, lines without a letter or digit skipped |
+| `--max-non-ascii F` | off | drop replies whose non-ASCII character fraction exceeds this |
+| `--max-reply-tokens N` | off | drop replies longer than this many tokens, reasoning trace included |
+| `--keep-budget-hit` | off | keep replies whose thinking budget cut the reasoning trace |
+| `--verify CMD` | none | shell command of your checker, which reads the survivors on stdin and prints `ok` or a reason per row |
+| `--context FILE` | none | put this text on the teacher's side of every kept row, refused when blank |
+| `--context-format FMT` | `{context}\n\n{prompt}` | how the context and the last user turn combine, must place both fields |
+
+### distill cache
+
+The flags of the teacher pass, in the order `--help` prints them.
+`--messages-key` picks which list of a row the teacher reads, and
+`--student-messages-key` only names the list the student's render reads
+later, in `align` and `eval`. A reply or reply-think row whose final
+turn has no content, such as a tool call, has nothing to target and is
+dropped, counted in the `[cache] frame` line. That line also counts the
+reply-think rows whose reasoning trace the teacher's template does not
+render, which train on the reply alone, and a reply-think pass in which
+no row keeps its trace is refused.
+
+A corpus written by `gen` renders with the thinking switch and the
+`--chat-template-kwargs` its `.gen.json` sidecar records, mapped onto the
+variables the teacher's template reads. `--frame-kwargs` adds to them,
+and a value that contradicts one is refused. A template that prints the
+date, as Llama 3's and gpt-oss's do, renders the day the cache was first
+started, and a resume and the student's render in `align` keep that day.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--teacher GGUF` | required unless `--validate` | the teacher GGUF, sharded ok |
+| `--corpus PATH_OR_ID` | required unless `--validate` | a jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]` |
+| `--out DIR` | required unless `--validate` | the cache directory to write |
+| `--validate DIR` | none | validate an existing cache and exit, no teacher load |
+| `--top-k N` | `256` | log-probabilities kept per position |
+| `--max-len N` | `2048` | teacher tokens per window, including the start token, at least 2. The continue frame and closing tail count toward it and must leave the window at least 8 |
+| `--max-disk-gb F` | none | refuse when the size estimate exceeds this |
+| `--cache-limit-gb F` | `8.0` | MLX buffer cache cap during the pass |
+| `--logits-cap-gb F` | `4.0` | memory cap that sizes the head sub-chunk |
+| `--floor` | off | also store `floor_kld`, the KL against the f16-rounded top-k |
+| `--rows-per-shard N` | `64` | rows per shard file |
+| `--trunk N` | `512`, or `8192` streaming | trunk chunk in tokens, rows stacked on the batch axis |
+| `--resume` | off | continue after the last verified shard, refused when the corpus, teacher, template, HF source or row options changed. A finished cache is validated, not redone |
+| `--max-rows N` | none | stop after this many rows |
+| `--max-tokens N` | none | stop after this many teacher tokens |
+| `--limit-docs N` | none | read at most this many documents |
+| `--text-key KEY` | `text` | text column of a jsonl or dataset row |
+| `--hf-split NAME` | `train` | dataset split for a Hugging Face id |
+| `--source TAG` | `human`, or `synthetic` with a generator sidecar | source tag written on every row |
+| `--frame KIND` | `none` | `none`, `continue`, `chat`, `reply` or `reply-think`: where the targets sit in the chat template, `reply-think` from the final turn's reasoning trace on |
+| `--per-turn` | off | with the chat or reply frame, one reply row per assistant turn |
+| `--student-messages-key KEY` | `student_messages` | corpus key of the student's own message list on reply rows |
+| `--frame-instruction TEXT` | `Continue the following text.` | user turn for the continue frame |
+| `--messages-key KEY` | `messages` | conversation column for the chat and reply frames |
+| `--close-final-windows` | off | with the continue frame, close the last window of a document with the turn-end marker |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file, added to those a `gen` sidecar records |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
+| `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
+| `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
+| `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
+| `--expert-bytes-gb F` | the streamed expert bytes | expert bytes read per forward, for the read-traffic report; 0 for a resident teacher |
+| `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval`, refused when a gate cannot replay |
+| `--hidden` | off | also store a seeded random sketch of the teacher's final hidden state per position, for `train --hs` |
+| `--hidden-dim N` | `256` | width of the hidden sketch |
+| `--hidden-seed N` | `1` | seed of the sketch matrix |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill align
+
+Alignment flags, in the order `--help` prints them.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--cache DIR` | required | the cache directory |
+| `--student GGUF_OR_DIR` | required | the student GGUF, or an MLX checkpoint directory for its tokenizer |
+| `--out DIR` | required | the view directory to write. An earlier view there is replaced once every check has passed |
+| `--tables DIR` | none | an earlier view directory whose tokenizer tables are reused when the pair matches |
+| `--kprime N` | the maximum seen | cap on distinct student-token groups kept per boundary; ignored on the identity path, where K' = K |
+| `--materialize` | off | also write the batch tensors as view shards |
+| `--max-disk-gb F` | none | refuse to materialize past this size |
+| `--force` | off | keep a view the own-group check would refuse |
+| `--val-fraction F` | `0.02` | fraction of rows held for validation, whole documents at a time and at least one row of a cache with two. A one-document cache splits it |
+| `--seed N` | `1` | seed of the validation split |
+| `--w-mid F` | `0.5` | weight of an intra-word shared boundary |
+| `--gamma F` | `0.001` | drop chunks of the chunk term (ALM) whose teacher boundary mass is below this, positive |
+| `--tau-alm F` | `1.0` | temperature on the chunk term (ALM), positive |
+| `--T-dk F` | `1.0` | temperature on the group softmaxes of the KL term, positive, under every `--loss` form |
+| `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side, at least 1 |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view, over those the cache recorded and its `gen` thinking switch |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill train
+
+Training flags, in the order `--help` prints them.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--view DIR` | required | a view directory, repeatable to mix views aligned alike over one tokenizer pair |
+| `--student GGUF` | required | the student GGUF, sharded ok |
+| `--adapter-out PATH` | required | where to write the GGUF adapter. A path that cannot be written is refused before the load, a module the adapter cannot hold before the first step |
+| `--iters N` | required | training steps |
+| `--lora-rank N` | `16` | LoRA rank |
+| `--lora-scale F` | `2.0` | LoRA multiplier applied directly, nonzero |
+| `--lora-alpha F` | none | LoRA multiplier as alpha over rank, nonzero, instead of `--lora-scale` |
+| `--lora-dropout F` | `0.0` | LoRA dropout, below 1, one mask per step, replayed by `--grad-checkpoint` |
+| `--grad-checkpoint` | off | recompute each layer's activations in the backward pass. Refused on Kimi K3 and DeepSeek-V4.1 |
+| `--lr F` | `1e-4` | peak learning rate |
+| `--batch-size N` | `8` | rows per step |
+| `--warmup F` | `0.05` | warmup as a fraction of the steps, at least one step and never the last, then cosine decay. `0` starts at the peak rate |
+| `--weight-decay F` | `0` | AdamW weight decay |
+| `--clip F` | `1.0` | gradient norm clip, `0` turns clipping off |
+| `--seed N` | `1` | data order and LoRA init |
+| `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant |
+| `--dk F` | `1` | weight of the bucketed KL term |
+| `--alm F` | `1`, `0` when `align` took the identity path | weight of the chunk term (ALM) |
+| `--ce F` | `0` | weight of the cross-entropy term |
+| `--T-dk F` | the view's | override the view's T_dk |
+| `--tau-alm F` | the view's | override the view's tau_alm |
+| `--gamma F` | the view's | override the view's gamma, refused when it differs on a materialized view (its chunks are cut by `align`) |
+| `--chunk N` | `512` | positions per head chunk |
+| `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
+| `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
+| `--ckpt-dir DIR` | `./ckpt` | checkpoint directory. A fresh run refuses one that holds an earlier run's checkpoints |
+| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or when the views, student, training settings or gmlx's validation leave-out rule differ from that run |
+| `--save-every N` | `200` | checkpoint interval in steps |
+| `--val-every N` | `200` | validation interval in steps |
+| `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |
+| `--report-every N` | `10` | train-loss report interval |
+| `--report JSON` | none | write the run log here |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
+| `--no-wired-limit` | off | leave the wired limit where it is |
+| `--cache-limit-gb F` | `8.0` | MLX buffer cache cap |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill eval
+
+Evaluation flags, in the order `--help` prints them. Task files are
+jsonl files. `arc_easy.jsonl` and `hellaswag.jsonl` hold
+`{id, query, choices, gold}` rows, `gsm8k.jsonl` holds
+`{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the worked
+examples shown before each question.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--student GGUF` | required | the student GGUF |
+| `--adapter GGUF` | none | the GGUF adapter to apply |
+| `--md PATH` | required | the Markdown report to write |
+| `--json PATH` | required | the JSON report to write |
+| `--cache DIR` | none | cache whose corpus the slices are checked against for overlap |
+| `--slice NAME=PATH` | none | a held-out text slice, repeatable |
+| `--teacher-bpb JSON` | none | teacher bits per byte per slice, a `{slice: bpb}` map or an earlier eval report, shown beside the student's |
+| `--tasks-dir DIR` | `.` | directory of the four task files |
+| `--tasks LIST` | none | comma list of `arc_easy`, `hellaswag`, `gsm8k` |
+| `--task-limit N` | all | items per task |
+| `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
+| `--before` | off | also score with the adapter disabled in process, needs `--adapter` |
+| `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, `student_messages` first, repeatable |
+| `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies |
+| `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
+| `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score. Ignored with `--before`, which anchors on the adapter-off replies |
+| `--chat-max-len N` | `2048` | longest chat or reply row scored, in student tokens. A longer row loses turns until it fits, or is dropped |
+| `--chat-per-turn` | off | score every assistant turn as its own row |
+| `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
+| `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |
+| `--reply-positions JSON` | none | a `distill census` JSON whose `high_delta` maps restrict the reply slices, refused when it names none of their rows or its frame differs from `--reply-think` |
+| `--kld-cache DIR` | none | same-vocabulary cache to score sparse KL against, refused on another tokenizer or a cached id beyond the student's head |
+| `--kld-rows N` | all | rows of the KL cache to score, spread over its length order |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every render |
+| `--max-len N` | `512` | window length for bits per byte |
+| `--bpb-prefix TEXT` | none | text placed before every window (`\n`, `\t`, `\r` and `\\` decoded), or `@continue` or `@model` for that frame's template prefix; another `@` exits 2 |
+| `--batch-size N` | `8` | windows per batch |
+| `--cache-limit-gb F` | `4.0` | MLX buffer cache cap |
+| `--decontam-threshold F` | `0.01` | slice window fraction found in the corpus above which its gate is void |
+| `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
+| `--cpu` | off | run on the CPU device, for smoke tests |
+
+### distill census
+
+Pairs the reply rows of a cache made without a context with the same
+rows in one or more caches made with one. It reports how much more
+likely the context makes each token the teacher wrote, the distance
+between the two stored top-k distributions with everything outside the
+top-k pooled, and, with several contexts, the part no single adapter can
+learn. With several `--with` caches, every cache decides which rows
+pair and which positions count, while the effect, the histogram and
+the positions map come from the first. Runs on the CPU. Exits 2 when a
+cache has no manifest or one it cannot read, when a `--with` cache was
+made with another teacher, tokenizer, top-k or head width than
+`--without`, when a reply-think cache records no `content_start` (one
+written before rows carried it), or when no rows pair. A `--corpus` that names no file, or holds a line
+that is not a JSON object, also exits 2.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--without DIR` | required | cache of the same replies read without the context |
+| `--with DIR` | required | cache with a context, repeatable |
+| `--out JSON` | required | the census JSON to write |
+| `--md PATH` | none | Markdown summary to write |
+| `--corpus JSONL` | none | the corpus jsonl the caches were made from, so `high_delta` is keyed by row id |
+| `--delta-threshold F` | `1.0` | nats gained at the token the teacher wrote that make a position high-delta |
+| `--pair-by MODE` | `line` | pair rows across caches by corpus `line` or by the full `doc` id |
+| `--max-rows N` | all | paired rows to measure |
 
 ## gmlx doctor
 

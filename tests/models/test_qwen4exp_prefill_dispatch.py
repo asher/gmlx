@@ -1,24 +1,31 @@
 """qwen4exp prefill-path coverage: HC prefill kernels (norm/epi/combine/
-inject) vs the eager ops, the MoE residual-dtype contract, and the QSA
+inject) vs the eager ops, the MoE residual-dtype contract, the QSA
 prefill dispatch (split-regime and ragged-L) vs the dense token-mask
-reference."""
+reference, and the QSA training route through blocked attention."""
 
 from __future__ import annotations
 
 
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
+from mlx.utils import tree_flatten
 
 from helpers import _real_apple_gpu
+from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
 import gmlx.models.qwen4_exp.model as q4
+from gmlx.load.config_synth import synthesize_config
 from gmlx.models.qwen4_exp.model import (
     Attention,
     HyperConnection,
+    Model,
     ModelArgs,
     QSAKVCache,
     SparseMoeBlock,
+    ensure_registered,
 )
+from gmlx.tune.indices import install_index_stop_gradient
 
 
 gpu_only = pytest.mark.skipif(
@@ -214,3 +221,154 @@ def test_qsa_ragged_all_sparse_matches_dense_mask():
     _, got = _run_arm(layer, [x1, x2], kernel=True)
     _, ref = _run_arm(layer, [x1, x2], kernel=False)
     _assert_close(got, ref, 2e-2)
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [1, 3])
+def test_qsa_gathered_decode_batches_rows(L):
+    """Two rows decoded together past the sparse boundary take the gathered
+    path and match each row decoded alone."""
+    args = ModelArgs(hidden_size=128, num_hidden_layers=1,
+                     num_attention_heads=4, num_key_value_heads=1,
+                     head_dim=64, indexer_budget=8, compress_ratios=[4],
+                     layer_types=["full_attention"])
+    mx.random.seed(23)
+    layer = Attention(args, 0)
+    for lin in (layer.q_proj, layer.k_proj, layer.v_proj, layer.o_proj,
+                layer.indexer.q_proj, layer.indexer.k_proj):
+        lin.weight = mx.random.normal(lin.weight.shape) * 0.05
+    x = mx.random.normal((2, 40, 128))
+    xd = mx.random.normal((2, L, 128))
+
+    def decode(rows):
+        cache = QSAKVCache(ratio=4)
+        layer(x[rows], mask=None, cache=cache)
+        return layer(xd[rows], mask=None, cache=cache)
+
+    both = decode(slice(0, 2))
+    # fp32 GEMM runs TF32 on M5-class GPUs while a one-row GEMV is exact
+    for i in range(2):
+        _assert_close(both[i:i + 1], decode(slice(i, i + 1)), 2e-3)
+
+
+# QSA training route
+
+
+def _train_model():
+    """Tiny full model (indexer budget 8 = 2 blocks of 4) with unit q/k
+    norms on the QSA layer, so its scores are not flat."""
+    ensure_registered()
+    cfg = synthesize_config(_qwen4exp_meta(True, True), _QWEN4EXP_SHAPES)
+    m = Model(ModelArgs.from_dict(cfg))
+    mx.random.seed(29)
+    m.load_weights([(k, mx.random.normal(v.shape) * 0.1)
+                    for k, v in tree_flatten(m.parameters())])
+    attn = m.layers[3].self_attn
+    attn.q_norm.weight = mx.full(attn.q_norm.weight.shape, 3.0)
+    attn.k_norm.weight = mx.full(attn.k_norm.weight.shape, 3.0)
+    mx.eval(m.parameters())
+    assert attn.indexer.block_topk == 2
+    return m
+
+
+def test_qsa_training_takes_blocked_attention(monkeypatch):
+    """A training row past the indexer budget attends through
+    blocked_attention on the QSA token mask, with the loss and gradients
+    of the sdpa route; GMLX_TRAIN_BLOCKED_ATTN=0 and eval take sdpa."""
+    m = _train_model()
+    calls = {"blocked": 0, "sdpa": 0}
+    blocked, sdpa = q4.blocked_attention, mx.fast.scaled_dot_product_attention
+
+    def blocked_spy(*a, **kw):
+        calls["blocked"] += 1
+        return blocked(*a, **kw)
+
+    def sdpa_spy(*a, **kw):
+        calls["sdpa"] += 1
+        return sdpa(*a, **kw)
+
+    monkeypatch.setattr(q4, "blocked_attention", blocked_spy)
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", sdpa_spy)
+    # 300 rows span two 256-row query blocks; rows from 11 on are sparse
+    ids = mx.random.randint(3, 32, (2, 301))
+    x, y = ids[:, :-1], ids[:, 1:]
+
+    def loss_fn(model):
+        return nn.losses.cross_entropy(model(x).astype(mx.float32), y,
+                                       reduction="mean")
+
+    arms = {}
+    m.train()
+    restore = install_index_stop_gradient()
+    try:
+        for arm, flag in (("blocked", "1"), ("sdpa", "0")):
+            monkeypatch.setenv("GMLX_TRAIN_BLOCKED_ATTN", flag)
+            calls.update(blocked=0, sdpa=0)
+            loss, g = nn.value_and_grad(m, loss_fn)(m)
+            mx.eval(loss, g)
+            arms[arm] = (float(loss), dict(tree_flatten(g)), dict(calls))
+    finally:
+        restore()
+    assert arms["blocked"][2] == {"blocked": 1, "sdpa": 0}
+    assert arms["sdpa"][2] == {"blocked": 0, "sdpa": 1}
+
+    (l_b, g_b, _), (l_s, g_s, _) = arms["blocked"], arms["sdpa"]
+    assert abs(l_b - l_s) < 1e-4, (l_b, l_s)
+    assert g_b.keys() == g_s.keys()
+    # fp32 GEMM runs TF32 on M5-class GPUs: under 2e-3 here, and a dense
+    # causal mask in place of the QSA one moves these by more than 1
+    for k in g_s:
+        ref = float(mx.abs(g_s[k]).max())
+        err = float(mx.abs(g_b[k] - g_s[k]).max())
+        assert err <= 2e-2 * ref + 1e-12, (k, err, ref)
+
+    monkeypatch.delenv("GMLX_TRAIN_BLOCKED_ATTN")
+    m.eval()
+    calls.update(blocked=0, sdpa=0)
+    mx.eval(m(x))
+    assert calls["blocked"] == 0
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [44, 45])
+def test_qsa_one_row_training_batch_takes_blocked_attention(monkeypatch, L):
+    """A one-row batch at the real head shape past the indexer budget
+    would take the kq split-regime or ragged kernels, which have no
+    backward. Training takes blocked_attention on the token mask, with the
+    loss and gradients of the sdpa route."""
+    if q4._kq_bs_prefill() is None:
+        pytest.skip("needs the kq block-sparse prefill kernel")
+    layer = _qsa_layer()
+    layer.train()
+    calls = {"blocked": 0}
+    blocked = q4.blocked_attention
+
+    def blocked_spy(*a, **kw):
+        calls["blocked"] += 1
+        return blocked(*a, **kw)
+
+    monkeypatch.setattr(q4, "blocked_attention", blocked_spy)
+    mx.random.seed(31)
+    x = mx.random.normal((1, L, 128)).astype(mx.bfloat16)
+
+    def loss_fn(m):
+        return m(x, mask="causal").astype(mx.float32).square().mean()
+
+    arms = {}
+    restore = install_index_stop_gradient()
+    try:
+        for arm, flag in (("blocked", "1"), ("sdpa", "0")):
+            monkeypatch.setenv("GMLX_TRAIN_BLOCKED_ATTN", flag)
+            calls["blocked"] = 0
+            loss, g = nn.value_and_grad(layer, loss_fn)(layer)
+            mx.eval(loss, g)
+            arms[arm] = (float(loss), dict(tree_flatten(g)), calls["blocked"])
+    finally:
+        restore()
+    assert arms["blocked"][2] == 1 and arms["sdpa"][2] == 0
+    (l_b, g_b, _), (l_s, g_s, _) = arms["blocked"], arms["sdpa"]
+    assert abs(l_b - l_s) <= 2e-2 * abs(l_s), (l_b, l_s)
+    for k in g_s:
+        ref = float(mx.abs(g_s[k].astype(mx.float32)).max())
+        err = float(mx.abs(g_b[k].astype(mx.float32) - g_s[k].astype(mx.float32)).max())
+        assert err <= 5e-2 * ref + 1e-12, (k, err, ref)

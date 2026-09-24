@@ -514,7 +514,7 @@ class MiniMaxM3SparseMoeBlock(nn.Module):
         scores = scores + self.e_score_correction_bias
 
         k = self.num_experts_per_tok
-        inds = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
+        inds = mx.stop_gradient(mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k])
         weights = mx.take_along_axis(orig_scores, inds, axis=-1)
         weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
         weights = (weights * self.routed_scaling_factor).astype(x.dtype)

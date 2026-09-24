@@ -510,14 +510,16 @@ class PrefillFeeder:
             present[[e for e in ids if 0 <= e < n_exp]] = True
             self._note_routing(li, routing, present)
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
+        """``wait=False`` is the finalizer's form: see
+        ``DecodeFeeder.close``."""
         # A wedged worker never returns: joining it would hang the close.
         # Its queued work is dropped, since no slot is staged again.
         wedged = bool(getattr(self, "_wedged", None))
         for name in ("_stage_pool", "_read_pool"):
             pool = getattr(self, name, None)
             if pool is not None:
-                pool.shutdown(wait=not wedged, cancel_futures=wedged)
+                pool.shutdown(wait=wait and not wedged, cancel_futures=wedged)
         fds, self._fds = getattr(self, "_fds", {}), {}
         if wedged:
             # The wedged read still uses its fd, and a closed fd number
@@ -532,7 +534,7 @@ class PrefillFeeder:
 
     def __del__(self):
         try:
-            self.close()
+            self.close(wait=False)
         except Exception:  # noqa: S110 - GC-time cleanup must never raise
             pass
 

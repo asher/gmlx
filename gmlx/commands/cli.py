@@ -2424,7 +2424,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train).
+# train == train; distill == distill).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -2447,6 +2447,7 @@ _VERBS = (
     "profiles",
     "doctor",
     "train",
+    "distill",
     "completion",
 )
 
@@ -2482,6 +2483,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "(add an id to resolve one model)\n"
         "  doctor       check the runtime, config, models, and services in one pass\n"
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
+        "  distill      offline distillation: cache a teacher, align, train, eval\n"
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} serve   "
         f"(start the server) ->  {prog} launch <harness>\n"
@@ -2571,7 +2573,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             break
         if tok in ("-h", "--help") or (
                 tok == "--help-all" and verb in ("run", "chat")):
-            rest = [tok]
+            # distill's actions own their parsers: `distill cache --help`
+            # keeps the action so the action's help prints, not the umbrella's
+            keep = [rest[0]] if verb == "distill" and rest and not rest[0].startswith("-") else []
+            rest = [*keep, tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
         from gmlx.upstream.seams import check_upstream_versions
@@ -2598,10 +2603,21 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             return server_main(
                 rest if verb == "serve" else [verb, *rest], prog=f"{prog} {verb}"
             )
+        if verb in ("train", "distill"):
+            # MLX multiplies float32 matrices at TF32 precision on M5-class
+            # GPUs by default; the chunked gated delta training scan needs
+            # exact float32 (gmlx.tune.gdn.f32_gemm_exact), and LoRA's
+            # float32 rank matmuls are small. setdefault keeps an explicit
+            # override in charge.
+            os.environ.setdefault("MLX_ENABLE_TF32", "0")
         if verb == "train":
             from .train import cmd_train
 
             return cmd_train(rest, prog=f"{prog} train")
+        if verb == "distill":
+            from .distill import cmd_distill
+
+            return cmd_distill(rest, prog=f"{prog} distill")
         if verb == "completion":
             from .completion import cmd_completion
 

@@ -63,6 +63,7 @@ def _restore_mlxvlm(request):
     saved["get_chat_template"] = pu.get_chat_template
     saved["make_sampler"] = gen.ResponseGenerator._make_sampler
     saved["make_tb_criteria"] = gen.ResponseGenerator._make_thinking_budget_criteria
+    saved["make_procs"] = gen.ResponseGenerator._make_logits_processors
     schemas = importlib.import_module("mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
     saved["stopping_call"] = _UTILS.StoppingCriteria.__call__
@@ -75,6 +76,7 @@ def _restore_mlxvlm(request):
     pu.get_chat_template = saved["get_chat_template"]
     gen.ResponseGenerator._make_sampler = saved["make_sampler"]
     gen.ResponseGenerator._make_thinking_budget_criteria = saved["make_tb_criteria"]
+    gen.ResponseGenerator._make_logits_processors = saved["make_procs"]
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]

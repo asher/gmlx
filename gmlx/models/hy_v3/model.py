@@ -179,7 +179,7 @@ def expert_select(
     orig_scores = scores
     scores = scores + expert_bias
 
-    inds = mx.argpartition(scores, kth=-top_k, axis=-1)[..., -top_k:]
+    inds = mx.stop_gradient(mx.argpartition(scores, kth=-top_k, axis=-1)[..., -top_k:])
     scores = mx.take_along_axis(orig_scores, inds, axis=-1)
     if top_k > 1 and norm_topk_prob:
         scores = scores / (scores.sum(axis=-1, keepdims=True) + 1e-20)
@@ -205,6 +205,15 @@ class MoEGate(nn.Module):
             self.routed_scaling_factor,
             self.norm_topk_prob,
         )
+
+    def _kq_route_weights(self, x, inds):
+        # Route replay (stream/moe_routes): the weight branch of
+        # expert_select at caller-chosen ids.
+        scores = mx.sigmoid(self.gate(x).astype(mx.float32))
+        w = mx.take_along_axis(scores, inds, axis=-1)
+        if self.top_k > 1 and self.norm_topk_prob:
+            w = w / (w.sum(axis=-1, keepdims=True) + 1e-20)
+        return w * self.routed_scaling_factor
 
 
 # Pass routing scores into a fused SwitchGLU so the mix (and a stamped

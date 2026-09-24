@@ -212,14 +212,16 @@ def test_mtp_thinking_criteria_restores_on_raise(_mtp_seams):
 
 
 def test_mtp_thinking_full_chain_with_seed_and_tbfix(_mtp_seams):
-    # Runtime chain mtp -> seed -> tbfix: one call restores the deferred
-    # budget, stashes the seed, builds the armed criteria, and attaches the
-    # rounds hook to it.
+    # Runtime chain mtp -> tbfix with the seed installed beside it: one call
+    # restores the deferred budget, builds the armed criteria, and attaches
+    # the rounds hook to it. The seed rides the logits-processors hook, so
+    # the criteria call stashes none.
     import gmlx.serve.seed_rows as sr
     gen, ar = _mtp_seams
     cls = gen.ResponseGenerator
     saved_insert = (ar.BatchGenerator.insert, ar.GenerationBatch._step,
-                    ar.SpeculativeGenerationBatch.next)
+                    ar.SpeculativeGenerationBatch.next,
+                    cls._make_logits_processors)
     sr._PENDING.clear()
     try:
         sp.install_thinking_budget_fix()
@@ -229,12 +231,13 @@ def test_mtp_thinking_full_chain_with_seed_and_tbfix(_mtp_seams):
         setattr(args, sp_mtp._DEFERRED_ATTR, 6)
         crit = cls._make_thinking_budget_criteria(_mtp_self(), args, [1, 2])
         assert args.thinking_budget == 6
-        assert sr._PENDING == [11]
+        assert not sr._PENDING
         assert crit is not None and crit.in_thinking is False   # tbfix armed
         assert crit._kq_mtp_hook is not None and crit._kq_mtp_hook.budget == 6
     finally:
         (ar.BatchGenerator.insert, ar.GenerationBatch._step,
-         ar.SpeculativeGenerationBatch.next) = saved_insert
+         ar.SpeculativeGenerationBatch.next,
+         cls._make_logits_processors) = saved_insert
         sr._PENDING.clear()
 
 

@@ -177,6 +177,28 @@ an inline Jinja string, replaces the GGUF's chat template. The loader
 infers the model's turn-ending tokens from the template it ends up with, so
 an override changes which tokens stop generation as well.
 
+Three helpers read a tokenizer's vocabulary as bytes, for tools that line
+up two tokenizers over the same text, such as `gmlx distill align`. They take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
+
+```python
+from gmlx import token_bytes, whitespace_start_mask, vocab_map_hash
+
+tb = token_bytes(tokenizer)                    # list[bytes | None], one per id
+ws = whitespace_start_mask(tokenizer, len(tb), tb)   # bool array, True at space-initial ids
+key = vocab_map_hash(tokenizer)                # 16 hex digits over the id-to-token map
+```
+
+`token_bytes(tokenizer, width=None)` returns the byte string of every id
+below `width`, which defaults to the vocabulary size. Specials and unfilled
+ids are `None`. ByteLevel vocabularies go through the GPT-2 byte decoder,
+and SentencePiece vocabularies map the U+2581 marker to a space and
+`<0xNN>` pieces to that byte. `whitespace_start_mask(tokenizer, width,
+token_bytes_list=None)` marks the ids whose bytes start with ASCII
+whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
+hashes the id-to-token map with specials left out. Equal hashes mean
+equal maps, not identical tokenization, since merges, the pre-tokenizer
+and the normalizer are not covered.
+
 ## mlx-lm server bridge
 
 ```python

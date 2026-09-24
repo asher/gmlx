@@ -6,6 +6,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx train` takes `--grad-checkpoint`, which recomputes activations in
+  the backward pass so longer rows fit in memory.
+- `token_bytes`, `whitespace_start_mask` and `vocab_map_hash` are exported
+  from `gmlx` for tools that line up two tokenizers over the same text.
+- `gmlx distill` trains a LoRA adapter for a small GGUF on a larger GGUF's
+  outputs, so the small model answers from a document without it in the prompt.
+- `gmlx.stream.moe_routes` records a forward's expert ids per layer and
+  replays them in a later forward over the same positions.
+- `GMLX_BATCH_INVARIANT=1` keeps `nn.Linear` expert routers and the gated-delta
+  decay gate the same at any prefill batch size, for about one percent of prefill.
+
+### Changed
+
+- Training attention at 4096-token rows peaks at 2.8 GB instead of
+  10.7 GB on Qwen3.5-9B. `GMLX_TRAIN_BLOCKED_ATTN=0` restores MLX's path.
+- Training on Qwen3.5, 3.6 and Qwen4 experimental runs a chunked gated
+  delta scan, 64 tokens per step instead of one. `GMLX_TRAIN_GDN_CHUNK=0`
+  restores the loop.
+- `gmlx train` and `gmlx distill` run float32 matmul at exact precision
+  unless `MLX_ENABLE_TF32` is set. Training a Qwen3.5 or Qwen3.6 model with
+  TF32 left on prints a notice once.
+- `--moe-expert-mass` and `--moe-expert-probe` now act on gpt-oss MoE
+  blocks, which were reported as unsupported before.
+
 ### Fixed
 
 - `serve` ignored a request's `thinking` control when the profile or
@@ -17,6 +43,57 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loaded again.
 - A short prefill chunk, a model unload, or process exit could hang forever
   after a stalled expert read.
+- A test run or a long session could stop dead when an expert streaming
+  feeder was garbage-collected while a thread was starting.
+- `gmlx train` on a text-only Qwen3.5 or Qwen3.6 GGUF kept every state
+  of the gated delta scan on the gradient tape, so a 9B model ran out of
+  memory at the first step on rows near 1000 tokens.
+- `gmlx train` on Qwen3-Next, Kimi-K3 and GLM-5-Next ran the same
+  per-token scan on the tape, and the GLM-5-Next chunk kernels carried no
+  gradient. All three now take a checkpointed scan under training.
+- `gmlx serve --adapter` on a base whose text stack sits under
+  `language_model`, such as the Qwen3.5 hybrids, refused the adapter with
+  every target reported as unmatched.
+- Serving with an adapter failed at the first decode step with
+  `'LoRAKQuantLinear' object has no attribute 'weight'` on models with
+  fused gate-up or q-k-v projections.
+- A request's `seed` could be applied to another request that arrived
+  while the server was busy, so a seeded reply did not repeat.
+- `gmlx train` on a MoE GGUF failed at the first step with
+  `Cannot calculate VJP with respect to indices`.
+- `gmlx train` with its default keys failed on Qwen4 experimental and
+  GLM-5-Next with `'LoRALinear' object has no attribute 'weight'`.
+- `gmlx train` on DeepSeek-V4.1 failed at the first step with
+  `[async_eval] Not allowed inside a graph transformation`.
+- `gmlx train` on DeepSeek-V4, V4.1, GLM-5-Next and HY4 without validation
+  data failed at the first step with
+  `Attempting to eval an array during function transformations`.
+- Training on DeepSeek-V4.1 gave a zero gradient to the adapters on the `wkv`
+  projections and on the compressor's `wgate`, so those modules never trained.
+- `gmlx train` on MoE, DeepSeek-V4, Qwen4 experimental, HY4 and Hadamard-folded
+  GGUFs failed on the GPU with `[Primitive::vjp] Not implemented`.
+- `gmlx train` failed after its last step, while writing the adapter, on Qwen3.5
+  and 3.6 MoE bases and on architectures gguf-py cannot name, such as GLM-5-Next.
+- Serving with an adapter that covers a MoE model's shared expert failed at the
+  first decode step with `'LoRAKQuantLinear' object has no attribute 'kquant_type'`.
+- `gmlx serve --adapter` on DeepSeek-V4 ignored the adapter on the `wq_a` and
+  `wkv` projections and on the compressor's `wkv` and `wgate`.
+- `gmlx train --dropout` with 1 or a negative value failed with a traceback
+  after the base model had loaded. It is now refused before the load.
+- `gmlx train --adapter-out` naming an existing folder trained the whole run and
+  then failed to write the adapter.
+- `gmlx train --adapter-out` ending in `/` wrote the adapter as a file named
+  after the folder.
+- `gmlx train --rank 0` wrote an adapter that `gmlx serve --adapter` could not
+  load.
+- A `gmlx train` run that failed or was refused before writing its adapter left
+  behind the empty folder made for `--adapter-out`.
+- Streamed MoE experts could return wrong values at layers whose gate+up
+  concat had been built, since the copy is expert-ordered while the
+  decode arena binds slot bytes and slot ids. Feeder-swapped calls now
+  gather from the bound bytes, and streamed stacks never build the copy.
+- A Hadamard-folded model kept the last layer's gated activation in memory
+  after a forward until its next one.
 
 ## [0.4.15] - 2026-09-22
 

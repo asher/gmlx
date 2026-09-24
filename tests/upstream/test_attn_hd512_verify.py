@@ -22,9 +22,11 @@ def _stock_sdpa():
     return getattr(fn, "_gmlx_orig_sdpa", fn)
 
 def _rand(qL, kL=KL, hq=HQ, hkv=HKV, d=D):
-    q = mx.random.normal((1, hq, qL, d)).astype(mx.bfloat16)
-    k = mx.random.normal((1, hkv, kL, d)).astype(mx.bfloat16)
-    v = mx.random.normal((1, hkv, kL, d)).astype(mx.bfloat16)
+    # keyed by the shape, so a draw does not depend on which tests ran first
+    kq, kk, kv = mx.random.split(mx.random.key(qL * 7919 + kL * 31 + d), 3)
+    q = mx.random.normal((1, hq, qL, d), key=kq).astype(mx.bfloat16)
+    k = mx.random.normal((1, hkv, kL, d), key=kk).astype(mx.bfloat16)
+    v = mx.random.normal((1, hkv, kL, d), key=kv).astype(mx.bfloat16)
     mx.eval(q, k, v)
     return q, k, v
 

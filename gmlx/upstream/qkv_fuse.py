@@ -94,6 +94,11 @@ def _make_fused(base_cls):
 
         def _kq_build_fused(self):
             projs = (self.q_proj, self.k_proj, self.v_proj)
+            if not all(isinstance(p, KQuantLinear) for p in projs):
+                # an adapter installed after load wraps the projections, and
+                # a fused wire would skip its delta: the stock path serves
+                object.__setattr__(self, "_kq_qkv_off", True)
+                return None
             rows = [p["weight"] for p in projs]
             biases = [p["bias"] for p in projs]
             if (

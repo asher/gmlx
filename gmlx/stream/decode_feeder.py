@@ -1693,14 +1693,19 @@ class DecodeFeeder:
                              slot_owner=lambda: self._owner[li]):
             yield
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
+        """``wait=False`` is the finalizer's form: a join from ``__del__``
+        deadlocks when the collection runs inside a thread's bootstrap,
+        which holds ``threading._shutdown_locks_lock`` that the join of a
+        finished thread takes again. Nothing in flight references the
+        feeder once it is collectable, so the pools drain on their own."""
         if getattr(self, "_closed", False):
             return
         self._closed = True
         for pool in (getattr(self, "_seed_pool", None),
                      getattr(self, "_seed_copy_pool", None)):
             if pool is not None:
-                pool.shutdown(wait=True)
+                pool.shutdown(wait=wait)
         if getattr(self, "_gpu_resident", False):
             import mlx_kquant as kq
 
@@ -1723,7 +1728,7 @@ class DecodeFeeder:
                 f"{self._routed_log_path}")
             self._routed_log = None
         if not getattr(self, "_stats_verbose", True):
-            self._print_wedges()
+            self._print_wedges(wait=wait)
             return
         if getattr(self, "_lookups", 0):
             print(
@@ -1784,9 +1789,9 @@ class DecodeFeeder:
             print(
                 f"[stream] layer-shed: {self._layer_shed_n} token-layer "
                 "routed paths skipped (shared expert only)")
-        self._print_wedges()
+        self._print_wedges(wait=wait)
 
-    def _print_wedges(self) -> None:
+    def _print_wedges(self, wait: bool = True) -> None:
         wedges = getattr(self, "_wedges", 0)
         if wedges:
             print(
@@ -1796,7 +1801,9 @@ class DecodeFeeder:
                      getattr(self, "_la_pool", None)):
             if pool is not None:
                 # A wedged worker never returns; joining it would hang exit.
-                pool.shutdown(wait=wedges == 0)
+                # The finalizer passes wait=False: a collection that runs
+                # on a read worker cannot join its own thread.
+                pool.shutdown(wait=wait and wedges == 0)
         locked, self._locked = getattr(self, "_locked", {}), {}
         self.locked_bytes = 0
         if locked:
@@ -1815,7 +1822,7 @@ class DecodeFeeder:
 
     def __del__(self):
         try:
-            self.close()
+            self.close(wait=False)
         except BaseException:  # noqa: BLE001, S110 - incl. ^C during interpreter exit
             pass
 

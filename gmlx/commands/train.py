@@ -20,47 +20,25 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
-from gmlx.load.adapter import save_lora_adapter
-
-_A, _B = ".lora_a", ".lora_b"
-
-
-def lora_modules_to_gguf(model) -> list:
-    """Trained LoRA factors from an mlx-lm-adapted model, in GGUF/PEFT orientation.
-
-    mlx-lm's ``LoRALinear`` stores ``lora_a`` ``(in, rank)`` / ``lora_b``
-    ``(rank, out)`` with forward ``z = (x @ lora_a) @ lora_b``; the GGUF format is
-    ``a = lora_a.T`` ``(rank, in)`` / ``b = lora_b.T`` ``(out, rank)`` so the
-    loader's ``(x @ a.T) @ b.T`` reproduces the delta exactly. The trainable
-    parameters are keyed by the in-memory module path (``<path>.lora_a/.lora_b``),
-    which is what :func:`adapter.save_lora_adapter` maps to GGUF tensor names.
-    """
-    from mlx.utils import tree_flatten
-
-    params = dict(tree_flatten(model.trainable_parameters()))
-    a_by, b_by = {}, {}
-    for key, arr in params.items():
-        if key.endswith(_A):
-            a_by[key[: -len(_A)]] = arr
-        elif key.endswith(_B):
-            b_by[key[: -len(_B)]] = arr
-    return [(mp, a_by[mp].T, b_by[mp].T) for mp in sorted(set(a_by) & set(b_by))]
+from gmlx.tune.lora import (  # noqa: F401  (re-exported for callers and tests)
+    adapter_refusals,
+    lora_modules_to_gguf,
+    prepare_lora_student,
+    probe_writable,
+    resolve_model_arg,
+    save_trained_adapter,
+)
 
 
-def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
-                         rank: int, scale: float) -> int:
-    """Write a model's trained LoRA layers as a llama.cpp GGUF adapter. ``alpha``
-    is recovered as ``scale * rank`` so the loader's ``alpha / rank`` recomputes
-    the trained ``scale``."""
-    modules = lora_modules_to_gguf(model)
-    if not modules:
-        raise ValueError("model has no trained LoRA layers to save")
-    n_head = config["num_attention_heads"]
-    n_head_kv = config.get("num_key_value_heads", n_head)
-    n_layers = config["num_hidden_layers"]
-    return save_lora_adapter(
-        out_path, modules, alpha=float(scale) * int(rank), base_arch=base_arch,
-        n_head=n_head, n_head_kv=n_head_kv, n_layers=n_layers)
+class TrainRefused(ValueError):
+    """A setting train_lora cannot train with, or one the loaded model
+    cannot take."""
+
+
+# the train step cannot replay a layer's dropout mask in the backward
+# recompute, so the recompute would see a fresh one
+CHECKPOINT_DROPOUT = ("--grad-checkpoint recomputes each layer under a fresh dropout mask; "
+                      "use it with --dropout 0")
 
 
 def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
@@ -69,34 +47,44 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                learning_rate: float = 1e-4, max_seq_length: int = 2048,
                val_batches: int = 25, steps_per_report: int = 10,
                steps_per_eval: int = 200, seed: int = 0,
-               hf_source: str | None = None) -> tuple[str, int]:
+               hf_source: str | None = None,
+               grad_checkpoint: bool = False) -> tuple[str, int]:
     """Train a LoRA adapter on a GGUF base and write it as a GGUF. Returns
-    ``(out_path, n_modules)``. The train loop runs on the GPU."""
+    ``(out_path, n_modules)``. The train loop runs on the GPU. Raises
+    TrainRefused on a setting it cannot train with, before the load, and
+    when the loaded model cannot take a requested setting."""
+    if grad_checkpoint and dropout > 0:
+        raise TrainRefused(CHECKPOINT_DROPOUT)
     import mlx.core as mx
     import mlx.optimizers as optim
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
-    from mlx_lm.tuner.lora import LoRALinear
     from mlx_lm.tuner.trainer import TrainingArgs, train
-    from mlx_lm.tuner.utils import linear_to_lora_layers
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 
     import gmlx.load.loadlog as loadlog
+    from gmlx.load.adapter import base_tensor_names, refusal_summary
     from gmlx.load.loader import load_model
     from gmlx.load.preflight import preflight
+    from gmlx.tune.attention import install_training_attention
+    from gmlx.tune.checkpoint import checkpoint_layers
+    from gmlx.tune.gdn import install_training_gdn
+    from gmlx.tune.indices import install_index_stop_gradient
+    from gmlx.tune.kernels import install_training_switch_gemm
 
     mx.random.seed(seed)
     patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
     base_arch = preflight(gguf_path, hf_source=hf_source).arch
+    base_names = base_tensor_names(gguf_path)
     with loadlog.load_ui(False, gguf_path):
         model, config, tokenizer = load_model(gguf_path, hf_source=hf_source)
 
-    linear_to_lora_layers(model, num_layers,
-                          {"rank": rank, "scale": scale, "dropout": dropout})
-    model.freeze()
-    model.apply_to_modules(
-        lambda _k, m: m.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
-        if isinstance(m, LoRALinear) else None)
+    prepare_lora_student(model, rank=rank, scale=scale, dropout=dropout,
+                         num_layers=num_layers)
+    refused = adapter_refusals(model, base_arch=base_arch, base_names=base_names)
+    if refused:
+        raise TrainRefused(f"a GGUF adapter cannot hold {len(refused)} of the adapted modules, "
+                           f"nothing was trained: {refusal_summary(refused)}")
 
     # Feature keys carry mlx-lm's own string defaults (not None): create_dataset
     # reads them via getattr(config, key, default), so a None here would shadow the
@@ -106,25 +94,68 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
         chat_feature="messages", prompt_feature="prompt",
         completion_feature="completion", text_feature="text",
         mask_prompt=False)
-    train_set, val_set, _ = load_dataset(ds_args, tokenizer)
+    # mlx-lm types the tokenizer as PreTrainedTokenizer; its wrapper is what
+    # load_dataset reads at runtime
+    train_set, val_set, _ = load_dataset(ds_args, tokenizer)  # pyright: ignore[reportArgumentType]
 
     model.train()
     opt = optim.Adam(learning_rate=learning_rate)
     # mlx-lm's trainer unconditionally writes a final safetensors to adapter_file
     # (steps_per_save only governs the *periodic* ones) - point it at a scratch dir
     # so the only artifact left on disk is our GGUF, written below.
-    with tempfile.TemporaryDirectory() as scratch:
-        args = TrainingArgs(
-            batch_size=batch_size, iters=iters, val_batches=val_batches,
-            steps_per_report=steps_per_report, steps_per_eval=steps_per_eval,
-            steps_per_save=iters + 1,  # suppress the periodic safetensors snapshots
-            max_seq_length=max_seq_length,
-            adapter_file=os.path.join(scratch, "mlx_lm_final.safetensors"))
-        train(model, opt, CacheDataset(train_set), CacheDataset(val_set), args=args)
+    restore_attention = install_training_attention(model)
+    install_training_gdn(model)   # mlx-lm gated delta layers: the checkpointed scan under training
+    if grad_checkpoint:
+        # every decoder-layer class, under language_model too; mlx-lm's own
+        # grad_checkpoint wraps the class of model.layers[0] alone
+        try:
+            n_ck = checkpoint_layers(model)
+        except ValueError as e:
+            restore_attention()
+            raise TrainRefused(f"--grad-checkpoint: {e}") from None
+        print(f"[train] per-layer checkpointing on {n_ck} layer classes")
+    # a router gathers its weights at ids it picked from trained scores,
+    # and MLX has no backward for a gather at ids that carry a gradient
+    restore_ids = install_index_stop_gradient()
+    restore_gemm = install_training_switch_gemm()
+    try:
+        with tempfile.TemporaryDirectory() as scratch:
+            args = TrainingArgs(
+                batch_size=batch_size, iters=iters, val_batches=val_batches,
+                steps_per_report=steps_per_report, steps_per_eval=steps_per_eval,
+                steps_per_save=iters + 1,  # suppress the periodic safetensors snapshots
+                max_seq_length=max_seq_length, grad_checkpoint=False,
+                adapter_file=os.path.join(scratch, "mlx_lm_final.safetensors"))
+            train(model, opt, CacheDataset(train_set), CacheDataset(val_set), args=args)
+    finally:
+        restore_gemm()
+        restore_ids()
+        restore_attention()
 
     n = save_trained_adapter(model, config, base_arch=base_arch,
-                             out_path=out_path, rank=rank, scale=scale)
+                             out_path=out_path, rank=rank, scale=scale,
+                             base_names=base_names)
     return out_path, n
+
+
+def _rank(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"a rank of at least 1 is required, got {n}")
+    return n
+
+
+def _dropout(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not 0.0 <= x < 1.0:
+        raise argparse.ArgumentTypeError(f"a dropout of at least 0 and below 1 is required, got {text}")
+    return x
 
 
 def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
@@ -150,12 +181,12 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
                    help="Examples per training step (default 4).")
     p.add_argument("--num-layers", type=int, default=8, metavar="N",
                    help="Number of top transformer layers to adapt (default 8).")
-    p.add_argument("--rank", type=int, default=8,
+    p.add_argument("--rank", type=_rank, default=8,
                    help="LoRA rank (default 8).")
     p.add_argument("--scale", type=float, default=20.0,
                    help="LoRA scale; alpha = scale x rank, recovered on load (default 20.0).")
-    p.add_argument("--dropout", type=float, default=0.0,
-                   help="LoRA dropout (default 0.0).")
+    p.add_argument("--dropout", type=_dropout, default=0.0,
+                   help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--learning-rate", type=float, default=1e-4,
                    help="Adam learning rate (default 1e-4).")
     p.add_argument("--max-seq-length", type=int, default=2048,
@@ -171,24 +202,23 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     p.add_argument("--hf-source", default=None, metavar="ID|DIR",
                    help="HF repo id for tokenizer/config fallback "
                         "(rarely needed).")
+    p.add_argument("--grad-checkpoint", action="store_true",
+                   help="Recompute each layer's activations in the backward "
+                        "pass instead of keeping them, trading time for memory. "
+                        "Refused on Kimi K3 and DeepSeek-V4.1, whose layers "
+                        "share state.")
     a = p.parse_args(argv)
 
-    base = a.model
-    # A bare name (no path separator, not a .gguf file on disk) resolves as a
-    # server-config model id/alias - same rule as `run`/`chat`.
-    if (not os.path.exists(os.path.expanduser(base))
-            and "/" not in base and os.sep not in base
-            and not base.lower().endswith(".gguf")):
-        import gmlx.config as cfgmod
-        try:
-            cfg, cfg_path = cfgmod.load_cli_config(a.config)
-            rm = cfgmod.resolve_cli_model(base, cfg) if cfg is not None else None
-        except cfgmod.ConfigError as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 2
-        if rm is not None:
-            print(f"[config] '{base}' -> {rm.path}  (from {cfg_path})")
-            base = rm.path
+    if a.grad_checkpoint and a.dropout > 0:
+        print(f"error: {CHECKPOINT_DROPOUT}", file=sys.stderr)
+        return 2
+
+    base, note, err = resolve_model_arg(a.model, a.config)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    if note is not None:
+        print(f"[config] {note}")
 
     # Fail on a bad --data before the (long) model load: a path-shaped value
     # that isn't a dataset directory would otherwise surface as a confusing
@@ -206,26 +236,29 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
             return 2
 
     adapter_out = os.path.abspath(os.path.expanduser(a.adapter_out))
+    if a.adapter_out.endswith(os.sep):
+        # abspath drops the separator that names a folder, which the probe refuses
+        adapter_out += os.sep
     # Prove the output path is writable before training: the GGUF writer only
     # opens it after the run completes, and a bad path there would discard
     # every trained weight.
-    try:
-        os.makedirs(os.path.dirname(adapter_out) or ".", exist_ok=True)
-        probe = adapter_out + ".probe"
-        with open(probe, "wb"):
-            pass
-        os.remove(probe)
-    except OSError as e:
-        print(f"error: --adapter-out is not writable: {e}", file=sys.stderr)
+    err = probe_writable(adapter_out)
+    if err is not None:
+        print(f"error: --adapter-out is not writable: {err}", file=sys.stderr)
         return 2
 
-    out, n = train_lora(
-        os.path.abspath(os.path.expanduser(base)), a.data,
-        adapter_out,
-        iters=a.iters, batch_size=a.batch_size, num_layers=a.num_layers,
-        rank=a.rank, scale=a.scale, dropout=a.dropout,
-        learning_rate=a.learning_rate, max_seq_length=a.max_seq_length,
-        val_batches=a.val_batches, steps_per_report=a.steps_per_report,
-        steps_per_eval=a.steps_per_eval, seed=a.seed, hf_source=a.hf_source)
+    try:
+        out, n = train_lora(
+            os.path.abspath(os.path.expanduser(base)), a.data,
+            adapter_out,
+            iters=a.iters, batch_size=a.batch_size, num_layers=a.num_layers,
+            rank=a.rank, scale=a.scale, dropout=a.dropout,
+            learning_rate=a.learning_rate, max_seq_length=a.max_seq_length,
+            val_batches=a.val_batches, steps_per_report=a.steps_per_report,
+            steps_per_eval=a.steps_per_eval, seed=a.seed, hf_source=a.hf_source,
+            grad_checkpoint=a.grad_checkpoint)
+    except TrainRefused as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"[gmlx] wrote {n}-module LoRA adapter -> {out}")
     return 0

@@ -466,6 +466,19 @@ _gdn_fused_decode_replay_kernel = (
 _FUSED_DECODE_PATCH = ClassPatch()
 
 
+def _live_cat(gdn, slot, members):
+    """The concatenated weight in ``slot`` while every member it was cut
+    from is still the plain Linear the concat took, else None. A wrapper
+    such as an in-process LoRA replaces the member and has to be called."""
+    w = getattr(gdn, slot, None)
+    if w is None:
+        return None
+    for name in members:
+        if type(getattr(gdn, name, None)) is not nn.Linear:
+            return None
+    return w
+
+
 def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     """Shared fused S=1 gated-delta decode step. mlx-lm's ``GatedDeltaNet`` and
     mlx-vlm's ``Qwen3_5GatedDeltaNet`` share the attribute + cache layout, so both
@@ -481,7 +494,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     Dv = self.head_v_dim
     SG = gdn_sg(B)
 
-    zba_w = getattr(self, "_gdn_zba_weight", None)
+    zba_w = _live_cat(self, "_gdn_zba_weight", ("in_proj_z", "in_proj_b", "in_proj_a"))
     if zba_w is not None:
         qkv = self.in_proj_qkv(inputs)
         zba = inputs @ zba_w.T
@@ -493,7 +506,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
         # One rotation feeds both projections on a Hadamard-folded file.
         qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
         z = z.reshape(B, S, self.num_v_heads, self.head_v_dim)
-        ba_w = getattr(self, "_gdn_ba_weight", None)
+        ba_w = _live_cat(self, "_gdn_ba_weight", ("in_proj_b", "in_proj_a"))
         if ba_w is not None:
             # One [2*Hv, K] matvec for the two tiny decay/gate rows. At
             # M=B*S in [2, 8] the M-stationary head kernel matters: stock
@@ -1151,10 +1164,20 @@ def _f16_head_gemv(x, w):
     )[0]
 
 
+def _float_weight(linear):
+    """The float ``weight`` a head GEMV can read, or None for a quantized
+    linear or an adapter wrapper, which have to be called."""
+    if hasattr(linear, "scales"):
+        return None
+    w = getattr(linear, "weight", None)
+    return w if isinstance(w, mx.array) else None
+
+
 def _bf16_verify_linear(linear, x):
-    """Route bf16 nn.Linear through _f16_head_gemv at M>1.  At M=1 or when the
-    Metal kernel is unavailable, falls back to the stock nn.Linear forward."""
-    if x.shape[1] > 1 and _F16_HEAD_GEMV is not None and not hasattr(linear, "scales"):
+    """Route bf16 nn.Linear through _f16_head_gemv at M>1.  At M=1, when the
+    Metal kernel is unavailable, or for a linear without a float weight,
+    falls back to the module's own forward."""
+    if x.shape[1] > 1 and _F16_HEAD_GEMV is not None and _float_weight(linear) is not None:
         out = _f16_head_gemv(x, linear.weight)
         b = getattr(linear, "bias", None)
         if b is not None:
@@ -1235,22 +1258,24 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
     # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
     # ~2x the combined one at these sizes, so run them as one [2 * Hv]
     # gemv against the concatenated weight (row-independent, bit-exact).
-    ba_key = (id(self.in_proj_b.weight), id(self.in_proj_a.weight))
+    # Keyed on the modules as well: an adapter wrapper replaces the module
+    # and has no weight of its own.
+    wb = _float_weight(self.in_proj_b)
+    wa = _float_weight(self.in_proj_a)
+    ba_key = (id(self.in_proj_b), id(self.in_proj_a), id(wb), id(wa))
     cba = getattr(self, "_gdn_verify_ba_weight", None)
     if cba is None or cba[0] != ba_key:
         fuse_ok = (
             _F16_HEAD_GEMV is not None
+            and wb is not None
+            and wa is not None
             and getattr(self.in_proj_b, "bias", None) is None
             and getattr(self.in_proj_a, "bias", None) is None
-            and not hasattr(self.in_proj_b, "scales")
-            and not hasattr(self.in_proj_a, "scales")
-            and self.in_proj_b.weight.dtype == self.in_proj_a.weight.dtype
+            and wb.dtype == wa.dtype
         )
         wba = None
         if fuse_ok:
-            wba = mx.concatenate(
-                [self.in_proj_b.weight, self.in_proj_a.weight], axis=0
-            )
+            wba = mx.concatenate([wb, wa], axis=0)
             mx.eval(wba)
         cba = (ba_key, wba)
         self._gdn_verify_ba_weight = cba

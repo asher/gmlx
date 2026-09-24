@@ -853,3 +853,24 @@ def test_process_exit_survives_a_wedged_prefill_read(tmp_path):
         text=True, timeout=60)
     assert r.returncode == 0, r.stderr[-2000:]
     assert "timed out" in r.stdout and "closed" in r.stdout
+
+
+def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
+    """Same contract as the decode feeder: ``__del__`` never joins."""
+    from gmlx.stream.feeder_common import DaemonPool
+
+    waits = []
+    orig = DaemonPool.shutdown
+
+    def spy(self, wait=True, **kw):
+        waits.append(wait)
+        return orig(self, wait=wait, **kw)
+
+    monkeypatch.setattr(DaemonPool, "shutdown", spy)
+    collected, _ = _make_prefill_feeder(monkeypatch, tmp_path)
+    collected.__del__()
+    assert waits and all(w is False for w in waits)
+    waits.clear()
+    closed, _ = _make_prefill_feeder(monkeypatch, tmp_path)  # both stay bound: no GC here
+    closed.close()
+    assert waits and all(w is True for w in waits)

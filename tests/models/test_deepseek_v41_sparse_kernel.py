@@ -200,6 +200,7 @@ def test_decode_steps_take_the_kernel_and_match_the_chain(monkeypatch):
     monkeypatch.setattr(v4, "_SPARSE_KERNEL_DTYPES", (mx.float32,))
     args = tm._args()
     model = tm._randomized(tm.Model(args))
+    model.eval()  # serve mode, as the loader leaves it
     prompt = mx.array([[5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]])
     steps = [mx.array([[33]]), mx.array([[35, 37]])]
 
@@ -235,6 +236,7 @@ def test_prefill_blocks_take_the_kernel_and_match_the_chain(monkeypatch):
     monkeypatch.setattr(v4, "_SPARSE_KERNEL_DTYPES", (mx.float32,))
     monkeypatch.setattr(v4, "_SPARSE_KERNEL_BLOCK", 4)
     model = tm._randomized(tm.Model(tm._args()))
+    model.eval()  # serve mode, as the loader leaves it
     prompt = mx.array([[5 + 2 * i for i in range(22)]])
     outs = {}
     for on in (True, False):
@@ -339,6 +341,7 @@ def test_prefill_kernel_takes_the_prompt_and_matches_the_chain(monkeypatch):
     monkeypatch.setattr(v4, "_SPARSE_KERNEL_DTYPES", (mx.float32,))
     monkeypatch.setattr(v4, "_SPARSE_KERNEL_BLOCK", 4)
     model = tm._randomized(tm.Model(tm._args()))
+    model.eval()  # serve mode, as the loader leaves it
     prompt = mx.array([[5 + 2 * i for i in range(22)]])
     outs = {}
     for on in (True, False):

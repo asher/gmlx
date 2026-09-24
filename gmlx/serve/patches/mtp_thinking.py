@@ -11,8 +11,8 @@ rounds, the same seam the CLI ^T/budget path uses), so the server route is:
   Non-MTP drafters keep the stock error, and the pre-generate readers
   (chat-template kwargs) ran before generate and saw the real value.
 * restore + build - an outermost wrapper on
-  ``_make_thinking_budget_criteria`` (over the seed and thinking-budget-fix
-  wrappers) puts the value back before delegating, so every later reader
+  ``_make_thinking_budget_criteria`` (over the thinking-budget-fix
+  rebind) puts the value back before delegating, so every later reader
   sees it even when the delegate early-outs or raises, then attaches an
   ``MTPFinishThinking`` to the criteria object the request carries.
 * transport - ``PromptProcessingBatch.generate`` moves the hook from the
@@ -171,8 +171,8 @@ def install_mtp_thinking_budget() -> None:
 
     Must run after ``install_full_prompt_mtp_prefill`` (the transport wrap
     has to land outside ``_mtp_generate`` so the hook stash happens after
-    the APC L0 store) and after the criteria-seam installers (thinking
-    budget fix, per-request seed) so the restore wrapper is outermost."""
+    the APC L0 store) and after the criteria-seam installer (the thinking
+    budget fix) so the restore wrapper is outermost."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server.generation import ResponseGenerator
 

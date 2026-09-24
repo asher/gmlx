@@ -83,7 +83,10 @@ Train loss should fall steadily. With only 90 examples, stop around 150
 iterations, because training longer overfits, validation loss rises and
 greedy decoding can repeat. `--num-layers` and `--rank` trade capacity for
 memory, and the defaults of 8 layers at rank 8 are a reasonable starting
-point. The flag table is under [gmlx train](cli.md#gmlx-train).
+point. When a longer `--max-seq-length` runs out of memory,
+`--grad-checkpoint` recomputes each layer's activations in the backward
+pass instead of keeping them, at some cost in time. The flag table is under
+[gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
 
@@ -188,7 +191,8 @@ The adapter file is the llama.cpp GGUF LoRA format, which
 `convert_lora_to_gguf.py` emits from a PEFT directory. It has `general.type`
 of `adapter`, `adapter.lora.alpha` in the metadata and `lora_a` and `lora_b`
 tensor pairs for each target, keyed to base tensor names, with PEFT scaling.
-Adapters trained with `gmlx train` therefore load in llama.cpp with `--lora`.
+Adapters trained with `gmlx train` or `gmlx distill train` therefore load
+in llama.cpp with `--lora`.
 Any PEFT LoRA converted with that script loads here, as do existing community
 GGUF adapters built for llama.cpp.
 
