@@ -6891,11 +6891,15 @@ def test_train_resume_without_the_best_checkpoint_forgets_its_value(tmp_path, to
     assert json.loads((ck / "best" / "state.json").read_text())["iteration"] == 3
 
 
-def test_train_resume_compares_against_the_value_the_best_checkpoint_holds(tmp_path, tok_bl, monkeypatch, capsys):
+@pytest.mark.parametrize("best_file", ["as saved", "another run", "no value"])
+def test_train_resume_compares_against_the_value_the_best_checkpoint_holds(tmp_path, tok_bl, monkeypatch, capsys,
+                                                                           best_file):
     """Validation can run more often than the last save, so the best
     checkpoint can hold a lower value than the last one records. A resume
     compares its validations against the best checkpoint's value, so a
-    worse validation cannot replace a better best."""
+    worse validation cannot replace a better best. A best checkpoint that
+    another run wrote, or one that records no value, leaves the value the
+    last checkpoint recorded."""
     from gmlx.distill import trainer as _trainer
 
     _mlx_students(monkeypatch)
@@ -6916,13 +6920,17 @@ def test_train_resume_compares_against_the_value_the_best_checkpoint_holds(tmp_p
     best = json.loads((ck / "best" / "state.json").read_text())
     last = json.loads((ck / "last" / "state.json").read_text())
     assert (best["iteration"], last["iteration"]) == (5, 4) and best["best_val"] < last["best_val"], (best, last)
+    edited = {"another run": dict(best, run=dict(best["run"], seed=99)), "no value": dict(best, best_val=None)}
+    if best_file in edited:
+        (ck / "best" / "state.json").write_text(json.dumps(edited[best_file]))
     capsys.readouterr()
     # the validation cadence is not part of the resumed run's settings
     assert _trainer.run_train(_trainer.TrainOptions(**dict(base, val_every=6, resume=True))) == 0
     err = capsys.readouterr().err
-    assert f"(best {best['best_val']:.4f})" in err, err
-    after = json.loads((ck / "best" / "state.json").read_text())["best_val"]
-    assert after <= best["best_val"]
+    want = best["best_val"] if best_file == "as saved" else last["best_val"]
+    assert f"(best {want:.4f})" in err, err
+    if best_file == "as saved":
+        assert json.loads((ck / "best" / "state.json").read_text())["best_val"] <= best["best_val"]
 
 
 def test_train_counts_a_skipped_batch_in_the_schedules(tmp_path, tok_bl, monkeypatch):

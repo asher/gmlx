@@ -283,6 +283,20 @@ def test_train_rank_below_one_is_refused_at_parse_time(tmp_path, capsys):
     assert e.value.code == 2 and "at least 1" in capsys.readouterr().err
 
 
+def test_train_refuses_an_adapter_path_that_names_a_folder_before_the_load(tmp_path, capsys, monkeypatch):
+    """A path ending in a separator names a folder, which the export would
+    write as a file of that name; the command refuses it before the base
+    model is loaded and leaves nothing behind."""
+    monkeypatch.setattr(train, "train_lora", lambda *a, **k: pytest.fail("train_lora ran"))
+    (tmp_path / "m.gguf").write_bytes(b"")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "train.jsonl").write_text("{}\n")
+    rc = train.cmd_train([str(tmp_path / "m.gguf"), "--data", str(tmp_path / "data"), "--adapter-out",
+                          str(tmp_path / "new") + os.sep])
+    assert rc == 2 and "directory" in capsys.readouterr().err
+    assert not (tmp_path / "new").exists()
+
+
 @pytest.mark.parametrize("dropout", ["1", "-0.1", "nan"])
 def test_train_dropout_outside_zero_to_one_is_refused_at_parse_time(tmp_path, capsys, dropout):
     """nn.Dropout refuses a probability of 1 or more inside the adapter

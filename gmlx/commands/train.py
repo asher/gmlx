@@ -236,6 +236,9 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
             return 2
 
     adapter_out = os.path.abspath(os.path.expanduser(a.adapter_out))
+    if a.adapter_out.endswith(os.sep):
+        # abspath drops the separator that names a folder, which the probe refuses
+        adapter_out += os.sep
     # Prove the output path is writable before training: the GGUF writer only
     # opens it after the run completes, and a bad path there would discard
     # every trained weight.

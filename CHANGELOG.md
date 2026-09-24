@@ -71,6 +71,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `wkv` projections and on the compressor's `wkv` and `wgate`.
 - `gmlx train --dropout` with 1 or a negative value failed with a traceback
   after the base model had loaded. It is now refused before the load.
+- `gmlx train --adapter-out` naming an existing folder trained the whole run and
+  then failed to write the adapter.
+- `gmlx train --adapter-out` ending in `/` wrote the adapter as a file named
+  after the folder.
+- `gmlx train --rank 0` wrote an adapter that `gmlx serve --adapter` could not
+  load.
 - A `gmlx train` run that failed or was refused before writing its adapter left
   behind the empty folder made for `--adapter-out`.
 
