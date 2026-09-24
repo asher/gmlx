@@ -327,3 +327,48 @@ def test_qsa_training_takes_blocked_attention(monkeypatch):
     calls.update(blocked=0, sdpa=0)
     mx.eval(m(x))
     assert calls["blocked"] == 0
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [44, 45])
+def test_qsa_one_row_training_batch_takes_blocked_attention(monkeypatch, L):
+    """A one-row batch at the real head shape past the indexer budget
+    would take the kq split-regime or ragged kernels, which have no
+    backward. Training takes blocked_attention on the token mask, with the
+    loss and gradients of the sdpa route."""
+    if q4._kq_bs_prefill() is None:
+        pytest.skip("needs the kq block-sparse prefill kernel")
+    layer = _qsa_layer()
+    layer.train()
+    calls = {"blocked": 0}
+    blocked = q4.blocked_attention
+
+    def blocked_spy(*a, **kw):
+        calls["blocked"] += 1
+        return blocked(*a, **kw)
+
+    monkeypatch.setattr(q4, "blocked_attention", blocked_spy)
+    mx.random.seed(31)
+    x = mx.random.normal((1, L, 128)).astype(mx.bfloat16)
+
+    def loss_fn(m):
+        return m(x, mask="causal").astype(mx.float32).square().mean()
+
+    arms = {}
+    restore = install_index_stop_gradient()
+    try:
+        for arm, flag in (("blocked", "1"), ("sdpa", "0")):
+            monkeypatch.setenv("GMLX_TRAIN_BLOCKED_ATTN", flag)
+            calls["blocked"] = 0
+            loss, g = nn.value_and_grad(layer, loss_fn)(layer)
+            mx.eval(loss, g)
+            arms[arm] = (float(loss), dict(tree_flatten(g)), calls["blocked"])
+    finally:
+        restore()
+    assert arms["blocked"][2] == 1 and arms["sdpa"][2] == 0
+    (l_b, g_b, _), (l_s, g_s, _) = arms["blocked"], arms["sdpa"]
+    assert abs(l_b - l_s) <= 2e-2 * abs(l_s), (l_b, l_s)
+    for k in g_s:
+        ref = float(mx.abs(g_s[k].astype(mx.float32)).max())
+        err = float(mx.abs(g_b[k].astype(mx.float32) - g_s[k].astype(mx.float32)).max())
+        assert err <= 5e-2 * ref + 1e-12, (k, err, ref)

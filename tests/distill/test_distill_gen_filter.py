@@ -399,6 +399,44 @@ def test_filter_runs_the_verify_command_over_the_survivors(tmp_path):
     assert side["filter"]["verify"] == cmd and side["filter"]["dropped"] == {"length": 1, "verify": 1}
 
 
+def test_filter_refuses_what_it_cannot_read_or_write_with_the_file_named(tmp_path, capsys):
+    """An input or a context that is not UTF-8 or cannot be opened, and an
+    out whose folder cannot be made, exit 2 with a refusal, where a
+    traceback or a bare codec message named no file."""
+    src = tmp_path / "gen.jsonl"
+    src.write_text(json.dumps(_row("a", GOOD)) + "\n")
+    out = tmp_path / "ok.jsonl"
+    latin = tmp_path / "latin.jsonl"
+    latin.write_bytes(b'{"id": "b", "note": "caf\xe9"}\n')
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(latin)], out=str(out))) == 2
+    assert f"[filter] refuse: {latin}: not UTF-8 (byte 24), convert it" in capsys.readouterr().err
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_bytes(b"the caf\xe9 context\n")
+    assert flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(out), context=str(ctx))) == 2
+    assert f"[filter] refuse: {ctx}: not UTF-8 (byte 7), convert it" in capsys.readouterr().err
+    ctx.write_text("the context\n")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    unread = tmp_path / "unread.jsonl"
+    unread.write_text(json.dumps(_row("c", GOOD)) + "\n")
+    ro.chmod(0o500)
+    unread.chmod(0o000)
+    try:
+        assert flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(ro / "sub" / "ok.jsonl"))) == 2
+        assert "[filter] refuse:" in capsys.readouterr().err
+        ctx.chmod(0o000)
+        assert flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(out), context=str(ctx))) == 2
+        assert "[filter] refuse:" in capsys.readouterr().err
+        ctx.chmod(0o600)
+        assert flt.run_filter(flt.FilterOptions(inputs=[str(unread)], out=str(out))) == 2
+        assert f"[filter] refuse: cannot read {unread}" in capsys.readouterr().err
+    finally:
+        ro.chmod(0o700)
+        unread.chmod(0o600)
+        ctx.chmod(0o600)
+    assert not out.exists()
+
+
 def test_filter_refuses_a_verify_command_that_fails_or_miscounts(tmp_path, capsys):
     src = tmp_path / "gen.jsonl"
     src.write_text(json.dumps(_row("a", GOOD)) + "\n")

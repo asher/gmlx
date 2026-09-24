@@ -377,8 +377,8 @@ def run_census(opts: CensusOptions) -> int:
     for c, m in zip(caches[1:], manifests[1:]):
         diff = cache_mismatch(caches[0], manifests[0], c, m)
         if diff:
-            print(f"[census] refuse: {c} was made with another {diff} than {caches[0]}; the census pairs caches "
-                  "of one teacher, tokenizer and top-k", file=sys.stderr)
+            print(f"[census] refuse: {c} was made with another {diff} than {caches[0]}. The census pairs caches "
+                  "of one teacher, tokenizer, top-k and head width", file=sys.stderr)
             return 2
     base = reply_rows(caches[0], opts.pair_by)
     ctx = [reply_rows(c, opts.pair_by) for c in caches[1:]]

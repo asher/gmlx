@@ -68,12 +68,15 @@ class UnreadableInput(Exception):
 
 
 def read_slice(path: Path) -> str:
-    """A --slice file's text. A file that is not UTF-8 is unreadable: its
-    bytes would score as replacement characters."""
+    """A --slice file's text. A file that is not UTF-8 is unreadable, since
+    its bytes would score as replacement characters, and so is one the
+    process cannot open."""
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
         raise UnreadableInput(f"{path}: not UTF-8 (byte {e.start}), convert it") from None
+    except OSError as e:
+        raise UnreadableInput(f"{path}: {e.strerror or e}") from None
 
 
 def read_jsonl(path: Path) -> list[dict]:

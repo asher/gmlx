@@ -3128,6 +3128,35 @@ _TEMPLATE_ANALYSIS = ("{% for m in messages %}{% if m['role'] == 'user' %}<|star
                       "{% if add_generation_prompt %}<|start|>assistant{% endif %}")
 
 
+_TEMPLATE_LAST_TRACE = (
+    "{% for m in messages %}{% if m['role'] == 'user' %}<|im_start|>user\n{{ m['content'] }}<|im_end|>\n"
+    "{% else %}<|im_start|>assistant\n{% if loop.last and m['reasoning_content'] %}<think>\n"
+    "{{ m['reasoning_content'] }}\n</think>\n\n{% endif %}{% if '.' in m['content'] %}<dot>{% endif %}"
+    "{{ m['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n"
+    "{% endif %}")
+
+
+def test_a_reasoning_trace_dropped_from_an_earlier_turn_does_not_match_a_later_one(tok_bl):
+    """The template renders the trace on the last turn only, and marks a
+    content with a period, so the probe misses and the search after the
+    header runs. The earlier turn's trace text appears only in the last
+    turn."""
+    tok = _with_template(tok_bl, _TEMPLATE_LAST_TRACE)
+
+    def a(text, rc):
+        return {"role": "assistant", "content": text, "reasoning_content": rc}
+
+    conv = [{"role": "user", "content": "q1"}, a("Paris.", "Let me check."),
+            {"role": "user", "content": "q2"}, a("Rome.", "Let me check.")]
+    b, spans = dl.render_row(tok, conv, open_tail=False)
+    assert [b[s0:s1].decode() for s0, s1, _ in spans] == ["Paris.", "Rome."]
+    b, spans = dl.render_row(tok, conv, open_tail=False, reason_target=True)
+    assert b[spans[-1][0]:spans[-1][1]].decode() == "Let me check.\n</think>\n\n<dot>Rome."
+    conv[-1]["content"] = "Paris."
+    b, spans = dl.render_row(tok, conv, open_tail=False)
+    assert [b[s0:s1] for s0, s1, _ in spans] == [b"Paris.", b"Paris."] and spans[0][2] <= spans[1][0]
+
+
 def test_an_inline_think_block_is_located_on_the_qwen3_template(tok_bl):
     """Published reasoning datasets keep the trace inline in the content.
     The Qwen3 template moves it out of the final turn and drops it from
@@ -3153,6 +3182,15 @@ def test_an_inline_think_block_is_located_on_the_qwen3_template(tok_bl):
         assert targets([q1, a(f"<think>\nyes\n</think>\n\n{reply}")])[-1] == (reply, "<|im_end|>\n")
     with pytest.raises(ValueError, match="only a think block"):
         targets([q1, a("<think>\nplan it\n</think>\n\n")])
+    # the template drops an earlier turn's trace, so the same trace in a
+    # later turn is not this turn's
+    for first, last in (("<think>\nLet me check.\n</think>\n\nParis", "<think>\nLet me check.\n</think>\n\nRome"),
+                        ("<think>\nok\n</think>\n\nParis", "ok Paris then ok")):
+        assert [t for t, _ in targets([q1, a(first), q2, a(last)])] == [
+            "Paris", last.rpartition("\n")[2]]
+    same = a("<think>\nLet me check.\n</think>\n\nParis")
+    b, spans = dl.render_row(tok, [q1, same, q2, same], open_tail=False)
+    assert [b[s0:s1] for s0, s1, _ in spans] == [b"Paris", b"Paris"] and spans[0][2] <= spans[1][0]
     tb = dl.token_bytes(tok)
     assert dl.fit_reply(tok, hist, 512, tb, reason_target=True) is not None
     assert dl.fit_conversation(tok, hist, 512, tb) is not None
@@ -7530,9 +7568,9 @@ def test_cache_refuses_a_dataset_id_without_datasets(tmp_path, tok_bl, capsys, m
     assert rc == 2 and "needs the datasets package" in capsys.readouterr().err
 
 
-def test_eval_refuses_a_slice_that_is_not_utf8(tmp_path, capsys):
+def test_eval_refuses_a_slice_that_is_not_utf8_or_cannot_be_opened(tmp_path, capsys):
     """A slice read leniently would score its bytes as replacement
-    characters."""
+    characters, and one the process cannot open raised a traceback."""
     from gmlx.distill import evaluate as _ev
 
     student = tmp_path / "student.gguf"
@@ -7543,6 +7581,15 @@ def test_eval_refuses_a_slice_that_is_not_utf8(tmp_path, capsys):
                                       json=str(tmp_path / "r.json"), slices=["s=" + str(sl)]))
     err = capsys.readouterr().err
     assert rc == 2 and "unreadable input" in err and "not UTF-8" in err
+    sl.write_text("the cat")
+    sl.chmod(0o000)
+    try:
+        rc = _ev.run_eval(_ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"),
+                                          json=str(tmp_path / "r.json"), slices=["s=" + str(sl)]))
+    finally:
+        sl.chmod(0o600)
+    err = capsys.readouterr().err
+    assert rc == 2 and f"unreadable input {sl}: Permission denied" in err
 
 
 def test_a_continue_frame_that_leaves_no_room_for_a_window_is_refused(tmp_path, tok_bl, capsys):

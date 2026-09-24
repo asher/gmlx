@@ -1271,20 +1271,23 @@ class Attention(nn.Module):
             sel, complete = selection
             key_len = k.shape[2]
             all_sparse = (offset + 1) // self.ratio > self.indexer.block_topk
+            # the kq sparse kernels have no backward: a training forward
+            # takes the token-mask branch
+            kern = not (self.training and cache is None)
             paged = _kq_paged() if (
-                L == 1 and self.ratio == 4 and D == 256
+                kern and L == 1 and self.ratio == 4 and D == 256
                 and q.dtype in (mx.bfloat16, mx.float16)) else None
             if paged is not None and all_sparse and not isinstance(mask, mx.array):
                 out = self._paged_attention(q, k, v, sel, key_len, paged)
-            elif L <= 8 and all_sparse and not isinstance(mask, mx.array):
+            elif kern and L <= 8 and all_sparse and not isinstance(mask, mx.array):
                 out = self._gathered_attention(q, k, v, sel, complete, offset, L)
-            elif (B == 1 and all_sparse and not isinstance(mask, mx.array)
+            elif (kern and B == 1 and all_sparse and not isinstance(mask, mx.array)
                   and L % 4 == 0 and self.ratio == 4 and D == 256
                   and H == 12 * Hkv and q.dtype in (mx.bfloat16, mx.float16)
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._block_sparse_prefill(q, k, v, sel, offset,
                                                  key_len, bs)
-            elif (B == 1 and not all_sparse and L > 8
+            elif (kern and B == 1 and not all_sparse and L > 8
                   and not isinstance(mask, mx.array)
                   and offset % 4 == 0 and L % 4 == 0
                   and self.ratio == 4 and D == 256 and H == 12 * Hkv
@@ -1292,7 +1295,7 @@ class Attention(nn.Module):
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._split_regime_prefill(q, k, v, sel, complete,
                                                  offset, L, key_len, bs)
-            elif (B == 1 and L > 8 and L % 4 != 0
+            elif (kern and B == 1 and L > 8 and L % 4 != 0
                   and not isinstance(mask, mx.array)
                   and (all_sparse or offset % 4 == 0)
                   and self.ratio == 4 and D == 256 and H == 12 * Hkv

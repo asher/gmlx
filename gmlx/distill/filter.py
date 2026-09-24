@@ -176,11 +176,18 @@ def recontext_row(row: dict, context: str, fmt: str = DEFAULT_CONTEXT_FORMAT) ->
 
 
 def _read_rows(path: Path) -> list[dict]:
-    """The corpus rows of a jsonl file, or a ValueError naming the first
-    line that is not JSON or not a row (an object with a non-empty list
-    of message objects whose contents are strings)."""
+    """The corpus rows of a jsonl file, or a ValueError naming the file
+    when it cannot be read or is not UTF-8, or naming the first line that
+    is not JSON or not a row (an object with a non-empty list of message
+    objects whose contents are strings)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{path}: not UTF-8 (byte {e.start}), convert it") from None
+    except OSError as e:
+        raise ValueError(f"cannot read {path}: {e.strerror or e}") from None
     rows = []
-    for n, ln in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+    for n, ln in enumerate(text.split("\n"), 1):
         if not ln.strip():
             continue
         try:
@@ -292,8 +299,15 @@ def run_filter(opts: FilterOptions) -> int:
         print(f"[filter] refuse: {fmt_err}", file=sys.stderr)
         return 2
     out = Path(opts.out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
+    except UnicodeDecodeError as e:
+        print(f"[filter] refuse: {opts.context}: not UTF-8 (byte {e.start}), convert it", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print(f"[filter] refuse: {e}", file=sys.stderr)
+        return 2
     if context is not None and not context.strip():
         print(f"[filter] refuse: context file {opts.context} is blank", file=sys.stderr)
         return 2

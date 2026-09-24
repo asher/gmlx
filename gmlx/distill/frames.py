@@ -316,11 +316,21 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
             cursor = max(cursor, _header_end(tokenizer, messages[:i], rendered))
             if rc:
                 kr = rendered.find(rc, cursor)
-                if kr >= 0:
+                # a trace the template dropped from this turn can match a
+                # later turn's, so it counts only when this content follows
+                # it and no whole turn of this content comes before it
+                if (kr >= 0 and not _turn_within(rendered, cs, cursor, kr, tails)
+                        and rendered.find(cs, kr + len(rc)) >= 0):
                     cursor = kr + len(rc)
                     if reason_target:
                         k0 = kr
             k = rendered.find(cs, cursor)
+            if k >= 0 and "</think>" in cs:
+                # a later turn can render this whole think block when the
+                # template dropped this turn's trace and kept its reply
+                reply = cs.partition("</think>")[2].strip()
+                if reply and _turn_within(rendered, reply, cursor, k, tails):
+                    k = -1
             if k < 0 and "</think>" in cs:
                 # the template moved an inline think block out of the
                 # content, or dropped it from an earlier turn: the trace is
@@ -330,13 +340,17 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
                 think, cs = think.split("<think>", 1)[-1].strip(), cs.strip()
                 if not cs:
                     raise ValueError("an assistant turn holds only a think block")
-                kr = rendered.find(think, cursor) if think else -1
-                if kr >= 0:
-                    cursor = kr + len(think)
-                    if reason_target:
-                        k0 = kr
+                # the template can drop an earlier turn's trace, so the next
+                # closing marker is this turn's only when the trace sits
+                # before it, this content follows it, and no whole turn of
+                # this content comes before the trace
                 close = rendered.find("</think>", cursor)
-                if close >= 0 and not rendered[cursor:close].strip():
+                kr = rendered.find(think, cursor, close) if think and close >= 0 else -1
+                if (close >= 0 and rendered[close + len("</think>"):].lstrip().startswith(cs)
+                        and (not think or kr >= 0)
+                        and not _turn_within(rendered, cs, cursor, kr if kr >= 0 else close, tails)):
+                    if kr >= 0 and reason_target:
+                        k0 = kr
                     cursor = close + len("</think>")
                 k = rendered.find(cs, cursor)
             if k < 0:
@@ -421,6 +435,18 @@ def _tail_end(rendered: str, end: int, tails: list[str]) -> int | None:
             if tail and rendered.startswith(tail, pos):
                 return pos + len(tail)
     return None
+
+
+def _turn_within(rendered: str, content: str, lo: int, hi: int, tails: list[str]) -> bool:
+    """Whether ``content`` sits between ``lo`` and ``hi`` as a whole turn,
+    followed by a turn-end marker. Markup that holds the content's letters
+    (a reply of "think" inside "<think>") does not count."""
+    k = rendered.find(content, lo, hi)
+    while k >= 0:
+        if _tail_end(rendered, k + len(content), tails) is not None:
+            return True
+        k = rendered.find(content, k + 1, hi)
+    return False
 
 
 
