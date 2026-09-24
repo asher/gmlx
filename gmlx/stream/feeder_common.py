@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import mmap
 import os
+import queue
+import threading
+from concurrent.futures import Future
 from contextlib import contextmanager
 
 import numpy as np
@@ -215,3 +218,74 @@ def swapped_weights(entry: dict, views: dict, slot_owner=None):
             proj.weight = w
             for lo in _expert_loras(proj):
                 lo.owner = None
+
+
+class DaemonPool:
+    """ThreadPoolExecutor stand-in whose workers are daemon threads. The
+    stdlib pool's workers are joined at interpreter exit, so one read
+    wedged in the kernel would hang process shutdown. Daemon workers die
+    with the process instead. ``on_start`` runs once in each worker thread
+    (the lookahead pool drops its disk-I/O priority there)."""
+
+    def __init__(self, n: int, on_start=None, name: str = "gmlx-decode-read"):
+        self._q: queue.Queue = queue.Queue()
+        self._on_start = on_start
+        self._name = name
+        self._threads = []
+        for i in range(n):
+            t = threading.Thread(
+                target=self._run, daemon=True, name=f"{name}-{i}")
+            t.start()
+            self._threads.append(t)
+
+    def _run(self) -> None:
+        if self._on_start is not None:
+            try:
+                self._on_start()
+            except Exception:  # noqa: S110 - start hook is advisory
+                pass
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            fut, fn, args = item
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn(*args))
+                except BaseException as exc:
+                    fut.set_exception(exc)
+            # A worker blocked in get() is a live frame: locals kept
+            # from the last item (the feeder's bound method, the
+            # future) would pin the feeder and its modules past unload.
+            del item, fut, fn, args
+
+    def submit(self, fn, *args) -> Future:
+        fut: Future = Future()
+        self._q.put((fut, fn, args))
+        return fut
+
+    def grow(self) -> None:
+        """Replace a worker lost to a wedged read."""
+        t = threading.Thread(
+            target=self._run, daemon=True,
+            name=f"{self._name}-{len(self._threads)}")
+        t.start()
+        self._threads.append(t)
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        if cancel_futures:
+            # Work no worker has taken yet is dropped. Its future is
+            # notified as a worker would, or wait() never returns on it.
+            while True:
+                try:
+                    item = self._q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None:
+                    item[0].cancel()
+                    item[0].set_running_or_notify_cancel()
+        for _ in self._threads:
+            self._q.put(None)
+        if wait:
+            for t in self._threads:
+                t.join()

@@ -452,10 +452,11 @@ def test_ring_depth_from_env(monkeypatch, tmp_path):
 
 def _wedge_stage(monkeypatch, feeder, layer):
     """Make ``layer``'s staging hang like a read wedged in the kernel until
-    the returned event is set."""
+    the returned event is set. Pair with ``_release_wedge``."""
     import gmlx.stream.prefill_feeder as pfm
 
     monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(pfm, "_QUARANTINED", [])
     stage, gate = feeder._stage, threading.Event()
 
     def wedged(li):
@@ -465,6 +466,33 @@ def _wedge_stage(monkeypatch, feeder, layer):
 
     monkeypatch.setattr(feeder, "_stage", wedged)
     return gate
+
+
+def _close_or_fail(feeder):
+    """Close a feeder whose worker is wedged. A close that joins the worker
+    would hang, so it runs on a daemon thread."""
+    closer = threading.Thread(target=feeder.close, daemon=True)
+    closer.start()
+    closer.join(5)
+    assert not closer.is_alive(), "close joined the wedged worker"
+
+
+def _release_wedge(feeder, gate):
+    """End the wedged stage, close the feeder, then close the fds its
+    quarantine keeps open for the process."""
+    import os
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    gate.set()
+    for ev in list(feeder._ready.values()):
+        assert ev.wait(5)
+    feeder.close()
+    for held in pfm._QUARANTINED:
+        if isinstance(held, dict):
+            for fd in held.values():
+                os.close(fd)
+    pfm._QUARANTINED.clear()
 
 
 def test_a_wedged_stage_takes_the_ring_out_of_service(monkeypatch, tmp_path):
@@ -488,8 +516,17 @@ def test_a_wedged_stage_takes_the_ring_out_of_service(monkeypatch, tmp_path):
                 pass
         feeder.release_slots()
         assert feeder._slots is slots, "a quarantined slot was dropped"
-    finally:
+        # The late stage ends. The ring stays out of service all the same.
         gate.set()
+        assert feeder._ready[1].wait(5)
+        feeder.release_slots()
+        assert feeder._slots is slots, "a quarantined slot was dropped"
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        assert not any(feeder.covers(li) for li in range(3))
+    finally:
+        _release_wedge(feeder, gate)
 
 
 def test_a_stage_timeout_in_the_call_takes_the_ring_out_of_service(
@@ -502,17 +539,20 @@ def test_a_stage_timeout_in_the_call_takes_the_ring_out_of_service(
                 pass
         assert feeder._wedged == [0] and not feeder.covers(0)
     finally:
-        gate.set()
+        _release_wedge(feeder, gate)
 
 
 def test_ring_release_keeps_the_slots_of_a_wedged_stage(monkeypatch, tmp_path):
     """Decode releases the ring. A slot a wedged read may still write is
-    neither unwired nor freed: freed, it would return to MLX's buffer cache
-    and another array would get the late bytes."""
+    never freed: freed, it would return to MLX's buffer cache and another
+    array would get the late bytes. It is unwired, so it stops counting
+    against the wired budget."""
     import gmlx.stream.prefill_feeder as pfm
 
-    unlocked = []
-    monkeypatch.setattr(pfm, "lock_pages", lambda mv: (id(mv), len(mv)))
+    locked, unlocked = [], []
+    monkeypatch.setattr(
+        pfm, "lock_pages",
+        lambda mv: locked.append((id(mv), len(mv))) or locked[-1])
     monkeypatch.setattr(pfm, "unlock_pages", lambda e: unlocked.append(e))
     monkeypatch.delenv("GMLX_DECODE_ARENA_MLOCK", raising=False)
     feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
@@ -522,8 +562,223 @@ def test_ring_release_keeps_the_slots_of_a_wedged_stage(monkeypatch, tmp_path):
             pass
         slots = feeder._slots
         feeder.release_slots()
-        assert feeder._slots is slots and unlocked == []
+        assert feeder._slots is slots
+        assert unlocked == locked and feeder._locked == []
         assert any(q is slots for q in pfm._QUARANTINED)
         assert not feeder.covers(0)
     finally:
+        _release_wedge(feeder, gate)
+
+
+def test_the_drain_waits_one_timeout_for_all_the_staging(monkeypatch, tmp_path):
+    """A new pass gives the stages in flight one timeout between them, not
+    one each. Layer 2 is queued behind the wedged layer 1 on the one stage
+    worker, so it never starts either."""
+    import time
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    monkeypatch.setenv("GMLX_PREFILL_RING_SLOTS", "3")
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=4)
+    gate = _wedge_stage(monkeypatch, feeder, 1)
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.5)
+    try:
+        with feeder.prefill_call(modules[0][0], 0):   # kicks layers 1 and 2
+            pass
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        elapsed = time.monotonic() - t0
+        assert feeder._wedged == [1, 2]
+        assert elapsed < 0.8, f"the drain took {elapsed:.2f}s for a 0.5s timeout"
+    finally:
+        _release_wedge(feeder, gate)
+
+
+def test_a_wedged_read_leaves_the_model_and_its_fds_to_the_process(
+        monkeypatch, tmp_path):
+    """A read wedged in the kernel blocks its stage worker for the life of
+    the process, and that worker's frame holds the feeder. The feeder lets
+    go of the MoE modules and of the decode feeder behind its hooks, so
+    they are freed with the model, and its close returns. Its fds stay
+    open: the wedged read still uses one, and a closed fd number goes to
+    the next open."""
+    import gc
+    import os
+    import weakref
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(pfm, "_QUARANTINED", [])
+    monkeypatch.setattr(pfm, "lock_pages", lambda mv: None)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    wedge_off = feeder._layers[1]["gate"][2]
+    gate = threading.Event()
+    name = "read_range_aligned" if feeder._nocache else "read_range"
+    real = getattr(pfm, name)
+
+    def maybe_wedge(fd, dest, off, *rest):
+        if off == wedge_off:
+            gate.wait()
+        return real(fd, dest, off, *rest)
+
+    monkeypatch.setattr(pfm, name, maybe_wedge)
+
+    class DecodeStandIn:
+        def seed_from_ring(self, *args):
+            return []
+
+        def lend_for_ring(self, nbytes):
+            pass
+
+    decode = DecodeStandIn()
+    feeder._seed_hook = decode.seed_from_ring
+    feeder._lend_hook = decode.lend_for_ring
+    fds = dict(feeder._fds)
+    try:
+        with feeder.prefill_call(modules[0][0], 0, ids=mx.array([[0, 1]])):
+            pass   # kicks layer 1, whose first read wedges
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        assert feeder._wedged == [1]
+        assert feeder._seed_prev is None and not feeder._seed_ids
+        _close_or_fail(feeder)
+        assert fds in pfm._QUARANTINED
+        for fd in fds.values():
+            os.fstat(fd)   # raises on a closed fd
+        mod_refs = [weakref.ref(m) for ms in modules.values() for m in ms]
+        decode_ref = weakref.ref(decode)
+        del modules, decode
+        gc.collect()
+        assert all(r() is None for r in mod_refs), "a MoE module outlived the model"
+        assert decode_ref() is None, "the decode feeder outlived the model"
+    finally:
         gate.set()
+        assert feeder._ready[1].wait(5)
+        for fd in fds.values():
+            os.close(fd)
+
+
+def test_a_failed_read_waits_for_its_siblings(monkeypatch, tmp_path):
+    """A stage whose read fails still waits for its other reads before the
+    layer counts as staged: one still in flight would write the slot the
+    next pass stages."""
+    import gmlx.stream.prefill_feeder as pfm
+
+    feeder, _modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    offs = {kind: feeder._layers[0][kind][2] for kind in _KINDS}
+    started, gate = threading.Event(), threading.Event()
+    name = "read_range_aligned" if feeder._nocache else "read_range"
+    real = getattr(pfm, name)
+
+    def reads(fd, dest, off, *rest):
+        if off == offs["gate"]:
+            raise OSError(5, "Input/output error")
+        if off == offs["down"]:
+            started.set()
+            gate.wait()
+        return real(fd, dest, off, *rest)
+
+    monkeypatch.setattr(pfm, name, reads)
+    feeder._kick(0)
+    try:
+        assert started.wait(5)
+        assert not feeder._ready[0].wait(0.3), \
+            "the layer counted as staged under a read in flight"
+    finally:
+        gate.set()
+    assert feeder._ready[0].wait(5)
+    assert isinstance(feeder._error, OSError)
+
+
+def test_a_wedged_partial_read_takes_the_ring_out_of_service(
+        monkeypatch, tmp_path):
+    """Partial staging reads outside the ring's stage events, so its wait
+    carries the same timeout."""
+    import os
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(pfm, "_QUARANTINED", [])
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    gate = threading.Event()
+    name = "read_range_aligned" if feeder._nocache else "read_range"
+    real = getattr(pfm, name)
+
+    def wedged(fd, dest, off, *rest):
+        gate.wait()
+        return real(fd, dest, off, *rest)
+
+    monkeypatch.setattr(pfm, name, wedged)
+    fds = dict(feeder._fds)
+    raised = []
+
+    def call():
+        try:
+            with feeder.prefill_partial_call(modules[0][0], 0, [1]):
+                pass
+        except RuntimeError as e:
+            raised.append(str(e))
+
+    caller = threading.Thread(target=call, daemon=True)
+    try:
+        caller.start()
+        caller.join(5)
+        assert not caller.is_alive(), "the partial staging wait has no timeout"
+        assert raised == ["[feeder] partial staging of layer 0 timed out"]
+        assert feeder._wedged == [0] and not feeder.covers(0)
+        _close_or_fail(feeder)
+        assert fds in pfm._QUARANTINED
+    finally:
+        gate.set()
+        feeder._read_pool.shutdown(wait=True)
+        for fd in fds.values():
+            os.close(fd)
+
+
+def test_process_exit_survives_a_wedged_prefill_read(tmp_path):
+    """The stage and read workers are daemon threads, so a read that never
+    returns does not hang interpreter exit."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = tmp_path / "wedge.py"
+    script.write_text(textwrap.dedent(f"""
+        import sys, threading
+        from pathlib import Path
+        sys.path.insert(0, {here!r})
+        import mlx.core as mx
+        mx.set_default_device(mx.cpu)
+        import mlx_kquant as kq
+        import gmlx.stream.prefill_feeder as pfm
+        from test_decode_feeder import _fake_arena_alloc, _make_fixture
+
+        kq.arena_alloc = _fake_arena_alloc
+        pfm._STAGE_TIMEOUT_S = 0.2
+        pfm.lock_pages = lambda mv: None
+        offsets, modules = _make_fixture(Path({str(tmp_path)!r}), 2)
+        feeder = pfm.PrefillFeeder(offsets, modules)
+        forever = threading.Event()
+        pfm.read_range_aligned = pfm.read_range = (
+            lambda *args: forever.wait())
+        try:
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        except RuntimeError as e:
+            print(e)
+        feeder.close()
+        print("closed", flush=True)
+    """))
+    env = dict(os.environ, KQUANT_FORCE_CPU="1")
+    r = subprocess.run(
+        [sys.executable, str(script)], env=env, capture_output=True,
+        text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "timed out" in r.stdout and "closed" in r.stdout

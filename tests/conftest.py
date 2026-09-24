@@ -60,15 +60,15 @@ def pytest_configure(config):
     # queue.get forever; past ~100 live threads faulthandler truncates
     # fatal-error dumps, cutting off the main thread's stack (the one that
     # names the crashing test).
-    import gmlx.stream.decode_feeder as decode_feeder
+    import gmlx.stream.feeder_common as feeder_common
 
-    orig_init = decode_feeder._DaemonReadPool.__init__
+    orig_init = feeder_common.DaemonPool.__init__
 
     def tracking_init(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
         _read_pools.append(self)
 
-    decode_feeder._DaemonReadPool.__init__ = tracking_init
+    feeder_common.DaemonPool.__init__ = tracking_init
 
 
 _read_pools: list = []

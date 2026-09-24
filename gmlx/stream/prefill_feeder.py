@@ -30,7 +30,7 @@ import fcntl
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
+from concurrent.futures import wait as futures_wait
 from contextlib import contextmanager
 
 import numpy as np
@@ -38,6 +38,7 @@ import numpy as np
 from .feeder_common import (
     ATTRS,
     KINDS,
+    DaemonPool,
     lock_pages,
     read_range,
     read_range_aligned,
@@ -58,8 +59,9 @@ _READ_WORKERS = 12
 # raising beats silently demand-faulting garbage.
 _STAGE_TIMEOUT_S = 300.0
 
-# Slots of rings taken out of service, held for the process: a wedged read
-# can still land in one after its feeder is closed.
+# Slots and shard fds of rings taken out of service, held for the process:
+# a wedged read can still land in a slot, or read through its fd, after its
+# feeder is closed.
 _QUARANTINED: list = []
 
 
@@ -166,8 +168,10 @@ class PrefillFeeder:
         # rest); staging past it would only be drained at the next pass.
         self._pass_last: int | None = None
 
-        self._stage_pool = ThreadPoolExecutor(max_workers=1)
-        self._read_pool = ThreadPoolExecutor(max_workers=_READ_WORKERS)
+        # Daemon workers: a read wedged in the kernel must not hang process
+        # exit.
+        self._stage_pool = DaemonPool(1, name="gmlx-prefill-stage")
+        self._read_pool = DaemonPool(_READ_WORKERS, name="gmlx-prefill-read")
         self._ready: dict[int, threading.Event] = {}
         self._last_li: int | None = None
         self._error: BaseException | None = None
@@ -285,10 +289,20 @@ class PrefillFeeder:
         """Take the ring out of service for the process. A stage that
         outlived the timeout holds a read wedged in the kernel, which can
         complete into its slot at any time. So no slot is staged again,
-        seeded from, unwired or freed (a freed slot goes back to MLX's
-        buffer cache and another array would get the late bytes)."""
+        seeded from or freed (a freed slot goes back to MLX's buffer cache
+        and another array would get the late bytes). The slots are
+        unwired, so they stop counting against the wired budget once the
+        model is gone. The worker blocked on the read holds this feeder
+        for the life of the process, so the feeder lets go of the MoE
+        modules and of the decode feeder behind its hooks."""
         self._wedged = sorted(late)
         _QUARANTINED.append(self._slots)
+        for e in self._locked:
+            unlock_pages(e)
+        self._locked = []
+        self._layers = {}
+        self._views = {}
+        self._lend_hook = self._seed_hook = None
         self._seed_ids.clear()
         self._seed_present.clear()
         self._seed_prev = None
@@ -313,14 +327,22 @@ class PrefillFeeder:
                 futures_wait(seeds)
                 self._t_seed_wait += time.monotonic() - t0
             slot = self._slots[self._slot_of[li]]
+            # No module in this frame: a wedged read blocks it for the life
+            # of the process.
+            reads = [(kind, path, off, nbytes)
+                     for kind, (_, path, off, nbytes) in self._layers[li].items()]
             futs = []
-            for kind, (_, path, off, nbytes) in self._layers[li].items():
+            for kind, path, off, nbytes in reads:
                 fd = self._fds[path]
                 mv = slot[kind][1]
                 for start in range(0, nbytes, _READ_CHUNK):
                     end = min(start + _READ_CHUNK, nbytes)
                     futs.append(self._submit_read(
                         path, fd, mv[start:end], off + start))
+            # Every read ends before the slot counts as staged, a failed one
+            # included: a sibling still in flight would write the slot the
+            # next pass stages.
+            futures_wait(futs)
             for f in futs:
                 f.result()
         except BaseException as e:  # surfaced on the caller's next wait
@@ -472,6 +494,10 @@ class PrefillFeeder:
                     futs.append(self._submit_read(
                         path, fd, mv[e * stride:(e + 1) * stride],
                         off + e * stride))
+        _, pending = futures_wait(futs, timeout=_STAGE_TIMEOUT_S)
+        if pending:
+            self._quarantine([li])
+            raise RuntimeError(f"[feeder] partial staging of layer {li} timed out")
         for f in futs:
             f.result()
         with self._swapped(li):
@@ -483,14 +509,18 @@ class PrefillFeeder:
 
     def close(self) -> None:
         # A wedged worker never returns: joining it would hang the close.
-        wait = not getattr(self, "_wedged", None)
-        pool = getattr(self, "_stage_pool", None)
-        if pool is not None:
-            pool.shutdown(wait=wait)
-        pool = getattr(self, "_read_pool", None)
-        if pool is not None:
-            pool.shutdown(wait=wait)
-        fds, self._fds = self._fds, {}
+        # Its queued work is dropped, since no slot is staged again.
+        wedged = bool(getattr(self, "_wedged", None))
+        for name in ("_stage_pool", "_read_pool"):
+            pool = getattr(self, name, None)
+            if pool is not None:
+                pool.shutdown(wait=not wedged, cancel_futures=wedged)
+        fds, self._fds = getattr(self, "_fds", {}), {}
+        if wedged:
+            # The wedged read still uses its fd, and a closed fd number
+            # goes to the next open. The fds stay open with the slots.
+            _QUARANTINED.append(fds)
+            return
         for fd in fds.values():
             try:
                 os.close(fd)
