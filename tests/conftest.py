@@ -76,10 +76,14 @@ _read_pools: list = []
 
 @pytest.fixture(autouse=True)
 def _shutdown_read_pools():
+    n = len(_read_pools)
     yield
+    # Only the pools this test created. A module or session fixture is set
+    # up before this one, so the pools of a model it shares stay open for
+    # the next test, and its own teardown closes them.
     # wait=False: a deliberately wedged worker (feeder wedge tests) never
     # takes its poison pill; joining it would hang the suite.
-    while _read_pools:
+    while len(_read_pools) > n:
         _read_pools.pop().shutdown(wait=False)
 
 
