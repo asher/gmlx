@@ -105,6 +105,10 @@ reason is not accepted in review. Tests are exempt.
   level.
 - Error messages follow the existing style: they say what was expected,
   what was found and what the user or upgrader should do next.
+- Install instructions show Homebrew first, then uv, and pip only for a
+  venv the user manages. Getting-started owns the install facts, and a page
+  that adds an extra shows the uv and pip forms, because a Homebrew install
+  already has every extra.
 
 ## Commit style
 
