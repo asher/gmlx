@@ -333,10 +333,9 @@ gmlx distill gen --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --prompts prompts-heldout
     --context schema.md --thinking --thinking-budget 1000 --max-tokens 320 \
     --temperature 0.6 --top-p 0.95 --out heldout-ctx.jsonl
 gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus heldout-ctx.jsonl --out cache-heldout-ctx/ \
-    --frame reply-think --frame-kwargs '{"enable_thinking": true}' --max-len 2560
+    --frame reply-think --max-len 2560
 gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus heldout-ctx.jsonl --out cache-heldout-bare/ \
-    --messages-key student_messages \
-    --frame reply-think --frame-kwargs '{"enable_thinking": true}' --max-len 2560
+    --messages-key student_messages --frame reply-think --max-len 2560
 gmlx distill census --without cache-heldout-bare/ --with cache-heldout-ctx/ \
     --corpus heldout-ctx.jsonl --out census.json --md census.md
 ```
@@ -390,7 +389,7 @@ gmlx distill filter --in r1-replies.jsonl --out r1-corpus.jsonl \
     --min-words 1 --max-reply-tokens 1180 --verify "./check-sql.py freight.sqlite" \
     --report r1-filter.json --rejects r1-rejects.jsonl
 gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus r1-corpus.jsonl --out cache-r1/ \
-    --frame reply-think --frame-kwargs '{"enable_thinking": true}' --top-k 256 --max-len 2560
+    --frame reply-think --top-k 256 --max-len 2560
 gmlx distill align --cache cache-r1/ --student Qwen3.5-9B-Q6_K.gguf --out view-r1/
 gmlx distill train --view view-r1/ --student Qwen3.5-9B-Q6_K.gguf --adapter-out r1.gguf \
     --iters 300 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5 --ckpt-dir ckpt-r1/
@@ -476,16 +475,17 @@ python3 -c 'import json,sys; a=sorted(g["completion_tokens"]-g["reasoning_tokens
 tells `cache` how to read each row. A frame names which positions are
 targets, the tokens the student is trained on. Here the rows are
 conversations and the targets start at the final turn's reasoning
-trace. `--frame-kwargs` sets the same thinking switch `gen` used, so the
-teacher reads the conversation the way it wrote it.
+trace.
 
-`gen --thinking` sends the server's thinking switch with every request
-and starts the teacher with `--thinking on`, so serve maps it onto the
-variable the teacher's template reads, `enable_thinking` for Qwen and
-the family's own name elsewhere. `cache` renders rows in process, so
-`--frame-kwargs` names that variable itself, `{"enable_thinking": true}`
-for a Qwen teacher. `align` reads the switch from the cache, so it needs
-no flag of its own.
+The teacher reads each conversation the way it wrote it. `gen --thinking`
+starts the teacher with `--thinking on`, and serve maps the switch onto
+the variable the teacher's template reads, `enable_thinking` for Qwen and
+the family's own name elsewhere. `filter` copies the `gen` sidecar to
+`r1-corpus.jsonl.gen.json`, and `cache` maps the recorded switch onto the
+same variable when it renders the rows. `--frame-kwargs` on `cache` sets
+other template variables and refuses a value that contradicts the
+switch. `align` reads the switch from the cache, so it needs no flag of
+its own.
 
 `--max-len` is the longest window, the stretch of a row cached as one
 piece, in teacher tokens. A longer text row is cut into windows at word
@@ -682,7 +682,7 @@ gmlx distill gen --model Qwen3.5-9B-Q6_K.gguf --serve-arg=--adapter --serve-arg=
 gmlx distill filter --in r2-replies.jsonl --out r2-corpus.jsonl --min-words 1 \
     --max-reply-tokens 1180 --verify "./check-sql.py freight.sqlite" --context schema.md
 gmlx distill cache --teacher Qwen3.6-27B-UD-Q8_K_XL.gguf --corpus r2-corpus.jsonl --out cache-r2/ \
-    --frame reply-think --frame-kwargs '{"enable_thinking": true}' --top-k 256 --max-len 2560
+    --frame reply-think --top-k 256 --max-len 2560
 gmlx distill align --cache cache-r2/ --student Qwen3.5-9B-Q6_K.gguf --out view-r2/
 gmlx distill train --view view-r1/ --view view-r2/ --student Qwen3.5-9B-Q6_K.gguf \
     --adapter-out r2.gguf --iters 678 --batch-size 3 --lora-rank 128 --lora-alpha 64 --lr 5e-5 \

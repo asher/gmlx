@@ -24,6 +24,10 @@ from .tokens import adds_bos, encode_with_byte_ends
 CONTINUE_INSTRUCTION = "Continue the following text."
 
 
+# the render setting that pins the day a template's strftime_now reports
+PINNED_DAY_KEY = "strftime_now_date"
+
+
 def parse_render_kwargs(spec: str | None) -> dict:
     """--frame-kwargs value: a JSON object, or a path to a JSON file."""
     if not spec:
@@ -35,9 +39,19 @@ def parse_render_kwargs(spec: str | None) -> dict:
             text = p.read_text(encoding="utf-8") if p.is_file() else spec
         except OSError as e:
             raise ValueError(f"--frame-kwargs {spec}: {e}") from None
-    kw = json.loads(text)
+    try:
+        kw = json.loads(text)
+    except ValueError as e:
+        raise ValueError(f"--frame-kwargs is not a JSON object: {e}") from None
     if not isinstance(kw, dict):
         raise ValueError("--frame-kwargs must be a JSON object")
+    if PINNED_DAY_KEY in kw:
+        import datetime
+        try:
+            datetime.date.fromisoformat(str(kw[PINNED_DAY_KEY]))
+        except ValueError:
+            raise ValueError(f"--frame-kwargs {PINNED_DAY_KEY} is not a YYYY-MM-DD date: "
+                             f"{kw[PINNED_DAY_KEY]!r}") from None
     return kw
 
 
@@ -79,6 +93,23 @@ def render_kwargs(tokenizer) -> dict:
     return dict(getattr(hf_inner(tokenizer), "distill_render_kwargs", None) or {})
 
 
+def generator_render_kwargs(tokenizer, generator: dict | None) -> dict:
+    """The template variables a gen sidecar records the replies were
+    sampled under, spelled for this tokenizer's template: its
+    chat_template_kwargs, and its thinking switch mapped onto the variable
+    the template reads, as serve maps it. Only variables the template
+    reads are kept, and a corpus without a sidecar gives none."""
+    if not generator:
+        return {}
+    from gmlx.tui.reasoning import map_thinking_controls
+    tpl = template_text(tokenizer)
+    base = generator.get("chat_template_kwargs")
+    thinking = generator.get("thinking")
+    kw = map_thinking_controls(dict(base) if isinstance(base, dict) else {},
+                               None if thinking is None else ("on" if thinking else "off"), None, tpl)
+    return {k: v for k, v in kw.items() if k in tpl}
+
+
 def resolve_render_kwargs(tokenizer, inherit: dict | None = None, override: dict | None = None) -> dict:
     """A side's render settings: the stable defaults for its template, then
     every inherited setting this template reads (the thinking switch a
@@ -92,10 +123,6 @@ def resolve_render_kwargs(tokenizer, inherit: dict | None = None, override: dict
     return kw
 
 
-# the render setting that pins the day a template's strftime_now reports
-PINNED_DAY_KEY = "strftime_now_date"
-
-
 def default_render_kwargs(tokenizer, date: str | None = None, day: str | None = None) -> dict:
     """Render settings that keep a template's output stable across days, so
     the cached render and every later re-render of the same conversation
@@ -103,17 +130,19 @@ def default_render_kwargs(tokenizer, date: str | None = None, day: str | None = 
     a date pinned in the Llama format, and one that calls strftime_now
     (gpt-oss) gets an ISO day under PINNED_DAY_KEY, which apply_template
     turns into a strftime_now that formats that day. ``date`` and ``day``
-    carry the other side's pin in either form, and today is the default."""
+    carry the other side's pin in either form, and today is the default.
+    A date_string is free text to the template, so one that is neither a
+    Llama nor an ISO date is kept as it is and pins no day."""
     import datetime
     tpl = template_text(tokenizer)
     pinned = None
-    try:
-        if day:
-            pinned = datetime.date.fromisoformat(day)
-        elif date:
-            pinned = datetime.datetime.strptime(date, "%d %b %Y").date()
-    except ValueError:
-        pinned = None
+    for pin, fmt in ((day, None), (date, "%d %b %Y"), (date, None)):
+        if pinned is None and pin:
+            try:
+                pinned = datetime.date.fromisoformat(pin) if fmt is None else \
+                    datetime.datetime.strptime(pin, fmt).date()
+            except ValueError:
+                pass
     if pinned is None:
         pinned = datetime.datetime.strptime(today_string(), "%d %b %Y").date()
     kw: dict = {}
@@ -639,16 +668,20 @@ def fit_conversation(tokenizer, msgs: list[dict], max_len: int, tb) -> tuple | N
 def trace_in_target(text: bytes, span: tuple, message: dict) -> bool | None:
     """Whether a reply-think target holds its turn's reasoning trace: None
     when the turn carries none (no reasoning_content and no inline think
-    block), else whether the trace's text lies inside the span. A template
-    that drops the trace leaves a reply-only target under the reply-think
-    label."""
+    block), else whether the trace's text lies in the span before the
+    answer, so a reply that restates its trace does not count as one. A
+    template that drops the trace leaves a reply-only target under the
+    reply-think label."""
     rc = (message.get("reasoning_content") or "").strip()
     c = message.get("content") or ""
     if not rc and "</think>" in c:
         rc = c.partition("</think>")[0].split("<think>", 1)[-1].strip()
     if not rc:
         return None
-    return rc.encode("utf-8") in text[span[0]:span[1]]
+    answer = (c.partition("</think>")[2] if "</think>" in c else c).strip().encode("utf-8")
+    seg = text[span[0]:span[1]]
+    cut = seg.rfind(answer) if answer else -1
+    return rc.encode("utf-8") in (seg[:cut] if cut >= 0 else seg)
 
 
 def fit_reply(tokenizer, msgs: list[dict], max_len: int, tb, reason_target: bool = False) -> tuple | None:

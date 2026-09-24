@@ -944,13 +944,14 @@ server that lists several models serves the run with the one named like
 | `--report-every N` | `50` | progress line interval in replies |
 
 `--serve-arg` refuses `--thinking`, `--thinking-budget`, `--chat-template`,
-`--chat-template-config`, `--reasoning-effort` and `--system-prompt`, in
-any spelling serve accepts. Each changes what the teacher is prompted
-with, and the rows would not record it. Set the thinking switch and
-budget with gen's own flags, template variables with
-`--chat-template-kwargs`, and a system prompt as a system turn in the
-prompt rows. A template override has no gen form, since `cache` renders
-the rows with the teacher's own template. Beside `--thinking-budget`,
+`--chat-template-config`, `--reasoning-effort`, `--system-prompt` and
+`--profile`, in any spelling serve accepts. Each changes what the teacher
+is prompted with, and the rows would not record it. Set the thinking
+switch and budget with gen's own flags, template variables with
+`--chat-template-kwargs`, sampling with gen's sampling flags, and a
+system prompt as a system turn in the prompt rows. A template override
+has no gen form, since `cache` renders the rows with the teacher's own
+template. Beside `--thinking-budget`,
 `--native-mtp`, `--speculative` and `--draft-gguf` are refused too,
 because a drafted server does not hold each request to the budget.
 
@@ -997,6 +998,13 @@ reply-think rows whose reasoning trace the teacher's template does not
 render, which train on the reply alone, and a reply-think pass in which
 no row keeps its trace is refused.
 
+A corpus written by `gen` renders with the thinking switch and the
+`--chat-template-kwargs` its `.gen.json` sidecar records, mapped onto the
+variables the teacher's template reads. `--frame-kwargs` adds to them,
+and a value that contradicts one is refused. A template that prints the
+date, as Llama 3's and gpt-oss's do, renders the day the cache was first
+started, and a resume and the student's render in `align` keep that day.
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--teacher GGUF` | required unless `--validate` | the teacher GGUF, sharded ok |
@@ -1024,7 +1032,7 @@ no row keeps its trace is refused.
 | `--frame-instruction TEXT` | `Continue the following text.` | user turn for the continue frame |
 | `--messages-key KEY` | `messages` | conversation column for the chat and reply frames |
 | `--close-final-windows` | off | with the continue frame, close the last window of a document with the turn-end marker |
-| `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every teacher render, an object or a file, added to those a `gen` sidecar records |
 | `--hf-source ID` | none | Hugging Face repo id whose config.json replaces the one synthesized from the GGUF. The tokenizer always comes from the GGUF |
 | `--no-require-feeder` | off | run a streaming teacher without the prefill feeder |
 | `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |

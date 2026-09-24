@@ -25,7 +25,7 @@ from . import frames as _frames
 from . import tokens as _tokens
 from .constants import DEFAULT_KNOBS, TABLES_VERSION, log
 from .data import CacheReader, ViewLoader
-from .format import manifest_sha256, output_error, read_json, write_json_atomic
+from .format import manifest_sha256, output_error, read_json, removes_empty_output, write_json_atomic
 
 # Projection gates on the own-group mass fraction a and the singleton mass
 # fraction s, mass-weighted over the top-K at shared boundaries.
@@ -233,6 +233,7 @@ def _log_first_failure(loader: ViewLoader) -> None:
             f"the first: {loader.first_failure}")
 
 
+@removes_empty_output(lambda opts: opts.out)
 def run_align(opts: AlignOptions) -> int:
     """Returns 0 on a written view, 2 when the cache is missing, 3 when the
     projection gate refuses the pair (``force`` keeps the view)."""
@@ -249,7 +250,7 @@ def run_align(opts: AlignOptions) -> int:
     try:
         frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
-        log(f"[align] refuse: --frame-kwargs is not a JSON object: {e}")
+        log(f"[align] refuse: {e}")
         return 2
     err = output_error(opts.out, directory=True)
     if err:
@@ -280,7 +281,7 @@ def run_align(opts: AlignOptions) -> int:
         log(f"[align] refuse: the tokenizer at {src} has another vocab hash than the cache recorded "
             f"({have[:12]} vs {str(want)[:12]}), the teacher tokenizer changed since the cache was written")
         return 2
-    out = Path(opts.out)
+    out = Path(opts.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     V_S = student_width(opts.student) or len(hf_inner(student_tok))
     knobs = dict(DEFAULT_KNOBS, w_mid=opts.w_mid, gamma=opts.gamma, tau_alm=opts.tau_alm,

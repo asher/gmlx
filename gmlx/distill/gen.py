@@ -61,6 +61,8 @@ PROMPT_FLAGS = {
                        "the prompt rows instead",
     "--chat-template": "renders the teacher's prompt with a template that cache does not use, so cache "
                        "would score other bytes than the teacher saw",
+    "--profile": "sets template variables through its reasoning intents, with no record in the rows, set "
+                 "sampling with gen's own flags and variables with --chat-template-kwargs instead",
 }
 
 

@@ -1333,6 +1333,10 @@ def test_cjk_units_split_ideographs_and_kana_only_and_leave_hangul_and_code_alon
     assert flt.word_count("a b c") == 3 and flt.word_count("\u4eca\u5929 \u5929\u6c14") == 4
     assert flt.word_count("\u4eba\u3005\u306f\u6642\u3005\uff71\uff72\uff73\uff74\uff75\u3007") == 11
     assert flt.word_count("\u300c\u5f15\u7528\u300d\uff61") == 2
+    # repeat marks, Hangzhou numerals and the masu mark are units, the
+    # tone marks and the wavy dash separate
+    assert flt.word_count("\u304f\u3031\u5c71\u303b\u3021\u3038\u303c") == 7
+    assert flt.word_count("\u5c71\u302a\u3030\u5ddd") == 2
     loop = "\u4eca\u5929\u5929\u6c14\u5f88\u597d" * 12
     assert flt.repeat_fraction(loop, 8) > 0.5 and flt.reason(_row("c", loop), opts) == "repeat"
 
@@ -1532,7 +1536,9 @@ def test_gen_refuses_serve_args_that_change_the_prompt_or_the_budget(tmp_path, s
              (["--chat-template-config", "{}"], "--chat-template-config is set from gen's --chat-template-kwargs"),
              (["--chat-template", "t.jinja"], "--chat-template renders the teacher's prompt"),
              (["--reas=high"], "--reasoning-effort (given as --reas) changes the teacher's prompt"),
-             (["--system-prompt", "be terse"], "--system-prompt changes the teacher's prompt")]
+             (["--system-prompt", "be terse"], "--system-prompt changes the teacher's prompt"),
+             (["--profile", "reasoning-high"], "--profile sets template variables"),
+             (["--prof=instruct"], "--profile (given as --prof) sets template variables")]
     for arg, want in cases:
         rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
                                         serve_arg=arg))

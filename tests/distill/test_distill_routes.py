@@ -170,3 +170,10 @@ def test_cache_routes_checks_free_space_once_the_route_bytes_are_known(tmp_path,
     err = capsys.readouterr().err
     assert "[cache] refuse: estimate" in err and "[cache] routes:" not in err
     assert _teacher._format.route_bytes_per_position(_ROUTING) == per_pos
+    # a --max-disk-gb between the two estimates refuses the resume too
+    from gmlx.distill.constants import GB
+    monkeypatch.setattr(_teacher._format, "free_bytes", lambda p: 10 ** 15)
+    cap = (plain + routed) / 2 / GB
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True, max_disk_gb=cap))) == 2
+    err = capsys.readouterr().err
+    assert f"[cache] refuse: estimate with routes exceeds --max-disk-gb {cap}" in err and "[cache] routes:" not in err

@@ -69,12 +69,15 @@ class FilterOptions:
 
 
 # whitespace and CJK punctuation separate units; ideographs, the
-# iteration marks and ideographic zero, and kana (half-width included) are
-# written without spaces, so each character is a unit of its own, while
-# Hangul, Latin, digits and code keep their whitespace tokens
-_SEP = re.compile("[\\s\u3000-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
-_CJK = re.compile("([\u2e80-\u2fdf\u3005-\u3007\u3040-\u30ff\u3100-\u312f\u31a0-\u31ff\u3400-\u4dbf"
-                  "\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003ffff])")
+# iteration and repeat marks, the ideographic and Hangzhou numerals, and
+# kana (half-width included) are written without spaces, so each
+# character is a unit of its own, while Hangul, Latin, digits and code
+# keep their whitespace tokens
+_SEP = re.compile("[\\s\u3000-\u3004\u3008-\u3020\u302a-\u3030\u3036\u3037\u303d-\u303f\uff01-\uff0f"
+                  "\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+_CJK = re.compile("([\u2e80-\u2fdf\u3005-\u3007\u3021-\u3029\u3031-\u3035\u3038-\u303c\u3040-\u30ff"
+                  "\u3100-\u312f\u31a0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f"
+                  "\U00020000-\U0003ffff])")
 
 
 def _units(text: str) -> list[str]:

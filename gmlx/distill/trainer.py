@@ -27,7 +27,7 @@ from . import loss as _loss
 from . import student as _student
 from . import view as _view
 from .constants import DEFAULT_KNOBS, GB, TABLES_VERSION, log
-from .format import free_bytes, manifest_sha256, output_error, read_json, write_json_atomic
+from .format import free_bytes, manifest_sha256, output_error, read_json, removes_empty_output, write_json_atomic
 from .teacher import teacher_identity
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
 
@@ -322,6 +322,13 @@ def load_checkpoint(ckpt_dir: Path, tag: str, model, opt) -> dict:
     return read_json(d / "state.json")
 
 
+def _render_kwargs_but_days(view: dict) -> dict:
+    """A view's student render kwargs without the day pins."""
+    days = ("date_string", _frames.PINNED_DAY_KEY)
+    return {k: x for k, x in (view.get("student_render_kwargs") or {}).items() if k not in days}
+
+
+@removes_empty_output(lambda opts: opts.ckpt_dir or "ckpt")
 def run_train(opts: TrainOptions) -> int:
     """Returns 0 after the export, 2 on a refusal before training."""
     import mlx.core as mx
@@ -395,8 +402,13 @@ def run_train(opts: TrainOptions) -> int:
             # specials map by other roles would train on its rows regrouped
             log(f"[train] refuse: {d} maps the student's specials by other roles than {view_dir}, align it again")
             return 2
-        if (v.get("student_render_kwargs") or {}) != (view.get("student_render_kwargs") or {}):
-            log(f"[train] refuse: {d} renders the student with other chat-template kwargs than {view_dir}")
+        # a day pin moves the date text outside the targets, and every
+        # row renders under view 0's pins, self-consistent on either day
+        kw2, kw0 = _render_kwargs_but_days(v), _render_kwargs_but_days(view)
+        if kw2 != kw0:
+            diff = ", ".join(f"{k} {kw2.get(k)!r} vs {kw0.get(k)!r}" for k in sorted(set(kw2) | set(kw0))
+                             if kw2.get(k) != kw0.get(k))
+            log(f"[train] refuse: {d} renders the student with other chat-template kwargs than {view_dir} ({diff})")
             return 2
         # T_dk, tau_alm and the lambdas are read by the loss alone; the
         # knobs that cut a view's chunks and weight its boundaries must agree
@@ -446,7 +458,7 @@ def run_train(opts: TrainOptions) -> int:
         if err:
             log(f"[train] refuse: cannot write --report {opts.report}: {err}")
             return 2
-    ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
+    ckpt_dir = Path(opts.ckpt_dir or "ckpt").expanduser()
     err = output_error(ckpt_dir, directory=True)
     if err:
         log(f"[train] refuse: cannot write --ckpt-dir {ckpt_dir}: {err}")

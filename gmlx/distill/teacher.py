@@ -173,11 +173,6 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     dropped += 1
                     continue
                 ids, ends, text, m2, spans, flag = row
-                if reason_target:
-                    has = _frames.trace_in_target(text, spans[-1], m2[-1])
-                    if has is not None:
-                        traced += 1
-                        trace_missing += int(not has)
                 st_row = None
                 if st_variants is not None:
                     st_row = list(st_variants[w])
@@ -193,6 +188,11 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                             continue
                         st_row = st_row[:sh] + st_row[sh + lost:]
                     student_rows += 1
+                if reason_target:
+                    has = _frames.trace_in_target(text, spans[-1], m2[-1])
+                    if has is not None:
+                        traced += 1
+                        trace_missing += int(not has)
                 flagged += int(flag)
                 rows.append((len(rows), doc_id, w, ids.astype(np.int32), ends.astype(np.uint32), text, m2, spans,
                              ("reply-think" if reason_target else "reply") if reply_kind else "chat", st_row,
@@ -527,6 +527,7 @@ def load_teacher(opts: CacheOptions):
     return model, config, arch, streaming, offloaded
 
 
+@_format.removes_empty_output(lambda opts: opts.out)
 def run_cache(opts: CacheOptions) -> int:
     """The pass. Returns 0 on a validated cache, 2 on a refusal before the
     teacher runs or on a shard the writer could not put down, 3 when the
@@ -534,12 +535,12 @@ def run_cache(opts: CacheOptions) -> int:
     chunk, 4 when the validator finds a problem in what was written."""
     import mlx.core as mx
 
-    out = Path(opts.out)
+    out = Path(opts.out).expanduser()
     t0 = time.perf_counter()
     try:
         frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
-        log(f"[cache] refuse: --frame-kwargs is not a JSON object: {e}")
+        log(f"[cache] refuse: {e}")
         return 2
     if not Path(opts.teacher).expanduser().exists():
         log(f"[cache] refuse: no teacher at {opts.teacher}")
@@ -558,12 +559,28 @@ def run_cache(opts: CacheOptions) -> int:
         log(f"[cache] refuse: cannot write --out {out}: {err}")
         return 2
     tokenizer = _tokens.load_tokenizer(opts.teacher)
-    # a resume renders as the first run did: the stored kwargs carry the
-    # date a template reads, which would otherwise move to today
+    try:
+        generator, generator_id = _corpus.generator_sidecar(opts.corpus)
+    except ValueError as e:
+        log(f"[cache] refuse: {e}")
+        return 2
+    # a generated corpus renders under the template variables its replies
+    # were sampled under, and a resume renders as the first run did: the
+    # stored kwargs carry the date a template reads, which would otherwise
+    # move to today
+    gen_kw = _frames.generator_render_kwargs(tokenizer, generator) if opts.frame != "none" else {}
     stored = _format.read_json(out / "progress.json").get("run") \
         if opts.resume and (out / "progress.json").is_file() else None
-    render_kw = _frames.resolve_render_kwargs(tokenizer, inherit=(stored or {}).get("render_kwargs"),
-                                              override=frame_kwargs)
+    inherit = {**gen_kw, **((stored or {}).get("render_kwargs") or {})}
+    render_kw = _frames.resolve_render_kwargs(tokenizer, inherit=inherit, override=frame_kwargs)
+    off = {k: v for k, v in gen_kw.items() if render_kw.get(k) != v}
+    if off:
+        log(f"[cache] refuse: {opts.corpus} was generated with "
+            + ", ".join(f"{k}={v!r}" for k, v in off.items()) + " and this pass renders "
+            + ", ".join(f"{k}={render_kw.get(k)!r}" for k in off)
+            + ", so the teacher would score the replies under another prompt. Leave these keys out of "
+            "--frame-kwargs or set them as gen did")
+        return 2
     _frames.set_render_kwargs(tokenizer, render_kw)
     if opts.frame != "none":
         why = _frames.template_problem(tokenizer)
@@ -584,11 +601,6 @@ def run_cache(opts: CacheOptions) -> int:
     except (OSError, ValueError) as e:
         # OSError: an unreadable corpus file, or a Hugging Face id the
         # datasets library cannot find
-        log(f"[cache] refuse: {e}")
-        return 2
-    try:
-        generator, generator_id = _corpus.generator_sidecar(opts.corpus)
-    except ValueError as e:
         log(f"[cache] refuse: {e}")
         return 2
     source = opts.source or ("synthetic" if generator else "human")

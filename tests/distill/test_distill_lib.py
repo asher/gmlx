@@ -2484,6 +2484,37 @@ def _mlx_students(monkeypatch):
                         lambda p, adapter, hf: (*_student.load_mlx_student(p, adapter_path=adapter), "mlx"))
 
 
+def test_train_takes_views_aligned_on_other_days_and_names_a_kwarg_they_differ_in(tmp_path, tok_bl, capsys,
+                                                                                  monkeypatch):
+    """A day pin changes only the date text of the student render, so
+    views aligned on two days train together; any other kwarg the views
+    differ in is refused by name."""
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    tok = _with_template(tok_bl, "Date: {{ strftime_now('%Y-%m-%d') }}{{ enable_thinking | default('') }}\n"
+                         + _TEMPLATE_A)
+    _mlx_students(monkeypatch)
+    monkeypatch.setattr(_frames, "today_string", lambda: "22 Sep 2026")
+    v1, student = _cpu_view(tmp_path, tok, "v1")
+    monkeypatch.setattr(_frames, "today_string", lambda: "23 Sep 2026")
+    v2, _ = _cpu_view(tmp_path, tok, "v2")
+    assert [json.loads((v / "view.json").read_text())["student_render_kwargs"] for v in (v1, v2)] == \
+        [{"strftime_now_date": "2026-09-22"}, {"strftime_now_date": "2026-09-23"}]
+    kw = dict(student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1)
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(v2)], ckpt_dir=str(tmp_path / "ck"),
+                                                    **kw)) == 0, capsys.readouterr().err
+    v3 = tmp_path / "v3"
+    assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(student), out=str(v3),
+                                              frame_kwargs='{"enable_thinking": true}')) == 0
+    capsys.readouterr()
+    assert _trainer.run_train(_trainer.TrainOptions(views=[str(v1), str(v3)], ckpt_dir=str(tmp_path / "ck3"),
+                                                    **kw)) == 2
+    assert "other chat-template kwargs than" in (err := capsys.readouterr().err) and \
+        "(enable_thinking True vs None)" in err
+
+
 def test_train_resume_refuses_other_settings_and_scores_a_fixed_val_sample(tmp_path, tok_bl, capsys, monkeypatch):
     """A checkpoint records the run it belongs to; a resume under another
     batch size or seed is refused, the same settings continue."""
@@ -3230,6 +3261,77 @@ def test_reply_think_rows_whose_template_drops_the_trace_are_counted_or_refused(
         assert len(rows) == 3 and counts == {"traced": 3, "trace_missing": missing}
     with pytest.raises(ValueError, match="renders none of the 3 reasoning traces"):
         _teacher.build_rows(_with_template(tok_bl, none), str(corpus), **kw)
+
+
+def test_cache_and_eval_log_the_rows_whose_template_drops_the_trace(tmp_path, tok_bl, capsys, monkeypatch):
+    """The counts of rows scored without their trace reach the [cache]
+    frame line, and eval's reply-slice log line and report."""
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import student as _student
+    from gmlx.distill import teacher as _teacher
+
+    gate = "{% if m['reasoning_content'] %}"
+    tok = _with_template(tok_bl, _TEMPLATE_TRACE.replace(
+        gate, "{% if m['reasoning_content'] and 'skip' not in m['reasoning_content'] %}"))
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"id": f"r{i}", "messages": [
+        {"role": "user", "content": f"q{i}"},
+        {"role": "assistant", "content": f"the cat {i}", "reasoning_content": rc}]}) + "\n"
+        for i, rc in enumerate(("plan it", "skip it", "plan more"))), encoding="utf-8")
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(tmp_path / "c"),
+                                                    top_k=8, max_len=256, frame="reply-think")) == 0
+    assert ", 1 rows whose reasoning trace the template does not render" in capsys.readouterr().err
+    model, cfg, tokenizer = _student.load_mlx_student(str(teacher))
+    monkeypatch.setattr(_ev, "load_student", lambda p, a, h: (model, cfg, tokenizer, "mlx"))
+    js = tmp_path / "r.json"
+    opts = _ev.EvalOptions(student=str(teacher), md=str(tmp_path / "r.md"), json=str(js), max_len=16,
+                           batch_size=2, reply_slices=[f"held={corpus}"], reply_think=True)
+    assert _ev.run_eval(opts) == 0
+    assert "held after: the student's template renders no reasoning trace in 1 of 3 rows" in capsys.readouterr().err
+    held = json.loads(js.read_text())["after"]["reply_bpb"]["held"]
+    assert held["traced"] == 3 and held["trace_missing"] == 1
+
+
+def test_trace_in_target_looks_for_the_trace_before_the_answer(tok_bl):
+    """A reply that restates its trace holds the trace's text after a
+    template drops the trace; only the text before the answer counts. An
+    inline think block counts when the template keeps it, and a turn with
+    no trace gives None."""
+    from gmlx.distill.frames import trace_in_target
+
+    q = {"role": "user", "content": "q"}
+    strip = _TEMPLATE_B.replace("[m] {{ m['content'] }}", "[m] {{ m['content'].split('</think>')[-1] }}")
+    cases = ((_TEMPLATE_B, {"content": "the answer is four", "reasoning_content": "four"}, False),
+             (_TEMPLATE_TRACE, {"content": "the answer is four", "reasoning_content": "four"}, True),
+             (_TEMPLATE_B, {"content": "<think>plan</think>answer"}, True),
+             (strip, {"content": "<think>plan</think>answer"}, False),
+             (_TEMPLATE_TRACE, {"content": "the answer"}, None))
+    for template, reply, want in cases:
+        msgs = [q, {"role": "assistant", **reply}]
+        b, spans = dl.render_row(_with_template(tok_bl, template), msgs, open_tail=False, reason_target=True)
+        assert trace_in_target(b, spans[-1], msgs[-1]) is want, (template, reply)
+
+
+def test_a_reply_row_dropped_for_its_student_list_counts_no_trace(tmp_path, tok_bl):
+    """A row whose student list cannot lose the turns fit_reply dropped is
+    counted as a mismatch and skipped; its trace is not a row's, so it
+    neither counts as missing nor triggers the refusal for a template
+    that renders no trace."""
+    from gmlx.distill import teacher as _teacher
+
+    long = {"role": "user", "content": "q1 " * 40}
+    reply = {"role": "assistant", "content": "the cat", "reasoning_content": "plan it"}
+    rows = [{"messages": [long, {"role": "assistant", "content": "a1 " * 40}, {"role": "user", "content": "q2"},
+                          reply],
+             "student_messages": [{"role": "user", "content": "q2"}, reply]},
+            {"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "the dog"}]}]
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = _teacher.build_rows(_with_template(tok_bl, _TEMPLATE_B), str(corpus), max_len=64, text_key="text",
+                              max_rows=None, max_tokens=None, source=None, hf_split="train", limit_docs=None,
+                              frame="reply-think")
+    assert len(out[0]) == 1 and out[-1]["reply_mismatch"] == 1 and out[-1]["trace_missing"] == 0
 
 
 def test_a_reasoning_trace_dropped_from_an_earlier_turn_does_not_match_a_later_one(tok_bl):
@@ -6110,6 +6212,40 @@ def test_a_refused_re_align_leaves_the_earlier_view_in_place(tmp_path, tok_bl, t
     assert {p.name: p.read_bytes() for p in out.iterdir()} == before
 
 
+def test_refusals_leave_no_empty_output_folder_and_a_tilde_output_lands_in_home(tmp_path, tok_bl, capsys,
+                                                                                monkeypatch):
+    """The output probe checks the expanded path, so the writers expand it
+    too, and a refusal after a verb made its output folder removes the
+    folders it made while they are empty."""
+    from gmlx.distill import format as _format
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    cache = tmp_path / "cache"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out="~/views/v1")) == 0
+    assert (home / "views" / "v1" / "view.json").is_file() and not (tmp_path / "~").exists()
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(tmp_path / "new" / "v2"),
+                                              materialize=True, max_disk_gb=1e-12)) == 2
+    assert "the partial view was removed" in capsys.readouterr().err and not (tmp_path / "new").exists()
+    monkeypatch.setattr(_format, "free_bytes", lambda p: 0)
+    from gmlx.distill import teacher as _teacher
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(student), corpus=str(_text_corpus(tmp_path / "c.jsonl")),
+                                                  out=str(tmp_path / "new" / "cache"), top_k=8, max_len=64))
+    assert rc == 2 and "GB free" in capsys.readouterr().err and not (tmp_path / "new").exists()
+    monkeypatch.setattr(_trainer, "free_bytes", lambda p: 0)
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16,
+                                                  ckpt_dir="~/runs/ck"))
+    assert rc == 2 and "under two checkpoints" in capsys.readouterr().err and not (home / "runs").exists()
+    assert not (tmp_path / "~").exists()
+
+
 def test_cache_refuses_a_torn_generator_sidecar_with_exit_2(tmp_path, tok_bl, capsys):
     """gen and filter refuse a sidecar that is not a JSON object with exit
     2; cache reads the same file for its generator block and must not
@@ -6370,6 +6506,41 @@ def test_cache_resume_refuses_a_changed_generator_sidecar(tmp_path, tok_bl, caps
     rc = _teacher.run_cache(_teacher.CacheOptions(**base, resume=True))
     err = capsys.readouterr().err
     assert rc == 2 and "generator_id" in err and "source" not in err.split("refuse", 1)[1]
+
+
+_TEMPLATE_SWITCHES = ("Effort: {{ reasoning_effort | default('medium') }} "
+                      "Think: {{ enable_thinking | default('unset') }}\n" + _TEMPLATE_B)
+
+
+def test_cache_renders_the_generator_switches_and_refuses_a_contradicting_frame_kwarg(tmp_path, tok_bl, capsys):
+    """gen records its thinking switch and chat-template kwargs in the
+    sidecar; cache renders the replies under the same variables, or the
+    teacher scores them under another prompt than the one they answer."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_SWITCHES)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = _chat_corpus(tmp_path / "chat.jsonl")
+    (tmp_path / "chat.jsonl.gen.json").write_text(json.dumps(
+        {"model": "m", "thinking": True, "chat_template_kwargs": {"reasoning_effort": "high", "unread": 1}}),
+        encoding="utf-8")
+    base = dict(teacher=str(teacher), corpus=str(corpus), top_k=8, max_len=256, frame="reply")
+    out = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(out=str(out), **base)) == 0, capsys.readouterr().err
+    assert json.loads((out / "progress.json").read_text())["run"]["render_kwargs"] == \
+        {"reasoning_effort": "high", "enable_thinking": True}
+    reader = dl.CacheReader(out)
+    assert all(b"Effort: high Think: True" in reader.row(r)[1] for r in range(len(reader)))
+    assert _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "same"), **base,
+                                                    frame_kwargs='{"reasoning_effort": "high"}')) == 0
+    capsys.readouterr()
+    rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "low"), **base,
+                                                  frame_kwargs='{"reasoning_effort": "low"}'))
+    err = capsys.readouterr().err
+    assert rc == 2 and "was generated with reasoning_effort='high'" in err and "reasoning_effort='low'" in err
+    rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "off"), **base,
+                                                  frame_kwargs='{"enable_thinking": false}'))
+    assert rc == 2 and "enable_thinking=True" in capsys.readouterr().err
 
 
 def test_cache_refuses_a_named_template_set_without_a_default(tmp_path, capsys):
@@ -6880,6 +7051,40 @@ def test_cache_refuses_a_top_k_at_the_head_width_and_a_manifest_it_cannot_write(
     rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "c"), top_k=8, **base))
     err = capsys.readouterr().err
     assert rc == 2 and "[cache] refuse: cannot write progress.json: disk full" in err
+
+
+def test_day_pins_read_either_date_form_and_a_malformed_day_is_refused(tmp_path, tok_bl, capsys, monkeypatch):
+    """A date_string in the Llama or the ISO form pins the strftime_now
+    day too, free text pins nothing, and a strftime_now_date that is not
+    an ISO day is refused when the flag is read, not per row."""
+    from gmlx.distill import frames as _frames
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import view as _view
+
+    monkeypatch.setattr(_frames, "today_string", lambda: "24 Sep 2026")
+    tok = _with_template(tok_bl, "{{ date_string }} {{ strftime_now('%Y-%m-%d') }}\n" + _TEMPLATE_B)
+    for kw, want in (({"date": "2026-09-22"}, ("2026-09-22", "2026-09-22")),
+                     ({"date": "22 Sep 2026"}, ("22 Sep 2026", "2026-09-22")),
+                     ({"date": "late September"}, ("late September", "2026-09-24")),
+                     ({"day": "2026-09-21"}, ("21 Sep 2026", "2026-09-21"))):
+        assert _frames.default_render_kwargs(tok, **kw) == \
+            {"date_string": want[0], _frames.PINNED_DAY_KEY: want[1]}, kw
+    with pytest.raises(ValueError, match="--frame-kwargs is not a JSON object"):
+        _frames.parse_render_kwargs('{"a": ')
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    bad = '{"strftime_now_date": "22 Sep 2026"}'
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_chat_corpus(tmp_path / "c.jsonl")),
+                                                  out=str(tmp_path / "cache"), top_k=8, max_len=256, frame="reply",
+                                                  frame_kwargs=bad))
+    why = "--frame-kwargs strftime_now_date is not a YYYY-MM-DD date: '22 Sep 2026'"
+    assert rc == 2 and f"[cache] refuse: {why}" in capsys.readouterr().err
+    cache = tmp_path / "ok"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(tmp_path / "c.jsonl"),
+                                                    out=str(cache), top_k=8, max_len=256, frame="reply")) == 0
+    capsys.readouterr()
+    rc = _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "v"),
+                                            frame_kwargs=bad))
+    assert rc == 2 and f"[align] refuse: {why}" in capsys.readouterr().err
 
 
 def test_frame_kwargs_file_that_cannot_be_read_is_a_value_error(tmp_path):

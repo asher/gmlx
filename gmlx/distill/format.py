@@ -4,6 +4,7 @@ convention."""
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -158,26 +159,55 @@ def sha256_file(path: Path, chunk: int = 1 << 24) -> str:
     return h.hexdigest()
 
 
-def output_error(path: str | Path, *, directory: bool = False) -> str | None:
-    """Why an output cannot be written, or None. A probe file is written in
-    the folder that will hold it (for a directory output, the directory),
-    so a verb refuses before its work instead of after. Folders the probe
-    had to make are removed again, and the verb makes them when it writes,
-    so a later refusal leaves no empty output folder behind."""
-    from gmlx.tune.lora import probe_writable
-    p = os.path.abspath(os.path.expanduser(str(path)))
-    target = os.path.join(p, ".write-check") if directory else p
+def missing_dirs(path: str | Path) -> list[str]:
+    """The folders on the way to path, path included, that do not exist
+    yet, deepest first."""
     made = []
-    d = os.path.dirname(target)
+    d = os.path.abspath(os.path.expanduser(str(path)))
     while not os.path.exists(d) and os.path.dirname(d) != d:
         made.append(d)
         d = os.path.dirname(d)
-    err = probe_writable(target)
-    for d in made:
+    return made
+
+
+def remove_empty_dirs(dirs: list[str]) -> None:
+    """Remove the folders deepest first, stopping at the first that is not
+    empty."""
+    for d in dirs:
         try:
             os.rmdir(d)
         except OSError:
             break
+
+
+def removes_empty_output(where):
+    """Decorate a verb's run function so that the folders on the way to the
+    output folder where(opts) names, which did not exist when the verb
+    started and are still empty when it returns, are removed. A refusal
+    then leaves no empty output folder behind."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def run(opts):
+            made = missing_dirs(where(opts))
+            try:
+                return fn(opts)
+            finally:
+                remove_empty_dirs(made)
+        return run
+    return wrap
+
+
+def output_error(path: str | Path, *, directory: bool = False) -> str | None:
+    """Why an output cannot be written, or None. A probe file is written in
+    the folder that will hold it (for a directory output, the directory),
+    so a verb refuses before its work instead of after. Folders the probe
+    had to make are removed again, and the verb makes them when it writes."""
+    from gmlx.tune.lora import probe_writable
+    p = os.path.abspath(os.path.expanduser(str(path)))
+    target = os.path.join(p, ".write-check") if directory else p
+    made = missing_dirs(os.path.dirname(target))
+    err = probe_writable(target)
+    remove_empty_dirs(made)
     return err
 
 

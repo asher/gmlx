@@ -613,8 +613,8 @@ def run_eval(opts: EvalOptions) -> int:
     report["contaminated_slices"] = sorted(contaminated)
     if corpus_sources is not None:
         report["corpus_sources"] = corpus_sources
-    write_json_atomic(Path(opts.json), report)
+    write_json_atomic(Path(opts.json).expanduser(), report)
     md = report_markdown(opts, report, slices, chat_slices, reply_slices, contaminated)
-    write_bytes_atomic(Path(opts.md), md.encode("utf-8"))
+    write_bytes_atomic(Path(opts.md).expanduser(), md.encode("utf-8"))
     print(md, end="")
     return 0
