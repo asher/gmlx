@@ -58,6 +58,10 @@ _READ_WORKERS = 12
 # raising beats silently demand-faulting garbage.
 _STAGE_TIMEOUT_S = 300.0
 
+# Slots of rings taken out of service, held for the process: a wedged read
+# can still land in one after its feeder is closed.
+_QUARANTINED: list = []
+
 
 def ring_slots() -> int:
     """Ring depth in layer slots (GMLX_PREFILL_RING_SLOTS, default 2). Each
@@ -167,6 +171,9 @@ class PrefillFeeder:
         self._ready: dict[int, threading.Event] = {}
         self._last_li: int | None = None
         self._error: BaseException | None = None
+        # Layers whose staging outlived _STAGE_TIMEOUT_S. Non-empty = the
+        # ring is out of service for the process (see _quarantine).
+        self._wedged: list[int] = []
         # Set by the loader to DecodeFeeder.lend_for_ring when a decode
         # arena coexists with this ring: called before a post-decode slot
         # rebuild; it shrinks the arena only when the kernel has lost the
@@ -220,10 +227,11 @@ class PrefillFeeder:
         """Drop the ring (its physical pages with it) once decode starts;
         the ring's room stays reserved under the ceiling and the next
         prefill pass re-allocates into it."""
-        if not self._slots:
+        # An out-of-service ring keeps its slots (see _quarantine).
+        if not self._slots or self._wedged:
             return
-        for ev in self._ready.values():  # a worker may still write a slot
-            ev.wait(_STAGE_TIMEOUT_S)
+        if not self._drain_staging():  # a worker may still write a slot
+            return
         self._submit_seed()
         for futs in self._seed_futs.values():
             futures_wait(futs)
@@ -257,7 +265,43 @@ class PrefillFeeder:
             self._fds)
 
     def covers(self, li: int) -> bool:
-        return li in self._layers
+        """True when layer ``li`` stages through the ring. False for every
+        layer once the ring is out of service, so the caller takes the
+        page-cache path."""
+        return li in self._layers and not self._wedged
+
+    def _drain_staging(self) -> bool:
+        """Wait for the staging in flight, within one timeout for all of
+        it. False when a stage outlived it: the ring is then out of
+        service."""
+        deadline = time.monotonic() + _STAGE_TIMEOUT_S
+        late = [li for li, ev in self._ready.items()
+                if not ev.wait(max(0.0, deadline - time.monotonic()))]
+        if late:
+            self._quarantine(late)
+        return not late
+
+    def _quarantine(self, late: list[int]) -> None:
+        """Take the ring out of service for the process. A stage that
+        outlived the timeout holds a read wedged in the kernel, which can
+        complete into its slot at any time. So no slot is staged again,
+        seeded from, unwired or freed (a freed slot goes back to MLX's
+        buffer cache and another array would get the late bytes)."""
+        self._wedged = sorted(late)
+        _QUARANTINED.append(self._slots)
+        self._seed_ids.clear()
+        self._seed_present.clear()
+        self._seed_prev = None
+        print(
+            f"[stream] feeder prefill: staging of layer(s) {self._wedged} "
+            f"outlived {_STAGE_TIMEOUT_S:.0f}s (a read wedged in the "
+            "kernel), ring out of service, prefill takes page-cache "
+            "prefetch from here on")
+
+    def _out_of_service(self) -> RuntimeError:
+        return RuntimeError(
+            f"[feeder] prefill ring out of service: staging of layer(s) "
+            f"{self._wedged} outlived {_STAGE_TIMEOUT_S:.0f}s")
 
     # staging
 
@@ -306,6 +350,8 @@ class PrefillFeeder:
     # the per-call protocol
 
     def _drain_on_new_pass(self, li: int) -> None:
+        if self._wedged:
+            raise self._out_of_service()
         if not self._slots:  # ring was released for decode; rebuild
             if self._lend_hook is not None:
                 self._lend_hook(self.n_slots * self.slot_bytes)
@@ -313,8 +359,8 @@ class PrefillFeeder:
         if self._last_li is None or li <= self._last_li:
             # New prefill pass (next chunk or new request). In-flight staging
             # from the old pass targets the same slots; drain before reusing.
-            for ev in self._ready.values():
-                ev.wait(_STAGE_TIMEOUT_S)
+            if not self._drain_staging():
+                raise self._out_of_service()
             self._ready.clear()
             self._error = None
         self._last_li = li
@@ -344,7 +390,7 @@ class PrefillFeeder:
         ids = self._seed_ids.pop(li, None)
         present = self._seed_present.pop(li, None)
         if li is None or ids is None or self._seed_hook is None \
-                or not self._slots:
+                or not self._slots or self._wedged:
             return
         entry = self._layers[li]
         kind0 = next(iter(entry))
@@ -386,6 +432,7 @@ class PrefillFeeder:
         ready = self._ready[li].wait(_STAGE_TIMEOUT_S)
         self._t_ready_wait += time.monotonic() - t0
         if not ready:
+            self._quarantine([li])
             raise RuntimeError(f"[feeder] staging layer {li} timed out")
         if self._error is not None:
             raise RuntimeError(f"[feeder] staging failed: {self._error}")
@@ -435,12 +482,14 @@ class PrefillFeeder:
             self._note_routing(li, routing, present)
 
     def close(self) -> None:
+        # A wedged worker never returns: joining it would hang the close.
+        wait = not getattr(self, "_wedged", None)
         pool = getattr(self, "_stage_pool", None)
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=wait)
         pool = getattr(self, "_read_pool", None)
         if pool is not None:
-            pool.shutdown(wait=True)
+            pool.shutdown(wait=wait)
         fds, self._fds = self._fds, {}
         for fd in fds.values():
             try:

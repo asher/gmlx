@@ -8,6 +8,7 @@ of known bytes (fixture shared with test_decode_feeder)."""
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 
 import numpy as np
@@ -447,3 +448,82 @@ def test_ring_depth_from_env(monkeypatch, tmp_path):
     from gmlx.stream.prefill_feeder import ring_slots
 
     assert ring_slots() == 2
+
+
+def _wedge_stage(monkeypatch, feeder, layer):
+    """Make ``layer``'s staging hang like a read wedged in the kernel until
+    the returned event is set."""
+    import gmlx.stream.prefill_feeder as pfm
+
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.2)
+    stage, gate = feeder._stage, threading.Event()
+
+    def wedged(li):
+        if li == layer:
+            gate.wait()
+        stage(li)
+
+    monkeypatch.setattr(feeder, "_stage", wedged)
+    return gate
+
+
+def test_a_wedged_stage_takes_the_ring_out_of_service(monkeypatch, tmp_path):
+    """A stage that outlived the timeout may still complete into its slot.
+    The next pass must not stage into the ring: every layer takes the
+    page-cache path and the slots stay allocated, never reused."""
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    gate = _wedge_stage(monkeypatch, feeder, 1)
+    try:
+        with feeder.prefill_call(modules[0][0], 0):   # kicks layer 1 too
+            pass
+        slots = feeder._slots
+        # A new pass: the drain finds layer 1 still staging.
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_partial_call(modules[0][0], 0, [2]):
+                pass
+        assert feeder._wedged == [1]
+        assert not any(feeder.covers(li) for li in range(3))
+        with pytest.raises(RuntimeError, match="out of service"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        feeder.release_slots()
+        assert feeder._slots is slots, "a quarantined slot was dropped"
+    finally:
+        gate.set()
+
+
+def test_a_stage_timeout_in_the_call_takes_the_ring_out_of_service(
+        monkeypatch, tmp_path):
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    gate = _wedge_stage(monkeypatch, feeder, 0)
+    try:
+        with pytest.raises(RuntimeError, match="timed out"):
+            with feeder.prefill_call(modules[0][0], 0):
+                pass
+        assert feeder._wedged == [0] and not feeder.covers(0)
+    finally:
+        gate.set()
+
+
+def test_ring_release_keeps_the_slots_of_a_wedged_stage(monkeypatch, tmp_path):
+    """Decode releases the ring. A slot a wedged read may still write is
+    neither unwired nor freed: freed, it would return to MLX's buffer cache
+    and another array would get the late bytes."""
+    import gmlx.stream.prefill_feeder as pfm
+
+    unlocked = []
+    monkeypatch.setattr(pfm, "lock_pages", lambda mv: (id(mv), len(mv)))
+    monkeypatch.setattr(pfm, "unlock_pages", lambda e: unlocked.append(e))
+    monkeypatch.delenv("GMLX_DECODE_ARENA_MLOCK", raising=False)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    gate = _wedge_stage(monkeypatch, feeder, 1)
+    try:
+        with feeder.prefill_call(modules[0][0], 0):
+            pass
+        slots = feeder._slots
+        feeder.release_slots()
+        assert feeder._slots is slots and unlocked == []
+        assert any(q is slots for q in pfm._QUARANTINED)
+        assert not feeder.covers(0)
+    finally:
+        gate.set()

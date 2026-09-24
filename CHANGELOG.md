@@ -12,6 +12,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `MLX_VLM_ENABLE_THINKING` set `enable_thinking`. The request now wins.
 - Unloading a DeepSeek-V4.1 model that reads its engram tables from the GGUF
   could hang while a table read was still queued.
+- A streamed expert read that stalled past the prefill staging timeout could
+  give later requests wrong output with no error. Prefill now reads through
+  the page cache for the rest of the run.
 
 ## [0.4.15] - 2026-09-22
 
