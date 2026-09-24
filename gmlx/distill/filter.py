@@ -37,10 +37,10 @@ from pathlib import Path
 
 from .constants import log
 from .corpus import message_list
-from .format import write_json_atomic
+from .format import output_error, write_json_atomic
 from .gen import DEFAULT_CONTEXT_FORMAT, apply_context, context_format_error
 
-FILTER_VERSION = "3"
+FILTER_VERSION = "4"
 MARKERS = ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "<start_of_turn>", "<end_of_turn>", "<turn|>",
            "<|eot_id|>", "<|start_header_id|>", "<|channel|>", "<|message|>", "<|return|>", "<|user|>",
            "<|assistant|>", "<think>", "</think>")
@@ -68,12 +68,13 @@ class FilterOptions:
     context_format: str = DEFAULT_CONTEXT_FORMAT
 
 
-# whitespace and CJK punctuation separate units; ideographs and kana are
+# whitespace and CJK punctuation separate units; ideographs, the
+# iteration marks and ideographic zero, and kana (half-width included) are
 # written without spaces, so each character is a unit of its own, while
 # Hangul, Latin, digits and code keep their whitespace tokens
-_SEP = re.compile("[\\s\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
-_CJK = re.compile("([\u2e80-\u2fdf\u3040-\u30ff\u3100-\u312f\u31a0-\u31ff\u3400-\u4dbf\u4e00-\u9fff"
-                  "\uf900-\ufaff\U00020000-\U0003ffff])")
+_SEP = re.compile("[\\s\u3000-\u3004\u3008-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]+")
+_CJK = re.compile("([\u2e80-\u2fdf\u3005-\u3007\u3040-\u30ff\u3100-\u312f\u31a0-\u31ff\u3400-\u4dbf"
+                  "\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003ffff])")
 
 
 def _units(text: str) -> list[str]:
@@ -299,8 +300,12 @@ def run_filter(opts: FilterOptions) -> int:
         print(f"[filter] refuse: {fmt_err}", file=sys.stderr)
         return 2
     out = Path(opts.out).expanduser()
+    for label, path in (("--out", out), ("--report", opts.report), ("--rejects", opts.rejects)):
+        err = output_error(path) if path else None
+        if err:
+            print(f"[filter] refuse: cannot write {label} {path}: {err}", file=sys.stderr)
+            return 2
     try:
-        out.parent.mkdir(parents=True, exist_ok=True)
         context = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
     except UnicodeDecodeError as e:
         print(f"[filter] refuse: {opts.context}: not UTF-8 (byte {e.start}), convert it", file=sys.stderr)
@@ -369,6 +374,7 @@ def run_filter(opts: FilterOptions) -> int:
     # write leaves the corpus that was there
     tmp = out.with_name(out.name + ".tmp")
     try:
+        out.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as ofh:
             for row in survivors:
                 ofh.write(json.dumps(row, ensure_ascii=False) + "\n")

@@ -373,7 +373,9 @@ def _eval_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--chat-refs", type=_path, default=None, metavar="JSON",
                    help="An earlier eval report whose replies anchor the drift score. Ignored with --before, "
                         "which anchors on the adapter-off replies.")
-    p.add_argument("--chat-max-len", type=_positive_int, default=2048, help="Longest conversation scored (default 2048).")
+    p.add_argument("--chat-max-len", type=_positive_int, default=2048,
+                   help="Longest chat or reply row scored, in student tokens (default 2048). A longer row "
+                        "loses turns until it fits, or is dropped when none fits.")
     p.add_argument("--chat-per-turn", action="store_true", help="Score every assistant turn as its own row.")
     p.add_argument("--reply-slice", action="append", default=[], metavar="NAME=PATH",
                    help="A jsonl of conversations scored on the final reply, repeatable.")

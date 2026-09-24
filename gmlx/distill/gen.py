@@ -48,11 +48,38 @@ DRAFTER_FLAGS = ("--native-mtp", "--speculative", "--draft-gguf")
 THINKING_KWARGS = ("enable_thinking", "thinking", "thinking_mode")
 
 
+# serve flags that change what the teacher is prompted with, which the
+# rows would not record, each with the reason gen gives when it refuses one
+PROMPT_FLAGS = {
+    "--thinking": "is gen's own flag, sent with every request and recorded in the sidecar, not a --serve-arg",
+    "--thinking-budget": "is gen's own flag, sent with every request, not a --serve-arg",
+    "--chat-template-config": "is set from gen's --chat-template-kwargs, which the sidecar records, "
+                              "not a --serve-arg",
+    "--reasoning-effort": "changes the teacher's prompt with no record in the rows, set the template's "
+                          "variable with --chat-template-kwargs instead",
+    "--system-prompt": "changes the teacher's prompt with no record in the rows, put a system turn in "
+                       "the prompt rows instead",
+    "--chat-template": "renders the teacher's prompt with a template that cache does not use, so cache "
+                       "would score other bytes than the teacher saw",
+}
+
+
 def drafter_flag(arg: str) -> bool:
     """True for a serve argument that installs a drafter, by its full
     spelling, an abbreviation argparse accepts, or either with =value."""
     name = arg.split("=", 1)[0]
     return len(name) > 3 and any(f.startswith(name) for f in DRAFTER_FLAGS)
+
+
+def prompt_flag(arg: str) -> str | None:
+    """The PROMPT_FLAGS entry a serve argument sets, by its full spelling,
+    an abbreviation argparse accepts, or either with =value."""
+    name = arg.split("=", 1)[0]
+    if name in PROMPT_FLAGS:
+        return name
+    if len(name) > 3:
+        return next((f for f in PROMPT_FLAGS if f.startswith(name)), None)
+    return None
 DEFAULT_CONTEXT_FORMAT = "{context}\n\n{prompt}"
 
 
@@ -122,7 +149,7 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
     present only when a context was applied."""
     if opts.context and not Path(opts.context).expanduser().is_file():
         raise ValueError(f"no context file at {opts.context}")
-    shared = Path(opts.context).expanduser().read_text(encoding="utf-8") if opts.context else None
+    shared = _corpus.read_utf8(Path(opts.context).expanduser()) if opts.context else None
     if shared is not None and not shared.strip():
         raise ValueError(f"context file {opts.context} is blank")
     rows: list[dict] = []
@@ -130,7 +157,7 @@ def prompt_rows(opts: GenOptions) -> list[dict]:
         path = Path(opts.prompts).expanduser()
         if not path.is_file():
             raise ValueError(f"no prompts file at {path}")
-        for i, line in enumerate(path.read_text(encoding="utf-8").split("\n")):
+        for i, line in enumerate(_corpus.read_utf8(path).split("\n")):
             if not line.strip():
                 continue
             where = f"prompt {i} of {path.name}"
@@ -676,12 +703,16 @@ def run_gen(opts: GenOptions) -> int:
               "--serve-arg) "
               "is not enforced per request, serve the teacher without the drafter", file=sys.stderr)
         return 2
-    if any(a == "--thinking-budget" or a.startswith("--thinking-budget=") for a in opts.serve_arg):
+    for a in opts.serve_arg:
         # a server-wide budget would cap every request under what the
-        # sidecar records as the budget
-        print("[gen] refuse: --thinking-budget is gen's own flag, sent with every request, not a --serve-arg",
-              file=sys.stderr)
-        return 2
+        # sidecar records, and the other flags change the prompt the rows
+        # hold for cache to render
+        flag = prompt_flag(a)
+        if flag:
+            name = a.split("=", 1)[0]
+            given = "" if name == flag else f" (given as {name})"
+            print(f"[gen] refuse: {flag}{given} {PROMPT_FLAGS[flag]}", file=sys.stderr)
+            return 2
     tokenizer = None
     if opts.thinking_budget:
         tok_path = opts.tokenizer or opts.teacher
@@ -713,6 +744,13 @@ def run_gen(opts: GenOptions) -> int:
         # an --out gen cannot write, a missing prompt file, or a Hugging
         # Face id the datasets library cannot find (an OSError subclass)
         print(f"[gen] refuse: {e}", file=sys.stderr)
+        return 2
+    if not rows:
+        # a run with nothing to generate would exit 0 and write no --out,
+        # and the next step would fail one step away from the cause
+        print(f"[gen] refuse: {opts.prompts or opts.corpus} yields no prompts"
+              + ("" if opts.prompts else f" (blank documents and those under --min-chars {opts.min_chars} "
+                 "are skipped)"), file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
     with_context = any(r.get("student_messages") for r in rows)

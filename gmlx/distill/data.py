@@ -10,7 +10,7 @@ from typing import Iterator
 
 import numpy as np
 
-from gmlx.load.tokenizer import hf_inner, token_bytes
+from gmlx.load.tokenizer import token_bytes
 
 from .align import Tables, project_topk, shared_boundaries, tokenization_bias_check
 from .constants import GB, NEG_INF
@@ -24,7 +24,7 @@ from .format import (
     write_bytes_atomic,
 )
 from .frames import render_row, row_render_args, shared_boundaries_spans, target_mask
-from .tokens import adds_bos, bos_id, encode_with_byte_ends
+from .tokens import encode_with_byte_ends
 
 # ---------------------------------------------------------------------------
 # view compilation and batches
@@ -73,8 +73,7 @@ def phantom_space_mismatch(tables: Tables, t_next, t_span, s_next, s_span) -> np
 
 def compile_row(cache_row: dict[str, np.ndarray], text: bytes, student_ids: np.ndarray,
                 student_ends: np.ndarray, tables: Tables, *, Kp: int | None,
-                knobs: dict, teacher_special: set[int], student_special: set[int],
-                identity: bool = False, t_spans: list | None = None,
+                knobs: dict, identity: bool = False, t_spans: list | None = None,
                 s_spans: list | None = None) -> RowView | None:
     """Compile one cache row against one student tokenization.
 
@@ -393,14 +392,12 @@ class ViewLoader:
         self.knobs = knobs
         self.Kp = Kp
         self.identity = identity
-        si = hf_inner(student_tok)
-        self.student_special = set(si.all_special_ids)
         self.stb = student_tb if student_tb is not None else (None if identity else token_bytes(student_tok, tables.V_S))
-        self.bos = bos_id(student_tok) if adds_bos(student_tok) else None
         self.view_dir = Path(view_dir) if view_dir else None
         self._mat: dict[int, dict] = {}
         self.dropped = 0
         self.render_failures = 0
+        self.first_failure: str | None = None
 
     def student_tokens(self, arrs: dict, text: bytes, meta: dict) -> tuple[np.ndarray, np.ndarray, list | None]:
         """(ids, end bytes, target spans or None). Identity rows forward the
@@ -425,23 +422,26 @@ class ViewLoader:
         arrs, text, meta = self.reader.row(r)
         try:
             s_ids, s_ends, s_spans = self.student_tokens(arrs, text, meta)
-        except ValueError:
-            self.dropped += 1
-            self.render_failures += 1
+        except ValueError as e:
+            self._failed(r, e)
             return None
         t_spans = [tuple(x) for x in meta["spans"]] if (s_spans is not None and meta.get("spans")) else None
         try:
             rv = compile_row(arrs, text, s_ids, s_ends, self.tables, Kp=self.Kp, knobs=self.knobs,
-                             teacher_special=set(), student_special=self.student_special,
                              identity=self.identity, t_spans=t_spans, s_spans=s_spans)
-        except ValueError:
+        except ValueError as e:
             # the two renders pair no spans (a template that rewrites content)
-            self.dropped += 1
-            self.render_failures += 1
+            self._failed(r, e)
             return None
         if rv is None:
             self.dropped += 1
         return rv
+
+    def _failed(self, r: int, e: ValueError) -> None:
+        self.dropped += 1
+        self.render_failures += 1
+        if self.first_failure is None:
+            self.first_failure = f"row {r}: {e}"
 
     def batch(self, rows: list[int]) -> dict[str, np.ndarray] | None:
         views = [v for v in (self.compile(r) for r in rows) if v is not None]

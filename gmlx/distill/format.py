@@ -50,6 +50,13 @@ def routes_dtype(n_experts: int):
     return np.uint8 if n_experts <= 256 else np.uint16
 
 
+def route_bytes_per_position(routing: dict) -> int:
+    """Bytes the routes field adds per position: one stored id per MoE
+    layer and selected expert, at the stored width."""
+    return (len(routing["moe_layers"]) * int(routing["k"])
+            * np.dtype(routes_dtype(int(routing["n_experts"]))).itemsize)
+
+
 def install_route_recording(model):
     """(recorder, reason): a gmlx RouteRecorder hooked on every MoE block of
     ``model``, or (None, why) when gmlx lacks the seam, the model has no
@@ -149,6 +156,29 @@ def sha256_file(path: Path, chunk: int = 1 << 24) -> str:
                 break
             h.update(b)
     return h.hexdigest()
+
+
+def output_error(path: str | Path, *, directory: bool = False) -> str | None:
+    """Why an output cannot be written, or None. A probe file is written in
+    the folder that will hold it (for a directory output, the directory),
+    so a verb refuses before its work instead of after. Folders the probe
+    had to make are removed again, and the verb makes them when it writes,
+    so a later refusal leaves no empty output folder behind."""
+    from gmlx.tune.lora import probe_writable
+    p = os.path.abspath(os.path.expanduser(str(path)))
+    target = os.path.join(p, ".write-check") if directory else p
+    made = []
+    d = os.path.dirname(target)
+    while not os.path.exists(d) and os.path.dirname(d) != d:
+        made.append(d)
+        d = os.path.dirname(d)
+    err = probe_writable(target)
+    for d in made:
+        try:
+            os.rmdir(d)
+        except OSError:
+            break
+    return err
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:

@@ -25,7 +25,7 @@ from . import frames as _frames
 from . import tokens as _tokens
 from .constants import DEFAULT_KNOBS, TABLES_VERSION, log
 from .data import CacheReader, ViewLoader
-from .format import manifest_sha256, read_json, write_json_atomic
+from .format import manifest_sha256, output_error, read_json, write_json_atomic
 
 # Projection gates on the own-group mass fraction a and the singleton mass
 # fraction s, mass-weighted over the top-K at shared boundaries.
@@ -226,6 +226,13 @@ def val_split(doc_ids: list, fraction: float, seed: int) -> set[int]:
     return val
 
 
+def _log_first_failure(loader: ViewLoader) -> None:
+    n = loader.render_failures
+    if n:
+        log(f"[align] {n} row{'s' if n != 1 else ''} failed to render or pair on the student side, "
+            f"the first: {loader.first_failure}")
+
+
 def run_align(opts: AlignOptions) -> int:
     """Returns 0 on a written view, 2 when the cache is missing, 3 when the
     projection gate refuses the pair (``force`` keeps the view)."""
@@ -243,6 +250,10 @@ def run_align(opts: AlignOptions) -> int:
         frame_kwargs = _frames.parse_render_kwargs(opts.frame_kwargs)
     except ValueError as e:
         log(f"[align] refuse: --frame-kwargs is not a JSON object: {e}")
+        return 2
+    err = output_error(opts.out, directory=True)
+    if err:
+        log(f"[align] refuse: cannot write --out {opts.out}: {err}")
         return 2
     # every input is read before an earlier view is removed, so a refusal
     # leaves the view directory as it found it
@@ -365,6 +376,7 @@ def run_align(opts: AlignOptions) -> int:
         # average) and replace an earlier view with nothing for train
         log(f"[align] refuse: no row compiled ({n} rows, {loader.dropped} dropped, {loader.render_failures} "
             "student render failures), no view written")
+        _log_first_failure(loader)
         return 2
     Kp = opts.kprime or (max(stats["n_groups_max"]) if stats["n_groups_max"] else reader.K)
     if identity:
@@ -416,6 +428,7 @@ def run_align(opts: AlignOptions) -> int:
         f"redirect={red:.3f} bias_ok={view['alignment']['tokenization_bias_ok']:.4f} "
         f"(on-path in top-K {view['alignment']['onpath_in_topk_fraction']:.3f}); "
         f"{wall / max(n, 1) * 1000:.2f} ms/row")
+    _log_first_failure(loader)
     if not identity and a < REFUSE_A and not opts.force:
         # refused before any write, so an earlier view in the directory
         # stays as it was and no new one is left for train to accept

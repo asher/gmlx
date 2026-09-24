@@ -23,6 +23,7 @@ from .frames import (
     row_render_args,
     shared_boundaries_spans,
     target_mask,
+    trace_in_target,
 )
 from .constants import LOG_FLOOR
 from .tokens import adds_bos, bos_id, encode_with_byte_ends
@@ -347,7 +348,7 @@ def _is_repetitive(text: str, n: int = 12, times: int = 3) -> bool:
 
 def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, last_only: bool = False,
                positions: dict | None = None, reason_target: bool = False,
-               trace_positions: dict | None = None) -> tuple[list, int]:
+               trace_positions: dict | None = None, counts: dict | None = None) -> tuple[list, int]:
     """Scorable rows (ids, target mask, target bytes, id) from conversations.
     Each entry of convs is a message list or a {id, messages,
     student_messages} row; the student's list is used when present. With
@@ -359,7 +360,10 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
     token starts inside a range (rows whose id is absent from it and from
     trace_positions score nothing); trace_positions holds ranges relative
     to the start of the reasoning trace, the span's own start under
-    reason_target. Returns the rows and the count dropped."""
+    reason_target. Returns the rows and the count dropped. Under
+    reason_target, counts (when given) gains "traced", the rows whose final
+    turn carries a trace, and "trace_missing", those whose target the
+    template left without it."""
     tb = token_bytes(tokenizer)
     rows = []
     dropped = 0
@@ -376,7 +380,12 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
             if fit is None:
                 dropped += 1
                 continue
-            ids, ends, _text, _m, spans, _f = fit
+            ids, ends, text, fm, spans, _f = fit
+            if reason_target and counts is not None:
+                has = trace_in_target(text, spans[-1], fm[-1])
+                if has is not None:
+                    counts["traced"] = counts.get("traced", 0) + 1
+                    counts["trace_missing"] = counts.get("trace_missing", 0) + int(not has)
             e = ends.astype(np.int64)
             tm = target_mask(e, spans)
             if positions is not None or trace_positions is not None:
@@ -472,11 +481,16 @@ def reply_slice_nll(model, tokenizer, rows: list[dict], *, max_len: int = 2048, 
     rows ({id, messages, student_messages}) under the student's own list,
     restricted to the byte ranges in positions and trace_positions (a
     census high-delta map) when given. Per-row items are returned for
-    paired comparisons."""
+    paired comparisons. Under reason_target, "traced" and
+    "trace_missing" count the rows with a trace and those whose target the
+    student's template left without it."""
+    counts = {"traced": 0, "trace_missing": 0}
     srows, dropped = _span_rows(tokenizer, rows, max_len=max_len, last_only=True, positions=positions,
-                                reason_target=reason_target, trace_positions=trace_positions)
+                                reason_target=reason_target, trace_positions=trace_positions, counts=counts)
     r = _score_span_rows(model, srows, batch_tokens=batch_tokens)
     r["dropped"] = dropped
+    if reason_target:
+        r.update(counts)
     r["restricted"] = positions is not None
     return r
 
@@ -549,7 +563,8 @@ def chat_sanity(model, tokenizer, items: list[dict], *, refs: dict | None = None
 
 def continuation_logprob(model, tokenizer, context: str, continuations: list[str]) -> list[float]:
     """Sum log-prob of each continuation given the context (multiple-choice
-    scoring by continuation log-likelihood)."""
+    scoring by continuation log-likelihood). A continuation that adds no
+    token scores -inf, never the empty sum 0."""
     import mlx.core as mx
     inner = hf_inner(tokenizer)
     ctx_ids = inner.encode(context, add_special_tokens=True)
@@ -562,6 +577,9 @@ def continuation_logprob(model, tokenizer, context: str, continuations: list[str
         k = 0
         while k < min(n_ctx, len(full)) and full[k] == ctx_ids[k]:
             k += 1
+        if k >= len(full):
+            out.append(-math.inf)
+            continue
         arr = np.array([full], dtype=np.int32)
         logits = model(mx.array(arr))
         if hasattr(logits, "logits"):

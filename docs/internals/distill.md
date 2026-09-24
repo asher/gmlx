@@ -24,10 +24,11 @@ values are float16 in any case.
 
 Some families scale their logits after the projection, and the head
 carries that scale beside the softcap. Granite divides by
-`logits_scaling`, Cohere multiplies by `logit_scale` and MiniCPM scales
-the hidden states. As a check that nothing else was missed, the head
-runs beside the model's own forward on eight tokens before the pass, and
-again before `train` and `eval` score anything. A difference in the
+`logits_scaling`, Cohere multiplies by `logit_scale`, Muse Glimmer
+multiplies by `output_multiplier` and MiniCPM scales the hidden states.
+As a check that nothing else was missed, the head runs beside the
+model's own forward on eight tokens before the pass, and again before
+`train` and `eval` score anything. A difference in the
 logits refuses the run, so a model that changes its logits in a way the
 head does not carry never reaches the cache.
 

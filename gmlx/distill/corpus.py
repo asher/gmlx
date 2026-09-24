@@ -58,6 +58,15 @@ def _json_line(line: str, p: Path, i: int):
         raise ValueError(f"{p.name} line {i + 1}: not JSON ({e})") from None
 
 
+def read_utf8(p: Path) -> str:
+    """The text of ``p``, refused with the file and the first bad byte
+    named when it is not UTF-8."""
+    try:
+        return Path(p).read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{p}: not UTF-8 (byte {e.start}), convert it") from None
+
+
 def _utf8_lines(p: Path, name: str, in_dir: bool = False) -> Iterator[str]:
     """The lines of ``p``, refused with the file named when it is not
     UTF-8."""

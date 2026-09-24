@@ -127,6 +127,8 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
     closed = 0
     student_rows = 0
     mismatch = 0
+    traced = 0
+    trace_missing = 0
 
     def full() -> bool:
         return bool((max_rows and len(rows) >= max_rows) or (max_tokens and n_tokens >= max_tokens))
@@ -171,6 +173,11 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     dropped += 1
                     continue
                 ids, ends, text, m2, spans, flag = row
+                if reason_target:
+                    has = _frames.trace_in_target(text, spans[-1], m2[-1])
+                    if has is not None:
+                        traced += 1
+                        trace_missing += int(not has)
                 st_row = None
                 if st_variants is not None:
                     st_row = list(st_variants[w])
@@ -195,6 +202,10 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     break
             if full():
                 break
+        if traced and trace_missing == traced:
+            raise ValueError(f"--frame reply-think: the teacher's template renders none of the {traced} reasoning "
+                             "traces of the final turns, so no row would train on one. Use --frame reply, or a "
+                             "template that renders reasoning_content")
     else:
         if frame == "continue":
             frame_text = _frames.render_frame(tokenizer, [{"role": "user", "content": instruction}])
@@ -277,7 +288,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
     # is reproducible on resume
     rows.sort(key=lambda r: (len(r[3]), r[0]))
     info = {"dropped": dropped, "frame_tokens": frame_tokens, "closed_rows": closed,
-            "student_rows": student_rows, "reply_mismatch": mismatch}
+            "student_rows": student_rows, "reply_mismatch": mismatch, "trace_missing": trace_missing}
     return rows, n_tokens, corpus_hash.hexdigest(), flagged, tb, ws, source, info
 
 
@@ -542,6 +553,10 @@ def run_cache(opts: CacheOptions) -> int:
     if opts.stream_experts and not teacher_is_gguf:
         log("[cache] refuse: --stream-experts needs a GGUF teacher")
         return 2
+    err = _format.output_error(out, directory=True)
+    if err:
+        log(f"[cache] refuse: cannot write --out {out}: {err}")
+        return 2
     tokenizer = _tokens.load_tokenizer(opts.teacher)
     # a resume renders as the first run did: the stored kwargs carry the
     # date a template reads, which would otherwise move to today
@@ -584,14 +599,16 @@ def run_cache(opts: CacheOptions) -> int:
     if generator:
         log(f"[cache] generator sidecar: {generator.get('model')} filter_version "
             f"{generator.get('filter_version')} ({generator_id})")
-    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor,
-                                       hidden_bytes=2 * opts.hidden_dim if opts.hidden else 0.0)
+    hidden_b = 2 * opts.hidden_dim if opts.hidden else 0.0
+    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, hidden_bytes=hidden_b)
     log(f"[cache] {len(rows)} rows, {n_tokens} tokens, estimate {est / GB:.2f} GB "
         f"({flagged} rows on the offsets fallback)")
     if opts.frame != "none":
         log(f"[cache] frame {opts.frame}: {frame_info['frame_tokens']} frame tokens, "
             f"{frame_info['dropped']} rows dropped, {frame_info['student_rows']} rows with a "
-            f"student list, {frame_info['reply_mismatch']} rows dropped for a reply mismatch")
+            f"student list, {frame_info['reply_mismatch']} rows dropped for a reply mismatch"
+            + (f", {frame_info['trace_missing']} rows whose reasoning trace the template does not render"
+               if opts.frame == "reply-think" else ""))
     if not rows:
         log(f"[cache] refuse: {opts.corpus} yields no rows (blank texts and conversations without an "
             "assistant turn are skipped)")
@@ -606,12 +623,27 @@ def run_cache(opts: CacheOptions) -> int:
     if not opts.resume and writer.n_done:
         log(f"[cache] refuse: {out} already has {writer.n_done} shards, pass --resume or a fresh --out")
         return 2
-    # the space still needed: a resume has the verified shards on disk
-    fb = _format.free_bytes(out)
-    need = max(est - writer.progress["bytes"], 0)
-    if need > fb * 0.9:
-        log(f"[cache] refuse: estimate {est / GB:.2f} GB ({need / GB:.2f} GB still to write) against "
-            f"{fb / GB:.2f} GB free")
+
+    def short_of_space(est: float) -> bool:
+        # the space still needed: a resume has the verified shards on disk
+        fb = _format.free_bytes(out)
+        need = max(est - writer.progress["bytes"], 0)
+        if need > fb * 0.9:
+            log(f"[cache] refuse: estimate {est / GB:.2f} GB ({need / GB:.2f} GB still to write) against "
+                f"{fb / GB:.2f} GB free")
+            return True
+        return False
+
+    # a resume that knows the routes' k counts their bytes up front, since
+    # the check the first chunk runs once k is learned does not run again
+    routed = writer.progress.get("routing") or {}
+    if opts.routes and opts.resume and routed.get("k") is not None:
+        est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, hidden_bytes=hidden_b,
+                                           routes_bytes=_format.route_bytes_per_position(routed))
+        if opts.max_disk_gb is not None and est > opts.max_disk_gb * GB:
+            log(f"[cache] refuse: estimate with routes exceeds --max-disk-gb {opts.max_disk_gb}")
+            return 2
+    if short_of_space(est):
         return 2
     # rows are sorted by length over the whole row set, so any change to the
     # corpus or the row options changes every shard's contents: a resume
@@ -757,12 +789,13 @@ def run_cache(opts: CacheOptions) -> int:
                 if routing["k"] is None:
                     routing["k"] = int(routes_blt.shape[-1])
                     writer.progress["routing"] = routing
-                    per_pos = routes_blt.shape[2] * routing["k"] * np.dtype(routes_blt.dtype).itemsize
-                    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, routes_bytes=per_pos,
-                                                       hidden_bytes=2 * opts.hidden_dim if opts.hidden else 0.0)
+                    est = _format.estimate_cache_bytes(n_tokens, opts.top_k, opts.floor, hidden_bytes=hidden_b,
+                                                       routes_bytes=_format.route_bytes_per_position(routing))
                     log(f"[cache] routes: k={routing['k']}, estimate with routes {est / GB:.2f} GB")
                     if opts.max_disk_gb is not None and est > opts.max_disk_gb * GB:
                         log(f"[cache] refuse: estimate with routes exceeds --max-disk-gb {opts.max_disk_gb}")
+                        return 2
+                    if short_of_space(est):
                         return 2
                 routes_blt = routes_blt.astype(_format.routes_dtype(routing["n_experts"]))
             if streaming and E_bytes:
@@ -897,6 +930,7 @@ def run_cache(opts: CacheOptions) -> int:
                     "student_messages_key": opts.student_messages_key,
                     "student_rows": frame_info.get("student_rows", 0),
                     "reply_mismatch": frame_info.get("reply_mismatch", 0),
+                    "trace_missing": frame_info.get("trace_missing", 0),
                     "target_positions": targets_total,
                     "render_kwargs": render_kw,
                     "turn_end_markers": _frames.assistant_tails(tokenizer),

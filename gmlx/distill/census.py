@@ -32,8 +32,9 @@ from pathlib import Path
 import numpy as np
 
 from .constants import log
+from .corpus import read_utf8
 from .data import CacheReader
-from .format import teacher_fingerprint, write_json_atomic
+from .format import output_error, teacher_fingerprint, write_json_atomic
 
 FLOOR = 1e-12
 HIST_BINS = [-math.inf, -1, -0.1, 0.1, 0.5, 1, 2, 4, math.inf]
@@ -117,7 +118,7 @@ def corpus_ids(corpus: Path, pair_by: str) -> dict[str, str]:
     the eval's reply slice names its rows."""
     out = {}
     n = 0
-    for i, line in enumerate(corpus.read_text(encoding="utf-8").split("\n")):
+    for i, line in enumerate(read_utf8(corpus).split("\n")):
         if line.strip():
             try:
                 row = json.loads(line)
@@ -362,7 +363,12 @@ def run_census(opts: CensusOptions) -> int:
     Returns 0, or 2 when a cache directory has no manifest or an
     unreadable one, a --with cache was made by another teacher,
     tokenizer, top-k or head width than --without, or no rows pair
-    across the caches."""
+    across the caches, or an output it cannot write."""
+    for label, path in (("--out", opts.out), ("--md", opts.md)):
+        err = output_error(path) if path else None
+        if err:
+            print(f"[census] refuse: cannot write {label} {path}: {err}", file=sys.stderr)
+            return 2
     caches = [Path(opts.without).expanduser()] + [Path(c).expanduser() for c in opts.with_]
     manifests = []
     for c in caches:

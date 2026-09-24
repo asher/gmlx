@@ -133,3 +133,40 @@ def test_routes_on_an_adapted_gate_record_and_replay_end_to_end(tmp_path, tok_bl
     k = _kld_arm(model, tok_bl, tmp_path / "cache", tmp_path)
     assert k["rows"] > 0 and k["replayed_rows"] == k["rows"]
     assert k["mean_kld_nats"] < 1e-3
+
+
+def test_cache_routes_checks_free_space_once_the_route_bytes_are_known(tmp_path, tok_bl, monkeypatch, capsys):
+    """The first space check holds no route bytes, since k is learned from
+    the first chunk. The estimate with routes is checked against the free
+    space once k is known, and a resume that knows k counts the route bytes
+    before it loads the teacher."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_checkpoint(tmp_path / "teacher", tok_bl, "glm4_moe_lite")
+    opts = _cache_opts(teacher, tmp_path)
+    assert _teacher.run_cache(opts) == 0
+    out = Path(opts.out)
+    prog = json.loads((out / "progress.json").read_text())
+    # two MoE layers, two routes each, uint8 ids
+    per_pos = 2 * 2 * 1
+    plain = dl.estimate_cache_bytes(prog["tokens"], 8, False)
+    routed = dl.estimate_cache_bytes(prog["tokens"], 8, False, routes_bytes=per_pos)
+    capsys.readouterr()
+    # room for the estimate without routes, not with them
+    free = (plain + routed) / 2 / 0.9
+    monkeypatch.setattr(_teacher._format, "free_bytes", lambda p: int(free))
+    fresh = tmp_path / "fresh"
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), out=str(fresh)))) == 2
+    err = capsys.readouterr().err
+    assert "[cache] routes: k=2" in err and "[cache] refuse: estimate" in err
+    assert not list(fresh.glob("batch-*"))
+    # a resume with one shard left: the route bytes count before the load
+    (out / "batch-00001.safetensors").unlink()
+    (out / "manifest.json").unlink()
+    done = prog["shards"][0]["bytes"]
+    free = ((plain - done) + (routed - done)) / 2 / 0.9
+    monkeypatch.setattr(_teacher._format, "free_bytes", lambda p: int(free))
+    assert _teacher.run_cache(_teacher.CacheOptions(**dict(vars(opts), resume=True))) == 2
+    err = capsys.readouterr().err
+    assert "[cache] refuse: estimate" in err and "[cache] routes:" not in err
+    assert _teacher._format.route_bytes_per_position(_ROUTING) == per_pos

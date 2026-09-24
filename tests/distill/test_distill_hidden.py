@@ -170,8 +170,7 @@ def test_view_carries_hidden_targets(tmp_path, tok_bl, tok_spm):
     arrs, _t, _m = plain.row(0)
     arrs.pop(HIDDEN_FIELD)
     s_ids, s_ends, _ = loader.student_tokens(arrs, _t, _m)
-    rv0 = dl.compile_row(arrs, _t, s_ids, s_ends, tables, Kp=8, knobs=KNOBS, teacher_special=set(),
-                         student_special=set(), identity=True)
+    rv0 = dl.compile_row(arrs, _t, s_ids, s_ends, tables, Kp=8, knobs=KNOBS, identity=True)
     assert rv0.hidden_target is None
     assert "hidden_target" not in dl.collate([rv0], 8, tables.G)
 

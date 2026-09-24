@@ -424,7 +424,9 @@ A teacher without a thinking mode runs without `--thinking` and
 `--thinking-budget`, since `gen` refuses a budget on its own. The caches
 below then take `--frame reply` instead of `reply-think`, and `eval`
 under [Use and measure the adapter](#use-and-measure-the-adapter) drops
-`--reply-think`. Pair a thinking teacher with a student that has a
+`--reply-think`. The same goes for a teacher whose chat template does not
+render the reasoning trace of a finished turn, which
+`cache --frame reply-think` refuses. Pair a thinking teacher with a student that has a
 thinking mode of its own, or run the teacher without `--thinking` and
 `--thinking-budget`.
 
@@ -640,7 +642,7 @@ and it checks that the student's general behavior survived:
 ```sh
 gmlx distill eval --student Qwen3.5-9B-Q6_K.gguf --adapter r1.gguf --before \
     --reply-slice heldout=heldout-ctx.jsonl --reply-think --reply-positions census.json \
-    --frame-kwargs '{"enable_thinking": true}' --md eval.md --json eval.json
+    --chat-max-len 2560 --frame-kwargs '{"enable_thinking": true}' --md eval.md --json eval.json
 ```
 
 `--before` scores the same loaded model a second time with the adapter
@@ -648,8 +650,10 @@ switched off, so both figures come from one process. `--reply-slice`
 scores the teacher's held-out replies from the census check on the bare
 prompt under `student_messages`, so the document is not in view.
 `--reply-think` includes their reasoning trace, and `--reply-positions`
-keeps only the positions the document moved. `--frame-kwargs` gives
-`eval` the thinking switch, since it has no cache to read one from.
+keeps only the positions the document moved. `--chat-max-len 2560`
+matches the census caches, so a reply that fit there is scored rather
+than dropped. `--frame-kwargs` gives `eval` the thinking switch, since
+it has no cache to read one from.
 [Read the numbers](#read-the-numbers) explains the report.
 
 `--chat-sanity chat-sanity.jsonl` on that command adds a check that the
@@ -1002,6 +1006,15 @@ A refused view means the cache it was built from changed, or the
 tokenizer tables do not match the student, so rerun `align`. A refusal
 naming fewer train rows than `--batch-size` means the corpus is too
 small for that batch.
+
+Fewer rows reach the view than the cache holds when the student's
+template renders some turns differently from the teacher's. The `failed
+to render or pair` line of `align` counts those rows and names the first
+one with its reason. A template that refuses a turn, such as a tool
+turn, drops every row that carries one. So does a pair of templates in
+which one splits a reasoning block off the reply and the other keeps it
+in the reply text. Pick a student whose template renders the same turns,
+or leave those rows out of the corpus.
 
 `eval` refuses `--reply-positions` when the census map names none of
 the reply rows. The census keys its map by the corpus ids it was given

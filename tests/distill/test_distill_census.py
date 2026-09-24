@@ -486,6 +486,10 @@ def test_census_refuses_a_corpus_line_that_is_not_an_object(tmp_path, tok, capsy
     rc = cs.run_census(cs.CensusOptions(without=str(a), with_=[str(b)], out=str(out), corpus=str(corpus)))
     assert rc == 2 and "[census] refuse: a.jsonl line 3: not JSON (" in capsys.readouterr().err
     assert not out.exists()
+    # a codec message alone named no file
+    corpus.write_bytes(b'{"id": "caf\xe9", "messages": []}\n')
+    rc = cs.run_census(cs.CensusOptions(without=str(a), with_=[str(b)], out=str(out), corpus=str(corpus)))
+    assert rc == 2 and f"[census] refuse: {corpus}: not UTF-8 (byte 11), convert it" in capsys.readouterr().err
 
 
 def test_census_gives_no_positions_map_to_a_document_whose_last_turn_one_cache_dropped(tmp_path, tok):

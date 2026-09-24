@@ -875,14 +875,15 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
 Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
 success. A refused input or setting exits 2, and so does a missing
 required flag, with argparse's usage message, a missing input file, and
-`filter` when its `--verify` command fails. `cache` exits 2 when a shard
-cannot be written and keeps the verified shards. `gen` exits 1 when some
-requests failed and their prompts remain to be rerun, and 2 when its
-server fails to start. `align` exits 3 when the own-group check refuses
-the pair, and writes no view. `cache` exits 3 when its memory probe
-misses twice or a `--routes` recording does not match its rows, and 4
-when the validator fails on what it wrote. `cache --validate` exits 1 on
-a problem.
+`filter` when its `--verify` command fails. Every output path is checked
+before any model loads, and one the action cannot write exits 2 as well.
+`cache` exits 2 when a shard cannot be written and keeps the verified
+shards. `gen` exits 1 when some requests failed and their prompts remain
+to be rerun, and 2 when its server fails to start. `align` exits 3 when
+the own-group check refuses the pair, and writes no view. `cache` exits
+3 when its memory probe misses twice or a `--routes` recording does not
+match its rows, and 4 when the validator fails on what it wrote.
+`cache --validate` exits 1 on a problem.
 
 ### distill gen
 
@@ -930,7 +931,7 @@ server that lists several models serves the run with the one named like
 | `--thinking` | off | thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off |
 | `--thinking-budget N` | none | with `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter` |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | tokenizer that counts the reasoning trace against the budget when `--base-url` is given |
-| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, compared on a resume. Refused: `--thinking-budget`, or `--native-mtp`, `--speculative` or `--draft-gguf` beside it |
+| `--serve-arg ARG` | none | extra `gmlx serve` argument, repeatable, compared on a resume. A flag that changes the prompt or thinking is refused, as is a drafter with `--thinking-budget` |
 | `--startup-timeout S` | `900` | seconds to wait for the served teacher |
 | `--concurrency N` | `8` | requests in flight |
 | `--max-tokens N` | `1024` | answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close on top, without one the trace shares this budget |
@@ -941,6 +942,17 @@ server that lists several models serves the run with the one named like
 | `--seed N` | `1` | base seed, and each request uses it plus the prompt index |
 | `--timeout S` | `1800` | per-request timeout |
 | `--report-every N` | `50` | progress line interval in replies |
+
+`--serve-arg` refuses `--thinking`, `--thinking-budget`, `--chat-template`,
+`--chat-template-config`, `--reasoning-effort` and `--system-prompt`, in
+any spelling serve accepts. Each changes what the teacher is prompted
+with, and the rows would not record it. Set the thinking switch and
+budget with gen's own flags, template variables with
+`--chat-template-kwargs`, and a system prompt as a system turn in the
+prompt rows. A template override has no gen form, since `cache` renders
+the rows with the teacher's own template. Beside `--thinking-budget`,
+`--native-mtp`, `--speculative` and `--draft-gguf` are refused too,
+because a drafted server does not hold each request to the budget.
 
 ### distill filter
 
@@ -980,7 +992,10 @@ The flags of the teacher pass, in the order `--help` prints them.
 `--student-messages-key` only names the list the student's render reads
 later, in `align` and `eval`. A reply or reply-think row whose final
 turn has no content, such as a tool call, has nothing to target and is
-dropped, counted in the `[cache] frame` line.
+dropped, counted in the `[cache] frame` line. That line also counts the
+reply-think rows whose reasoning trace the teacher's template does not
+render, which train on the reply alone, and a reply-think pass in which
+no row keeps its trace is refused.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1110,11 +1125,11 @@ examples shown before each question.
 | `--task-limit N` | all | items per task |
 | `--gsm8k-max-tokens N` | `384` | generation budget per GSM8K item |
 | `--before` | off | also score with the adapter disabled in process, needs `--adapter` |
-| `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, repeatable |
+| `--chat-slice NAME=PATH` | none | a jsonl of `{messages}` conversations scored on their assistant turns, `student_messages` first, repeatable |
 | `--chat-sanity PATH` | none | a jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies |
 | `--chat-max-tokens N` | `256` | reply budget for the chat sanity set |
 | `--chat-refs JSON` | none | an earlier eval report whose replies anchor the drift score. Ignored with `--before`, which anchors on the adapter-off replies |
-| `--chat-max-len N` | `2048` | longest conversation scored |
+| `--chat-max-len N` | `2048` | longest chat or reply row scored, in student tokens. A longer row loses turns until it fits, or is dropped |
 | `--chat-per-turn` | off | score every assistant turn as its own row |
 | `--reply-slice NAME=PATH` | none | a jsonl of conversations scored on the final reply, repeatable |
 | `--reply-think` | off | reply slices target the final turn from its reasoning trace onward |

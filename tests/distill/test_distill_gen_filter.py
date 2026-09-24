@@ -301,6 +301,28 @@ def test_gen_refuses_a_dataset_id_without_datasets_and_an_out_it_cannot_write(tm
     assert _Handler.calls == []
 
 
+def test_gen_refuses_an_empty_prompt_set_and_names_a_file_that_is_not_utf8(tmp_path, stub_server, capsys):
+    """A prompt set with nothing to run exited 0 and wrote no --out, so the
+    next step failed away from the cause, and a prompts or context file
+    that is not UTF-8 was refused with a codec message naming no file."""
+    corpus = tmp_path / "docs.jsonl"
+    corpus.write_text(json.dumps({"id": "d", "text": "too short"}) + "\n")
+    out = tmp_path / "c.jsonl"
+    assert gen.run_gen(gen.GenOptions(out=str(out), corpus=str(corpus), base_url=stub_server)) == 2
+    assert (f"[gen] refuse: {corpus} yields no prompts (blank documents and those under --min-chars 2000 are "
+            "skipped)") in capsys.readouterr().err
+    latin = tmp_path / "p.jsonl"
+    latin.write_bytes(b'{"id": "a", "messages": [{"role": "user", "content": "caf\xe9"}]}\n')
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=str(latin), base_url=stub_server)) == 2
+    assert f"[gen] refuse: {latin}: not UTF-8 (byte " in capsys.readouterr().err
+    prompts = _prompts(tmp_path / "ok.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "x"}]}])
+    ctx = tmp_path / "ctx.txt"
+    ctx.write_bytes(b"the caf\xe9 doc\n")
+    assert gen.run_gen(gen.GenOptions(out=str(out), prompts=prompts, context=str(ctx), base_url=stub_server)) == 2
+    assert f"[gen] refuse: {ctx}: not UTF-8 (byte 7), convert it" in capsys.readouterr().err
+    assert _Handler.calls == [] and not out.exists()
+
+
 def test_gen_counts_a_failed_request_and_keeps_the_rest(tmp_path, stub_server, monkeypatch):
     prompts = _prompts(tmp_path / "p.jsonl", [
         {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},
@@ -372,7 +394,7 @@ def test_filter_reasons_in_order_and_the_sidecar(tmp_path):
     assert flt.run_filter(flt.FilterOptions(inputs=[str(out)], out=str(out2), keep_budget_hit=True)) == 0
     assert [r["id"] for r in _rows(out2)] == ["b2"]
     side2 = json.loads((tmp_path / "ok2.jsonl.gen.json").read_text())
-    assert side2["filter_version"] == "3+3"
+    assert side2["filter_version"] == "4+4"
     assert [p["params"]["max_reply_tokens"] for p in side2["filter_history"]] == [1180]
     assert side2["filter"]["params"]["max_trace_repeat"] == 0.5
 
@@ -434,6 +456,12 @@ def test_filter_refuses_what_it_cannot_read_or_write_with_the_file_named(tmp_pat
         ro.chmod(0o700)
         unread.chmod(0o600)
         ctx.chmod(0o600)
+    assert not out.exists()
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    for flag, kw in (("--report", {"report": str(blocker / "r.json")}), ("--rejects", {"rejects": str(blocker / "r")})):
+        assert flt.run_filter(flt.FilterOptions(inputs=[str(src)], out=str(out), **kw)) == 2
+        assert f"[filter] refuse: cannot write {flag} {blocker}" in capsys.readouterr().err
     assert not out.exists()
 
 
@@ -1287,9 +1315,10 @@ def test_trace_repeat_threshold_is_its_own_flag():
 
 
 def test_cjk_units_split_ideographs_and_kana_only_and_leave_hangul_and_code_alone():
-    """Ideographs and kana split per character; code, Hangul and punctuation
-    stay whitespace tokens, so an unspaced Chinese answer with inline
-    code is not empty and a dashed rule line is not a loop."""
+    """Ideographs and kana split per character, with the iteration marks,
+    ideographic zero and half-width kana among them; code, Hangul and
+    punctuation stay whitespace tokens, so an unspaced Chinese answer with
+    inline code is not empty and a dashed rule line is not a loop."""
     opts = flt.FilterOptions(inputs=[], out="o.jsonl")
     cjk_code = ("\u8fd9\u662f\u4e00\u4e2a\u4f8b\u5b50\uff0c\u8bf7\u770b\u4ee3\u7801 `x = foo(bar)` "
                 "\u7136\u540e\u8fd0\u884c `python run.py --fast` \u5c31\u53ef\u4ee5\u4e86\u3002")
@@ -1302,6 +1331,8 @@ def test_cjk_units_split_ideographs_and_kana_only_and_leave_hangul_and_code_alon
     hangul = " ".join(f"\ud55c\uae00{i}" for i in range(20))
     assert flt.word_count(hangul) == 20
     assert flt.word_count("a b c") == 3 and flt.word_count("\u4eca\u5929 \u5929\u6c14") == 4
+    assert flt.word_count("\u4eba\u3005\u306f\u6642\u3005\uff71\uff72\uff73\uff74\uff75\u3007") == 11
+    assert flt.word_count("\u300c\u5f15\u7528\u300d\uff61") == 2
     loop = "\u4eca\u5929\u5929\u6c14\u5f88\u597d" * 12
     assert flt.repeat_fraction(loop, 8) > 0.5 and flt.reason(_row("c", loop), opts) == "repeat"
 
@@ -1317,12 +1348,12 @@ def test_filter_sidecar_records_every_pass_and_refuses_inputs_filtered_different
     first = tmp_path / "first.jsonl"
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a)], out=str(first), max_trace_repeat=0.3)) == 0
     side = json.loads((tmp_path / "first.jsonl.gen.json").read_text())
-    assert side["filter_version"] == flt.FILTER_VERSION == "3"
+    assert side["filter_version"] == flt.FILTER_VERSION == "4"
     assert side["filter"]["params"]["max_trace_repeat"] == 0.3 and "filter_history" not in side
     second = tmp_path / "second.jsonl"
     assert flt.run_filter(flt.FilterOptions(inputs=[str(first)], out=str(second), max_trace_repeat=0.4)) == 0
     side2 = json.loads((tmp_path / "second.jsonl.gen.json").read_text())
-    assert side2["filter_version"] == "3+3" and side2["filter"]["params"]["max_trace_repeat"] == 0.4
+    assert side2["filter_version"] == "4+4" and side2["filter"]["params"]["max_trace_repeat"] == 0.4
     assert [p["params"]["max_trace_repeat"] for p in side2["filter_history"]] == [0.3]
     b = tmp_path / "b.jsonl"
     b.write_text(json.dumps(_row("b", GOOD)) + "\n")
@@ -1487,16 +1518,29 @@ def test_gen_counts_a_retokenized_trace_one_short_of_the_budget_as_a_hit(tmp_pat
     assert all(r["gen"]["budget_hit"] is False and r["gen"]["reasoning_tokens"] == 39 for r in _rows(out2))
 
 
-def test_gen_refuses_a_thinking_budget_inside_the_serve_args(tmp_path, stub_server, capsys):
+def test_gen_refuses_serve_args_that_change_the_prompt_or_the_budget(tmp_path, stub_server, capsys):
     """The budget is sent with every request, so a server-wide one under
-    --serve-arg would silently cap what --thinking-budget records."""
+    --serve-arg would silently cap what --thinking-budget records. The
+    thinking switch, the template, its variables and a server system
+    prompt change what the teacher is prompted with, which the rows would
+    not record. Each is refused by any spelling serve's parser accepts."""
     prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "q"}]}])
-    for arg in (["--thinking-budget", "40"], ["--kv-bits", "4", "--thinking-budget=40"]):
+    cases = [(["--thinking-budget", "40"], "--thinking-budget is gen's own flag"),
+             (["--kv-bits", "4", "--thinking-budget=40"], "--thinking-budget is gen's own flag"),
+             (["--thinking-b=512"], "--thinking-budget (given as --thinking-b) is gen's own flag"),
+             (["--thinking", "on"], "--thinking is gen's own flag"),
+             (["--chat-template-config", "{}"], "--chat-template-config is set from gen's --chat-template-kwargs"),
+             (["--chat-template", "t.jinja"], "--chat-template renders the teacher's prompt"),
+             (["--reas=high"], "--reasoning-effort (given as --reas) changes the teacher's prompt"),
+             (["--system-prompt", "be terse"], "--system-prompt changes the teacher's prompt")]
+    for arg, want in cases:
         rc = gen.run_gen(gen.GenOptions(out=str(tmp_path / "a.jsonl"), prompts=prompts, base_url=stub_server,
                                         serve_arg=arg))
         err = capsys.readouterr().err
-        assert rc == 2 and "[gen] refuse: --thinking-budget is gen's own flag" in err, err
+        assert rc == 2 and f"[gen] refuse: {want}" in err, (arg, err)
     assert not (tmp_path / "a.jsonl").exists()
+    for arg in ("--thinking-start-token", "--thinking-s=<t>", "--kv-bits", "r1.gguf", "--adapter"):
+        assert gen.prompt_flag(arg) is None, arg
 
 
 def test_gen_resume_and_filter_join_refuse_another_gen_version(tmp_path, stub_server, capsys):

@@ -949,6 +949,28 @@ def _with_template(tok, template):
     return tok
 
 
+def test_a_template_that_prints_today_renders_a_pinned_day(tok_bl):
+    """gpt-oss prints strftime_now('%Y-%m-%d'), which read the clock, so a
+    cache resumed on another day and a student rendered on another day
+    rendered other bytes. The day is pinned like Llama's date_string, and
+    either form of pin crosses to the other side."""
+    import datetime
+
+    tok = _with_template(tok_bl, "Current date: {{ strftime_now('%Y-%m-%d') }}\n" + _TEMPLATE_A)
+    assert dl.resolve_render_kwargs(tok) == {"strftime_now_date": datetime.date.today().isoformat()}
+    assert dl.resolve_render_kwargs(tok, inherit={"date_string": "02 Jan 2020"}) == {"strftime_now_date": "2020-01-02"}
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "the cat"}]
+    try:
+        dl.set_render_kwargs(tok, dl.resolve_render_kwargs(tok, inherit={"strftime_now_date": "2020-01-02"}))
+        text, spans = dl.render_row(tok, msgs, open_tail=False)
+        assert text.startswith(b"Current date: 2020-01-02\n") and text[spans[0][0]:spans[0][1]] == b"the cat"
+    finally:
+        dl.set_render_kwargs(tok, {})
+    llama = _with_template(tok_bl, "Today Date: {{ date_string }}\n" + _TEMPLATE_A)
+    assert dl.resolve_render_kwargs(llama, inherit={"strftime_now_date": "2020-01-02"}) == {
+        "date_string": "02 Jan 2020"}
+
+
 def test_special_text_bytes_in_offsets(tok_bl):
     tb = dl.token_bytes(tok_bl)
     text = b"<bos>the cat"
@@ -1273,6 +1295,30 @@ def test_view_loader_counts_student_render_failures(tmp_path, tok_bl):
     assert loader.render_failures == 1 and sum(v is not None for v in views) == 1
 
 
+def test_align_names_the_first_row_the_student_cannot_render_or_pair(tmp_path, tok_bl, capsys):
+    """A row the student's template refuses, or whose spans do not pair
+    with the teacher's, is dropped. align logs how many and the first
+    one's reason beside the kept count, not only a dropped total."""
+    import copy
+
+    from gmlx.distill import view as _view
+
+    teacher = _with_template(tok_bl, _TEMPLATE_A)
+    convs = [[{"role": "user", "content": "q"}, {"role": "tool", "content": "{}"},
+              {"role": "assistant", "content": "the cat is"}],
+             [{"role": "user", "content": "q"}, {"role": "assistant", "content": "the cat is the cat"}]]
+    _tiny_framed_cache(tmp_path / "cache", teacher, convs, open_tail=False)
+    teacher.save_pretrained(tmp_path / "cache" / "tokenizer")
+    _with_template(copy.deepcopy(tok_bl), _TEMPLATE_NOSYS).save_pretrained(tmp_path / "student")
+    rc = _view.run_align(_view.AlignOptions(cache=str(tmp_path / "cache"), student=str(tmp_path / "student"),
+                                            out=str(tmp_path / "view")))
+    err = capsys.readouterr().err
+    assert rc == 0 and "[align] 1 rows kept, 1 dropped" in err
+    line = next(x for x in err.splitlines() if "failed to render or pair" in x)
+    assert line.startswith("[align] 1 row failed to render or pair on the student side, the first: row ")
+    assert "tool role not supported" in line
+
+
 # ---------------------------------------------------------------------------
 # reply rows, two message lists, census, LoRA alpha
 # ---------------------------------------------------------------------------
@@ -1541,8 +1587,7 @@ def test_identity_tables_at_a_wider_student_head():
     row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
            "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
            "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
-    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
-                        teacher_special=set(), student_special=set(), identity=True)
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS), identity=True)
     b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
     h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
     loss, _aux = dl.distill_loss(h, b, head, group_of=None, G=tables.G, Kp=K,
@@ -1951,6 +1996,12 @@ def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
     chat.write_text(json.dumps({"id": "a", "messages": [{"role": "user", "content": "hi"}]}) + "\n")
     rc, err = run(chat_sanity=str(chat), chat_refs=str(refs))
     assert rc == 2 and "not an eval report with chat items" in err
+    # a kind other than task or refuse counts toward neither refusal rate
+    odd = tmp_path / "odd.jsonl"
+    odd.write_text("".join(json.dumps({"id": i, "messages": [{"role": "user", "content": "hi"}], "kind": k}) + "\n"
+                           for i, k in (("a", "task"), ("b", "refusal"), ("c", "Refuse"))))
+    rc, err = run(chat_sanity=str(odd))
+    assert rc == 2 and f"{odd}: item 'b' has kind 'refusal' (2 such items), the kinds are task and refuse" in err
     tasks = tmp_path / "tasks"
     tasks.mkdir()
     (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": "q", "choices": ["x", "y"]}) + "\n")
@@ -1961,7 +2012,9 @@ def test_eval_checks_cache_refs_and_task_keys_before_the_load(tmp_path, capsys):
                                (["x", "y"], "1", "gold '1' is not an index"),
                                ([], 0, "has no list of choice strings"),
                                ("xy", 0, "has no list of choice strings"),
-                               (["x", 3], 0, "has no list of choice strings")):
+                               (["x", 3], 0, "has no list of choice strings"),
+                               # an empty choice scored 0, the highest log-prob, and won every item
+                               (["x", ""], 0, "has no list of choice strings, each non-empty")):
         (tasks / "arc_easy.jsonl").write_text(json.dumps({"id": "a", "query": "q", "choices": choices,
                                                           "gold": gold}) + "\n")
         rc, err = run(tasks="arc_easy", tasks_dir=str(tasks))
@@ -2822,6 +2875,22 @@ def test_continuation_logprob_scores_every_token_without_a_bos(tok_bl):
     lp = dl_eval._target_logprobs(W[mx.array(arr)], arr[:, 1:])[0]
     got = dl.continuation_logprob(Stub(), tok_bl, "", ["the cat is"])[0]
     assert got == pytest.approx(float(lp.sum()))
+    # a continuation that adds no token is never the most likely one
+    assert dl.continuation_logprob(Stub(), tok_bl, "the cat", ["", " is"])[0] == -math.inf
+
+
+def test_a_chat_slice_row_is_scored_on_the_list_the_student_sees(tmp_path):
+    """A context run's rows hold the teacher's list with the document and
+    the student's without it; the reply slices score the student's, and
+    a chat slice of the same rows must too."""
+    from gmlx.distill import evaluate as _ev
+
+    teacher = [{"role": "user", "content": "doc\n\nq"}, {"role": "assistant", "content": "a"}]
+    student = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+    path = tmp_path / "chat.jsonl"
+    path.write_text(json.dumps({"id": "0", "messages": teacher, "student_messages": student}) + "\n"
+                    + json.dumps({"id": "1", "messages": teacher}) + "\n")
+    assert _ev.read_conversations(path) == [student, teacher]
 
 
 def test_reply_slice_se_weights_rows_by_their_bytes(tok_bl):
@@ -3134,6 +3203,33 @@ _TEMPLATE_LAST_TRACE = (
     "{{ m['reasoning_content'] }}\n</think>\n\n{% endif %}{% if '.' in m['content'] %}<dot>{% endif %}"
     "{{ m['content'] }}<|im_end|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n"
     "{% endif %}")
+
+
+def test_reply_think_rows_whose_template_drops_the_trace_are_counted_or_refused(tmp_path, tok_bl):
+    """A template that does not render reasoning_content leaves a reply-only
+    target under the reply-think label: cache counts such rows and refuses
+    when no row keeps its trace, and eval counts them on the student side."""
+    from gmlx.distill import teacher as _teacher
+
+    corpus = tmp_path / "c.jsonl"
+    convs = [[{"role": "user", "content": f"q{i}"},
+              {"role": "assistant", "content": f"the cat {i}", "reasoning_content": rc}]
+             for i, rc in enumerate(("plan it", "skip it", "plan more"))]
+    corpus.write_text("".join(json.dumps({"messages": m}) + "\n" for m in convs))
+    kw = dict(max_len=256, text_key="text", max_rows=None, max_tokens=None, source=None, hf_split="train",
+              limit_docs=None, frame="reply-think")
+    gate = "{% if m['reasoning_content'] %}"
+    partial = _TEMPLATE_TRACE.replace(gate, "{% if m['reasoning_content'] and 'skip' not in m['reasoning_content'] %}")
+    none = _TEMPLATE_TRACE.replace(gate, "{% if false %}")
+    for template, missing in ((_TEMPLATE_TRACE, 0), (partial, 1)):
+        tk = _with_template(tok_bl, template)
+        assert _teacher.build_rows(tk, str(corpus), **kw)[-1]["trace_missing"] == missing
+        counts: dict = {}
+        rows, _ = dl_eval._span_rows(tk, [{"id": str(i), "messages": m} for i, m in enumerate(convs)], max_len=256,
+                                     last_only=True, reason_target=True, counts=counts)
+        assert len(rows) == 3 and counts == {"traced": 3, "trace_missing": missing}
+    with pytest.raises(ValueError, match="renders none of the 3 reasoning traces"):
+        _teacher.build_rows(_with_template(tok_bl, none), str(corpus), **kw)
 
 
 def test_a_reasoning_trace_dropped_from_an_earlier_turn_does_not_match_a_later_one(tok_bl):
@@ -5617,8 +5713,7 @@ def test_head_pass_without_gradients_returns_the_same_loss_and_no_cotangent():
     row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
            "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
            "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
-    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
-                        teacher_special=set(), student_special=set(), identity=True)
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS), identity=True)
     b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
     h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
     hg = _loss.gather_positions(h, b["positions"])
@@ -5880,8 +5975,7 @@ def test_head_pass_can_skip_the_host_round_trip_and_an_f16_head_is_cast_once():
     row = {"token_end_byte": np.arange(1, T + 1), "onpath_mask": np.array([1, 1, 1, 1, 1, 0], bool),
            "top_k_indices": rng.integers(0, V_T, (T, K)).astype(np.int32),
            "top_k_log_softmax": np.log(np.full((T, K), 0.2)).astype(np.float32)}
-    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS),
-                        teacher_special=set(), student_special=set(), identity=True)
+    rv = dl.compile_row(row, b"abcdef", ids, np.arange(1, T + 1), tables, Kp=K, knobs=dict(KNOBS), identity=True)
     b = dl.batch_to_mx(dl.collate([rv], K, tables.G))
     h = mx.array(rng.standard_normal((1, 32, d)).astype(np.float32))
     hg = _loss.gather_positions(h, b["positions"])
@@ -6457,6 +6551,83 @@ def test_corpus_hash_sees_document_boundaries(tmp_path, tok_bl):
     assert _teacher.build_rows(tok_bl, str(a), **kw)[2] != ha
 
 
+def test_every_action_refuses_an_output_it_cannot_write_before_its_work(tmp_path, tok_bl, monkeypatch, capsys):
+    """An output checked only at the end cost the run: eval scored every
+    slice and then failed on --json, cache and align raised on their
+    folder, and train made its checkpoint folder before a --report it
+    could not write. Each refuses with exit 2 before any work, and the
+    check leaves no folder behind for a refusal that comes later."""
+    from gmlx.distill import census as _census
+    from gmlx.distill import evaluate as _ev
+    from gmlx.distill import format as _fmt
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    bad = blocker / "sub"
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+    sl = tmp_path / "s.txt"
+    sl.write_text("the cat")
+
+    def refused(rc, needle):
+        err = capsys.readouterr().err
+        assert rc == 2 and needle in err, err
+
+    for kw, flag in ((dict(json=str(bad / "r.json"), md=str(tmp_path / "r.md")), "--json"),
+                     (dict(json=str(tmp_path / "r.json"), md=str(bad / "r.md")), "--md")):
+        refused(_ev.run_eval(_ev.EvalOptions(student=str(student), slices=["s=" + str(sl)], **kw)),
+                f"[eval] refuse: cannot write {flag} {bad}")
+    refused(_census.run_census(_census.CensusOptions(without=str(tmp_path / "a"), with_=[str(tmp_path / "b")],
+                                                     out=str(bad / "c.json"))), "[census] refuse: cannot write --out")
+    cache = tmp_path / "fake-cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text("{}")
+    refused(_view.run_align(_view.AlignOptions(cache=str(cache), student=str(student), out=str(bad / "view"))),
+            "[align] refuse: cannot write --out")
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text(json.dumps({"text": "the cat"}) + "\n")
+    refused(_teacher.run_cache(_teacher.CacheOptions(teacher=str(student), corpus=str(corpus), out=str(bad / "c"))),
+            "[cache] refuse: cannot write --out")
+    _mlx_students(monkeypatch)
+    v1, st = _cpu_view(tmp_path, tok_bl, "v1", n_rows=4)
+    opts = dict(views=[str(v1)], student=str(st), iters=1, batch_size=1, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    refused(_trainer.run_train(_trainer.TrainOptions(**dict(opts, report=str(bad / "log.json")))),
+            "[train] refuse: cannot write --report")
+    assert not (tmp_path / "ck").exists()
+    refused(_trainer.run_train(_trainer.TrainOptions(**dict(opts, ckpt_dir=str(bad / "ck")))),
+            "[train] refuse: cannot write --ckpt-dir")
+    assert _fmt.output_error(tmp_path / "a" / "b" / "r.json") is None
+    assert _fmt.output_error(tmp_path / "a" / "v", directory=True) is None
+    assert not (tmp_path / "a").exists()
+
+
+def test_train_names_the_align_path_when_two_views_over_one_pair_took_different_ones(tmp_path, tok_bl, monkeypatch,
+                                                                                         capsys):
+    """One tokenizer pair aligns on the identity path from an unframed cache
+    and on the general path from rows with a student list. Two such views
+    were refused as over another tokenizer pair, which the user could not
+    act on."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    v1, student = _cpu_view(tmp_path, tok_bl, "v1", n_rows=4)
+    v2 = tmp_path / "v2"
+    shutil.copytree(v1, v2)
+    vj = json.loads((v2 / "view.json").read_text())
+    assert vj["identity"]
+    (v2 / "view.json").write_text(json.dumps(dict(vj, identity=False)))
+    opts = dict(views=[str(v1), str(v2)], student=str(student), iters=1, batch_size=1, no_wired_limit=True,
+                lora_rank=2, chunk=16, val_batches=1, ckpt_dir=str(tmp_path / "ck"))
+    assert _trainer.run_train(_trainer.TrainOptions(**opts)) == 2
+    err = capsys.readouterr().err
+    assert f"[train] refuse: {v2} took the general align path and {v1} the other" in err
+    assert "another tokenizer pair" not in err
+
+
 def test_train_on_a_one_row_view_names_the_empty_split_and_refuses_a_held_ckpt_dir(tmp_path, tok_bl, monkeypatch,
                                                                                  capsys):
     """A one-row cache holds no validation row: train says so on its
@@ -6584,10 +6755,10 @@ def test_identity_compile_drops_a_row_with_no_on_path_position():
     ids = np.arange(n, dtype=np.int32)
     tables = SimpleNamespace(G=16)
     assert _data.compile_row(row, b"x" * (2 * n), ids, row["token_end_byte"].astype(np.int64), tables, Kp=K,
-                             knobs={}, teacher_special=set(), student_special=set(), identity=True) is None
+                             knobs={}, identity=True) is None
     row["onpath_mask"][:3] = True
     rv = _data.compile_row(row, b"x" * (2 * n), ids, row["token_end_byte"].astype(np.int64), tables, Kp=K,
-                           knobs={}, teacher_special=set(), student_special=set(), identity=True)
+                           knobs={}, identity=True)
     assert rv is not None and rv.stats["J"] == 3
 
 
@@ -7012,8 +7183,7 @@ def _segment_start_weights(t_tok, s_tok, tables, text=b"the cat is"):
            "onpath_log_p": np.full(T, np.log(0.6), np.float32), "onpath_mask": np.arange(T) < T - 1,
            "log_boundary_mass": np.full(T, np.log(0.5), np.float32),
            "tail_log_mass": np.full(T, np.log(0.05), np.float32)}
-    rv = dl.compile_row(row, text, s_ids, s_ends, tables, Kp=K, knobs=dict(KNOBS),
-                        teacher_special=set(), student_special=set())
+    rv = dl.compile_row(row, text, s_ids, s_ends, tables, Kp=K, knobs=dict(KNOBS))
     return rv.bnd_pos, rv.bnd_weight
 
 

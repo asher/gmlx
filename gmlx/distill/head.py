@@ -103,11 +103,11 @@ def head_weight_fn(mod) -> Callable:
 
 
 def head_scale(args) -> float:
-    """The factor an mlx-lm model applies to its logits after the
-    projection: Granite divides by logits_scaling, Cohere multiplies by
-    logit_scale, MiniCPM divides the hidden states by hidden_size over
-    dim_model_base on an untied head (its tied path applies no scale).
-    1.0 for every other model."""
+    """The factor a model applies to its logits after the projection:
+    Granite divides by logits_scaling, Cohere multiplies by logit_scale,
+    Muse Glimmer by output_multiplier before its softcap, MiniCPM divides
+    the hidden states by hidden_size over dim_model_base on an untied head
+    (its tied path applies no scale). 1.0 for every other model."""
     s = 1.0
     ls = getattr(args, "logits_scaling", None)
     if ls:
@@ -115,6 +115,9 @@ def head_scale(args) -> float:
     lg = getattr(args, "logit_scale", None)
     if lg is not None:
         s *= float(lg)
+    om = getattr(args, "output_multiplier", None)
+    if om is not None:
+        s *= float(om)
     dmb = getattr(args, "dim_model_base", None)
     hs = getattr(args, "hidden_size", None)
     if dmb and hs and not getattr(args, "tie_word_embeddings", False):

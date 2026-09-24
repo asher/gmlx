@@ -21,8 +21,8 @@ from . import tokens as _tokens
 from .constants import GB, log
 from .corpus import message_list, nfc, norm_messages
 from .data import CacheReader
-from .format import (read_json, replay_layers_for, routing_block, shard_texts, write_bytes_atomic,
-                     write_json_atomic)
+from .format import (output_error, read_json, replay_layers_for, routing_block, shard_texts,
+                     write_bytes_atomic, write_json_atomic)
 from .student import adapter_disabled
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model
 from .trainer import load_student
@@ -104,9 +104,11 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def read_conversations(path: Path) -> list:
-    """The ``messages`` list of every row of a chat-slice jsonl."""
+    """The list every row of a chat-slice jsonl shows the student: its
+    ``student_messages`` when it has one (a context run's rows), else its
+    ``messages``, as the reply slices and the cache read them."""
     try:
-        return [r["messages"] for r in read_jsonl(path)]
+        return [r.get("student_messages") or r["messages"] for r in read_jsonl(path)]
     except KeyError as e:
         raise UnreadableInput(f"{path}: a row has no {e} key") from e
 
@@ -154,14 +156,15 @@ def check_gsm8k_items(path, rows: list, keys: tuple = TASK_KEYS["gsm8k"]) -> lis
 
 def check_mc_items(path, rows: list) -> list:
     """rows of a multiple-choice task: query is a string, choices a
-    non-empty list of strings and gold an index into it, else
-    UnreadableInput (the scorer would raise after the slices ran)."""
+    non-empty list of non-empty strings and gold an index into it, else
+    UnreadableInput (the scorer would raise after the slices ran, and an
+    empty choice would score 0, the highest log-prob there is)."""
     for r in check_keys(path, rows, MC_KEYS):
         if not isinstance(r["query"], str):
             raise UnreadableInput(f"{path}: item {r.get('id')!r} has no string 'query'")
         ch = r["choices"]
-        if not isinstance(ch, list) or not ch or not all(isinstance(c, str) for c in ch):
-            raise UnreadableInput(f"{path}: item {r.get('id')!r} has no list of choice strings")
+        if not isinstance(ch, list) or not ch or not all(isinstance(c, str) and c for c in ch):
+            raise UnreadableInput(f"{path}: item {r.get('id')!r} has no list of choice strings, each non-empty")
         g = r["gold"]
         if isinstance(g, bool) or not isinstance(g, int) or not 0 <= g < len(ch):
             raise UnreadableInput(f"{path}: item {r.get('id')!r} gold {g!r} is not an index into its "
@@ -306,6 +309,9 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         log(f"[eval] {name} {label}: reply bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
             f"{r['rows']} rows{' at the high-delta positions' if positions is not None else ''}, "
             f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
+        if r.get("trace_missing"):
+            log(f"[eval] {name} {label}: the student's template renders no reasoning trace in "
+                f"{r['trace_missing']} of {r['traced']} rows, which score their reply only")
     if opts.kld_cache:
         t0 = time.perf_counter()
         model.eval()
@@ -455,6 +461,11 @@ def run_eval(opts: EvalOptions) -> int:
         log(f"[eval] refuse: --bpb-prefix {opts.bpb_prefix} names no frame, the frames are "
             + ", ".join("@" + k for k in _frames.FRAME_PREFIX_KINDS) + " (or give the prefix text)")
         return 2
+    for label, path in (("--json", opts.json), ("--md", opts.md)):
+        err = output_error(path)
+        if err:
+            log(f"[eval] refuse: cannot write {label} {path}: {err}")
+            return 2
     # every input is read before the load, so a malformed file is refused
     # in seconds and never after minutes of scoring
     tasks: dict = {}
@@ -496,6 +507,11 @@ def run_eval(opts: EvalOptions) -> int:
                 return 2
         chat_items = (check_keys(Path(opts.chat_sanity), read_jsonl(Path(opts.chat_sanity)), ("messages",))
                       if opts.chat_sanity else [])
+        # an item of another kind would count toward neither refusal rate
+        odd = [it for it in chat_items if it.get("kind", "task") not in ("task", "refuse")]
+        if odd:
+            raise UnreadableInput(f"{opts.chat_sanity}: item {odd[0].get('id')!r} has kind {odd[0].get('kind')!r} "
+                                  f"({len(odd)} such items), the kinds are task and refuse")
         refs_before = chat_refs(Path(opts.chat_refs)) if opts.chat_refs else None
         teacher_bpb = teacher_bpb_map(Path(opts.teacher_bpb)) if opts.teacher_bpb else None
         if opts.kld_cache:

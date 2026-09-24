@@ -84,22 +84,43 @@ def resolve_render_kwargs(tokenizer, inherit: dict | None = None, override: dict
     every inherited setting this template reads (the thinking switch a
     cache was rendered with, the date pinned to the other side's), then
     the user's overrides."""
-    kw = default_render_kwargs(tokenizer, date=(inherit or {}).get("date_string"))
+    kw = default_render_kwargs(tokenizer, date=(inherit or {}).get("date_string"),
+                               day=(inherit or {}).get(PINNED_DAY_KEY))
     tpl = template_text(tokenizer)
     kw.update({k: v for k, v in (inherit or {}).items() if k in tpl})
     kw.update(override or {})
     return kw
 
 
-def default_render_kwargs(tokenizer, date: str | None = None) -> dict:
-    """Render settings that keep a template's output stable across days:
-    templates that read date_string (Llama 3.x) get today's date pinned in
-    the Llama format, so the cached render and every later re-render of the
-    same conversation agree byte for byte."""
+# the render setting that pins the day a template's strftime_now reports
+PINNED_DAY_KEY = "strftime_now_date"
+
+
+def default_render_kwargs(tokenizer, date: str | None = None, day: str | None = None) -> dict:
+    """Render settings that keep a template's output stable across days, so
+    the cached render and every later re-render of the same conversation
+    agree byte for byte. A template that reads date_string (Llama 3.x) gets
+    a date pinned in the Llama format, and one that calls strftime_now
+    (gpt-oss) gets an ISO day under PINNED_DAY_KEY, which apply_template
+    turns into a strftime_now that formats that day. ``date`` and ``day``
+    carry the other side's pin in either form, and today is the default."""
+    import datetime
     tpl = template_text(tokenizer)
+    pinned = None
+    try:
+        if day:
+            pinned = datetime.date.fromisoformat(day)
+        elif date:
+            pinned = datetime.datetime.strptime(date, "%d %b %Y").date()
+    except ValueError:
+        pinned = None
+    if pinned is None:
+        pinned = datetime.datetime.strptime(today_string(), "%d %b %Y").date()
     kw: dict = {}
     if "date_string" in tpl:
-        kw["date_string"] = date or today_string()
+        kw["date_string"] = date or pinned.strftime("%d %b %Y")
+    if "strftime_now" in tpl:
+        kw[PINNED_DAY_KEY] = pinned.isoformat()
     return kw
 
 
@@ -107,6 +128,13 @@ def today_string() -> str:
     """Today in the Llama date format."""
     import datetime
     return datetime.date.today().strftime("%d %b %Y")
+
+
+def _pinned_strftime(day: str):
+    """A strftime_now for templates that formats ``day`` at midnight."""
+    import datetime
+    at = datetime.datetime.fromisoformat(day)
+    return lambda fmt: at.strftime(fmt)
 
 
 def _fold_system(messages: list[dict]) -> list[dict] | None:
@@ -131,6 +159,10 @@ def apply_template(tokenizer, messages: list[dict], *, add_generation_prompt: bo
     inner = hf_inner(tokenizer)
     kw = dict(render_kwargs(tokenizer))
     kw.update(extra)
+    day = kw.pop(PINNED_DAY_KEY, None)
+    if day:
+        # a render variable shadows the template global of the same name
+        kw["strftime_now"] = _pinned_strftime(day)
     try:
         return inner.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kw)
     except Exception as e:  # jinja TemplateError, ValueError from the template
@@ -602,6 +634,21 @@ def fit_conversation(tokenizer, msgs: list[dict], max_len: int, tb) -> tuple | N
         while msgs and msgs[-1].get("role") != "assistant":
             msgs = msgs[:-1]
     return None
+
+
+def trace_in_target(text: bytes, span: tuple, message: dict) -> bool | None:
+    """Whether a reply-think target holds its turn's reasoning trace: None
+    when the turn carries none (no reasoning_content and no inline think
+    block), else whether the trace's text lies inside the span. A template
+    that drops the trace leaves a reply-only target under the reply-think
+    label."""
+    rc = (message.get("reasoning_content") or "").strip()
+    c = message.get("content") or ""
+    if not rc and "</think>" in c:
+        rc = c.partition("</think>")[0].split("<think>", 1)[-1].strip()
+    if not rc:
+        return None
+    return rc.encode("utf-8") in text[span[0]:span[1]]
 
 
 def fit_reply(tokenizer, msgs: list[dict], max_len: int, tb, reason_target: bool = False) -> tuple | None:

@@ -27,7 +27,7 @@ from . import loss as _loss
 from . import student as _student
 from . import view as _view
 from .constants import DEFAULT_KNOBS, GB, TABLES_VERSION, log
-from .format import free_bytes, manifest_sha256, read_json, write_json_atomic
+from .format import free_bytes, manifest_sha256, output_error, read_json, write_json_atomic
 from .teacher import teacher_identity
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model, log_bmask_from
 
@@ -380,9 +380,15 @@ def run_train(opts: TrainOptions) -> int:
         except ValueError as e:
             log(f"[train] refuse: {e}, run gmlx distill align again")
             return 2
-        if (t2.teacher_hash, t2.student_hash, t2.V_T, t2.V_S, bool(v["identity"])) != \
-                (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S, bool(view["identity"])):
+        if (t2.teacher_hash, t2.student_hash, t2.V_T, t2.V_S) != \
+                (tables.teacher_hash, tables.student_hash, tables.V_T, tables.V_S):
             log(f"[train] refuse: {d} is over another tokenizer pair than {view_dir}")
+            return 2
+        if bool(v["identity"]) != bool(view["identity"]):
+            # one pair aligns on the identity path from an unframed cache and
+            # on the general path from rows with a student list
+            log(f"[train] refuse: {d} took the {'identity' if v['identity'] else 'general'} align path and "
+                f"{view_dir} the other, so their targets cannot share a batch; train them apart")
             return 2
         if t2.roles != tables.roles:
             # every loader groups with view 0's tables; a view whose
@@ -420,8 +426,31 @@ def run_train(opts: TrainOptions) -> int:
         log("[train] refuse: every loss weight in force is 0 (the identity path turns --alm off), nothing to train")
         return 2
 
+    if opts.adapter_out:
+        from gmlx.tune.lora import probe_writable
+        if not opts.adapter_out.endswith(os.sep):
+            opts.adapter_out = os.path.abspath(os.path.expanduser(opts.adapter_out))
+        err = probe_writable(opts.adapter_out)
+        if err:
+            log(f"[train] refuse: cannot write --adapter-out {opts.adapter_out}: {err}")
+            return 2
+        try:
+            gguf_file(opts.student)
+        except IndexError:
+            log(f"[train] refuse: --adapter-out needs a GGUF student to take the architecture from, none under "
+                f"{opts.student}")
+            return 2
+    if opts.report:
+        opts.report = os.path.abspath(os.path.expanduser(opts.report))
+        err = output_error(opts.report)
+        if err:
+            log(f"[train] refuse: cannot write --report {opts.report}: {err}")
+            return 2
     ckpt_dir = Path(opts.ckpt_dir) if opts.ckpt_dir else Path("ckpt")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    err = output_error(ckpt_dir, directory=True)
+    if err:
+        log(f"[train] refuse: cannot write --ckpt-dir {ckpt_dir}: {err}")
+        return 2
     if not opts.resume:
         # a fresh run would replace last at its first save and leave an
         # earlier run's best beside it; a forgotten --resume must lose nothing
@@ -447,23 +476,6 @@ def run_train(opts: TrainOptions) -> int:
                 "validation row shares (val_leave_out, set by the gmlx version), so a fresh --ckpt-dir trains "
                 "under the current one")
             return 2
-    if opts.adapter_out:
-        from gmlx.tune.lora import probe_writable
-        if not opts.adapter_out.endswith(os.sep):
-            opts.adapter_out = os.path.abspath(os.path.expanduser(opts.adapter_out))
-        err = probe_writable(opts.adapter_out)
-        if err:
-            log(f"[train] refuse: cannot write --adapter-out {opts.adapter_out}: {err}")
-            return 2
-        try:
-            gguf_file(opts.student)
-        except IndexError:
-            log(f"[train] refuse: --adapter-out needs a GGUF student to take the architecture from, none under "
-                f"{opts.student}")
-            return 2
-    if opts.report:
-        opts.report = os.path.abspath(os.path.expanduser(opts.report))
-        Path(opts.report).parent.mkdir(parents=True, exist_ok=True)
 
     model, cfg, tokenizer, kind = load_student(opts.student, None, opts.hf_source)
     _frames.set_render_kwargs(tokenizer, view.get("student_render_kwargs") or {})
@@ -729,6 +741,7 @@ def run_train(opts: TrainOptions) -> int:
             if width is not None:
                 hs_head_for(width)
         est_ckpt = 2 * trainable_count(model) * 4 * 3
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
         if free_bytes(ckpt_dir) < 2 * est_ckpt:
             log(f"[train] refuse: free space under two checkpoints ({free_bytes(ckpt_dir) / GB:.2f} GB)")
             return 2
