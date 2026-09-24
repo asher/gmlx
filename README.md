@@ -55,6 +55,7 @@ covers older versions, which build them from source.
 ```sh
 uv tool install "gmlx[all]"     # or: pip install "gmlx[all]" into a venv you manage
 brew install ffmpeg             # voice and non-wav audio only
+# or, on macOS 26.2+, both at once: brew install asher/gmlx/gmlx
 
 mkdir ~/gmlx && cd ~/gmlx
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
@@ -77,7 +78,8 @@ minus the quant tag, as its id. The other id rules are in
 lists the extras. A model needs memory for roughly its file size plus the
 conversation's KV cache, and the same guide
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
-for each machine size. Upgrade with `uv tool upgrade gmlx`. To remove gmlx,
+for each machine size. Upgrade with `uv tool upgrade gmlx`, or `brew upgrade
+gmlx` for a Homebrew install. To remove gmlx,
 follow
 [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
 

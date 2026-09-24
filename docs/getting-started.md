@@ -46,6 +46,19 @@ terminal cannot find `gmlx`,
 [troubleshooting.md](troubleshooting.md#gmlx-command-not-found-in-a-new-terminal)
 explains.
 
+On macOS 26.2 or newer you can install with Homebrew instead:
+
+```sh
+brew install asher/gmlx/gmlx
+```
+
+The formula installs every extra and ffmpeg. Its virtual environment holds
+the exact dependency versions tested with that release, and `brew upgrade
+gmlx` builds a new environment for each version. A server or login item that
+was running during an upgrade keeps the old code until you run `gmlx
+restart`. The rest of this section applies to the uv and pip forms, because
+a Homebrew install has no extras left to add.
+
 `[all]` turns on all optional features. The core install already serves, loads
 vision models, embeds and runs the menu bar, which leaves few extras:
 

@@ -32,8 +32,10 @@ def check_runtime() -> dict:
     try:
         import mlx_kquant  # noqa: F401
     except ImportError as e:
+        from . import extras
         return _check("runtime", "FAIL",
-                      f"mlx-kquant not importable: {e} (pip install mlx-kquant)")
+                      f"mlx-kquant not importable: {e} "
+                      f"({extras.repair_hint('mlx-kquant')})")
     from importlib.metadata import PackageNotFoundError, version
     vers = []
     for dist in ("mlx", "mlx-kquant", "mlx-lm", "gguf"):
@@ -324,7 +326,7 @@ def check_extras(cfg, running=()):
             if x in origin:
                 out += f" [server config {origin[x]}]"
             return out
-        pips = "; ".join(extras.install_hint(x) for x in missing)
+        pips = "; ".join(dict.fromkeys(extras.install_hint(x) for x in missing))
         return _check("extras", "FAIL",
                       "configured but not installed: "
                       f"{', '.join(label(x) for x in missing)} ({pips})")

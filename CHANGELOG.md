@@ -36,6 +36,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `thinking` request field in the z.ai form with a `clear_thinking` key, as
   pi-ai sends it, was ignored as unrecognized. The server now applies the switch
   and maps `clear_thinking` onto the variable the template reads.
+- gmlx installs with Homebrew on macOS 26.2 and newer, as
+  `brew install asher/gmlx/gmlx`, with every extra and ffmpeg included.
+- Login items and background servers record the interpreter by a path that
+  survives `brew upgrade`, and install hints name `brew reinstall` for a
+  Homebrew install.
 
 ## [0.4.16] - 2026-09-24
 

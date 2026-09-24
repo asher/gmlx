@@ -257,4 +257,5 @@ config the server would run with.
 To remove gmlx completely, first run `gmlx service uninstall` if you
 installed the login item, then delete the directories in the table and the
 models you pulled, and uninstall the `gmlx` and `mlx-kquant` packages the
-way you installed them.
+way you installed them. For a Homebrew install that is `brew uninstall
+gmlx`, which leaves the paths in the table in place.
