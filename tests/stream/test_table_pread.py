@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import threading
 
 import mlx.core as mx
 import numpy as np
@@ -227,3 +228,64 @@ def test_gather_stats_totals_the_row_reads(table_gguf, monkeypatch):
         assert got["seconds"] > 0
     finally:
         src.close()
+
+
+def test_close_returns_while_a_read_ahead_is_queued(table_gguf, monkeypatch):
+    """A read-ahead takes the source lock when it starts. A close that
+    waits for it while holding that lock never returns."""
+    path, raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    s.read(np.array([0]))                # open the fd and the pools
+    gate = threading.Event()
+    s._ahead.submit(gate.wait)           # holds the one read-ahead thread
+    try:
+        queued = s.read_ahead(np.array([1, 2]))
+        closer = threading.Thread(target=s.close, daemon=True)
+        closer.start()
+        closer.join(0.5)
+    finally:
+        gate.set()
+    closer.join(5)
+    assert not closer.is_alive(), "close deadlocked against the read-ahead"
+    assert queued.cancelled() or queued.exception() is not None
+    assert s._fd is None and s._pool is None and s._ahead is None
+
+
+def test_a_read_after_close_raises(table_gguf, monkeypatch):
+    path, _raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    s.read(np.array([0]))
+    s.close()
+    s.close()                            # idempotent
+    with pytest.raises(RuntimeError, match="is closed"):
+        s.read(np.array([0]))
+    with pytest.raises(RuntimeError, match="is closed"):
+        s.read_ahead(np.array([0]))
+    assert s._fd is None
+
+
+def test_close_leaves_the_fd_to_the_read_in_flight(table_gguf, monkeypatch):
+    """A read in flight keeps its fd until it ends, so a close never hands
+    its preads a closed or reused descriptor."""
+    import gmlx.stream.table_pread as tp
+
+    path, raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    started, gate = threading.Event(), threading.Event()
+    real = tp.read_range_aligned
+
+    def slow(fd, mv, off, size):
+        started.set()
+        gate.wait()
+        real(fd, mv, off, size)
+
+    monkeypatch.setattr(tp, "read_range_aligned", slow)
+    fut = s.read_ahead(np.array([7]))
+    try:
+        assert started.wait(5)
+        s.close(wait=False)
+        assert s._fd is not None, "fd closed under a read in flight"
+    finally:
+        gate.set()
+    assert np.array_equal(fut.result(timeout=5), raw[[7]])
+    assert s._fd is None
