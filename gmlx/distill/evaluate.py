@@ -21,7 +21,8 @@ from . import tokens as _tokens
 from .constants import GB, log
 from .corpus import message_list, nfc, norm_messages
 from .data import CacheReader
-from .format import read_json, replay_layers_for, shard_texts, write_bytes_atomic, write_json_atomic
+from .format import (read_json, replay_layers_for, routing_block, shard_texts, write_bytes_atomic,
+                     write_json_atomic)
 from .student import adapter_disabled
 from .head import HEAD_PARITY_TOL, head_parity_gap, head_spec_from_model
 from .trainer import load_student
@@ -64,6 +65,15 @@ class EvalOptions:
 
 class UnreadableInput(Exception):
     """A slice, task or report file that cannot be read as what it should be."""
+
+
+def read_slice(path: Path) -> str:
+    """A --slice file's text. A file that is not UTF-8 is unreadable: its
+    bytes would score as replacement characters."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise UnreadableInput(f"{path}: not UTF-8 (byte {e.start}), convert it") from None
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -298,6 +308,9 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
         model.eval()
         reader = CacheReader(Path(opts.kld_cache), keep=2)
         replay = kld_replay_layers(model, reader.manifest, opts.adapter)
+        if replay is None and not opts.adapter and routing_block(reader.manifest):
+            log("[eval] the cache's recorded routes are not replayed: the student's MoE layers are not the "
+                "teacher's, or gmlx cannot replay their gates")
         k = _eval.cache_kld(model, reader, max_rows=opts.kld_rows, tokenizer=tokenizer, replay_layers=replay,
                             head=head)
         k["wall_s"] = time.perf_counter() - t0
@@ -445,8 +458,7 @@ def run_eval(opts: EvalOptions) -> int:
     kld_manifest: dict = {}
     corpus_sources = None
     try:
-        slices = {name: nfc(Path(path).expanduser().read_text(encoding="utf-8", errors="replace"))
-                  for name, path in slice_specs}
+        slices = {name: nfc(read_slice(Path(path).expanduser())) for name, path in slice_specs}
         if opts.tasks:
             td = Path(opts.tasks_dir or ".")
             for t in opts.tasks.split(","):

@@ -18,7 +18,9 @@ inline, DeepSeek-shaped gate submodules need an adapter, registered here
 for the mlx-lm ``group_expert_select`` gates and supplied as a
 ``_kq_route_weights(x, inds)`` method by the gmlx-owned gates. A block
 without one makes ``install_moe_route_replay`` refuse, since a partial
-replay would misalign every layer after the gap.
+replay would misalign every layer after the gap; ``replay_unsupported``
+lists those blocks without touching the model, so a caller can decline
+to record routes, or score without replay, instead.
 
 Position bookkeeping is the caller's: set ``RouteReplay.offset`` to the
 first position of each chunk before its forward (``advance`` moves it by
@@ -32,8 +34,11 @@ import mlx.core as mx
 import numpy as np
 
 from gmlx.stream.moe_experts import (
+    _CALLBACK_BLOCKS,
     _apply_expert_controls,  # noqa: F401  (the seam this module drives)
+    _gate_submodule,
     _hook_target,
+    _inline_forward,
     _moe_owners,
 )
 
@@ -138,20 +143,59 @@ class RouteReplay:
 # those ids itself.
 
 
-def _group_select_weights(gate, x, inds):
-    # mlx_lm deepseek_v3.group_expert_select: sigmoid scores, optional
-    # renormalization, routed scaling; the group mask steers selection only.
-    scores = mx.sigmoid((x @ gate.weight.T).astype(mx.float32))
+@mx.compile
+def _sigmoid_select(logits, inds, top_k, norm_topk_prob, routed_scaling_factor, eps):
+    # mlx_lm group_expert_select: sigmoid scores, optional renormalization
+    # (over the sum plus ``eps`` where the arch adds one), routed scaling;
+    # the correction bias and the group mask steer selection only.
+    # Compiled like the source: on the GPU the fused sigmoid of a bf16 or
+    # f16 cast is an ulp off the eager kernel.
+    scores = mx.sigmoid(logits.astype(mx.float32))
     w = mx.take_along_axis(scores, inds, axis=-1)
-    if gate.top_k > 1 and gate.norm_topk_prob:
-        w = w / w.sum(axis=-1, keepdims=True)
-    return w * gate.routed_scaling_factor
+    if top_k > 1 and norm_topk_prob:
+        denominator = w.sum(axis=-1, keepdims=True)
+        w = w / (denominator if eps is None else denominator + eps)
+    return w * routed_scaling_factor
+
+
+def _sigmoid_select_weights(gate, logits, inds, eps=None):
+    return _sigmoid_select(logits, inds, gate.top_k, gate.norm_topk_prob,
+                           gate.routed_scaling_factor, eps)
+
+
+def _group_select_weights(gate, x, inds):
+    # deepseek_v3, glm4_moe
+    return _sigmoid_select_weights(gate, x @ gate.weight.T, inds)
+
+
+def _group_select_weights_eps(gate, x, inds):
+    # glm4_moe_lite, mimo_v2_flash, exaone_moe: the sum plus 1e-20
+    return _sigmoid_select_weights(gate, x @ gate.weight.T, inds, eps=1e-20)
+
+
+def _dsv32_select_weights(gate, x, inds):
+    # deepseek_v32: deepseek_v3's select, with the router matmul in fp32 on
+    # the gates upstream/dsv32_patches.py flags
+    if getattr(gate, "_dsv32_gate_fp32", False):
+        logits = x.astype(mx.float32) @ gate.weight.T.astype(mx.float32)
+        return _sigmoid_select_weights(gate, logits, inds)
+    return _group_select_weights(gate, x, inds)
 
 
 _GATE_WEIGHTS = {
     ("mlx_lm.models.deepseek_v3", "MoEGate"): _group_select_weights,
+    ("mlx_lm.models.deepseek_v32", "MoEGate"): _dsv32_select_weights,
+    ("mlx_lm.models.exaone_moe", "MoEGate"): _group_select_weights_eps,
     ("mlx_lm.models.glm4_moe", "MoEGate"): _group_select_weights,
+    ("mlx_lm.models.glm4_moe_lite", "MoEGate"): _group_select_weights_eps,
+    ("mlx_lm.models.mimo_v2_flash", "MoEGate"): _group_select_weights_eps,
 }
+
+
+def _gate_class(gate):
+    """The gate's own class, under the seam subclass when installed."""
+    cls = type(gate)
+    return cls.__mro__[1] if cls.__name__.endswith("_ExpertCtl") else cls
 
 
 def _gate_weights_fn(gate):
@@ -159,10 +203,28 @@ def _gate_weights_fn(gate):
     None when no adapter exists for its class."""
     if hasattr(type(gate), "_kq_route_weights"):
         return lambda g, x, inds: g._kq_route_weights(x, inds)
-    cls = type(gate)
-    if cls.__name__.endswith("_ExpertCtl"):
-        cls = cls.__mro__[1]
+    cls = _gate_class(gate)
     return _GATE_WEIGHTS.get((cls.__module__, cls.__name__))
+
+
+def replay_unsupported(model) -> list[tuple[int, str]]:
+    """(layer, class) for every MoE block ``install_moe_route_replay``
+    refuses: a gate submodule without a weights adapter, named by module
+    and class, or a block with no forward seam. Leaves the model as it
+    is."""
+    out = []
+    for li, owner in _moe_owners(model):
+        gate = _gate_submodule(owner)
+        if gate is None:
+            name = type(owner).__name__
+            if not (name in _CALLBACK_BLOCKS or name.endswith("_ExpertCtl")
+                    or _inline_forward(owner) is not None):
+                out.append((li, name))
+            continue
+        if getattr(gate, "_kq_route_weights_fn", None) is None and _gate_weights_fn(gate) is None:
+            cls = _gate_class(gate)
+            out.append((li, f"{cls.__module__}.{cls.__name__}"))
+    return out
 
 
 def moe_layers(model) -> list[int]:

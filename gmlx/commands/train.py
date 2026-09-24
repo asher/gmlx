@@ -138,6 +138,16 @@ def _rank(text: str) -> int:
     return n
 
 
+def _dropout(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"a number is required, got {text!r}") from None
+    if not 0.0 <= x < 1.0:
+        raise argparse.ArgumentTypeError(f"a dropout of at least 0 and below 1 is required, got {text}")
+    return x
+
+
 def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -165,8 +175,8 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
                    help="LoRA rank (default 8).")
     p.add_argument("--scale", type=float, default=20.0,
                    help="LoRA scale; alpha = scale x rank, recovered on load (default 20.0).")
-    p.add_argument("--dropout", type=float, default=0.0,
-                   help="LoRA dropout (default 0.0).")
+    p.add_argument("--dropout", type=_dropout, default=0.0,
+                   help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--learning-rate", type=float, default=1e-4,
                    help="Adam learning rate (default 1e-4).")
     p.add_argument("--max-seq-length", type=int, default=2048,

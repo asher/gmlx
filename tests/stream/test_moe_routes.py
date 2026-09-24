@@ -5,6 +5,7 @@ refuse what they cannot replay."""
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -156,6 +157,180 @@ def test_mlx_lm_deepseek_gate_adapter_matches_select():
             n_group, topk_group, norm)
 
 
+# mlx-lm group_expert_select gates beyond deepseek_v3 and glm4_moe:
+# module -> the MoE block class that owns the gate.
+_SIGMOID_GATE_BLOCKS = {
+    "deepseek_v32": "DeepseekV32MoE",
+    "exaone_moe": "MoE",
+    "glm4_moe_lite": "Glm4MoeLiteMoE",
+    "mimo_v2_flash": "MoE",
+}
+
+
+def _sigmoid_gate_cfg(n_group=1, topk_group=1, norm=True, k=4):
+    return SimpleNamespace(
+        num_experts_per_tok=k, norm_topk_prob=norm, n_routed_experts=8,
+        num_experts=8, routed_scaling_factor=2.5, n_group=n_group,
+        topk_group=topk_group, hidden_size=16, moe_intermediate_size=32,
+        n_shared_experts=None, num_shared_experts=0, topk_method="noaux_tc",
+    )
+
+
+def _randomize_gate(gate):
+    # MoEGate starts at zeros, which ties every score
+    gate.weight = mx.random.normal(gate.weight.shape)
+    gate.e_score_correction_bias = mx.random.normal(gate.e_score_correction_bias.shape)
+
+
+def _dsv32_fp32_router(module, monkeypatch):
+    from gmlx.upstream.dsv32_patches import _patch_dsv32_moe_gate_fp32
+
+    monkeypatch.setenv("GMLX_DSV32_GATE_FP32", "1")
+    _patch_dsv32_moe_gate_fp32(module)
+
+
+@pytest.mark.parametrize("arch", sorted(_SIGMOID_GATE_BLOCKS))
+def test_mlx_lm_sigmoid_gate_adapters_match_select(arch):
+    """Each adapter gives the gate's own weights at the gate's own ids, bit
+    for bit, across group masks, renormalization, k=1 and both dtypes."""
+    MoEGate = importlib.import_module(f"mlx_lm.models.{arch}").MoEGate
+    for dtype in (mx.float32, mx.bfloat16):
+        for n_group, topk_group, norm, k in ((1, 1, True, 2), (2, 1, False, 2), (4, 2, True, 2),
+                                             (1, 1, True, 1)):
+            gate = MoEGate(_sigmoid_gate_cfg(n_group, topk_group, norm, k))
+            mx.random.seed(20)
+            _randomize_gate(gate)
+            gate.weight = gate.weight.astype(dtype)
+            x = mx.random.normal((2, 3, 16)).astype(dtype)
+            inds, weights = gate(x)
+            fn = _gate_weights_fn(gate)
+            assert fn is not None, arch
+            mx.eval(inds, weights)
+            assert np.array_equal(np.array(fn(gate, x, inds)), np.array(weights)), (
+                arch, dtype, n_group, topk_group, norm, k)
+
+
+def test_dsv32_gate_adapter_follows_the_fp32_router_patch(monkeypatch):
+    """glm-dsa GGUFs load deepseek_v32 with the fp32 router patch on: the
+    adapter runs the router matmul in fp32 on a flagged gate and in the
+    model dtype on an unflagged one, matching the gate either way."""
+    from mlx_lm.models.deepseek_v32 import MoEGate
+
+    class _Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = MoEGate(_sigmoid_gate_cfg())
+
+    holder = _Holder()
+    mx.random.seed(21)
+    _randomize_gate(holder.gate)
+    holder.set_dtype(mx.bfloat16)
+    _dsv32_fp32_router(holder, monkeypatch)
+    gate = holder.gate
+    assert gate._dsv32_gate_fp32
+    x = mx.random.normal((2, 5, 16)).astype(mx.bfloat16)
+    fn = _gate_weights_fn(gate)
+    at = {}
+    for flag in (True, False):
+        gate._dsv32_gate_fp32 = flag
+        inds, weights = gate(x)
+        mx.eval(inds, weights)
+        assert np.array_equal(np.array(fn(gate, x, inds)), np.array(weights)), flag
+        at[flag] = np.array(fn(gate, x, mx.zeros_like(inds) + mx.arange(4, dtype=inds.dtype)))
+    # the two branches differ on bf16, so both were exercised
+    assert not np.array_equal(at[True], at[False])
+
+
+@pytest.mark.parametrize("arch,fp32", [(a, False) for a in sorted(_SIGMOID_GATE_BLOCKS)]
+                         + [("deepseek_v32", True)])
+def test_mlx_lm_sigmoid_gate_blocks_replay(arch, fp32, monkeypatch):
+    """Replaying a block's own recorded routes reproduces its unhooked
+    forward bit for bit, in float32 and (GPU only, the CPU gather_mm is
+    float32 only) in bfloat16, and a swapped id moves that position only."""
+    mod = importlib.import_module(f"mlx_lm.models.{arch}")
+    mx.random.seed(22)
+    x = mx.random.normal((1, 5, 16))
+    block = getattr(mod, _SIGMOID_GATE_BLOCKS[arch])(_sigmoid_gate_cfg())
+    _randomize_gate(block.gate)
+    if fp32:
+        _dsv32_fp32_router(block, monkeypatch)
+        assert block.gate._dsv32_gate_fp32
+    mx.eval(block.parameters())
+    stock = np.array(block(x))
+    _check_block(block, x, 8)
+    assert np.array_equal(np.array(block(x)), stock), arch
+
+    if mx.default_device() != mx.gpu:
+        return
+    block.set_dtype(mx.bfloat16)
+    xb = x.astype(mx.bfloat16)
+    stock = np.array(block(xb).astype(mx.float32))
+    model = _shell(block)
+    rec = install_moe_route_record(model)
+    mx.eval(block(xb))
+    routes = rec.take()
+    clear_moe_route_controls(model)
+    install_moe_route_replay(model, RouteReplay(routes, rec.layers))
+    assert np.array_equal(np.array(block(xb).astype(mx.float32)), stock), arch
+    clear_moe_route_controls(model)
+
+
+def _deepseek_v2_block():
+    from mlx_lm.models.deepseek_v2 import DeepseekV2MoE
+
+    cfg = SimpleNamespace(
+        num_experts_per_tok=2, n_routed_experts=8, routed_scaling_factor=1.0,
+        topk_method="greedy", n_group=1, topk_group=1, hidden_size=16,
+        moe_intermediate_size=32, n_shared_experts=None,
+    )
+    return DeepseekV2MoE(cfg)
+
+
+def test_replay_unsupported_names_a_gate_without_an_adapter():
+    """deepseek_v2's softmax gate has no weights adapter: the query names it
+    by module and class without swapping it, before and after recording."""
+    from gmlx.stream.moe_routes import replay_unsupported
+
+    block = _deepseek_v2_block()
+    model = _shell(block)
+    want = [(0, "mlx_lm.models.deepseek_v2.MoEGate")]
+    assert replay_unsupported(model) == want
+    assert type(block.gate).__name__ == "MoEGate"
+    rec = install_moe_route_record(model)
+    assert rec.layers == [0]
+    clear_moe_route_controls(model)
+    assert replay_unsupported(model) == want
+    with pytest.raises(ValueError, match="layer 0 MoEGate_ExpertCtl"):
+        install_moe_route_replay(model, RouteReplay(np.zeros((1, 5, 2)), [0]))
+
+
+def test_replay_unsupported_agrees_with_the_installer():
+    """The query lists a block exactly when install_moe_route_replay
+    refuses it, over every block shape the seam knows."""
+    from gmlx.stream.moe_routes import replay_unsupported
+
+    blocks = list(_arch_fixtures()) + [
+        _gptoss_block(), _k3_block(), _deepseek_v2_block(),
+        _Block(_kquant_glu(), _WeightedGate()), _Block(_kquant_glu(), _TupleGate()),
+    ]
+    for arch, cls in _SIGMOID_GATE_BLOCKS.items():
+        blocks.append(getattr(importlib.import_module(f"mlx_lm.models.{arch}"), cls)(_sigmoid_gate_cfg()))
+    seen = set()
+    for block in blocks:
+        model = _shell(block)
+        listed = replay_unsupported(model)
+        try:
+            install_moe_route_replay(model, RouteReplay(np.zeros((1, 5, 2)), [0]))
+            refused = False
+        except ValueError as e:
+            assert "unsupported on MoE block" in str(e)
+            refused = True
+        clear_moe_route_controls(model)
+        assert bool(listed) == refused, type(block).__name__
+        seen.add(refused)
+    assert seen == {True, False}
+
+
 def test_kimi_k3_replay():
     mx.random.seed(16)
     x = mx.random.normal((1, 5, 32))
@@ -199,7 +374,10 @@ def test_replay_refuses_unsupported_block(capsys):
             w = mx.take_along_axis(g, inds, axis=-1)
             return (self.switch_mlp(x, inds) * w[..., None]).sum(axis=-2)
 
+    from gmlx.stream.moe_routes import replay_unsupported
+
     model = _shell(_LinearGateBlock(_kquant_glu()))
+    assert replay_unsupported(model) == [(0, "_LinearGateBlock")]
     rec = install_moe_route_record(model)
     assert rec.layers == []
     assert "skipped unsupported block(s): _LinearGateBlock" in capsys.readouterr().out

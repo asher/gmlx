@@ -58,6 +58,27 @@ def _json_line(line: str, p: Path, i: int):
         raise ValueError(f"{p.name} line {i + 1}: not JSON ({e})") from None
 
 
+def _utf8_lines(p: Path, name: str, in_dir: bool = False) -> Iterator[str]:
+    """The lines of ``p``, refused with the file named when it is not
+    UTF-8."""
+    try:
+        with open(p, encoding="utf-8") as fh:
+            yield from fh
+    except UnicodeDecodeError:
+        where = " or move it out of the corpus directory" if in_dir else ""
+        raise ValueError(f"{name} is not UTF-8, convert it{where}") from None
+
+
+def _hf_datasets(spec: str):
+    """The datasets module, for a corpus spec that names no local path."""
+    try:
+        import datasets  # function-local, as gen/benchmarks.py:48
+    except ImportError:
+        raise ValueError(f"no file or directory at {spec}, and reading it as a Hugging Face dataset id "
+                         "needs the datasets package (pip install datasets)") from None
+    return datasets
+
+
 def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 hf_split: str = "train", prefix: str | None = None) -> Iterator[tuple[str, str]]:
     """(doc_id, text) from a jsonl file, a directory of text files, or an
@@ -68,16 +89,15 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
     p = Path(spec).expanduser()
     n = 0
     if p.is_file():
-        with open(p, encoding="utf-8") as fh:
-            for i, line in enumerate(fh):
-                line = line.strip()
-                if not line:
-                    continue
-                obj = _json_line(line, p, i)
-                yield f"{prefix or p.name}:{i}", nfc(text_value(obj, text_key, f"{p.name} line {i + 1}"))
-                n += 1
-                if limit and n >= limit:
-                    return
+        for i, line in enumerate(_utf8_lines(p, prefix or str(p), in_dir=prefix is not None)):
+            line = line.strip()
+            if not line:
+                continue
+            obj = _json_line(line, p, i)
+            yield f"{prefix or p.name}:{i}", nfc(text_value(obj, text_key, f"{p.name} line {i + 1}"))
+            n += 1
+            if limit and n >= limit:
+                return
         return
     if p.is_dir():
         for f in sorted(p.rglob("*")):
@@ -99,7 +119,7 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                 if limit and n >= limit:
                     return
         return
-    import datasets  # function-local, as gen/benchmarks.py:48
+    datasets = _hf_datasets(spec)
     name, _, config = spec.partition("@")
     ds = datasets.load_dataset(name, config or None, split=hf_split, streaming=True)
     for i, row in enumerate(ds):
@@ -158,17 +178,16 @@ def iter_conversations(spec: str, key: str = "messages", student_key: str | None
     p = Path(spec).expanduser()
     n = 0
     if p.is_file():
-        with open(p, encoding="utf-8") as fh:
-            for i, line in enumerate(fh):
-                line = line.strip()
-                if not line:
-                    continue
-                yield one(_json_line(line, p, i), f"{p.name}:{i}")
-                n += 1
-                if limit and n >= limit:
-                    return
+        for i, line in enumerate(_utf8_lines(p, str(p))):
+            line = line.strip()
+            if not line:
+                continue
+            yield one(_json_line(line, p, i), f"{p.name}:{i}")
+            n += 1
+            if limit and n >= limit:
+                return
         return
-    import datasets  # function-local, as gen/benchmarks.py:48
+    datasets = _hf_datasets(spec)
     name, _, config = spec.partition("@")
     ds = datasets.load_dataset(name, config or None, split=hf_split, streaming=True)
     for i, row in enumerate(ds):

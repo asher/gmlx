@@ -257,9 +257,12 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
     the trace, the closing marker the template puts after it and the
     content are all targets behind the thinking-mode generation prompt
     (the frame is then `<think>` plus its newline on the Qwen family).
-    Raises ValueError when the template rejects the conversation or an
-    assistant content cannot be located in the render (a template that
-    rewrites content). A token that straddles a span edge is never a
+    A content that opens with an inline think block, which the Qwen3
+    templates move out of the content or drop from earlier turns, is
+    located as a reasoning_content is. Raises ValueError when the
+    template rejects the conversation or an assistant content cannot be
+    located in the render (a template that rewrites content). A token
+    that straddles a span edge is never a
     target, so a frame ending in a space that merges with the content's
     first token loses that token as a target; the chat templates in use
     end their frame with a newline or a special token."""
@@ -318,6 +321,24 @@ def render_row(tokenizer, messages: list[dict], *, open_tail: bool,
                     if reason_target:
                         k0 = kr
             k = rendered.find(cs, cursor)
+            if k < 0 and "</think>" in cs:
+                # the template moved an inline think block out of the
+                # content, or dropped it from an earlier turn: the trace is
+                # located as a reasoning_content is, the content after the
+                # marker that closes it
+                think, _, cs = cs.partition("</think>")
+                think, cs = think.split("<think>", 1)[-1].strip(), cs.strip()
+                if not cs:
+                    raise ValueError("an assistant turn holds only a think block")
+                kr = rendered.find(think, cursor) if think else -1
+                if kr >= 0:
+                    cursor = kr + len(think)
+                    if reason_target:
+                        k0 = kr
+                close = rendered.find("</think>", cursor)
+                if close >= 0 and not rendered[cursor:close].strip():
+                    cursor = close + len("</think>")
+                k = rendered.find(cs, cursor)
             if k < 0:
                 raise ValueError("assistant content not found in the rendered conversation")
         end = k + len(cs)

@@ -359,9 +359,10 @@ def cache_mismatch(base_dir: Path, base: dict, other_dir: Path, other: dict) -> 
 
 def run_census(opts: CensusOptions) -> int:
     """Pair the caches, measure, and write the JSON (and Markdown).
-    Returns 0, or 2 when a cache directory has no manifest, a --with
-    cache was made by another teacher, tokenizer or top-k than
-    --without, or no rows pair across the caches."""
+    Returns 0, or 2 when a cache directory has no manifest or an
+    unreadable one, a --with cache was made by another teacher,
+    tokenizer, top-k or head width than --without, or no rows pair
+    across the caches."""
     caches = [Path(opts.without).expanduser()] + [Path(c).expanduser() for c in opts.with_]
     manifests = []
     for c in caches:

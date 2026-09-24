@@ -51,6 +51,8 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
 
+from gmlx.envflags import env_bool
+from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
 
@@ -1324,8 +1326,15 @@ class Attention(nn.Module):
                         qsa = qsa & mask
                     else:
                         qsa = mask + mx.where(qsa, 0.0, -mx.inf).astype(mask.dtype)
-                out = mx.fast.scaled_dot_product_attention(
-                    q, k, v, scale=self.scale, mask=qsa)
+                if (self.training and cache is None
+                        and env_bool("GMLX_TRAIN_BLOCKED_ATTN", True)):
+                    # MLX's unfused backward keeps every layer's
+                    # [B, H, L, L] softmax on the tape
+                    out = blocked_attention(q, k, v, scale=self.scale,
+                                            mask=qsa)
+                else:
+                    out = mx.fast.scaled_dot_product_attention(
+                        q, k, v, scale=self.scale, mask=qsa)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(out * mx.sigmoid(gate))
 

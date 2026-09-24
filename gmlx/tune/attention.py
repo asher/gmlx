@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from gmlx.envflags import env_bool
+
 _BLOCK = 256
 
 
@@ -180,7 +182,8 @@ def install_training_attention(model, *, block: int = _BLOCK):
     global in each module that defines one of the model's layer classes
     (the mlx-lm and mlx-vlm seam every stock attention calls) and returns
     a function that restores them. Calls with a cache or attention sinks,
-    or made while the model is in eval mode, take the original path."""
+    made while the model is in eval mode or made with
+    ``GMLX_TRAIN_BLOCKED_ATTN=0``, take the original path."""
     import sys
 
     patched = []
@@ -199,7 +202,8 @@ def install_training_attention(model, *, block: int = _BLOCK):
                      sinks=None, **kw):
                 if (model.training and cache is None and sinks is None
                         and not kw and scale is not None
-                        and isinstance(keys, mx.array)):
+                        and isinstance(keys, mx.array)
+                        and env_bool("GMLX_TRAIN_BLOCKED_ATTN", True)):
                     return blocked_attention(queries, keys, values, scale=scale,
                                              mask=mask, block=block)
                 return orig(queries, keys, values, cache, scale, mask,

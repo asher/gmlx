@@ -212,6 +212,7 @@ def test_filter_refuses_a_malformed_jsonl_line(tmp_path, capsys):
     ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--limit-docs", "0"],
     ["cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--max-rows", "0"],
     ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--ngram", "0"],
+    ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--min-words", "0"],
     ["filter", "--in", "a.jsonl", "--out", "o.jsonl", "--max-line-repeats", "0"],
     ["census", "--without", "a", "--with", "b", "--out", "c.json", "--max-rows", "0"],
 ])

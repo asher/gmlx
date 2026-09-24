@@ -126,7 +126,7 @@ def _filter_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--report", type=_path, default=None, metavar="JSON", help="Write the kept and dropped counts here.")
     p.add_argument("--rejects", type=_path, default=None, metavar="PATH",
                    help="Write one {id, reason} line per dropped row here, with the checker's word under detail.")
-    p.add_argument("--min-words", "--min-tokens", dest="min_words", type=int, default=16, metavar="N",
+    p.add_argument("--min-words", "--min-tokens", dest="min_words", type=_positive_int, default=16, metavar="N",
                    help="Drop replies whose answer has fewer units than this, a unit being a whitespace-separated "
                         "word or one ideograph or kana character, the reasoning trace not counted (default 16). "
                         "Set 1 when a right answer can be a few words. --min-tokens is the same flag.")

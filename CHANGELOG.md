@@ -69,6 +69,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first decode step with `'LoRAKQuantLinear' object has no attribute 'kquant_type'`.
 - `gmlx serve --adapter` on DeepSeek-V4 ignored the adapter on the `wq_a` and
   `wkv` projections and on the compressor's `wkv` and `wgate`.
+- `gmlx train --dropout` with 1 or a negative value failed with a traceback
+  after the base model had loaded. It is now refused before the load.
 
 ## [0.4.14] - 2026-09-18
 

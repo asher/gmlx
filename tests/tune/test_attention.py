@@ -99,7 +99,7 @@ def test_nothing_quadratic_survives_the_forward():
     assert y.shape == (2, 8, 40, 32)
 
 
-def test_installer_routes_training_calls_only():
+def test_installer_routes_training_calls_only(monkeypatch):
     from mlx_lm.models import llama
     from mlx_lm.models.llama import ModelArgs
 
@@ -128,6 +128,12 @@ def test_installer_routes_training_calls_only():
         mx.eval(y_eval)
         assert len(calls) == 1, "eval call did not reach the original attention"
         assert np.allclose(_np(y_train), _np(y_eval), atol=1e-4)
+        # the switch sends training calls to the original attention too
+        monkeypatch.setenv("GMLX_TRAIN_BLOCKED_ATTN", "0")
+        model.train()
+        mx.eval(model(ids))
+        assert len(calls) == 2, "GMLX_TRAIN_BLOCKED_ATTN=0 kept the blocked route"
+        monkeypatch.delenv("GMLX_TRAIN_BLOCKED_ATTN")
         restore()
         assert llama.scaled_dot_product_attention is spy
     finally:

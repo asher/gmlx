@@ -7,6 +7,7 @@ default and would put the dense references 1e-3 away from the fused head).
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -1600,6 +1601,25 @@ def test_train_refuses_tables_that_are_not_the_views_own(tmp_path, tok_bl, tok_s
     assert "not the ones view.json was aligned with" in capsys.readouterr().err
 
 
+def test_cache_resume_refuses_a_run_started_before_rows_carried_doc_sha(tmp_path, tok_bl, capsys):
+    """Shards written before rows carried doc_sha would pair across caches
+    only in the shards written after the resume."""
+    from gmlx.distill import teacher as _teacher
+
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    out = tmp_path / "cache"
+    opts = _teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(out), top_k=8, max_len=24,
+                                 rows_per_shard=2)
+    assert _teacher.run_cache(opts) == 0
+    prog = json.loads((out / "progress.json").read_text())
+    prog["run"].pop("row_format", None)
+    (out / "progress.json").write_text(json.dumps(prog))
+    capsys.readouterr()
+    assert _teacher.run_cache(dataclasses.replace(opts, resume=True)) == 2
+    assert "row_format None -> 1" in capsys.readouterr().err
+
+
 def test_cache_resume_refuses_other_inputs(tmp_path, tok_bl, capsys):
     """progress.json records the corpus and row options of the first run,
     and a resume with any of them changed is refused before the teacher
@@ -3106,6 +3126,36 @@ _TEMPLATE_ANALYSIS = ("{% for m in messages %}{% if m['role'] == 'user' %}<|star
                       "{{ m['reasoning_content'] }}<|end|>{% endif %}<|start|>assistant<|channel|>final<|message|>"
                       "{{ m['content'] }}<|return|>{% endif %}{% endfor %}"
                       "{% if add_generation_prompt %}<|start|>assistant{% endif %}")
+
+
+def test_an_inline_think_block_is_located_on_the_qwen3_template(tok_bl):
+    """Published reasoning datasets keep the trace inline in the content.
+    The Qwen3 template moves it out of the final turn and drops it from
+    earlier ones, so the content is not in the render as written."""
+    tok = _with_template(tok_bl, (Path(__file__).parents[1] / "fixtures" / "qwen3_template.jinja").read_text())
+    q1, q2 = {"role": "user", "content": "q1"}, {"role": "user", "content": "q2"}
+
+    def a(text, **kw):
+        return {"role": "assistant", "content": text, **kw}
+
+    def targets(msgs, **kw):
+        b, spans = dl.render_row(tok, msgs, open_tail=False, **kw)
+        return [(b[s0:s1].decode(), b[s1:s2].decode()) for s0, s1, s2 in spans]
+
+    inline = a("<think>\nplan it\n</think>\n\nthe answer")
+    assert targets([q1, inline], reason_target=True) == [("plan it\n</think>\n\nthe answer", "<|im_end|>\n")]
+    assert targets([q1, inline]) == [("the answer", "<|im_end|>\n")]
+    hist = [q1, a("<think>\nr1\n</think>\n\nfirst"), q2, a("second", reasoning_content="r2")]
+    assert targets(hist, reason_target=True) == [("first", "<|im_end|>\n"),
+                                                 ("r2\n</think>\n\nsecond", "<|im_end|>\n")]
+    # a short reply sits inside the markup around it
+    for reply in ("a", "think", "yes"):
+        assert targets([q1, a(f"<think>\nyes\n</think>\n\n{reply}")])[-1] == (reply, "<|im_end|>\n")
+    with pytest.raises(ValueError, match="only a think block"):
+        targets([q1, a("<think>\nplan it\n</think>\n\n")])
+    tb = dl.token_bytes(tok)
+    assert dl.fit_reply(tok, hist, 512, tb, reason_target=True) is not None
+    assert dl.fit_conversation(tok, hist, 512, tb) is not None
 
 
 def test_render_row_finds_a_short_reply_behind_a_reasoning_trace(tok_bl):
@@ -7137,6 +7187,53 @@ def test_train_leaves_out_rows_whose_prompt_another_view_validates(tmp_path, tok
             in err)
 
 
+def test_train_leaves_out_context_rows_another_round_validates(tmp_path, tok_bl, capsys, monkeypatch):
+    """Two rounds of replies to one prompt set, each under one context the
+    student does not see. A row of one round trains on the teacher's answer
+    to a prompt the other round validates, whatever reply each round holds."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+    from gmlx.distill.data import CacheReader
+
+    _mlx_students(monkeypatch)
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    prompts = [f"the cat is {i} q{i}" for i in range(40)]
+
+    def pairs(tag, order):
+        out = []
+        for i in order:
+            ans = {"role": "assistant", "content": f"the cat {tag} is {i}"}
+            out.append(([{"role": "user", "content": f"the hat is 7\n\n{prompts[i]}"}, ans],
+                        [{"role": "user", "content": prompts[i]}, ans]))
+        return out
+
+    _tiny_reply_cache(tmp_path / "c1", tok, pairs("a", range(40)), corpus_sha="round-a")
+    _tiny_reply_cache(tmp_path / "c2", tok, pairs("b hat", np.random.default_rng(0).permutation(40)[:30]),
+                      corpus_sha="round-b")
+    student = _tiny_mlx_teacher(tmp_path / "student", tok)
+    views, val, trained = [], set(), []
+    for name in ("c1", "c2"):
+        tok.save_pretrained(tmp_path / name / "tokenizer")
+        out = tmp_path / f"v-{name}"
+        assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / name), student=str(student), out=str(out),
+                                                  val_fraction=0.2)) == 0
+        views.append(str(out))
+        rd = CacheReader(tmp_path / name)
+        for e in json.loads((out / "view.json").read_text())["index"]:
+            p = rd.rows_meta[e["row"]]["student_messages"][0]["content"]
+            (val.add(p) if e["split"] == "val" else trained.append(p))
+    leaked = sum(p in val for p in trained)
+    assert leaked > 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=views, student=str(student), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                  ckpt_dir=str(tmp_path / "ck")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert (f"[train] {leaked} train rows left out: a validation row holds their document or prompt"
+            in err)
+
+
 def test_prompt_keys_match_one_prompt_or_one_document_and_nothing_else():
     from gmlx.distill.trainer import prompt_keys
 
@@ -7149,9 +7246,9 @@ def test_prompt_keys_match_one_prompt_or_one_document_and_nothing_else():
     a = prompt_keys({"messages": [ask, reply("x")], "doc_id": "r1.jsonl:3", "frame": "reply"}, "c1", "0:3")
     b = prompt_keys({"messages": [ask, reply("y")], "doc_id": "r2.jsonl:9", "frame": "reply"}, "c2", "1:9")
     assert a & b
-    # a row with a context the student does not see keeps its reply in the
-    # key, so one question over two contexts is two prompts; its
-    # context-free twin shares the document's content hash instead
+    # a row with a context the student does not see is keyed by the prompt
+    # the teacher read, so one question over two contexts is two prompts;
+    # its context-free twin shares the document's content hash instead
     ctx = {"role": "system", "content": "a long context"}
     c = prompt_keys({"messages": [ctx, ask, reply("x")], "student_messages": [ask, reply("x")],
                      "doc_id": "r3.jsonl:0", "frame": "reply", "doc_sha": "s1"}, "c3", "2:0")
@@ -7161,6 +7258,9 @@ def test_prompt_keys_match_one_prompt_or_one_document_and_nothing_else():
     assert not c & c2
     assert c & prompt_keys({"messages": [ask, reply("x")], "doc_id": "r1.jsonl:3", "frame": "reply",
                             "doc_sha": "s1"}, "c1", "0:3")
+    # one question under one context in another round of replies
+    assert c & prompt_keys({"messages": [ctx, ask, reply("v")], "student_messages": [ask, reply("v")],
+                            "doc_id": "r4.jsonl:0", "frame": "reply", "doc_sha": "s4"}, "c4", "3:0")
     # one conversation rendered two ways in one corpus: the document key
     whole = prompt_keys({"messages": [ask, reply("x"), ask, reply("z")], "doc_id": "d.jsonl:4",
                          "frame": "chat"}, "c1", "0:1")
@@ -7394,6 +7494,55 @@ def test_a_directory_corpus_with_a_file_that_is_not_utf8_is_refused(tmp_path, to
     rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(d), out=str(tmp_path / "cache"),
                                                   top_k=8, max_len=24))
     assert rc == 2 and "[cache] refuse: b.txt is not UTF-8" in capsys.readouterr().err
+
+
+def test_a_jsonl_corpus_that_is_not_utf8_is_refused_with_the_file_named(tmp_path, tok_bl, capsys):
+    from gmlx.distill import corpus as _corpus
+    from gmlx.distill import teacher as _teacher
+
+    d = tmp_path / "docs"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.txt").write_text("the cat is the cat", encoding="utf-8")
+    bad = json.dumps({"text": "the caf\u00e9"}, ensure_ascii=False).encode("latin-1")
+    (d / "sub" / "b.jsonl").write_bytes(bad + b"\n")
+    with pytest.raises(ValueError, match="sub/b.jsonl is not UTF-8, convert it or move it out"):
+        list(_corpus.iter_corpus(str(d)))
+    with pytest.raises(ValueError, match="b.jsonl is not UTF-8, convert it$"):
+        list(_corpus.iter_corpus(str(d / "sub" / "b.jsonl")))
+    chat = tmp_path / "chat.jsonl"
+    chat.write_bytes(json.dumps({"messages": [{"role": "user", "content": "the caf\u00e9"}]},
+                                ensure_ascii=False).encode("latin-1") + b"\n")
+    with pytest.raises(ValueError, match="chat.jsonl is not UTF-8"):
+        list(_corpus.iter_conversations(str(chat)))
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(d), out=str(tmp_path / "cache"),
+                                                  top_k=8, max_len=24))
+    assert rc == 2 and "[cache] refuse: sub/b.jsonl is not UTF-8" in capsys.readouterr().err
+
+
+def test_cache_refuses_a_dataset_id_without_datasets(tmp_path, tok_bl, capsys, monkeypatch):
+    from gmlx.distill import teacher as _teacher
+
+    monkeypatch.setitem(__import__("sys").modules, "datasets", None)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus="someorg/ds",
+                                                  out=str(tmp_path / "cache"), top_k=8, max_len=24))
+    assert rc == 2 and "needs the datasets package" in capsys.readouterr().err
+
+
+def test_eval_refuses_a_slice_that_is_not_utf8(tmp_path, capsys):
+    """A slice read leniently would score its bytes as replacement
+    characters."""
+    from gmlx.distill import evaluate as _ev
+
+    student = tmp_path / "student.gguf"
+    student.write_bytes(b"")
+    sl = tmp_path / "s.txt"
+    sl.write_bytes("the caf\u00e9 is the cat".encode("latin-1"))
+    rc = _ev.run_eval(_ev.EvalOptions(student=str(student), md=str(tmp_path / "r.md"),
+                                      json=str(tmp_path / "r.json"), slices=["s=" + str(sl)]))
+    err = capsys.readouterr().err
+    assert rc == 2 and "unreadable input" in err and "not UTF-8" in err
 
 
 def test_a_continue_frame_that_leaves_no_room_for_a_window_is_refused(tmp_path, tok_bl, capsys):

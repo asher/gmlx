@@ -830,7 +830,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--num-layers N` | `8` | top transformer layers to adapt |
 | `--rank N` | `8` | LoRA rank |
 | `--scale F` | `20.0` | LoRA scale. Alpha is scale times rank |
-| `--dropout F` | `0.0` | LoRA dropout |
+| `--dropout F` | `0.0` | LoRA dropout, below 1 |
 | `--learning-rate F` | `1e-4` | Adam learning rate |
 | `--max-seq-length N` | `2048` | longest training sequence |
 | `--val-batches N` | `25` | validation batches in each evaluation |
@@ -1015,7 +1015,7 @@ dropped, counted in the `[cache] frame` line.
 | `--no-wired-limit` | off | leave the wired limit where it is for a teacher that fits in memory |
 | `--stream-experts` | off | force expert streaming on a MoE teacher that would fit in memory |
 | `--expert-bytes-gb F` | the streamed expert bytes | expert bytes read per forward, for the read-traffic report; 0 for a resident teacher |
-| `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval` |
+| `--routes` | off | MoE teachers: store every layer's top-k expert ids per position for replay by `eval`, refused when a gate cannot replay |
 | `--hidden` | off | also store a seeded random sketch of the teacher's final hidden state per position, for `train --hs` |
 | `--hidden-dim N` | `256` | width of the hidden sketch |
 | `--hidden-seed N` | `1` | seed of the sketch matrix |
@@ -1140,10 +1140,10 @@ top-k pooled, and, with several contexts, the part no single adapter can
 learn. With several `--with` caches, every cache decides which rows
 pair and which positions count, while the effect, the histogram and
 the positions map come from the first. Runs on the CPU. Exits 2 when a
-cache has no manifest, when a `--with` cache was made with another
-teacher, tokenizer or top-k than `--without`, when a reply-think cache
-records no `content_start` (one written before rows carried it), or
-when no rows pair. A `--corpus` that names no file, or holds a line
+cache has no manifest or one it cannot read, when a `--with` cache was
+made with another teacher, tokenizer, top-k or head width than
+`--without`, when a reply-think cache records no `content_start` (one
+written before rows carried it), or when no rows pair. A `--corpus` that names no file, or holds a line
 that is not a JSON object, also exits 2.
 
 | Flag | Default | Meaning |

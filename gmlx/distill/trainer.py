@@ -102,7 +102,7 @@ CHUNK_KNOBS = ("gamma", "max_chunk_len", "w_mid", "redirect_cut")
 
 # version of the rule prompt_keys applies, in the resume fingerprint so a
 # run resumed under another rule is refused
-VAL_LEAVE_OUT = 3
+VAL_LEAVE_OUT = 4
 
 # frames whose messages wrap a window of a document in one fixed
 # instruction: every row of every document shares the prompt
@@ -112,21 +112,23 @@ _WINDOW_FRAMES = ("continue", "continue-closed")
 def prompt_keys(meta: dict, corpus: str, fallback: str) -> set[str]:
     """What a row answers, as keys a validation row can share: its
     document within its corpus, the document's content hash when the cache
-    recorded one, and for a chat row the messages the student sees without
-    the final assistant reply. The document keys (``d:``) match one
-    conversation rendered two ways (per turn and whole, with a context and
-    without) and one document in two caches cut at other caps, the message
-    key one prompt under two document names or in two corpora. A row with
-    a context the student does not see keeps its reply in the message key,
-    so one templated question over many contexts is many prompts."""
+    recorded one, and for a chat row its prompt as the teacher reads it,
+    the messages without the final assistant reply. The document keys
+    (``d:``) match one conversation rendered two ways (per turn and whole,
+    with a context and without) and one document in two caches cut at
+    other caps, the message key one prompt under two document names or in
+    two corpora. A context the student does not see is part of the prompt,
+    so one question over many contexts is many prompts, and one question
+    under one context in two rounds of replies is one."""
     doc = meta.get("doc_id")
     keys = {f"d:{corpus}:{doc}" if doc is not None else f"r:{fallback}"}
     if meta.get("doc_sha"):
         keys.add("d:" + meta["doc_sha"])
-    st = meta.get("student_messages")
-    msgs = st or meta.get("messages")
+    st, tm = meta.get("student_messages"), meta.get("messages")
+    # the targets answer what the teacher read, context included
+    msgs = tm if st and st != tm else (st or tm)
     if msgs and meta.get("frame") not in _WINDOW_FRAMES:
-        if msgs[-1].get("role") == "assistant" and not (st and st != meta.get("messages")):
+        if msgs[-1].get("role") == "assistant":
             msgs = msgs[:-1]
         blob = json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode()
         keys.add("m:" + hashlib.sha256(blob).hexdigest())

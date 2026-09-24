@@ -397,6 +397,9 @@ def head_logits(head: HeadSpec, h):
     return z if z.dtype == mx.float16 else z.astype(mx.bfloat16)
 
 
+ROW_FORMAT = 1
+
+
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw,
                     tokenizer=None, source: str | None = None, generator_id: str = "") -> dict:
     """The inputs a resumed pass must share with the first run: the corpus
@@ -404,9 +407,9 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
     and leading bytes (its path may be spelled another way), its
     vocabulary and, when rows are framed, its chat template (a directory
     checkpoint keeps both outside the hashed files), the config source,
-    the hidden sketch and the render kwargs. Any difference refuses the
-    resume. A key this build added compares as None against a record
-    that predates it."""
+    the hidden sketch, the render kwargs and the version of the row
+    sidecar format. Any difference refuses the resume. A key this build
+    added compares as None against a record that predates it."""
     template = _frames.template_text(tokenizer) if tokenizer is not None else ""
     return {"corpus_sha256": corpus_sha, "n_rows": n_rows, "n_tokens": n_tokens, "source": source,
             "generator_id": generator_id,
@@ -421,7 +424,9 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "render_kwargs": (render_kw or None) if opts.frame != "none" else None,
             "per_turn": bool(opts.per_turn),
             "close_final_windows": bool(opts.close_final_windows),
-            "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None}
+            "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None,
+            # 1: rows carry doc_sha, which train pairs across caches by
+            "row_format": ROW_FORMAT}
 
 
 def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, int]:
@@ -561,7 +566,9 @@ def run_cache(opts: CacheOptions) -> int:
             max_tokens=opts.max_tokens, source=opts.source, hf_split=opts.hf_split, limit_docs=opts.limit_docs,
             frame=opts.frame, instruction=opts.frame_instruction, messages_key=opts.messages_key,
             close_final=opts.close_final_windows, per_turn=opts.per_turn, student_key=opts.student_messages_key)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
+        # OSError: an unreadable corpus file, or a Hugging Face id the
+        # datasets library cannot find
         log(f"[cache] refuse: {e}")
         return 2
     try:

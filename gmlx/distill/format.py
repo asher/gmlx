@@ -52,8 +52,8 @@ def routes_dtype(n_experts: int):
 
 def install_route_recording(model):
     """(recorder, reason): a gmlx RouteRecorder hooked on every MoE block of
-    ``model``, or (None, why) when gmlx lacks the seam or the model has no
-    supported MoE block."""
+    ``model``, or (None, why) when gmlx lacks the seam, the model has no
+    supported MoE block, or a block records routes eval cannot replay."""
     try:
         from gmlx.stream import moe_routes as _mr
     except ImportError:
@@ -69,6 +69,14 @@ def install_route_recording(model):
         # off again, or every later forward would feed it
         _mr.clear_moe_route_controls(model)
         return None, f"route recording unsupported on MoE layers {missing}"
+    unsupported = _mr.replay_unsupported(model)
+    if unsupported:
+        # a gate without a weights adapter records its ids, but eval
+        # cannot recompute the mixing weights to replay them
+        _mr.clear_moe_route_controls(model)
+        names = ", ".join(sorted({n for _, n in unsupported}))
+        return None, (f"route replay unsupported on MoE layers {[li for li, _ in unsupported]} "
+                      f"(no weights adapter for {names})")
     return rec, ""
 
 
@@ -110,13 +118,13 @@ def routing_block(manifest: dict) -> dict | None:
 def replay_layers_for(model, manifest: dict) -> list[int] | None:
     """The manifest's MoE layer list when ``model`` carries the same layers
     in the same order with the same number of experts behind each (the
-    cache's own teacher), else None. A layer whose expert count cannot be
-    read is not compared."""
+    cache's own teacher) and every one of its MoE blocks can replay, else
+    None. A layer whose expert count cannot be read is not compared."""
     rb = routing_block(manifest)
     if not rb:
         return None
     try:
-        from gmlx.stream.moe_routes import moe_expert_counts, moe_layers
+        from gmlx.stream.moe_routes import moe_expert_counts, moe_layers, replay_unsupported
     except ImportError:
         return None
     inner = getattr(model, "language_model", model)
@@ -124,6 +132,10 @@ def replay_layers_for(model, manifest: dict) -> list[int] | None:
         return None
     n = rb.get("n_experts")
     if n is not None and any(c is not None and c != int(n) for c in moe_expert_counts(inner)):
+        return None
+    if replay_unsupported(inner):
+        # a gate without a weights adapter cannot replay; the rows score
+        # without replay
         return None
     return list(rb["moe_layers"])
 

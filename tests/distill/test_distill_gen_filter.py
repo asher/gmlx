@@ -274,6 +274,33 @@ def test_gen_refuses_before_any_request(tmp_path, stub_server, capsys):
     assert _Handler.calls == []
 
 
+def test_gen_refuses_a_dataset_id_without_datasets_and_an_out_it_cannot_write(tmp_path, stub_server, capsys,
+                                                                               monkeypatch):
+    """Exit 1 is for requests to rerun, so an input gen cannot read is
+    refused with exit 2."""
+    prompts = _prompts(tmp_path / "p.jsonl", [{"id": "a", "messages": [{"role": "user", "content": "x"}]}])
+    monkeypatch.setitem(sys.modules, "datasets", None)
+    assert gen.run_gen(gen.GenOptions(out=str(tmp_path / "c.jsonl"), corpus="someorg/ds",
+                                      base_url=stub_server)) == 2
+    assert "needs the datasets package" in capsys.readouterr().err
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    unread = tmp_path / "unread.jsonl"
+    unread.write_text("")
+    ro.chmod(0o500)
+    unread.chmod(0o000)
+    try:
+        assert gen.run_gen(gen.GenOptions(out=str(ro / "sub" / "c.jsonl"), prompts=prompts,
+                                          base_url=stub_server)) == 2
+        assert "[gen] refuse:" in capsys.readouterr().err
+        assert gen.run_gen(gen.GenOptions(out=str(unread), prompts=prompts, base_url=stub_server)) == 2
+        assert "[gen] refuse:" in capsys.readouterr().err
+    finally:
+        ro.chmod(0o700)
+        unread.chmod(0o600)
+    assert _Handler.calls == []
+
+
 def test_gen_counts_a_failed_request_and_keeps_the_rest(tmp_path, stub_server, monkeypatch):
     prompts = _prompts(tmp_path / "p.jsonl", [
         {"id": "a", "messages": [{"role": "user", "content": "alpha"}]},

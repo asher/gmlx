@@ -823,8 +823,9 @@ fields.
 `align` set aside and `train` never trains on, drawn once across every
 view. A training row that shares its document or its prompt with a
 validation row of any view is left out as well, and `train` logs how
-many. Documents are matched by their text, so two caches of one corpus
-cut at other sizes still pair up, while a one-document cache keeps the
+many. The prompt is what the teacher read, context included. Documents
+are matched by their text, so two caches of one corpus cut at other
+sizes still pair up. Within one view, a one-document cache keeps the
 split `align` made. `best` is the lowest of the earlier validations, so
 a `val` below it is a new best, and the first validation line has no
 `best` yet. A validation loss that rises
@@ -1115,7 +1116,9 @@ Memory and the measurements behind these defaults are on the
 - Recorded routes are replayed by `eval --kld-cache` when the student
   carries the teacher's MoE layers and no adapter is loaded, so a
   requantized teacher is scored on the teacher's own routes and an
-  adapter's routing changes count against it. `train` does not replay
+  adapter's routing changes count against it. `cache --routes` refuses a
+  teacher whose MoE gates gmlx cannot replay, such as DeepSeek-V2's
+  softmax gate, DeepSeek-V4 and HY4. `train` does not replay
   them, so a MoE student trained from a MoE teacher of the same family
   learns from the teacher's outputs alone.
 - The hidden-state term reads the teacher's final hidden state only. No

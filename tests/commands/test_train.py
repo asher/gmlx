@@ -262,6 +262,15 @@ def test_train_rank_below_one_is_refused_at_parse_time(tmp_path, capsys):
     assert e.value.code == 2 and "at least 1" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("dropout", ["1", "-0.1", "nan"])
+def test_train_dropout_outside_zero_to_one_is_refused_at_parse_time(tmp_path, capsys, dropout):
+    """nn.Dropout refuses a probability of 1 or more inside the adapter
+    install, after the base model load; the parser refuses it first."""
+    with pytest.raises(SystemExit) as e:
+        train.cmd_train([str(tmp_path / "m.gguf"), "--data", str(tmp_path), "--adapter-out",
+                         str(tmp_path / "a.gguf"), "--dropout", dropout])
+    assert e.value.code == 2 and "below 1" in capsys.readouterr().err
+
 
 def test_adapter_export_reads_the_text_model_under_a_multimodal_wrapper(tmp_path):
     """A wrapper that nests the text model under language_model (the

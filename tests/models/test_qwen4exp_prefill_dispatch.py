@@ -1,24 +1,31 @@
 """qwen4exp prefill-path coverage: HC prefill kernels (norm/epi/combine/
-inject) vs the eager ops, the MoE residual-dtype contract, and the QSA
+inject) vs the eager ops, the MoE residual-dtype contract, the QSA
 prefill dispatch (split-regime and ragged-L) vs the dense token-mask
-reference."""
+reference, and the QSA training route through blocked attention."""
 
 from __future__ import annotations
 
 
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
+from mlx.utils import tree_flatten
 
 from helpers import _real_apple_gpu
+from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
 import gmlx.models.qwen4_exp.model as q4
+from gmlx.load.config_synth import synthesize_config
 from gmlx.models.qwen4_exp.model import (
     Attention,
     HyperConnection,
+    Model,
     ModelArgs,
     QSAKVCache,
     SparseMoeBlock,
+    ensure_registered,
 )
+from gmlx.tune.indices import install_index_stop_gradient
 
 
 gpu_only = pytest.mark.skipif(
@@ -242,3 +249,81 @@ def test_qsa_gathered_decode_batches_rows(L):
     # fp32 GEMM runs TF32 on M5-class GPUs while a one-row GEMV is exact
     for i in range(2):
         _assert_close(both[i:i + 1], decode(slice(i, i + 1)), 2e-3)
+
+
+# QSA training route
+
+
+def _train_model():
+    """Tiny full model (indexer budget 8 = 2 blocks of 4) with unit q/k
+    norms on the QSA layer, so its scores are not flat."""
+    ensure_registered()
+    cfg = synthesize_config(_qwen4exp_meta(True, True), _QWEN4EXP_SHAPES)
+    m = Model(ModelArgs.from_dict(cfg))
+    mx.random.seed(29)
+    m.load_weights([(k, mx.random.normal(v.shape) * 0.1)
+                    for k, v in tree_flatten(m.parameters())])
+    attn = m.layers[3].self_attn
+    attn.q_norm.weight = mx.full(attn.q_norm.weight.shape, 3.0)
+    attn.k_norm.weight = mx.full(attn.k_norm.weight.shape, 3.0)
+    mx.eval(m.parameters())
+    assert attn.indexer.block_topk == 2
+    return m
+
+
+def test_qsa_training_takes_blocked_attention(monkeypatch):
+    """A training row past the indexer budget attends through
+    blocked_attention on the QSA token mask, with the loss and gradients
+    of the sdpa route; GMLX_TRAIN_BLOCKED_ATTN=0 and eval take sdpa."""
+    m = _train_model()
+    calls = {"blocked": 0, "sdpa": 0}
+    blocked, sdpa = q4.blocked_attention, mx.fast.scaled_dot_product_attention
+
+    def blocked_spy(*a, **kw):
+        calls["blocked"] += 1
+        return blocked(*a, **kw)
+
+    def sdpa_spy(*a, **kw):
+        calls["sdpa"] += 1
+        return sdpa(*a, **kw)
+
+    monkeypatch.setattr(q4, "blocked_attention", blocked_spy)
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", sdpa_spy)
+    # 300 rows span two 256-row query blocks; rows from 11 on are sparse
+    ids = mx.random.randint(3, 32, (2, 301))
+    x, y = ids[:, :-1], ids[:, 1:]
+
+    def loss_fn(model):
+        return nn.losses.cross_entropy(model(x).astype(mx.float32), y,
+                                       reduction="mean")
+
+    arms = {}
+    m.train()
+    restore = install_index_stop_gradient()
+    try:
+        for arm, flag in (("blocked", "1"), ("sdpa", "0")):
+            monkeypatch.setenv("GMLX_TRAIN_BLOCKED_ATTN", flag)
+            calls.update(blocked=0, sdpa=0)
+            loss, g = nn.value_and_grad(m, loss_fn)(m)
+            mx.eval(loss, g)
+            arms[arm] = (float(loss), dict(tree_flatten(g)), dict(calls))
+    finally:
+        restore()
+    assert arms["blocked"][2] == {"blocked": 1, "sdpa": 0}
+    assert arms["sdpa"][2] == {"blocked": 0, "sdpa": 1}
+
+    (l_b, g_b, _), (l_s, g_s, _) = arms["blocked"], arms["sdpa"]
+    assert abs(l_b - l_s) < 1e-4, (l_b, l_s)
+    assert g_b.keys() == g_s.keys()
+    # fp32 GEMM runs TF32 on M5-class GPUs: under 2e-3 here, and a dense
+    # causal mask in place of the QSA one moves these by more than 1
+    for k in g_s:
+        ref = float(mx.abs(g_s[k]).max())
+        err = float(mx.abs(g_b[k] - g_s[k]).max())
+        assert err <= 2e-2 * ref + 1e-12, (k, err, ref)
+
+    monkeypatch.delenv("GMLX_TRAIN_BLOCKED_ATTN")
+    m.eval()
+    calls.update(blocked=0, sdpa=0)
+    mx.eval(m(x))
+    assert calls["blocked"] == 0

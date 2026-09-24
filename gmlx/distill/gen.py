@@ -706,12 +706,12 @@ def run_gen(opts: GenOptions) -> int:
         print(f"[gen] refuse: {fmt_err}", file=sys.stderr)
         return 2
     out = Path(opts.out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
     try:
+        out.parent.mkdir(parents=True, exist_ok=True)
         rows = prompt_rows(opts)
     except (OSError, ValueError) as e:
-        # a missing prompt file, or a Hugging Face id the datasets library
-        # cannot find (an OSError subclass)
+        # an --out gen cannot write, a missing prompt file, or a Hugging
+        # Face id the datasets library cannot find (an OSError subclass)
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     prompt_hash = prompt_set_sha256(rows)
@@ -732,7 +732,7 @@ def run_gen(opts: GenOptions) -> int:
             return 2
     try:
         done = _done_ids(out)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         print(f"[gen] refuse: {e}", file=sys.stderr)
         return 2
     conflict = prompt_conflict(done, rows, out, opts.prompts or opts.corpus or "the prompt set")
