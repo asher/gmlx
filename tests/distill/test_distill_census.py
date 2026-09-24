@@ -614,6 +614,75 @@ def test_census_keeps_the_closing_markup_out_of_the_trace_ranges(tmp_path, tok):
     assert s["teacher_high_delta"]["positions"] == 2 * len(REPLIES)
 
 
+def _merged_tokenizer():
+    return _bytelevel_tokenizer([("\u0120", "t"), ("h", "e"), ("\u0120t", "he"), ("\u0120", "a"),
+                                 ("i", "s"), ("\u0120", "is"), ("c", "a"), ("ca", "t")])
+
+
+def _split_template(close: str) -> str:
+    """A template that splits an inline think block off the content, as
+    Qwen3's does, closing it with close."""
+    return ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{% if m['role'] == 'assistant' and "
+            "'</think>' in m['content'] %}<think>\n{{ m['content'].split('</think>')[0].split('<think>')[-1].strip() }}"
+            + close + "{{ m['content'].split('</think>')[-1].lstrip() }}{% else %}{{ m['content'] }}{% endif %}"
+            "<|im_end|>\n{% endfor %}")
+
+
+def _content_offset(tk, conv: list[dict], frame: str) -> tuple[int, bytes, tuple]:
+    """(content_start - reply start, rendered text, reply span) as the
+    cache records them for conv's final reply."""
+    from gmlx.distill import teacher as _teacher
+
+    tb = dl.token_bytes(tk)
+    text, spans = dl.render_row(tk, conv, open_tail=False, last_only=True, reason_target=frame == "reply-think")
+    ids, ends, _ = dl.encode_with_byte_ends(tk, text, tb, add_special_tokens=False)
+    meta = _teacher.row_meta((0, "d", 0, ids, ends, text, conv, spans, frame), "human", frame).as_dict()
+    return meta["content_start"] - spans[-1][0], text, tuple(spans[-1])
+
+
+def test_census_keeps_an_inline_blocks_closing_markup_out_of_the_trace_ranges(tmp_path):
+    """An inline think block the template splits off is the row's trace,
+    so its closing markup stays out of the trace ranges as it does for a
+    reasoning_content trace. eval would anchor such a position at the
+    student's trace start, inside the answer of a student whose markup is
+    shorter."""
+    teacher = _with_template(_merged_tokenizer(), _split_template("\n</think>\n\n"))
+    convs = [[{"role": "user", "content": f"say it {i}"},
+              {"role": "assistant", "content": "<think>plan it</think>the cat is here"}] for i in range(3)]
+    off, text, span = _content_offset(teacher, convs[0], "reply-think")
+    assert text[span[0]:span[0] + off] == b"plan it\n</think>\n\n"
+    # 4 starts "it" inside the trace, 16 starts the newline after "</think>"
+    common = dict(frame="reply-think", reason_target=True, content_offset=off)
+    without = _reply_cache(tmp_path / "without", teacher, convs, doc_prefix="a.jsonl", **common)
+    with_ = _reply_cache(tmp_path / "with", teacher, convs, doc_prefix="a.jsonl", boost={4: 6.0, 16: 6.0}, **common)
+    out = tmp_path / "census.json"
+    assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+    s = json.loads(out.read_text())
+    assert len(s["high_delta_trace"]) == 3 and all(v[-1][1] <= 7 for v in s["high_delta_trace"].values()), s
+    assert all(v == [] for v in s["high_delta"].values()), s["high_delta"]
+
+
+def test_census_keys_the_whole_content_of_a_reasoning_content_row_from_its_start(tmp_path):
+    """A template that reads reasoning_content keeps the content whole,
+    a literal "</think>" in it included, so the content positions start at
+    the content on both reply frames, not after the literal."""
+    tk = _with_template(_merged_tokenizer(), _TEMPLATE_TRACE)
+    content = "is a cat </think> the cat"
+    convs = [[{"role": "user", "content": f"say it {i}"},
+              {"role": "assistant", "content": content, "reasoning_content": "the cat"}] for i in range(3)]
+    for frame in ("reply", "reply-think"):
+        off, text, span = _content_offset(tk, convs[0], frame)
+        assert text[span[0] + off:span[1]] == content.encode()
+        common = dict(frame=frame, reason_target=frame == "reply-think", content_offset=off)
+        without = _reply_cache(tmp_path / f"without-{frame}", tk, convs, doc_prefix="a.jsonl", **common)
+        with_ = _reply_cache(tmp_path / f"with-{frame}", tk, convs, doc_prefix="a.jsonl", boost={off: 6.0}, **common)
+        out = tmp_path / f"census-{frame}.json"
+        assert cs.run_census(cs.CensusOptions(without=str(without), with_=[str(with_)], out=str(out))) == 0
+        s = json.loads(out.read_text())
+        assert s["high_delta_trace"] == {} and len(s["high_delta"]) == 3, (frame, s)
+        assert all(v == [[0, 2]] for v in s["high_delta"].values()), (frame, s["high_delta"])
+
+
 def test_census_keeps_the_closing_markup_out_when_the_trace_carries_newlines(tmp_path, tok):
     """A server returns the reasoning with newlines around it, and the row
     renders it that way. render_row anchors the trace at its stripped

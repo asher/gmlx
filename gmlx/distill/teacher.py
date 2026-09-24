@@ -408,7 +408,7 @@ def head_logits(head: HeadSpec, h):
     return z if z.dtype == mx.float16 else z.astype(mx.bfloat16)
 
 
-ROW_FORMAT = 1
+ROW_FORMAT = 2
 
 
 def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: int, render_kw,
@@ -436,7 +436,8 @@ def run_fingerprint(opts: CacheOptions, corpus_sha: str, n_rows: int, n_tokens: 
             "per_turn": bool(opts.per_turn),
             "close_final_windows": bool(opts.close_final_windows),
             "frame_instruction": opts.frame_instruction if opts.frame == "continue" else None,
-            # 1: rows carry doc_sha, which train pairs across caches by
+            # 1: rows carry doc_sha, which train pairs across caches by;
+            # 2: content_start is the answer after an inline think block
             "row_format": ROW_FORMAT}
 
 

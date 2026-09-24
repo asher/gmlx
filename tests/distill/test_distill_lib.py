@@ -1646,9 +1646,11 @@ def test_train_refuses_tables_that_are_not_the_views_own(tmp_path, tok_bl, tok_s
     assert "not the ones view.json was aligned with" in capsys.readouterr().err
 
 
-def test_cache_resume_refuses_a_run_started_before_rows_carried_doc_sha(tmp_path, tok_bl, capsys):
+def test_cache_resume_refuses_a_run_started_under_an_older_row_format(tmp_path, tok_bl, capsys):
     """Shards written before rows carried doc_sha would pair across caches
-    only in the shards written after the resume."""
+    only in the shards written after the resume, and shards written before
+    content_start moved past an inline think block would key their content
+    positions apart from the later ones."""
     from gmlx.distill import teacher as _teacher
 
     teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
@@ -1662,7 +1664,11 @@ def test_cache_resume_refuses_a_run_started_before_rows_carried_doc_sha(tmp_path
     (out / "progress.json").write_text(json.dumps(prog))
     capsys.readouterr()
     assert _teacher.run_cache(dataclasses.replace(opts, resume=True)) == 2
-    assert "row_format None -> 1" in capsys.readouterr().err
+    assert "row_format None -> 2" in capsys.readouterr().err
+    prog["run"]["row_format"] = 1
+    (out / "progress.json").write_text(json.dumps(prog))
+    assert _teacher.run_cache(dataclasses.replace(opts, resume=True)) == 2
+    assert "row_format 1 -> 2" in capsys.readouterr().err
 
 
 def test_cache_resume_refuses_other_inputs(tmp_path, tok_bl, capsys):

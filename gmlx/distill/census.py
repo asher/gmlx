@@ -35,6 +35,7 @@ from .constants import log
 from .corpus import read_utf8
 from .data import CacheReader
 from .format import output_error, teacher_fingerprint, write_json_atomic
+from .frames import reply_trace
 
 FLOOR = 1e-12
 HIST_BINS = [-math.inf, -1, -0.1, 0.1, 0.5, 1, 2, 4, math.inf]
@@ -207,13 +208,11 @@ def census(base: tuple[CacheReader, dict], ctx: list[tuple[CacheReader, dict]], 
         # keeps every position before the content
         trace_len = None
         msgs0 = meta0.get("messages") or []
-        rc = msgs0[-1].get("reasoning_content") if msgs0 and isinstance(msgs0[-1], dict) else None
-        if isinstance(rc, str) and rc.strip():
-            # render_row anchors the trace at its stripped text, and a
-            # server returns it with the newlines around it
-            tb = rc.strip().encode("utf-8")
-            if text0[b0:b0 + len(tb)] == tb:
-                trace_len = len(tb)
+        # render_row anchors the trace at its stripped text, and a server
+        # returns it with the newlines around it
+        tb = (reply_trace(msgs0[-1]) if msgs0 and isinstance(msgs0[-1], dict) else "").encode("utf-8")
+        if tb and text0[b0:b0 + len(tb)] == tb:
+            trace_len = len(tb)
         sides = []
         ok = True
         history = None

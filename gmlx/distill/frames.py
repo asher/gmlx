@@ -665,10 +665,25 @@ def fit_conversation(tokenizer, msgs: list[dict], max_len: int, tb) -> tuple | N
     return None
 
 
-def reply_answer(message: dict) -> str:
-    """The answer of an assistant turn: its content after an inline think
-    block, stripped."""
+def reply_trace(message: dict) -> str:
+    """The reasoning trace of an assistant turn, stripped: its
+    reasoning_content, else the text of an inline think block in its
+    content, else empty."""
+    rc = message.get("reasoning_content")
+    if isinstance(rc, str) and rc.strip():
+        return rc.strip()
     c = message.get("content") or ""
+    return c.partition("</think>")[0].split("<think>", 1)[-1].strip() if "</think>" in c else ""
+
+
+def reply_answer(message: dict) -> str:
+    """The answer of an assistant turn, stripped: the whole content when
+    the trace is in reasoning_content, as the templates that read it keep
+    the content, else the content after an inline think block."""
+    c = message.get("content") or ""
+    rc = message.get("reasoning_content")
+    if isinstance(rc, str) and rc.strip():
+        return c.strip()
     return (c.partition("</think>")[2] if "</think>" in c else c).strip()
 
 
@@ -679,10 +694,7 @@ def trace_in_target(text: bytes, span: tuple, message: dict) -> bool | None:
     answer, so a reply that restates its trace does not count as one. A
     template that drops the trace leaves a reply-only target under the
     reply-think label."""
-    rc = (message.get("reasoning_content") or "").strip()
-    c = message.get("content") or ""
-    if not rc and "</think>" in c:
-        rc = c.partition("</think>")[0].split("<think>", 1)[-1].strip()
+    rc = reply_trace(message)
     if not rc:
         return None
     answer = reply_answer(message).encode("utf-8")
