@@ -662,6 +662,77 @@ def test_a_wedged_read_leaves_the_model_and_its_fds_to_the_process(
             os.close(fd)
 
 
+
+def test_a_failed_seed_copy_leaves_the_decode_feeder_to_the_model(
+        monkeypatch, tmp_path):
+    """A failed seed copy holds its exception, and the traceback holds the
+    decode feeder. After a wedge, neither the feeder's seed state nor the
+    wedged stage's frame keeps such a copy. Layer 2 shares slot 0 with
+    layer 0, so its stage joins layer 0's failed copy before its read
+    wedges, and layer 1's failed copy is still in the seed state when the
+    call times out."""
+    import gc
+    import os
+    import weakref
+    from concurrent.futures import Future
+
+    import gmlx.stream.prefill_feeder as pfm
+
+    monkeypatch.setattr(pfm, "_STAGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(pfm, "_QUARANTINED", [])
+    monkeypatch.setattr(pfm, "lock_pages", lambda mv: None)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers=3)
+    wedge_off = feeder._layers[2]["gate"][2]
+    started, gate = threading.Event(), threading.Event()
+    name = "read_range_aligned" if feeder._nocache else "read_range"
+    real = getattr(pfm, name)
+
+    def maybe_wedge(fd, dest, off, *rest):
+        if off == wedge_off:
+            started.set()
+            gate.wait()
+        return real(fd, dest, off, *rest)
+
+    monkeypatch.setattr(pfm, name, maybe_wedge)
+
+    class DecodeStandIn:
+        def _seed_layer(self, li):
+            raise MemoryError(f"seed copy of layer {li} failed")
+
+        def seed_from_ring(self, li, counts, n_tokens, mvs, present):
+            fut = Future()
+            try:
+                self._seed_layer(li)
+            except MemoryError as e:
+                fut.set_exception(e)
+            return [fut]
+
+    decode = DecodeStandIn()
+    feeder._seed_hook = decode.seed_from_ring
+    fds = dict(feeder._fds)
+    ids = mx.array([[0, 1]])
+    try:
+        for li in (0, 1):
+            with feeder.prefill_call(modules[li][0], li, ids=ids):
+                pass
+        assert started.wait(5)
+        assert 0 not in feeder._seed_futs, "layer 2's stage kept no copy"
+        with pytest.raises(RuntimeError, match="timed out"):
+            with feeder.prefill_call(modules[2][0], 2, ids=ids):
+                pass
+        assert feeder._wedged == [2]
+        assert not feeder._seed_futs
+        decode_ref = weakref.ref(decode)
+        del decode
+        gc.collect()
+        assert decode_ref() is None, "a failed seed copy kept the decode feeder"
+    finally:
+        gate.set()
+        assert feeder._ready[2].wait(5)
+        feeder.close()
+        for fd in fds.values():
+            os.close(fd)
+
 def test_a_failed_read_waits_for_its_siblings(monkeypatch, tmp_path):
     """A stage whose read fails still waits for its other reads before the
     layer counts as staged: one still in flight would write the slot the

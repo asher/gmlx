@@ -294,7 +294,8 @@ class PrefillFeeder:
         unwired, so they stop counting against the wired budget once the
         model is gone. The worker blocked on the read holds this feeder
         for the life of the process, so the feeder lets go of the MoE
-        modules and of the decode feeder behind its hooks."""
+        modules, and of the decode feeder behind its hooks and its seed
+        copies (a failed copy's traceback holds that feeder)."""
         self._wedged = sorted(late)
         _QUARANTINED.append(self._slots)
         for e in self._locked:
@@ -303,6 +304,7 @@ class PrefillFeeder:
         self._layers = {}
         self._views = {}
         self._lend_hook = self._seed_hook = None
+        self._seed_futs.clear()
         self._seed_ids.clear()
         self._seed_present.clear()
         self._seed_prev = None
@@ -327,8 +329,9 @@ class PrefillFeeder:
                 futures_wait(seeds)
                 self._t_seed_wait += time.monotonic() - t0
             slot = self._slots[self._slot_of[li]]
-            # No module in this frame: a wedged read blocks it for the life
-            # of the process.
+            # No module or seed copy in this frame: a wedged read blocks it
+            # for the life of the process.
+            seeds = None
             reads = [(kind, path, off, nbytes)
                      for kind, (_, path, off, nbytes) in self._layers[li].items()]
             futs = []
