@@ -6891,6 +6891,40 @@ def test_train_resume_without_the_best_checkpoint_forgets_its_value(tmp_path, to
     assert json.loads((ck / "best" / "state.json").read_text())["iteration"] == 3
 
 
+def test_train_resume_compares_against_the_value_the_best_checkpoint_holds(tmp_path, tok_bl, monkeypatch, capsys):
+    """Validation can run more often than the last save, so the best
+    checkpoint can hold a lower value than the last one records. A resume
+    compares its validations against the best checkpoint's value, so a
+    worse validation cannot replace a better best."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ck"
+    base = dict(views=[str(view)], student=str(student), iters=6, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=4, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16, lr=3e-3)
+    orig_save = _trainer.save_checkpoint
+
+    def stop_after_best_5(ckpt_dir, tag, model, opt, state, extra=None):
+        orig_save(ckpt_dir, tag, model, opt, state, extra=extra)
+        if tag == "best" and state["iteration"] == 5:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(_trainer, "save_checkpoint", stop_after_best_5)
+    with pytest.raises(KeyboardInterrupt):
+        _trainer.run_train(_trainer.TrainOptions(**dict(base, val_every=1)))
+    monkeypatch.setattr(_trainer, "save_checkpoint", orig_save)
+    best = json.loads((ck / "best" / "state.json").read_text())
+    last = json.loads((ck / "last" / "state.json").read_text())
+    assert (best["iteration"], last["iteration"]) == (5, 4) and best["best_val"] < last["best_val"], (best, last)
+    capsys.readouterr()
+    # the validation cadence is not part of the resumed run's settings
+    assert _trainer.run_train(_trainer.TrainOptions(**dict(base, val_every=6, resume=True))) == 0
+    err = capsys.readouterr().err
+    assert f"(best {best['best_val']:.4f})" in err, err
+    after = json.loads((ck / "best" / "state.json").read_text())["best_val"]
+    assert after <= best["best_val"]
+
+
 def test_train_counts_a_skipped_batch_in_the_schedules(tmp_path, tok_bl, monkeypatch):
     """A batch that compiles to nothing still advances the optimizer's
     step, so the schedule ends where the step count says."""

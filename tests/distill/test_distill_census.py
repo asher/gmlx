@@ -665,8 +665,10 @@ def test_census_keeps_an_inline_blocks_closing_markup_out_of_the_trace_ranges(tm
 def test_census_keys_the_whole_content_of_a_reasoning_content_row_from_its_start(tmp_path):
     """A template that reads reasoning_content keeps the content whole,
     a literal "</think>" in it included, so the content positions start at
-    the content on both reply frames, not after the literal."""
+    the content on both reply frames, not after the literal, in the census
+    and in eval alike."""
     tk = _with_template(_merged_tokenizer(), _TEMPLATE_TRACE)
+    tb = dl.token_bytes(tk)
     content = "is a cat </think> the cat"
     convs = [[{"role": "user", "content": f"say it {i}"},
               {"role": "assistant", "content": content, "reasoning_content": "the cat"}] for i in range(3)]
@@ -681,6 +683,12 @@ def test_census_keys_the_whole_content_of_a_reasoning_content_row_from_its_start
         s = json.loads(out.read_text())
         assert s["high_delta_trace"] == {} and len(s["high_delta"]) == 3, (frame, s)
         assert all(v == [[0, 2]] for v in s["high_delta"].values()), (frame, s["high_delta"])
+        # eval applies the map from the same content start
+        rows, _ = dl_eval._span_rows(tk, [{"id": "a.jsonl:0", "messages": convs[0]}], max_len=256, last_only=True,
+                                     reason_target=frame == "reply-think", positions=s["high_delta"])
+        assert len(rows) == 1, frame
+        ids, tm = rows[0][0], rows[0][1]
+        assert [tb[int(ids[t + 1])] for t in np.nonzero(tm[:-1])[0]] == [b"is"], frame
 
 
 def test_census_keeps_the_closing_markup_out_when_the_trace_carries_newlines(tmp_path, tok):

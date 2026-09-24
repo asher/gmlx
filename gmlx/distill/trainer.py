@@ -735,11 +735,21 @@ def run_train(opts: TrainOptions) -> int:
             last = checkpoint_dir(ckpt_dir, "last")
             state = load_checkpoint(ckpt_dir, "last", model, opt)
             log(f"[train] resumed at step {state['iteration']}")
-            if state.get("best_val") is not None and checkpoint_dir(ckpt_dir, "best") is None:
-                # the value would otherwise bar every later validation from
-                # writing the best checkpoint that is not there
-                state["best_val"] = None
-                log(f"[train] no best checkpoint under {ckpt_dir}, the next scored validation writes one")
+            best_dir = checkpoint_dir(ckpt_dir, "best")
+            if best_dir is None:
+                if state.get("best_val") is not None:
+                    # the value would otherwise bar every later validation
+                    # from writing the best checkpoint that is not there
+                    state["best_val"] = None
+                    log(f"[train] no best checkpoint under {ckpt_dir}, the next scored validation writes one")
+            else:
+                # validation can run more often than the last save, so best
+                # can hold a lower value than the one last recorded
+                best_state = read_json(best_dir / "state.json")
+                bv = best_state.get("best_val")
+                if (bv is not None and best_state.get("run") == state.get("run")
+                        and (state.get("best_val") is None or bv < state["best_val"])):
+                    state["best_val"] = bv
             if opts.hs and last is not None and not (last / "hs_head.safetensors").exists():
                 log("[train] hidden-state map not in the last checkpoint, a fresh map starts at the resumed step")
         tokens0 = int(state["tokens"])
