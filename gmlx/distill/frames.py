@@ -620,31 +620,42 @@ def shared_boundaries_spans(t_ends: np.ndarray, s_ends: np.ndarray,
 
 def cut_windows(ids: np.ndarray, ws_start: np.ndarray, max_len: int,
                 n_special_prefix: int, text: bytes | None = None,
-                ends: np.ndarray | None = None) -> list[tuple[int, int]]:
+                ends: np.ndarray | None = None, fits=None) -> list[tuple[int, int]]:
     """Windows [start, end) over a document's teacher tokens, at most
     max_len tokens each, cut at the last whitespace-initial token boundary.
     The first window keeps the special prefix (BOS); later windows start at
     a whitespace-initial token. A window with no whitespace-initial token
     in range is cut hard at max_len, backed off to a character boundary
     when the text bytes and the per-token end offsets are given (a
-    byte-level tokenizer splits a multi-byte character over tokens)."""
+    byte-level tokenizer splits a multi-byte character over tokens).
+    ``fits(start, end)``, when given, is asked of every window, and one it
+    refuses is cut back the same way until it fits or holds one token."""
     if max_len < 1:
         raise ValueError(f"window length must be at least 1 token, got {max_len}")
     n = len(ids)
+
+    def cut_before(start: int, end: int) -> int:
+        # the whitespace-initial token at or before end, else a
+        # character boundary at or before it
+        lo = start + n_special_prefix + 1 if start == 0 else start + 1
+        cut = end
+        while cut > lo and not ws_start[ids[cut]]:
+            cut -= 1
+        if cut > lo:
+            return cut
+        if text is not None and ends is not None:
+            while end > lo and int(ends[end - 1]) < len(text) and (text[int(ends[end - 1])] & 0xC0) == 0x80:
+                end -= 1
+        return end
+
     out = []
     start = 0
     while start < n:
         end = min(start + max_len, n)
         if end < n:
-            cut = end
-            lo = start + n_special_prefix + 1 if start == 0 else start + 1
-            while cut > lo and not ws_start[ids[cut]]:
-                cut -= 1
-            if cut > lo:
-                end = cut
-            elif text is not None and ends is not None:
-                while end > lo and int(ends[end - 1]) < len(text) and (text[int(ends[end - 1])] & 0xC0) == 0x80:
-                    end -= 1
+            end = cut_before(start, end)
+        while fits is not None and end - start > 1 and not fits(start, end):
+            end = max(cut_before(start, end - 1), start + 1)
         out.append((start, end))
         start = end
     return out

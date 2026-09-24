@@ -199,6 +199,7 @@ class RowMeta:
     content_start: int | None = None
     zero_width: list | None = None      # token indices that span no bytes (a dummy prefix after a special)
     turns: int | None = None            # per-turn rows: how many turns the conversation has, window counts from 0
+    doc_sha: str | None = None          # the document's content hash, what the leave-out rule keys it by
 
     def as_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -214,6 +215,8 @@ class RowMeta:
             d.pop("content_start", None)
         if d.get("turns") is None:
             d.pop("turns", None)
+        if d.get("doc_sha") is None:
+            d.pop("doc_sha", None)
         return d
 
 

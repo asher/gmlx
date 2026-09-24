@@ -989,7 +989,7 @@ dropped, counted in the `[cache] frame` line.
 | `--out DIR` | required unless `--validate` | the cache directory to write |
 | `--validate DIR` | none | validate an existing cache and exit, no teacher load |
 | `--top-k N` | `256` | log-probabilities kept per position |
-| `--max-len N` | `2048` | teacher tokens per window, including the start token, at least 2. The continue frame counts toward it and must leave the window at least 8 |
+| `--max-len N` | `2048` | teacher tokens per window, including the start token, at least 2. The continue frame and closing tail count toward it and must leave the window at least 8 |
 | `--max-disk-gb F` | none | refuse when the size estimate exceeds this |
 | `--cache-limit-gb F` | `8.0` | MLX buffer cache cap during the pass |
 | `--logits-cap-gb F` | `4.0` | memory cap that sizes the head sub-chunk |
@@ -1077,7 +1077,7 @@ Training flags, in the order `--help` prints them.
 | `--hs F` | `0` | weight of the hidden-state term, a learned map from the student's final hidden state to the cache's sketch at every boundary |
 | `--hs-loss MODE` | `cosine` | `cosine` or `mse` on unit vectors |
 | `--ckpt-dir DIR` | `./ckpt` | checkpoint directory. A fresh run refuses one that holds an earlier run's checkpoints |
-| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or views, student, HF source, LoRA, batch, seed, steps, val, lr, warmup, knobs, clip, decay or hs changed |
+| `--resume` | off | resume from `--ckpt-dir`, refused when none exists or when the views, student, training settings or gmlx's validation leave-out rule differ from that run |
 | `--save-every N` | `200` | checkpoint interval in steps |
 | `--val-every N` | `200` | validation interval in steps |
 | `--val-batches N` | `16` | validation batches per pass, one seeded draw across the val rows of every view |

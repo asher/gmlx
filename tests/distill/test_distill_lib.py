@@ -7149,11 +7149,18 @@ def test_prompt_keys_match_one_prompt_or_one_document_and_nothing_else():
     a = prompt_keys({"messages": [ask, reply("x")], "doc_id": "r1.jsonl:3", "frame": "reply"}, "c1", "0:3")
     b = prompt_keys({"messages": [ask, reply("y")], "doc_id": "r2.jsonl:9", "frame": "reply"}, "c2", "1:9")
     assert a & b
-    # the student's messages decide, not the teacher's context render
+    # a row with a context the student does not see keeps its reply in the
+    # key, so one question over two contexts is two prompts; its
+    # context-free twin shares the document's content hash instead
     ctx = {"role": "system", "content": "a long context"}
     c = prompt_keys({"messages": [ctx, ask, reply("x")], "student_messages": [ask, reply("x")],
-                     "doc_id": "r3.jsonl:0", "frame": "reply"}, "c3", "2:0")
-    assert c & a
+                     "doc_id": "r3.jsonl:0", "frame": "reply", "doc_sha": "s1"}, "c3", "2:0")
+    c2 = prompt_keys({"messages": [dict(ctx, content="another context"), ask, reply("w")],
+                      "student_messages": [ask, reply("w")], "doc_id": "r3.jsonl:1", "frame": "reply",
+                      "doc_sha": "s2"}, "c3", "2:1")
+    assert not c & c2
+    assert c & prompt_keys({"messages": [ask, reply("x")], "doc_id": "r1.jsonl:3", "frame": "reply",
+                            "doc_sha": "s1"}, "c1", "0:3")
     # one conversation rendered two ways in one corpus: the document key
     whole = prompt_keys({"messages": [ask, reply("x"), ask, reply("z")], "doc_id": "d.jsonl:4",
                          "frame": "chat"}, "c1", "0:1")
@@ -7208,6 +7215,185 @@ def test_resume_fingerprint_records_the_leave_out_rule(tmp_path, tok_bl):
     opts = _trainer.TrainOptions(views=[str(view)], student=str(student), iters=1)
     fp = _trainer.resume_fingerprint([v], opts, {}, 2.0)
     assert fp["val_leave_out"] == _trainer.VAL_LEAVE_OUT
+
+
+def test_train_trains_on_a_one_document_cache(tmp_path, tok_bl, capsys, monkeypatch):
+    """align splits the only document of a one-document cache, and train
+    keeps the training half of it."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = tmp_path / "one.jsonl"
+    corpus.write_text(json.dumps({"text": "the cat is the cat " * 60}) + "\n")
+    cache = tmp_path / "cache"
+    assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                    top_k=8, max_len=24)) == 0
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / "v"))) == 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(tmp_path / "v")], student=str(teacher), iters=1,
+                                                  batch_size=2, ckpt_dir=str(tmp_path / "ck"), no_wired_limit=True,
+                                                  lora_rank=2, chunk=16, val_batches=1))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "left out" not in err
+
+
+def test_train_leaves_out_a_document_a_cache_cut_at_another_cap_validates(tmp_path, tok_bl, capsys, monkeypatch):
+    """Two caches of one corpus that stop at different row caps hash
+    different parts of it. A document one view validates is still left
+    out of the other view's training rows."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+    from gmlx.distill.data import CacheReader
+
+    _mlx_students(monkeypatch)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    corpus = tmp_path / "c.jsonl"
+    words = ["the", "cat", "is", "123", "a", "hat"]
+    corpus.write_text("".join(json.dumps({"text": f"doc {i} " + " ".join(words[(i + j) % 6] for j in range(30))})
+                              + "\n" for i in range(40)))
+    views, splits = [], []
+    for name, cap in (("a", 30), ("b", 60)):
+        cache = tmp_path / f"cache-{name}"
+        assert _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache),
+                                                        top_k=8, max_len=24, max_rows=cap)) == 0
+        assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(tmp_path / name),
+                                                  val_fraction=0.2)) == 0
+        rd = CacheReader(cache)
+        views.append(str(tmp_path / name))
+        splits.append([(e["split"], rd.rows_meta[e["row"]]["doc_id"])
+                       for e in json.loads((tmp_path / name / "view.json").read_text())["index"]])
+    assert len({CacheReader(tmp_path / f"cache-{n}").manifest["gmlx_distill"]["corpus_sha256"] for n in "ab"}) == 2
+    val = [{d for sp, d in v if sp == "val"} for v in splits]
+    shared = sum(1 for i, v in enumerate(splits) for sp, d in v if sp == "train" and d in val[1 - i])
+    assert shared > 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=views, student=str(teacher), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                  ckpt_dir=str(tmp_path / "ck")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert f"[train] {shared} train rows left out: a validation row holds their document or prompt" in err
+
+
+def test_a_resume_under_an_older_leave_out_rule_is_refused_and_says_why(tmp_path, tok_bl, capsys, monkeypatch):
+    """A checkpoint written before the rule existed, or under an older
+    one, trained on another set of rows."""
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    ck = tmp_path / "ckpt"
+    base = dict(views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(ck),
+                save_every=1, val_every=1, val_batches=1, no_wired_limit=True, lora_rank=2, chunk=16)
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    state = json.loads((ck / "last" / "state.json").read_text())
+    del state["run"]["val_leave_out"]
+    (ck / "last" / "state.json").write_text(json.dumps(state))
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(**dict(base, iters=3, resume=True)))
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert f"val_leave_out None -> {_trainer.VAL_LEAVE_OUT}" in err
+    assert "the rule that leaves out train rows a validation row shares" in err and "fresh --ckpt-dir" in err
+
+
+def test_context_rows_on_one_question_are_many_prompts_and_share_a_document_with_their_twin(tmp_path, tok_bl):
+    """One question asked over two contexts the student does not see is
+    two prompts to the teacher, and neither leaves the other out. The
+    same conversation cached without its context is the same document."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill.trainer import prompt_keys
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    ask = {"role": "user", "content": "what is it"}
+
+    def reply(text):
+        return {"role": "assistant", "content": text}
+
+    ctx_rows = [{"messages": [{"role": "user", "content": f"{ctx}\n\nwhat is it"}, reply(r)],
+                 "student_messages": [ask, reply(r)]}
+                for ctx, r in (("the cat is 123", "the cat"), ("the hat is 45", "the hat"))]
+    (tmp_path / "ctx.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ctx_rows))
+    (tmp_path / "plain.jsonl").write_text(json.dumps({"messages": [ask, reply("the cat")]}) + "\n")
+    keys = {}
+    for name in ("ctx", "plain"):
+        rows, _, sha = _teacher.build_rows(tok, str(tmp_path / f"{name}.jsonl"), max_len=80, text_key="text",
+                                           max_rows=None, max_tokens=None, source=None, hf_split="train",
+                                           limit_docs=None, frame="reply")[:3]
+        for r in sorted(rows, key=lambda r: r[0]):
+            keys[(name, r[0])] = prompt_keys(_teacher.row_meta(r, "human", "reply").as_dict(), sha, f"{name}:{r[0]}")
+    assert not keys[("ctx", 0)] & keys[("ctx", 1)]
+    assert keys[("ctx", 0)] & keys[("plain", 0)]
+    assert not keys[("ctx", 1)] & keys[("plain", 0)]
+
+
+def test_continue_rows_fit_max_len_with_the_closing_tail(tmp_path, tok_bl):
+    """The window that ends a document is closed by the turn-end marker,
+    and the marker's tokens come out of the window's budget. A window
+    whose text tokenizes longer inside the frame, where its leading space
+    is stripped, is cut back until the row fits."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": "the cat " * n}) + "\n" for n in range(1, 40)))
+    kw = dict(text_key="text", max_rows=None, max_tokens=None, source=None, hf_split="train", limit_docs=None,
+              frame="continue")
+
+    def smallest(close):
+        for ml in range(2, 200):
+            try:
+                _teacher.build_rows(tok, str(corpus), max_len=ml, close_final=close, **kw)
+                return ml
+            except ValueError:
+                pass
+        raise AssertionError("no --max-len fits")
+
+    assert smallest(True) > smallest(False)
+    for close in (False, True):
+        for ml in range(smallest(close), smallest(close) + 12):
+            rows = _teacher.build_rows(tok, str(corpus), max_len=ml, close_final=close, **kw)[0]
+            assert any(r[8] == "continue-closed" for r in rows) == close
+            assert max(len(r[3]) for r in rows) <= ml
+
+
+def test_floor_kld_is_finite_where_the_teacher_head_masks_entries():
+    """A head that sets padded vocabulary entries to -inf has zero
+    probability there, which adds nothing to the floor."""
+    rng = np.random.default_rng(3)
+    V, n, K = 64, 4, 8
+    z = rng.standard_normal((n, V)).astype(np.float32)
+    z[:, 48:] = -np.inf
+    nxt = np.array([1, 2, 3, -1], dtype=np.int32)
+    red = dl.reduce_logits(mx.array(z).astype(mx.bfloat16), mx.array(nxt), K=K,
+                           log_bmask=dl.log_bmask_from(rng.random(V) < 0.2), onpath_valid=nxt >= 0, floor=True)
+    assert np.isfinite(red["floor_kld"]).all()
+    zf = z.copy()
+    zf[:, 48:] = -1e4
+    ref = dl.reduce_logits(mx.array(zf).astype(mx.bfloat16), mx.array(nxt), K=K,
+                           log_bmask=dl.log_bmask_from(rng.random(V) < 0.2), onpath_valid=nxt >= 0, floor=True)
+    assert np.allclose(red["floor_kld"], ref["floor_kld"], atol=1e-5)
+
+
+def test_a_directory_corpus_with_a_file_that_is_not_utf8_is_refused(tmp_path, tok_bl, capsys):
+    from gmlx.distill import corpus as _corpus
+    from gmlx.distill import teacher as _teacher
+
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.txt").write_text("the cat is the cat", encoding="utf-8")
+    (d / "b.txt").write_bytes("the caf\u00e9 is the cat".encode("latin-1"))
+    with pytest.raises(ValueError, match="b.txt is not UTF-8"):
+        list(_corpus.iter_corpus(str(d)))
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok_bl)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(d), out=str(tmp_path / "cache"),
+                                                  top_k=8, max_len=24))
+    assert rc == 2 and "[cache] refuse: b.txt is not UTF-8" in capsys.readouterr().err
 
 
 def test_a_continue_frame_that_leaves_no_room_for_a_window_is_refused(tmp_path, tok_bl, capsys):

@@ -84,14 +84,22 @@ def _hash_doc(h, doc_id: str, payload: bytes) -> None:
         h.update(part)
 
 
+def _doc_sha(payload: bytes) -> str:
+    """A document's own content hash, the key the trainer's leave-out
+    rule matches one document by across caches cut at other caps."""
+    return hashlib.sha256(payload).hexdigest()[:32]
+
+
 def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows: int | None,
                max_tokens: int | None, source: str | None, hf_split: str, limit_docs: int | None,
                frame: str = "none", instruction: str = CONTINUE_INSTRUCTION, messages_key: str = "messages",
                close_final: bool = False, per_turn: bool = False, student_key: str | None = "student_messages"):
     """Deterministic row list: (row_id, doc_id, window, ids, ends, text bytes,
-    messages, spans, frame kind, student messages). The last four are None
-    on unframed rows; student messages are None unless the corpus row
-    carries a list under student_key.
+    messages, spans, frame kind, student messages, turns, document hash).
+    Messages through turns are None on unframed rows; student messages
+    are None unless the corpus row carries a list under student_key. The
+    document hash covers the text, or the conversation as the student
+    sees it, whole.
 
     frame "continue" renders every text window as a one-turn conversation
     (user: instruction, model: the window) through the teacher's chat
@@ -143,6 +151,10 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     # counted in rows, the unit of every other counter
                     mismatch += len(variants)
                     continue
+            # a row with a context the student does not see is keyed by the
+            # student's list, the one its context-free render shares
+            doc_sha = _doc_sha(json.dumps(st if st is not None else msgs, sort_keys=True,
+                                          ensure_ascii=False).encode())
             st_variants = (_corpus.per_turn_rows(st) if per_turn else [st]) if st is not None else None
             if st_variants is not None and len(st_variants) != len(variants):
                 mismatch += len(variants)
@@ -177,7 +189,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                 flagged += int(flag)
                 rows.append((len(rows), doc_id, w, ids.astype(np.int32), ends.astype(np.uint32), text, m2, spans,
                              ("reply-think" if reason_target else "reply") if reply_kind else "chat", st_row,
-                             len(variants) if per_turn else None))
+                             len(variants) if per_turn else None, doc_sha))
                 n_tokens += len(ids)
                 if full():
                     break
@@ -208,26 +220,43 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
             if not tbytes.strip():
                 continue
             _hash_doc(corpus_hash, doc_id, tbytes)
+            doc_sha = _doc_sha(tbytes)
             ids, ends, flag = _tokens.encode_with_byte_ends(tokenizer, tbytes, tb, add_special_tokens=False)
             flagged += int(flag)
             if len(ids) == 0:
                 continue
-            for w, (s, e) in enumerate(_frames.cut_windows(ids, ws, budget, 0, text=tbytes, ends=ends)):
+            rendered = {}
+
+            def continue_row(s, e, ids=ids, ends=ends, tbytes=tbytes):
+                b0 = int(ends[s - 1]) if s > 0 else 0
+                content = tbytes[b0:int(ends[e - 1])].decode("utf-8").lstrip()
+                if not content:
+                    # a blank window makes no row
+                    return True
+                kind = "continue-closed" if close_final and e == len(ids) else "continue"
+                msgs = _frames.continue_messages(content, instruction)
+                rtext, spans = _frames.render_row(tokenizer, msgs, **_frames.row_render_args(kind))
+                rids, rends, f2 = _tokens.encode_with_byte_ends(tokenizer, rtext, tb, add_special_tokens=False)
+                rendered[(s, e)] = (rtext, msgs, spans, kind, rids, rends.astype(np.int64), f2)
+                # the window's text tokenizes anew inside the frame, where a
+                # stripped leading space can split its first word
+                return len(rids) <= max_len
+
+            windows = _frames.cut_windows(ids, ws, budget, 0, text=tbytes, ends=ends,
+                                          fits=continue_row if frame == "continue" else None)
+            for w, (s, e) in enumerate(windows):
                 b0 = int(ends[s - 1]) if s > 0 else 0
                 b1 = int(ends[e - 1])
                 wtext = tbytes[b0:b1]
                 kind = None
                 if frame == "continue":
-                    content = wtext.decode("utf-8").lstrip()
-                    if not content:
+                    if (s, e) not in rendered:
+                        continue_row(s, e)
+                    if (s, e) not in rendered:
                         continue
-                    msgs = _frames.continue_messages(content, instruction)
-                    kind = "continue-closed" if close_final and e == len(ids) else "continue"
+                    wtext, msgs, spans, kind, wids, wends, f2 = rendered[(s, e)]
                     closed += int(kind == "continue-closed")
-                    wtext, spans = _frames.render_row(tokenizer, msgs, **_frames.row_render_args(kind))
-                    wids, wends, f2 = _tokens.encode_with_byte_ends(tokenizer, wtext, tb, add_special_tokens=False)
                     flagged += int(f2)
-                    wends = wends.astype(np.int64)
                 else:
                     wids = ids[s:e]
                     wends = ends[s:e].astype(np.int64) - b0
@@ -238,7 +267,7 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                 if len(wids) < 2:
                     continue
                 rows.append((len(rows), doc_id, w, wids.astype(np.int32), wends.astype(np.uint32), wtext, msgs,
-                             spans, kind))
+                             spans, kind, None, None, doc_sha))
                 n_tokens += len(wids)
                 if full():
                     break
@@ -261,7 +290,7 @@ def row_meta(r, source: str, frame: str, generator_id: str = "", special: set[in
     zero_width for the validator; ``special`` is the marker set the byte
     ends were computed with."""
     meta = _format.RowMeta(row_id=r[0], doc_id=str(r[1]), window=r[2], n_tokens=len(r[3]), source=source,
-                           generator_id=generator_id)
+                           generator_id=generator_id, doc_sha=r[11] if len(r) > 11 else None)
     if special:
         zw = _tokens.zero_width_indices(r[3], r[4], special)
         if zw:

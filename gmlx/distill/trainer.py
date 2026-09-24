@@ -102,7 +102,7 @@ CHUNK_KNOBS = ("gamma", "max_chunk_len", "w_mid", "redirect_cut")
 
 # version of the rule prompt_keys applies, in the resume fingerprint so a
 # run resumed under another rule is refused
-VAL_LEAVE_OUT = 2
+VAL_LEAVE_OUT = 3
 
 # frames whose messages wrap a window of a document in one fixed
 # instruction: every row of every document shares the prompt
@@ -110,21 +110,55 @@ _WINDOW_FRAMES = ("continue", "continue-closed")
 
 
 def prompt_keys(meta: dict, corpus: str, fallback: str) -> set[str]:
-    """What a row answers, as keys a validation row of another view can
-    share: its document within its corpus, and for a chat row the messages
-    the student sees without the final assistant reply. The document key
-    matches one conversation rendered two ways (per turn and whole, with a
-    context and without), the message key one prompt under two document
-    names or in two corpora."""
+    """What a row answers, as keys a validation row can share: its
+    document within its corpus, the document's content hash when the cache
+    recorded one, and for a chat row the messages the student sees without
+    the final assistant reply. The document keys (``d:``) match one
+    conversation rendered two ways (per turn and whole, with a context and
+    without) and one document in two caches cut at other caps, the message
+    key one prompt under two document names or in two corpora. A row with
+    a context the student does not see keeps its reply in the message key,
+    so one templated question over many contexts is many prompts."""
     doc = meta.get("doc_id")
     keys = {f"d:{corpus}:{doc}" if doc is not None else f"r:{fallback}"}
-    msgs = meta.get("student_messages") or meta.get("messages")
+    if meta.get("doc_sha"):
+        keys.add("d:" + meta["doc_sha"])
+    st = meta.get("student_messages")
+    msgs = st or meta.get("messages")
     if msgs and meta.get("frame") not in _WINDOW_FRAMES:
-        if msgs[-1].get("role") == "assistant":
+        if msgs[-1].get("role") == "assistant" and not (st and st != meta.get("messages")):
             msgs = msgs[:-1]
         blob = json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode()
         keys.add("m:" + hashlib.sha256(blob).hexdigest())
     return keys
+
+
+def leave_out(train_rows: list, val_rows: list, metas: list[list[dict]], corpora: list[str]) -> list:
+    """The train rows, (view, row) pairs, that share no key of
+    prompt_keys with a validation row. align keeps a document on one side
+    of its view's split and splits the only document of a one-document
+    cache on purpose, so a document key leaves a row out only when another
+    view, or another document of the row's view, holds it."""
+    def keys_of(vr):
+        return prompt_keys(metas[vr[0]][vr[1]], corpora[vr[0]], f"{vr[0]}:{vr[1]}")
+
+    def doc_of(vr):
+        return vr[0], metas[vr[0]][vr[1]].get("doc_id")
+
+    # each key with the (view, document) pairs whose validation rows hold it
+    held: dict[str, set] = {}
+    for vr in val_rows:
+        for k in keys_of(vr):
+            held.setdefault(k, set()).add(doc_of(vr))
+
+    def twin_held(vr):
+        for k in keys_of(vr):
+            holders = held.get(k)
+            if holders and (not k.startswith("d:") or holders - {doc_of(vr)}):
+                return True
+        return False
+
+    return [vr for vr in train_rows if not twin_held(vr)]
 
 
 def corpus_identity(manifest: dict) -> str:
@@ -407,7 +441,9 @@ def run_train(opts: TrainOptions) -> int:
             log(f"[train] refuse: --resume with other settings than the run that wrote the checkpoint ({diff}); "
                 "a resume repeats the views, batch size, seed, step count, validation sample size, learning "
                 "rate, warmup, loss knobs, gradient clip, weight decay, LoRA rank, multiplier, keys and "
-                "dropout, hidden-state term, student and HF source")
+                "dropout, hidden-state term, student and HF source, and the rule that leaves out train rows a "
+                "validation row shares (val_leave_out, set by the gmlx version), so a fresh --ckpt-dir trains "
+                "under the current one")
             return 2
     if opts.adapter_out:
         from gmlx.tune.lora import probe_writable
@@ -553,13 +589,8 @@ def run_train(opts: TrainOptions) -> int:
         val_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "val"]
         view_has_val = bool(val_rows)
 
-        corpora = [corpus_identity(rd.manifest) for rd in readers]
-
-        def keys_of(vr):
-            return prompt_keys(readers[vr[0]].rows_meta[vr[1]], corpora[vr[0]], f"{vr[0]}:{vr[1]}")
-
-        held = set().union(*(keys_of(vr) for vr in val_rows))
-        kept = [vr for vr in train_rows if not keys_of(vr) & held]
+        kept = leave_out(train_rows, val_rows, [rd.rows_meta for rd in readers],
+                         [corpus_identity(rd.manifest) for rd in readers])
         left_out = len(train_rows) - len(kept)
         if left_out:
             log(f"[train] {left_out} train rows left out: a validation row holds their document or prompt")

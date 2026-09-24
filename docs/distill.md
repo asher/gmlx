@@ -821,10 +821,13 @@ fields.
 
 `val` is the loss on a fixed sample of the validation rows, the rows
 `align` set aside and `train` never trains on, drawn once across every
-view. A training row whose prompt a validation row of any view also
-holds is left out, and `train` logs how many. `best` is the lowest of
-the earlier validations, so a `val` below it is a new best, and the
-first validation line has no `best` yet. A validation loss that rises
+view. A training row that shares its document or its prompt with a
+validation row of any view is left out as well, and `train` logs how
+many. Documents are matched by their text, so two caches of one corpus
+cut at other sizes still pair up, while a one-document cache keeps the
+split `align` made. `best` is the lowest of the earlier validations, so
+a `val` below it is a new best, and the first validation line has no
+`best` yet. A validation loss that rises
 while the training loss keeps falling means the adapter is memorizing
 the rows, and fewer steps or a lower rank fix it.
 

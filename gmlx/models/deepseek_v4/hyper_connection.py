@@ -257,16 +257,21 @@ def _make_hc_sinkhorn_collapse_kernel():
 _hc_sinkhorn_collapse_kernel = _make_hc_sinkhorn_collapse_kernel()
 
 
+def _kern(name: str):
+    """The module's kernel ``name``, built now when the module was first
+    imported under a CPU default device (the builders return None there)."""
+    k = globals()[name]
+    if k is None:
+        k = globals()[name] = globals()["_make" + name]()
+    return k
+
+
 def _hc_kernel(x, fn_t, scale, base, hc_mult, sinkhorn_iters, eps, norm_eps):
     """Requires ``hc_mult == 4`` despite the HC template arg (the kernel body
     unrolls 4 streams); callers route other widths to :func:`_hc_ops`."""
-    global _hc_sinkhorn_collapse_kernel
-    if _hc_sinkhorn_collapse_kernel is None:
-        # first imported under a CPU default device
-        _hc_sinkhorn_collapse_kernel = _make_hc_sinkhorn_collapse_kernel()
     B, L, H, D = x.shape
 
-    return _hc_sinkhorn_collapse_kernel(
+    return _kern("_hc_sinkhorn_collapse_kernel")(
         inputs=[x, fn_t, scale, base],
         template=[
             ("T", x.dtype),
@@ -357,7 +362,8 @@ class HyperConnection(nn.Module):
             ok = (
                 _HC_M1_ENABLED
                 and self.hc_mult == 4
-                and (_KQ_HC or _hc_front_reduce_kernel is not None)
+                and (_KQ_HC or _kern("_hc_front_reduce_kernel") is not None)
+                and _kern("_hc_sinkhorn_collapse_lag_kernel") is not None
                 and mx.default_device() == mx.gpu
                 and (self.fn.shape[1] // self.hc_mult) % 1024 == 0
             )
@@ -373,7 +379,7 @@ class HyperConnection(nn.Module):
         return (
             self._m1_ok
             and not self.training
-            and _hc_sinkhorn_collapse_lag_kernel is not None
+            and _kern("_hc_sinkhorn_collapse_lag_kernel") is not None
             and x.shape[0] * x.shape[1] > _HC_M1_MAX_ROWS
         )
 
@@ -392,7 +398,7 @@ class HyperConnection(nn.Module):
                 x, mixes_raw, ssq, self.scale, self.base, norm_weight,
                 iters=self.sinkhorn_iters, hc_eps=self.hc_eps,
                 norm_eps=self.norm_eps)
-        return _hc_sinkhorn_collapse_m1_kernel(
+        return _kern("_hc_sinkhorn_collapse_m1_kernel")(
             inputs=[x, mixes_raw, ssq, self.scale, self.base, norm_weight],
             template=[
                 ("T", x.dtype),
@@ -416,7 +422,7 @@ class HyperConnection(nn.Module):
         if _KQ_HC:
             return _kq.hc_front_reduce(x, self.fn)
         mix = (2 + H) * H
-        return _hc_front_reduce_kernel(
+        return _kern("_hc_front_reduce_kernel")(
             inputs=[x, self.fn],
             template=[("T", x.dtype), ("HC", H), ("D", D)],
             grid=(B * L * (mix + 1) * 256, 1, 1),
@@ -435,7 +441,7 @@ class HyperConnection(nn.Module):
         B, L, D = x_sub.shape
         H = resid.shape[2]
         mix = (2 + H) * H
-        return _hc_front_expand_reduce_kernel(
+        return _kern("_hc_front_expand_reduce_kernel")(
             inputs=[x_sub, resid, post, comb, self.fn],
             template=[("T", x_sub.dtype), ("HC", H), ("D", D)],
             grid=(B * L * (mix + 1) * 256, 1, 1),
@@ -449,7 +455,7 @@ class HyperConnection(nn.Module):
         sublayer's ``pre_in`` (the V4.1 lag), sublayer RMSNorm folded in.
         Returns (normed_collapsed, pre, post, comb)."""
         B, L, H, D = x.shape
-        return _hc_sinkhorn_collapse_lag_kernel(
+        return _kern("_hc_sinkhorn_collapse_lag_kernel")(
             inputs=[x, mixes_raw, ssq, self.scale, self.base, norm_weight,
                     pre_in],
             template=[
@@ -1110,7 +1116,7 @@ def hc_expand_m1(x, residual, post, comb):
         return _kq.hc_expand(x, residual, post, comb)
     B, L, D = x.shape
     H = residual.shape[2]
-    return _hc_expand_m1_kernel(
+    return _kern("_hc_expand_m1_kernel")(
         inputs=[x, residual, post, comb],
         template=[("T", x.dtype), ("D", D), ("NTG", 2)],
         grid=(B * L * 2 * 256, 1, 1),
@@ -1368,12 +1374,8 @@ def hc_expand_collapse(hc, x, residual, post, comb):
 
     fn_t = fn_transposed(hc)
 
-    global _hc_expand_collapse_kernel
-    if _hc_expand_collapse_kernel is None:
-        # first imported under a CPU default device
-        _hc_expand_collapse_kernel = _make_hc_expand_collapse_kernel()
     B, L, H, D = residual.shape
-    return _hc_expand_collapse_kernel(
+    return _kern("_hc_expand_collapse_kernel")(
         inputs=[x, residual, post, comb, fn_t, hc.scale, hc.base],
         template=[
             ("T", x.dtype),

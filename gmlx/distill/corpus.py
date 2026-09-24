@@ -63,7 +63,8 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
     """(doc_id, text) from a jsonl file, a directory of text files, or an
     HF dataset id (streamed). Text is NFC-normalized here, once. ``prefix``
     names a jsonl file inside a directory corpus in its ids by relative
-    path, so two files with one basename never share an id."""
+    path, so two files with one basename never share an id. A file that is
+    not UTF-8 raises ValueError."""
     p = Path(spec).expanduser()
     n = 0
     if p.is_file():
@@ -88,7 +89,12 @@ def iter_corpus(spec: str, text_key: str = "text", limit: int | None = None,
                         if limit and n >= limit:
                             return
                     continue
-                yield str(f.relative_to(p)), nfc(f.read_text(encoding="utf-8", errors="replace"))
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except UnicodeDecodeError as e:
+                    raise ValueError(f"{f.relative_to(p)} is not UTF-8 (byte {e.start}), convert it or move it "
+                                     "out of the corpus directory") from None
+                yield str(f.relative_to(p)), nfc(text)
                 n += 1
                 if limit and n >= limit:
                     return

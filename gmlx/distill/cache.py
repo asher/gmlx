@@ -63,10 +63,12 @@ def reduce_logits(logits, next_ids, *, K: int, log_bmask, onpath_valid,
         head_safe = mx.minimum(head_mass, mx.array(-1e-7, dtype=mx.float32))
         log_p_tail = log1mexp(head_safe) - math.log(float(V - K))
         p_full = mx.exp(log_softmax)
-        cross_head = mx.sum(mx.take_along_axis(p_full, top_idx, axis=-1) * top_f16, axis=-1)
+        # a head that masks entries to -inf gives 0 * -inf there, taken as 0
+        p_top = mx.take_along_axis(p_full, top_idx, axis=-1)
+        cross_head = mx.sum(mx.where(p_top > 0, p_top * top_f16, 0.0), axis=-1)
         p_masked = mx.put_along_axis(p_full, top_idx, mx.zeros(top_idx.shape, dtype=mx.float32), axis=-1)
         cross_tail = mx.sum(p_masked, axis=-1) * log_p_tail
-        neg_ent = mx.sum(p_full * log_softmax, axis=-1)
+        neg_ent = mx.sum(mx.where(p_full > 0, p_full * log_softmax, 0.0), axis=-1)
         fk = neg_ent - cross_head - cross_tail
         mx.eval(fk)
         out["floor_kld"] = np.asarray(fk)

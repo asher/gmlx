@@ -56,8 +56,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GLM-5-Next with `'LoRALinear' object has no attribute 'weight'`.
 - `gmlx train` on DeepSeek-V4.1 failed at the first step with
   `[async_eval] Not allowed inside a graph transformation`.
-- `gmlx train` on DeepSeek-V4 and V4.1 without validation data failed at the
-  first step with `Attempting to eval an array during function transformations`.
+- `gmlx train` on DeepSeek-V4, V4.1, GLM-5-Next and HY4 without validation
+  data failed at the first step with
+  `Attempting to eval an array during function transformations`.
 - Training on DeepSeek-V4.1 gave a zero gradient to the adapters on the `wkv`
   projections and on the compressor's `wgate`, so those modules never trained.
 - `gmlx train` on MoE, DeepSeek-V4, Qwen4 experimental, HY4 and Hadamard-folded
