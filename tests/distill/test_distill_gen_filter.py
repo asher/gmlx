@@ -1874,3 +1874,28 @@ def test_filter_joins_a_rerun_sidecar_that_never_saw_the_server(tmp_path, stub_s
     capsys.readouterr()
     assert flt.run_filter(flt.FilterOptions(inputs=[str(a), str(b)], out=str(out))) == 2
     assert "served_model_id" in capsys.readouterr().err
+
+
+def test_the_distill_e2e_harness_gen_flags_pass_the_option_checks(tmp_path, monkeypatch):
+    """pytest does not collect tests/e2e/run_distill_e2e.py, so a gen check
+    added later can refuse the harness's flags unseen. gen's option checks
+    accept them and reach the prompt read."""
+    import ast
+
+    from gmlx.commands.distill import cmd_gen
+
+    src = Path(__file__).parents[1] / "e2e" / "run_distill_e2e.py"
+    flags = next(ast.literal_eval(n.value) for n in ast.parse(src.read_text()).body
+                 if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "GEN_FLAGS" for t in n.targets))
+
+    class Reached(Exception):
+        pass
+
+    def reached(opts):
+        raise Reached
+
+    monkeypatch.setattr(gen, "prompt_rows", reached)
+    (tmp_path / "t.gguf").write_bytes(b"")
+    with pytest.raises(Reached):
+        cmd_gen(["--teacher", str(tmp_path / "t.gguf"), "--prompts", str(tmp_path / "p.jsonl"),
+                 "--out", str(tmp_path / "r.jsonl"), "--port", "8097", *flags])

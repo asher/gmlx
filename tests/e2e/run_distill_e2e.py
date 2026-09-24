@@ -35,6 +35,11 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models import ModelRegistry           # noqa: E402
 
+# gen's flags for the served teacher; gen sends thinking off unless
+# --thinking is given. tests/distill/test_distill_gen_filter.py runs gen's
+# option checks on this tuple, since pytest does not collect this harness.
+GEN_FLAGS = ("--max-tokens", "256", "--concurrency", "2")
+
 PARAGRAPHS = [
     "The tide tables for the harbour are printed every spring and pinned inside the door of the "
     "chandlery, where the ink fades by August and the fishermen read them from memory.",
@@ -152,8 +157,7 @@ def main() -> int:
             for i, p in enumerate(PARAGRAPHS[:6])))
         replies, corpus_gen = Path(tmp) / "replies.jsonl", Path(tmp) / "corpus-gen.jsonl"
         if _run([gmlx, "distill", "gen", "--teacher", teacher, "--prompts", str(prompts), "--out", str(replies),
-                 "--port", str(a.gen_port), "--max-tokens", "256", "--concurrency", "2",
-                 "--chat-template-kwargs", '{"enable_thinking": false}'], os.path.join(tmp, "gen.log")):
+                 "--port", str(a.gen_port), *GEN_FLAGS], os.path.join(tmp, "gen.log")):
             return 1
         gen_rows = [json.loads(ln) for ln in replies.read_text().splitlines() if ln.strip()]
         if len(gen_rows) != 6 or not all(r["messages"][-1]["role"] == "assistant" for r in gen_rows):
