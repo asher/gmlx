@@ -260,6 +260,10 @@ _hc_sinkhorn_collapse_kernel = _make_hc_sinkhorn_collapse_kernel()
 def _hc_kernel(x, fn_t, scale, base, hc_mult, sinkhorn_iters, eps, norm_eps):
     """Requires ``hc_mult == 4`` despite the HC template arg (the kernel body
     unrolls 4 streams); callers route other widths to :func:`_hc_ops`."""
+    global _hc_sinkhorn_collapse_kernel
+    if _hc_sinkhorn_collapse_kernel is None:
+        # first imported under a CPU default device
+        _hc_sinkhorn_collapse_kernel = _make_hc_sinkhorn_collapse_kernel()
     B, L, H, D = x.shape
 
     return _hc_sinkhorn_collapse_kernel(
@@ -316,6 +320,21 @@ def _hc_ops(x, y, mixes, scale, base, hc_mult, sinkhorn_iters, eps):
     return (pre[..., None] * y).sum(axis=2).astype(x.dtype), post, comb
 
 
+def fn_transposed(hc) -> mx.array:
+    """``hc.fn`` transposed. Outside training the transpose is built once
+    and kept on the module, since fn is frozen. A training step reads
+    ``fn.T`` on every call, because an eval inside a compiled or
+    transformed step is refused."""
+    if hc.training:
+        return hc.fn.T
+    fn_t = getattr(hc, "_fn_t", None)
+    if fn_t is None:
+        fn_t = mx.contiguous(hc.fn.T)
+        mx.eval(fn_t)
+        hc._fn_t = fn_t
+    return fn_t
+
+
 class HyperConnection(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -361,11 +380,7 @@ class HyperConnection(nn.Module):
     def front_wide(self, x):
         """The front at prefill width: one GEMM over the f32 rows and one
         norm pass. The per-row kernel rereads fn for every row."""
-        fn_t = getattr(self, "_fn_t", None)
-        if fn_t is None:
-            fn_t = mx.contiguous(self.fn.T)
-            mx.eval(fn_t)
-            self._fn_t = fn_t
+        fn_t = fn_transposed(self)
         y = x.astype(mx.float32).flatten(-2)
         ssq = mx.square(mx.linalg.norm(y, axis=-1, keepdims=True))
         return y @ fn_t, ssq
@@ -484,11 +499,7 @@ class HyperConnection(nn.Module):
     def __call__(self, x: mx.array):
         # fn is frozen; materialize its transpose once instead of adding a
         # Transpose node per layer per step (underscored: not a parameter).
-        fn_t = getattr(self, "_fn_t", None)
-        if fn_t is None:
-            fn_t = mx.contiguous(self.fn.T)
-            mx.eval(fn_t)
-            self._fn_t = fn_t
+        fn_t = fn_transposed(self)
 
         use_ops = (
             self.training
@@ -1355,12 +1366,12 @@ def hc_expand_collapse(hc, x, residual, post, comb):
         collapsed, post2, comb2 = hc(h)
         return h, collapsed, post2, comb2
 
-    fn_t = getattr(hc, "_fn_t", None)
-    if fn_t is None:
-        fn_t = mx.contiguous(hc.fn.T)
-        mx.eval(fn_t)
-        hc._fn_t = fn_t
+    fn_t = fn_transposed(hc)
 
+    global _hc_expand_collapse_kernel
+    if _hc_expand_collapse_kernel is None:
+        # first imported under a CPU default device
+        _hc_expand_collapse_kernel = _make_hc_expand_collapse_kernel()
     B, L, H, D = residual.shape
     return _hc_expand_collapse_kernel(
         inputs=[x, residual, post, comb, fn_t, hc.scale, hc.base],
@@ -1421,8 +1432,11 @@ class HyperHead(nn.Module):
     def __call__(self, x: mx.array):
         y = x.astype(mx.float32)
         z = mx.fast.rms_norm(y.flatten(-2), None, self.norm_eps)
+        # The skinny kernel has no backward, so a training step takes the
+        # matmul.
         if (
             2 <= z.shape[-2] <= 16
+            and not self.training
             and mx.default_device() == mx.gpu
             and _kq_skinny_available()
         ):
@@ -1430,11 +1444,6 @@ class HyperHead(nn.Module):
 
             mixes = kq.skinny_matmul(z, self.fn)
         else:
-            fn_t = getattr(self, "_fn_t", None)
-            if fn_t is None:
-                fn_t = mx.contiguous(self.fn.T)
-                mx.eval(fn_t)
-                self._fn_t = fn_t
-            mixes = z @ fn_t
+            mixes = z @ fn_transposed(self)
         pre = mx.sigmoid(mixes * self.scale + self.base) + self.hc_eps
         return (pre[..., None] * y).sum(axis=2).astype(x.dtype)

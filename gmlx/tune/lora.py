@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 
-from gmlx.load.adapter import save_lora_adapter
+from gmlx.load.adapter import adapter_tensor_names, save_lora_adapter
 
 _A, _B = ".lora_a", ".lora_b"
 
@@ -54,14 +54,19 @@ def prepare_lora_student(model, *, rank: int = 8, scale: float | None = 20.0,
     adapter factors trainable. Works on a gmlx K-quant base and on an MLX
     float checkpoint. An expert stack (a switch layer) named by the keys
     is left as it was: a GGUF adapter holds matrices only, and the fused
-    expert paths stay in force. Returns the number of adapted modules."""
+    expert paths stay in force. A row-fused projection pair is split back
+    into its members first, since the forward would call the fused module
+    in place of an adapted member. Returns the number of adapted modules."""
     from mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 
+    from gmlx.load.modules import drop_fused_children
+
     multiplier = lora_scale(rank, scale, alpha)
     patch_mlx_lm_lora()   # KQuantLinear.to_lora; idempotent
+    drop_fused_children(model)
     n = len(_layer_list(model)) if num_layers is None else num_layers
     config = {"rank": rank, "scale": multiplier, "dropout": dropout}
     if keys is not None:
@@ -131,15 +136,29 @@ def lora_modules_to_gguf(model, keys: Iterable[str] | None = None) -> list:
     return [(mp, a_by[mp].T, b_by[mp].T) for mp in paths]
 
 
+def adapter_refusals(model, *, base_arch: str, base_names,
+                     keys: Iterable[str] | None = None) -> dict:
+    """The adapted modules :func:`save_trained_adapter` could not write,
+    as path -> reason, empty when the export will succeed. The trainers
+    call it before the first step, so a run whose adapter cannot be written
+    stops before it trains."""
+    paths = [mp for mp, _a, _b in lora_modules_to_gguf(getattr(model, "language_model", model), keys)]
+    return adapter_tensor_names(paths, base_arch=base_arch, base_names=base_names)[1]
+
+
 def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
                          scale: float, rank: int | None = None,
-                         keys: Iterable[str] | None = None) -> int:
+                         keys: Iterable[str] | None = None,
+                         base_names=None) -> int:
     """Write a model's trained LoRA layers as a llama.cpp GGUF adapter.
     ``alpha`` is stored as ``scale * rank`` so the loader's ``alpha / rank``
     recomputes the trained ``scale``; the rank is the factors' own, and a
     ``rank`` given that differs from it is refused. A multimodal wrapper
     is read at its ``language_model``, so the module paths match the text
-    base the adapter loads onto. Returns the module count."""
+    base the adapter loads onto. ``base_names``, the base GGUF's tensor
+    names, key each pair to the tensor that loads into its module, which
+    every architecture the loader reads needs and gguf-py covers only for
+    its own. Returns the module count."""
     modules = lora_modules_to_gguf(getattr(model, "language_model", model), keys)
     if not modules:
         raise ValueError("model has no trained LoRA layers to save")
@@ -157,7 +176,7 @@ def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
     try:
         n = save_lora_adapter(
             tmp, modules, alpha=float(scale) * int(rank), base_arch=base_arch,
-            n_head=n_head, n_head_kv=n_head_kv, n_layers=n_layers)
+            n_head=n_head, n_head_kv=n_head_kv, n_layers=n_layers, base_names=base_names)
         fd = os.open(tmp, os.O_RDONLY)
         try:
             os.fsync(fd)

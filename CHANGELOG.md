@@ -56,6 +56,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GLM-5-Next with `'LoRALinear' object has no attribute 'weight'`.
 - `gmlx train` on DeepSeek-V4.1 failed at the first step with
   `[async_eval] Not allowed inside a graph transformation`.
+- `gmlx train` on DeepSeek-V4 and V4.1 without validation data failed at the
+  first step with `Attempting to eval an array during function transformations`.
+- Training on DeepSeek-V4.1 gave a zero gradient to the adapters on the `wkv`
+  projections and on the compressor's `wgate`, so those modules never trained.
+- `gmlx train` on MoE, DeepSeek-V4, Qwen4 experimental, HY4 and Hadamard-folded
+  GGUFs failed on the GPU with `[Primitive::vjp] Not implemented`.
+- `gmlx train` failed after its last step, while writing the adapter, on Qwen3.5
+  and 3.6 MoE bases and on architectures gguf-py cannot name, such as GLM-5-Next.
+- Serving with an adapter that covers a MoE model's shared expert failed at the
+  first decode step with `'LoRAKQuantLinear' object has no attribute 'kquant_type'`.
+- `gmlx serve --adapter` on DeepSeek-V4 ignored the adapter on the `wq_a` and
+  `wkv` projections and on the compressor's `wkv` and `wgate`.
 
 ## [0.4.14] - 2026-09-18
 

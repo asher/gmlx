@@ -214,3 +214,31 @@ def test_qsa_ragged_all_sparse_matches_dense_mask():
     _, got = _run_arm(layer, [x1, x2], kernel=True)
     _, ref = _run_arm(layer, [x1, x2], kernel=False)
     _assert_close(got, ref, 2e-2)
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [1, 3])
+def test_qsa_gathered_decode_batches_rows(L):
+    """Two rows decoded together past the sparse boundary take the gathered
+    path and match each row decoded alone."""
+    args = ModelArgs(hidden_size=128, num_hidden_layers=1,
+                     num_attention_heads=4, num_key_value_heads=1,
+                     head_dim=64, indexer_budget=8, compress_ratios=[4],
+                     layer_types=["full_attention"])
+    mx.random.seed(23)
+    layer = Attention(args, 0)
+    for lin in (layer.q_proj, layer.k_proj, layer.v_proj, layer.o_proj,
+                layer.indexer.q_proj, layer.indexer.k_proj):
+        lin.weight = mx.random.normal(lin.weight.shape) * 0.05
+    x = mx.random.normal((2, 40, 128))
+    xd = mx.random.normal((2, L, 128))
+
+    def decode(rows):
+        cache = QSAKVCache(ratio=4)
+        layer(x[rows], mask=None, cache=cache)
+        return layer(xd[rows], mask=None, cache=cache)
+
+    both = decode(slice(0, 2))
+    # fp32 GEMM runs TF32 on M5-class GPUs while a one-row GEMV is exact
+    for i in range(2):
+        _assert_close(both[i:i + 1], decode(slice(i, i + 1)), 2e-3)

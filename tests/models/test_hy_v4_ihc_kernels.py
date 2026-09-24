@@ -46,6 +46,7 @@ def hc_and_norm():
     norm = nn.RMSNorm(D, eps=NEPS)
     norm.weight = mx.random.uniform(0.5, 1.5, (D,))
     mx.eval(hc.parameters(), norm.parameters())
+    hc.eval()  # the kernels serve inference only, as after a load
     return hc, norm
 
 

@@ -15,7 +15,9 @@ float32, probabilities cast back to the input dtype before the value
 matmul. Grouped-query heads are handled without tiling keys or values.
 Masks: ``None``, ``"causal"`` (bottom-right aligned when the key length
 exceeds the query length), a boolean array or an additive array whose
-last two axes are ``[T_q, T_k]`` with leading axes that broadcast.
+last two axes are ``[T_q, T_k]`` with leading axes that broadcast against
+``[B, H_q]``. An additive mask is a differentiable input: MLA models pass
+positional scores that depend on parameters as the mask.
 Attention sinks are not supported here and fall through to MLX.
 """
 from __future__ import annotations
@@ -33,10 +35,10 @@ def _prep_mask(mask, Tq: int, Tk: int):
         if mask != "causal":
             raise ValueError(f"blocked_attention: unsupported mask {mask!r}")
         return True, None
-    if mask.shape[-2] != Tq or mask.shape[-1] != Tk:
+    if mask.shape[-2] != Tq or mask.shape[-1] != Tk or mask.ndim > 4:
         raise ValueError(
             f"blocked_attention: mask shape {mask.shape} does not end in [{Tq}, {Tk}]")
-    return False, mask
+    return False, mask.reshape((1,) * (4 - mask.ndim) + mask.shape)
 
 
 def _scores(qb, kb, scale: float, causal: bool, i0: int, i1: int, kend: int,
@@ -51,7 +53,7 @@ def _scores(qb, kb, scale: float, causal: bool, i0: int, i1: int, kend: int,
         s = mx.where(cols <= rows, s, low)
     if mask is not None:
         mb = mask[..., i0:i1, :kend]
-        if mask.ndim == 4 and qb.ndim == 5:
+        if qb.ndim == 5:
             # [B, Hq or 1, bq, kend] -> [B, Hkv or 1, rep or 1, bq, kend]
             if mb.shape[1] == 1:
                 mb = mb[:, :, None]
@@ -73,6 +75,9 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
     Dv = values.shape[-1]
     rep = Hq // Hkv
     causal, mask_arr = _prep_mask(mask, Tq, Tk)
+    # An additive mask is a primal with its own cotangent. A boolean mask
+    # stays a constant.
+    extra = [] if mask_arr is None or mask_arr.dtype == mx.bool_ else [mask_arr]
     offset = Tk - Tq
     dtype = queries.dtype
     block = max(1, min(block, Tq))
@@ -83,8 +88,21 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
     def kend_of(i1):
         return min(Tk, i1 + offset) if causal else Tk
 
+    def mask_of(extra):
+        return extra[0] if extra else mask_arr
+
+    def reduce_to(dm, shape):
+        """Sum a ``[B, Hq, bq, kend]`` block to the mask's broadcast shape."""
+        axes = [a for a in (0, 1) if shape[a] == 1 and dm.shape[a] != 1]
+        if axes:
+            dm = mx.sum(dm, axis=axes, keepdims=True)
+        if dm.shape[-1] < Tk:
+            dm = mx.pad(dm, [(0, 0), (0, 0), (0, 0), (0, Tk - dm.shape[-1])])
+        return dm
+
     @mx.custom_function
-    def attn(q, k, v):
+    def attn(q, k, v, extra):
+        m = mask_of(extra)
         q = q5(q)
         k = k[:, :, None]
         v = v[:, :, None]
@@ -93,7 +111,7 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
             i1 = min(Tq, i0 + block)
             kend = kend_of(i1)
             s = _scores(q[:, :, :, i0:i1], k[:, :, :, :kend], scale, causal,
-                        i0, i1, kend, offset, mask_arr, dtype)
+                        i0, i1, kend, offset, m, dtype)
             lse = mx.logsumexp(s, axis=-1, keepdims=True)
             p = mx.exp(s - lse).astype(dtype)
             outs.append(mx.matmul(p, v[:, :, :, :kend]))
@@ -104,7 +122,9 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
 
     @attn.vjp
     def attn_vjp(primals, cotangents, outputs):
-        q, k, v = primals
+        q, k, v, extra = primals
+        m = mask_of(extra)
+        dm_blocks = []
         dout = cotangents[0]
         out, lse = outputs
         q = q5(q)
@@ -130,11 +150,15 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
                 # step and every block's probabilities stay alive until the
                 # last chain consumes them.
                 qb, kb, vb = mx.depends([qb, kb, vb], [dq_blocks[-1], dk, dv])
-            s = _scores(qb, kb, scale, causal, i0, i1, kend, offset, mask_arr, dtype)
+            s = _scores(qb, kb, scale, causal, i0, i1, kend, offset, m, dtype)
             p = mx.exp(s - lse[:, :, :, i0:i1])                      # f32
             db = dout[:, :, :, i0:i1]
             dp = mx.matmul(db, vb.swapaxes(-1, -2)).astype(mx.float32)
-            ds = p * (dp - delta[:, :, :, i0:i1]) * scale            # f32
+            dsm = p * (dp - delta[:, :, :, i0:i1])                   # f32
+            if extra:
+                dm = dsm.reshape(B, Hq, i1 - i0, kend)
+                dm_blocks.append(reduce_to(dm, m.shape).astype(m.dtype))
+            ds = dsm * scale
             pd = p.astype(dtype)
             dsd = ds.astype(dtype)
             dv_b = mx.sum(mx.matmul(pd.swapaxes(-1, -2), db), axis=2)
@@ -143,9 +167,10 @@ def blocked_attention(queries, keys, values, *, scale: float, mask=None,
             dv = dv.at[:, :, :kend].add(dv_b.astype(mx.float32))
             dk = dk.at[:, :, :kend].add(dk_b.astype(mx.float32))
         dq = mx.concatenate(dq_blocks, axis=3).reshape(B, Hq, Tq, D)
-        return dq.astype(dtype), dk.astype(dtype), dv.astype(dtype)
+        dextra = [mx.concatenate(dm_blocks, axis=2)] if extra else []
+        return dq.astype(dtype), dk.astype(dtype), dv.astype(dtype), dextra
 
-    out, _lse = attn(queries, keys, values)
+    out, _lse = attn(queries, keys, values, extra)
     return out
 
 

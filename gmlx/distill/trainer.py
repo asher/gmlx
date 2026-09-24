@@ -100,18 +100,38 @@ def view_fingerprint(view: dict) -> str:
 CHUNK_KNOBS = ("gamma", "max_chunk_len", "w_mid", "redirect_cut")
 
 
-def prompt_key(meta: dict, fallback: str) -> str:
-    """What a row answers: its messages without the final assistant reply,
-    or its document for a text row. Two views can hold one prompt under two
-    document names, which the per-view split cannot see."""
-    msgs = meta.get("messages")
-    if msgs:
+# version of the rule prompt_keys applies, in the resume fingerprint so a
+# run resumed under another rule is refused
+VAL_LEAVE_OUT = 2
+
+# frames whose messages wrap a window of a document in one fixed
+# instruction: every row of every document shares the prompt
+_WINDOW_FRAMES = ("continue", "continue-closed")
+
+
+def prompt_keys(meta: dict, corpus: str, fallback: str) -> set[str]:
+    """What a row answers, as keys a validation row of another view can
+    share: its document within its corpus, and for a chat row the messages
+    the student sees without the final assistant reply. The document key
+    matches one conversation rendered two ways (per turn and whole, with a
+    context and without), the message key one prompt under two document
+    names or in two corpora."""
+    doc = meta.get("doc_id")
+    keys = {f"d:{corpus}:{doc}" if doc is not None else f"r:{fallback}"}
+    msgs = meta.get("student_messages") or meta.get("messages")
+    if msgs and meta.get("frame") not in _WINDOW_FRAMES:
         if msgs[-1].get("role") == "assistant":
             msgs = msgs[:-1]
         blob = json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode()
-        return "m:" + hashlib.sha256(blob).hexdigest()
-    doc = meta.get("doc_id")
-    return f"d:{doc}" if doc is not None else f"r:{fallback}"
+        keys.add("m:" + hashlib.sha256(blob).hexdigest())
+    return keys
+
+
+def corpus_identity(manifest: dict) -> str:
+    """The corpus a cache was built from: its content hash, else the name
+    it was given."""
+    blk = manifest.get("gmlx_distill") or {}
+    return str(blk.get("corpus_sha256") or (blk.get("corpus") or {}).get("spec") or manifest.get("dataset") or "")
 
 
 def _resolve(module, path: str):
@@ -154,7 +174,8 @@ def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale
     settings, the loss knobs, the gradient clip, the weight decay, the
     LoRA rank, multiplier, keys and
     dropout, the hidden-state term, the student by size and leading
-    bytes, and the config source."""
+    bytes, the config source and the rule that leaves out train rows a
+    validation row holds."""
     ident = teacher_identity(opts.student)
     return {"views": [view_fingerprint(v) for v in views],
             "batch_size": int(opts.batch_size), "seed": int(opts.seed), "iters": int(opts.iters),
@@ -164,7 +185,7 @@ def resume_fingerprint(views: list[dict], opts: TrainOptions, knobs: dict, scale
             "weight_decay": None if opts.weight_decay is None else float(opts.weight_decay),
             "lora_rank": int(opts.lora_rank), "lora_scale": float(scale), "lora_keys": list(LORA_KEYS),
             "lora_dropout": float(opts.lora_dropout), "hs": float(opts.hs), "hf_source": opts.hf_source,
-            "hs_loss": opts.hs_loss if opts.hs else None,
+            "hs_loss": opts.hs_loss if opts.hs else None, "val_leave_out": VAL_LEAVE_OUT,
             "student": {"size": ident["size"], "sha256_head": ident["sha256_head"]}}
 
 
@@ -446,10 +467,24 @@ def run_train(opts: TrainOptions) -> int:
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
     from gmlx.tune.indices import install_index_stop_gradient
+    from gmlx.tune.kernels import install_training_switch_gemm
     if n_adapted == 0:
         log(f"[train] refuse: no module of the student matched the LoRA keys ({', '.join(LORA_KEYS)}), "
             "nothing would train")
         return 2
+    base_arch, base_names = "", None
+    if opts.adapter_out:
+        from gmlx.load.adapter import base_tensor_names, refusal_summary
+        from gmlx.load.preflight import preflight
+        from gmlx.tune.lora import adapter_refusals
+        student_gguf = gguf_file(opts.student)
+        base_arch = preflight(student_gguf, hf_source=opts.hf_source).arch
+        base_names = base_tensor_names(student_gguf)
+        refused = adapter_refusals(inner, base_arch=base_arch, base_names=base_names, keys=LORA_KEYS)
+        if refused:
+            log(f"[train] refuse: --adapter-out: a GGUF adapter cannot hold {len(refused)} of the adapted "
+                f"modules: {refusal_summary(refused)}")
+            return 2
     cov = lora_key_coverage(model, LORA_KEYS)
     log("[train] LoRA keys: " + ", ".join(f"{k} {n}/{total}" for k, (n, total) in cov.items()))
     mixed = lora_mixed_keys(cov)
@@ -468,6 +503,7 @@ def run_train(opts: TrainOptions) -> int:
     # a router gathers its weights at ids it picked from trained scores,
     # and MLX has no backward for a gather at ids that carry a gradient
     restore_ids = install_index_stop_gradient()
+    restore_gemm = install_training_switch_gemm()
     try:
         gdn_install = install_training_gdn(model)
         if gdn_install.count:
@@ -517,13 +553,16 @@ def run_train(opts: TrainOptions) -> int:
         val_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "val"]
         view_has_val = bool(val_rows)
 
-        def key_of(vr):
-            return prompt_key(readers[vr[0]].rows_meta[vr[1]], f"{vr[0]}:{vr[1]}")
+        corpora = [corpus_identity(rd.manifest) for rd in readers]
 
-        held = {key_of(vr) for vr in val_rows}
-        kept = [vr for vr in train_rows if key_of(vr) not in held]
-        if len(kept) < len(train_rows):
-            log(f"[train] {len(train_rows) - len(kept)} train rows left out: a validation row holds their prompt")
+        def keys_of(vr):
+            return prompt_keys(readers[vr[0]].rows_meta[vr[1]], corpora[vr[0]], f"{vr[0]}:{vr[1]}")
+
+        held = set().union(*(keys_of(vr) for vr in val_rows))
+        kept = [vr for vr in train_rows if not keys_of(vr) & held]
+        left_out = len(train_rows) - len(kept)
+        if left_out:
+            log(f"[train] {left_out} train rows left out: a validation row holds their document or prompt")
             train_rows = kept
         lengths = {(vi, e["row"]): e["n_student_tokens"] for vi, v in enumerate(views) for e in v["index"]}
         # one seeded draw across the val rows of every view, so validation
@@ -543,7 +582,8 @@ def run_train(opts: TrainOptions) -> int:
             counts = [sum(1 for vi, _ in train_rows if vi == i) for i in range(len(views))]
             log(f"[train] {len(views)} views mixed: train rows {counts} from {[str(d) for d in view_dirs]}")
         if len(train_rows) < opts.batch_size:
-            log(f"[train] refuse: {len(train_rows)} train rows, fewer than --batch-size {opts.batch_size}")
+            why = f" after {left_out} left out for their validation twins" if left_out else ""
+            log(f"[train] refuse: {len(train_rows)} train rows{why}, fewer than --batch-size {opts.batch_size}")
             return 2
         it = _data.BatchIterator([lengths[r] for r in train_rows], opts.batch_size, opts.seed)
 
@@ -738,10 +778,9 @@ def run_train(opts: TrainOptions) -> int:
         log(f"[train] done: {state['iteration']} steps, {state['tokens']} tokens, {skipped} skipped, "
             f"{time.perf_counter() - t0:.0f}s")
         if opts.adapter_out:
-            from gmlx.load.preflight import preflight
             from gmlx.tune.lora import save_trained_adapter
-            n = save_trained_adapter(inner, cfg, base_arch=preflight(gguf_file(opts.student)).arch,
-                                     out_path=opts.adapter_out, scale=scale, keys=LORA_KEYS)
+            n = save_trained_adapter(inner, cfg, base_arch=base_arch, out_path=opts.adapter_out,
+                                     scale=scale, keys=LORA_KEYS, base_names=base_names)
             log(f"[train] wrote {opts.adapter_out} ({n} modules)")
         if opts.report:
             write_json_atomic(Path(opts.report), {
@@ -752,5 +791,6 @@ def run_train(opts: TrainOptions) -> int:
                            "peak_gb": mx.get_peak_memory() / GB}})
         return 0
     finally:
+        restore_gemm()
         restore_ids()
         restore_attn()

@@ -360,6 +360,19 @@ def _build_router_cat(m):
     return cat
 
 
+def _kq_member_projs(*owners):
+    """The gate, up and down projections of ``owners`` that a fused path
+    reads in place of calling them, or None when any is not a quantized
+    leaf. An adapter wraps a member in a module without ``kquant_type``,
+    and that member has to run its own forward to apply the adapter."""
+    projs = tuple(getattr(o, n, None) for o in owners
+                  for n in ("gate_proj", "up_proj", "down_proj"))
+    for p in projs:
+        if getattr(p, "kquant_type", None) is None:
+            return None
+    return projs
+
+
 # Regime 1: gpt-oss packed-mxfp4 SwitchGLU (biased NativeFPSwitchLinear)
 
 
@@ -604,6 +617,19 @@ def _make_fused_kquant(base_cls, caps):
                 and _kq_fused_device_ok(self)
             )
 
+        def _kq_shexp_projs(self):
+            """The stamped shared expert's projections, or None without a
+            stamp. A stamp whose shared expert holds an adapted projection
+            is dropped here, so this call and every later one leave the
+            shared expert to the caller, which calls it with its adapter."""
+            se = getattr(self, "_kq_shexp_mod", None)
+            if se is None:
+                return None
+            projs = _kq_member_projs(se)
+            if projs is None:
+                object.__setattr__(self, "_kq_shexp_mod", None)
+            return projs
+
         def _fused_h(self, x, idx, scores=None):
             """The gate/up gather: ``[t, k, I]`` activated hidden (``k + 1``
             slots per token when the shexp fold rides along with scores).
@@ -622,15 +648,14 @@ def _make_fused_kquant(base_cls, caps):
                 akw["alpha"] = self._kq_glu_alpha
                 akw["gate_bias"] = self._kq_gb32
                 akw["up_bias"] = self._kq_ub32
-            se = (getattr(self, "_kq_shexp_mod", None)
-                  if scores is not None else None)
+            se = self._kq_shexp_projs() if scores is not None else None
             if se is not None:
-                skw = ({"shexp_kquant_type": se.gate_proj.kquant_type}
-                       if se.gate_proj.kquant_type != gate.kquant_type
-                       else {})
+                sg, su, _ = se
+                skw = ({"shexp_kquant_type": sg.kquant_type}
+                       if sg.kquant_type != gate.kquant_type else {})
                 return kq.moe_glu_gather_shexp_kq(
                     x.reshape(t, d_in), gate.weight, up.weight,
-                    se.gate_proj.weight, se.up_proj.weight,
+                    sg.weight, su.weight,
                     gate.kquant_type, idx, **akw, **skw)
             return kq.moe_glu_gather_kq(
                 x.reshape(t, d_in),
@@ -647,8 +672,7 @@ def _make_fused_kquant(base_cls, caps):
             the mix and plain exits' in-op epilogue."""
             t, k = idx.shape
             down = self.down_proj
-            se = (getattr(self, "_kq_shexp_mod", None)
-                  if scores is not None else None)
+            se = self._kq_shexp_projs() if scores is not None else None
             lkw = lora or {}
             if se is not None:
                 if lkw:
@@ -658,11 +682,11 @@ def _make_fused_kquant(base_cls, caps):
                 if not _mix_implicit:
                     sc = mx.concatenate(
                         [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
-                skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
-                       if se.down_proj.kquant_type != down.kquant_type
-                       else {})
+                sd = se[2]
+                skw = ({"shexp_kquant_type": sd.kquant_type}
+                       if sd.kquant_type != down.kquant_type else {})
                 y = kq.gather_qmv_mix_kq(
-                    h, down.weight, se.down_proj.weight,
+                    h, down.weight, sd.weight,
                     down.kquant_type, idx, sc, **skw)
                 return y.reshape(t, y.shape[-1])
             if (scores is not None and _has_mix_ns
@@ -992,7 +1016,8 @@ def _make_fused_block(base_cls, caps):
                 from gmlx.stream.moe_experts import qwen3_next_moe_forward
 
                 return qwen3_next_moe_forward(self, x)
-            if not (
+            projs = None
+            if (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
                 and t * self.top_k < 64
@@ -1001,6 +1026,9 @@ def _make_fused_block(base_cls, caps):
                 and getattr(self, "sharding_group", None) is None
                 and _kq_fused_device_ok(self, self.switch_mlp)
             ):
+                # An adapted member sends the block down the stock path.
+                projs = _kq_member_projs(self.switch_mlp, self.shared_expert)
+            if projs is None:
                 if expert_ctl:
                     # Stock forward with the fan-out hook at the selection
                     # seam (the eligibility check asserted this shape).
@@ -1046,20 +1074,18 @@ def _make_fused_block(base_cls, caps):
                     self, inds.reshape(*rows, k), sc[..., :k].reshape(*rows, k))
                 inds = inds3.reshape(t, k)
                 sc = mx.concatenate([routed.reshape(t, k), sc[..., k:]], axis=-1)
-            sw, se = self.switch_mlp, self.shared_expert
+            wg, wu, wd, sg, su, sd = projs
             skw = {}
-            if se.gate_proj.kquant_type != sw.gate_proj.kquant_type:
-                skw = {"shexp_kquant_type": se.gate_proj.kquant_type}
+            if sg.kquant_type != wg.kquant_type:
+                skw = {"shexp_kquant_type": sg.kquant_type}
             h = kq.moe_glu_gather_shexp_kq(
-                xf, sw.gate_proj.weight, sw.up_proj.weight,
-                se.gate_proj.weight, se.up_proj.weight,
-                sw.gate_proj.kquant_type, inds, act="silu", **skw)
+                xf, wg.weight, wu.weight, sg.weight, su.weight,
+                wg.kquant_type, inds, act="silu", **skw)
             skw = {}
-            if se.down_proj.kquant_type != sw.down_proj.kquant_type:
-                skw = {"shexp_kquant_type": se.down_proj.kquant_type}
+            if sd.kquant_type != wd.kquant_type:
+                skw = {"shexp_kquant_type": sd.kquant_type}
             y = kq.gather_qmv_mix_kq(
-                h, sw.down_proj.weight, se.down_proj.weight,
-                sw.down_proj.kquant_type, inds, sc, **skw)
+                h, wd.weight, sd.weight, wd.kquant_type, inds, sc, **skw)
             return y.reshape(x.shape)
 
     _FusedKQuantMoeBlock.__name__ = "_FusedKQuantMoeBlock"
@@ -2197,23 +2223,54 @@ def install_lora_adapter(model: nn.Module, plan,
 
 
 # Fused decode wires the upstream patches cache on the module that owns the
-# projections (occupancy_fuse.py, qkv_fuse.py). A wire is built on first use
+# projections (occupancy_fuse.py, qkv_fuse.py), and the router concat a
+# fused MoE block caches beside its router. A wire is built on first use
 # and checks for an adapter only then, so one built before the install would
 # keep serving the base weights alone. The gated-delta z, b and a weights
 # (gdn_patches.py) are concatenated at load, before any install, and only a
 # wrapped member invalidates them. Their builders take plain Linears only,
 # so a cleared cat stays cleared.
-_FUSED_WIRE_SLOTS = ("_kq_wqkv", "_kq_bqkv", "_kq_wgu", "_kq_wdn")
+_FUSED_WIRE_SLOTS = ("_kq_wqkv", "_kq_bqkv", "_kq_wgu", "_kq_wdn", "_kq_router_cat")
 _FUSED_CAT_SLOTS = {
     "_gdn_zba_weight": ("in_proj_z", "in_proj_b", "in_proj_a"),
     "_gdn_ba_weight": ("in_proj_b", "in_proj_a"),
 }
+# Row-fused projection pairs the model holds as child modules and calls in
+# place of their members (deepseek_v4 install_gemv_row_fusion, run at every
+# load). A cleared slot sends the forward back to the members, which then
+# serve their adapters. Nothing rebuilds a slot once cleared.
+_FUSED_CHILD_SLOTS = {
+    "_qa_kv_fused": ("wq_a", "wkv"),
+    "_kv_gate_fused": ("wkv", "wgate"),
+}
+
+
+def _clear_fused_child(owner, slot: str) -> bool:
+    """Drop the fused module ``owner`` holds in ``slot`` and leave the
+    slot None. The module sits in the module dict, not in ``vars``.
+    Returns whether there was one."""
+    if not isinstance(owner.get(slot), nn.Module):
+        return False
+    del owner[slot]
+    object.__setattr__(owner, slot, None)
+    return True
+
+
+def drop_fused_children(model: nn.Module) -> int:
+    """Clear every row-fused child slot under ``model``, so each forward
+    calls the member projections. Returns the number of slots cleared."""
+    n = 0
+    for _, m in model.named_modules():
+        for slot in _FUSED_CHILD_SLOTS:
+            n += _clear_fused_child(m, slot)
+    return n
 
 
 def _drop_fused_wires(by_path: dict, wrapped: set[str]) -> int:
-    """Clear cached fused wires on every module that owns a wrapped leaf,
-    so the next forward rebuilds them and sees the adapter. Returns the
-    number of wires cleared."""
+    """Clear cached fused wires and fused child modules on every module
+    that owns a wrapped leaf, so the next forward rebuilds the wires or
+    calls the members, and sees the adapter. Returns the number of wires
+    cleared."""
     n = 0
     for path in wrapped:
         owner = by_path.get(path.rsplit(".", 1)[0]) if "." in path else None
@@ -2226,6 +2283,9 @@ def _drop_fused_wires(by_path: dict, wrapped: set[str]) -> int:
             if vars(owner).get(slot) is not None:
                 object.__setattr__(owner, slot, None)
                 n += 1
+        for slot, members in _FUSED_CHILD_SLOTS.items():
+            if leaf in members:
+                n += _clear_fused_child(owner, slot)
     return n
 
 

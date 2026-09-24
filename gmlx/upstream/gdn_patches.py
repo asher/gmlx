@@ -420,6 +420,19 @@ _gdn_fused_decode_kernel = (
 _FUSED_DECODE_PATCH = ClassPatch()
 
 
+def _live_cat(gdn, slot, members):
+    """The concatenated weight in ``slot`` while every member it was cut
+    from is still the plain Linear the concat took, else None. A wrapper
+    such as an in-process LoRA replaces the member and has to be called."""
+    w = getattr(gdn, slot, None)
+    if w is None:
+        return None
+    for name in members:
+        if type(getattr(gdn, name, None)) is not nn.Linear:
+            return None
+    return w
+
+
 def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     """Shared fused S=1 gated-delta decode step. mlx-lm's ``GatedDeltaNet`` and
     mlx-vlm's ``Qwen3_5GatedDeltaNet`` share the attribute + cache layout, so both
@@ -435,7 +448,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     Dv = self.head_v_dim
     SG = gdn_sg(B)
 
-    zba_w = getattr(self, "_gdn_zba_weight", None)
+    zba_w = _live_cat(self, "_gdn_zba_weight", ("in_proj_z", "in_proj_b", "in_proj_a"))
     if zba_w is not None:
         qkv = self.in_proj_qkv(inputs)
         zba = inputs @ zba_w.T
@@ -447,7 +460,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
         # One rotation feeds both projections on a Hadamard-folded file.
         qkv, z = shared_linears((self.in_proj_qkv, self.in_proj_z), inputs)
         z = z.reshape(B, S, self.num_v_heads, self.head_v_dim)
-        ba_w = getattr(self, "_gdn_ba_weight", None)
+        ba_w = _live_cat(self, "_gdn_ba_weight", ("in_proj_b", "in_proj_a"))
         if ba_w is not None:
             # One [2*Hv, K] matvec for the two tiny decay/gate rows. At
             # M=B*S in [2, 8] the M-stationary head kernel matters: stock

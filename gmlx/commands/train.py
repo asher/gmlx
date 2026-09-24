@@ -21,6 +21,7 @@ import tempfile
 from types import SimpleNamespace
 
 from gmlx.tune.lora import (  # noqa: F401  (re-exported for callers and tests)
+    adapter_refusals,
     lora_modules_to_gguf,
     prepare_lora_student,
     probe_writable,
@@ -52,21 +53,28 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 
     import gmlx.load.loadlog as loadlog
+    from gmlx.load.adapter import base_tensor_names, refusal_summary
     from gmlx.load.loader import load_model
     from gmlx.load.preflight import preflight
     from gmlx.tune.attention import install_training_attention
     from gmlx.tune.checkpoint import checkpoint_layers
     from gmlx.tune.gdn import install_training_gdn
     from gmlx.tune.indices import install_index_stop_gradient
+    from gmlx.tune.kernels import install_training_switch_gemm
 
     mx.random.seed(seed)
     patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
     base_arch = preflight(gguf_path, hf_source=hf_source).arch
+    base_names = base_tensor_names(gguf_path)
     with loadlog.load_ui(False, gguf_path):
         model, config, tokenizer = load_model(gguf_path, hf_source=hf_source)
 
     prepare_lora_student(model, rank=rank, scale=scale, dropout=dropout,
                          num_layers=num_layers)
+    refused = adapter_refusals(model, base_arch=base_arch, base_names=base_names)
+    if refused:
+        raise TrainRefused(f"a GGUF adapter cannot hold {len(refused)} of the adapted modules, "
+                           f"nothing was trained: {refusal_summary(refused)}")
 
     # Feature keys carry mlx-lm's own string defaults (not None): create_dataset
     # reads them via getattr(config, key, default), so a None here would shadow the
@@ -99,6 +107,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     # a router gathers its weights at ids it picked from trained scores,
     # and MLX has no backward for a gather at ids that carry a gradient
     restore_ids = install_index_stop_gradient()
+    restore_gemm = install_training_switch_gemm()
     try:
         with tempfile.TemporaryDirectory() as scratch:
             args = TrainingArgs(
@@ -109,11 +118,13 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                 adapter_file=os.path.join(scratch, "mlx_lm_final.safetensors"))
             train(model, opt, CacheDataset(train_set), CacheDataset(val_set), args=args)
     finally:
+        restore_gemm()
         restore_ids()
         restore_attention()
 
     n = save_trained_adapter(model, config, base_arch=base_arch,
-                             out_path=out_path, rank=rank, scale=scale)
+                             out_path=out_path, rank=rank, scale=scale,
+                             base_names=base_names)
     return out_path, n
 
 

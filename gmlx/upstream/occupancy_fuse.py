@@ -84,6 +84,12 @@ def _same_codec_kquant(projs) -> bool:
     return len({p.kquant_type for p in projs}) == 1
 
 
+def _unwrapped(projs) -> bool:
+    """Every projection is still the K-quant leaf a wire was cut from. An
+    adapter wrapped after the wire was built has to be called."""
+    return all(isinstance(p, KQuantLinear) for p in projs)
+
+
 def _fuse_wires(projs):
     w = mx.concatenate([p["weight"] for p in projs], axis=0)
     mx.eval(w)
@@ -159,6 +165,8 @@ def _make_fused_attention(base_cls):
                 w = self._kq_build_fused()
                 if w is None:
                     return super().__call__(x, mask=mask, cache=cache)
+            elif not _unwrapped((self.q_proj, self.k_proj, self.v_proj)):
+                return super().__call__(x, mask=mask, cache=cache)
 
             B, L, _ = x.shape
             n_q, n_kv = self.n_heads, self.n_kv_heads
@@ -225,6 +233,8 @@ def _make_fused_qwen35_attention(base_cls):
                 w = self._kq_build_fused()
                 if w is None:
                     return super().__call__(x, mask=mask, cache=cache)
+            elif not _unwrapped((self.q_proj, self.k_proj, self.v_proj)):
+                return super().__call__(x, mask=mask, cache=cache)
 
             B, L, _ = x.shape
             n_q = self.num_attention_heads
@@ -301,6 +311,8 @@ def _make_fused_mlp(base_cls):
                 w = self._kq_build_fused()
                 if w is None:
                     return super().__call__(x)
+            elif not _unwrapped((self.gate_proj, self.up_proj)):
+                return super().__call__(x)
             gu = kq.quantized_matmul(
                 x, w, self.gate_proj["scales"], self.gate_proj.kquant_type,
                 transpose=True,
@@ -310,7 +322,8 @@ def _make_fused_mlp(base_cls):
 
             minb = _splitk_min_b()
             dn = self._kq_wdn
-            if minb <= 0 or h.shape[0] < minb or dn is None:
+            if (minb <= 0 or h.shape[0] < minb or dn is None
+                    or not _unwrapped((self.down_proj,))):
                 return self.down_proj(h)
             # down_proj K-split: two half-K matmuls overlap where the
             # single long-K launch underfills the chip. One extra bf16

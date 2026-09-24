@@ -48,6 +48,7 @@ from gmlx.models.deepseek_v4.cache import (
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     _hc_split_sinkhorn_ops,
+    fn_transposed,
     hc_expand,
     hc_expand_m1,
 )
@@ -445,7 +446,7 @@ class Indexer(nn.Module):
         FP4-grid rows), so the cache needs no cast per step."""
         k = self.k_norm(self.wk(latent))
         k = pool_rope(k[:, None], offset=pool_base).squeeze(1)
-        return _indexer_qat(k).astype(mx.float16)
+        return _indexer_qat(k, self.training).astype(mx.float16)
 
     def __call__(self, x, q_residual, rope, index_k, pmask, offset, streams):
         B, L, _ = x.shape
@@ -454,11 +455,11 @@ class Indexer(nn.Module):
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         q = rope(q, offset)
-        q = _indexer_qat(q)
+        q = _indexer_qat(q, self.training)
 
-        weights = _v4._skinny_linear(self.weights_proj, x) * (
-            self.n_heads ** -0.5
-        )
+        weights = _v4._skinny_linear(
+            self.weights_proj, x, not self.training
+        ) * (self.n_heads ** -0.5)
         scorer = _indexer_kernel_scorer(
             q, index_k, weights, self.scale, k,
             offset if pmask is not None else None, streams.ratio,
@@ -853,6 +854,9 @@ def _candidate_blocks(scores, topk_blocks, block_size, floor):
 # in groups of 16 with an E4M3 scale, and the indexer takes FP4 block-32 with
 # an E8M0 scale and no Hadamard.
 # (reference kernel.py act_quant / fp4_act_quant and their call sites)
+# In training each round-trip passes the gradient straight through
+# (_v4._ste). The chains have a zero derivative and the kernels have no
+# backward.
 
 
 def _qat_enabled() -> bool:
@@ -893,9 +897,11 @@ def _qat_fused(which: str) -> bool:
     return on
 
 
-def _kv_qat(kv: mx.array) -> mx.array:
+def _kv_qat(kv: mx.array, training: bool = False) -> mx.array:
     if not _qat_enabled():
         return kv
+    if training:
+        return _v4._ste(kv, _kv_qat(kv))
     if kv.shape[-1] % 32 == 0 and _qat_fused("kv"):
         import mlx_kquant as kq
 
@@ -903,9 +909,11 @@ def _kv_qat(kv: mx.array) -> mx.array:
     return _v4._fp8_e4m3_roundtrip(kv, block=32)
 
 
-def _indexer_qat(x: mx.array) -> mx.array:
+def _indexer_qat(x: mx.array, training: bool = False) -> mx.array:
     if not _qat_enabled():
         return x
+    if training:
+        return _v4._ste(x, _indexer_qat(x))
     if x.shape[-1] == 128 and _qat_fused("indexer"):
         import mlx_kquant as kq
 
@@ -922,9 +930,11 @@ def _latent_qat_core(v: mx.array) -> mx.array:
     return _v4._e2m1_round(mx.clip(v / scale, -6.0, 6.0)) * scale
 
 
-def _latent_qat(x: mx.array) -> mx.array:
+def _latent_qat(x: mx.array, training: bool = False) -> mx.array:
     if not _qat_enabled() or x.shape[-1] % 16:
         return x
+    if training:
+        return _v4._ste(x, _latent_qat(x))
     orig = x.dtype
     v = mx.unflatten(x.astype(mx.float32), -1, (-1, 16))
     return mx.flatten(_latent_qat_core(v), -2).astype(orig)
@@ -1087,7 +1097,7 @@ class DeepseekV41Attention(nn.Module):
 
         if latent.shape[1] > 0:
             roped = self.pool_rope(latent[:, None], offset=pool_base).squeeze(1)
-            latent = _latent_qat(roped)
+            latent = _latent_qat(roped, self.training)
         streams.pooled = (
             pool_cache.update_and_fetch(latent) if pool_cache is not None else latent
         )
@@ -1124,7 +1134,7 @@ class DeepseekV41Attention(nn.Module):
 
         kv = self.kv_norm(self.wkv(x)).reshape(B, 1, L, self.head_dim)
         kv = self.rope(kv, offset)
-        kv = _kv_qat(kv)
+        kv = _kv_qat(kv, self.training)
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
         if prof:
@@ -1197,7 +1207,9 @@ class DeepseekV41Attention(nn.Module):
                 if pmask is not None:
                     sparse_mask = pmask.sparse(topk)[:, None]
                 out = None
-                if _v4._sparse_kernel_ok():
+                # The sparse kernels have no backward, so a training step
+                # takes the chains.
+                if not self.training and _v4._sparse_kernel_ok():
                     kblock = (
                         _v4._sparse_kernel_block() if arrays and n_full > 16 else 0
                     )
@@ -1274,13 +1286,8 @@ def _hc_mixes(hc: HyperConnection, x: mx.array):
     one. The same projection HyperConnection.__call__ runs, without the
     collapse: V4.1 collapses with the previous sublayer's pre.
     (reference Block.hc_mixes)"""
-    fn_t = getattr(hc, "_fn_t", None)
-    if fn_t is None:
-        fn_t = mx.contiguous(hc.fn.T)
-        mx.eval(fn_t)
-        hc._fn_t = fn_t
     y = x.astype(mx.float32)
-    mixes = mx.fast.rms_norm(y.flatten(-2), None, hc.norm_eps) @ fn_t
+    mixes = mx.fast.rms_norm(y.flatten(-2), None, hc.norm_eps) @ fn_transposed(hc)
     return _hc_split_sinkhorn_ops(
         mixes, hc.scale, hc.base, hc.hc_mult, hc.sinkhorn_iters, hc.hc_eps
     )

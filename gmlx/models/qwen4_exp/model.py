@@ -192,13 +192,15 @@ class HyperConnection(nn.Module):
         inject = self.inject if "inject" in self else None
         plain = ("weight" in down and "weight" in up
                  and (inject is None or "weight" in inject))
-        if B * T <= 8 and plain and self._hclr_ok(h.dtype):
+        # The kernels have no backward: training takes the ops.
+        kern = not self.training
+        if kern and B * T <= 8 and plain and self._hclr_ok(h.dtype):
             norm, front, epi = _kq_hc()
             xn = norm(h, self.norm.weight, self.norm.eps)
             lo, inj = front(xn, down.weight, inject.weight,
                             self.norm.weight.dtype)
             return epi(lo, up.weight, xn), inj
-        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps)
+        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps) if kern else None
         if xn is None:
             xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
@@ -207,10 +209,10 @@ class HyperConnection(nn.Module):
         if inject is None:
             return _hc_mix(up_out, xn)
         inj_out = (_hc_inject_kern(xf, inject.weight)
-                   if "weight" in inject else None)
+                   if kern and "weight" in inject else None)
         if inj_out is None:
             inj_out = inject(xf)
-        r = _hc_epi_kern(up_out, xn, inj_out)
+        r = _hc_epi_kern(up_out, xn, inj_out) if kern else None
         if r is not None:
             return r
         # inj stays eager: compiling this sigmoid shifts its fp32 lsb and
@@ -447,8 +449,10 @@ def _hc_combine_ops(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
     return h + out[:, :, None, :] * inject[..., None]
 
 
-def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
-    if h.shape[0] * h.shape[1] > 8:
+def _hc_combine(h: mx.array, out: mx.array, inject: mx.array,
+                kern: bool = True) -> mx.array:
+    """``kern`` False keeps to the ops, which have a backward."""
+    if kern and h.shape[0] * h.shape[1] > 8:
         y = _hc_combine_kern(h, out, inject)
         if y is not None:
             return y
@@ -1118,7 +1122,8 @@ class Attention(nn.Module):
         r, topk = self.ratio, self.indexer.block_topk
         members = (sel[..., None] * r + mx.arange(r)).reshape(B, L, topk * r)
         tail_start = (complete * r)[None, :, None]
-        tail = tail_start + mx.arange(r)[None, None, :]
+        tail = mx.broadcast_to(
+            tail_start + mx.arange(r)[None, None, :], (B, L, r))
         query_ends = (offset + mx.arange(L) + 1)[None, :, None]
         tail_ok = tail < query_ends
         idx = mx.concatenate([members, mx.minimum(tail, query_ends - 1)], axis=-1)
@@ -1670,10 +1675,10 @@ class DecoderLayer(nn.Module):
         else:
             out = self.self_attn(mixed, mask=mask, cache=cache,
                                  positions=positions)
-        h = _hc_combine(h, out, inject)
+        h = _hc_combine(h, out, inject, kern=not self.training)
         mixed, inject = self.hc_ffn(h)
         out = self.mlp(mixed)
-        return _hc_combine(h, out, inject)
+        return _hc_combine(h, out, inject, kern=not self.training)
 
 
 class Qwen4ExpModel(nn.Module):

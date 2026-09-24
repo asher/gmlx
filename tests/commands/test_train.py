@@ -5,6 +5,8 @@ transpose + q/k forward-permute + scale chain must reconstruct an mlx-lm
 CPU-only - hand-built LoRALinear layers, no training, no kernels."""
 from __future__ import annotations
 
+import os
+
 import mlx.core as mx
 import pytest
 
@@ -22,6 +24,10 @@ IN, R, S = 16, 4, 2.0
 Q_OUT, K_OUT = N_HEAD * HEAD_DIM, N_HEAD_KV * HEAD_DIM   # 32, 16
 CONFIG = {"num_attention_heads": N_HEAD, "num_key_value_heads": N_HEAD_KV,
           "num_hidden_layers": 1}
+
+
+# The base tensors _Model's three LoRA modules load from.
+_BASE_NAMES = ("blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.ffn_down.weight")
 
 
 def _lora(out, *, seed):
@@ -137,6 +143,7 @@ def test_grad_checkpoint_uses_the_layer_class_checkpointer(monkeypatch, tmp_path
     model = _Model()
     monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
     monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
@@ -305,6 +312,7 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
 
     monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
     monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
@@ -355,6 +363,7 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
     orig = mx.argpartition
     monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (model, CONFIG, object()))
     monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
@@ -362,11 +371,15 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
     monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: None))
     monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
     monkeypatch.setattr(trainer, "train",
-                        lambda *a, **k: seen.append(getattr(mx.argpartition, "_gmlx_index_stop_gradient", False)))
+                        lambda *a, **k: seen.append((getattr(mx.argpartition, "_gmlx_index_stop_gradient", False),
+                                                     os.environ.get("KQ_SWITCH_GEMM_MIN_ROWS"))))
     monkeypatch.setattr(train, "save_trained_adapter", lambda *a, **k: 0)
+    monkeypatch.setenv("KQ_SWITCH_GEMM_MIN_ROWS", "512")
     train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
-    assert seen == [True]
+    # kq's segment GEMM for large sorted expert calls has no backward
+    assert seen == [(True, "0")]
     assert mx.argpartition is orig
+    assert os.environ["KQ_SWITCH_GEMM_MIN_ROWS"] == "512"
 
 
 def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monkeypatch, tmp_path):
@@ -390,6 +403,7 @@ def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monke
 
     monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
     monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
     monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (_Model(), CONFIG, object()))
     monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
@@ -397,6 +411,45 @@ def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monke
     monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: seen.append("restored")))
     monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
     monkeypatch.setattr(trainer, "train", boom)
+    monkeypatch.delenv("KQ_SWITCH_GEMM_MIN_ROWS", raising=False)
     with pytest.raises(RuntimeError, match="boom"):
         train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
     assert mx.argpartition is orig and seen == ["restored"]
+    assert "KQ_SWITCH_GEMM_MIN_ROWS" not in os.environ
+
+
+def test_train_refuses_before_the_loop_when_the_adapter_could_not_hold_a_module(monkeypatch, tmp_path):
+    """A LoRA module that no tensor of the base loads into ends train_lora
+    before the first step, and a run that trains hands the base names to
+    the export."""
+    import contextlib
+
+    import mlx_lm.tuner.datasets as datasets
+    import mlx_lm.tuner.trainer as trainer
+    import mlx_kquant.mlx_lm_patch as patch
+
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+    import gmlx.tune.attention as attention
+    import gmlx.tune.gdn as gdn
+
+    seen = []
+    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (_Model(), CONFIG, object()))
+    monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: None))
+    monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
+    monkeypatch.setattr(trainer, "train", lambda *a, **k: seen.append("trained"))
+    monkeypatch.setattr(train, "save_trained_adapter", lambda *a, **k: seen.append(k["base_names"]) or 3)
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: ["blk.0.attn_q.weight", "blk.0.ffn_down.weight"])
+    with pytest.raises(train.TrainRefused, match=r"^a GGUF adapter cannot hold 1 of the adapted modules, nothing "
+                                                 r"was trained: model.layers.0.self_attn.k_proj \(no tensor"):
+        train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
+    assert seen == []
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(_BASE_NAMES))
+    assert train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)[1] == 3
+    assert seen == ["trained", list(_BASE_NAMES)]

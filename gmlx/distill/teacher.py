@@ -196,7 +196,11 @@ def build_rows(tokenizer, corpus: str, *, max_len: int, text_key: str, max_rows:
                     tids, _, _ = _tokens.encode_with_byte_ends(tokenizer, tails[0].encode("utf-8"), tb,
                                                                add_special_tokens=False)
                     tail_tokens = len(tids)
-            budget = max(max_len - frame_tokens - tail_tokens, 8)
+            budget = max_len - frame_tokens - tail_tokens
+            if budget < 8:
+                raise ValueError(
+                    f"--max-len {max_len} leaves {budget} tokens for a window beside the {frame_tokens}-token "
+                    f"continue frame{' and its closing tail' if tail_tokens else ''}, at least 8 are needed")
         else:
             budget = max_len - (1 if bos is not None else 0)
         for doc_id, text in _corpus.iter_corpus(corpus, text_key=text_key, limit=limit_docs, hf_split=hf_split):

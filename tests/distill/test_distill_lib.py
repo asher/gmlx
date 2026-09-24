@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 from pathlib import Path
 
@@ -1317,8 +1318,9 @@ def test_fit_reply_drops_leading_turns(tok_bl):
     assert dl.fit_reply(tok, conv[:-1], 10_000, tb) is None
 
 
-def _tiny_reply_cache(tmp: Path, tok, pairs, K=8, seed=5):
-    """A reply-row cache: pairs of (teacher messages, student messages or None)."""
+def _tiny_reply_cache(tmp: Path, tok, pairs, K=8, seed=5, corpus_sha="x"):
+    """A reply-row cache: pairs of (teacher messages, student messages or
+    None). ``corpus_sha`` names the corpus the rows came from."""
     rng = np.random.default_rng(seed)
     tb = dl.token_bytes(tok)
     V = len(tb)
@@ -1348,7 +1350,8 @@ def _tiny_reply_cache(tmp: Path, tok, pairs, K=8, seed=5):
     dl.write_manifest(tmp, teacher_path="synthetic", dataset="synthetic", num_samples=len(rows),
                       max_seq_len=64, seed=seed, top_k=K, vocab_size=V, config_vocab_size=V,
                       tokenizer_hash=dl.vocab_map_hash(tok), batch_size=8,
-                      gmlx_distill={"mlx_kld_compatible": False, "corpus_sha256": "x", "frame": {"kind": "reply"}})
+                      gmlx_distill={"mlx_kld_compatible": False, "corpus_sha256": corpus_sha,
+                                    "frame": {"kind": "reply"}})
 
 
 def test_asymmetric_rows_align_on_the_student_list(tmp_path, tok_bl, tok_spm):
@@ -3047,9 +3050,29 @@ def test_cut_windows_hard_cut_stays_on_a_character_boundary(tmp_path, tok_bl):
         text[b0:int(ends[e - 1])].decode("utf-8")
     corpus = tmp_path / "cjk.jsonl"
     corpus.write_text(json.dumps({"text": text.decode("utf-8")}) + "\n", encoding="utf-8")
-    rows = _teacher.build_rows(tok, str(corpus), max_len=40, text_key="text", max_rows=None, max_tokens=None,
+    # 48 leaves 9 tokens per window beside the 39-token continue frame
+    rows = _teacher.build_rows(tok, str(corpus), max_len=48, text_key="text", max_rows=None, max_tokens=None,
                                source=None, hf_split="train", limit_docs=None, frame="continue")
     assert len(rows[0]) > 1
+
+
+def test_continue_rows_stay_within_max_len(tmp_path, tok_bl):
+    """A --max-len that leaves under 8 tokens beside the continue frame is
+    refused with the frame's size, and every row built with room fits the
+    limit, frame included."""
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    corpus = tmp_path / "prose.jsonl"
+    corpus.write_text(json.dumps({"text": "The quick brown fox jumps over the lazy dog. " * 40}) + "\n",
+                      encoding="utf-8")
+    kw = dict(text_key="text", max_rows=None, max_tokens=None, source=None, hf_split="train", limit_docs=None,
+              frame="continue")
+    with pytest.raises(ValueError, match="--max-len 40 leaves 1 tokens for a window beside the 39-token"):
+        _teacher.build_rows(tok, str(corpus), max_len=40, **kw)
+    rows = _teacher.build_rows(tok, str(corpus), max_len=48, **kw)[0]
+    assert len(rows) > 1
+    assert max(len(r[3]) for r in rows) <= 48
 
 
 def test_train_refuses_a_student_that_adapts_nothing_and_warns_on_a_partial_match(tmp_path, tok_bl, capsys,
@@ -3562,6 +3585,39 @@ def test_train_refuses_a_directory_or_a_non_gguf_student_for_the_adapter_before_
     rc = _trainer.run_train(_trainer.TrainOptions(adapter_out=str(tmp_path / "a.gguf"), **base))
     err = capsys.readouterr().err
     assert rc == 2 and "--adapter-out needs a GGUF student" in err and str(student) in err
+
+
+def test_train_refuses_before_the_first_step_when_the_adapter_could_not_hold_a_module(tmp_path, tok_bl, capsys,
+                                                                                    monkeypatch):
+    """A LoRA module that no tensor of the student GGUF loads into stops the
+    run before it trains, not at the export after the last step, and a run
+    that trains writes pairs keyed to the student's own tensor names."""
+    from types import SimpleNamespace
+
+    import gmlx.load.adapter as adapter
+    import gmlx.load.preflight as preflight
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    monkeypatch.setattr(_trainer, "gguf_file", lambda p: str(tmp_path / "student.gguf"))
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: SimpleNamespace(arch="llama"))
+    tensors = ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down")
+    names = [f"blk.{i}.{t}.weight" for i in range(2) for t in tensors]
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: [n for n in names if n != "blk.1.ffn_up.weight"])
+    ck = tmp_path / "ck"
+    out = tmp_path / "a.gguf"
+    base = dict(views=[str(view)], student=str(student), iters=1, batch_size=2, no_wired_limit=True, lora_rank=2,
+                chunk=16, val_batches=1, ckpt_dir=str(ck), save_every=1, adapter_out=str(out))
+    rc = _trainer.run_train(_trainer.TrainOptions(**base))
+    err = capsys.readouterr().err
+    assert rc == 2 and not (ck / "last").exists() and not out.exists() and "[train] it " not in err
+    assert ("[train] refuse: --adapter-out: a GGUF adapter cannot hold 1 of the adapted modules: "
+            "model.layers.1.mlp.up_proj (no tensor of the base GGUF loads into it)") in err
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: list(names))
+    assert _trainer.run_train(_trainer.TrainOptions(**base)) == 0
+    plan = adapter.load_lora_adapter(str(out), base_arch="llama")
+    assert len(plan.modules) == 14 and "model.layers.1.mlp.up_proj" in plan.modules
 
 
 def test_train_reports_the_resumed_runs_own_throughput(tmp_path, tok_bl, capsys, monkeypatch):
@@ -7050,8 +7106,10 @@ def test_train_leaves_out_rows_whose_prompt_another_view_validates(tmp_path, tok
         return [([{"role": "user", "content": prompts[i]},
                   {"role": "assistant", "content": f"the cat {tag} is {i}"}], None) for i in order]
 
-    _tiny_reply_cache(tmp_path / "c1", tok, pairs("a", range(40)))
-    _tiny_reply_cache(tmp_path / "c2", tok, pairs("b hat", np.random.default_rng(0).permutation(40)[:30]))
+    # two rounds, two corpus files: only the prompts are shared
+    _tiny_reply_cache(tmp_path / "c1", tok, pairs("a", range(40)), corpus_sha="round-a")
+    _tiny_reply_cache(tmp_path / "c2", tok, pairs("b hat", np.random.default_rng(0).permutation(40)[:30]),
+                      corpus_sha="round-b")
     student = _tiny_mlx_teacher(tmp_path / "student", tok)
     views, val, trained = [], set(), []
     for name in ("c1", "c2"):
@@ -7075,19 +7133,96 @@ def test_train_leaves_out_rows_whose_prompt_another_view_validates(tmp_path, tok
                                                   ckpt_dir=str(tmp_path / "ck")))
     err = capsys.readouterr().err
     assert rc == 0, err
-    assert f"[train] {leaked} train rows left out: a validation row holds their prompt" in err
+    assert (f"[train] {leaked} train rows left out: a validation row holds their document or prompt"
+            in err)
 
 
-def test_prompt_key_ignores_the_reply_and_names_text_rows_by_document():
-    from gmlx.distill.trainer import prompt_key
+def test_prompt_keys_match_one_prompt_or_one_document_and_nothing_else():
+    from gmlx.distill.trainer import prompt_keys
 
     ask = {"role": "user", "content": "q"}
-    a = prompt_key({"messages": [ask, {"role": "assistant", "content": "x"}], "doc_id": "r1.jsonl:3"}, "0:3")
-    b = prompt_key({"messages": [ask, {"role": "assistant", "content": "y"}], "doc_id": "r2.jsonl:9"}, "1:9")
-    assert a == b
-    assert prompt_key({"messages": [ask]}, "0:0") == a
-    assert prompt_key({"doc_id": "c.jsonl:1"}, "0:1") == prompt_key({"doc_id": "c.jsonl:1"}, "1:5")
-    assert prompt_key({}, "0:1") != prompt_key({}, "1:1")
+
+    def reply(text):
+        return {"role": "assistant", "content": text}
+
+    # one prompt under two document names: the message key matches
+    a = prompt_keys({"messages": [ask, reply("x")], "doc_id": "r1.jsonl:3", "frame": "reply"}, "c1", "0:3")
+    b = prompt_keys({"messages": [ask, reply("y")], "doc_id": "r2.jsonl:9", "frame": "reply"}, "c2", "1:9")
+    assert a & b
+    # the student's messages decide, not the teacher's context render
+    ctx = {"role": "system", "content": "a long context"}
+    c = prompt_keys({"messages": [ctx, ask, reply("x")], "student_messages": [ask, reply("x")],
+                     "doc_id": "r3.jsonl:0", "frame": "reply"}, "c3", "2:0")
+    assert c & a
+    # one conversation rendered two ways in one corpus: the document key
+    whole = prompt_keys({"messages": [ask, reply("x"), ask, reply("z")], "doc_id": "d.jsonl:4",
+                         "frame": "chat"}, "c1", "0:1")
+    turn = prompt_keys({"messages": [ask, reply("x")], "doc_id": "d.jsonl:4", "frame": "reply"}, "c1", "1:1")
+    assert whole & turn
+    # two corpora with a file of the same name share no document
+    assert not prompt_keys({"doc_id": "train.jsonl:1"}, "sha-a", "0:1") & prompt_keys(
+        {"doc_id": "train.jsonl:1"}, "sha-b", "1:1")
+    # windows of two documents under one continue instruction share nothing
+    inst = [{"role": "user", "content": "continue the text"}]
+    w1 = prompt_keys({"messages": inst + [reply("one")], "doc_id": "t.jsonl:0", "frame": "continue"}, "c", "0:0")
+    w2 = prompt_keys({"messages": inst + [reply("two")], "doc_id": "t.jsonl:1", "frame": "continue-closed"},
+                     "c", "0:1")
+    assert not w1 & w2
+    assert not prompt_keys({}, "c", "0:1") & prompt_keys({}, "c", "1:1")
+
+
+def test_train_runs_on_a_continue_framed_cache(tmp_path, tok_bl, capsys, monkeypatch):
+    """Every continue row wraps its window in one instruction. Training
+    must not take that shared prompt for a validation twin of every row."""
+    from gmlx.distill import teacher as _teacher
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+
+    _mlx_students(monkeypatch)
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    corpus = tmp_path / "c.jsonl"
+    corpus.write_text("".join(json.dumps({"text": f"the cat is {i} the hat is {i} " * 3}) + "\n"
+                              for i in range(30)))
+    cache = tmp_path / "cache"
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus), out=str(cache), top_k=8,
+                                                  max_len=128, rows_per_shard=4, frame="continue"))
+    assert rc == 0, capsys.readouterr().err
+    view = tmp_path / "view"
+    assert _view.run_align(_view.AlignOptions(cache=str(cache), student=str(teacher), out=str(view),
+                                              val_fraction=0.1)) == 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(teacher), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                  ckpt_dir=str(tmp_path / "ck")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "left out" not in err
+
+
+def test_resume_fingerprint_records_the_leave_out_rule(tmp_path, tok_bl):
+    from gmlx.distill import trainer as _trainer
+
+    view, student = _cpu_view(tmp_path, tok_bl)
+    v = json.loads((view / "view.json").read_text())
+    opts = _trainer.TrainOptions(views=[str(view)], student=str(student), iters=1)
+    fp = _trainer.resume_fingerprint([v], opts, {}, 2.0)
+    assert fp["val_leave_out"] == _trainer.VAL_LEAVE_OUT
+
+
+def test_a_continue_frame_that_leaves_no_room_for_a_window_is_refused(tmp_path, tok_bl, capsys):
+    from gmlx.distill import teacher as _teacher
+
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    corpus = _text_corpus(tmp_path / "c.jsonl")
+    with pytest.raises(ValueError, match="continue frame"):
+        _teacher.build_rows(tok, str(corpus), max_len=8, text_key="text", max_rows=None, max_tokens=None,
+                            source=None, hf_split="train", limit_docs=None, frame="continue")
+    teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
+    rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(corpus),
+                                                  out=str(tmp_path / "cache"), top_k=8, max_len=8,
+                                                  frame="continue"))
+    assert rc == 2 and "continue frame" in capsys.readouterr().err
 
 
 def test_cut_windows_refuses_a_window_with_no_room():
@@ -7110,15 +7245,19 @@ def test_a_train_run_that_raises_restores_the_selection_ops_and_attention(tmp_pa
     orig = mx.argpartition
 
     def boom(*a, **k):
+        seen.append(os.environ.get("KQ_SWITCH_GEMM_MIN_ROWS"))
         raise RuntimeError("boom")
 
     monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: seen.append("restored")))
     monkeypatch.setattr(_data, "collate", boom)
+    monkeypatch.delenv("KQ_SWITCH_GEMM_MIN_ROWS", raising=False)
     with pytest.raises(RuntimeError, match="boom"):
         _trainer.run_train(_trainer.TrainOptions(
             views=[str(view)], student=str(student), iters=1, batch_size=2, seed=1, ckpt_dir=str(tmp_path / "ck"),
             no_wired_limit=True, lora_rank=2, chunk=16))
-    assert mx.argpartition is orig and seen == ["restored"]
+    # the loop ran with kq's segment GEMM off, and the setting is put back
+    assert mx.argpartition is orig and seen == ["0", "restored"]
+    assert "KQ_SWITCH_GEMM_MIN_ROWS" not in os.environ
 
 
 def test_grad_checkpoint_trains_the_same_adapter(tmp_path, tok_bl, capsys, monkeypatch):

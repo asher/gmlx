@@ -823,7 +823,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 |------|---------|---------|
 | `model`, positional | required | the base GGUF, or a config id |
 | `--data PATH_OR_ID` | required | a directory with `train.jsonl` and `valid.jsonl`, or a Hugging Face dataset id |
-| `--adapter-out PATH` | required | where to write the adapter |
+| `--adapter-out PATH` | required | where to write the adapter. A module the adapter cannot hold is refused before the first step |
 | `--config FILE` | the first default location | the config an id is resolved against |
 | `--iters N` | `150` | training iterations |
 | `--batch-size N` | `4` | batch size |
@@ -989,7 +989,7 @@ dropped, counted in the `[cache] frame` line.
 | `--out DIR` | required unless `--validate` | the cache directory to write |
 | `--validate DIR` | none | validate an existing cache and exit, no teacher load |
 | `--top-k N` | `256` | log-probabilities kept per position |
-| `--max-len N` | `2048` | teacher tokens per window, including the start token, at least 2 |
+| `--max-len N` | `2048` | teacher tokens per window, including the start token, at least 2. The continue frame counts toward it and must leave the window at least 8 |
 | `--max-disk-gb F` | none | refuse when the size estimate exceeds this |
 | `--cache-limit-gb F` | `8.0` | MLX buffer cache cap during the pass |
 | `--logits-cap-gb F` | `4.0` | memory cap that sizes the head sub-chunk |
@@ -1053,7 +1053,7 @@ Training flags, in the order `--help` prints them.
 |------|---------|---------|
 | `--view DIR` | required | a view directory, repeatable to mix views aligned alike over one tokenizer pair |
 | `--student GGUF` | required | the student GGUF, sharded ok |
-| `--adapter-out PATH` | required | where to write the GGUF adapter, refused before the load when it is a directory or cannot be written |
+| `--adapter-out PATH` | required | where to write the GGUF adapter. A path that cannot be written is refused before the load, a module the adapter cannot hold before the first step |
 | `--iters N` | required | training steps |
 | `--lora-rank N` | `16` | LoRA rank |
 | `--lora-scale F` | `2.0` | LoRA multiplier applied directly, nonzero |

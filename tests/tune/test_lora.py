@@ -14,6 +14,7 @@ from mlx.utils import tree_flatten
 
 from gmlx.tune.lora import (
     LORA_KEYS,
+    adapter_refusals,
     lora_modules_to_gguf,
     lora_scale,
     prepare_lora_student,
@@ -125,3 +126,17 @@ def test_prepare_leaves_expert_stacks_out_of_the_adapter():
     assert not any(isinstance(m, LoRASwitchLinear) for _k, m in model.named_modules())
     names = [k for k, _ in tree_flatten(model.trainable_parameters())]
     assert len(names) == 2 * n and not any("layers.0.mlp" in k for k in names)
+
+
+def test_adapter_refusals_name_the_modules_the_export_would_refuse():
+    """The check the trainers run before the first step resolves the same
+    names the export writes."""
+    model = _model(layers=2)
+    prepare_lora_student(model, rank=2, scale=1.0, keys=LORA_KEYS)
+    tensors = ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down")
+    names = [f"blk.{i}.{t}.weight" for i in range(2) for t in tensors]
+    assert adapter_refusals(model, base_arch="llama", base_names=names) == {}
+    names.remove("blk.1.ffn_up.weight")
+    assert adapter_refusals(model, base_arch="llama", base_names=names) == {
+        "model.layers.1.mlp.up_proj": "no tensor of the base GGUF loads into it"}
+    assert adapter_refusals(model, base_arch="llama", base_names=names, keys=("self_attn.q_proj",)) == {}

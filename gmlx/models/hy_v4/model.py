@@ -205,8 +205,9 @@ class IndependentHyperConnection(nn.Module):
 
     def pre_norm(self, x: mx.array, norm: nn.RMSNorm):
         """``pre`` with the sublayer norm folded in, one dispatch when the
-        fused kernel applies. The collapse feeds nothing but that norm."""
-        if ihc_kernels.eligible(x, self.hc_mult):
+        fused kernel applies. The collapse feeds nothing but that norm.
+        The kernels have no backward, so training takes the ops."""
+        if not self.training and ihc_kernels.eligible(x, self.hc_mult):
             return ihc_kernels.front_collapse(
                 x, self._fn_transposed(), self.scale, self.base, norm.weight,
                 self.hc_eps, self.norm_eps, self.magnitude)
@@ -215,7 +216,7 @@ class IndependentHyperConnection(nn.Module):
 
     def expand(self, y: mx.array, residual: mx.array, post: mx.array):
         """``y`` [B, L, D] scaled by ``post`` into each residual stream."""
-        if ihc_kernels.eligible(residual, self.hc_mult):
+        if not self.training and ihc_kernels.eligible(residual, self.hc_mult):
             return ihc_kernels.expand(y, residual, post)
         out = (residual.astype(mx.float32)
                + post[..., None] * y.astype(mx.float32)[..., None, :])

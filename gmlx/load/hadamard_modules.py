@@ -77,17 +77,18 @@ def _blocked_transform(xf: mx.array, block: int) -> mx.array:
     return y.reshape(*lead, -1)
 
 
-def rotate(x: mx.array, fold: _Fold) -> mx.array:
+def rotate(x: mx.array, fold: _Fold, kernel: bool = True) -> mx.array:
     """The forward fold of a projection input: permute, sign, transform.
-    Returns ``x.dtype``."""
+    Returns ``x.dtype``. ``kernel`` False keeps to the MLX ops, which have
+    a backward: the kq kernel has none."""
     global _count
     if os.environ.get("GMLX_HADAMARD_ROTATE") == "0":
         return x
     if os.environ.get("GMLX_HADAMARD_TRACE") == "1":
         _count += 1
-    kernel = _kernel(fold.block)
-    if kernel is not None:
-        return kernel(x, fold.signs, block=fold.block, perm=fold.perm)
+    kq_rotate = _kernel(fold.block) if kernel else None
+    if kq_rotate is not None:
+        return kq_rotate(x, fold.signs, block=fold.block, perm=fold.perm)
     if fold.perm is not None:
         rep, nk, hd = fold.perm
         lead = x.shape[:-1]
@@ -124,7 +125,7 @@ class HadamardKQuantLinear(KQuantLinear):
 
     def __call__(self, x, lora=None, *, pre_rotated=False):
         if not pre_rotated:
-            x = rotate(x, self._hadamard)
+            x = rotate(x, self._hadamard, kernel=not self.training)
         return super().__call__(x, lora=lora)
 
 
@@ -136,7 +137,7 @@ class HadamardKQuantEmbedding(KQuantEmbedding):
         return rotate_inverse(super().__call__(x), self._hadamard)
 
     def as_linear(self, x):
-        return super().as_linear(rotate(x, self._hadamard))
+        return super().as_linear(rotate(x, self._hadamard, kernel=not self.training))
 
 
 def is_folded(module) -> bool:
@@ -164,7 +165,7 @@ def shared_linears(modules, x: mx.array) -> tuple:
             continue
         xr = rotated.get(key)
         if xr is None:
-            xr = rotate(x, f)
+            xr = rotate(x, f, kernel=not m.training)
             rotated[key] = xr
         outs.append(m(xr, pre_rotated=True))
     return tuple(outs)

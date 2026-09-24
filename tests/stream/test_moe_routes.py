@@ -329,6 +329,7 @@ def test_recorded_ids_do_not_hold_the_selection_buffers():
     rec = RouteRecorder()
     rec.layers = list(range(n_layers))
     mx.eval(mx.zeros((1,)))
+    mx.synchronize()
     mx.clear_cache()
     base = mx.get_active_memory()
     for li in range(n_layers):
@@ -338,6 +339,10 @@ def test_recorded_ids_do_not_hold_the_selection_buffers():
         inds, w = _apply_expert_controls(SimpleNamespace(_kq_li=li, _kq_route_record=rec), inds, w)
         mx.eval((w * inds.astype(mx.float32)).sum())
         del g, inds, w
+    # A GPU command buffer releases its inputs in its completion handler,
+    # after mx.eval returns, so the last layer's buffers count as active
+    # until the stream is synchronized.
+    mx.synchronize()
     mx.clear_cache()
     held = mx.get_active_memory() - base
     kept = n_layers * B * T * k * 4
