@@ -1148,6 +1148,7 @@ def _generate_speculative(
         "rounds": len(accept),
         "draft_n": total_d,
         "draft_n_accepted": total_a,
+        "gated_rounds": int(getattr(drafter, "gated_rounds", 0) or 0),
     }
 
 
@@ -1322,6 +1323,7 @@ def generate_speculative_owned(
         "rounds": len(accept),
         "draft_n": total_d,
         "draft_n_accepted": total_a,
+        "gated_rounds": int(getattr(drafter, "gated_rounds", 0) or 0),
     }
 
 

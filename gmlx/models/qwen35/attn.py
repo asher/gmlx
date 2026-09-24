@@ -42,6 +42,7 @@ import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.cache.kvarn_cache import KVarNView
+from gmlx.load.hadamard_modules import fold_of, glu_rotate
 from .gdn import owned_gdn_active as owned_attn_active  # one switch
 from .owned import _qwen3_5_left_padding_info
 from .rope import apply_multimodal_rotary_pos_emb as _apply_mrope
@@ -947,7 +948,9 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
         return verify_linear(
-            self.o_proj, output * mx.sigmoid(gate), target_verify
+            self.o_proj,
+            glu_rotate(output, gate, fold_of(self.o_proj), activation="sigmoid"),
+            target_verify,
         )
 
 

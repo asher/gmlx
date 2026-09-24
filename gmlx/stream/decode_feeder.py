@@ -56,6 +56,7 @@ from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .feeder_common import (
     ATTRS,
     KINDS,
+    DaemonPool,
     lock_pages,
     read_range,
     swapped_weights,
@@ -213,65 +214,6 @@ def _pressure_level() -> int:
     except AttributeError:
         return 1
     return int(val.value) if rc == 0 else 1
-
-
-class _DaemonReadPool:
-    """ThreadPoolExecutor stand-in whose workers are daemon threads. The
-    stdlib pool's workers are joined at interpreter exit, so one read
-    wedged in the kernel would hang process shutdown; daemon workers die
-    with the process instead. ``on_start`` runs once in each worker thread
-    (the lookahead pool drops its disk-I/O priority there)."""
-
-    def __init__(self, n: int, on_start=None):
-        self._q: queue.Queue = queue.Queue()
-        self._on_start = on_start
-        self._threads = []
-        for i in range(n):
-            t = threading.Thread(
-                target=self._run, daemon=True, name=f"gmlx-decode-read-{i}")
-            t.start()
-            self._threads.append(t)
-
-    def _run(self) -> None:
-        if self._on_start is not None:
-            try:
-                self._on_start()
-            except Exception:  # noqa: S110 - start hook is advisory
-                pass
-        while True:
-            item = self._q.get()
-            if item is None:
-                return
-            fut, fn, args = item
-            if fut.set_running_or_notify_cancel():
-                try:
-                    fut.set_result(fn(*args))
-                except BaseException as exc:
-                    fut.set_exception(exc)
-            # A worker blocked in get() is a live frame: locals kept
-            # from the last item (the feeder's bound method, the
-            # future) would pin the feeder and its modules past unload.
-            del item, fut, fn, args
-
-    def submit(self, fn, *args) -> Future:
-        fut: Future = Future()
-        self._q.put((fut, fn, args))
-        return fut
-
-    def grow(self) -> None:
-        """Replace a worker lost to a wedged read."""
-        t = threading.Thread(
-            target=self._run, daemon=True,
-            name=f"gmlx-decode-read-{len(self._threads)}")
-        t.start()
-        self._threads.append(t)
-
-    def shutdown(self, wait: bool = True) -> None:
-        for _ in self._threads:
-            self._q.put(None)
-        if wait:
-            for t in self._threads:
-                t.join()
 
 
 def _iopol_utility() -> None:
@@ -453,7 +395,7 @@ class DecodeFeeder:
         self._lookups = 0
         self._layer_hits = {li: 0 for li in self._layers}
         self._layer_lookups = {li: 0 for li in self._layers}
-        self._read_pool = _DaemonReadPool(read_workers)
+        self._read_pool = DaemonPool(read_workers)
 
         # Lookahead prestage state (constants above; pool and bounce
         # buffers are lazy - most runs never prestage). _pending maps
@@ -472,7 +414,7 @@ class DecodeFeeder:
         self._seeded = 0
         self._seed_bytes = 0
         self._t_seed = 0.0
-        self._la_pool: _DaemonReadPool | None = None
+        self._la_pool: DaemonPool | None = None
         self._la_bounce: queue.Queue | None = None
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
         self._la_cancel = (
@@ -1005,7 +947,7 @@ class DecodeFeeder:
                 read_range(self._fds[path], memoryview(buf)[: b - a], a)
                 return (b - a), time.monotonic() - t
 
-            pool = _DaemonReadPool(_FAST_DISK_PROBE_DEPTH)
+            pool = DaemonPool(_FAST_DISK_PROBE_DEPTH)
             try:
                 futs = [pool.submit(one, job) for job in picks]
                 _, pending = futures_wait(
@@ -1064,7 +1006,7 @@ class DecodeFeeder:
             "prestage back to guess-grade eviction and the wide barrier"
         )
 
-    def _la_state(self) -> _DaemonReadPool:
+    def _la_state(self) -> DaemonPool:
         if self._la_pool is None:
             import mlx_kquant as kq
 
@@ -1077,7 +1019,7 @@ class DecodeFeeder:
                 if os.environ.get(
                     "GMLX_DECODE_LOOKAHEAD_IOPOL", default) != "0"
                 else None)
-            self._la_pool = _DaemonReadPool(n, on_start=on_start)
+            self._la_pool = DaemonPool(n, on_start=on_start)
             if self._aligned:
                 self._la_bounce = queue.Queue()
                 for _ in range(n):

@@ -34,6 +34,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `serve` ignored a request's `thinking` control when the profile or
+  `MLX_VLM_ENABLE_THINKING` set `enable_thinking`. The request now wins.
+- Unloading a DeepSeek-V4.1 model that reads its engram tables from the GGUF
+  could hang while a table read was still queued.
+- A stalled prefill expert read could give later requests wrong output with
+  no error. Prefill now reads through the page cache until the model is
+  loaded again.
+- A short prefill chunk, a model unload, or process exit could hang forever
+  after a stalled expert read.
 - A test run or a long session could stop dead when an expert streaming
   feeder was garbage-collected while a thread was starting.
 - `gmlx train` on a text-only Qwen3.5 or Qwen3.6 GGUF kept every state
@@ -79,6 +88,34 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   load.
 - A `gmlx train` run that failed or was refused before writing its adapter left
   behind the empty folder made for `--adapter-out`.
+- Streamed MoE experts could return wrong values at layers whose gate+up
+  concat had been built, since the copy is expert-ordered while the
+  decode arena binds slot bytes and slot ids. Feeder-swapped calls now
+  gather from the bound bytes, and streamed stacks never build the copy.
+## [0.4.15] - 2026-09-22
+
+### Added
+
+- The PrismML `PTQ1_0` and `PQ2_0` ternary codecs load, and Hadamard-folded
+  GGUFs such as the Ternary Bonsai Qwen3.8-27B files run with the rotation
+  applied at run time. `validate` reports a folded file.
+- DSpark drafters on the DFlash backbone, such as the community Ternary
+  Bonsai 2 drafters, load with `--draft-gguf` against Qwen3.5-family targets.
+
+### Changed
+
+- Requires mlx-kquant 0.4.13. On GPUs without NAX (M1 to M4), its verify
+  kernels speed up speculative decoding for `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`,
+  `PQ2_0` and `PTQ1_0` targets.
+- The Qwen3.5-family speculative verify runs the gated-delta scan on a kernel
+  that spreads each head across the GPU, with the gated output norm as its
+  own dispatch. The scan records each position's state update instead of
+  storing every state, and the next step replays the accepted ones.
+
+### Fixed
+
+- A model load now ends with a full garbage collection, so Python's first
+  full pass over the new model no longer stalls a decode step soon after.
 
 ## [0.4.14] - 2026-09-18
 
@@ -134,10 +171,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Streaming decode with the lookahead prestage no longer crashes on a
   model whose router scores are bfloat16 ("'bfloat16' is not a valid
   PEP 3118 buffer format string").
-- Streamed MoE experts could return wrong values at layers whose gate+up
-  concat had been built, since the copy is expert-ordered while the
-  decode arena binds slot bytes and slot ids. Feeder-swapped calls now
-  gather from the bound bytes, and streamed stacks never build the copy.
 
 ## [0.4.13] - 2026-09-12
 

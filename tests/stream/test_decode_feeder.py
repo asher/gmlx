@@ -1208,12 +1208,32 @@ def test_read_pool_on_start_hook():
     drops its disk-I/O priority there) before serving reads."""
     import threading
 
-    from gmlx.stream.decode_feeder import _DaemonReadPool
+    from gmlx.stream.feeder_common import DaemonPool
 
     ran = threading.Event()
-    pool = _DaemonReadPool(1, on_start=ran.set)
+    pool = DaemonPool(1, on_start=ran.set)
     assert ran.wait(2)
     pool.shutdown()
+
+
+def test_read_pool_shutdown_notifies_the_work_it_cancels():
+    """Work a shutdown drops counts as done for wait(). A stage that waits
+    on its reads would otherwise never end once a close cancels one."""
+    import threading
+    from concurrent.futures import wait as futures_wait
+
+    from gmlx.stream.feeder_common import DaemonPool
+
+    gate = threading.Event()
+    pool = DaemonPool(1)
+    pool.submit(gate.wait)
+    queued = pool.submit(int)
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+        done, _ = futures_wait([queued], timeout=5)
+        assert done and queued.cancelled()
+    finally:
+        gate.set()
 
 
 def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
@@ -1825,15 +1845,15 @@ def test_finalizer_never_joins_its_pools(monkeypatch, tmp_path):
         return orig(self, wait=wait, **kw)
 
     monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", spy)
-    from gmlx.stream import decode_feeder as df
+    from gmlx.stream.feeder_common import DaemonPool
 
-    orig_read = df._DaemonReadPool.shutdown
+    orig_daemon = DaemonPool.shutdown
 
-    def spy_read(self, wait=True):
+    def spy_daemon(self, wait=True, **kw):
         waits.append(wait)
-        return orig_read(self, wait=wait)
+        return orig_daemon(self, wait=wait, **kw)
 
-    monkeypatch.setattr(df._DaemonReadPool, "shutdown", spy_read)
+    monkeypatch.setattr(DaemonPool, "shutdown", spy_daemon)
     def with_pools():  # the seed pools exist only once seeding has run
         feeder, _ = _make_feeder(monkeypatch, tmp_path)
         feeder._seed_pool = concurrent.futures.ThreadPoolExecutor(1)

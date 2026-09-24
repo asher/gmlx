@@ -63,6 +63,15 @@ onto forwards that share q/k/v and gate/up. On the 27B this is 258
 rotations per decoded token instead of 402. The stock GDN prefill body
 still rotates `in_proj_qkv` and `in_proj_z` separately.
 
+The down and output projections read a gated activation, the swiglu and
+the attention output gate. Where the installed mlx-kquant has
+`glu_hadamard`, `glu_rotate` computes the activation and its rotation in
+one kernel and offers the rotated row, and the projection's own rotation
+returns that row without a dispatch. The offer matches the array object
+and the fold, so any other row still rotates. The stock forwards and the
+owned tree both route the activation through `glu_rotate`, which covers
+80 of the 258 rotations on the 27B.
+
 ## Precision
 
 A folded file runs at the activation dtype every other file gets, bf16
@@ -71,11 +80,14 @@ evenly, so the rotated row has a small dynamic range and the mantissa is
 what limits precision on it. float16 keeps three more mantissa bits than
 bf16, and `GMLX_ACTIVATION_DTYPE=float16` tightens the teacher-forced
 logprob delta against the reference on the 27B from about 0.3 nats to
-about 0.04 at the same speed. The bf16 delta already sits inside gmlx's
-own prefill-versus-decode noise, and model-wide float16 carries an
-overflow risk in the residual stream at long context that has not been
-ruled out, so the default stays. Passing f32 activations changes nothing,
-because the kquant matmul's internal precision follows its output dtype.
+about 0.04. The bf16 delta already sits inside gmlx's own
+prefill-versus-decode noise, and float16 costs speed on a GPU with native
+bf16. On the PQ2_0 file an M3 Max decodes about 2 percent slower on float16,
+and the prefill tile runs about 20 percent slower. The 16K decode
+integrity test passes the PQ2_0 file on float16, so the narrower exponent
+range holds at depth, and float16 stays the option for parity work rather
+than the default. Passing f32 activations changes nothing, because the
+kquant matmul's internal precision follows its output dtype.
 
 ## Refusal
 
@@ -86,5 +98,6 @@ fold target raises at resolution for the same reason.
 
 ## Switches
 
-`GMLX_HADAMARD_KERNEL`, `GMLX_HADAMARD_TRACE` and `GMLX_HADAMARD_ROTATE`
-are documented in [debug-switches.md](debug-switches.md).
+`GMLX_HADAMARD_KERNEL`, `GMLX_HADAMARD_FUSE`, `GMLX_HADAMARD_TRACE` and
+`GMLX_HADAMARD_ROTATE` are documented in
+[debug-switches.md](debug-switches.md).

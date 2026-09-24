@@ -451,6 +451,78 @@ def test_request_reasoning_effort_field_maps_onto_template():
     assert out._kq_thinking_explicit is False
 
 
+_SWITCH_TEMPLATE = "{% if enable_thinking %}<think>{% endif %}"
+
+
+def _build_with_server_thinking(monkeypatch, req, *, sampling=None,
+                                env=None):
+    """Run the installed gen-args chain (profile injection, then the
+    template-kwargs stash) with a server-side enable_thinking from the
+    profile sampling block or MLX_VLM_ENABLE_THINKING."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    if env is None:
+        monkeypatch.delenv("MLX_VLM_ENABLE_THINKING", raising=False)
+    else:
+        monkeypatch.setenv("MLX_VLM_ENABLE_THINKING", env)
+
+    def stub(request, processor=None, tenant_id=None):
+        # mlx-vlm: the request field, else the environment variable.
+        flag = (request.enable_thinking
+                if "enable_thinking" in request.model_fields_set
+                else env is not None)
+        return gen.GenerationArguments(enable_thinking=flag)
+
+    monkeypatch.setattr(_APP, "_build_gen_args", stub)
+    sp.install_gen_args_profile_injection()
+    sp.install_chat_template_kwargs()
+    spec = ResolvedModel(id="m", path="/p", sampling=sampling or {}, load={},
+                         cache={}, system=None, speculative=False,
+                         mmproj=None, draft_gguf=None, pin=False, ttl_s=None)
+    proc = types.SimpleNamespace(chat_template=_SWITCH_TEMPLATE)
+    tok = serving.set_active_spec(spec)
+    try:
+        return _APP._build_gen_args(req, proc)
+    finally:
+        serving.reset_active_spec(tok)
+
+
+@pytest.mark.parametrize("control", ["off", {"type": "disabled"}])
+@pytest.mark.parametrize("server", ["profile", "env"])
+def test_request_thinking_control_beats_server_enable_thinking(
+        monkeypatch, control, server):
+    """A server-wide enable_thinking (profile sampling or the environment
+    variable) is a default: a request's own thinking control still wins."""
+    req = types.SimpleNamespace(model_fields_set={"thinking"},
+                                chat_template_kwargs=None, thinking=control)
+    kwargs = ({"sampling": {"enable_thinking": True}} if server == "profile"
+              else {"env": "1"})
+    args = _build_with_server_thinking(monkeypatch, req, **kwargs)
+    assert args.enable_thinking is False
+    assert args.to_template_kwargs()["enable_thinking"] is False
+
+
+@pytest.mark.parametrize("server", ["profile", "env"])
+def test_server_enable_thinking_kept_without_request_control(
+        monkeypatch, server):
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None)
+    kwargs = ({"sampling": {"enable_thinking": True}} if server == "profile"
+              else {"env": "1"})
+    args = _build_with_server_thinking(monkeypatch, req, **kwargs)
+    assert args.enable_thinking is True
+    assert args.to_template_kwargs()["enable_thinking"] is True
+
+
+def test_request_enable_thinking_beats_request_thinking_control(monkeypatch):
+    req = types.SimpleNamespace(model_fields_set={"enable_thinking", "thinking"},
+                                chat_template_kwargs=None,
+                                enable_thinking=True, thinking="off")
+    args = _build_with_server_thinking(
+        monkeypatch, req, sampling={"enable_thinking": False})
+    assert args.enable_thinking is True
+    assert args.to_template_kwargs()["enable_thinking"] is True
+
+
 class _RecordingTok:
     """A tokenizer stand-in whose **kwargs signature makes mlx-vlm's
     enable_thinking capability probe say yes (the 0.6.15 injection path)."""

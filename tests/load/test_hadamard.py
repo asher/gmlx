@@ -31,6 +31,7 @@ from gmlx.load.hadamard_modules import (
     HadamardKQuantEmbedding,
     HadamardKQuantLinear,
     _Fold,
+    glu_rotate,
     install_hadamard_modules,
     reset_rotation_count,
     rotate,
@@ -620,3 +621,47 @@ def test_owned_verify_linears_shares_the_rotation(monkeypatch):
     assert n == 1
     for g, w in zip(got, want):
         assert mx.array_equal(g, w)
+
+
+def _glu_inputs(rng, width):
+    x = rng.standard_normal((2, 3, width)).astype(np.float32)
+    g = 3 * rng.standard_normal((2, 3, width)).astype(np.float32)
+    return mx.array(x).astype(mx.bfloat16), mx.array(g).astype(mx.bfloat16)
+
+
+def _plain_glu(x, g, activation):
+    from mlx_lm.models.activations import swiglu
+
+    return swiglu(g, x) if activation == "silu" else x * mx.sigmoid(g)
+
+
+@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
+def test_glu_rotate_unfused_is_the_plain_product(monkeypatch, activation):
+    rng = np.random.default_rng(16)
+    fold = _fold(FoldTarget(width=512, block=256, signs=_signs(rng, 512)))
+    x, g = _glu_inputs(rng, 512)
+    want = _plain_glu(x, g, activation)
+    for f, fuse in ((None, "1"), (fold, "0")):
+        monkeypatch.setenv("GMLX_HADAMARD_FUSE", fuse)
+        assert mx.array_equal(glu_rotate(x, g, f, activation=activation), want)
+
+
+@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
+def test_glu_rotate_fused_offers_its_rotation(monkeypatch, activation):
+    """The fused row is the rotated product, and the folded projection's
+    own rotate call returns it instead of rotating again."""
+    if getattr(kq, "glu_hadamard", None) is None:
+        pytest.skip("installed mlx-kquant has no glu_hadamard")
+    if mx.default_device() != mx.gpu:
+        pytest.skip("the fused form runs on the GPU device only")
+    rng = np.random.default_rng(17)
+    fold = _fold(FoldTarget(width=512, block=256, signs=_signs(rng, 512)))
+    other = _fold(FoldTarget(width=512, block=256, signs=_signs(rng, 512)))
+    x, g = _glu_inputs(rng, 512)
+    monkeypatch.setenv("GMLX_HADAMARD_FUSE", "1")
+    y = glu_rotate(x, g, fold, activation=activation)
+    assert rotate(y, fold) is y
+    assert rotate(y, other) is not y
+    chain = rotate(_plain_glu(x, g, activation), fold)
+    yf, cf = (np.array(a.astype(mx.float32)) for a in (y, chain))
+    assert np.abs(yf - cf).max() <= 2e-2 * np.abs(cf).max()
