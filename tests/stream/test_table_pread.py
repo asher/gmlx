@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import threading
+from concurrent.futures import CancelledError
 
 import mlx.core as mx
 import numpy as np
@@ -288,4 +289,54 @@ def test_close_leaves_the_fd_to_the_read_in_flight(table_gguf, monkeypatch):
     finally:
         gate.set()
     assert np.array_equal(fut.result(timeout=5), raw[[7]])
+    assert s._fd is None
+
+
+def test_a_close_that_cancels_queued_fills_ends_the_read(
+        table_gguf, monkeypatch):
+    """A close cancels the row fills no worker has started. The read they
+    belong to raises rather than wait on them forever."""
+    monkeypatch.setenv("GMLX_TABLE_PREAD_WORKERS", "4")
+    path, _raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    _, pool, _ = s._ready()
+    s._release()
+    gate, busy = threading.Event(), threading.Semaphore(0)
+
+    def hold():
+        busy.release()
+        gate.wait()
+
+    for _ in range(4):                   # every row worker is busy
+        pool.submit(hold)
+    for _ in range(4):
+        assert busy.acquire(timeout=5)
+    real_submit, submitted, queued = pool.submit, [], threading.Event()
+
+    def submit(fn, *args):
+        submitted.append(real_submit(fn, *args))
+        if len(submitted) == 4:
+            queued.set()
+        return submitted[-1]
+
+    monkeypatch.setattr(pool, "submit", submit)
+    raised = []
+
+    def read():
+        try:
+            s.read(np.arange(40))
+        except BaseException as e:       # noqa: BLE001
+            raised.append(e)
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        reader.start()
+        assert queued.wait(5)
+        s.close(wait=False)
+    finally:
+        gate.set()
+    reader.join(5)
+    assert not reader.is_alive(), "the read waits on a cancelled fill"
+    assert all(f.cancelled() for f in submitted)
+    assert len(raised) == 1 and isinstance(raised[0], CancelledError)
     assert s._fd is None

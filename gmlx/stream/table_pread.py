@@ -24,8 +24,7 @@ import os
 import threading
 import time
 import weakref
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import wait as futures_wait
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import mlx.core as mx
@@ -150,8 +149,14 @@ class TableSource:
                     futs.append(pool.submit(fill, lo, hi))
             finally:
                 # A close can refuse the next submit. The fd stays open
-                # until the reads already queued end.
-                futures_wait(futs)
+                # until the reads already queued end. wait() never
+                # returns on a fill the close cancelled, so each fill
+                # is joined through its own future.
+                for f in futs:
+                    try:
+                        f.exception()
+                    except CancelledError:
+                        pass
             for f in futs:
                 f.result()
         elif cuts:
