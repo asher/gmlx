@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-09-24
+
 ### Added
 
 - `gmlx train` takes `--grad-checkpoint`, which recomputes activations in
