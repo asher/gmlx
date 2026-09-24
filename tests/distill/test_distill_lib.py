@@ -5202,14 +5202,17 @@ def test_corpus_readers_refuse_a_row_without_the_key(tmp_path):
 def test_hf_corpus_rows_are_refused_like_jsonl_rows(monkeypatch):
     """The Hugging Face readers apply the same value checks, naming the
     dataset and the row."""
-    import datasets
+    import sys
+    import types
 
     from gmlx.distill import corpus as _corpus
 
-    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: iter([{"text": "ok"}, {"text": None}]))
+    datasets = types.ModuleType("datasets")  # CI installs no datasets
+    monkeypatch.setitem(sys.modules, "datasets", datasets)
+    datasets.load_dataset = lambda *a, **k: iter([{"text": "ok"}, {"text": None}])
     with pytest.raises(ValueError, match="someorg/ds row 1: 'text' is not a string"):
         list(_corpus.iter_corpus("someorg/ds"))
-    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: iter([{"msgs": []}]))
+    datasets.load_dataset = lambda *a, **k: iter([{"msgs": []}])
     with pytest.raises(ValueError, match="someorg/ds:0: no 'messages' key"):
         list(_corpus.iter_conversations("someorg/ds"))
 
@@ -7262,7 +7265,7 @@ def _tiny_gguf_tokenizer_file(path: Path) -> Path:
     byte-level test vocabulary of tests/load/test_tokenizer.py."""
     from gguf import GGUFWriter
 
-    from tests.load.test_tokenizer import _bytelevel_meta
+    from test_tokenizer import _bytelevel_meta  # tests/load, on sys.path by conftest
 
     meta = _bytelevel_meta()
     w = GGUFWriter(str(path), "qwen2")
@@ -7323,7 +7326,7 @@ def test_header_reads_accept_a_tensor_type_gguf_py_does_not_know(tmp_path):
 
     from gmlx.distill import tokens as _tokens
     from gmlx.load.tokenizer import load_tokenizer_from_gguf
-    from tests.load.test_tokenizer import _bytelevel_meta
+    from test_tokenizer import _bytelevel_meta  # tests/load, on sys.path by conftest
 
     meta = _bytelevel_meta()
     toks = meta["tokenizer.ggml.tokens"] + [f"<extra{i}>" for i in range(3000)]
