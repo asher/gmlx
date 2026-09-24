@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `serve` ignored a request's `thinking` control when the profile or
+  `MLX_VLM_ENABLE_THINKING` set `enable_thinking`. The request now wins.
+
 ## [0.4.15] - 2026-09-22
 
 ### Added

@@ -81,29 +81,36 @@ def _stash_template_kwargs(args, request, _processor):
     merged = _merged_template_kwargs(request, spec, template)
     fields_set = getattr(request, "model_fields_set", None) or set()
     spec_sampling = getattr(spec, "sampling", None) or {} if spec else {}
-    thinking_explicit = (
-        "enable_thinking" in fields_set
-        or "enable_thinking" in spec_sampling
+    request_switch = "enable_thinking" in fields_set
+    server_switch = (
+        "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
     # Dedicated request controls: `thinking` as the z.ai / GLM dict
     # ({"type": "enabled"|"disabled"}) or a plain on/off/adaptive value
     # (the chat client forwards --thinking verbatim), and a top-level
     # `reasoning_effort`. Mapped onto whatever switch this model's
-    # template reads.
-    raw = getattr(request, "thinking", None) if not thinking_explicit else None
+    # template reads. Precedence: request enable_thinking, then these
+    # controls, then the profile or environment value, then the
+    # template's own default.
+    raw = None if request_switch else getattr(request, "thinking", None)
     req_effort = getattr(request, "reasoning_effort", None)
     if raw is not None or req_effort is not None:
         from gmlx.tui.reasoning import map_thinking_controls
 
         merged = map_thinking_controls(merged, raw, req_effort, template,
                                        warn=_warn_thinking)
-    if not thinking_explicit:
-        from gmlx.tui.reasoning import thinking_switch_flag
+    from gmlx.tui.reasoning import thinking_switch_flag
 
-        flag = thinking_switch_flag(raw) if raw is not None else None
-        args.enable_thinking = True if flag is None else flag
-        thinking_explicit = flag is not None
+    flag = thinking_switch_flag(raw) if raw is not None else None
+    if flag is not None:
+        args.enable_thinking = flag
+        thinking_explicit = True
+    elif request_switch or server_switch:
+        thinking_explicit = True
+    else:
+        args.enable_thinking = True
+        thinking_explicit = False
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit
