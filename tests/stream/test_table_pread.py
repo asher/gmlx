@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import gc
+import threading
+from concurrent.futures import CancelledError
+from concurrent.futures import wait as futures_wait
 
 import mlx.core as mx
 import numpy as np
@@ -227,3 +230,234 @@ def test_gather_stats_totals_the_row_reads(table_gguf, monkeypatch):
         assert got["seconds"] > 0
     finally:
         src.close()
+
+
+def test_close_returns_while_a_read_ahead_is_queued(table_gguf, monkeypatch):
+    """A read-ahead takes the source lock when it starts. A close that
+    waits for it while holding that lock never returns."""
+    path, raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    s.read(np.array([0]))                # open the fd and the pools
+    gate = threading.Event()
+    s._ahead.submit(gate.wait)           # holds the one read-ahead thread
+    try:
+        queued = s.read_ahead(np.array([1, 2]))
+        closer = threading.Thread(target=s.close, daemon=True)
+        closer.start()
+        closer.join(0.5)
+    finally:
+        gate.set()
+    closer.join(5)
+    if closer.is_alive():
+        # Free the read-ahead worker, or the interpreter hangs at exit
+        # joining it.
+        s._lock.release()
+        closer.join(5)
+        pytest.fail("close deadlocked against the read-ahead")
+    assert queued.cancelled() or queued.exception() is not None
+    assert s._fd is None and s._pool is None and s._ahead is None
+
+
+def test_a_read_after_close_raises(table_gguf, monkeypatch):
+    path, _raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    s.read(np.array([0]))
+    s.close()
+    s.close()                            # idempotent
+    with pytest.raises(RuntimeError, match="is closed"):
+        s.read(np.array([0]))
+    with pytest.raises(RuntimeError, match="is closed"):
+        s.read_ahead(np.array([0]))
+    assert s._fd is None
+
+
+def test_close_leaves_the_fd_to_the_read_in_flight(table_gguf, monkeypatch):
+    """A read in flight keeps its fd until it ends, so a close never hands
+    its preads a closed or reused descriptor."""
+    import gmlx.stream.table_pread as tp
+
+    path, raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    started, gate = threading.Event(), threading.Event()
+    real = tp.read_range_aligned
+
+    def slow(fd, mv, off, size):
+        started.set()
+        gate.wait()
+        real(fd, mv, off, size)
+
+    monkeypatch.setattr(tp, "read_range_aligned", slow)
+    fut = s.read_ahead(np.array([7]))
+    try:
+        assert started.wait(5)
+        s.close(wait=False)
+        assert s._fd is not None, "fd closed under a read in flight"
+    finally:
+        gate.set()
+    assert np.array_equal(fut.result(timeout=5), raw[[7]])
+    assert s._fd is None
+
+
+def test_a_refused_submit_waits_for_the_reads_already_queued(
+        table_gguf, monkeypatch):
+    """A close between the row-pool submits of one read refuses the rest.
+    The read raises, and the fd stays open until the fills already
+    submitted end, so no pread runs on a closed or reused fd."""
+    import os
+    import time
+
+    import gmlx.stream.table_pread as tp
+
+    monkeypatch.setenv("GMLX_TABLE_PREAD_WORKERS", "4")
+    path, _raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    fd, pool, _ = s._ready()
+    s._release()
+    closed, late = threading.Event(), []
+    real_read, real_close = tp.read_range_aligned, os.close
+
+    def read(rfd, mv, off, size):
+        time.sleep(0.002)
+        if rfd == fd and closed.is_set():
+            late.append(off)
+        return real_read(rfd, mv, off, size)
+
+    def close(cfd):
+        if cfd == fd:
+            closed.set()
+        return real_close(cfd)
+
+    monkeypatch.setattr(tp, "read_range_aligned", read)
+    monkeypatch.setattr(tp.os, "close", close)
+    real_submit, submitted = pool.submit, []
+
+    def submit(fn, *args):
+        if len(submitted) == 2:
+            time.sleep(0.01)             # the first two fills are running
+            closer = threading.Thread(target=s.close, kwargs={"wait": False})
+            closer.start()
+            closer.join()
+        submitted.append(real_submit(fn, *args))
+        return submitted[-1]
+
+    monkeypatch.setattr(pool, "submit", submit)
+    with pytest.raises(RuntimeError):
+        s.read(np.arange(40))
+    futures_wait(submitted, timeout=5)
+    assert len(submitted) == 2
+    assert closed.is_set() and s._fd is None
+    assert late == [], f"{len(late)} preads ran on the closed fd"
+
+
+def test_the_finalizer_closes_without_joining_the_readers(
+        table_gguf, monkeypatch):
+    """A dropped module closes its source from whatever thread collects
+    it, a reader thread included, which must not join itself or the
+    read-ahead that waits on it."""
+    import types
+    import weakref
+
+    import gmlx.stream.table_pread as tp
+
+    monkeypatch.setenv("GMLX_TABLE_PREAD_WORKERS", "4")
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    finalizers = []
+
+    def finalize(obj, fn, *args):
+        finalizers.append(weakref.finalize(obj, fn, *args))
+        return finalizers[-1]
+
+    monkeypatch.setattr(tp, "weakref", types.SimpleNamespace(finalize=finalize))
+    model = _FakeModel(_engram_table())
+    install_deferred_tables(model, {"blk.1.engram_embd.weight": src})
+    (fin,) = finalizers
+    # A close that joins would deadlock the reader below. Fail first.
+    assert fin.peek()[2] == (False,), "the finalizer's close joins the readers"
+    real, errors = tp.read_range_aligned, []
+
+    def read(fd, mv, off, size):
+        if threading.current_thread().name.startswith("gmlx-table_") \
+                and fin.alive:
+            try:
+                fin()                    # as a collection on this thread
+            except Exception as e:       # noqa: BLE001
+                errors.append(e)
+        return real(fd, mv, off, size)
+
+    _, pool, _ = src._ready()
+    src._release()
+    real_submit, fills = pool.submit, []
+
+    def submit(fn, *args):
+        fills.append(real_submit(fn, *args))
+        return fills[-1]
+
+    monkeypatch.setattr(pool, "submit", submit)
+    monkeypatch.setattr(tp, "read_range_aligned", read)
+    fut = src.read_ahead(np.arange(40))
+    done, _ = futures_wait([fut], timeout=5)
+    if not done:
+        # A read-ahead left waiting on the fills the close cancelled would
+        # hang interpreter exit, which joins its worker. Wake it first.
+        for f in fills:
+            if f.cancelled():
+                f.set_running_or_notify_cancel()
+        pytest.fail("the read-ahead never ended after the finalizer's close")
+    assert errors == []
+    try:
+        assert np.array_equal(fut.result(), raw[:40])
+    except (CancelledError, RuntimeError):
+        pass              # the close cancelled a queued fill or refused one
+    assert src._fd is None
+    del model
+
+
+def test_a_close_that_cancels_queued_fills_ends_the_read(
+        table_gguf, monkeypatch):
+    """A close cancels the row fills no worker has started. The read they
+    belong to raises rather than wait on them forever."""
+    monkeypatch.setenv("GMLX_TABLE_PREAD_WORKERS", "4")
+    path, _raw = table_gguf
+    s = _sources(path, monkeypatch)["blk.1.engram_embd.weight"]
+    _, pool, _ = s._ready()
+    s._release()
+    gate, busy = threading.Event(), threading.Semaphore(0)
+
+    def hold():
+        busy.release()
+        gate.wait()
+
+    for _ in range(4):                   # every row worker is busy
+        pool.submit(hold)
+    for _ in range(4):
+        assert busy.acquire(timeout=5)
+    real_submit, submitted, queued = pool.submit, [], threading.Event()
+
+    def submit(fn, *args):
+        submitted.append(real_submit(fn, *args))
+        if len(submitted) == 4:
+            queued.set()
+        return submitted[-1]
+
+    monkeypatch.setattr(pool, "submit", submit)
+    raised = []
+
+    def read():
+        try:
+            s.read(np.arange(40))
+        except BaseException as e:       # noqa: BLE001
+            raised.append(e)
+
+    reader = threading.Thread(target=read, daemon=True)
+    try:
+        reader.start()
+        assert queued.wait(5)
+        s.close(wait=False)
+    finally:
+        gate.set()
+    reader.join(5)
+    assert not reader.is_alive(), "the read waits on a cancelled fill"
+    assert all(f.cancelled() for f in submitted)
+    assert len(raised) == 1 and isinstance(raised[0], CancelledError)
+    assert s._fd is None

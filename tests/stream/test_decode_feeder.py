@@ -1208,12 +1208,32 @@ def test_read_pool_on_start_hook():
     drops its disk-I/O priority there) before serving reads."""
     import threading
 
-    from gmlx.stream.decode_feeder import _DaemonReadPool
+    from gmlx.stream.feeder_common import DaemonPool
 
     ran = threading.Event()
-    pool = _DaemonReadPool(1, on_start=ran.set)
+    pool = DaemonPool(1, on_start=ran.set)
     assert ran.wait(2)
     pool.shutdown()
+
+
+def test_read_pool_shutdown_notifies_the_work_it_cancels():
+    """Work a shutdown drops counts as done for wait(). A stage that waits
+    on its reads would otherwise never end once a close cancels one."""
+    import threading
+    from concurrent.futures import wait as futures_wait
+
+    from gmlx.stream.feeder_common import DaemonPool
+
+    gate = threading.Event()
+    pool = DaemonPool(1)
+    pool.submit(gate.wait)
+    queued = pool.submit(int)
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+        done, _ = futures_wait([queued], timeout=5)
+        assert done and queued.cancelled()
+    finally:
+        gate.set()
 
 
 def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):

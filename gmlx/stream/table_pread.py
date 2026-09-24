@@ -24,7 +24,7 @@ import os
 import threading
 import time
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import mlx.core as mx
@@ -58,6 +58,10 @@ class TableSource:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _size: int = field(default=0, repr=False)
     _workers: int = field(default=0, repr=False)
+    # Reads between _ready() and _release(). The last one out closes the
+    # fd of a closed source, so no pread reads a closed or reused fd.
+    _users: int = field(default=0, repr=False)
+    _closed: bool = field(default=False, repr=False)
     # Gather cost, so a run can price the tier against its own wall.
     gathers: int = field(default=0, repr=False)
     gathered_rows: int = field(default=0, repr=False)
@@ -67,15 +71,20 @@ class TableSource:
     def nbytes(self) -> int:
         return self.rows * self.row_bytes
 
-    def _ready(self) -> tuple[int, ThreadPoolExecutor]:
+    def _ready(self) -> tuple[int, ThreadPoolExecutor, ThreadPoolExecutor]:
+        """The fd and the two pools, opened on first use. Every call is
+        paired with ``_release``."""
         with self._lock:
+            if self._closed:
+                raise RuntimeError(
+                    f"table source {os.path.basename(self.path)} is closed")
             if self._fd is None:
                 fd = os.open(self.path, os.O_RDONLY)
                 if hasattr(fcntl, "F_NOCACHE"):
                     fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
                 self._fd = fd
                 self._size = os.fstat(fd).st_size
-            if self._pool is None:
+            if self._pool is None or self._ahead is None:
                 self._workers = max(
                     1, int(os.environ.get("GMLX_TABLE_PREAD_WORKERS", "32")))
                 self._pool = ThreadPoolExecutor(
@@ -84,16 +93,36 @@ class TableSource:
                 # must not sit in the row pool, whose workers it joins.
                 self._ahead = ThreadPoolExecutor(
                     1, thread_name_prefix="gmlx-table-ahead")
-            return self._fd, self._pool
+            self._users += 1
+            return self._fd, self._pool, self._ahead
+
+    def _release(self) -> None:
+        with self._lock:
+            self._users -= 1
+            fd = None
+            if self._closed and not self._users:
+                fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
 
     def read_ahead(self, ids: np.ndarray):
         """``read(ids)`` on its own thread; a Future of the rows."""
-        self._ready()
-        return self._ahead.submit(self.read, ids)
+        _, _, ahead = self._ready()
+        try:
+            return ahead.submit(self.read, ids)
+        finally:
+            self._release()
 
     def read(self, ids: np.ndarray) -> np.ndarray:
         """Rows ``ids`` as raw bytes, shape ``[len(ids), row_bytes]``."""
-        fd, pool = self._ready()
+        fd, pool, _ = self._ready()
+        try:
+            return self._read(fd, pool, ids)
+        finally:
+            self._release()
+
+    def _read(self, fd: int, pool: ThreadPoolExecutor,
+              ids: np.ndarray) -> np.ndarray:
         t0 = time.perf_counter()
         uniq, inv = np.unique(ids, return_inverse=True)
         if uniq.size and (uniq[0] < 0 or uniq[-1] >= self.rows):
@@ -114,7 +143,21 @@ class TableSource:
         cuts = [(lo, min(lo + span, uniq.size))
                 for lo in range(0, uniq.size, span)]
         if len(cuts) > 1:
-            for f in [pool.submit(fill, lo, hi) for lo, hi in cuts]:
+            futs = []
+            try:
+                for lo, hi in cuts:
+                    futs.append(pool.submit(fill, lo, hi))
+            finally:
+                # A close can refuse the next submit. The fd stays open
+                # until the reads already queued end. wait() never
+                # returns on a fill the close cancelled, so each fill
+                # is joined through its own future.
+                for f in futs:
+                    try:
+                        f.exception()
+                    except CancelledError:
+                        pass
+            for f in futs:
                 f.result()
         elif cuts:
             fill(*cuts[0])
@@ -123,17 +166,26 @@ class TableSource:
         self.gather_seconds += time.perf_counter() - t0
         return out[inv]
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
+        """Stop the pools and close the fd. Later reads raise. A queued
+        read-ahead is cancelled. The fd closes when the last read in
+        flight ends. ``wait=False`` is the finalizer's form: a collection
+        that runs on a reader thread cannot join that thread."""
         with self._lock:
-            if self._ahead is not None:
-                self._ahead.shutdown(wait=True)
-                self._ahead = None
-            if self._pool is not None:
-                self._pool.shutdown(wait=True)
-                self._pool = None
-            if self._fd is not None:
-                os.close(self._fd)
-                self._fd = None
+            if self._closed:
+                return
+            self._closed = True
+            pools = (self._ahead, self._pool)
+            self._ahead = self._pool = None
+            fd = None
+            if not self._users:
+                fd, self._fd = self._fd, None
+        # Outside the lock: a running read-ahead takes it in _ready().
+        for pool in pools:
+            if pool is not None:
+                pool.shutdown(wait=wait, cancel_futures=True)
+        if fd is not None:
+            os.close(fd)
 
 
 def oversize_tables(shards: list[str], arch: str | None,
@@ -275,7 +327,7 @@ def install_deferred_tables(model, sources: dict[str, TableSource]) -> list[str]
         mod.__class__ = _pread_class(mod.__class__)
         # The fd and the reader pool outlive every reference but the
         # module's; a server that releases models would leak both.
-        weakref.finalize(mod, src.close)
+        weakref.finalize(mod, src.close, False)
         done.append(tier.gguf_name)
     missed = sorted(set(sources) - set(done) - already)
     if missed:
