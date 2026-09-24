@@ -48,8 +48,8 @@ def parse_render_kwargs(spec: str | None) -> dict:
     if PINNED_DAY_KEY in kw:
         import datetime
         try:
-            datetime.date.fromisoformat(str(kw[PINNED_DAY_KEY]))
-        except ValueError:
+            kw[PINNED_DAY_KEY] = datetime.date.fromisoformat(kw[PINNED_DAY_KEY]).isoformat()
+        except (TypeError, ValueError):
             raise ValueError(f"--frame-kwargs {PINNED_DAY_KEY} is not a YYYY-MM-DD date: "
                              f"{kw[PINNED_DAY_KEY]!r}") from None
     return kw
@@ -141,7 +141,7 @@ def default_render_kwargs(tokenizer, date: str | None = None, day: str | None = 
             try:
                 pinned = datetime.date.fromisoformat(pin) if fmt is None else \
                     datetime.datetime.strptime(pin, fmt).date()
-            except ValueError:
+            except (TypeError, ValueError):
                 pass
     if pinned is None:
         pinned = datetime.datetime.strptime(today_string(), "%d %b %Y").date()
@@ -665,6 +665,13 @@ def fit_conversation(tokenizer, msgs: list[dict], max_len: int, tb) -> tuple | N
     return None
 
 
+def reply_answer(message: dict) -> str:
+    """The answer of an assistant turn: its content after an inline think
+    block, stripped."""
+    c = message.get("content") or ""
+    return (c.partition("</think>")[2] if "</think>" in c else c).strip()
+
+
 def trace_in_target(text: bytes, span: tuple, message: dict) -> bool | None:
     """Whether a reply-think target holds its turn's reasoning trace: None
     when the turn carries none (no reasoning_content and no inline think
@@ -678,7 +685,7 @@ def trace_in_target(text: bytes, span: tuple, message: dict) -> bool | None:
         rc = c.partition("</think>")[0].split("<think>", 1)[-1].strip()
     if not rc:
         return None
-    answer = (c.partition("</think>")[2] if "</think>" in c else c).strip().encode("utf-8")
+    answer = reply_answer(message).encode("utf-8")
     seg = text[span[0]:span[1]]
     cut = seg.rfind(answer) if answer else -1
     return rc.encode("utf-8") in (seg[:cut] if cut >= 0 else seg)

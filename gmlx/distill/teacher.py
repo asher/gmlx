@@ -314,12 +314,12 @@ def row_meta(r, source: str, frame: str, generator_id: str = "", special: set[in
         meta.spans = [[int(x) for x in sp] for sp in r[7]]
         meta.prefix_n_tokens = first + 1
         meta.suffix_start_byte = int(r[7][0][0])
-        # where the reply's content starts: the target span opens at the
-        # reasoning trace on a reply-think row, and the census keys
-        # content positions from the content itself
+        # where the reply's answer starts: the target span opens at the
+        # reasoning trace on a reply-think row or at an inline think block
+        # the template keeps, and the census keys content positions from
+        # the answer itself
         if meta.frame in ("reply", "reply-think"):
-            cs = (r[6][-1].get("content") or "").strip()
-            meta.content_start = int(r[7][-1][1]) - len(cs.encode("utf-8"))
+            meta.content_start = int(r[7][-1][1]) - len(_frames.reply_answer(r[6][-1]).encode("utf-8"))
         else:
             meta.content_start = int(r[7][-1][0])
         if len(r) > 9 and r[9] is not None:

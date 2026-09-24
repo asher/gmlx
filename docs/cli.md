@@ -1065,7 +1065,7 @@ Alignment flags, in the order `--help` prints them.
 | `--tau-alm F` | `1.0` | temperature on the chunk term (ALM), positive |
 | `--T-dk F` | `1.0` | temperature on the group softmaxes of the KL term, positive, under every `--loss` form |
 | `--max-chunk-len N` | `8` | longest ALM chunk in tokens on either side, at least 1 |
-| `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view |
+| `--frame-kwargs JSON` | none | chat-template kwargs for every student render, stored in the view, over those the cache recorded and its `gen` thinking switch |
 | `--cpu` | off | run on the CPU device, for smoke tests |
 
 ### distill train

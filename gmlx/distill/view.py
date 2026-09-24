@@ -286,9 +286,13 @@ def run_align(opts: AlignOptions) -> int:
     V_S = student_width(opts.student) or len(hf_inner(student_tok))
     knobs = dict(DEFAULT_KNOBS, w_mid=opts.w_mid, gamma=opts.gamma, tau_alm=opts.tau_alm,
                  T_dk=opts.T_dk, max_chunk_len=opts.max_chunk_len)
-    frame = (manifest.get("gmlx_distill", {}) or {}).get("frame")
-    student_kw = _frames.resolve_render_kwargs(student_tok, inherit=(frame or {}).get("render_kwargs"),
-                                               override=frame_kwargs)
+    block = manifest.get("gmlx_distill", {}) or {}
+    frame = block.get("frame")
+    # the cache keeps the teacher's spelling of gen's thinking switch; the
+    # student reads it under its own template's variable, as serve maps it
+    gen_kw = _frames.generator_render_kwargs(student_tok, block.get("generator")) if frame else {}
+    inherit = {**gen_kw, **((frame or {}).get("render_kwargs") or {})}
+    student_kw = _frames.resolve_render_kwargs(student_tok, inherit=inherit, override=frame_kwargs)
     _frames.set_render_kwargs(student_tok, student_kw)
     if frame:
         why = _frames.template_problem(student_tok)

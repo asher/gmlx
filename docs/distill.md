@@ -484,8 +484,8 @@ the family's own name elsewhere. `filter` copies the `gen` sidecar to
 `r1-corpus.jsonl.gen.json`, and `cache` maps the recorded switch onto the
 same variable when it renders the rows. `--frame-kwargs` on `cache` sets
 other template variables and refuses a value that contradicts the
-switch. `align` reads the switch from the cache, so it needs no flag of
-its own.
+switch. `align` reads the switch from the cache and maps it onto the
+student's own variable, so it needs no flag of its own.
 
 `--max-len` is the longest window, the stretch of a row cached as one
 piece, in teacher tokens. A longer text row is cut into windows at word

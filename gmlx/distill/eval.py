@@ -20,6 +20,7 @@ from .frames import (
     fit_reply,
     render_frame,
     render_row,
+    reply_answer,
     row_render_args,
     shared_boundaries_spans,
     target_mask,
@@ -394,8 +395,7 @@ def _span_rows(tokenizer, convs: list, *, max_len: int, per_turn: bool = False, 
                 tranges = (trace_positions or {}).get(key)
                 keep = np.zeros_like(tm)
                 b0, b1, _b2 = (int(x) for x in spans[-1])
-                cs = (m[-1].get("content") or "").strip()
-                cstart = b1 - len(cs.encode("utf-8"))
+                cstart = b1 - len(reply_answer(m[-1]).encode("utf-8"))
                 # a row without a trace has b0 == cstart: its trace ranges
                 # would otherwise select content bytes
                 for anchor, rs in ((cstart, ranges), (b0, tranges if b0 < cstart else None)):

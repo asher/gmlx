@@ -184,6 +184,27 @@ def test_adapter_alpha_follows_the_trained_rank(tmp_path):
         train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=out, rank=R + 1, scale=S)
 
 
+def test_the_adapter_export_makes_the_folders_the_write_probe_removed(tmp_path):
+    """The write probe removes the folders it made, so the export makes
+    them when it writes."""
+    out = tmp_path / "new" / "a" / "trained.gguf"
+    model = _Model()
+    model.freeze()
+    model.apply_to_modules(
+        lambda _k, m: m.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+        if isinstance(m, LoRALinear) else None)
+    assert train.save_trained_adapter(model, CONFIG, base_arch="llama", out_path=str(out), scale=S) == 3
+    assert adapter.load_lora_adapter(str(out)).alpha == pytest.approx(S * R)
+
+
+def test_train_lora_refuses_checkpointing_with_dropout_before_the_load(tmp_path):
+    """The recompute would draw a fresh dropout mask, so the gradient
+    would not be the loss's; a Python caller is refused as the CLI is."""
+    with pytest.raises(train.TrainRefused, match="fresh dropout mask"):
+        train.train_lora(str(tmp_path / "missing.gguf"), str(tmp_path), str(tmp_path / "o.gguf"),
+                         grad_checkpoint=True, dropout=0.1)
+
+
 def test_adapter_export_is_atomic(tmp_path, monkeypatch):
     """A failure while the adapter is written leaves no file at the
     output path, and a good write leaves no temporary beside it."""

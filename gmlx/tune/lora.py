@@ -173,6 +173,7 @@ def save_trained_adapter(model, config, *, base_arch: str, out_path: str,
     # written beside the final name and moved into place, so a failure
     # mid-write leaves no adapter a loader could read
     tmp = out_path + ".tmp"
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     try:
         n = save_lora_adapter(
             tmp, modules, alpha=float(scale) * int(rank), base_arch=base_arch,
@@ -214,12 +215,19 @@ def resolve_model_arg(base: str, config: str | None = None) -> tuple[str, str | 
 
 
 def probe_writable(path: str) -> str | None:
-    """Create the parent directory of ``path`` and prove a file can be
-    written there. Returns the OS error message, or None when writable.
-    A path that names a directory is refused, since the file's own write
-    would fail only after the run."""
+    """Prove a file can be written at ``path``. Returns the OS error
+    message, or None when writable. The folders the probe makes on the way
+    are removed again, so a run refused later leaves none behind, and the
+    writer makes them when it writes. A path that names a directory is
+    refused, since the file's own write would fail only after the run."""
     if os.path.isdir(path) or path.endswith(os.sep):
         return "it is a directory"
+    made = []
+    d = os.path.abspath(os.path.dirname(path) or ".")
+    while not os.path.exists(d) and os.path.dirname(d) != d:
+        made.append(d)
+        d = os.path.dirname(d)
+    err = None
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         probe = path + ".probe"
@@ -227,5 +235,10 @@ def probe_writable(path: str) -> str | None:
             pass
         os.remove(probe)
     except OSError as e:
-        return str(e)
-    return None
+        err = str(e)
+    for d in made:
+        try:
+            os.rmdir(d)
+        except OSError:
+            break
+    return err

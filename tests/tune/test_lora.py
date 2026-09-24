@@ -102,11 +102,14 @@ def test_resolve_model_arg_paths_and_config_ids(tmp_path):
 
 
 def test_probe_writable(tmp_path):
-    assert probe_writable(str(tmp_path / "sub" / "adapter.gguf")) is None
-    assert (tmp_path / "sub").is_dir()
+    """The probe removes the folders it made, so a run refused after it
+    leaves none behind; the writer makes them when it writes."""
+    assert probe_writable(str(tmp_path / "sub" / "a" / "adapter.gguf")) is None
+    assert not (tmp_path / "sub").exists()
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    assert probe_writable(str(blocker / "adapter.gguf")) is not None
+    assert probe_writable(str(blocker / "a" / "adapter.gguf")) is not None
+    assert not (blocker / "a").exists()
 
 
 

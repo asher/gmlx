@@ -204,11 +204,7 @@ def output_error(path: str | Path, *, directory: bool = False) -> str | None:
     had to make are removed again, and the verb makes them when it writes."""
     from gmlx.tune.lora import probe_writable
     p = os.path.abspath(os.path.expanduser(str(path)))
-    target = os.path.join(p, ".write-check") if directory else p
-    made = missing_dirs(os.path.dirname(target))
-    err = probe_writable(target)
-    remove_empty_dirs(made)
-    return err
+    return probe_writable(os.path.join(p, ".write-check") if directory else p)
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:

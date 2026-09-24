@@ -3971,6 +3971,19 @@ def test_row_meta_records_the_content_start_of_a_reply_think_row(tok_bl):
             assert meta["content_start"] > b0 and b"let me think" in text[b0:meta["content_start"]]
         else:
             assert meta["content_start"] == b0
+    # an inline think block the template keeps opens the span; the answer
+    # after it is where the content positions start, on both sides
+    inline = [msgs[0], {"role": "assistant", "content": "<think>plan it well</think>the cat is here"}]
+    text, spans = dl.render_row(tok, inline, open_tail=False, last_only=True, reason_target=True)
+    ids, ends, _ = dl.encode_with_byte_ends(tok, text, dl.token_bytes(tok), add_special_tokens=False)
+    meta = _teacher.row_meta((0, "d", 0, ids, ends, text, inline, spans, "reply-think"), "human",
+                             "reply-think").as_dict()
+    assert text[meta["content_start"]:spans[-1][1]] == b"the cat is here"
+    rows, _ = dl_eval._span_rows(tok, [{"id": "r", "messages": inline}], max_len=256, last_only=True,
+                                 positions={"r": [[0, 3]]}, reason_target=True)
+    ids, tm = rows[0][0], rows[0][1]
+    tb = dl.token_bytes(tok)
+    assert b"".join(tb[int(ids[t + 1])] for t in np.nonzero(tm[:-1])[0]).startswith(b"the")
 
 
 # ---------------------------------------------------------------------------
@@ -6244,6 +6257,12 @@ def test_refusals_leave_no_empty_output_folder_and_a_tilde_output_lands_in_home(
                                                   ckpt_dir="~/runs/ck"))
     assert rc == 2 and "under two checkpoints" in capsys.readouterr().err and not (home / "runs").exists()
     assert not (tmp_path / "~").exists()
+    # an MLX student cannot export a GGUF adapter; the refusal comes after
+    # the --adapter-out probe, which leaves no folder behind
+    rc = _trainer.run_train(_trainer.TrainOptions(views=[str(view)], student=str(student), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16,
+                                                  adapter_out=str(tmp_path / "new" / "a" / "r1.gguf")))
+    assert rc == 2 and "needs a GGUF student" in capsys.readouterr().err and not (tmp_path / "new").exists()
 
 
 def test_cache_refuses_a_torn_generator_sidecar_with_exit_2(tmp_path, tok_bl, capsys):
@@ -6541,6 +6560,13 @@ def test_cache_renders_the_generator_switches_and_refuses_a_contradicting_frame_
     rc = _teacher.run_cache(_teacher.CacheOptions(out=str(tmp_path / "off"), **base,
                                                   frame_kwargs='{"enable_thinking": false}'))
     assert rc == 2 and "enable_thinking=True" in capsys.readouterr().err
+    # a student whose template spells the switch as a bare variable reads
+    # it under that name, as serve would pass it
+    from gmlx.distill import view as _view
+    student = _tiny_mlx_teacher(tmp_path / "student", _with_template(
+        _bytelevel_tokenizer(_BL_MERGES), "Mode: {{ thinking | default('unset') }}\n" + _TEMPLATE_B))
+    assert _view.run_align(_view.AlignOptions(cache=str(out), student=str(student), out=str(tmp_path / "v"))) == 0
+    assert json.loads((tmp_path / "v" / "view.json").read_text())["student_render_kwargs"] == {"thinking": True}
 
 
 def test_cache_refuses_a_named_template_set_without_a_default(tmp_path, capsys):
@@ -7071,6 +7097,11 @@ def test_day_pins_read_either_date_form_and_a_malformed_day_is_refused(tmp_path,
             {"date_string": want[0], _frames.PINNED_DAY_KEY: want[1]}, kw
     with pytest.raises(ValueError, match="--frame-kwargs is not a JSON object"):
         _frames.parse_render_kwargs('{"a": ')
+    with pytest.raises(ValueError, match="strftime_now_date is not a YYYY-MM-DD date: 20260922"):
+        _frames.parse_render_kwargs('{"strftime_now_date": 20260922}')
+    assert _frames.parse_render_kwargs('{"strftime_now_date": "20260922"}') == {"strftime_now_date": "2026-09-22"}
+    assert _frames.default_render_kwargs(tok, date=20260922) == \
+        {"date_string": 20260922, _frames.PINNED_DAY_KEY: "2026-09-24"}
     teacher = _tiny_mlx_teacher(tmp_path / "teacher", tok)
     bad = '{"strftime_now_date": "22 Sep 2026"}'
     rc = _teacher.run_cache(_teacher.CacheOptions(teacher=str(teacher), corpus=str(_chat_corpus(tmp_path / "c.jsonl")),

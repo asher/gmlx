@@ -31,7 +31,14 @@ from gmlx.tune.lora import (  # noqa: F401  (re-exported for callers and tests)
 
 
 class TrainRefused(ValueError):
-    """A setting the loaded model cannot train with, found after the load."""
+    """A setting train_lora cannot train with, or one the loaded model
+    cannot take."""
+
+
+# the train step cannot replay a layer's dropout mask in the backward
+# recompute, so the recompute would see a fresh one
+CHECKPOINT_DROPOUT = ("--grad-checkpoint recomputes each layer under a fresh dropout mask; "
+                      "use it with --dropout 0")
 
 
 def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
@@ -44,7 +51,10 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
                grad_checkpoint: bool = False) -> tuple[str, int]:
     """Train a LoRA adapter on a GGUF base and write it as a GGUF. Returns
     ``(out_path, n_modules)``. The train loop runs on the GPU. Raises
-    TrainRefused when the loaded model cannot take a requested setting."""
+    TrainRefused on a setting it cannot train with, before the load, and
+    when the loaded model cannot take a requested setting."""
+    if grad_checkpoint and dropout > 0:
+        raise TrainRefused(CHECKPOINT_DROPOUT)
     import mlx.core as mx
     import mlx.optimizers as optim
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
@@ -200,10 +210,7 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     a = p.parse_args(argv)
 
     if a.grad_checkpoint and a.dropout > 0:
-        # the compiled train step cannot replay a layer's dropout mask in
-        # the backward recompute, so the recompute would see a fresh one
-        print("error: --grad-checkpoint recomputes each layer under a fresh dropout mask; "
-              "use it with --dropout 0", file=sys.stderr)
+        print(f"error: {CHECKPOINT_DROPOUT}", file=sys.stderr)
         return 2
 
     base, note, err = resolve_model_arg(a.model, a.config)
