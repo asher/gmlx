@@ -248,9 +248,9 @@ class _MixedModel(nn.Module):
     def __call__(self, x, idx):
         h = self.emb(x)
         pair = (mx.sin(h), mx.tanh(h))
-        for layer in self.layers:
-            h = layer(h, idx, pair, self.frozen, tag="mix")
-        return h
+        h = self.layers[0](h, idx, pair, self.frozen, tag="mix")
+        # a keyword argument crosses the checkpoint the same way
+        return self.layers[1](h, idx, pair=pair, frozen=self.frozen, tag="mix")
 
 
 def test_arguments_left_in_the_closure_keep_the_plain_gradient():

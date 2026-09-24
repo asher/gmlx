@@ -188,3 +188,25 @@ def test_arch_table_and_loader_rows():
     assert _assistant_kind("qwen4_exp", "/nonexistent.gguf") == "qwen4exp"
     lm = build(dict(synthesize_config(_qwen4exp_meta(True, True), _QWEN4EXP_SHAPES)))
     assert isinstance(lm, Model)
+
+
+def test_default_lora_keys_train_through_the_hyper_connection_inject():
+    """gmlx train wraps every Linear, the hyper-connection inject included,
+    and the inject kernel reads a weight the wrapper does not have."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.tune.indices import install_index_stop_gradient
+    from gmlx.tune.lora import prepare_lora_student
+
+    m = Model(_args())
+    _randomize(m)
+    prepare_lora_student(m, rank=4, scale=2.0, keys=None)
+    m.train()
+    restore = install_index_stop_gradient()
+    try:
+        ids = mx.array([[i % 30 + 1 for i in range(16)]])
+        loss, g = nn.value_and_grad(m, lambda m, t: m(t).astype(mx.float32).sum())(m, ids)
+        mx.eval(loss, g)
+    finally:
+        restore()
+    assert any("inject.lora_a" in k for k, _ in tree_flatten(g))

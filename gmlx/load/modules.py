@@ -2199,8 +2199,15 @@ def install_lora_adapter(model: nn.Module, plan,
 # Fused decode wires the upstream patches cache on the module that owns the
 # projections (occupancy_fuse.py, qkv_fuse.py). A wire is built on first use
 # and checks for an adapter only then, so one built before the install would
-# keep serving the base weights alone.
+# keep serving the base weights alone. The gated-delta z, b and a weights
+# (gdn_patches.py) are concatenated at load, before any install, and only a
+# wrapped member invalidates them. Their builders take plain Linears only,
+# so a cleared cat stays cleared.
 _FUSED_WIRE_SLOTS = ("_kq_wqkv", "_kq_bqkv", "_kq_wgu", "_kq_wdn")
+_FUSED_CAT_SLOTS = {
+    "_gdn_zba_weight": ("in_proj_z", "in_proj_b", "in_proj_a"),
+    "_gdn_ba_weight": ("in_proj_b", "in_proj_a"),
+}
 
 
 def _drop_fused_wires(by_path: dict, wrapped: set[str]) -> int:
@@ -2212,7 +2219,10 @@ def _drop_fused_wires(by_path: dict, wrapped: set[str]) -> int:
         owner = by_path.get(path.rsplit(".", 1)[0]) if "." in path else None
         if owner is None:
             continue
-        for slot in _FUSED_WIRE_SLOTS:
+        leaf = path.rsplit(".", 1)[1]
+        slots = _FUSED_WIRE_SLOTS + tuple(
+            k for k, members in _FUSED_CAT_SLOTS.items() if leaf in members)
+        for slot in slots:
             if vars(owner).get(slot) is not None:
                 object.__setattr__(owner, slot, None)
                 n += 1

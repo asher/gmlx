@@ -100,6 +100,20 @@ def view_fingerprint(view: dict) -> str:
 CHUNK_KNOBS = ("gamma", "max_chunk_len", "w_mid", "redirect_cut")
 
 
+def prompt_key(meta: dict, fallback: str) -> str:
+    """What a row answers: its messages without the final assistant reply,
+    or its document for a text row. Two views can hold one prompt under two
+    document names, which the per-view split cannot see."""
+    msgs = meta.get("messages")
+    if msgs:
+        if msgs[-1].get("role") == "assistant":
+            msgs = msgs[:-1]
+        blob = json.dumps(msgs, sort_keys=True, ensure_ascii=False).encode()
+        return "m:" + hashlib.sha256(blob).hexdigest()
+    doc = meta.get("doc_id")
+    return f"d:{doc}" if doc is not None else f"r:{fallback}"
+
+
 def _resolve(module, path: str):
     for part in path.split("."):
         module = getattr(module, part, None) if module is not None else None
@@ -502,6 +516,15 @@ def run_train(opts: TrainOptions) -> int:
         train_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "train"]
         val_rows = [(vi, e["row"]) for vi, v in enumerate(views) for e in v["index"] if e["split"] == "val"]
         view_has_val = bool(val_rows)
+
+        def key_of(vr):
+            return prompt_key(readers[vr[0]].rows_meta[vr[1]], f"{vr[0]}:{vr[1]}")
+
+        held = {key_of(vr) for vr in val_rows}
+        kept = [vr for vr in train_rows if key_of(vr) not in held]
+        if len(kept) < len(train_rows):
+            log(f"[train] {len(train_rows) - len(kept)} train rows left out: a validation row holds their prompt")
+            train_rows = kept
         lengths = {(vi, e["row"]): e["n_student_tokens"] for vi, v in enumerate(views) for e in v["index"]}
         # one seeded draw across the val rows of every view, so validation
         # scores the same rows at every cadence and not the shortest rows of

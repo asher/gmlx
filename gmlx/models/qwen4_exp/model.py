@@ -186,23 +186,30 @@ class HyperConnection(nn.Module):
 
     def __call__(self, h: mx.array):
         B, T, hc, D = h.shape
-        if B * T <= 8 and self._hclr_ok(h.dtype):
+        # A LoRA wrapper (training, or a served adapter) has no weight of
+        # its own, so the kernels that read one fall back to calling it.
+        down, up = self.down, self.up
+        inject = self.inject if "inject" in self else None
+        plain = ("weight" in down and "weight" in up
+                 and (inject is None or "weight" in inject))
+        if B * T <= 8 and plain and self._hclr_ok(h.dtype):
             norm, front, epi = _kq_hc()
             xn = norm(h, self.norm.weight, self.norm.eps)
-            lo, inj = front(xn, self.down.weight, self.inject.weight,
+            lo, inj = front(xn, down.weight, inject.weight,
                             self.norm.weight.dtype)
-            return epi(lo, self.up.weight, xn), inj
+            return epi(lo, up.weight, xn), inj
         xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps)
         if xn is None:
             xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
-        lo = nn.silu(self.down(xf) * (1.0 / hc))
-        up_out = self.up(lo)
-        if "inject" not in self:
+        lo = nn.silu(down(xf) * (1.0 / hc))
+        up_out = up(lo)
+        if inject is None:
             return _hc_mix(up_out, xn)
-        inj_out = _hc_inject_kern(xf, self.inject.weight)
+        inj_out = (_hc_inject_kern(xf, inject.weight)
+                   if "weight" in inject else None)
         if inj_out is None:
-            inj_out = self.inject(xf)
+            inj_out = inject(xf)
         r = _hc_epi_kern(up_out, xn, inj_out)
         if r is not None:
             return r
@@ -1036,7 +1043,7 @@ class QSAIndexer(nn.Module):
             w = mx.full((B, L, self.n_heads),
                         1.0 / math.sqrt(self.head_dim), dtype=x.dtype)
             s16 = _kq_score()(q, blocks.astype(x.dtype), w, offset, self.ratio)
-            sel = topk(s16, k, True)[:, 0].astype(mx.int64)
+            sel = mx.stop_gradient(topk(s16, k, True)[:, 0].astype(mx.int64))
             return sel, complete
         s = self.scores(x, blocks, offset, cos=cos, sin=sin)
         valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
@@ -1048,7 +1055,7 @@ class QSAIndexer(nn.Module):
             # order-insensitive. Scores narrow to the activation dtype for
             # the kernel's 16-bit wire.
             sel = topk(s.astype(x.dtype)[:, None], k, True)[:, 0]
-            sel = sel.astype(mx.int64)
+            sel = mx.stop_gradient(sel.astype(mx.int64))
         else:
             sel = mx.argpartition(s, kth=-k, axis=-1)[..., -k:]
         return sel, complete

@@ -174,7 +174,8 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Recompute each layer's activations in the backward "
                         "pass instead of keeping them, trading time for memory. "
-                        "Refused on Kimi K3, whose layers share state.")
+                        "Refused on Kimi K3 and DeepSeek-V4.1, whose layers "
+                        "share state.")
     a = p.parse_args(argv)
 
     if a.grad_checkpoint and a.dropout > 0:

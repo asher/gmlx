@@ -628,6 +628,8 @@ def cut_windows(ids: np.ndarray, ws_start: np.ndarray, max_len: int,
     in range is cut hard at max_len, backed off to a character boundary
     when the text bytes and the per-token end offsets are given (a
     byte-level tokenizer splits a multi-byte character over tokens)."""
+    if max_len < 1:
+        raise ValueError(f"window length must be at least 1 token, got {max_len}")
     n = len(ids)
     out = []
     start = 0

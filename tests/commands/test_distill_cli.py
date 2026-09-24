@@ -275,6 +275,13 @@ def test_cache_counts_take_positive_integers():
         assert rc == 2 and "a positive integer is required, got 0" in out
 
 
+def test_cache_windows_hold_the_start_token_and_one_scored_token():
+    """A one-token window leaves no room past the start token, and the
+    window cut would never advance."""
+    rc, out = _run(["distill", "cache", "--teacher", "t.gguf", "--corpus", "c.jsonl", "--out", "d", "--max-len", "1"])
+    assert rc == 2 and "at least 2 is required" in out
+
+
 
 def test_filter_help_names_the_trace_repeat_threshold():
     rc, out = _run(["distill", "filter", "--help"])

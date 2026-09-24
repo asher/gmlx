@@ -313,9 +313,11 @@ def test_grad_checkpoint_refusal_restores_attention_and_exits_2(monkeypatch, tmp
     monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
     monkeypatch.setattr(checkpoint, "checkpoint_layers", refuse)
     monkeypatch.setattr(trainer, "train", lambda *a, **k: seen.append("trained"))
+    orig = mx.argpartition
     with pytest.raises(train.TrainRefused, match="--grad-checkpoint: per-layer checkpointing cannot run _Layer"):
         train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1, grad_checkpoint=True)
     assert seen == ["restored"]
+    assert mx.argpartition is orig
 
     def refused(*a, **k):
         raise train.TrainRefused("--grad-checkpoint: per-layer checkpointing cannot run _Layer")
@@ -365,3 +367,36 @@ def test_train_loop_runs_with_selection_ids_off_the_gradient(monkeypatch, tmp_pa
     train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
     assert seen == [True]
     assert mx.argpartition is orig
+
+
+def test_a_train_loop_that_raises_restores_the_selection_ops_and_attention(monkeypatch, tmp_path):
+    import contextlib
+
+    import mlx_lm.tuner.datasets as datasets
+    import mlx_lm.tuner.trainer as trainer
+    import mlx_kquant.mlx_lm_patch as patch
+
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+    import gmlx.tune.attention as attention
+    import gmlx.tune.gdn as gdn
+
+    seen = []
+    orig = mx.argpartition
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(patch, "patch_mlx_lm_lora", lambda: None)
+    monkeypatch.setattr(preflight, "preflight", lambda p, hf_source=None: type("P", (), {"arch": "llama"})())
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", lambda p, hf_source=None: (_Model(), CONFIG, object()))
+    monkeypatch.setattr(train, "prepare_lora_student", lambda *a, **k: None)
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: seen.append("restored")))
+    monkeypatch.setattr(gdn, "install_training_gdn", lambda m: None)
+    monkeypatch.setattr(trainer, "train", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"), iters=1)
+    assert mx.argpartition is orig and seen == ["restored"]

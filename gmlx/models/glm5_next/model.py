@@ -367,7 +367,8 @@ class Glm5NextMoEGate(nn.Module):
     def __call__(self, x: mx.array):
         logits = x.astype(mx.float32) @ self.weight.T
         t = logits.size // self.n_routed_experts
-        if t * self.top_k < 64 and _kq_router_available():
+        # The kernel has no backward, so training takes the eager select.
+        if t * self.top_k < 64 and not self.training and _kq_router_available():
             # Decode-scale: sigmoid + bias-steered top-k + renorm + scale in
             # one kq dispatch instead of the compiled select's kernel chain.
             # Ties at the selection boundary break by min index here and by
@@ -549,11 +550,16 @@ class Glm5NextIndexer(nn.Module):
         # form is an exact f32 GEMV like the decode step, where the M-row
         # GEMM runs TF32 and costs three times as much at M = 2.
         xf = x.astype(mx.float32)
-        wt = self.weights_proj.weight.T
-        if 1 < L <= 4:
-            w = mx.concatenate([xf[:, j:j + 1] @ wt for j in range(L)], axis=1)
+        if "weight" not in self.weights_proj:
+            # a LoRA wrapper has no weight of its own
+            w = self.weights_proj(xf)
         else:
-            w = xf @ wt
+            wt = self.weights_proj.weight.T
+            if 1 < L <= 4:
+                w = mx.concatenate(
+                    [xf[:, j:j + 1] @ wt for j in range(L)], axis=1)
+            else:
+                w = xf @ wt
         w = w * self._w_scale
 
         if (L <= 4 and isinstance(offset, int) and self.select_k in (512, 2048)
@@ -571,8 +577,8 @@ class Glm5NextIndexer(nn.Module):
 
                 scores = kq.dsa_indexer_score_decode(
                     q, pooled.astype(q.dtype), w, offset, self.kpool)
-                return kq.dsa_topk_indices(
-                    scores, self.select_k, bucketed=True)[:, 0]
+                return mx.stop_gradient(kq.dsa_topk_indices(
+                    scores, self.select_k, bucketed=True)[:, 0])
             except Exception as exc:  # noqa: BLE001 - inline fallback
                 _INDEXER_DECODE_STATE["ok"] = False
                 print(f"[glm5_next] kquant indexer decode disabled for this "
@@ -999,8 +1005,10 @@ class Glm5NextMLAAttention(nn.Module):
             # threshold, a selection mask over the full latent below it.
             latent_d = _dequantized(latent_all, kv_cache)
             S = latent_d.shape[2]
+            # The gathered path evaluates per block, which a gradient
+            # transform refuses, so training takes the masked stream.
             if (S > _STREAM_MIN_KEYS and B == 1 and _SPARSE_GATHER
-                    and isinstance(offset, int)):
+                    and isinstance(offset, int) and not self.training):
                 q_n = self.embed_q(q)
                 out = self._gathered_sparse_prefill(
                     q_n, latent_d, sel_pools, offset, L, S)

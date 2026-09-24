@@ -460,8 +460,9 @@ _EXP2_TABLE = mx.array([2.0**i for i in range(-126, 128)], dtype=mx.float32)
 
 
 def _exp2i(e: mx.array) -> mx.array:
-    """2**e for integer-valued float e in [-126, 127], exactly."""
-    return mx.take(_EXP2_TABLE, e.astype(mx.int32) + 126)
+    """2**e for integer-valued float e in [-126, 127], exactly. The
+    exponent is a rounded value and carries no gradient."""
+    return mx.take(_EXP2_TABLE, mx.stop_gradient(e.astype(mx.int32) + 126))
 
 
 def _e4m3_round(v: mx.array) -> mx.array:
@@ -2112,7 +2113,8 @@ class Indexer(nn.Module):
                         offset,
                         self.compressor.compress_ratio,
                     )
-                    return kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0]
+                    return mx.stop_gradient(
+                        kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0])
             except Exception as exc:  # noqa: BLE001 - permanent fallback
                 _dsa_disable("indexer", exc)
                 return None
@@ -2189,7 +2191,8 @@ class Indexer(nn.Module):
                 scores = mx.where(
                     pm[:, None], scores, mx.finfo(scores.dtype).min
                 )
-            return kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0]
+            return mx.stop_gradient(
+                kq.dsa_topk_indices(scores, k, bucketed=True)[:, 0])
         except Exception as exc:  # noqa: BLE001 - permanent fallback
             _dsa_disable("indexer", exc)
             return None

@@ -991,3 +991,48 @@ def test_indexer_decode_route_agrees_with_inline(monkeypatch, length):
         a, b = set(sels["kq"][j].tolist()), set(sels["inline"][j].tolist())
         assert len(a) == idx.select_k
         assert len(a & b) >= idx.select_k - 8, f"row {j}: {idx.select_k - len(a & b)} differ"
+
+
+def _default_key_step(model, T, monkeypatch=None):
+    import mlx.nn as nn
+
+    from gmlx.tune.indices import install_index_stop_gradient
+    from gmlx.tune.lora import prepare_lora_student
+
+    prepare_lora_student(model, rank=4, scale=2.0, keys=None)
+    model.train()
+    restore = install_index_stop_gradient()
+    try:
+        ids = mx.array([[i % 60 + 1 for i in range(T)]])
+        loss, g = nn.value_and_grad(model, lambda m, t: m(t).astype(mx.float32).sum())(model, ids)
+        mx.eval(loss, g)
+    finally:
+        restore()
+    return g
+
+
+def test_default_lora_keys_train_through_the_indexer():
+    """gmlx train wraps every Linear, the indexer's weights_proj included.
+    A row long enough to select pools reads that projection through the
+    wrapper."""
+    from mlx.utils import tree_flatten
+
+    g = _default_key_step(_random_model(_tiny_args()), 24)
+    names = [k for k, _ in tree_flatten(g)]
+    assert any("weights_proj.lora_a" in k for k in names)
+
+
+def test_training_skips_the_gathered_sparse_prefill(monkeypatch):
+    """The gathered path evaluates each key block as it goes, which no
+    gradient transform allows."""
+    def gathered(self, *a, **k):
+        raise AssertionError("gathered path reached")
+
+    monkeypatch.setattr(glm5_model, "_STREAM_MIN_KEYS", 8)
+    monkeypatch.setattr(glm5_model.Glm5NextMLAAttention, "_gathered_sparse_prefill", gathered)
+    model = _random_model(_tiny_args())
+    model.eval()
+    ids = mx.array([[i % 60 + 1 for i in range(24)]])
+    with pytest.raises(AssertionError, match="gathered path reached"):
+        model(ids)
+    _default_key_step(model, 24)

@@ -264,12 +264,13 @@ def _named(specs: list[str]) -> list[tuple[str, str]]:
 
 def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: dict,
             chat_slices: dict | None = None, reply_slices: dict | None = None,
-            positions: dict | None = None, trace_positions: dict | None = None, head=None) -> dict:
+            positions: dict | None = None, trace_positions: dict | None = None, head=None,
+            label: str = "after") -> dict:
     """Every instrument on the loaded weights as they are. ``positions``
     and ``trace_positions``, a census high_delta map and its trace half,
     restrict every reply slice to the byte ranges they name. ``head`` is
     the student's head spec, so the cache KL runs the head over the
-    scored positions only."""
+    scored positions only. ``label`` names the arm in every log line."""
     res: dict = {"bpb": {}, "tasks": {}, "chat_bpb": {}, "reply_bpb": {}}
     for name, convs in (chat_slices or {}).items():
         t0 = time.perf_counter()
@@ -278,7 +279,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                  batch_tokens=opts.batch_size * opts.max_len, per_turn=opts.chat_per_turn)
         r["wall_s"] = time.perf_counter() - t0
         res["chat_bpb"][name] = r
-        log(f"[eval] {name}: assistant-turn bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
+        log(f"[eval] {name} {label}: assistant-turn bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
             f"{r['rows']} {'turns' if opts.chat_per_turn else 'conversations'}, {r['dropped']} dropped "
             f"({r['wall_s']:.0f}s)")
     for name, rows in (reply_slices or {}).items():
@@ -289,7 +290,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                   reason_target=opts.reply_think, trace_positions=trace_positions)
         r["wall_s"] = time.perf_counter() - t0
         res["reply_bpb"][name] = r
-        log(f"[eval] {name}: reply bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
+        log(f"[eval] {name} {label}: reply bpb {_fmt(r['bpb'])} ({_fmt(r['nll_per_token'])} nats/token) over "
             f"{r['rows']} rows{' at the high-delta positions' if positions is not None else ''}, "
             f"{r['dropped']} dropped ({r['wall_s']:.0f}s)")
     if opts.kld_cache:
@@ -301,7 +302,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                             head=head)
         k["wall_s"] = time.perf_counter() - t0
         res["kld"] = k
-        log(kld_line("", k))
+        log(kld_line(f" {label}", k))
     tb = token_bytes(tokenizer)
     prefix = None
     if opts.bpb_prefix:
@@ -314,7 +315,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
                                 window_prefix=prefix)
         r["wall_s"] = time.perf_counter() - t0
         res["bpb"][name] = r
-        log(f"[eval] {name}: bpb {_fmt(r['bpb'])} over {r['bytes']} bytes ({r['wall_s']:.0f}s)")
+        log(f"[eval] {name} {label}: bpb {_fmt(r['bpb'])} over {r['bytes']} bytes ({r['wall_s']:.0f}s)")
     model.eval()
     for tname, items in tasks.items():
         t0 = time.perf_counter()
@@ -325,7 +326,7 @@ def run_arm(model, tokenizer, opts: EvalOptions, slices: dict[str, str], tasks: 
             per = _eval.score_multiple_choice(model, tokenizer, items["items"])
         acc = float(np.mean([p["correct"] for p in per])) if per else None
         res["tasks"][tname] = {"acc": acc, "n": len(per), "items": per, "wall_s": time.perf_counter() - t0}
-        log(f"[eval] {tname}: acc {_fmt(acc)} on {len(per)} items ({res['tasks'][tname]['wall_s']:.0f}s)")
+        log(f"[eval] {tname} {label}: acc {_fmt(acc)} on {len(per)} items ({res['tasks'][tname]['wall_s']:.0f}s)")
     return res
 
 
@@ -553,7 +554,7 @@ def run_eval(opts: EvalOptions) -> int:
     if opts.before:
         with adapter_disabled(model):
             report["before"] = run_arm(model, tokenizer, opts, slices, tasks, chat_slices, reply_slices,
-                                       positions, trace_positions, head=head)
+                                       positions, trace_positions, head=head, label="before")
     if opts.chat_sanity:
         items = chat_items
         refs = refs_before

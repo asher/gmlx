@@ -21,7 +21,12 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx.load.hadamard_modules import shared_linears
-from gmlx.upstream.gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
+from gmlx.upstream.gdn_patches import (
+    _F16_HEAD_GEMV,
+    _f16_head_gemv,
+    _float_weight,
+    gpu_active,
+)
 
 __all__ = ["verify_linear", "verify_linears"]
 
@@ -693,7 +698,7 @@ def verify_linear(linear, x: mx.array, target_verify: bool):
         _F16_HEAD_GEMV is not None
         and target_verify
         and x.shape[1] > 1
-        and not hasattr(linear, "scales")
+        and _float_weight(linear) is not None
     ):
         out = _f16_head_gemv(x, linear.weight)
         b = getattr(linear, "bias", None)

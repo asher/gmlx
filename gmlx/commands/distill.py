@@ -171,8 +171,8 @@ def _cache_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--out", type=_path, metavar="DIR", help="Cache directory to write.")
     p.add_argument("--validate", type=_path, metavar="DIR", help="Validate an existing cache and exit.")
     p.add_argument("--top-k", type=_positive_int, default=256, help="Log-probabilities kept per position (default 256).")
-    p.add_argument("--max-len", type=_positive_int, default=2048,
-                   help="Teacher tokens per window including the start token (default 2048).")
+    p.add_argument("--max-len", type=_window_len, default=2048,
+                   help="Teacher tokens per window including the start token, at least 2 (default 2048).")
     p.add_argument("--max-disk-gb", type=_nonneg_float, default=None,
                    help="Refuse when the size estimate exceeds this (default none).")
     p.add_argument("--cache-limit-gb", type=_nonneg_float, default=8.0,
@@ -295,8 +295,8 @@ def _train_parser(prog: str) -> argparse.ArgumentParser:
                    help="LoRA multiplier as alpha / rank. Give this or --lora-scale, not both.")
     p.add_argument("--lora-dropout", type=_dropout, default=0.0, help="LoRA dropout, below 1 (default 0.0).")
     p.add_argument("--grad-checkpoint", action="store_true",
-                   help="Recompute each layer's activations in the backward pass. Refused on Kimi K3, "
-                        "whose layers share state.")
+                   help="Recompute each layer's activations in the backward pass. Refused on Kimi K3 "
+                        "and DeepSeek-V4.1, whose layers share state.")
     p.add_argument("--lr", type=_positive_float, default=1e-4, help="Peak learning rate (default 1e-4).")
     p.add_argument("--batch-size", type=_positive_int, default=8, help="Rows per step (default 8).")
     p.add_argument("--warmup", type=_fraction, default=0.05,
@@ -501,6 +501,13 @@ def _positive_int(text: str) -> int:
         raise argparse.ArgumentTypeError(f"an integer is required, got {text!r}") from None
     if n < 1:
         raise argparse.ArgumentTypeError(f"a positive integer is required, got {n}")
+    return n
+
+
+def _window_len(text: str) -> int:
+    n = _positive_int(text)
+    if n < 2:
+        raise argparse.ArgumentTypeError(f"at least 2 is required, the start token and one scored token, got {n}")
     return n
 
 

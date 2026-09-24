@@ -186,3 +186,83 @@ def test_owned_selection_functions_detach_their_ids_without_the_wrapper():
     for label, fn in fns.items():
         g = _input_grad(fn, logits)
         assert np.isfinite(g).all() and np.abs(g).sum() > 0, label
+
+
+def test_qwen4_exp_kernel_block_ids_carry_no_gradient(monkeypatch):
+    """The kq radix top-k is a custom kernel that the wrapper never sees.
+    A stand-in selecting with the stock op keeps the ids on the tape, so
+    the block mask's backward is defined only if the site detaches them."""
+    from gmlx.models.qwen4_exp import model as q4
+
+    stock = mx.argpartition
+    monkeypatch.setattr(
+        q4, "_kq_topk_fn",
+        lambda s, k, flag: stock(-s.astype(mx.float32), kth=k - 1, axis=-1)[..., :k])
+    idx = q4.QSAIndexer(SimpleNamespace(
+        indexer_n_heads=4, indexer_head_dim=32, indexer_budget=2048,
+        hidden_size=64, rope_theta=1e4, rms_norm_eps=1e-6), 4, 16)
+    mx.random.seed(0)
+    L, key_len = 8, 2080
+    x = mx.random.normal((1, L, 64)).astype(mx.bfloat16)
+    ik = mx.random.normal((1, key_len, 32)).astype(mx.bfloat16)
+
+    def f(x):
+        sel, _ = idx.select(x, ik, None, key_len - L)
+        assert sel.shape == (1, L, 512)
+        blk = mx.zeros((1, L, key_len // 4 + 1))
+        v = x.astype(mx.float32).sum()
+        return mx.put_along_axis(blk, sel, v, axis=-1).sum()
+
+    mx.eval(mx.grad(f)(x))
+
+
+def test_glm5_next_router_kernel_is_skipped_in_training(monkeypatch):
+    """The fused router kernel has no backward."""
+    import mlx_kquant as kq
+
+    from gmlx.models.glm5_next import model as g5
+
+    def kernel(*a, **k):
+        raise AssertionError("router kernel reached")
+
+    monkeypatch.setattr(g5, "_kq_router_available", lambda: True)
+    monkeypatch.setattr(kq, "moe_router_topk", kernel, raising=False)
+    gate = g5.Glm5NextMoEGate(_args(hidden_size=16, n_routed_experts=8,
+                                    num_experts_per_tok=2))
+    gate.weight = mx.random.normal(gate.weight.shape)
+    gate.train()
+    x = mx.random.normal((1, 3, 16))
+    mx.eval(_input_grad(lambda x: gate(x)[1], x))
+    gate.eval()
+    with pytest.raises(AssertionError, match="router kernel reached"):
+        gate(x)
+
+
+def test_every_kernel_top_k_call_detaches_its_ids():
+    """Each ``dsa_topk_indices`` call in gmlx is inside ``mx.stop_gradient``,
+    since the kernel has no backward and the training wrapper covers the
+    mlx.core ops only. Warm-up lambdas are exempt."""
+    import ast
+    from pathlib import Path
+
+    import gmlx
+
+    root = Path(gmlx.__file__).parent
+    bare = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "dsa_topk_indices"):
+                continue
+            p = parent.get(node)
+            while p is not None and not isinstance(p, (ast.stmt, ast.Lambda)):
+                if (isinstance(p, ast.Call) and isinstance(p.func, ast.Attribute)
+                        and p.func.attr == "stop_gradient"):
+                    break
+                p = parent.get(p)
+            if p is None or isinstance(p, ast.stmt):
+                bare.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert bare == []

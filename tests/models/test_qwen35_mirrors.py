@@ -135,7 +135,15 @@ def test_moe_sparse_block_call_mirror():
     _assert_mirror(
         block_cls.__call__,
         _ML.Qwen3_5MoeSparseMoeBlock.__call__,
-        [("_target_verify_linear(", "verify_linear(", 2)],
+        [
+            ("_target_verify_linear(", "verify_linear(", 2),
+            (
+                # the expert ids carry no gradient, so a training step has a backward
+                "inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]",
+                "inds = mx.stop_gradient(mx.argpartition(gates, kth=-k, axis=-1)[..., -k:])",
+                1,
+            ),
+        ],
         "Qwen3_5MoeSparseMoeBlock.__call__",
     )
 

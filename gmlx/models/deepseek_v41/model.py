@@ -531,7 +531,7 @@ class Indexer(nn.Module):
                 tops.append(
                     mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k]
                 )
-            if L > 4:
+            if L > 4 and not self.training:
                 # Dispatch this block before the next is built. Left lazy,
                 # every block's [m, P] scores, their contiguous copies and
                 # masks stay allocated until the chunk evaluates, which at
@@ -778,7 +778,8 @@ def _indexer_kernel_topk(scores, k):
     arg-select: the same index set as argpartition, order unspecified."""
     import mlx_kquant as kq
 
-    return kq.dsa_topk_indices(scores[:, None], k, bucketed=True)[:, 0]
+    return mx.stop_gradient(
+        kq.dsa_topk_indices(scores[:, None], k, bucketed=True)[:, 0])
 
 
 def _select_candidate_blocks(scores, topk_blocks, block_size, floor):
@@ -1387,6 +1388,10 @@ class DeepseekV41Block(nn.Module):
     """Attention and FFN between a collapse and an expand, with the
     collapse weights coming from the previous sublayer.
     (reference Block.forward)"""
+
+    _gmlx_checkpoint_refusal = ("a source layer hands its pooled keys, index keys and top-k to later layers "
+                                "through a shared object, which a per-layer recompute can neither "
+                                "differentiate nor restore")
 
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()

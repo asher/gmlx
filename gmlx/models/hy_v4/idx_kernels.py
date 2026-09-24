@@ -65,9 +65,10 @@ def select(q, k, weights, topk, offset, mask):
                                axis=-1)
         scores = _kq.dsa_indexer_score_decode(
             q, k.reshape(B, S, hd), w, offset, 1)
-        return _kq.dsa_topk_indices(scores, topk)
+        return mx.stop_gradient(_kq.dsa_topk_indices(scores, topk))
 
     if L % _TILE:
         return None
     scores = _kq.dsa_indexer_scores(q, k, w, True, causal_q_offset=offset)
-    return _kq.dsa_topk_indices(scores, topk, causal_valid_prefix=True)
+    return mx.stop_gradient(
+        _kq.dsa_topk_indices(scores, topk, causal_valid_prefix=True))

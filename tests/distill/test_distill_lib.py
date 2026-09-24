@@ -2837,7 +2837,7 @@ def test_eval_reports_an_empty_task_as_none(tmp_path, tok_bl, capsys):
     opts = _ev.EvalOptions(student="s.gguf", md=str(tmp_path / "r.md"), json=str(tmp_path / "r.json"))
     res = _ev.run_arm(Stub(), tok_bl, opts, {}, {"arc_easy": {"items": []}})
     assert res["tasks"]["arc_easy"]["acc"] is None and res["tasks"]["arc_easy"]["n"] == 0
-    assert "acc None" in capsys.readouterr().err
+    assert "[eval] arc_easy after: acc None" in capsys.readouterr().err
     report = {"after": res, "before": {}, "reply_positions": None}
     md = _ev.report_markdown(opts, report, {}, {}, {}, set())
     assert "| arc_easy | None | None | 0 |" in md
@@ -4622,6 +4622,8 @@ def test_eval_before_arm_scores_the_adapter_off_and_reports_decontam_and_teacher
     assert _ev.run_eval(opts) == 0, capsys.readouterr().err
     rep = json.loads(js.read_text())
     after, before = rep["after"]["bpb"]["clean"]["bpb"], rep["before"]["bpb"]["clean"]["bpb"]
+    err = capsys.readouterr().err
+    assert f"[eval] clean after: bpb {after:.4f}" in err and f"[eval] clean before: bpb {before:.4f}" in err
     on = dl_eval.bits_per_byte(model, tokenizer, clean_text, max_len=16, batch_size=2)["bpb"]
     with _student.adapter_disabled(model):
         off = dl_eval.bits_per_byte(model, tokenizer, clean_text, max_len=16, batch_size=2)["bpb"]
@@ -6048,6 +6050,15 @@ def test_tables_version_is_past_the_roles_change():
     assert TABLES_VERSION >= 3
 
 
+def test_tables_version_is_past_the_same_vocab_token_lengths():
+    """Same-vocab tables written before they kept the token lengths load
+    with no lengths, and the phantom-space check then marks nothing, so
+    the version must be past the value those tables recorded."""
+    from gmlx.distill.constants import TABLES_VERSION
+
+    assert TABLES_VERSION >= 8
+
+
 def test_align_removes_a_leftover_staging_directory_and_refuses_when_the_tables_cannot_be_written(
         tmp_path, tok_bl, tok_spm, capsys, monkeypatch):
     """A materialize.tmp left by a killed --materialize run goes on the next
@@ -6975,6 +6986,7 @@ def test_train_refuses_grad_checkpoint_on_a_layer_class_that_shares_state(tmp_pa
     forward."""
     from mlx_lm.models import llama
 
+    import gmlx.tune.attention as attention
     from gmlx.distill import trainer as _trainer
 
     _mlx_students(monkeypatch)
@@ -6982,10 +6994,20 @@ def test_train_refuses_grad_checkpoint_on_a_layer_class_that_shares_state(tmp_pa
     monkeypatch.setattr(llama.TransformerBlock, "_gmlx_checkpoint_refusal", "its layers share a bank",
                         raising=False)
     orig = llama.TransformerBlock.__call__
+    orig_ids = mx.argpartition
+    seen = []
+
+    def install(m):
+        seen.append("installed")
+        return lambda: seen.append("restored")
+
+    monkeypatch.setattr(attention, "install_training_attention", install)
     rc = _trainer.run_train(_trainer.TrainOptions(
         views=[str(view)], student=str(student), iters=1, batch_size=2, seed=1, ckpt_dir=str(tmp_path / "ck"),
         no_wired_limit=True, lora_rank=2, chunk=16, grad_checkpoint=True))
     assert rc == 2
+    assert mx.argpartition is orig_ids
+    assert seen.count("installed") == seen.count("restored")
     assert ("[train] refuse: --grad-checkpoint: per-layer checkpointing cannot run TransformerBlock: "
             "its layers share a bank") in capsys.readouterr().err
     assert llama.TransformerBlock.__call__ is orig
@@ -7010,3 +7032,116 @@ def test_train_runs_a_moe_student(tmp_path, tok_bl, capsys, monkeypatch):
     assert mx.argpartition is orig
     state = json.loads((ck / "last" / "state.json").read_text())
     assert state["iteration"] == 2
+
+
+def test_train_leaves_out_rows_whose_prompt_another_view_validates(tmp_path, tok_bl, capsys, monkeypatch):
+    """Two rounds answer one prompt set, and each view splits by its own
+    document names. A row trained through one view on a prompt the other
+    view validates would score validation on trained text."""
+    from gmlx.distill import trainer as _trainer
+    from gmlx.distill import view as _view
+    from gmlx.distill.data import CacheReader
+
+    _mlx_students(monkeypatch)
+    tok = _with_template(tok_bl, _TEMPLATE_A)
+    prompts = [f"the cat is {i} q{i}" for i in range(40)]
+
+    def pairs(tag, order):
+        return [([{"role": "user", "content": prompts[i]},
+                  {"role": "assistant", "content": f"the cat {tag} is {i}"}], None) for i in order]
+
+    _tiny_reply_cache(tmp_path / "c1", tok, pairs("a", range(40)))
+    _tiny_reply_cache(tmp_path / "c2", tok, pairs("b hat", np.random.default_rng(0).permutation(40)[:30]))
+    student = _tiny_mlx_teacher(tmp_path / "student", tok)
+    views, val, trained = [], set(), []
+    for name in ("c1", "c2"):
+        tok.save_pretrained(tmp_path / name / "tokenizer")
+        out = tmp_path / f"v-{name}"
+        assert _view.run_align(_view.AlignOptions(cache=str(tmp_path / name), student=str(student), out=str(out),
+                                                  val_fraction=0.1)) == 0
+        views.append(str(out))
+        rd = CacheReader(tmp_path / name)
+        for e in json.loads((out / "view.json").read_text())["index"]:
+            p = rd.rows_meta[e["row"]]["messages"][0]["content"]
+            if e["split"] == "val":
+                val.add(p)
+            else:
+                trained.append(p)
+    leaked = sum(p in val for p in trained)
+    assert leaked > 0
+    capsys.readouterr()
+    rc = _trainer.run_train(_trainer.TrainOptions(views=views, student=str(student), iters=1, batch_size=2,
+                                                  no_wired_limit=True, lora_rank=2, chunk=16, val_batches=1,
+                                                  ckpt_dir=str(tmp_path / "ck")))
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert f"[train] {leaked} train rows left out: a validation row holds their prompt" in err
+
+
+def test_prompt_key_ignores_the_reply_and_names_text_rows_by_document():
+    from gmlx.distill.trainer import prompt_key
+
+    ask = {"role": "user", "content": "q"}
+    a = prompt_key({"messages": [ask, {"role": "assistant", "content": "x"}], "doc_id": "r1.jsonl:3"}, "0:3")
+    b = prompt_key({"messages": [ask, {"role": "assistant", "content": "y"}], "doc_id": "r2.jsonl:9"}, "1:9")
+    assert a == b
+    assert prompt_key({"messages": [ask]}, "0:0") == a
+    assert prompt_key({"doc_id": "c.jsonl:1"}, "0:1") == prompt_key({"doc_id": "c.jsonl:1"}, "1:5")
+    assert prompt_key({}, "0:1") != prompt_key({}, "1:1")
+
+
+def test_cut_windows_refuses_a_window_with_no_room():
+    """A zero-token window never advances. The cache budget reaches zero
+    when --max-len leaves nothing past the start token."""
+    from gmlx.distill import frames as _frames
+
+    with pytest.raises(ValueError, match="at least 1 token"):
+        _frames.cut_windows(np.arange(5), np.ones(8, dtype=bool), 0, 0)
+
+
+def test_a_train_run_that_raises_restores_the_selection_ops_and_attention(tmp_path, tok_bl, monkeypatch):
+    import gmlx.tune.attention as attention
+    from gmlx.distill import data as _data
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    seen = []
+    orig = mx.argpartition
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(attention, "install_training_attention", lambda m: (lambda: seen.append("restored")))
+    monkeypatch.setattr(_data, "collate", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        _trainer.run_train(_trainer.TrainOptions(
+            views=[str(view)], student=str(student), iters=1, batch_size=2, seed=1, ckpt_dir=str(tmp_path / "ck"),
+            no_wired_limit=True, lora_rank=2, chunk=16))
+    assert mx.argpartition is orig and seen == ["restored"]
+
+
+def test_grad_checkpoint_trains_the_same_adapter(tmp_path, tok_bl, capsys, monkeypatch):
+    """Per-layer checkpointing recomputes each layer in the backward and
+    changes no gradient, so two runs at one seed save the same weights."""
+    from mlx_lm.models import llama
+    from safetensors.numpy import load_file
+
+    from gmlx.distill import trainer as _trainer
+
+    _mlx_students(monkeypatch)
+    # the run rewrites the layer class for the rest of the process
+    monkeypatch.setattr(llama.TransformerBlock, "__call__", llama.TransformerBlock.__call__)
+    view, student = _cpu_view(tmp_path, tok_bl)
+    saved = []
+    for ck in (False, True):
+        out = tmp_path / f"ck-{int(ck)}"
+        rc = _trainer.run_train(_trainer.TrainOptions(
+            views=[str(view)], student=str(student), iters=2, batch_size=2, seed=1, ckpt_dir=str(out),
+            no_wired_limit=True, lora_rank=2, chunk=16, grad_checkpoint=ck))
+        assert rc == 0, capsys.readouterr().err
+        saved.append(load_file(str(out / "last" / "trainable.safetensors")))
+    assert "[train] per-layer checkpointing on 1 layer classes" in capsys.readouterr().err
+    assert saved[0].keys() == saved[1].keys() and saved[0]
+    for k in saved[0]:
+        np.testing.assert_allclose(saved[0][k], saved[1][k], rtol=1e-5, atol=1e-6)

@@ -16,8 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outputs, so the small model answers from a document without it in the prompt.
 - `gmlx.stream.moe_routes` records a forward's expert ids per layer and
   replays them in a later forward over the same positions.
-- `GMLX_BATCH_INVARIANT=1` keeps expert routing and the gated-delta decay
-  gate the same at any prefill batch size, for about one percent of prefill.
+- `GMLX_BATCH_INVARIANT=1` keeps `nn.Linear` expert routers and the gated-delta
+  decay gate the same at any prefill batch size, for about one percent of prefill.
 
 ### Changed
 
@@ -52,6 +52,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while the server was busy, so a seeded reply did not repeat.
 - `gmlx train` on a MoE GGUF failed at the first step with
   `Cannot calculate VJP with respect to indices`.
+- `gmlx train` with its default keys failed on Qwen4 experimental and
+  GLM-5-Next with `'LoRALinear' object has no attribute 'weight'`.
+- `gmlx train` on DeepSeek-V4.1 failed at the first step with
+  `[async_eval] Not allowed inside a graph transformation`.
 
 ## [0.4.14] - 2026-09-18
 

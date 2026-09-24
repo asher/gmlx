@@ -204,3 +204,103 @@ def test_cat_matmul_fallback_parity():
     ref = mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1)
     assert mx.allclose(got.astype(mx.float32), ref.astype(mx.float32),
                        atol=1e-2, rtol=1e-2)
+
+
+def _adapted_gdn(leaves, merge_zba=False):
+    """A one-layer tree whose GatedDeltaNet was armed at load, then took a
+    GGUF adapter on ``leaves``."""
+    from mlx_lm.models.qwen3_5 import TextModelArgs
+
+    from gmlx.load.adapter import LoraAdapter, LoraModule
+    from gmlx.load.modules import install_lora_adapter
+
+    args = TextModelArgs(
+        model_type="qwen3_5", hidden_size=64, intermediate_size=128,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        rms_norm_eps=1e-6, vocab_size=32, linear_num_value_heads=2,
+        linear_num_key_heads=2, linear_key_head_dim=32,
+        linear_value_head_dim=32, linear_conv_kernel_dim=4,
+        full_attention_interval=4, head_dim=32, rope_theta=1e4,
+        max_position_embeddings=128)
+
+    class Root(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [nn.Module()]
+            self.layers[0].linear_attn = GatedDeltaNet(args)
+
+    mx.random.seed(0)
+    root = Root()
+    gdn = root.layers[0].linear_attn
+    mx.eval(root.parameters())
+    if merge_zba:
+        assert patches._gdn_try_merge_zba(gdn)
+    else:
+        assert patches._gdn_try_cat_ba(gdn)
+    r = 4
+    modules = {}
+    for leaf in leaves:
+        path = f"layers.0.linear_attn.{leaf}"
+        out = getattr(gdn, leaf).weight.shape[0]
+        modules[path] = LoraModule(
+            path, mx.random.normal((r, 64)) * 0.5,
+            mx.random.normal((out, r)) * 0.5, r, 1.0)
+    install_lora_adapter(root, LoraAdapter(alpha=float(r), arch="qwen35",
+                                           modules=modules))
+    return gdn
+
+
+@pytest.mark.parametrize("merge_zba,leaves", [
+    (False, ("in_proj_b",)),
+    (False, ("in_proj_a",)),
+    (True, ("in_proj_z",)),
+    (True, ("in_proj_b", "in_proj_a")),
+])
+def test_an_adapter_on_z_b_or_a_reaches_the_fused_decode(monkeypatch, merge_zba, leaves):
+    """The cat and the merge are built at load. An adapter installed later
+    on one of their members clears them, so decode calls the wrapper."""
+    from mlx_lm.models.cache import ArraysCache
+
+    gdn = _adapted_gdn(leaves, merge_zba=merge_zba)
+    assert getattr(gdn, "_gdn_ba_weight", None) is None
+    assert getattr(gdn, "_gdn_zba_weight", None) is None
+    seen = {}
+
+    def kernel(inputs, template, grid, threadgroup, output_shapes, output_dtypes):
+        seen["a"], seen["b"], seen["z"] = inputs[2], inputs[3], inputs[7]
+        return [mx.zeros(output_shapes[0], output_dtypes[0]), inputs[6]]
+
+    monkeypatch.setattr(patches, "_gdn_fused_decode_kernel", kernel)
+    x = mx.random.normal((1, 1, 64))
+    cache = ArraysCache(size=2)
+    cache[0] = mx.zeros((1, 3, gdn.conv_dim))
+    cache[1] = mx.zeros((1, 2, 32, 32))
+    patches._gdn_fused_decode_body(gdn, x, cache)
+    assert mx.allclose(seen["b"], gdn.in_proj_b(x).reshape(seen["b"].shape))
+    assert mx.allclose(seen["a"], gdn.in_proj_a(x).reshape(seen["a"].shape))
+    assert mx.allclose(seen["z"], gdn.in_proj_z(x).reshape(seen["z"].shape))
+
+
+def test_an_adapter_elsewhere_keeps_the_cat():
+    gdn = _adapted_gdn(("in_proj_qkv",))
+    assert getattr(gdn, "_gdn_ba_weight", None) is not None
+
+
+def test_the_fused_verify_calls_adapted_b_a_and_out(monkeypatch):
+    """The verify body reads each projection's weight for the head GEMV. A
+    wrapper has none, so it is called instead."""
+    gdn = _adapted_gdn(("in_proj_b", "in_proj_a", "out_proj"))
+    seen = {}
+
+    def kernel(inputs, template, grid, threadgroup, output_shapes, output_dtypes):
+        seen["ba"] = inputs[2]
+        return [mx.zeros(s, d) for s, d in zip(output_shapes, output_dtypes)]
+
+    monkeypatch.setattr(patches, "_gdn_fused_verify_kernel", kernel)
+    monkeypatch.setattr(patches, "_F16_HEAD_GEMV", object())
+    monkeypatch.setattr(patches, "_f16_head_gemv", lambda x, w: x @ w.T)
+    x = mx.random.normal((1, 3, 64))
+    out = patches._gdn_fused_verify_body(gdn, x, None, None, [])
+    want = mx.concatenate([gdn.in_proj_b(x), gdn.in_proj_a(x)], axis=-1)
+    assert mx.allclose(seen["ba"], want)
+    assert mx.allclose(out, gdn.out_proj(mx.zeros((1, 3, gdn.value_dim))))

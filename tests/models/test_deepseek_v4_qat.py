@@ -318,3 +318,14 @@ def test_kv_indexer_bit_identity():
     assert mx.array_equal(
         _indexer_qat_roundtrip(x), _ref_indexer_qat_roundtrip(x)
     ).item()
+
+
+def test_the_scale_exponent_carries_no_gradient():
+    """A QAT scale is a table lookup at a rounded exponent. The lookup ids
+    leave the gradient, so a training step through the fake-quant chain has
+    a backward."""
+    from gmlx.models.deepseek_v4.model import _exp2i
+
+    e = mx.array([-3.0, 0.0, 5.0])
+    g = mx.grad(lambda e: (_exp2i(e) * e).sum())(e)
+    assert mx.array_equal(g, _exp2i(e)).item()

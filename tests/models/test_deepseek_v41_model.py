@@ -509,3 +509,42 @@ def test_wide_route_engages_past_decode_width(monkeypatch):
     monkeypatch.setenv("GMLX_DS41_HC_FUSED", "0")
     mx.eval(model(prompt, cache=model.make_cache()))
     assert calls == []
+
+
+def test_a_training_step_has_a_backward():
+    """A prefill of more than four tokens dispatches each indexer block
+    early. That eval is not allowed under a gradient, so training skips it,
+    and the training wrapper keeps the selections off the gradient."""
+    import mlx.nn as nn
+
+    from gmlx.tune.indices import install_index_stop_gradient
+
+    mx.random.seed(4)
+    model = _randomized(Model(_args()))
+    model.train()
+    model.freeze()
+    model.model.embed_tokens.unfreeze(keys=["weight"], recurse=False)
+    toks = mx.array(np.random.default_rng(0).integers(3, 64, size=(2, 40)).astype(np.int32))
+    restore = install_index_stop_gradient()
+    try:
+        loss, g = nn.value_and_grad(model, lambda m, t: (m(t).astype(mx.float32) ** 2).mean())(model, toks)
+        mx.eval(loss, g)
+    finally:
+        restore()
+    grad = g["model"]["embed_tokens"]["weight"]
+    assert bool(mx.isfinite(grad).all()) and float(mx.abs(grad).sum()) > 0
+
+
+def test_per_layer_checkpointing_refuses_the_shared_streams():
+    """Source layers hand pooled keys, index keys and top-k to later layers
+    through SharedStreams, which a per-layer recompute can neither
+    differentiate nor restore."""
+    from gmlx.models.deepseek_v41.model import DeepseekV41Block
+    from gmlx.tune.checkpoint import checkpoint_layers
+
+    model = Model(_args())
+    orig = DeepseekV41Block.__call__
+    with pytest.raises(ValueError, match="cannot run DeepseekV41Block: a source layer hands"):
+        checkpoint_layers(model)
+    assert DeepseekV41Block.__call__ is orig
+    assert not any(getattr(ly, "_gmlx_ckpt", False) for ly in model.model.layers)
