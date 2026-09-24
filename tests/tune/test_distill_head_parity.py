@@ -57,3 +57,23 @@ def test_the_distill_head_backward_is_the_gradient_of_its_forward(name):
                                   log_bmask=mx.zeros((head.V,)), C=8, params=params, d_onpath=a,
                                   d_Qslot=None, d_logbm=None, want_params=False)
         assert float(mx.abs(got - want).max() / mx.abs(want).max()) < 2e-2
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_startup_backward_check_runs_on_a_model_in_eval_mode_and_leaves_each_mode(name):
+    """train runs the backward check on the model as the loader leaves it,
+    in eval mode, where a Hadamard-folded head rotates through a kernel
+    with no backward. The check runs the head in training mode and gives
+    every module its own mode back."""
+    from gmlx.distill.head import HEAD_PARITY_TOL, head_backward_gap, head_spec_from_model
+
+    with process_patches():
+        model, _config, _case = build(name)
+        model.eval()
+        inner = getattr(model, "language_model", model)
+        inner.layers[0].train()
+        head = head_spec_from_model(inner)
+        assert head_backward_gap(model, head, mx.arange(1, 9)[None]) < HEAD_PARITY_TOL
+        in_layer = {id(m) for _, m in inner.layers[0].named_modules()}
+        wrong = [k for k, m in model.named_modules() if m.training != (id(m) in in_layer)]
+        assert not wrong, wrong

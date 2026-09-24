@@ -7312,6 +7312,76 @@ def test_header_tokenizer_carries_the_bundled_template_and_transforms_of_its_arc
     assert _tokens.tokenizer_from_gguf(str(path)).apply_chat_template(msgs, tokenize=False) == "False"
 
 
+def test_header_reads_accept_a_tensor_type_gguf_py_does_not_know(tmp_path):
+    """The Bonsai GGUFs carry tensor types 142 and 143, which gguf-py's
+    reader refuses. The tokenizer, the head width and llama.cpp's BOS
+    default are read from such a file, with a vocabulary longer than the
+    header scanner's default array limit."""
+    import struct
+
+    from gguf import GGUFWriter
+
+    from gmlx.distill import tokens as _tokens
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+    from tests.load.test_tokenizer import _bytelevel_meta
+
+    meta = _bytelevel_meta()
+    toks = meta["tokenizer.ggml.tokens"] + [f"<extra{i}>" for i in range(3000)]
+    types = meta["tokenizer.ggml.token_type"] + [1] * 3000
+    path = tmp_path / "pq2.gguf"
+    w = GGUFWriter(str(path), "llama")
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "llama-bpe")
+    w.add_array("tokenizer.ggml.tokens", toks)
+    w.add_array("tokenizer.ggml.merges", meta["tokenizer.ggml.merges"])
+    w.add_array("tokenizer.ggml.token_type", types)
+    w.add_uint32("tokenizer.ggml.bos_token_id", 0)
+    w.add_uint32("tokenizer.ggml.eos_token_id", 1)
+    w.add_tensor("token_embd.weight", np.zeros((len(toks), 8), dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    # the tensor info is the name, n_dims (u32), ne (u64 each), then the type
+    raw = bytearray(path.read_bytes())
+    at = raw.rindex(b"token_embd.weight") + len(b"token_embd.weight")
+    (n_dims,) = struct.unpack_from("<I", raw, at)
+    struct.pack_into("<I", raw, at + 4 + 8 * n_dims, 142)
+    path.write_bytes(bytes(raw))
+
+    assert _tokens.logits_width_from_gguf(str(path)) == len(toks)
+    tok = _tokens.tokenizer_from_gguf(str(path))
+    assert tok.convert_ids_to_tokens(len(toks) - 1) == "<extra2999>"
+    # no add_bos_token key and a llama-bpe pre-tokenizer: llama.cpp adds BOS
+    assert tok.encode("Hello", add_special_tokens=True)[0] == 0
+    plain = load_tokenizer_from_gguf({**meta, "tokenizer.ggml.pre": "llama-bpe"}, "llama")
+    assert plain.encode("Hello", add_special_tokens=True)[0] != 0
+    _tokens.llamacpp_bos_default(plain, str(path))
+    assert plain.encode("Hello", add_special_tokens=True)[0] == 0
+
+
+def test_the_student_head_width_is_read_from_every_shard_of_a_split_gguf(tmp_path):
+    """A split GGUF's first shard need not hold the head, and align falls
+    back to the tokenizer length without the width, which a padded head
+    does not match."""
+    from gguf import GGUFWriter
+
+    from gmlx.distill import tokens as _tokens
+    from gmlx.distill import view as _view
+
+    for i, names in ((1, ["blk.0.attn_q.weight"]), (2, ["token_embd.weight", "output.weight"])):
+        w = GGUFWriter(str(tmp_path / f"s-{i:05d}-of-00002.gguf"), "qwen2")
+        for name in names:
+            w.add_tensor(name, np.zeros((24 if name != "blk.0.attn_q.weight" else 8, 8), dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+    first = str(tmp_path / "s-00001-of-00002.gguf")
+    assert _tokens.logits_width_from_gguf(first) == 24
+    assert _view.student_width(first) == 24
+
+
 def test_align_takes_the_general_path_on_an_unframed_cache_the_student_segments_differently(tmp_path, tok_bl,
                                                                                             capsys):
     """An equal vocabulary is not an equal tokenization: a student with the

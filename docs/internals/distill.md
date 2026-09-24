@@ -70,9 +70,10 @@ rotates its input before that weight, so the closed form also takes the
 cotangent back through the rotation, in the MLX-op form that has a
 backward. Beside the logit check described under the teacher pass,
 `train` compares the closed form with the gradient of the head's own
-forward on the same eight tokens. A student where the two differ is
-refused, so a head that changes its input before the projection never
-trains on a wrong cotangent.
+forward on the same eight tokens, with the head in training mode, the
+form it trains in. A student where the two differ is refused, so a head
+that changes its input before the projection never trains on a wrong
+cotangent.
 
 No head pass runs inside the trunk's gradient transform. The trunk
 forward is evaluated first, the head pass computes the loss and the

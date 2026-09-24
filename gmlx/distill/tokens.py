@@ -14,37 +14,41 @@ from gmlx.load.tokenizer import backend, hf_inner, special_ids, vocab_map_hash
 # tokens
 # ---------------------------------------------------------------------------
 
+def _gguf_kv(path) -> dict:
+    """The GGUF's metadata as a KV dict, arrays in full, read by gmlx's
+    header scanner, which knows the tensor types gguf-py's reader
+    refuses."""
+    from gmlx.load.headerscan import scan_gguf
+    return scan_gguf(str(path), include_tensors=False, array_limit=1 << 62).kv
+
+
 def tokenizer_from_gguf(path: str):
     """Build the HF fast tokenizer from a GGUF header only (no tensor
     reads) through gmlx's synthesizer. Returns a PreTrainedTokenizerFast
     with gmlx's _gguf_* attributes set."""
-    import gguf
-
     from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
     from gmlx.load.tokenizer import bundled_chat_template_for_arch, finish_gguf_tokenizer, load_tokenizer_from_gguf
-    reader = gguf.GGUFReader(path)
-    f = reader.fields["general.architecture"]
-    arch = bytes(f.parts[f.data[0]]).decode()
+    kv = _gguf_kv(path)
+    arch = kv["general.architecture"]
     # the same template and transforms the model loader installs, so a
     # row renders alike here and in serve, and align and train see one
     # student identity
-    fast = load_tokenizer_from_gguf(reader, arch, chat_template_override=bundled_chat_template_for_arch(arch))
+    fast = load_tokenizer_from_gguf(kv, arch, chat_template_override=bundled_chat_template_for_arch(arch))
     finish_gguf_tokenizer(fast, GGUF_ARCH_TO_MODEL_TYPE.get(arch))
-    llamacpp_bos_default(fast, reader)
+    llamacpp_bos_default(fast, kv)
     return fast
 
 
 def llamacpp_bos_default(tokenizer, gguf) -> None:
     """Apply llama.cpp's add_bos default to a tokenizer synthesized from a
-    GGUF that carries no tokenizer.ggml.add_bos_token key. gguf is a path
-    or an open GGUFReader. Every distill entry point that takes a GGUF
-    tokenizer from gmlx passes through here."""
-    import gguf as gguf_py
-    reader = gguf_py.GGUFReader(gguf) if isinstance(gguf, (str, Path)) else gguf
-    if "tokenizer.ggml.add_bos_token" in reader.fields:
+    GGUF that carries no tokenizer.ggml.add_bos_token key. gguf is a path,
+    a KV dict or an open GGUFReader. Every distill entry point that takes
+    a GGUF tokenizer from gmlx passes through here."""
+    from gmlx.load.gguf_meta import as_kv_dict, read_string
+    kv = _gguf_kv(gguf) if isinstance(gguf, (str, Path)) else as_kv_dict(gguf)
+    if "tokenizer.ggml.add_bos_token" in kv:
         return
-    pre_f = reader.fields.get("tokenizer.ggml.pre")
-    pre = bytes(pre_f.parts[pre_f.data[0]]).decode() if pre_f is not None else ""
+    pre = read_string(kv, "tokenizer.ggml.pre") or ""
     if pre in _LLAMA3_PRE_ADD_BOS:
         _prepend_bos(hf_inner(tokenizer))
 
@@ -96,16 +100,17 @@ def load_tokenizer(path: str):
 
 
 def logits_width_from_gguf(path: str) -> int:
-    """output.weight ne[1], or token_embd.weight ne[1] for tied heads. Header
-    only."""
-    import gguf
-    reader = gguf.GGUFReader(path)
-    by_name = {t.name: t for t in reader.tensors}
+    """output.weight ne[1], or token_embd.weight ne[1] for tied heads, from
+    every shard of a split GGUF. Header only."""
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.preflight import find_split_shards
+    by_name = {t.name: t for shard in find_split_shards(str(path))
+               for t in scan_gguf(shard, array_limit=0).tensors}
     for name in ("output.weight", "token_embd.weight"):
         t = by_name.get(name)
         if t is not None:
-            # gguf-py reports ne in GGUF order (ne[0] = fastest); the vocab
-            # width is the last dimension.
+            # the scan reports ne in GGUF order (ne[0] = fastest), so the
+            # vocab width is the last dimension
             return int(t.shape[-1])
     raise ValueError(f"{path}: no output.weight or token_embd.weight")
 

@@ -204,7 +204,9 @@ def head_backward_gap(model, head: HeadSpec, ids) -> float:
     cotangent and the gradient of its own function, for a fixed on-path
     cotangent at the trunk's hidden states on ``ids`` [1, T], relative to
     the largest gradient entry. A head that changes its input before the
-    projection in a way the closed form does not carry shows up here."""
+    projection in a way the closed form does not carry shows up here. The
+    head runs in training mode, the form it trains in, and every module
+    gets its own mode back on return."""
     import mlx.core as mx
     from .student import trunk_hidden
     inner = getattr(model, "language_model", model)
@@ -217,11 +219,20 @@ def head_backward_gap(model, head: HeadSpec, ids) -> float:
     def onpath(hh):
         z = _head_logits_f32(head, params, hh)
         return mx.take_along_axis(z - mx.logsumexp(z, axis=-1, keepdims=True), nxt[:, None], axis=1)[:, 0]
-    _, (ref,) = mx.vjp(onpath, [h], [a])
-    dh, _ = chunked_head_vjp(h, head, nxt, n_bnd=0, target_gid=None, group_of=None, G=1, Kp=1,
-                             log_bmask=mx.zeros((head.V,)), C=T, params=params, d_onpath=a,
-                             d_Qslot=None, d_logbm=None, want_params=False)
-    gap = mx.abs(dh - ref).max() / mx.maximum(mx.abs(ref).max(), 1e-12)
+    # a folded head in eval mode rotates through the kernel, which has no
+    # backward
+    modes = [(m, m.training) for _, m in model.named_modules()]
+    model.train()
+    try:
+        _, (ref,) = mx.vjp(onpath, [h], [a])
+        dh, _ = chunked_head_vjp(h, head, nxt, n_bnd=0, target_gid=None, group_of=None, G=1, Kp=1,
+                                 log_bmask=mx.zeros((head.V,)), C=T, params=params, d_onpath=a,
+                                 d_Qslot=None, d_logbm=None, want_params=False)
+        gap = mx.abs(dh - ref).max() / mx.maximum(mx.abs(ref).max(), 1e-12)
+    finally:
+        # parents come before their children, so each module ends at its own mode
+        for m, t in modes:
+            m.train(t)
     mx.eval(gap)
     return float(gap)
 
