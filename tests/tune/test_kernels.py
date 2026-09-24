@@ -62,3 +62,29 @@ def test_a_kquant_expert_backward_over_many_routed_rows(monkeypatch):
     g_ref = mx.grad(loss(ref))(x)
     rel = float(mx.abs(g - g_ref).max() / mx.abs(g_ref).max())
     assert rel < 2e-2, rel
+
+
+def test_every_folded_gated_product_call_names_its_kernel_choice():
+    """kq's fused product and rotation has no backward. Every
+    ``glu_rotate`` call passes ``kernel`` so a training forward keeps to
+    the unfused product."""
+    import ast
+    import pathlib
+
+    import gmlx
+
+    root = pathlib.Path(gmlx.__file__).parent
+    missing, seen = [], 0
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+            if name != "glu_rotate":
+                continue
+            seen += 1
+            if not any(k.arg == "kernel" for k in node.keywords):
+                missing.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert seen >= 4
+    assert missing == []

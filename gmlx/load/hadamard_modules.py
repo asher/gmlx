@@ -168,12 +168,14 @@ def _fused(fold: _Fold, name: str):
 
 
 def glu_rotate(x: mx.array, gate: mx.array, fold: _Fold | None, *,
-               activation: str = "silu") -> mx.array:
+               activation: str = "silu", kernel: bool = True) -> mx.array:
     """``act(gate) * x`` (silu: swiglu; sigmoid: an output gate) for the
     folded projection whose fold is ``fold``. Fused, the result is the
     rotated row, offered as its own rotation; unfused, the plain
-    product."""
-    if fold is None or (op := _fused(fold, "glu_hadamard")) is None:
+    product. ``kernel`` False keeps to the unfused product, which has a
+    backward: the fused kq op has none."""
+    if (fold is None or not kernel
+            or (op := _fused(fold, "glu_hadamard")) is None):
         if activation == "silu":
             return swiglu(gate, x)
         return x * mx.sigmoid(gate)

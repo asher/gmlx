@@ -949,7 +949,8 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
 
         return verify_linear(
             self.o_proj,
-            glu_rotate(output, gate, fold_of(self.o_proj), activation="sigmoid"),
+            glu_rotate(output, gate, fold_of(self.o_proj), activation="sigmoid",
+                       kernel=not self.training),
             target_verify,
         )
 

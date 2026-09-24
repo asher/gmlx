@@ -78,7 +78,7 @@ def test_attention_forward_mirrors_upstream():
             (
                 "self.o_proj(output * mx.sigmoid(gate))",
                 "self.o_proj(glu_rotate(output, gate, fold_of(self.o_proj), "
-                "activation='sigmoid'))",
+                "activation='sigmoid', kernel=not self.training))",
                 1,
             ),
         ],
@@ -95,7 +95,7 @@ def test_mlp_forward_mirrors_upstream():
                 "return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))",
                 "gate, up = shared_linears((self.gate_proj, self.up_proj), x)\n"
                 "    return self.down_proj(glu_rotate(up, gate, "
-                "fold_of(self.down_proj)))",
+                "fold_of(self.down_proj), kernel=not self.training))",
                 1,
             ),
         ],
@@ -228,6 +228,7 @@ def test_fused_glu_feeds_a_folded_down_projection(monkeypatch):
             signs=rng.choice(np.array([-1, 1], dtype=np.int8), inter)),
     }
     assert install_hadamard_modules(model, targets) == 3
+    model.eval()   # the kernels serve inference only, as after a load
     x = mx.array(rng.standard_normal((2, 3, HIDDEN)).astype(np.float32)).astype(
         mx.bfloat16)
     want, n_each = _counted(monkeypatch, lambda: model.mlp(x))

@@ -116,7 +116,7 @@ def test_attention_call_mirror():
             (
                 "output * mx.sigmoid(gate)",
                 "glu_rotate(output, gate, fold_of(self.o_proj), "
-                "activation='sigmoid')",
+                "activation='sigmoid', kernel=not self.training)",
                 1,
             ),
         ],
@@ -133,7 +133,8 @@ def test_mlp_call_mirror():
             ("_target_verify_linear(", "verify_linear(", 1),
             (
                 "swiglu(gate, up)",
-                "glu_rotate(up, gate, fold_of(self.down_proj))",
+                "glu_rotate(up, gate, fold_of(self.down_proj), "
+                "kernel=not self.training)",
                 1,
             ),
         ],

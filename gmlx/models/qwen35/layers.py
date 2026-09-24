@@ -64,7 +64,8 @@ class OwnedQwen3_5MLP(_L.Qwen3_5MLP):
             (self.gate_proj, self.up_proj), x, target_verify
         )
         return verify_linear(
-            self.down_proj, glu_rotate(up, gate, fold_of(self.down_proj)),
+            self.down_proj,
+            glu_rotate(up, gate, fold_of(self.down_proj), kernel=not self.training),
             target_verify)
 
 

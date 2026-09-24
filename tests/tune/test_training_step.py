@@ -176,3 +176,38 @@ def test_one_step_trains_exports_and_serves(arch, tmp_path):
         assert rel(t, s) < tol, form
         # the adapter moves the logits far past the tolerance
         assert rel(t, b) > 5 * tol, form
+
+
+def test_a_folded_gated_product_trains_where_its_projection_is_unadapted(monkeypatch):
+    """An unadapted folded down or output projection gives the swiglu and
+    the attention output gate its fold, and serve runs the product and the
+    rotation as one kq op. That op has no backward, so a training step
+    takes the unfused product."""
+    import mlx_kquant as kq
+
+    from gmlx.tune.attention import install_training_attention
+    from gmlx.tune.gdn import install_training_gdn
+    from gmlx.tune.lora import prepare_lora_student
+
+    calls = []
+    fused = kq.glu_hadamard
+    monkeypatch.setattr(kq, "glu_hadamard",
+                        lambda *a, **k: calls.append(1) or fused(*a, **k))
+    with process_patches():
+        model, config, _ = build("qwen3_5_hadamard")
+        keys = ("self_attn.q_proj", "mlp.gate_proj", "mlp.up_proj")
+        assert prepare_lora_student(model, rank=4, scale=SCALE, num_layers=None, keys=keys) > 0
+        batch, lengths = _batch(vocab_size(config), 65, [65, 50], seed=1)
+        restore = install_training_attention(model)
+        install_training_gdn(model)
+        try:
+            loss, grad = _one_step(model, batch, lengths)
+        finally:
+            restore()
+        assert math.isfinite(loss) and not calls
+        for k, g in tree_flatten(grad):
+            if k.endswith(".lora_b"):
+                assert mx.abs(g.astype(mx.float32)).max().item() > 0.0, k
+        eval_logits(model, _batch(vocab_size(config), 24, [24, 24], seed=3)[0])
+    # serve fuses at the same sites
+    assert calls
