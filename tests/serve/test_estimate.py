@@ -358,7 +358,7 @@ def test_pi_model_entry_window_and_max_tokens():
     e = launch.pi_model_entry({"id": "a", "context_length": 8192})
     assert e == {"id": "a", "contextWindow": 8192, "maxTokens": 2048}
     e = launch.pi_model_entry({"id": "a", "context_length": 2048, "max_context_at_width_1": None})
-    assert e["maxTokens"] == launch._PI_MAX_TOKENS_FLOOR
+    assert e["maxTokens"] == launch._MAX_TOKENS_FLOOR
 
 
 def test_build_pi_configs_writes_context_window():

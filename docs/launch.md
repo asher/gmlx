@@ -1,10 +1,11 @@
 # Connect coding agents and chat apps
 
 This guide covers configuring an external tool to use your server. The tool
-can be a coding harness, an agent runtime, a terminal chat client or the Open
-WebUI browser app. `gmlx launch <client>` probes the server, writes the tool's
-native configuration without modifying your dotfiles and runs the tool. If no
-server is answering, it starts one first.
+can be a coding harness, an agent runtime, a terminal chat client, the Open
+WebUI browser app or the DeepSeek Harness web app. `gmlx launch <client>`
+probes the server, writes the tool's native configuration without modifying
+your dotfiles and runs the tool. If no server is answering, it starts one
+first.
 
 ```sh
 gmlx launch pi --model qwen3.6-27b            # pi on a local model
@@ -35,8 +36,8 @@ instead, for inspection or scripting.
 
 The three configuration styles differ in what they touch. Injection writes
 a config under `~/.config/gmlx/` and points the tool at it through an
-environment variable the tool honors, so the tool's own config is never
-read or written. Merge adds a provider block to the tool's file, preserves
+environment variable or command-line option the tool honors, so the tool's
+own config is never read or written. Merge adds a provider block to the tool's file, preserves
 the providers already there and refuses to overwrite a file it cannot
 parse. Environment passes everything in the exec environment with no file
 at all.
@@ -52,6 +53,7 @@ at all.
 | aichat | terminal chat client with tools | injection | `~/.config/gmlx/aichat/` via `AICHAT_CONFIG_DIR` |
 | elia | terminal chat TUI | injection | `~/.config/gmlx/elia-xdg` via `XDG_CONFIG_HOME` |
 | open-webui | browser chat app | environment | `OPENAI_API_BASE_URL` and related variables |
+| dsh | DeepSeek Harness web app | injection | `~/.config/gmlx/dsh/gmlx.cordis.yml` via `--patch` |
 
 ## Starting the server automatically
 
@@ -84,9 +86,10 @@ server is not running.
 `--model ID` picks which served model the tool uses, and without it the
 tool gets the server's default. An `id@profile` form such as
 `--model qwen3.6-27b@coding` runs all requests from the tool at that
-profile's sampling. The id is validated against the served list. Three
-clients, claude-code, goose and hermes, cannot start without a model, so
-for them either pass `--model` or set `server.defaults.model`.
+profile's sampling. The id is validated against the served list. Four
+clients, claude-code, dsh, goose and hermes, cannot start without a model,
+so for them either pass `--model` or set `server.defaults.model`. dsh also
+starts when the server has exactly one chat model.
 
 When you pass `--model`, the server is also asked to keep that model
 resident through the idle timeout, so a long session's model is not
@@ -117,6 +120,7 @@ was launched without the key, so rerun with `--api-key`.
 | claude-code | `ANTHROPIC_AUTH_TOKEN` in the exec environment |
 | aichat, elia | `api_key` in the injected config |
 | open-webui | `OPENAI_API_KEY` in the exec environment only |
+| dsh | `GMLX_API_KEY` in the exec environment only |
 
 ## The clients
 
@@ -196,3 +200,44 @@ The configuration depends on which services the server reports:
 | `embeddings` | document RAG ([rag.md](rag.md)) |
 | `rerank` as well | hybrid search with the external reranker at `/v1/rerank` |
 | `stt` and `tts` | audio engines at the server's `/v1/audio/*` endpoints. The voice rule is in [services.md](services.md#text-to-speech-tts) |
+
+### dsh
+
+DeepSeek Harness is an agent app that runs in the browser. Install version
+0.1.7 or newer with `npm install -g @deepseek-ai/dsh@next`. The launch
+refuses an older dsh and prints that command.
+
+The launch runs dsh with its own profile, `gmlx`, under `$DSH_HOME/profiles/`,
+where `DSH_HOME` defaults to `~/.dsh`. On the first launch dsh creates the
+profile from its shipped `web` template, and later launches reuse it. Your
+other dsh profiles are not touched. A `gmlx` directory there without a
+`package.json` is refused, so remove or rename it before you launch.
+
+The provider, default model and compaction settings go in
+`~/.config/gmlx/dsh/gmlx.cordis.yml`, which the launch passes to dsh with
+`--patch`. The file registers the server with dsh's pi-ai adapter, and each
+served chat model gets the sizes and `compat` switches that pi gets. A
+`--patch` file is dsh's top configuration layer. The web app therefore
+cannot save a model switch as the new default, or an edit to the gmlx
+provider on its Models page. Rerun the launch with `--model` to change the
+default.
+
+The web app serves on port 3080, or on 3081 when the gmlx server holds 3080,
+and opens a browser. It compacts a conversation automatically only for a
+model with about 86K tokens of context or more, and the launch prints a note
+for a smaller default model. A conversation on a smaller model still compacts
+when the server reports that a request no longer fits, as described under
+[Limits and back-pressure](api.md#limits-and-back-pressure).
+
+The same file works with dsh's `headless` profile, which also applies its
+per-model compaction settings. This command answers one task in the terminal
+and exits:
+
+```sh
+GMLX_API_KEY=gmlx dsh --profile headless \
+  --patch ~/.config/gmlx/dsh/gmlx.cordis.yml "run the tests"
+```
+
+dsh's `web_search` tool uses DeepSeek's search service and needs
+`DEEPSEEK_API_KEY`. dsh uploads a conversation to DeepSeek only with feedback
+you submit on it, and `DSH_TELEMETRY_MODE=DISABLED` turns that off.

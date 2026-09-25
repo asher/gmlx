@@ -1328,6 +1328,277 @@ def test_launch_open_webui_missing_binary_errors(monkeypatch, tmp_path):
     assert rc == 1                                        # no auto-install, clean exit
 
 
+# dsh (DeepSeek Harness): build_dsh_overlay (pure) - Cordis patch rows
+def _dsh_models():
+    return [
+        {"id": "qwen3.6-27b", "default": True, "context_length": 131072,
+         "max_context_at_width_1": 65536},
+        {"id": "gemma-vlm", "vlm": True, "context_length": 8192},
+        {"id": "unsized"},
+        {"id": "coder", "alias_of": "qwen3.6-27b", "profile": "coder",
+         "context_length": 131072, "max_context_at_width_1": 65536},
+        {"id": "whisper-1", "stt": True},
+    ]
+
+
+def _dsh_rows(rows):
+    return {r["id"]: r["config"] for r in rows}
+
+
+def test_build_dsh_overlay_shape():
+    rows = _dsh_rows(launch.build_dsh_overlay(
+        "http://127.0.0.1:8080/v1", _dsh_models(), default_model="qwen3.6-27b"))
+    prov = rows["llm-pi-ai"]["providers"]["gmlx"]
+    assert prov["api"] == "openai-completions"
+    assert prov["baseURL"] == "http://127.0.0.1:8080/v1"
+    assert prov["apiKeyEnv"] == "GMLX_API_KEY"
+    assert prov["compat"] == launch._PI_AI_COMPAT
+    assert (prov["defaultContextWindow"], prov["defaultMaxTokens"]) == (32768, 8192)
+    by_id = {m["id"]: m for m in prov["models"]}
+    assert set(by_id) == {"qwen3.6-27b", "gemma-vlm", "unsized", "coder"}
+    assert by_id["qwen3.6-27b"] == {"id": "qwen3.6-27b", "name": "qwen3.6-27b",
+                                    "contextWindow": 65536, "maxTokens": 8192}
+    assert by_id["gemma-vlm"]["input"] == ["text", "image"]
+    assert by_id["unsized"] == {"id": "unsized", "name": "unsized"}
+    assert "alias of qwen3.6-27b" in by_id["coder"]["name"]
+    assert "reasoningEfforts" not in json.dumps(prov)       # server decides thinking
+    assert rows["agent-default-model"] == {"provider": "gmlx",
+                                           "model": "qwen3.6-27b"}
+
+
+def test_build_dsh_overlay_lists_profile_default():
+    # pi-ai refuses an id its route does not list (UNKNOWN_MODEL)
+    rows = _dsh_rows(launch.build_dsh_overlay(
+        "http://x/v1", _dsh_models(), default_model="qwen3.6-27b@coding"))
+    models = rows["llm-pi-ai"]["providers"]["gmlx"]["models"]
+    assert models[-1] == {"id": "qwen3.6-27b@coding", "name": "qwen3.6-27b@coding",
+                          "contextWindow": 65536, "maxTokens": 8192}
+    targets = [(p["provider"], p["model"])
+               for p in rows["compaction-basic"]["modelPolicies"]]
+    assert ("gmlx", "qwen3.6-27b@coding") in targets
+    assert len(targets) == len(set(targets))               # duplicates fail dsh load
+    assert rows["agent-default-model"]["model"] == "qwen3.6-27b@coding"
+
+
+def test_build_dsh_overlay_lists_a_served_default_once():
+    rows = _dsh_rows(launch.build_dsh_overlay("http://x/v1", _dsh_models(),
+                                              default_model="coder"))
+    ids = [m["id"] for m in rows["llm-pi-ai"]["providers"]["gmlx"]["models"]]
+    assert ids.count("coder") == 1
+
+
+@pytest.mark.parametrize("window,headroom,out", [
+    (4096, None, None),
+    (8192, 4096, 2048),
+    (32768, 6144, 8192),
+    (131072, 30720, 8192),
+    (262144, 63488, 8192),
+])
+def test_build_dsh_overlay_compaction_policy(window, headroom, out):
+    rows = _dsh_rows(launch.build_dsh_overlay(
+        "http://x/v1", [{"id": "m", "context_length": window}], default_model="m"))
+    if headroom is None:
+        assert "compaction-basic" not in rows
+        return
+    assert rows["compaction-basic"]["modelPolicies"] == [
+        {"provider": "gmlx", "model": "m", "headroomTokens": headroom,
+         "maxTokens": out}]
+    assert launch.dsh_compaction_resolves(window, out, headroom)
+
+
+def test_build_dsh_overlay_unsized_policy_uses_route_defaults():
+    rows = _dsh_rows(launch.build_dsh_overlay("http://x/v1", [{"id": "m"}],
+                                              default_model="m"))
+    assert rows["compaction-basic"]["modelPolicies"] == [
+        {"provider": "gmlx", "model": "m", "headroomTokens": 6144,
+         "maxTokens": 8192}]
+
+
+def test_model_capacity_output_cap_fits_tiny_windows():
+    assert launch.model_capacity({"context_length": 1024}) == (1024, 512)
+    assert launch.model_capacity({"context_length": 2048}) == (2048, 1024)
+    assert launch.model_capacity({"id": "x"}) is None
+
+
+def test_dsh_web_compaction_threshold():
+    # default headroom 65536 at retainRatio 0.16: the message budget must
+    # exceed 78019 tokens
+    assert not launch.dsh_compaction_resolves(86211, 8192)
+    assert launch.dsh_compaction_resolves(86212, 8192)
+
+
+# dsh: _dsh_home and _dsh_version
+def test_dsh_home_blank_and_tilde(monkeypatch):
+    home = Path(launch.os.environ["HOME"])
+    monkeypatch.setenv("DSH_HOME", "  ")
+    assert launch._dsh_home() == (home / ".dsh").resolve()
+    monkeypatch.setenv("DSH_HOME", "~/dh")
+    assert launch._dsh_home() == (home / "dh").resolve()
+    monkeypatch.delenv("DSH_HOME")
+    assert launch._dsh_home() == (home / ".dsh").resolve()
+
+
+def test_dsh_version_reads_the_package_manifest(tmp_path):
+    pkg = tmp_path / "node_modules" / "@deepseek-ai" / "dsh"
+    (pkg / "lib").mkdir(parents=True)
+    (pkg / "lib" / "bin.js").write_text("")
+    (pkg / "package.json").write_text(json.dumps(
+        {"name": "@deepseek-ai/dsh", "version": "0.1.9"}))
+    link = tmp_path / "dsh"
+    link.symlink_to(pkg / "lib" / "bin.js")
+    assert launch._dsh_version(str(link)) == "0.1.9"
+
+
+def test_dsh_version_falls_back_to_the_cli(tmp_path):
+    script = tmp_path / "dsh"
+    script.write_text("#!/bin/sh\necho 0.2.0-rc.1\n")
+    script.chmod(0o755)
+    assert launch._dsh_version(str(script)) == "0.2.0-rc.1"
+
+
+def test_check_dsh_version_floor(capsys):
+    with pytest.raises(launch.LaunchError) as e:
+        launch._check_dsh_version("0.1.6")
+    assert "npm install -g @deepseek-ai/dsh@next" in str(e.value)
+    launch._check_dsh_version("0.1.7-alpha.2")             # prerelease of the floor
+    launch._check_dsh_version("0.2.0")
+    launch._check_dsh_version("not a version")
+    assert "cannot read the dsh version" in capsys.readouterr().err
+
+
+# dsh: _launch_dsh flow (faked probe + recording exec)
+def _fake_dsh(monkeypatch, tmp_path, models=None, version="0.1.7-rc.2"):
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None: models or _dsh_models())
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(launch, "_dsh_version", lambda binary: version)
+    home = tmp_path / "dsh-home"
+    monkeypatch.setenv("DSH_HOME", str(home))
+    return home
+
+
+def _run_dsh(tmp_path, **kw):
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls.update(binary=binary, argv=argv, env=env)
+        return 0
+
+    kw.setdefault("config_path", str(tmp_path / "overlay.yml"))
+    rc = launch._launch_dsh(_args(harness="dsh", **kw), exec_fn=fake_exec)
+    return rc, calls
+
+
+def test_launch_dsh_first_launch_creates_profile(monkeypatch, tmp_path, capsys):
+    _fake_dsh(monkeypatch, tmp_path)
+    rc, calls = _run_dsh(tmp_path)
+    assert rc == 0
+    overlay = tmp_path / "overlay.yml"
+    assert calls["binary"] == "/usr/bin/dsh"
+    assert calls["argv"] == ["dsh", "--profile", "gmlx", "--from-default-profile",
+                             "web", "--patch", str(overlay)]
+    assert calls["env"]["GMLX_API_KEY"] == "gmlx"           # placeholder, no auth
+    rows = _dsh_rows(launch.yaml.safe_load(overlay.read_text()))
+    assert rows["agent-default-model"]["model"] == "qwen3.6-27b"
+    assert "creates the dsh profile" in capsys.readouterr().out
+
+
+def test_launch_dsh_existing_profile_skips_template(monkeypatch, tmp_path):
+    home = _fake_dsh(monkeypatch, tmp_path)
+    profile = home / "profiles" / "gmlx"
+    profile.mkdir(parents=True)
+    (profile / "package.json").write_text("{}")
+    _, calls = _run_dsh(tmp_path)
+    assert "--from-default-profile" not in calls["argv"]
+
+
+def test_launch_dsh_refuses_profile_dir_without_manifest(monkeypatch, tmp_path):
+    home = _fake_dsh(monkeypatch, tmp_path)
+    (home / "profiles" / "gmlx").mkdir(parents=True)
+    with pytest.raises(launch.LaunchError) as e:
+        _run_dsh(tmp_path)
+    assert "no package.json" in str(e.value)
+
+
+def test_launch_dsh_passes_the_api_key(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path)
+    _, calls = _run_dsh(tmp_path, api_key="sekret")
+    assert calls["env"]["GMLX_API_KEY"] == "sekret"
+
+
+def test_launch_dsh_moves_off_a_server_on_3080(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path)
+    _, calls = _run_dsh(tmp_path, port=3080,
+                        base_url="http://127.0.0.1:3080/v1")
+    assert calls["argv"][-2:] == ["--port", "3081"]
+
+
+def test_launch_dsh_refuses_an_old_dsh(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path, version="0.1.5-rc.3")
+    with pytest.raises(launch.LaunchError, match="too old"):
+        _run_dsh(tmp_path)
+
+
+def test_launch_dsh_config_only_skips_exec_and_version(monkeypatch, tmp_path,
+                                                       capsys):
+    _fake_dsh(monkeypatch, tmp_path)
+
+    def no_probe(binary):
+        raise AssertionError("version probed under --config-only")
+
+    monkeypatch.setattr(launch, "_dsh_version", no_probe)
+    rc, calls = _run_dsh(tmp_path, config_only=True)
+    assert rc == 0 and calls == {}
+    assert (tmp_path / "overlay.yml").exists()
+    out = capsys.readouterr().out
+    assert "run it with:  GMLX_API_KEY=gmlx dsh --profile gmlx" in out
+
+
+def test_launch_dsh_missing_binary_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(launch, "probe_models", lambda base, api_key=None: _models())
+    monkeypatch.setattr(launch.shutil, "which", lambda name: None)
+    rc = launch.cmd_launch(["dsh", "--config-path", str(tmp_path / "o.yml")])
+    assert rc == 1                                        # no auto-install, clean exit
+
+
+def test_launch_dsh_single_chat_model_is_the_default(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path, models=[
+        {"id": "only", "context_length": 131072},
+        {"id": "whisper-1", "stt": True}])
+    _, calls = _run_dsh(tmp_path)
+    rows = _dsh_rows(launch.yaml.safe_load((tmp_path / "overlay.yml").read_text()))
+    assert rows["agent-default-model"]["model"] == "only"
+
+
+def test_launch_dsh_needs_a_default(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path, models=[{"id": "a"}, {"id": "b"}])
+    with pytest.raises(launch.LaunchError, match="needs a default model"):
+        _run_dsh(tmp_path)
+
+
+def test_launch_dsh_refuses_a_service_default(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path)
+    with pytest.raises(launch.LaunchError, match="service model"):
+        _run_dsh(tmp_path, model="whisper-1")
+
+
+def test_launch_dsh_small_window_notes(monkeypatch, tmp_path, capsys):
+    _fake_dsh(monkeypatch, tmp_path, models=[
+        {"id": "m", "default": True, "context_length": 8192}])
+    _run_dsh(tmp_path)
+    out = capsys.readouterr().out
+    assert "small for an agent" in out
+    assert "needs a 80068-token context" in out
+
+
+def test_launch_dsh_large_window_prints_no_notes(monkeypatch, tmp_path, capsys):
+    _fake_dsh(monkeypatch, tmp_path, models=[
+        {"id": "m", "default": True, "context_length": 131072}])
+    _run_dsh(tmp_path)
+    out = capsys.readouterr().out
+    assert "small for an agent" not in out and "compacts m only" not in out
+
+
 def test_probe_models_named_api_key_hint_on_401(monkeypatch):
     import urllib.error
 

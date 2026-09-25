@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx launch dsh` runs the DeepSeek Harness web app, 0.1.7 or newer, on a
+  local model. It uses a `gmlx` profile of its own and passes the provider and
+  default model to dsh as a `--patch` file.
+
 ### Fixed
 
 - `/v1/chat/completions` ignored `max_completion_tokens`, OpenAI's current

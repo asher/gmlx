@@ -575,12 +575,13 @@ gmlx launch opencode
 gmlx launch pi --model qwen3.6-27b@coding
 gmlx launch claude-code --model qwen3.6-27b
 gmlx launch open-webui
+gmlx launch dsh --model qwen3.6-27b
 gmlx launch omp --config-only
 ```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | required | `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui` or `menubar` |
+| `client`, positional | required | `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh` or `menubar` |
 | `--model ID[@profile]` | the server's default | the served model the tool uses, kept resident while it runs |
 | `--base-url URL` | none | an explicit server, never auto-started |
 | `--host H`, `--port P` | the managed server | the server to target |
