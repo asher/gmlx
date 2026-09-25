@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Ported from vLLM examples/features/structured_diffusion (canvas seeding,
 # width rule) and vllm/model_executor/models/diffusion_gemma.py (step loop)
-# at ab3de6edf2 (Apache-2.0; see licenses/vllm-LICENSE).
+# at ab3de6edf2 and modified for gmlx (Apache-2.0; see
+# licenses/vllm-LICENSE).
 """Structured reads on a DiffusionGemma model.
 
 A read seeds the decoder canvas with an answer template, runs the decoder

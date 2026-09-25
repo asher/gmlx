@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Ported from vLLM examples/features/structured_diffusion/structured_server.py
-# at ab3de6edf2 (Apache-2.0; see licenses/vllm-LICENSE).
+# at ab3de6edf2 and modified for gmlx (Apache-2.0; see
+# licenses/vllm-LICENSE).
 """Question schema parsing and the Jev request-body mapping.
 
 The rules match the vLLM proxy. A value that cannot be converted to a

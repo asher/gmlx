@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Ported from vLLM examples/features/structured_diffusion/structured_server.py
-# at ab3de6edf2 (Apache-2.0; see licenses/vllm-LICENSE).
+# at ab3de6edf2 and modified for gmlx (Apache-2.0; see
+# licenses/vllm-LICENSE).
 """The Jev decision contract: the state text and the answer shapes."""
 
 from __future__ import annotations
