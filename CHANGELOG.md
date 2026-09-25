@@ -28,6 +28,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previous drafter head.
 - `gmlx run`, `chat` and `bench` with MTP or a DFlash 2 drafter decode
   faster, on the command-buffer settings `gmlx serve` already decoded with.
+- A single `gmlx serve` request with MTP or a DFlash 2 drafter spends less
+  time between speculative rounds.
 
 ### Fixed
 

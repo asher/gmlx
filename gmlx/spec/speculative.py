@@ -882,6 +882,7 @@ def _owned_decode_rounds(
     sidecar_ctx: dict | None = None,
     seed_stream: dict | None = None,
     thinking_hook=None,
+    round_pos: list | None = None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -897,6 +898,9 @@ def _owned_decode_rounds(
     loop reports every emitted token through hook.observe and, when a close is
     requested, commits the hook's forced close sequence as fully-accepted
     verify rounds instead of drafting (see _next_forced_chunk).
+
+    round_pos, when given, holds [index, count] of the token being yielded
+    within its round, so the serve engine can take a whole round per tick.
     """
     token_dtype = mx.int32
     row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
@@ -1237,6 +1241,8 @@ def _owned_decode_rounds(
             delivered = 0
             try:
                 for tok in new_tokens:
+                    if round_pos is not None:
+                        round_pos[:] = [delivered, n_new]
                     delivered += 1
                     if thinking_hook is not None:
                         thinking_hook.observe(tok)
@@ -1480,9 +1486,12 @@ def owned_server_rounds(
     Matches mlx-vlm's run_speculative_server_rounds contract: the server has
     already prefilled prompt_cache and emitted first_bonus, and passes the
     captured full-prompt hidden, the prefill shared_kv_states, and the prompt
-    tokens (the head seed). Yields (per-row [tok], None); the bonus is never
-    re-yielded. Routes through the OWNED decode loop, not mlx-vlm's _mtp_rounds,
-    so the serve path is the same engine the CLI uses and is batching-ready.
+    tokens (the head seed). Yields (per-row [tok], round metadata), and the
+    bonus is never re-yielded. The metadata's round_pos and round_len let
+    the engine take a round's tokens in one tick, as the batched rounds do,
+    instead of running a full engine tick per token. Routes through the
+    OWNED decode loop, not mlx-vlm's _mtp_rounds, so the serve path is the
+    same engine the CLI uses and is batching-ready.
     """
     lm = model.language_model if hasattr(model, "language_model") else model
     b = (int(first_bonus.reshape(-1).item())
@@ -1518,13 +1527,14 @@ def owned_server_rounds(
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
     generated = [b]
+    pos = [0, 1]
     rounds = _owned_decode_rounds(
         model, drafter, lm, prompt_cache,
         hidden=hidden, b=b, shared_kv=shared_kv_states,
         seed_tokens=prompt_tokens, emitted=1, max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
-        seed_stream=seed_stream, thinking_hook=thinking_hook)
+        seed_stream=seed_stream, thinking_hook=thinking_hook, round_pos=pos)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1553,7 +1563,7 @@ def owned_server_rounds(
                 prompt_cache = hidden = shared_kv_states = None
                 drafter_warm = first_bonus = prompt_tokens = None
                 sidecar_ctx = None
-            yield [tok], None
+            yield [tok], {"round_pos": pos[0], "round_len": pos[1]}
     finally:
         # Non-terminal finishes (client disconnect mid-stream): close the
         # round loop first -- its mid-round-close rollback must trim the
