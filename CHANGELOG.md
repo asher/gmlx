@@ -33,6 +33,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   DFlash 2 drafters and on models with 2 KV heads such as Qwen3.6-35B-A3B.
 - MTP on Qwen3.5-9B, and other models with 16 query heads and 4 KV heads,
   runs faster at long context when it verifies 3 or 4 tokens.
+- Speculative decoding on Gemma-4 with its assistant drafter runs faster at
+  long context, by 17% on E2B and 5% on 31B with a 30k-token prompt.
 
 ### Fixed
 

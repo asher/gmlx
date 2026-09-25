@@ -119,12 +119,13 @@ def test_verify_gemm_eligibility():
     ok = _rand(4)
     assert attn_hd512._verify_gemm_eligible(*ok, "causal")
     assert attn_hd512._verify_gemm_eligible(*ok, None)
-    # qL gates: 2 stays on the vector route, decode (1) never routes here
-    assert not attn_hd512._verify_gemm_eligible(*_rand(2), "causal")
+    # every verify width at 4 KV heads, never decode or past qL 8
+    assert attn_hd512._verify_gemm_eligible(*_rand(2), "causal")
+    assert attn_hd512._verify_gemm_eligible(*_rand(8), "causal")
     assert not attn_hd512._verify_gemm_eligible(*_rand(1), "causal")
-    assert not attn_hd512._verify_gemm_eligible(*_rand(7), "causal")
+    assert not attn_hd512._verify_gemm_eligible(*_rand(9), "causal")
     # shallow KV stays on stock
-    assert not attn_hd512._verify_gemm_eligible(*_rand(4, kL=2048), "causal")
+    assert not attn_hd512._verify_gemm_eligible(*_rand(4, kL=256), "causal")
     # non-hd512 and array masks fall through
     assert not attn_hd512._verify_gemm_eligible(*_rand(4, d=256), "causal")
     q, k, v = ok
@@ -145,6 +146,16 @@ def test_fa_chunks():
     # live cap must be a real tile size when the kernel is present
     if attn_hd512._HAS_FA_VERIFY:
         assert attn_hd512._FA_MAX_ROWS in (32, 64)
+
+
+def _routed_sdpa(q, k, v, scale):
+    # causal call through the installed wrapper, with the routes it bumped
+    attn_hd512.install_hd512_sdpa()
+    before = attn_hd512.route_counts()
+    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
+                                               mask="causal")
+    after = attn_hd512.route_counts()
+    return out, [key[0] for key in after if after[key] > before.get(key, 0)]
 
 
 _NEEDS_FA = pytest.mark.skipif(
@@ -174,9 +185,10 @@ def test_fa_verify_fold_matches_reference(hq, hkv, qL):
 
 @_NEEDS_FA
 @pytest.mark.parametrize("hq,hkv,qL", [
-    (16, 2, 4),   # gemma-4-26b-moe globals: g8 x qL4 = one 32-row tile
-    (32, 4, 4),   # gemma-4-31b globals: same fold
-    (32, 4, 5),   # g8 x qL5 = 40 rows -> 2 chunks on the 32-row d-split tile
+    (16, 2, 4),   # gemma-4-26b-a4b globals: g8 x qL4 = one 32-row tile
+    (16, 2, 3),   # 24 rows
+    (8, 2, 6),    # gemma-4-e4b globals: g4 x qL6 = 24 rows
+    (8, 2, 8),    # 32 rows
 ])
 def test_fa_verify_hd512_fold_matches_reference(hq, hkv, qL):
     q, k, v = _rand(qL, kL=KL, hq=hq, hkv=hkv)
@@ -188,6 +200,59 @@ def test_fa_verify_hd512_fold_matches_reference(hq, hkv, qL):
     assert out.shape == (1, hq, qL, D)
     err = mx.abs(out.astype(mx.float32) - ref).max().item()
     assert err < 2e-2, f"hq/hkv={hq}/{hkv} qL={qL} err={err}"
+
+
+@pytest.mark.parametrize("hq,hkv,qL,kL,want", [
+    (32, 4, 1, 1023, None),     # decode below 1024 keys stays on stock
+    (32, 4, 1, 1024, "vector"),
+    (8, 1, 1, 511, None),       # one KV head: decode from 512 keys
+    (8, 1, 1, 512, "vector"),
+    (8, 1, 2, 511, None),       # verify below 512 keys stays on stock
+    (8, 1, 2, 8192, "vector"),  # one KV head, 16 rows: vector to 8192 keys
+    (8, 1, 2, 8193, None),
+    (8, 1, 3, 4096, "vector"),  # 24 rows: to 4096
+    (8, 1, 3, 4097, None),
+    (16, 1, 2, 1024, "vector"),  # 32 rows: to 1024
+    (16, 1, 2, 1025, None),
+    (16, 1, 3, 1024, None),     # 48 rows: stock at any depth
+    (32, 4, 2, 511, None),
+    (32, 4, 2, 512, "gemm"),    # 4 KV heads: the GEMM at every width
+    (32, 4, 8, 65536, "gemm"),
+    (16, 2, 2, 512, "vector"),  # 2 KV heads, up to 20 rows: vector
+    (8, 2, 5, 65536, "vector"),
+    (16, 2, 3, 1023, None),     # 21 to 31 rows: fa from 1024
+    (16, 2, 3, 1024, "fa"),
+    (8, 2, 7, 1024, "fa"),
+    (8, 2, 8, 512, "gemm"),     # 32 rows: GEMM below 4096, fa from there
+    (16, 2, 4, 4095, "gemm"),
+    (16, 2, 4, 4096, "fa"),
+    (16, 2, 5, 512, "gemm"),    # over 32 rows: GEMM
+    (16, 2, 9, 4096, None),     # past qL 8
+])
+def test_hd512_route_table(hq, hkv, qL, kL, want):
+    # the table reads shapes only, so the operands stay unevaluated
+    q = mx.zeros((1, hq, qL, 512), dtype=mx.bfloat16)
+    k = mx.zeros((1, hkv, kL, 512), dtype=mx.bfloat16)
+    assert attn_hd512._hd512_route(q, k) == want
+
+
+@_NEEDS_FA
+@pytest.mark.parametrize("hq,hkv,qL,kL,route", [
+    (8, 2, 4, 2048, "sdpa_vector"),
+    (8, 2, 8, 4096, "fa_verify"),
+    (32, 4, 8, 1024, "verify_gemm"),
+    (16, 2, 6, 1024, "verify_gemm"),
+    (16, 1, 2, 2048, "stock"),
+    (8, 1, 1, 512, "sdpa_vector"),
+])
+def test_hd512_routes_match_reference(hq, hkv, qL, kL, route):
+    # each route of the table, through the installed wrapper
+    q, k, v = _rand(qL, kL=kL, hq=hq, hkv=hkv)
+    out, grew = _routed_sdpa(q, k, v, SCALE)
+    assert grew and all(r.startswith(route) for r in grew), grew
+    ref = _ref(q, k, v, qL > 1)
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"{hq}/{hkv} qL={qL} kL={kL} err={err}"
 
 
 def test_fa_verify_hd512_eligibility():
@@ -261,16 +326,6 @@ def test_fa_verify_eligibility_oversized_fold():
     # g=27: odd and >64 rows unfolded -- no valid split at either tile cap
     q2, k2, v2 = _rand(4, hq=27, hkv=1, d=256)
     assert not attn_hd512._fa_verify_eligible(q2, k2, v2, "causal")
-
-
-def _routed_sdpa(q, k, v, scale):
-    # causal call through the installed wrapper, with the routes it bumped
-    attn_hd512.install_hd512_sdpa()
-    before = attn_hd512.route_counts()
-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
-                                               mask="causal")
-    after = attn_hd512.route_counts()
-    return out, [key[0] for key in after if after[key] > before.get(key, 0)]
 
 
 @_NEEDS_FA
@@ -389,7 +444,16 @@ def test_route_counts_and_stock_warning(capsys):
     attn_hd512._stock_depth_warning(q3, k3, "causal", None)
     q4, k4, v4 = _rand(4, kL=4096, d=256, hq=32, hkv=2)
     attn_hd512._stock_depth_warning(q4, k4, "causal", None)
+    # head_dim 512: the table's stock pick (one KV head) stays quiet, a
+    # shape the table routes elsewhere warns
+    q5, k5, v5 = _rand(4, kL=16384, d=512, hq=8, hkv=1)
+    assert attn_hd512._hd512_route(q5, k5) is None
+    attn_hd512._stock_depth_warning(q5, k5, "causal", None)
     assert "stock materialized" not in capsys.readouterr().err
+    q6, k6, v6 = _rand(4, kL=16384, d=512, hq=16, hkv=2)
+    assert attn_hd512._hd512_route(q6, k6) == "fa"
+    attn_hd512._stock_depth_warning(q6, k6, "causal", None)
+    assert capsys.readouterr().err.count("stock materialized") == 1
 
 
 def _stock_sdpa():
