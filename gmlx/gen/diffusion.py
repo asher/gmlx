@@ -55,8 +55,10 @@ def stream(model, tokenizer, prompt, *, max_tokens: int = 256, **_ignored):
     and are ignored."""
     from mlx_vlm.generate.diffusion import stream_diffusion_generate
 
+    from .generation import encode_prompt
+
     processor, backend, skip_ids = _diffusion_io(tokenizer)
-    ids = tokenizer.encode(prompt) if isinstance(prompt, str) else list(prompt)
+    ids = encode_prompt(tokenizer, prompt) if isinstance(prompt, str) else list(prompt)
     input_ids = mx.array(ids)[None]
     yield from stream_diffusion_generate(
         model,

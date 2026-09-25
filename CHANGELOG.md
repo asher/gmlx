@@ -10,6 +10,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The `--draft-block-size` help and docs called N the drafted tokens. A round
   drafts N-1, so llama-server's `--spec-draft-n-max M` matches N = M+1.
+- DiffusionGemma prompts on `gmlx run` and on the server started with two BOS
+  tokens, one from the chat template and one from the tokenizer. They now
+  start with one.
 
 ## [0.4.17] - 2026-09-25
 

@@ -260,6 +260,11 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
          "server_patches.install_retire_render_capture (ids hop + "
          "tokenize path for the next-turn retirement key)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
+         "chat_behavior.install_diffusion_single_bos (wrapped: a "
+         "DiffusionGemma prompt that opens with BOS gets no second one)"),
+    Seam("mlx_vlm.server.generation", "prepare_inputs",
+         "chat_behavior.install_diffusion_single_bos (module attr)"),
     Seam("mlx_vlm.server.openai", "apply_chat_template",
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
