@@ -5,9 +5,10 @@ name: release
 # publishing (no API token stored). Pure-Python package: one ubuntu build job,
 # no compile matrix.
 #
-# After the publish, the homebrew job regenerates the formula in the
-# asher/homebrew-gmlx tap, installs and tests it, and pushes it. To retry only
-# that job, run the workflow on the release tag with homebrew_only set.
+# After the publish, the homebrew job regenerates the formula and pushes it to
+# the asher/homebrew-gmlx tap. homebrew-verify then installs and tests it on
+# macOS and reverts the push if that fails. To retry only these two jobs, run
+# the workflow on the release tag with homebrew_only set.
 #
 # Prerequisites (one-time, before the first real release):
 #   * a PyPI project + a Trusted Publisher entry for this repo/workflow;
@@ -72,11 +73,9 @@ jobs:
     needs: [publish]
     # Also runs when build and publish were skipped for a homebrew_only retry.
     if: ${{ !cancelled() && (needs.publish.result == 'success' || inputs.homebrew_only) }}
-    # The formula requires macOS 26: mlx-kquant publishes macosx_26_0 wheels only.
-    runs-on: macos-26
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -91,9 +90,11 @@ jobs:
         run: |
           version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          brew install uv
-          python3 scripts/brew_formula.py "$version" -o tap/Formula/gmlx.rb
-      - name: Commit to the local tap clone
+          python -m pip install uv
+          python scripts/brew_formula.py "$version" -o tap/Formula/gmlx.rb
+          ruby -c tap/Formula/gmlx.rb
+      - name: Commit and push
+        id: commit
         working-directory: tap
         run: |
           git config user.name "github-actions[bot]"
@@ -101,12 +102,31 @@ jobs:
           git add Formula/gmlx.rb
           if git diff --cached --quiet; then
             echo "formula already at $VERSION"
-            echo "UNCHANGED=1" >> "$GITHUB_ENV"
-          else
-            git commit -m "gmlx $VERSION"
+            exit 0
           fi
+          git commit -m "gmlx $VERSION"
+          git push origin HEAD
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  homebrew-verify:
+    name: verify the Homebrew formula
+    needs: [homebrew]
+    if: ${{ needs.homebrew.outputs.commit != '' }}
+    # The formula requires macOS 26: mlx-kquant publishes macosx_26_0 wheels only.
+    runs-on: macos-26
+    env:
+      COMMIT: ${{ needs.homebrew.outputs.commit }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: asher/homebrew-gmlx
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          ref: ${{ needs.homebrew.outputs.commit }}
+          fetch-depth: 2
+          path: tap
       - name: Audit, install and test the formula
-        if: env.UNCHANGED != '1'
         run: |
           brew tap asher/gmlx "$GITHUB_WORKSPACE/tap"
           brew trust asher/gmlx
@@ -114,7 +134,17 @@ jobs:
           brew audit --strict --formula asher/gmlx/gmlx
           brew install asher/gmlx/gmlx
           brew test asher/gmlx/gmlx
-      - name: Push the formula
-        if: env.UNCHANGED != '1'
+      - name: Revert the formula
+        if: failure()
         working-directory: tap
-        run: git push origin HEAD
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$COMMIT" ]; then
+            echo "::error::the tap moved past $COMMIT, so it was not reverted"
+            exit 1
+          fi
+          git revert --no-edit "$COMMIT"
+          git push origin HEAD:main
+          echo "::error::the formula failed its install check and was reverted"
