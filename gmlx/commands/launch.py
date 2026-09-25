@@ -356,6 +356,16 @@ def _load_json(path: Path) -> dict:
 _PI_MAX_TOKENS_CAP = 8192
 _PI_MAX_TOKENS_FLOOR = 1024
 
+# pi-ai request switches for a gmlx provider: the output cap goes out as
+# max_tokens, and the store, developer-role and long prompt-cache fields,
+# which the server does not read, stay off the request.
+_PI_AI_COMPAT = {
+    "maxTokensField": "max_tokens",
+    "supportsStore": False,
+    "supportsDeveloperRole": False,
+    "supportsLongCacheRetention": False,
+}
+
 
 def pi_model_entry(m: dict) -> dict:
     """One ``models[]`` entry for pi's ``models.json``: the id, plus
@@ -389,6 +399,7 @@ def build_pi_configs(base_url: str, models: list, *,
         "api": "openai-completions",
         # pi requires an apiKey; a placeholder when the server has no auth.
         "apiKey": api_key or provider_id,
+        "compat": dict(_PI_AI_COMPAT),
         "models": [pi_model_entry(m) for m in chat_models(models)],
     }
     models_doc["providers"] = providers

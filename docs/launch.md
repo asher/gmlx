@@ -141,6 +141,10 @@ opencode takes it in the injected file's top-level `model` key, pi as
 `defaultProvider` and `defaultModel` in the merged files, and omp as
 `modelRoles.default`.
 
+pi's provider block also sizes each model's context window and output cap
+from `/v1/models`. Its `compat` switches make pi send the cap as
+`max_tokens` and leave out fields the server does not read.
+
 ### hermes
 
 The injected file is your `~/.hermes/config.yaml` merged with the gmlx

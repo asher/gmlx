@@ -535,6 +535,10 @@ def test_build_pi_configs_shape():
     assert [m["id"] for m in prov["models"]] == ["qwen3.6-27b", "gemma-e2b", "coder"]
     assert settings_doc["defaultProvider"] == "gmlx"
     assert settings_doc["defaultModel"] == "qwen3.6-27b"
+    # pi-ai sends only fields the server reads: max_tokens, no store
+    assert prov["compat"] == {
+        "maxTokensField": "max_tokens", "supportsStore": False,
+        "supportsDeveloperRole": False, "supportsLongCacheRetention": False}
 
 
 def test_build_pi_configs_no_default_omits_model():
@@ -595,7 +599,8 @@ def test_launch_pi_writes_both_files_and_execs(monkeypatch, tmp_path):
     assert calls["binary"] == "/usr/bin/pi" and calls["argv"] == ["pi"]
     models_doc = json.loads((tmp_path / "models.json").read_text())
     settings_doc = json.loads((tmp_path / "settings.json").read_text())
-    assert "gmlx" in models_doc["providers"]
+    assert models_doc["providers"]["gmlx"]["compat"]["maxTokensField"] \
+        == "max_tokens"
     assert settings_doc["defaultModel"] == "qwen3.6-27b"     # server default marker
 
 
