@@ -28,6 +28,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch pi` left pi sending a `store` field the server does not read,
   which logged an ignored-parameter warning on every request. pi now sends
   its output cap as `max_tokens` and no `store`.
+- A `thinking` request field in the z.ai form with a `clear_thinking` key, as
+  pi-ai sends it, was ignored as unrecognized. The server now applies the switch
+  and maps `clear_thinking` onto the variable the template reads.
 
 ## [0.4.16] - 2026-09-24
 

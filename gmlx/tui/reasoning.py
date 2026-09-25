@@ -526,12 +526,30 @@ def want_color(stream=None) -> bool:
 
 def thinking_flag(value) -> bool | None:
     """The z.ai / GLM API spelling of the thinking switch -
-    ``{"type": "enabled"|"disabled"}`` - as a bool; ``None`` for anything
-    else (including template variables that happen to be named thinking)."""
-    if (isinstance(value, dict) and set(value) <= {"type"}
-            and value.get("type") in ("enabled", "disabled")):
+    ``{"type": "enabled"|"disabled"}``, with an optional boolean
+    ``clear_thinking`` - as a bool; ``None`` for anything else (including
+    template variables that happen to be named thinking)."""
+    if (isinstance(value, dict) and set(value) <= {"type", "clear_thinking"}
+            and value.get("type") in ("enabled", "disabled")
+            and isinstance(value.get("clear_thinking", False), bool)):
         return value["type"] == "enabled"
     return None
+
+
+def history_reasoning_kwargs(value, template: str) -> dict:
+    """The template variable for the ``clear_thinking`` key of a z.ai
+    thinking dict. ``clear_thinking: false`` asks to keep earlier turns'
+    reasoning in the prompt. A template that reads ``clear_thinking`` gets
+    it unchanged, and one that reads ``preserve_thinking`` gets the inverse.
+    Empty when the key is absent or the template reads neither."""
+    if thinking_flag(value) is None or "clear_thinking" not in value:
+        return {}
+    clear = value["clear_thinking"]
+    if _reads(template, "clear_thinking"):
+        return {"clear_thinking": clear}
+    if _reads(template, "preserve_thinking"):
+        return {"preserve_thinking": not clear}
+    return {}
 
 
 def thinking_switch_flag(value) -> bool | None:
@@ -545,17 +563,22 @@ def thinking_switch_flag(value) -> bool | None:
     return None
 
 
-def normalize_template_kwargs(kwargs: dict) -> dict:
+def normalize_template_kwargs(kwargs: dict, template: str = "") -> dict:
     """Translate ``thinking: {"type": ...}`` (the z.ai / GLM API request
     schema users copy from provider docs) into ``enable_thinking``, the
-    variable chat templates actually read. Any other ``thinking`` value
-    passes through untouched as a plain template variable."""
-    flag = thinking_flag(kwargs.get("thinking"))
+    variable chat templates actually read, and its ``clear_thinking`` key
+    as :func:`history_reasoning_kwargs` does for ``template``. Any other
+    ``thinking`` value passes through untouched as a plain template
+    variable. Keys set explicitly win over translated ones."""
+    zai = kwargs.get("thinking")
+    flag = thinking_flag(zai)
     if flag is None:
         return kwargs
     out = dict(kwargs)
     del out["thinking"]
     out.setdefault("enable_thinking", flag)
+    for key, value in history_reasoning_kwargs(zai, template).items():
+        out.setdefault(key, value)
     return out
 
 
@@ -668,7 +691,8 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     z.ai dict shape accepted) becomes MiniMax's three-state ``thinking_mode``
     where present, ``enable_thinking`` next (Qwen3.x, GLM, DeepSeek-V4
     alias), a bare ``thinking`` variable next (Kimi K2.x), or Hy3's
-    ``reasoning_effort: no_think`` dialect.
+    ``reasoning_effort: no_think`` dialect. The z.ai dict's
+    ``clear_thinking`` maps as :func:`history_reasoning_kwargs` says.
     ``reasoning_effort`` passes through under its own name (level names are
     the model's own; its template validates them), and an explicit level -
     argument or ``base`` key - wins over one a ``thinking`` switch would
@@ -687,6 +711,7 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     if thinking is None:
         return out
     if isinstance(thinking, dict):
+        out.update(history_reasoning_kwargs(thinking, template))
         flag = thinking_flag(thinking)
         thinking = {True: "on", False: "off", None: thinking}[flag]
     mode = _THINKING_LEVELS.get(thinking) if not isinstance(thinking, dict) \
