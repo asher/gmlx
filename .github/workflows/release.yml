@@ -5,18 +5,30 @@ name: release
 # publishing (no API token stored). Pure-Python package: one ubuntu build job,
 # no compile matrix.
 #
+# After the publish, the homebrew job regenerates the formula in the
+# asher/homebrew-gmlx tap, installs and tests it, and pushes it. To retry only
+# that job, run the workflow on the release tag with homebrew_only set.
+#
 # Prerequisites (one-time, before the first real release):
 #   * a PyPI project + a Trusted Publisher entry for this repo/workflow;
-#   * a GitHub Environment named "pypi" (optionally with required reviewers).
+#   * a GitHub Environment named "pypi" (optionally with required reviewers);
+#   * a write-enabled deploy key on asher/homebrew-gmlx, with its private half
+#     stored in this repo as the HOMEBREW_TAP_DEPLOY_KEY secret.
 
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      homebrew_only:
+        description: "Skip the PyPI build and publish; only update the tap"
+        type: boolean
+        default: false
 
 jobs:
   build:
     name: build sdist + wheel
+    if: ${{ !inputs.homebrew_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -54,3 +66,55 @@ jobs:
           name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  homebrew:
+    name: update the Homebrew tap
+    needs: [publish]
+    # Also runs when build and publish were skipped for a homebrew_only retry.
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || inputs.homebrew_only) }}
+    # The formula requires macOS 26: mlx-kquant publishes macosx_26_0 wheels only.
+    runs-on: macos-26
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v6
+        with:
+          repository: asher/homebrew-gmlx
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+      - name: Generate the formula
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          brew install uv
+          python3 scripts/brew_formula.py "$version" -o tap/Formula/gmlx.rb
+      - name: Commit to the local tap clone
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/gmlx.rb
+          if git diff --cached --quiet; then
+            echo "formula already at $VERSION"
+            echo "UNCHANGED=1" >> "$GITHUB_ENV"
+          else
+            git commit -m "gmlx $VERSION"
+          fi
+      - name: Audit, install and test the formula
+        if: env.UNCHANGED != '1'
+        run: |
+          brew tap asher/gmlx "$GITHUB_WORKSPACE/tap"
+          brew trust asher/gmlx
+          brew style asher/gmlx
+          brew audit --strict --formula asher/gmlx/gmlx
+          brew install asher/gmlx/gmlx
+          brew test asher/gmlx/gmlx
+      - name: Push the formula
+        if: env.UNCHANGED != '1'
+        working-directory: tap
+        run: git push origin HEAD

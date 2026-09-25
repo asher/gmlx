@@ -22,32 +22,48 @@ login item.
 
 - Any Apple Silicon Mac. [Pick a model for your Mac](#pick-a-model-for-your-mac)
   has suggestions for each memory size.
-- macOS 26.2 or newer is recommended, because the Metal kernels then install
-  as a prebuilt wheel. On older versions the install compiles them, which
-  needs full Xcode with its Metal toolchain, not the Command Line Tools
-  alone. Recent Xcode fetches the toolchain with
+- macOS 26.2 or newer is recommended. The Homebrew install needs it, and the
+  Metal kernels then install prebuilt. On older versions a uv or pip install
+  compiles them, which needs full Xcode with its Metal toolchain, not the
+  Command Line Tools alone. Recent Xcode fetches the toolchain with
   `xcodebuild -downloadComponent MetalToolchain`.
-- Python 3.11 or newer, which uv or pipx fetches for you.
-- Disk space for models, plus [Homebrew](https://brew.sh) if you want voice.
+- [Homebrew](https://brew.sh), which also supplies ffmpeg for voice.
+- Disk space for models.
 
 ## Install
 
+On macOS 26.2 or newer, install with Homebrew:
+
 ```sh
-uv tool install "gmlx[all]"      # or: pip install "gmlx[all]"
+brew install asher/gmlx/gmlx
+```
+
+The formula installs gmlx with every optional feature, plus ffmpeg. Its
+environment holds the exact dependency versions tested with that release, and
+`brew upgrade gmlx` builds a new environment for each version. A server or
+login item that was running during an upgrade keeps the old code until you
+run `gmlx restart`.
+
+On older macOS, or to choose the optional features yourself, install with uv:
+
+```sh
+uv tool install "gmlx[all]"
 brew install ffmpeg              # voice and non-wav audio only
 ```
 
 uv puts the `gmlx` command on your PATH in an isolated environment and fetches
 a suitable Python for it, and pipx behaves the same way. Install
 [uv](https://docs.astral.sh/uv/) with `brew install uv`, and upgrade later
-with `uv tool upgrade gmlx`. The pip form installs into a venv you manage
-yourself, so the command exists only while that venv is active. If a new
-terminal cannot find `gmlx`,
+with `uv tool upgrade gmlx`. To use gmlx from a venv you manage yourself, for
+example to call its Python API, run `pip install "gmlx[all]"` in that venv,
+which needs Python 3.11 or newer. The command then exists only while the venv
+is active. If a new terminal cannot find `gmlx`,
 [troubleshooting.md](troubleshooting.md#gmlx-command-not-found-in-a-new-terminal)
 explains.
 
-`[all]` turns on all optional features. The core install already serves, loads
-vision models, embeds and runs the menu bar, which leaves few extras:
+A uv or pip install chooses its extras, and `[all]` turns on all of them. The
+core install already serves, loads vision models, embeds and runs the menu
+bar, which leaves few extras:
 
 | Extra | Adds |
 |-------|------|
@@ -64,7 +80,7 @@ the same form you used the first time. You rarely have to remember that:
 `gmlx init` offers to install the extra for each service you turn on, and
 any "not installed" message names the command.
 
-ffmpeg is the one dependency that no Python installer supplies. It decodes
+With uv or pip, ffmpeg is the one dependency you install separately. It decodes
 audio uploads and encodes mp3, flac and opus, so it is needed for voice and
 for any audio that is not wav.
 

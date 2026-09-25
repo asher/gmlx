@@ -11,7 +11,7 @@ disturb the install. The trade-off is that :data:`EXTRA_PACKAGES` must track
 ``pyproject.toml``'s ``[project.optional-dependencies]`` by hand.
 
 Which installer to drive is not a given: gmlx may sit in a plain venv, or in an
-environment owned by ``uv tool`` or pipx. :func:`install_route` decides, and
+environment owned by ``uv tool``, pipx or Homebrew. :func:`install_route` decides, and
 :func:`install_hint` renders the matching command for the "not installed"
 messages throughout the codebase - none of which should hardcode ``pip``.
 """
@@ -117,24 +117,32 @@ def ffmpeg_present() -> bool:
 # installers put gmlx in an environment they own: uv's has no pip at all, and
 # anything pip-installed into pipx's is dropped by the next upgrade. Both drop
 # a receipt file at the environment root - the only reliable marker, since
-# their directory layouts move with UV_TOOL_DIR / PIPX_HOME.
+# their directory layouts move with UV_TOOL_DIR / PIPX_HOME. A Homebrew keg
+# ships every extra and must not be changed with pip, so it gets no command.
 DIST_NAME = "gmlx"
+BREW_FORMULA = "asher/gmlx/gmlx"
 _UV_RECEIPT = "uv-receipt.toml"
 _PIPX_RECEIPT = "pipx_metadata.json"
 
 ROUTE_UV = "uv-tool"
 ROUTE_PIPX = "pipx"
 ROUTE_PIP = "pip"
+ROUTE_BREW = "homebrew"
 
 
 def install_route() -> str:
-    """Which installer owns this environment: ``uv-tool`` / ``pipx`` / ``pip``."""
+    """Which installer owns this environment: ``uv-tool`` / ``pipx`` /
+    ``homebrew`` / ``pip``."""
     from pathlib import Path
+
+    from gmlx.serve.procname import homebrew_keg
     prefix = Path(sys.prefix)
     if (prefix / _UV_RECEIPT).is_file():
         return ROUTE_UV
     if (prefix / _PIPX_RECEIPT).is_file():
         return ROUTE_PIPX
+    if homebrew_keg() is not None:
+        return ROUTE_BREW
     return ROUTE_PIP
 
 
@@ -198,8 +206,11 @@ def install_command(extra: str, route: str | None = None) -> list[str]:
     ``gmlx[extra]`` (see the module docstring); the tool routes name the extra
     itself, which is safe there because a tool install of gmlx from an index
     can be reconstructed from its receipt - one from a local checkout or a VCS
-    cannot, and that is the empty case."""
+    cannot, and that is the empty case. A Homebrew keg is empty too: it ships
+    every extra, and pip must not change it."""
     route = route or install_route()
+    if route == ROUTE_BREW:
+        return []
     if route == ROUTE_UV:
         plan = _uv_tool_spec(extra)
         if plan is None:
@@ -225,11 +236,26 @@ def install_hint(extra: str) -> str:
     route = install_route()
     if route == ROUTE_PIP:
         return f"pip install '{DIST_NAME}[{extra}]'"
+    if route == ROUTE_BREW:
+        return f"brew reinstall {BREW_FORMULA}"
     cmd = install_command(extra, route)
     if not cmd:
         return (f"reinstall gmlx from the source this tool install came from, "
                 f"with the {extra} extra added")
     return shlex.join(cmd)
+
+
+def repair_hint(package: str) -> str:
+    """The command that restores ``package`` when a core dependency is
+    missing, which means the install itself is damaged."""
+    route = install_route()
+    if route == ROUTE_BREW:
+        return f"brew reinstall {BREW_FORMULA}"
+    if route == ROUTE_UV:
+        return f"uv tool upgrade --reinstall {DIST_NAME}"
+    if route == ROUTE_PIPX:
+        return f"pipx reinstall {DIST_NAME}"
+    return f"pip install {package}"
 
 
 def install_extra(extra: str, *, runner=None) -> bool:
@@ -243,6 +269,8 @@ def install_extra(extra: str, *, runner=None) -> bool:
     cmd = install_command(extra, route)
     if not cmd or (route != ROUTE_PIP and shutil.which(cmd[0]) is None):
         why = (f"{cmd[0]} is not on PATH" if cmd
+               else "the Homebrew install is missing packages"
+               if route == ROUTE_BREW
                else "this install came from a local or VCS source")
         print(f"[init] {why} - install {extra} with:\n"
               f"    {install_hint(extra)}", file=sys.stderr)

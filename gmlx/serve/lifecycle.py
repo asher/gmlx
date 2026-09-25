@@ -352,13 +352,13 @@ def identity_ok(run: dict | None) -> bool:
 # procname.child_env() so the renamed stub still resolves this venv.
 
 def child_argv(serve_args: list) -> list:
-    exe = procname.named_python() or os.path.abspath(sys.executable)
+    exe = procname.named_python() or procname.stable_executable()
     return [exe, "-m", "gmlx", "serve", *serve_args]
 
 
 def _agent_path() -> str:
     """A PATH for a launchd agent: the running interpreter's bin dir + system dirs."""
-    venv_bin = os.path.dirname(os.path.abspath(sys.executable))
+    venv_bin = os.path.dirname(procname.stable_executable())
     return ":".join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin",
                      "/usr/sbin", "/sbin"])
 
@@ -750,7 +750,7 @@ def start_menubar(*, extra: list | None = None, auto: bool = False) -> int:
         return 0
     # The gmlx.app-bundled stub makes the notification-permission prompt (and
     # ps / Activity Monitor) read "gmlx" instead of "Python".
-    exe = procname.menubar_bundle() or os.path.abspath(sys.executable)
+    exe = procname.menubar_bundle() or procname.stable_executable()
     argv = [exe, "-m", "gmlx", "launch", "menubar",
             "--foreground", *(["--auto-raised"] if auto else []), *(extra or [])]
     # stdout/stderr to a log (crashed GUI threads used to vanish into DEVNULL);
@@ -1111,7 +1111,7 @@ def _agent_entry() -> list:
     tramp = procname.agent_trampoline()
     if tramp:
         return [tramp]
-    return [os.path.abspath(sys.executable), "-m", "gmlx"]
+    return [procname.stable_executable(), "-m", "gmlx"]
 
 
 def _load_agent(label: str, pp: Path) -> str | None:

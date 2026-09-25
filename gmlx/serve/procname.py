@@ -69,6 +69,40 @@ def _app_dir() -> Path:
     return Path(os.path.expanduser("~/Library/Application Support/gmlx"))
 
 
+def homebrew_keg() -> Path | None:
+    """The Homebrew keg this venv lives in, or None. The formula puts the
+    venv at ``<cellar>/<formula>/<version>/libexec``, and Homebrew writes
+    ``INSTALL_RECEIPT.json`` at the keg root."""
+    try:
+        keg = Path(sys.prefix).parent.resolve()
+    except OSError:
+        return None
+    return keg if (keg / "INSTALL_RECEIPT.json").is_file() else None
+
+
+def stable_executable() -> str:
+    """The venv interpreter, by a path that stays valid across upgrades.
+
+    In a Homebrew keg the interpreter path holds the formula version, and
+    ``brew cleanup`` deletes that directory after an upgrade. Launchd
+    plists, the agent trampoline and restarted servers record this path, so
+    for a keg it is given through ``<prefix>/opt/<formula>``, which always
+    points to the linked version. Other installs get the plain absolute
+    path."""
+    exe = os.path.abspath(sys.executable)
+    keg = homebrew_keg()
+    if keg is None:
+        return exe
+    opt = keg.parent.parent.parent / "opt" / keg.parent.name
+    try:
+        rel = Path(os.path.realpath(os.path.dirname(exe))).relative_to(keg)
+        if opt.resolve().parent != keg.parent:
+            return exe
+    except (ValueError, OSError):
+        return exe
+    return str(opt / rel / os.path.basename(exe))
+
+
 def _stub_path() -> str:
     """The executable actually loaded in this process. Not
     ``realpath(sys.executable)``: on Homebrew framework builds that lands on
@@ -155,7 +189,7 @@ def child_env() -> dict:
     """Environment for a child exec'd through a renamed stub: the venv
     interpreter path, so getpath still lands in this venv."""
     env = dict(os.environ)
-    env["PYTHONEXECUTABLE"] = os.path.abspath(sys.executable)
+    env["PYTHONEXECUTABLE"] = stable_executable()
     return env
 
 
@@ -257,7 +291,7 @@ def agent_trampoline() -> str | None:
         return None
     try:
         script = Path(exe).parent / f"{PROC_NAME}-agent"
-        py = os.path.abspath(sys.executable)
+        py = stable_executable()
         body = ('#!/bin/sh\n'
                 f'BIN="{exe}"\n'
                 f'PY="{py}"\n'

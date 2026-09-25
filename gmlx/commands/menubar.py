@@ -860,7 +860,8 @@ class _MenuBarApp:
         `gmlx`: the terminal shell's PATH may resolve to a different install
         (missing the talk extra) than the venv this menu bar came from."""
         import shlex
-        exe = shlex.quote(os.path.abspath(sys.executable))
+        from gmlx.serve.procname import stable_executable
+        exe = shlex.quote(stable_executable())
         cmd = f"{exe} -m gmlx talk"
         # The terminal shell's cwd won't find the server's config by
         # discovery, and talk's wake word / persona / brain live there.

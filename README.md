@@ -46,15 +46,11 @@ answering at 46 tokens per second.
 
 ## Quickstart
 
-gmlx needs an Apple Silicon Mac and Python 3.11 or newer. Intel Macs and
-Linux are not supported. On macOS 26.2 or newer the Metal kernels install as
-a prebuilt wheel, and
-[getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#what-you-need)
-covers older versions, which build them from source.
+gmlx needs an Apple Silicon Mac. Intel Macs and Linux are not supported. On
+macOS 26.2 or newer, install with Homebrew:
 
 ```sh
-uv tool install "gmlx[all]"     # or: pip install "gmlx[all]" into a venv you manage
-brew install ffmpeg             # voice and non-wav audio only
+brew install asher/gmlx/gmlx
 
 mkdir ~/gmlx && cd ~/gmlx
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
@@ -67,18 +63,21 @@ curl localhost:8080/v1/chat/completions -d \
 gmlx stop
 ```
 
+On older macOS, or to choose the optional features yourself, install with
+`uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
+[getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#install)
+covers both routes and the Metal kernel build that older versions need.
+
 Any local `.gguf` runs, chats or serves this way with no other setup. The
 curl asks for `qwen3-0.6b` because a single served file takes its filename,
 minus the quant tag, as its id. The other id rules are in
 [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md#quick-start).
 
-`gmlx[all]` turns on every optional feature, and
-[getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#install)
-lists the extras. A model needs memory for roughly its file size plus the
-conversation's KV cache, and the same guide
+A model needs memory for roughly its file size plus the conversation's KV
+cache, and getting-started.md
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
-for each machine size. Upgrade with `uv tool upgrade gmlx`. To remove gmlx,
-follow
+for each machine size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
+gmlx` for a uv install. To remove gmlx, follow
 [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
 
 ## Set up with gmlx init
