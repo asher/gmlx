@@ -18,11 +18,19 @@ from .reads import (
     build_canvas,
     label_id_union,
 )
-from .schema import JEV_EXTENSIONS, Limits, SchemaError, jev_schema, parse_seed
+from .schema import (
+    GMLX_EXTENSIONS,
+    JEV_EXTENSIONS,
+    Limits,
+    SchemaError,
+    jev_schema,
+    parse_seed,
+)
 from .template import TemplateResolver, system_text
 
 __all__ = [
     "Cancelled",
+    "GMLX_EXTENSIONS",
     "JEV_EXTENSIONS",
     "Limits",
     "ReadEngine",

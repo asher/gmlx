@@ -8,6 +8,7 @@ import pytest
 from gmlx.systemone.contract import jev_answer, jev_answers, jev_state, log_labels, usage
 from gmlx.systemone.schema import (
     DEFAULT_SEED,
+    GMLX_EXTENSIONS,
     JEV_EXTENSIONS,
     Limits,
     SchemaError,
@@ -245,6 +246,43 @@ def test_think_accepts_the_range_ends():
     assert parse_schema(_schema(_noul("q"), think=4096))["think"] == 4096
 
 
+def test_think_auto_starts_without_a_thought_and_keeps_its_settings():
+    s = parse_schema(_schema(_noul("q"), think="auto"))
+    assert s["think"] == 0
+    assert s["think_auto"] == {"threshold": 0.8, "budget": 64}
+    s = parse_schema(_schema(_noul("q"), think="auto", think_threshold="0.9",
+                             think_budget=128))
+    assert s["think_auto"] == {"threshold": 0.9, "budget": 128}
+
+
+def test_a_number_think_has_no_auto_settings():
+    s = parse_schema(_schema(_noul("q"), think=32, think_threshold=0.5))
+    assert (s["think"], s["think_auto"]) == (32, None)
+
+
+@pytest.mark.parametrize("extra,match", [
+    ({"think_threshold": 0}, "think_threshold must be above 0"),
+    ({"think_threshold": 1.5}, "think_threshold must be above 0"),
+    ({"think_threshold": "high"}, "think_threshold must be a number"),
+    ({"think_budget": 0}, "think_budget must be 1 to 4096"),
+    ({"think_budget": 4097}, "think_budget must be 1 to 4096"),
+    ({"think_budget": "long"}, "think_budget must be an integer"),
+])
+def test_bad_think_auto_settings_are_refused(extra, match):
+    _raises(_schema(_noul("q"), think="auto", **extra), match)
+
+
+def test_jev_schema_defaults_fill_only_absent_fields():
+    body = {"questions": {"q": {"type": "noul"}}}
+    auto = {"think": "auto", "think_threshold": 0.7, "think_budget": 32}
+    s = jev_schema(body, defaults=auto)
+    assert (s["think"], s["think_auto"]) == (0, {"threshold": 0.7, "budget": 32})
+    s = jev_schema({**body, "think": 0}, defaults=auto)
+    assert (s["think"], s["think_auto"]) == (0, None)
+    s = jev_schema({**body, "think_budget": 16}, defaults=auto)
+    assert s["think_auto"] == {"threshold": 0.7, "budget": 16}
+
+
 def test_the_format_switches_to_indexed_past_ten_questions():
     ten = [_noul(f"q{i}") for i in range(10)]
     assert parse_schema(_schema(*ten))["format"] == "lines"
@@ -253,8 +291,9 @@ def test_the_format_switches_to_indexed_past_ten_questions():
 
 def test_parsed_schema_keys():
     s = parse_schema(_schema(_noul("q"), instructions="Be strict."))
-    assert set(s) == {"questions", "instructions", "policy", "steps", "think", "ask",
-                      "chunk_rows", "chunk_prompt", "sequential", "format"}
+    assert set(s) == {"questions", "instructions", "policy", "steps", "think",
+                      "think_auto", "ask", "chunk_rows", "chunk_prompt", "sequential",
+                      "format"}
     assert s["instructions"] == "Be strict."
     assert set(s["questions"][0]) == {"id", "type", "instructions", "choices", "labels",
                                       "depends_on", "ask_if", "alone"}
@@ -337,6 +376,7 @@ def test_jev_extensions_list():
     assert JEV_EXTENSIONS == ("instructions", "samples", "auto_max", "auto_threshold",
                               "steps", "think", "ask", "chunk_rows", "chunk_prompt",
                               "sequential")
+    assert GMLX_EXTENSIONS == ("think_threshold", "think_budget")
 
 
 def test_jev_schema_applies_the_limits():

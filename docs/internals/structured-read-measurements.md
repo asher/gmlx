@@ -2,16 +2,26 @@
 
 The timings behind [structured-reads.md](structured-reads.md), for
 contributors who change the read engine, the route or its prompt. They show
-where the time of a `/v1/systemone` decision goes on one machine and one
-GGUF, how to measure again, and how the request options and the wording of
-a question change the answers.
+where the time of a `/v1/systemone` decision goes on one machine, how to
+measure again, and how the request options and the wording of a question
+change the answers.
+
+- [Setup](#setup)
+- [Prefill](#prefill)
+- [Reads and samples](#reads-and-samples)
+- [Steps and unembedding](#steps-and-unembedding)
+- [Extension and thoughts](#extension-and-thoughts)
+- [Whole decisions](#whole-decisions)
+- [Question wording](#question-wording)
+- [Accuracy](#accuracy)
+- [Thinking on mixed requests](#thinking-on-mixed-requests)
 
 ## Setup
 
 | Item | Value |
 |------|-------|
 | machine | Apple M3 Max, 128 GB, macOS 26.6 |
-| model | diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file |
+| model | diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and Q8_0 in the last two sections |
 | canvas | 64, the `server.systemone.canvas` default |
 | peak memory | 19.7 GB over the whole bench |
 
@@ -148,7 +158,7 @@ A labeled set measured what each option does to the answers. It holds 38
 facts that need recalled knowledge, each asked as a yes or no question and
 as its negation, and 26 choice questions on centuries, currencies and
 animal classes. Every question names its subject only in the state, as a
-fixed question set does, and every read uses seed 42.
+fixed question set does, and every read and thought uses seed 42.
 
 | Method | Yes or no right | Yes answers, 38 true | Choice right | Log loss | Seconds per item |
 |--------|-----------------|----------------------|--------------|----------|------------------|
@@ -156,7 +166,8 @@ fixed question set does, and every read uses seed 42.
 | `samples: 4` | 67 of 76 | 39 | 23 of 26 | 0.45 | 0.25 |
 | full-vocabulary unembedding, 4 samples | 67 of 76 | 39 | 23 of 26 | 0.45 | 0.28 |
 | `steps: 4`, 4 samples | 67 of 76 | 35 | 23 of 26 | 0.61 | 0.64 |
-| `think: 64` | 70 of 76 | 36 | 26 of 26 | 0.25 | 2.85 |
+| `think: 64` | 71 of 76 | 35 | 25 of 26 | 0.28 | 1.60 |
+| `think: "auto"`, threshold 0.8, budget 64 | 69 of 76 | 39 | 26 of 26 | 0.37 | 0.65 |
 | 4 samples divided by a read on a content-free state | 59 of 76 | 49 | 20 of 26 | 0.79 | 0.34 |
 | 4 samples averaged with the label order reversed | 66 of 76 | 36 | 23 of 26 | 0.44 | 0.50 |
 
@@ -166,9 +177,39 @@ content-free state, the calibration used for few-shot classifiers, makes
 the answers worse. Reversing the label order trims the lean toward yes at
 twice the cost and fixes no answer.
 
-The default's wrong answers are mostly its unsure ones. Taking the thought
-only for items whose default confidence is below 0.8 would have covered 15
-percent of the items and reached 95 of 102 right, against 89 for the
-default and 96 with a thought on every item. A few answers stay wrong with
-a thought, such as sesame in pad thai, so they come from the model's
-knowledge and not from the read.
+The default's wrong answers are mostly its unsure ones, which is what
+`think: "auto"` relies on. It wrote a thought for 15 of the 102 items and
+reached 95 right, against 89 for the default and 96 with a thought on
+every item, at 40 percent of the time of the full thought. A few answers
+stay wrong with a thought, such as sesame in pad thai, so they come from
+the model's knowledge and not from the read.
+
+The Q8_0 file, 26.9 GB, gives the same result. It gets 88 right by
+default, 93 with `think: "auto"` and 96 with a thought on every item, and
+12 of its 14 wrong answers are also wrong on Q4_K_M. A larger quantization
+does not fix the answers a read gets wrong.
+
+## Thinking on mixed requests
+
+The labeled set asks one question per request. The 28 requests in the
+[decisions.md examples](../decisions.md#examples) and five support tickets
+with five questions each show what `think: "auto"` does on requests with
+several questions. Each request was decided with `think: 0` and with
+`think: "auto"` at seed 42.
+
+| Quantization | Requests that thought | Mean with `think: 0` | Mean with `"auto"` | Mean of a request that thought | Answers changed |
+|--------------|-----------------------|----------------------|--------------------|--------------------------------|-----------------|
+| Q4_K_M | 4 of 33 | 0.56 s | 0.99 s | 4.4 s | 1 |
+| Q8_0 | 5 of 33 | 0.41 s | 0.73 s | 2.7 s | 3 |
+
+Every request that thought had two to five questions, and none of the 21
+single-question requests did, because one unsure answer runs the whole
+decision again. Most unsure answers were on questions without one right
+answer, such as a customer's tone at 0.51 or a ticket's severity, and the
+thought moved them between plausible labels. It raised one right answer's
+confidence, the euro for Bratislava from 0.42 to 0.99. It also made one
+right answer wrong, gluten in risotto alla milanese, from no at 0.68 to yes
+at 0.98, so a confident answer after a thought is not proof.
+
+Q8_0 decisions ran about a quarter faster than Q4_K_M decisions in both
+modes on this machine.

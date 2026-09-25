@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 
 import gmlx.gen.profiles as _family_profiles
+from gmlx.systemone.schema import THINK_BUDGET, THINK_THRESHOLD
 from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
 
@@ -124,7 +125,8 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
-                             "max_samples"})
+                             "max_samples", "think", "think_threshold",
+                             "think_budget"})
 _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
                            "chat_template", "chat_template_kwargs",
                            "thinking", "reasoning_effort"})
@@ -298,6 +300,14 @@ class SystemoneCfg:
     constrained: bool = True     # read over the label ids only
     max_questions: int = 64      # per request
     max_samples: int = 32        # per question, fixed or auto
+    think: int | str = 0         # request default: a budget, or "auto"
+    think_threshold: float = THINK_THRESHOLD  # request default for "auto"
+    think_budget: int = THINK_BUDGET          # request default for "auto"
+
+    def request_defaults(self) -> dict:
+        """The values a request takes for the think fields it omits."""
+        return {"think": self.think, "think_threshold": self.think_threshold,
+                "think_budget": self.think_budget}
 
 
 @dataclass
@@ -1381,8 +1391,25 @@ def _parse_systemone(raw) -> SystemoneCfg:
     model = raw.get("model")
     if model is not None and not isinstance(model, str):
         raise ConfigError(f"{where}.model: expected a model id, got {model!r}")
+    think = raw.get("think", 0)
+    if think != "auto":
+        think = _coerce_num("think", think, int, where=where)
+        if think is None or not 0 <= think <= 4096:
+            raise ConfigError(
+                f'{where}.think: expected 0 to 4096 or "auto", got {raw.get("think")!r}')
+    threshold = _coerce_num("think_threshold",
+                            raw.get("think_threshold", THINK_THRESHOLD), float,
+                            where=where)
+    if threshold is None or not 0 < threshold <= 1:
+        raise ConfigError(f"{where}.think_threshold: expected a number above 0 "
+                          f"and at most 1, got {threshold!r}")
+    budget = _coerce_num("think_budget", raw.get("think_budget", THINK_BUDGET), int,
+                         where=where)
+    if budget is None or not 1 <= budget <= 4096:
+        raise ConfigError(f"{where}.think_budget: expected 1 to 4096, got {budget!r}")
     return SystemoneCfg(model=model or None, canvas=canvas,
                         constrained=bool(raw.get("constrained", True)),
+                        think=think, think_threshold=threshold, think_budget=budget,
                         **counts)
 
 

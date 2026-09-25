@@ -111,7 +111,7 @@ def _run_offline(a, body: dict) -> dict:
     cfg, settings = _offline_settings(a.config)
     limits = Limits(max_questions=settings.max_questions,
                     max_samples=settings.max_samples)
-    schema = jev_schema(body, limits)
+    schema = jev_schema(body, limits, settings.request_defaults())
     state = jev_state(body)
     seed = parse_seed(body)
     path = _model_path(a.model, cfg)

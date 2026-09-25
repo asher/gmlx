@@ -330,6 +330,9 @@ gets a 400.
 | `constrained` | `true` | take label probabilities from a softmax over the read's label tokens. `false` takes them over the full vocabulary |
 | `max_questions` | `64` | the most questions one request may ask. A request with more gets a 422 |
 | `max_samples` | `32` | the cap on a request's `samples` and `auto_max`. A larger value is lowered to it |
+| `think` | `0` | the thought budget for a request without `think`, 0 to 4096, or `"auto"` to think only when an answer is unsure |
+| `think_threshold` | `0.8` | the confidence below which `"auto"` thinks, for a request without `think_threshold` |
+| `think_budget` | `64` | the thought budget of `"auto"`, for a request without `think_budget` |
 
 A question set whose answer template does not fit in `canvas` is split
 into chunks, each read on its own. A config with an unknown key here, or a

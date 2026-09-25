@@ -10,6 +10,7 @@ stages when its tokens allow."""
 
 from __future__ import annotations
 
+import functools
 import math
 import time
 from typing import Callable, Optional, Protocol
@@ -284,8 +285,36 @@ def decide(
     read, chunked by the canvas, with a question marked alone in its own
     read. Later stages continue the earlier answers as a prefilled prompt. A
     question whose ask_if condition failed is skipped and its answer is
-    null."""
-    del state_text  # carried inside chat_ids
+    null.
+
+    With ``think: "auto"`` the decision runs without a thought first. When
+    an answer's confidence is below the threshold, it runs again with a
+    thought of the auto budget, and that run gives the answers."""
+    auto = schema.get("think_auto")
+    run = functools.partial(
+        _decide_once, engine=engine, resolver=resolver, chat_ids=chat_ids,
+        seed=seed, constrained=constrained, canvas_len=canvas_len,
+        decode=decode, should_stop=should_stop)
+    if not auto:
+        return run(schema)
+    first, first_rows = run(dict(schema, think_auto=None))
+    unsure = sorted(qid for qid, a in first["answers"].items()
+                    if a is not None and a["confidence"] < auto["threshold"])
+    info = {"threshold": auto["threshold"], "budget": auto["budget"],
+            "unsure": unsure, "thought": bool(unsure)}
+    if not unsure:
+        first["diagnostics"]["think_auto"] = info
+        return first, first_rows
+    body, rows = run(dict(schema, think=auto["budget"], think_auto=None))
+    timing = body["diagnostics"]["timing"]
+    timing["total_ms"] += first["diagnostics"]["timing"]["total_ms"]
+    timing["reads"] += first["diagnostics"]["timing"]["reads"]
+    body["diagnostics"]["think_auto"] = info
+    return body, first_rows + rows
+
+
+def _decide_once(schema, *, engine, resolver, chat_ids, seed, constrained,
+                 canvas_len, decode, should_stop):
     d = _Decision(engine, resolver, chat_ids, constrained, canvas_len, decode,
                   should_stop)
     started = time.time()

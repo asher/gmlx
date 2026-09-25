@@ -67,6 +67,17 @@ TRIAGE = {
     },
 }
 
+# A read without a thought picks the 18th century here at 0.86, above the
+# default think_threshold of 0.8, so the think "auto" case raises it to 0.9.
+CENTURY = {
+    "model": "jev-latest",
+    "state": {"event": "the opening of the Suez Canal"},
+    "questions": {"century": {
+        "type": "choice", "instructions": "In which century did the event happen?",
+        "criteria": {"16th": "1501-1600", "17th": "1601-1700", "18th": "1701-1800",
+                     "19th": "1801-1900", "20th": "1901-2000"}}},
+}
+
 # Past ten questions the answer template writes each label right after its
 # id, so the ids are numbered: a word id merges with the label into
 # different tokens per label, which the template check refuses.
@@ -164,6 +175,9 @@ def run_decisions(rep: Report, base: str, out_dir: str):
         ("ticket_think64", {**TICKET, "think": 64}),
         ("triage_chain", TRIAGE),
         ("facts_indexed", FACTS),
+        ("century_think_auto", {**CENTURY, "think": "auto", "think_threshold": 0.9,
+                                "think_budget": 128}),
+        ("ticket_think_auto", {**TICKET, "think": "auto"}),
     ]
     results = {}
     for name, body in cases:
@@ -205,6 +219,21 @@ def run_decisions(rep: Report, base: str, out_dir: str):
         rep.check("triage_chain: outage skipped", a.get("outage") is None, f"{a.get('outage')}")
         stages = (tr.get("diagnostics") or {}).get("stages") or []
         rep.check("triage_chain: two stages", len(stages) == 2, f"{stages}")
+    ca = results.get("century_think_auto")
+    if ca:
+        auto = (ca.get("diagnostics") or {}).get("think_auto") or {}
+        rep.check("century_think_auto: unsure, so the thought ran",
+                  auto.get("thought") is True and auto.get("unsure") == ["century"]
+                  and auto.get("budget") == 128,
+                  f"{auto}")
+        rep.check("century_think_auto: 19th century",
+                  ca["answers"]["century"]["choice"] == "19th", f"{ca['answers']['century']}")
+    ta = results.get("ticket_think_auto")
+    if ta:
+        auto = (ta.get("diagnostics") or {}).get("think_auto") or {}
+        rep.check("ticket_think_auto: sure, so no thought",
+                  auto.get("thought") is False and not (ta.get("diagnostics") or {}).get("thought"),
+                  f"{auto}")
     fx = results.get("facts_indexed")
     if fx:
         wrong = [k for k, _, truth in _FACTS

@@ -1290,6 +1290,19 @@ def test_systemone_defaults():
     so = build_config(_doc()).systemone
     assert (so.model, so.canvas, so.constrained, so.max_questions,
             so.max_samples) == (None, 64, True, 64, 32)
+    assert so.request_defaults() == {"think": 0, "think_threshold": 0.8,
+                                     "think_budget": 64}
+
+
+def test_systemone_think_settings():
+    doc = _alias_doc()
+    doc["server"]["systemone"] = {"think": "auto", "think_threshold": "0.7",
+                                  "think_budget": 96}
+    so = build_config(doc).systemone
+    assert so.request_defaults() == {"think": "auto", "think_threshold": 0.7,
+                                     "think_budget": 96}
+    doc["server"]["systemone"] = {"think": 32}
+    assert build_config(doc).systemone.think == 32
 
 
 @pytest.mark.parametrize("model", ["m-named", "big", "coder", "m-named@coder"])
@@ -1311,6 +1324,11 @@ def test_systemone_model_accepts_an_id_or_alias(model):
     ({"max_questions": "many"}, "max_questions"),
     ({"model": 3}, "model"),
     ({"bogus": 1}, "bogus"),
+    ({"think": "sometimes"}, "think"),
+    ({"think": 5000}, "think"),
+    ({"think_threshold": 0}, "think_threshold"),
+    ({"think_threshold": 2}, "think_threshold"),
+    ({"think_budget": 0}, "think_budget"),
 ])
 def test_systemone_rejects_bad_settings(section, needle):
     doc = _alias_doc()

@@ -321,8 +321,10 @@ questions whose answer changes with the earlier one.
 
 ## Samples, steps and thoughts
 
-A request can also carry these fields, which the vLLM route defines. They
-set how many times each answer is read and how much work each read does:
+A request can also carry these fields. They set how many times each answer
+is read and how much work each read does. The vLLM route defines all of
+them except `think_threshold`, `think_budget` and the `"auto"` value of
+`think`, which gmlx adds:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -331,7 +333,9 @@ set how many times each answer is read and how much work each read does:
 | `auto_max` | `4` | the sample count `"auto"` extends to |
 | `auto_threshold` | `0.1` | the entropy in nats at a label position above which `"auto"` extends |
 | `steps` | `1` | denoise steps per read, clamped to 1 through 8 |
-| `think` | `0` | a thought budget in tokens, 0 to 4096. The model writes a thought first, and the reads see it |
+| `think` | `server.systemone.think` | a thought budget in tokens, 0 to 4096, or `"auto"`. The model writes a thought first, and the reads see it |
+| `think_threshold` | `server.systemone.think_threshold` | the confidence below which `"auto"` runs the decision again with a thought |
+| `think_budget` | `server.systemone.think_budget` | the thought budget in tokens that `"auto"` uses |
 | `ask` | every question | the ids to answer, which must include everything they depend on |
 | `chunk_rows` | the canvas | the most canvas tokens one read's answer template may take, at least 8. A larger stage is split into chunks |
 | `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with its questions only, and `"shared"` gives every chunk all of them |
@@ -347,6 +351,19 @@ default.
 most, because the model writes it with its full denoise loop, which takes
 seconds. [structured-read-measurements.md](internals/structured-read-measurements.md)
 has the timings.
+
+`think: "auto"` spends that cost only on unsure decisions. The decision runs
+without a thought first. When any answer's confidence is below
+`think_threshold`, it runs again with a thought of `think_budget` tokens,
+and the answers come from that run. `diagnostics.think_auto` lists the
+unsure questions and says whether the thought ran. The defaults are 0.8
+and 64 tokens. With `server.systemone.think` set to `"auto"`, a Jev client
+gets the behavior without sending any of the fields.
+
+A decision with more questions runs the thought more often, since one
+unsure answer is enough. A question without one right answer, such as a
+customer's tone, often stays unsure after the thought, so the time buys
+little there. Use `"auto"` when the questions need recalled facts.
 
 `server.systemone.max_questions` caps the question count, and a request
 over it gets a 422. `samples` and `auto_max` are lowered to
@@ -369,10 +386,11 @@ These changes help, in order of cost:
   both "contains sesame" and "free of sesame".
 - Put the values in the options. Options named `1700s`, `1800s` and
   `1900s` get `1800s` at 0.994 for the Suez Canal.
-- Ask for a thought when an answer is unsure. With `think: 128` the model
-  picks the 19th century at 1.00. A thought costs about ten times a plain
-  decision, so send the request again with `think` only when an answer's
-  confidence is below your threshold.
+- Let the model think when it is unsure. With `think: 128` the model picks
+  the 19th century at 1.00, but a thought takes several times as long as a
+  plain decision. `think: "auto"` writes one only when an answer's
+  confidence is below `think_threshold`, so at the default 0.8 it leaves
+  the Suez answer at 0.87 as it is.
 
 More samples, more steps and full-vocabulary label probabilities, set with
 `server.systemone.constrained: false`, do not change accuracy.
@@ -381,8 +399,9 @@ compares the options and the wordings on a set of known facts.
 
 Before acting on the numbers, run states whose answers you know and choose
 each threshold from how the model scores them. A few answers stay wrong
-even with a thought, so send an answer that matters and stays unsure to a
-person.
+even with a thought, and a thought can make a wrong answer confident. Send
+an answer that matters to a person when it is unsure or when its state is
+unlike the ones you tested.
 
 ## Errors and queueing
 

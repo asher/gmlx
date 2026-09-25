@@ -425,6 +425,19 @@ def test_think_runs_at_the_served_canvas(app):
     assert thinks == [("think", 16, 32)]
 
 
+def test_the_server_think_default_reaches_a_request_that_omits_think(app):
+    client = app.use(cfg=SystemoneCfg(canvas=32, think="auto", think_threshold=1.0,
+                                      think_budget=24))
+    r = client.post("/v1/systemone", json=_ticket())
+    assert r.status_code == 200, r.text
+    auto = r.json()["diagnostics"]["think_auto"]
+    assert auto["thought"] is True and auto["budget"] == 24
+    thinks = [c for c in _Reader.built[0].calls if c[0] == "think"]
+    assert thinks == [("think", 24, 32)]
+    r = client.post("/v1/systemone", json=_ticket(think=0))
+    assert "think_auto" not in r.json()["diagnostics"]
+
+
 # admission, logging, holds
 
 def test_a_request_over_the_context_budget_is_refused_before_queueing(app, monkeypatch):
@@ -435,6 +448,9 @@ def test_a_request_over_the_context_budget_is_refused_before_queueing(app, monke
     r = client.post("/v1/systemone", json=_ticket(think=4096))
     assert r.status_code == 400
     assert len(_Reader.built) == 1
+    assert not any(c[0] == "think" for c in _Reader.built[0].calls)
+    r = client.post("/v1/systemone", json=_ticket(think="auto", think_budget=4096))
+    assert r.status_code == 400
     assert not any(c[0] == "think" for c in _Reader.built[0].calls)
 
 

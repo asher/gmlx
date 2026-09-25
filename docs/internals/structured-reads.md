@@ -105,6 +105,15 @@ the close tag added to the stop set for the call. The global MLX random
 state is seeded from the request seed first, so a thought also repeats.
 The reads then use the prompt with the thought appended.
 
+`think: "auto"` is a gmlx extension with no counterpart in the proxy.
+`decide` runs the decision without a thought, and when any answered
+question's confidence is below the threshold, runs it again with a thought
+of the auto budget and returns that run. The diagnostics count the reads
+of both runs, and the route's admission check prices the prompt with the
+auto budget. With `think` absent from the request, the route takes it from
+`server.systemone`, so the default stays vLLM's `0` unless the config
+changes it.
+
 ## Running on the server
 
 mlx-vlm serves a diffusion model from one engine thread, and a decision

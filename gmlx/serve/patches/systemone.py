@@ -138,7 +138,8 @@ def _admit(rg, rt, tokens, schema) -> int:
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
     resolver = rt.resolver
-    think = int(schema["think"])
+    # With think "auto", the second run's thought is the largest prompt.
+    think = int(schema["think"] or (schema.get("think_auto") or {}).get("budget", 0))
     bound_text = tokens.render(system_text(schema, chunked=True), think > 0)
     bound_ids = tokens.encode_prompt(bound_text)
     growth = (think + len(resolver.thought_open) + len(resolver.thought_close)
@@ -200,7 +201,7 @@ def make_systemone_endpoint(installed):
             return fail(400, "invalid_request_error", _NO_IMAGES)
         warn_ignored_fields(_ENDPOINT, set(body) - SYSTEMONE_CONSUMED)
         try:
-            schema = jev_schema(body, limits)
+            schema = jev_schema(body, limits, cfg.request_defaults())
             state = jev_state(body)
             seed = parse_seed(body)
         except SchemaError as e:
@@ -305,8 +306,10 @@ def make_systemone_endpoint(installed):
 
         diagnostics = result["diagnostics"]
         input_tokens = int(diagnostics.get("prompt_tokens") or 0)
-        _log.info("systemone: %s reads=%d %.0fms", log_labels(result["answers"]),
-                  diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"])
+        auto = diagnostics.get("think_auto") or {}
+        _log.info("systemone: %s reads=%d %.0fms%s", log_labels(result["answers"]),
+                  diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"],
+                  " thought=auto" if auto.get("thought") else "")
         gen = importlib.import_module("mlx_vlm.server.generation")
         try:
             runtime.metrics.record_success(gen._build_metrics_envelope(

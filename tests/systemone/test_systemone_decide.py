@@ -440,6 +440,59 @@ def test_ask_limits_the_questions_answered():
     assert r["out"]["diagnostics"]["chunk_prompt"] == "own"
 
 
+# think: "auto"
+
+
+class ThoughtEngine(FakeEngine):
+    """Unsure without a thought in the prompt, sure with one."""
+
+    def read(self, prompt, req):
+        sure = THOUGHT[0] in prompt.ids
+        self.weights = (lambda seed, i, n: [50.0] + [1.0] * (n - 1)) if sure \
+            else (lambda seed, i, n: [1.0, 1.2] + [1.0] * (n - 2))
+        return super().read(prompt, req)
+
+
+def test_think_auto_keeps_a_sure_first_pass():
+    r = _run({**_qs("q1"), "think": "auto"})
+    d = r["out"]["diagnostics"]
+    assert r["engine"].thinks == []
+    assert d["think_auto"] == {"threshold": 0.8, "budget": 64, "unsure": [],
+                               "thought": False}
+    assert set(d) == DECISION_KEYS | {"think_auto"}
+
+
+def test_think_auto_runs_again_with_a_thought_when_an_answer_is_unsure():
+    eng = ThoughtEngine()
+    r = _run({**_qs("q1", "q2"), "think": "auto", "think_budget": 48}, engine=eng)
+    out, d = r["out"], r["out"]["diagnostics"]
+    assert [t["budget"] for t in eng.thinks] == [48]
+    assert d["think_auto"] == {"threshold": 0.8, "budget": 48, "unsure": ["q1", "q2"],
+                               "thought": True}
+    assert out["answers"]["q1"]["label"] == "yes"
+    assert out["answers"]["q1"]["confidence"] > 0.9
+    assert d["thought"]["tokens"] == len(THOUGHT)
+    # Four unsure reads, then one sure read on the thought.
+    assert d["timing"]["reads"] == 5
+    first = _run({**_qs("q1", "q2")}, engine=ThoughtEngine())
+    second = _run({**_qs("q1", "q2"), "think": 48}, engine=ThoughtEngine())
+    assert r["rows"] == first["rows"] + second["rows"]
+
+
+def test_think_auto_threshold_decides_what_is_unsure():
+    r = _run({**_qs("q1"), "think": "auto", "think_threshold": 0.5},
+             engine=ThoughtEngine())
+    assert r["out"]["diagnostics"]["think_auto"]["thought"] is False
+    assert r["engine"].thinks == []
+
+
+def test_think_auto_ignores_skipped_questions():
+    body = {**_qs("q1", "q2", q2={"ask_if": {"q1": ["no"]}}), "think": "auto"}
+    r = _run(body)
+    assert r["out"]["answers"]["q2"] is None
+    assert r["out"]["diagnostics"]["think_auto"]["unsure"] == []
+
+
 # determinism and cancellation
 
 
