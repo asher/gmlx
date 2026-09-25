@@ -303,6 +303,47 @@ def test_greedy_draft_block_shape_and_ceiling():
         cold.draft_block(3, None, None, BLOCK, None, greedy=True)
 
 
+# --- draft-side head ----------------------------------------------------------
+
+def _head_patched(monkeypatch, mode):
+    from gmlx.spec.mtp_load import _patch_draft_head_quantized
+
+    if mode is None:
+        monkeypatch.delenv("GMLX_DRAFT_HEAD", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_DRAFT_HEAD", mode)
+    lm, drafter = _target(), _drafter()
+    _patch_draft_head_quantized(drafter, "lm_head")
+    drafter.reset(lm)
+    return lm, drafter
+
+
+@pytest.mark.parametrize("mode", [None, "q4"])
+def test_draft_head_is_a_quantized_copy_and_the_target_keeps_its_own(
+        monkeypatch, mode):
+    """The drafter's logits come from a quantized copy of a float target
+    head. The target keeps its own head, so verify is unchanged, and a
+    second reset reinstalls the copy after bind restores the target's."""
+    lm, drafter = _head_patched(monkeypatch, mode)
+    target_head = lm.lm_head
+    h = mx.random.normal((1, 3, _tcfg().hidden_size), key=mx.random.key(4))
+    ref = target_head(h)
+    for _ in range(2):
+        assert drafter.lm_head is not target_head
+        assert "lm_head" not in drafter
+        got = drafter._logits(h)
+        rel = (mx.abs(got - ref).max() / mx.abs(ref).max()).item()
+        assert rel < (2e-2 if mode is None else 1.5e-1)
+        drafter.reset(lm)
+    assert lm.lm_head is target_head
+    assert target_head.weight.dtype != mx.uint8
+
+
+def test_draft_head_f16_keeps_the_target_head(monkeypatch):
+    lm, drafter = _head_patched(monkeypatch, "f16")
+    assert drafter.lm_head is lm.lm_head
+
+
 # --- selector lattice ---------------------------------------------------------
 
 def test_lattice_matches_a_numpy_transcription_and_greedy_walk_is_argmax():

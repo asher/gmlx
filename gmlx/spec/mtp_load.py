@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -307,6 +308,9 @@ def _load_mtp_drafter(
             f"[mtp] drafter: NemotronHMTPDrafter layer_idx={first_mtp_block} "
             f"block_size={drafter.config.block_size}"
         )
+        if n_head is None or n_head_kv is None:
+            raise ValueError(
+                "nemotron_h MTP remap needs the target's attention head counts")
         d_weights, d_meta, d_stats = remap_nemotron_mtp_arrays(
             arrays, kquant_meta,
             first_mtp_block=first_mtp_block,
@@ -393,7 +397,7 @@ def _mtp_dbg(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
 
-def _patch_draft_head_quantized(drafter) -> None:
+def _patch_draft_head_quantized(drafter, head_attr: str = "_lm_head_fn") -> None:
     """Swap the drafter's lm_head for a q8_0-encoded draft-side copy.
 
     The draft proposal only needs argmax/sample fidelity; verify keeps the
@@ -403,6 +407,7 @@ def _patch_draft_head_quantized(drafter) -> None:
     Targets with an already-quantized head are left alone.
     GMLX_DRAFT_HEAD=f16 restores the stock head; =q4 trades further
     bytes for acceptance risk (measurement-gated).
+    ``head_attr`` names the drafter attribute its bind sets to the head.
     """
     mode = os.environ.get("GMLX_DRAFT_HEAD", "q8")
     if mode == "f16":
@@ -415,7 +420,7 @@ def _patch_draft_head_quantized(drafter) -> None:
 
     def _bind_with_quant_head(target_model):
         out = orig_bind(target_model)
-        head = getattr(drafter, "_lm_head_fn", None)
+        head = getattr(drafter, head_attr, None)
         w = getattr(head, "weight", None)
         if w is None or w.dtype == mx.uint8:
             _mtp_dbg(f"[mtp] drafter head: skip (head={type(head).__name__}, "
@@ -435,7 +440,8 @@ def _patch_draft_head_quantized(drafter) -> None:
             _mtp_dbg(f"[mtp] drafter head: {codec} draft-side copy "
                      f"({w.nbytes / 1e9:.2f} -> {wq.nbytes / 1e9:.2f} GB)")
         _, wq, sc = quantized[key]
-        drafter._lm_head_fn = lambda h: kq.quantized_matmul(h, wq, sc, codec)
+        setattr(drafter, head_attr,
+                lambda h: kq.quantized_matmul(h, wq, sc, codec))
         return out
 
     drafter.bind = _bind_with_quant_head
@@ -577,6 +583,16 @@ _DEEPSEEK4_MTP_RAW = {
 }
 
 
+def _kq_scales(arrays: dict, name: str) -> mx.array:
+    """The ``.scales`` entry of K-quant tensor ``name``. The loader emits one
+    for every codec (a size-1 placeholder for inline-scale codecs), so a
+    missing one is converter drift and fails at load."""
+    key = _strip_weight(name) + ".scales"
+    if key not in arrays:
+        raise RuntimeError(f"K-quant tensor {name!r} has no .scales entry")
+    return arrays[key]
+
+
 def remap_deepseek4_mtp_arrays(
     arrays: dict, kquant_meta: dict, *, o_groups: int, o_lora_rank: int
 ):
@@ -615,17 +631,15 @@ def remap_deepseek4_mtp_arrays(
                 f"deepseek4 MTP remap: unknown tensor {name!r} (converter drift?)"
             )
         codec = kquant_meta.get(name)
-        scales = (
-            arrays.get(_strip_weight(name) + ".scales") if codec is not None else None
-        )
         if base == "attn_output_a":
             arr = arr.reshape(o_groups, o_lora_rank, -1)
-            # Same ndim guard as the vendored Model.sanitize: codecs with
-            # inline scales (q8_0) carry a size-1 .scales placeholder.
-            if scales is not None and scales.ndim == 2:
-                scales = scales.reshape(o_groups, o_lora_rank, -1)
         hf_weights[target] = arr
         if codec is not None:
+            scales = _kq_scales(arrays, name)
+            # Same ndim guard as the vendored Model.sanitize: codecs with
+            # inline scales (q8_0) carry a size-1 .scales placeholder.
+            if base == "attn_output_a" and scales.ndim == 2:
+                scales = scales.reshape(o_groups, o_lora_rank, -1)
             hf_weights[_strip_weight(target) + ".scales"] = scales
             hf_kquant_meta[target] = codec
         stats["mapped"] += 1
@@ -1093,8 +1107,7 @@ def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
         hf_weights[target] = arr
         codec = kquant_meta.get(name)
         if codec is not None:
-            hf_weights[_strip_weight(target) + ".scales"] = arrays.get(
-                _strip_weight(name) + ".scales")
+            hf_weights[_strip_weight(target) + ".scales"] = _kq_scales(arrays, name)
             hf_kquant_meta[target] = codec
         stats["mapped"] += 1
     return hf_weights, hf_kquant_meta, stats
@@ -1371,6 +1384,7 @@ def _load_dflash2_drafter(
 
     validate_drafter(drafter)
     log("[mtp] dflash2 drafter bound; target capture layers wired")
+    _patch_draft_head_quantized(drafter, "lm_head")
     _stamp_mtp_width_cap(
         drafter, str(target_config_dict.get("model_type") or "dflash2"),
         target=target, hard_limit=1, log=log)
@@ -1592,15 +1606,13 @@ def remap_deepseek4_dspark_arrays(
                 )
             target = f"stages.{stage}.{mapped}"
         codec = kquant_meta.get(name)
-        scales = (
-            arrays.get(_strip_weight(name) + ".scales") if codec is not None else None
-        )
         if base == "attn_output_a":
             arr = arr.reshape(o_groups, o_lora_rank, -1)
-            if scales is not None and scales.ndim == 2:
-                scales = scales.reshape(o_groups, o_lora_rank, -1)
         hf_weights[target] = arr
         if codec is not None:
+            scales = _kq_scales(arrays, name)
+            if base == "attn_output_a" and scales.ndim == 2:
+                scales = scales.reshape(o_groups, o_lora_rank, -1)
             hf_weights[_strip_weight(target) + ".scales"] = scales
             hf_kquant_meta[target] = codec
         stats["mapped"] += 1
@@ -1912,7 +1924,7 @@ def load_mtp_model(
     # hy_v3's sanitize strips the in-GGUF MTP block (model.layers.80.*) from
     # the trunk weights, same as its plain-text load path. mlx-vlm targets
     # keep sanitize=False (seam 2: GGUF norms already raw).
-    _mt = config_dict.get("model_type")
+    _mt = config_dict.get("model_type") or ""
     from gmlx.load.hadamard import hadamard_targets_for
 
     _install_and_load(
@@ -1941,7 +1953,7 @@ def load_mtp_model(
     #    assistant (a separate companion GGUF). Seam 4.
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if assistant else "native-head")
-    if assistant:
+    if draft_gguf_path is not None:
         if int(config_dict.get("mtp_num_hidden_layers", 0)) >= 1:
             _log(f"[mtp] native MTP head present; using external drafter "
                  f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
@@ -2104,15 +2116,19 @@ def load_vlm_mtp_model(
     from gmlx.load.vlm import load_vlm_model
 
     # 1. target VLM - .language_model is the hook-bearing text class.
-    model, config, processor, raw_tokenizer = load_vlm_model(
-        gguf_path,
-        mmproj_path,
-        arch=arch,
-        hf_source=hf_source,
-        zero_copy=zero_copy,
-        verbose=verbose,
-        return_tokenizer=True,
-        spec_target=True,
+    # return_tokenizer=True returns the raw tokenizer as a 4th element.
+    model, config, processor, raw_tokenizer = cast(
+        "tuple[Any, dict, Any, Any]",
+        load_vlm_model(
+            gguf_path,
+            mmproj_path,
+            arch=arch,
+            hf_source=hf_source,
+            zero_copy=zero_copy,
+            verbose=verbose,
+            return_tokenizer=True,
+            spec_target=True,
+        ),
     )
     text_config = config.get("text_config") or {}
     text_model_type = text_config.get("model_type") or config.get("model_type")
