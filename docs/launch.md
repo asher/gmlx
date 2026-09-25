@@ -223,15 +223,19 @@ provider on its Models page. Rerun the launch with `--model` to change the
 default.
 
 The web app serves on port 3080, or on 3081 when the gmlx server holds 3080,
-and opens a browser. It compacts a conversation automatically only for a
-model with about 86K tokens of context or more, and the launch prints a note
-for a smaller default model. A conversation on a smaller model still compacts
-when the server reports that a request no longer fits, as described under
+and opens a browser. It does not work in the directory you launch from. It
+starts in `~/Documents/deepseek-harness/default-workspace`, and Add workspace
+in the app opens a project folder.
+
+The web app compacts a conversation automatically only for a model with
+about 86K tokens of context or more, and the launch prints a note for a
+smaller default model. A conversation on a smaller model still compacts when
+the server reports that a request no longer fits, as described under
 [Limits and back-pressure](api.md#limits-and-back-pressure).
 
 The same file works with dsh's `headless` profile, which also applies its
-per-model compaction settings. This command answers one task in the terminal
-and exits:
+per-model compaction settings. This command answers one task about the
+current directory and exits:
 
 ```sh
 GMLX_API_KEY=gmlx dsh --profile headless \
