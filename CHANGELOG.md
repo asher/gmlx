@@ -26,6 +26,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DFlash 2 speculative decoding on a target with a float output head, such
   as a Q8_K_XL Qwen3.8-27B, runs faster. `GMLX_DRAFT_HEAD=f16` restores the
   previous drafter head.
+- `gmlx run`, `chat` and `bench` with MTP or a DFlash 2 drafter decode
+  faster, on the command-buffer settings `gmlx serve` already decoded with.
 
 ### Fixed
 
