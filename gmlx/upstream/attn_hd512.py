@@ -19,10 +19,11 @@ route is gated to qL <= GMLX_HD512_MAXQL (default 6). Output matches stock SDPA
 to bf16 rounding.
 
 The head_dim-256 verify route (qL>=2; its qL==1 decode is already fused by the
-vector path) is on by default. Disable it with GMLX_HD256_VERIFY=0. Stock's
-vector kernel also declines a verify whose GQA fold is wider than 32 rows
-(qL x G > 32, e.g. Qwen3.x 24/4 at qL 6..8), and then materializes the scores
-at every depth, so kq.sdpa_fa_verify claims those widths from the first key.
+vector path) is on by default. Disable it with GMLX_HD256_VERIFY=0. A verify
+whose GQA fold (qL x G rows) holds 18 rows or more goes to kq.sdpa_fa_verify
+once the KV passes a depth set by the fold and the KV heads, from 512 keys for
+most folds. Stock's vector kernel declines folds over 32 rows (e.g. Qwen3.x
+24/4 at qL 6..8, 32/2 from qL 3) and materializes their scores at every depth.
 
 head_dim-512 verify widths (qL 3..5, kv >= 2) preferentially take the
 kq.sdpa_fa_verify d-split kernel over the same GQA fold (one flash-attention
@@ -135,30 +136,29 @@ _GQA_MIN_KV_512 = env_int("GMLX_GQA_SDPA_MINKV512", 32768)
 # from 2k to 131k, qL=3 1.1-1.5x, qL=2 LOSES mid-depth (stays on vector).
 # Disable with GMLX_VERIFY_GEMM=0 (falls back to kq.sdpa_vector above).
 _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
-# Speculative-verify on the matrix units: kq.sdpa_fa_verify, a
-# simdgroup-matrix flash-attention pass over the same GQA fold. One KV sweep
-# on matrix units vs the vector route's per-row strided walk; measured at
-# 24/4 hd256 bf16 (qwen3.x full-attn): qL=4 1.14x @4k -> 1.53x @131k, qL=3
-# wins from ~16k, qL=2 loses (stays on vector). At qL 6..8 a fold wider
-# than 32 rows (qL x G > 32) is stock's materialized fallback at any depth,
-# and kq.sdpa_vector declines it: at 24/4, layers chained in series, fa runs
-# 1.43-1.53x @512, 1.67-1.77x @4k, 2.0-2.1x @32k and 1.96-2.15x @131k, one
-# 64-row tile ahead of two 32-row chunks at every depth. 16/2 (one 64-row
-# tile) gains 1.4-3.0x and 32/2 (two 64-row chunks) 1.04-2.2x from 512 to
-# 131k. Narrower qL 6..8
-# folds stay on stock's vector kernel: 16/4 (24-32 rows) gains 1.2-1.7x
-# from 16k and loses up to 0.85x at 4k, 16/8 (12-16 rows) loses at every
-# depth to 64k. The kernel takes one row
-# tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up to 4x that
-# (e.g. 32/2 gqa16 at qL 4) run as per-chunk calls over a kv-major split of
-# the GQA group -- each chunk re-sweeps the KV, still far ahead of the
-# per-row vector walk at those shapes. hd512 (gemma-4 26b-moe/31b global
-# layers, kv>=2) claims ahead of the verify_gemm fold below; A/B the two
-# with GMLX_VERIFY_FA=0. Disable with GMLX_VERIFY_FA=0.
+# Speculative verify on the matrix units: kq.sdpa_fa_verify, a
+# simdgroup-matrix flash-attention pass over the GQA fold. One KV sweep
+# serves all G x qL folded rows, so its cost barely moves with the rows,
+# while stock and kq.sdpa_vector walk the keys once per row, and stock
+# materializes any fold over 32 rows at every depth. At hd256 the gate keys
+# on the folded rows and the KV heads (_fa_min_kv_256). Chained over 16
+# layers, bf16, on mlx-kquant's GPU-filling split count: folds over 32 rows
+# gain 1.35-1.8x at 512 keys and 1.7-4x at 16k (24/4, 16/2, 32/2 at qL
+# 3..8); 24-32 rows 1.2-1.75x from 512 keys at 4 KV heads and 1.05-1.75x
+# from 1024 at 2; 18-23 rows 1.03-1.15x from 1024 keys at 4 KV heads and
+# 1.0-1.1x from 8192 at 2, to 131k; under 18 rows (16/4 and 8/2 at qL
+# 3..4, qL 2 below G 9) fa loses at every depth. Below 256 keys stock wins
+# every shape, since fa's per-split partials cost about 23 us. The kernel
+# takes one row tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up
+# to 4x that (e.g. 32/2 gqa16 at qL 5..8) run as per-chunk calls over a
+# kv-major split of the GQA group, each sweeping the KV again, which pays
+# from 1024 keys (1.4-2.2x to 16k). hd512 (gemma-4 26b-moe/31b global
+# layers, kv>=2) claims qL 3..5 ahead of the verify_gemm fold below; A/B
+# the two with GMLX_VERIFY_FA=0. Disable with GMLX_VERIFY_FA=0.
 _VERIFY_FA = env_bool("GMLX_VERIFY_FA", True)
+# hd512: qL 4..5 from 4096 keys, qL 3 from 16384.
 _FA_MIN_KV = env_int("GMLX_VERIFY_FA_MINKV", 4096)
-# qL 3, and qL 6..8 folds of 24-32 rows, win from 16k only.
-_FA_MIN_KV_NARROW = 16384
+_FA_MIN_KV_QL3 = 16384
 _HAS_FA_VERIFY = mlx_kquant is not None and hasattr(mlx_kquant, "sdpa_fa_verify")
 # hd256 wide-group decode (gqa > 8, i.e. qwen3.5-122b 32/2): the per-key dot
 # fan-out (16 dots/staged element) is compute-bound on the FMA-path kernels
@@ -382,6 +382,20 @@ def _fa_row_cap(hd):
     return 32 if hd == 512 else _FA_MAX_ROWS
 
 
+def _fa_min_kv_256(rows, chunks, kv):
+    # First key count from which the hd256 fold beats stock and
+    # kq.sdpa_vector, or None where it never does (see _VERIFY_FA).
+    if chunks > 1:
+        return 1024
+    if rows > 32:
+        return 512
+    if rows >= 24:
+        return 512 if kv >= 4 else 1024
+    if rows >= 18:
+        return 1024 if kv >= 4 else 8192
+    return None
+
+
 def _fa_verify_eligible(q, k, v, mask):
     # B==1 verify width, causal only, fold must split into <=4 row tiles
     # along the GQA group. hd256 = qwen3.x full-attn; hd512 = gemma-4
@@ -400,19 +414,16 @@ def _fa_verify_eligible(q, k, v, mask):
     if hd == 512 and kv < 2:
         return False
     g = q.shape[1] // kv
-    if hd == 256 and 6 <= qL <= 8:
-        # A fold over 32 rows is stock's materialized fallback at any depth.
-        if qL * g > 32:
-            min_kv = qL
-        elif qL * g >= 24:
-            min_kv = _FA_MIN_KV_NARROW
-        else:
+    n = _fa_chunks(g, qL, _fa_row_cap(hd))
+    if n is None:
+        return False
+    if hd == 256:
+        min_kv = _fa_min_kv_256(g * qL, n, kv) if 2 <= qL <= 8 else None
+        if min_kv is None:
             return False
     elif 3 <= qL <= 5:
-        min_kv = _FA_MIN_KV_NARROW if qL == 3 else _FA_MIN_KV
+        min_kv = _FA_MIN_KV_QL3 if qL == 3 else _FA_MIN_KV
     else:
-        return False
-    if _fa_chunks(g, qL, _fa_row_cap(hd)) is None:
         return False
     if qL > k.shape[2] or k.shape[2] < min_kv:
         return False

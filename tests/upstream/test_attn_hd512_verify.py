@@ -264,12 +264,10 @@ def test_fa_verify_eligibility_oversized_fold():
 
 
 @_NEEDS_FA
-@pytest.mark.parametrize("qL,kL", [(8, 8), (6, 40), (8, 512), (7, 4096),
-                                   (8, 16384)])
+@pytest.mark.parametrize("qL,kL", [(6, 512), (8, 512), (7, 4096), (8, 16384)])
 def test_fa_verify_wide_fold_matches_reference(qL, kL):
     # qwen3.x full attention (24/4) at DFlash block widths: a fold over 32
-    # rows is stock's materialized fallback, so fa claims it from the first
-    # key, including a cache shorter than one key tile
+    # rows is stock's materialized fallback, so fa claims it from 512 keys
     scale = 256**-0.5
     q, k, v = _rand(qL, kL=kL, hq=24, hkv=4, d=256)
     assert attn_hd512._fa_verify_eligible(q, k, v, "causal")
@@ -285,18 +283,34 @@ def test_fa_verify_wide_fold_matches_reference(qL, kL):
     assert err < 2e-2, f"qL={qL} kL={kL} err={err}"
 
 
-def test_fa_verify_eligibility_wide_qL():
+@pytest.mark.parametrize("qL,hq,hkv,below,from_kv", [
+    (8, 24, 4, 256, 512),     # 48 rows, one tile
+    (5, 32, 2, 512, 1024),    # 80 rows, two chunks
+    (8, 16, 4, 256, 512),     # 32 rows at 4 KV heads
+    (4, 16, 2, 512, 1024),    # 32 rows at 2 KV heads
+    (2, 32, 2, 512, 1024),    # qL 2 with a 16-wide group
+    (3, 24, 4, 512, 1024),    # 18 rows at 4 KV heads
+    (5, 8, 2, 4096, 8192),    # 20 rows at 2 KV heads
+])
+def test_fa_verify_eligibility_by_fold(qL, hq, hkv, below, from_kv):
+    def elig(kL):
+        return attn_hd512._fa_verify_eligible(
+            *_rand(qL, kL=kL, hq=hq, hkv=hkv, d=256), "causal")
+
+    assert not elig(below)
+    assert elig(from_kv)
+
+
+def test_fa_verify_eligibility_narrow_fold():
     def elig(qL, kL, hq, hkv, d=256):
         return attn_hd512._fa_verify_eligible(
             *_rand(qL, kL=kL, hq=hq, hkv=hkv, d=d), "causal")
 
-    # folds of 24-32 rows (16/4) stay on stock's vector kernel below 16k
-    assert not elig(8, 4096, 16, 4)
-    assert elig(8, 16384, 16, 4)
-    assert elig(6, 16384, 16, 4)
-    # folds under 24 rows (16/8) never leave it
+    # folds under 18 rows stay on stock or kq.sdpa_vector at any depth
+    assert not elig(4, 32768, 16, 4)
     assert not elig(8, 16384, 16, 8)
-    # past the DFlash block width, and hd512 above qL 5, fall through
+    assert not elig(2, 16384, 24, 4)
+    # past the DFlash block width, and hd512 outside qL 3..5, fall through
     assert not elig(9, 512, 24, 4)
     assert not elig(6, KL, 32, 4, d=512)
 
