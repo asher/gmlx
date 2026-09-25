@@ -1213,12 +1213,12 @@ def _launch_dsh(a, *, exec_fn) -> int:
                        or (_DSH_DEFAULT_WINDOW, _DSH_DEFAULT_MAX_TOKENS))
     if window < _DSH_SMALL_WINDOW:
         print(f"[launch] note: {default_model} has a {window}-token context, "
-              f"small for an agent; expect frequent compaction")
+              f"which is small for an agent, so expect frequent compaction")
     if not dsh_compaction_resolves(window, out_cap):
         # The web app compacts at dsh's default headroom only.
         need = out_cap + math.ceil(_DSH_HEADROOM / (1 - _DSH_RETAIN_RATIO))
         print(f"[launch] note: the dsh web app compacts {default_model} only "
-              f"after the server reports an overflow - automatic compaction "
+              f"after the server reports an overflow. Automatic compaction "
               f"there needs a {need}-token context, and this model has "
               f"{window}")
     if a.config_only:
