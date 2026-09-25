@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -139,7 +140,8 @@ def test_prompt_impossible_rejects(tight):
     rg = _rg(DENSE, tokens=100_000)
     with pytest.raises(PromptTooLongError) as e:
         mp.preflight_prompt_memory(rg, "x" * 200_000)
-    assert "cannot fit" in str(e.value)
+    # pi-ai's overflow pattern, so agent clients compact and retry
+    assert re.search(r"prompt is too long", str(e.value), re.I)
     assert "prompt_tokens=100000" in str(e.value)
 
 

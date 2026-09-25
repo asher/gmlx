@@ -105,6 +105,7 @@
   "mlx_vlm.server.generation:ResponseGenerator._preprocess_request": "5d89b1f03ae7156daf671c3c4999673ef2bc77bc5d650847abfc882099cd38f9",
   "mlx_vlm.server.generation:ResponseGenerator._step": "d7abfe591a2ab6cdd0fe4b577c29786198e00722f1f7499b53b1af41a1df657a",
   "mlx_vlm.server.generation:ResponseGenerator.generate": "76c27ca4e8020006c38e459acccbb5edc68a07ffb8e05511d4e0a6e71d8166d7",
+  "mlx_vlm.server.generation:_check_configured_context_budget": "47ccaec08d07e22f233a514e088d3fb3c12500267dd4d75dd1dd7412d16af29d",
   "mlx_vlm.server.generation:load_model_resources": "b46a19148aee1d5a9cfcdbd732a55ea07887a4b0faeac7b69cce22dd761a2259",
   "mlx_vlm.server.generation:run_speculative_server_rounds": "5404718096cb62425037155d35862257ba6162ef7657a8778821f25c5021936e",
   "mlx_vlm.server.openai:_infer_tool_parser_from_processor": "d7fdc11617d5e8c5e59491d49f502966810fb97a52a62c8f0c09770425d6a59e",

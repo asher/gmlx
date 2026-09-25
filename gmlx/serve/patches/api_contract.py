@@ -4,7 +4,8 @@ for parameters the server accepts but never reads (the request schemas are
 enforcement of ``tool_choice: "none"`` (drop the tools before the chat
 template ever sees them). ``required``/named tool_choice can't be enforced
 without per-template grammars, so a request that asked for a forced call and
-got none back logs one warning instead."""
+got none back logs one warning instead. Context-overflow errors use the
+wording agent clients match to compact and retry."""
 
 from __future__ import annotations
 
@@ -302,3 +303,30 @@ def install_api_contract() -> None:
     _wrap_post_routes(app, _MESSAGES_PATHS, _API_CONTRACT_FLAG,
                       _make_raw_endpoint(ANTHROPIC_CONSUMED,
                                          _MESSAGES_PATHS[-1]))
+
+
+# Context overflow wording
+# Agent clients compact the conversation and retry when an error names a
+# context overflow in words they know: Anthropic's "prompt is too long" or
+# OpenAI's "exceeds the context window". mlx-vlm's text matches neither, so
+# the client stops at the error.
+def _check_context_budget(prompt_tokens: int, max_tokens: int):
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    limit = gen.get_configured_context_limit()
+    max_gen = max(0, int(max_tokens or 0))
+    needed = prompt_tokens + max_gen
+    if limit is not None and needed > limit:
+        raise gen.PromptTooLongError(
+            f"prompt is too long: {needed} tokens > {limit} maximum. The "
+            f"request needs {prompt_tokens} prompt + {max_gen} max generation "
+            f"tokens, which exceeds the context window (MAX_KV_SIZE).")
+
+
+def install_context_overflow_wording() -> None:
+    """Replace mlx-vlm's configured-context check with one that raises the
+    same error in wording clients recognize. Idempotent."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    # Callers look the name up at call time. The package re-exports it.
+    gen._check_configured_context_budget = _check_context_budget
+    importlib.import_module("mlx_vlm.server") \
+        ._check_configured_context_budget = _check_context_budget

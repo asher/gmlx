@@ -404,9 +404,9 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
                 else f"prompt + max_tokens {pinned}")
         worst = max(need, need_pinned)
         raise _preflight_error_cls()(
-            f"request cannot fit: {what} needs an estimated "
-            f"{worst / GB:.1f} GB of KV and prefill transient, but only "
-            f"{avail / GB:.1f} GB remains with the batch drained "
+            f"prompt is too long for the memory available: {what} needs an "
+            f"estimated {worst / GB:.1f} GB of KV and prefill transient, but "
+            f"only {avail / GB:.1f} GB remains with the batch drained "
             f"(prompt_tokens={tokens}). Reduce the prompt"
             + (" or max_tokens" if need_pinned > avail else "") + ".")
     except Exception as e:

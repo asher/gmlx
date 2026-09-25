@@ -34,7 +34,8 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
   sequences (mlx-vlm only implements them on the Anthropic endpoint).
 * **API contract** - one warning line per request naming set-but-unread
   parameters (per-dialect allowlists), server-side ``tool_choice: "none"``
-  enforcement, and a warning when a forced tool call parsed zero calls.
+  enforcement, a warning when a forced tool call parsed zero calls, and
+  context-overflow errors in the wording agent clients match.
 * **``/v1/completions``** - a minimal classic text-completions route (single
   string prompt, ``n=1``, SSE streaming, stop sequences); mlx-vlm serves only
   the chat-shaped routes.
@@ -71,7 +72,7 @@ from .apc import (
     install_apc_lone_harvest,
     install_retire_render_capture,
 )
-from .api_contract import install_api_contract
+from .api_contract import install_api_contract, install_context_overflow_wording
 from .chat_behavior import (
     install_chat_template_kwargs,
     install_ignore_eos,
@@ -146,6 +147,7 @@ __all__ = [
     "install_chat_load_offload",
     "install_chat_template_kwargs",
     "install_completions_route",
+    "install_context_overflow_wording",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -271,6 +273,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
+    install_context_overflow_wording()
     # Before the load-offload / profile-capture / keepalive wrappers so they
     # wrap the completions route too.
     install_completions_route()

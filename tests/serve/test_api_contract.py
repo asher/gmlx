@@ -390,6 +390,28 @@ def test_install_api_contract_idempotent():
                            sp_api._API_CONTRACT_FLAG, False)
 
 
+def test_context_overflow_check_keeps_the_rule(monkeypatch):
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    for mod in (gen, pkg):
+        monkeypatch.setattr(mod, "_check_configured_context_budget",
+                            mod._check_configured_context_budget)
+    sp.install_context_overflow_wording()
+    sp.install_context_overflow_wording()
+    check = gen._check_configured_context_budget
+    assert check is sp_api._check_context_budget
+    assert pkg._check_configured_context_budget is check
+
+    monkeypatch.setattr(gen, "get_configured_context_limit", lambda: 100)
+    check(80, 20)
+    check(100, None)
+    with pytest.raises(gen.PromptTooLongError,
+                       match="101 tokens > 100 maximum"):
+        check(81, 20)
+    monkeypatch.setattr(gen, "get_configured_context_limit", lambda: None)
+    check(10**6, 10**6)
+
+
 def _stream_response(chunks):
     """A minimal StreamingResponse stand-in: just a ``body_iterator``."""
     import types

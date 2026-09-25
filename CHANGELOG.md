@@ -11,6 +11,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `/v1/chat/completions` ignored `max_completion_tokens`, OpenAI's current
   name for the output cap. It now sets the cap and wins over `max_tokens`
   and a profile value, so pi requests get the cap pi sends.
+- A 400 for a request over the context budget or the memory preflight did
+  not read as a context overflow to agent clients, so they stopped instead of
+  compacting. Both messages now start with `prompt is too long`.
 
 ## [0.4.16] - 2026-09-24
 

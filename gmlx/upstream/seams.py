@@ -230,6 +230,9 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "_check_configured_context_budget",
+         "server_patches.install_context_overflow_wording (replaced; "
+         "same check, overflow text clients match)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
          "mem_preflight.install_memory_preflight; "
          "server_patches.mtp_thinking (thinking_budget deferral)",

@@ -290,6 +290,7 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
+| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](server-config.md#load-keys) |
 | the prompt alone cannot fit in memory | 400 with the estimated need and the available budget | `GMLX_PREFLIGHT_MEM=0` |
 | more requests waiting than the queue cap | 503 with `Retry-After` set to the estimated drain time, 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
 | a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |
@@ -301,9 +302,14 @@ drained. `max_tokens` counts only when the request pins it
 explicitly, and media requests are not estimated. The load gate judges a
 model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
-still returning from a recent unload. The switches in the last column, and
-the decode batch width the queue cap is derived from, are documented under
-[Server](env-vars.md#server).
+still returning from a recent unload. The environment variables in the last
+column, and the decode batch width the queue cap is derived from, are
+documented under [Server](env-vars.md#server).
+
+Both 400s for a request that does not fit start their message with `prompt
+is too long`, and the budget error also says the request `exceeds the context
+window`. Agent clients that recognize those words, pi among them, compact the
+conversation and retry instead of stopping at the error.
 
 ## Hugging Face policy
 
