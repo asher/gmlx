@@ -213,14 +213,18 @@ profile from its shipped `web` template, and later launches reuse it. Your
 other dsh profiles are not touched. A `gmlx` directory there without a
 `package.json` is refused, so remove or rename it before you launch.
 
-The provider, default model and compaction settings go in
+The providers, default model and title and compaction settings go in
 `~/.config/gmlx/dsh/gmlx.cordis.yml`, which the launch passes to dsh with
-`--patch`. The file registers the server with dsh's pi-ai adapter, and each
-served chat model gets the sizes and `compat` switches that pi gets. A
-`--patch` file is dsh's top configuration layer. The web app therefore
-cannot save a model switch as the new default, or an edit to the gmlx
-provider on its Models page. Rerun the launch with `--model` to change the
-default.
+`--patch`. A `--patch` file is dsh's top configuration layer. The web app
+therefore cannot save a model switch as the new default, or an edit to the
+gmlx providers on its Models page. Rerun the launch with `--model` to change
+the default.
+
+The file registers the server twice with dsh's pi-ai adapter, and each served
+chat model gets the sizes and `compat` switches that pi gets. Under
+`gmlx (local)` the server and its profiles decide whether a model thinks.
+Under `gmlx (thinking off)` the same models answer without thinking, and dsh
+writes its session titles there with the default model.
 
 The web app serves on port 3080, or on 3081 when the gmlx server holds 3080,
 and opens a browser. It does not work in the directory you launch from. It

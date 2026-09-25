@@ -1015,6 +1015,20 @@ _DSH_THRESHOLD_RATIO = 0.8
 _DSH_RETAIN_RATIO = 0.16
 _DSH_COMPACT_MIN_WINDOW = 8192
 _DSH_SMALL_WINDOW = 16384
+# A second route lists the same models with thinking off. pi-ai sends the
+# z.ai `thinking` field there, which the server maps onto each template's
+# switch, and a call that names no reasoning level gets {"type": "disabled"}.
+# pi-ai sends the field only for a model that declares a level beyond off.
+_DSH_NOTHINK_SUFFIX = "-nothink"
+_DSH_NOTHINK_COMPAT = {**_PI_AI_COMPAT, "thinkingFormat": "zai",
+                       "supportsReasoningEffort": False}
+_DSH_NOTHINK_EFFORTS = {"off": None, "high": "high"}
+# dsh's session-title-llm row, restated because a patch replaces the whole
+# config. The title call names no reasoning level, so on the second route it
+# runs with thinking off and fits dsh's 64 tokens.
+_DSH_TITLE_ROW = {"targetWords": 5, "targetCjkCharacters": 10,
+                  "maxInputBytes": 4096, "maxOutputTokens": 64,
+                  "timeoutMs": 60000}
 
 
 def dsh_compaction_resolves(window: int, out: int,
@@ -1039,10 +1053,13 @@ def dsh_headroom(window: int, out: int) -> int:
 
 def build_dsh_overlay(base_url: str, models: list, *, default_model: str,
                       provider_id: str = _PROVIDER_ID) -> list:
-    """The Cordis patch rows that route dsh at the gmlx server: an llm-pi-ai
-    provider listing every served chat id, the default model, and compaction
-    policies sized to each model's window. An ``id@profile`` default is listed
-    too, since pi-ai refuses a model id its route does not list. Pure - no IO."""
+    """The Cordis patch rows that route dsh at the gmlx server: two llm-pi-ai
+    providers listing every served chat id, one as the server serves it and
+    one with thinking off, the default model, session titles on the
+    thinking-off route, and compaction policies sized to each model's window.
+    An ``id@profile`` default is listed too, since pi-ai refuses a model id
+    its route does not list. Pure - no IO."""
+    nothink_id = provider_id + _DSH_NOTHINK_SUFFIX
     heads = {m["id"]: m for m in chat_models(models)}
     listed = [(m, m["id"], _display_name(m)) for m in heads.values()]
     if default_model not in heads:
@@ -1063,21 +1080,35 @@ def build_dsh_overlay(base_url: str, models: list, *, default_model: str,
             policies.append({"provider": provider_id, "model": model_id,
                              "headroomTokens": dsh_headroom(window, out),
                              "maxTokens": out})
-    provider = {
-        "displayName": "gmlx (local)",
-        "api": "openai-completions",
-        "baseURL": base_url,
-        # dsh resolves a key only through an env var, even for a keyless server
-        "apiKeyEnv": _DSH_KEY_ENV,
-        "compat": dict(_PI_AI_COMPAT),
-        "defaultContextWindow": _DSH_DEFAULT_WINDOW,
-        "defaultMaxTokens": _DSH_DEFAULT_MAX_TOKENS,
-        "models": entries,
+    policies += [dict(p, provider=nothink_id) for p in policies]
+
+    def route(display_name: str, compat: dict, route_models: list) -> dict:
+        return {
+            "displayName": display_name,
+            "api": "openai-completions",
+            "baseURL": base_url,
+            # dsh resolves a key only through an env var, even for a keyless server
+            "apiKeyEnv": _DSH_KEY_ENV,
+            "compat": dict(compat),
+            "defaultContextWindow": _DSH_DEFAULT_WINDOW,
+            "defaultMaxTokens": _DSH_DEFAULT_MAX_TOKENS,
+            "models": route_models,
+        }
+
+    nothink_entries = [dict(e, reasoningEfforts=dict(_DSH_NOTHINK_EFFORTS))
+                       for e in entries]
+    providers = {
+        provider_id: route("gmlx (local)", _PI_AI_COMPAT, entries),
+        nothink_id: route("gmlx (thinking off)", _DSH_NOTHINK_COMPAT,
+                          nothink_entries),
     }
     rows = [
-        {"id": "llm-pi-ai", "config": {"providers": {provider_id: provider}}},
+        {"id": "llm-pi-ai", "config": {"providers": providers}},
         {"id": "agent-default-model",
          "config": {"provider": provider_id, "model": default_model}},
+        {"id": "session-title-llm",
+         "config": {**_DSH_TITLE_ROW, "provider": nothink_id,
+                    "model": default_model}},
     ]
     if policies:
         # The web template disables this host row and runs a default-config

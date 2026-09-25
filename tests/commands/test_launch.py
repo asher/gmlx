@@ -1366,6 +1366,35 @@ def test_build_dsh_overlay_shape():
                                            "model": "qwen3.6-27b"}
 
 
+def test_build_dsh_overlay_thinking_off_route():
+    rows = _dsh_rows(launch.build_dsh_overlay(
+        "http://x/v1", _dsh_models(), default_model="qwen3.6-27b"))
+    providers = rows["llm-pi-ai"]["providers"]
+    plain, nothink = providers["gmlx"], providers["gmlx-nothink"]
+    assert nothink["displayName"] == "gmlx (thinking off)"
+    assert nothink["baseURL"] == plain["baseURL"]
+    assert nothink["apiKeyEnv"] == plain["apiKeyEnv"]
+    # pi-ai sends thinking {"type": "disabled"} for a call with no level
+    assert nothink["compat"] == {**launch._PI_AI_COMPAT, "thinkingFormat": "zai",
+                                 "supportsReasoningEffort": False}
+    assert [m["id"] for m in nothink["models"]] == [m["id"] for m in plain["models"]]
+    for m in nothink["models"]:
+        assert m["reasoningEfforts"] == {"off": None, "high": "high"}
+
+
+def test_build_dsh_overlay_titles_run_with_thinking_off():
+    rows = _dsh_rows(launch.build_dsh_overlay(
+        "http://x/v1", _dsh_models(), default_model="qwen3.6-27b@coding"))
+    title = rows["session-title-llm"]
+    assert (title["provider"], title["model"]) == ("gmlx-nothink",
+                                                    "qwen3.6-27b@coding")
+    # a patch replaces the whole row config, so dsh's own values are restated
+    assert {k: title[k] for k in launch._DSH_TITLE_ROW} == launch._DSH_TITLE_ROW
+    nothink_ids = [m["id"] for m in
+                   rows["llm-pi-ai"]["providers"]["gmlx-nothink"]["models"]]
+    assert "qwen3.6-27b@coding" in nothink_ids
+
+
 def test_build_dsh_overlay_lists_profile_default():
     # pi-ai refuses an id its route does not list (UNKNOWN_MODEL)
     rows = _dsh_rows(launch.build_dsh_overlay(
@@ -1400,18 +1429,18 @@ def test_build_dsh_overlay_compaction_policy(window, headroom, out):
     if headroom is None:
         assert "compaction-basic" not in rows
         return
+    policy = {"model": "m", "headroomTokens": headroom, "maxTokens": out}
     assert rows["compaction-basic"]["modelPolicies"] == [
-        {"provider": "gmlx", "model": "m", "headroomTokens": headroom,
-         "maxTokens": out}]
+        {"provider": "gmlx", **policy}, {"provider": "gmlx-nothink", **policy}]
     assert launch.dsh_compaction_resolves(window, out, headroom)
 
 
 def test_build_dsh_overlay_unsized_policy_uses_route_defaults():
     rows = _dsh_rows(launch.build_dsh_overlay("http://x/v1", [{"id": "m"}],
                                               default_model="m"))
+    policy = {"model": "m", "headroomTokens": 6144, "maxTokens": 8192}
     assert rows["compaction-basic"]["modelPolicies"] == [
-        {"provider": "gmlx", "model": "m", "headroomTokens": 6144,
-         "maxTokens": 8192}]
+        {"provider": "gmlx", **policy}, {"provider": "gmlx-nothink", **policy}]
 
 
 def test_model_capacity_output_cap_fits_tiny_windows():
