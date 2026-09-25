@@ -63,9 +63,11 @@ All routes except `/health` require the API key when one is set.
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
-`default` markers and two context figures: `context_length`, the GGUF's
-trained window, and `max_context_at_width_1`, how much of it fits in memory
-for a single stream. A harness sizes its context window from the second. A
+`default` markers and two context figures. `context_length` is the GGUF's
+trained window, or the model's [`max_kv_size`](server-config.md#load-keys)
+when that is smaller. `max_context_at_width_1` is how much of the window
+fits in memory for a single stream. A harness sizes its context window from
+the smaller of the two. A
 resident model with KV quantization configured adds a `kv_quant` object:
 `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`, a
 `verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`

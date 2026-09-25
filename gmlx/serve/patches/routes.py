@@ -20,6 +20,7 @@ from ._common import (
     _get_pool,
     _remove_routes,
 )
+from .api_contract import model_context_limit
 
 _log = logging.getLogger(__name__)
 
@@ -29,6 +30,24 @@ def _mtime(path) -> int:
         return int(os.path.getmtime(path))
     except Exception:
         return 0
+
+
+def _context_length(spec) -> int | None:
+    """The GGUF's trained context, capped by the model's context limit."""
+    trained = _capacity.trained_context_length(spec.path)
+    limit = model_context_limit(spec)
+    if trained and limit:
+        return min(trained, limit)
+    return trained or limit
+
+
+def _alias_spec(name, rm):
+    """The alias resolved with its own profile, whose load keys can differ
+    from the target's. The target's spec when the alias does not resolve."""
+    try:
+        return serving.resolve_request_model(name)[1]
+    except Exception:
+        return rm
 
 
 def _models_payload() -> dict:
@@ -66,7 +85,7 @@ def _models_payload() -> dict:
             return kv_by_loaded[base]
         return kv_by_id.get(base, kv_by_path.get(rm.path))
 
-    def _entry(mid, rm, *, alias_of=None, profile=None):
+    def _entry(mid, rm, *, alias_of=None, profile=None, spec=None):
         return {
             "id": mid,
             "object": "model",
@@ -81,10 +100,11 @@ def _models_payload() -> dict:
             "profile": profile if alias_of else rm.profile_name,
             "family": getattr(rm, "family", None),   # sampling family (profiles.py)
             "default": mid == default_id,            # aliases never == default_id
-            # The GGUF's trained context, and (for the model the capacity
-            # table was derived from) how much of it fits at width 1 - what
-            # a harness sizes its context window / compaction from.
-            "context_length": _capacity.trained_context_length(rm.path),
+            # The GGUF's trained context capped by max_kv_size, and (for the
+            # model the capacity table was derived from) how much of it fits
+            # at width 1 - what a harness sizes its context window /
+            # compaction from.
+            "context_length": _context_length(spec or rm),
             "max_context_at_width_1": _capacity.max_context_at_width_1(rm.path),
             **({"alias_of": alias_of} if alias_of else {}),
         }
@@ -96,7 +116,8 @@ def _models_payload() -> dict:
         rm = models.get(target_id)
         if rm is not None:
             data.append(_entry(name, rm, alias_of=target_id,
-                               profile=profile or rm.profile_name))
+                               profile=profile or rm.profile_name,
+                               spec=_alias_spec(name, rm)))
     return {"object": "list", "data": data}
 
 

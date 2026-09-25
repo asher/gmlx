@@ -5,14 +5,18 @@ enforcement of ``tool_choice: "none"`` (drop the tools before the chat
 template ever sees them). ``required``/named tool_choice can't be enforced
 without per-template grammars, so a request that asked for a forced call and
 got none back logs one warning instead. Context-overflow errors use the
-wording agent clients match to compact and retry."""
+wording agent clients match to compact and retry, and the context limit
+follows the requested model's ``max_kv_size``."""
 
 from __future__ import annotations
 
 import contextvars
+import functools
 import importlib
 import logging
 import os
+
+import gmlx.serve.bridge_vlm as serving
 
 from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
@@ -320,7 +324,41 @@ def _check_context_budget(prompt_tokens: int, max_tokens: int):
         raise gen.PromptTooLongError(
             f"prompt is too long: {needed} tokens > {limit} maximum. The "
             f"request needs {prompt_tokens} prompt + {max_gen} max generation "
-            f"tokens, which exceeds the context window (MAX_KV_SIZE).")
+            f"tokens, which exceeds the context window (max_kv_size).")
+
+
+# Per-model context limit
+# mlx-vlm reads the limit from its runtime config or the MAX_KV_SIZE
+# environment variable. gmlx sets a model's load keys in the environment
+# only while the model loads, so the request check reads a per-model
+# max_kv_size from the request's resolved model.
+_CONTEXT_LIMIT_FLAG = "_kq_gguf_model_context_limit"
+
+
+def _spec_context_limit(spec, process_limit):
+    value = (getattr(spec, "load", None) or {}).get("max_kv_size")
+    if value is not None:
+        return int(value) or None
+    return process_limit()
+
+
+def model_context_limit(spec) -> int | None:
+    """The context limit for a resolved model: its ``max_kv_size`` load
+    key, else the process-wide limit. None when neither is set. A value
+    of 0 turns the limit off for that model."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    process_limit = gen.get_configured_context_limit
+    if getattr(process_limit, _CONTEXT_LIMIT_FLAG, False):
+        process_limit = process_limit.__wrapped__
+    return _spec_context_limit(spec, process_limit)
+
+
+def _make_context_limit(original):
+    @functools.wraps(original)
+    def get_configured_context_limit():
+        return _spec_context_limit(serving.get_active_spec(), original)
+    get_configured_context_limit.__dict__[_CONTEXT_LIMIT_FLAG] = True
+    return get_configured_context_limit
 
 
 # mlx-vlm's /v1/messages handler runs the streaming preflight outside the
@@ -364,13 +402,19 @@ def _make_messages_overflow_endpoint(original):
 
 def install_context_overflow_wording() -> None:
     """Replace mlx-vlm's configured-context check with one that raises the
-    same error in wording clients recognize, and answer a streaming
-    ``/v1/messages`` overflow with 400. Idempotent."""
+    same error in wording clients recognize, take the limit from the
+    requested model, and answer a streaming ``/v1/messages`` overflow with
+    400. Idempotent."""
     gen = importlib.import_module("mlx_vlm.server.generation")
-    # Callers look the name up at call time. The package re-exports it.
+    pkg = importlib.import_module("mlx_vlm.server")
+    # Callers look the names up at call time. The package re-exports them.
     gen._check_configured_context_budget = _check_context_budget
-    importlib.import_module("mlx_vlm.server") \
-        ._check_configured_context_budget = _check_context_budget
+    pkg._check_configured_context_budget = _check_context_budget
+    limit = gen.get_configured_context_limit
+    if not getattr(limit, _CONTEXT_LIMIT_FLAG, False):
+        limit = _make_context_limit(limit)
+        gen.get_configured_context_limit = limit
+        pkg.get_configured_context_limit = limit
     anthropic = importlib.import_module("mlx_vlm.server.anthropic")
     hook = anthropic._preflight_stream_context_budget
     if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
