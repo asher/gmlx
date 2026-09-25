@@ -149,6 +149,8 @@ def _named_value_candidates(flag: str) -> list[str]:
             from gmlx.gen.profiles import builtin_intents
 
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
+        if flag == "--dsh-profile":
+            return _dsh_profile_candidates()
     except Exception:  # noqa: BLE001 - value candidates are best-effort
         return []
     return []
@@ -204,12 +206,34 @@ def _model_candidates(words: list[str]) -> list[str]:
     return out
 
 
+# Launch targets that are not coding harnesses, grouped as launch.py groups them.
+_HARNESS_KINDS = {
+    "hermes": "agent runtime", "goose": "agent runtime",
+    "aichat": "chat TUI", "elia": "chat TUI",
+    "open-webui": "web app", "dsh": "web app",
+}
+
+
 def _harness_candidates() -> list[str]:
     from .launch import _HARNESSES
 
-    out = [f"{h}\tcoding harness" for h in sorted(_HARNESSES)]
+    out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding harness')}"
+           for h in sorted(_HARNESSES)]
     out.append("menubar\tmacOS status-bar monitor")
     return out
+
+
+def _dsh_profile_candidates() -> list[str]:
+    """dsh's shipped profiles plus the profiles under $DSH_HOME."""
+    from .launch import _DSH_PROFILE, _DSH_SHIPPED, _DSH_STDIO, _dsh_home
+
+    names = {n: "shipped dsh profile" for n in _DSH_SHIPPED - _DSH_STDIO}
+    names[_DSH_PROFILE] = "gmlx profile (default)"
+    root = _dsh_home() / "profiles"
+    for d in (root.iterdir() if root.is_dir() else ()):
+        if (d / "package.json").is_file():
+            names.setdefault(d.name, "dsh profile")
+    return [f"{n}\t{h}" for n, h in sorted(names.items())]
 
 
 def _running_servers() -> list[dict]:
