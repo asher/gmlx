@@ -143,11 +143,11 @@ _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
 # materializes any fold over 32 rows at every depth. At hd256 the gate keys
 # on the folded rows and the KV heads (_fa_min_kv_256). Chained over 16
 # layers, bf16, on mlx-kquant's GPU-filling split count: folds over 32 rows
-# gain 1.35-1.8x at 512 keys and 1.7-4x at 16k (24/4, 16/2, 32/2 at qL
-# 3..8); 24-32 rows 1.2-1.75x from 512 keys at 4 KV heads and 1.05-1.75x
-# from 1024 at 2; 18-23 rows 1.03-1.15x from 1024 keys at 4 KV heads and
-# 1.0-1.1x from 8192 at 2, to 131k; under 18 rows (16/4 and 8/2 at qL
-# 3..4, qL 2 below G 9) fa loses at every depth. Below 256 keys stock wins
+# gain 1.35-1.8x at 512 keys and 1.7-4x at 16k (24/4 at qL 6..8, 16/2 at
+# 5..8, 32/2 at 3..4); 24-32 rows 1.2-1.75x from 512 keys at 4 KV heads
+# and 1.05-1.75x from 1024 at 2; 18-23 rows 1.03-1.15x from 1024 keys at 4
+# KV heads and 1.0-1.1x from 8192 at 2, to 131k; under 18 rows (16/4 and
+# 8/2 at qL 3..4, qL 2 below G 9) fa loses at every depth. Below 256 keys stock wins
 # every shape, since fa's per-split partials cost about 23 us. The kernel
 # takes one row tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up
 # to 4x that (e.g. 32/2 gqa16 at qL 5..8) run as per-chunk calls over a

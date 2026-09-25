@@ -263,6 +263,16 @@ def test_fa_verify_eligibility_oversized_fold():
     assert not attn_hd512._fa_verify_eligible(q2, k2, v2, "causal")
 
 
+def _routed_sdpa(q, k, v, scale):
+    # causal call through the installed wrapper, with the routes it bumped
+    attn_hd512.install_hd512_sdpa()
+    before = attn_hd512.route_counts()
+    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
+                                               mask="causal")
+    after = attn_hd512.route_counts()
+    return out, [key[0] for key in after if after[key] > before.get(key, 0)]
+
+
 @_NEEDS_FA
 @pytest.mark.parametrize("qL,kL", [(6, 512), (8, 512), (7, 4096), (8, 16384)])
 def test_fa_verify_wide_fold_matches_reference(qL, kL):
@@ -271,26 +281,47 @@ def test_fa_verify_wide_fold_matches_reference(qL, kL):
     scale = 256**-0.5
     q, k, v = _rand(qL, kL=kL, hq=24, hkv=4, d=256)
     assert attn_hd512._fa_verify_eligible(q, k, v, "causal")
-    attn_hd512.install_hd512_sdpa()
-    before = attn_hd512.route_counts()
-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
-                                               mask="causal")
-    after = attn_hd512.route_counts()
-    grew = [key[0] for key in after if after[key] > before.get(key, 0)]
+    out, grew = _routed_sdpa(q, k, v, scale)
     assert grew and all(r.startswith("fa_verify") for r in grew), grew
     ref = _ref(q, k, v, True, scale=scale)
     err = mx.abs(out.astype(mx.float32) - ref).max().item()
     assert err < 2e-2, f"qL={qL} kL={kL} err={err}"
 
 
+@_NEEDS_FA
+def test_fa_verify_qL2_wide_group_matches_reference():
+    # qwen3.5-122b (32/2) MTP verifying 2 tokens: a 32-row fold, fa from 1024
+    scale = 256**-0.5
+    q, k, v = _rand(2, kL=1024, hq=32, hkv=2, d=256)
+    out, grew = _routed_sdpa(q, k, v, scale)
+    assert grew and all(r.startswith("fa_verify") for r in grew), grew
+    ref = _ref(q, k, v, True, scale=scale)
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"err={err}"
+
+
+@_NEEDS_FA
+@pytest.mark.parametrize("qL", [3, 4])
+def test_narrow_fold_at_depth_routes_sdpa_vector(qL):
+    # qwen3.5-9b (16/4) MTP: folds of 12 and 16 rows, where fa loses, stay
+    # on kq.sdpa_vector at depth
+    scale = 256**-0.5
+    q, k, v = _rand(qL, kL=8192, hq=16, hkv=4, d=256)
+    out, grew = _routed_sdpa(q, k, v, scale)
+    assert grew == ["sdpa_vector"], grew
+    ref = _ref(q, k, v, True, scale=scale)
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"qL={qL} err={err}"
+
+
 @pytest.mark.parametrize("qL,hq,hkv,below,from_kv", [
-    (8, 24, 4, 256, 512),     # 48 rows, one tile
-    (5, 32, 2, 512, 1024),    # 80 rows, two chunks
-    (8, 16, 4, 256, 512),     # 32 rows at 4 KV heads
-    (4, 16, 2, 512, 1024),    # 32 rows at 2 KV heads
-    (2, 32, 2, 512, 1024),    # qL 2 with a 16-wide group
-    (3, 24, 4, 512, 1024),    # 18 rows at 4 KV heads
-    (5, 8, 2, 4096, 8192),    # 20 rows at 2 KV heads
+    (8, 24, 4, 511, 512),     # 48 rows, one tile
+    (5, 32, 2, 1023, 1024),   # 80 rows, two chunks
+    (8, 16, 4, 511, 512),     # 32 rows at 4 KV heads
+    (4, 16, 2, 1023, 1024),   # 32 rows at 2 KV heads
+    (2, 32, 2, 1023, 1024),   # qL 2 with a 16-wide group
+    (3, 24, 4, 1023, 1024),   # 18 rows at 4 KV heads
+    (5, 8, 2, 8191, 8192),    # 20 rows at 2 KV heads
 ])
 def test_fa_verify_eligibility_by_fold(qL, hq, hkv, below, from_kv):
     def elig(kL):
