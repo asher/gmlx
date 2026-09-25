@@ -33,11 +33,12 @@ once the KV is deep enough. head_dim 64 (e.g. gpt-oss full-attn layers) engages
 at GMLX_GQA_SDPA_MINKV (default 4096): stock MLX's fused vector path
 plateaus near 37% of read-once bandwidth at long KV; the kq kernel's coarse
 contiguous splits + GQA-shared K/V tile staging reach ~55-60% (1.3-1.6x per
-call from 16k up). head_dim 512 (gemma-4 global layers, >= 2 kv heads) engages
-at GMLX_GQA_SDPA_MINKV512 (default 32768), where it overtakes the
-kq.sdpa_vector route below (1.12x @32k -> 1.28x @131k per call; token-exact
-+1.7% whole-step at 49k on gemma-4-31b). Attention sinks ride through the
-kernel's merge pass. Disable with GMLX_GQA_SDPA=0.
+call from 16k up). head_dim 512 (gemma-4 global layers with 4 or more KV
+heads, or a group of 4 or less) engages at GMLX_GQA_SDPA_MINKV512 (default
+32768), where it overtakes the kq.sdpa_vector route below (1.02x-1.28x per
+call on gemma-4-31b from 32k to 131k, token-exact +1.7% whole-step at 49k).
+Attention sinks ride through the kernel's merge pass. Disable with
+GMLX_GQA_SDPA=0.
 
 Also tiles a pathological single-shot full-width prefill (qL > GMLX_HD512_TILE)
 so its score materialization stays bounded; the runtime's normal chunked prefill
@@ -115,13 +116,15 @@ _GQA_DECODE = env_bool("GMLX_GQA_SDPA", True)
 _GQA_MIN_KV = env_int("GMLX_GQA_SDPA_MINKV", 4096)
 _GQA_HD256 = env_bool("GMLX_GQA_SDPA_HD256", False)
 _GQA_MIN_KV_256 = env_int("GMLX_GQA_SDPA_MINKV256", 49152)
-# hd512 GQA decode (gemma-4 global layers): chained per-call probe at the 31b
-# shape (Hq/Hkv 32/4) reads 1.12x @32k -> 1.28x @131k over kq.sdpa_vector,
-# crossing over between 16k and 32k. Requires >= 2 kv heads: at Hkv=1 (12b)
-# the split grid is too starved and the kernel loses at every depth.
+# hd512 GQA decode (gemma-4 global layers) from 32768 keys, where it beats
+# kq.sdpa_vector at 4 or more KV heads (31b 32/4: 1.02-1.07x at 32k-48k,
+# 1.28x @131k) and at groups of 4 or less (e4b 8/2: 1.11-1.22x at 32k-64k).
+# A group of 8 over 2 KV heads (26b-a4b 16/2) underfills the split grid and
+# loses 1.06-1.16x at 32k-48k, and one KV head (e2b, 12b) loses at every
+# depth. Those decode by _hd512_route.
 _GQA_MIN_KV_512 = env_int("GMLX_GQA_SDPA_MINKV512", 32768)
 # hd512 speculative verify: fold the GQA group into the query rows
-# ([B,Hq,qL,D] -> [B,Hkv,G*qL,D]; exact -- query heads are grouped
+# ([B,Hq,qL,D] -> [B,Hkv,G*qL,D], exact since query heads are grouped
 # kv-major) and run plain batched-GEMM attention with a bottom-right causal
 # mask and precise softmax. One matrix-unit KV sweep serves all G*qL rows
 # where the kq.sdpa_vector route pays a strided sweep per query row.
@@ -184,19 +187,26 @@ def _causal_str(mask):
 
 # head_dim 512 route table, from per-call sweeps over the five gemma-4
 # global-layer shapes (12b 16/1, e2b 8/1, e4b 8/2, 26b-a4b 16/2, 31b 32/4),
-# chained over 16 layers, bf16, qL 1..8, 256 to 65536 keys. Stock has no
-# fused kernel at head_dim 512, so it materializes the scores at every
-# width. Decode takes kq.sdpa_vector from 1024 keys, 512 at one KV head
-# (1.02-1.72x). At one KV head stock's broadcast matmul is itself a folded
-# GEMM, so kq.sdpa_vector (one KV walk per folded row) wins only while the
-# depth is short for the fold: to 8192 keys at 16 rows, 4096 at 24, 1024 at
-# 32, and it loses up to 1.95x past that. At 4 or more KV heads the GEMM
-# fold wins from 512 keys (1.01-1.19x over fa at qL 3, 1.16-1.45x at qL 4,
-# 1.6-3.3x over stock at qL 5..8). At qL 2 there, kq.sdpa_vector is up to
-# 6% ahead from 8192 to 16384 keys. At 2 KV heads kq.sdpa_vector takes up
-# to 20 rows, fa 21 to 31 rows from 1024 keys, 32 rows go to the GEMM below
-# 4096 keys and fa from there, and wider folds go to the GEMM, where fa
-# would sweep the KV once per 32-row chunk (1.4-1.9x slower).
+# chained over 16 layers, bf16, qL 1..8, depths from 128 to 65536 keys.
+# Stock has no fused kernel at head_dim 512, so it materializes the scores
+# at every width. Every route starts at 384 keys, where the table's pick
+# beats stock by 1.03-1.75x (8/2 at 8 queries runs 2% behind); below that
+# the gains are a few microseconds. At one KV head stock's broadcast matmul
+# is itself a folded GEMM, so kq.sdpa_vector (one KV walk per folded row)
+# wins only while the depth is short for the fold, decode included: to
+# 16384 keys at 8 rows, 8192 at 16, 4096 at 24 and 1024 at 32. Past that
+# it loses up to 3.5x. At 2 or more KV heads decode takes kq.sdpa_vector
+# from 1024 keys (1.05-1.96x) until _gqa_decode_eligible claims it. At 4 or
+# more KV heads the GEMM fold wins every verify width (1.01-1.19x over fa
+# at qL 3, 1.16-1.45x at qL 4, 1.6-3.3x over stock at qL 5..8). At qL 2
+# there, kq.sdpa_vector is up to 6% ahead from 8192 to 16384 keys. At 2 KV
+# heads kq.sdpa_vector takes up to 16 rows, and 20 rows below 65536 keys,
+# where fa pulls 1.10x ahead. fa takes 21 to 31 rows from 1024 keys, 32
+# rows go to the GEMM below 4096 keys and fa from there, and wider folds go
+# to the GEMM, where fa would sweep the KV once per 32-row chunk (1.4-1.9x
+# slower). At one KV head and 24 rows fa is up to 1.16x ahead from 4096 to
+# 8192 keys. The table leaves that fold to kq.sdpa_vector and stock, since
+# only e2b verifying 3 tokens produces it.
 def _hd512_route(q, k):
     """The route for a B == 1 head_dim-512 call: "vector", "fa", "gemm",
     or None for stock."""
@@ -204,18 +214,22 @@ def _hd512_route(q, k):
     if kv == 0 or q.shape[1] % kv != 0:
         return None
     qL, kL = q.shape[2], k.shape[2]
-    rows = (q.shape[1] // kv) * qL
-    if qL == 1:
-        return "vector" if kL >= (512 if kv == 1 else 1024) else None
-    if qL > 8 or qL > kL or kL < 512:
+    if qL > 8 or qL > kL or kL < 384:
         return None
+    rows = (q.shape[1] // kv) * qL
+    vector = "vector" if qL <= _MAX_QL else None
     if kv == 1:
-        top = 8192 if rows <= 16 else 4096 if rows <= 24 else 1024 if rows <= 32 else 0
-        return "vector" if kL <= top else None
+        top = (16384 if rows <= 8 else 8192 if rows <= 16 else 4096 if rows <= 24
+               else 1024 if rows <= 32 else 0)
+        return vector if kL <= top else None
+    if qL == 1:
+        return vector if kL >= 1024 else None
     if kv >= 4 or rows > 32:
         return "gemm"
+    if rows <= 16 or (rows <= 20 and kL < 65536):
+        return vector
     if rows <= 20:
-        return "vector"
+        return "fa"
     if rows < 32:
         return "fa" if kL >= 1024 else None
     return "fa" if kL >= 4096 else "gemm"
@@ -317,7 +331,8 @@ def _gqa_decode_eligible(q, k, v, mask):
         min_kv = _GQA_MIN_KV
     elif hd == 256 and _GQA_HD256:
         min_kv = _GQA_MIN_KV_256
-    elif hd == 512 and k.shape[1] >= 2:
+    elif hd == 512 and k.shape[1] >= 2 and (
+            k.shape[1] >= 4 or q.shape[1] // k.shape[1] <= 4):
         min_kv = _GQA_MIN_KV_512
     else:
         return False
@@ -446,7 +461,8 @@ _SDPA_DEBUG = [24] if env_bool("GMLX_SDPA_DEBUG", False) else None
 # summary under GMLX_ROUTE_LOG=1, and a one-shot loud warning when a
 # verify-shaped causal call at depth lands on the stock materialized path --
 # the regression signature that previously needed ad-hoc taps to surface.
-# Head_dim-512 shapes that _hd512_route sends to stock do not warn.
+# Head_dim-512 shapes that _hd512_route or a kill switch sends to stock
+# do not warn.
 # Counts are taken at claim time; a kernel exception that falls through to a
 # later branch double-counts, which is itself a signal worth seeing.
 _ROUTE_COUNTS: dict = {}
@@ -474,8 +490,11 @@ def _stock_depth_warning(q, k, mask, sinks):
     B, hq, qL, hd = q.shape
     if B != 1 or not 2 <= qL <= 8 or hd < 256 or k.shape[2] < 16384:
         return
-    if hd == 512 and _hd512_route(q, k) is None:
-        return  # _hd512_route sends this shape to stock
+    if hd == 512:
+        r = _hd512_route(q, k)
+        if (r is None or (r == "fa" and not (_VERIFY_FA and _HAS_FA_VERIFY))
+                or (r == "gemm" and not _VERIFY_GEMM)):
+            return  # stock by the table or by a kill switch
     key = (hd, qL, hq, k.shape[1])
     if key in _STOCK_WARNED:
         return
