@@ -262,6 +262,11 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     st, out = est.estimate_request(dict(body, max_tokens=256))
     assert out["max_tokens"] == 256 and out["need_bytes"] == (6 + 256) * 1024
     assert out["fits_drained"] is False and out["context_ok"] is False
+    # the chat alias pins it the same way
+    st, out = est.estimate_request(dict(body, max_completion_tokens=256))
+    assert out["max_tokens"] == 256
+    st, out = est.estimate_request(dict(body, max_completion_tokens=0))
+    assert out["max_tokens"] is None                         # invalid: not pinned
 
     # nothing configured: judged against the GGUF's trained context instead
     monkeypatch.setattr(gen_mod, "get_configured_context_limit", lambda: None)
@@ -353,7 +358,7 @@ def test_pi_model_entry_window_and_max_tokens():
     e = launch.pi_model_entry({"id": "a", "context_length": 8192})
     assert e == {"id": "a", "contextWindow": 8192, "maxTokens": 2048}
     e = launch.pi_model_entry({"id": "a", "context_length": 2048, "max_context_at_width_1": None})
-    assert e["maxTokens"] == launch._PI_MAX_TOKENS_FLOOR
+    assert e["maxTokens"] == launch._MAX_TOKENS_FLOOR
 
 
 def test_build_pi_configs_writes_context_window():

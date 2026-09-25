@@ -413,6 +413,12 @@ On each request, `enable_thinking` in the request body wins. A request's own
 The profile or `MLX_VLM_ENABLE_THINKING` value applies after that, and the
 template's own default applies when none of them is set.
 
+A `thinking` field may also take the z.ai form, `{"type": "enabled"}` or
+`{"type": "disabled"}`. Its optional `clear_thinking` key reaches a template
+that reads `clear_thinking` unchanged, and a template that reads
+`preserve_thinking` as the inverse, so `clear_thinking: false` keeps
+prior-turn reasoning in the prompt.
+
 ```yaml
 profiles:
   quick:

@@ -11,6 +11,8 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
   min_p/penalties with plain ``getattr`` against pydantic defaults, so a profile
   can only win by post-processing the built args per key, honouring
   ``request.model_fields_set`` (a client-set field always wins).
+* **Chat ``max_completion_tokens``** - OpenAI's current chat spelling of the
+  output cap sets ``max_tokens``; mlx-vlm's chat schema declares only the old one.
 * **``/v1/models`` override** - lists the configured/discovered ids (with
   resident / pinned / capability markers), never ``scan_cache_dir()``.
 * **HF-download gate** - a non-local, non-GGUF id with HF disabled raises instead
@@ -32,7 +34,8 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
   sequences (mlx-vlm only implements them on the Anthropic endpoint).
 * **API contract** - one warning line per request naming set-but-unread
   parameters (per-dialect allowlists), server-side ``tool_choice: "none"``
-  enforcement, and a warning when a forced tool call parsed zero calls.
+  enforcement, a warning when a forced tool call parsed zero calls, and
+  context-overflow errors in the wording agent clients match.
 * **``/v1/completions``** - a minimal classic text-completions route (single
   string prompt, ``n=1``, SSE streaming, stop sequences); mlx-vlm serves only
   the chat-shaped routes.
@@ -69,7 +72,7 @@ from .apc import (
     install_apc_lone_harvest,
     install_retire_render_capture,
 )
-from .api_contract import install_api_contract
+from .api_contract import install_api_contract, install_context_overflow_wording
 from .chat_behavior import (
     install_chat_template_kwargs,
     install_ignore_eos,
@@ -125,6 +128,7 @@ from .routes import (
 from .sampling import (
     install_fast_sampler,
     install_gen_args_profile_injection,
+    install_max_completion_tokens,
     install_xtc_sampling,
 )
 
@@ -143,6 +147,7 @@ __all__ = [
     "install_chat_load_offload",
     "install_chat_template_kwargs",
     "install_completions_route",
+    "install_context_overflow_wording",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -154,6 +159,7 @@ __all__ = [
     "install_json_content_type_tolerance",
     "install_keep_route",
     "install_loopback_host_guard",
+    "install_max_completion_tokens",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_mtp_thinking_budget",
@@ -195,6 +201,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     disable_credentialed_cors()
     install_health_liveness_override()
     install_gen_args_profile_injection()
+    install_max_completion_tokens()
     install_vanilla_stream_chunks()
     install_xtc_sampling()
     if os.environ.get("GMLX_STEP_LOG"):
@@ -266,6 +273,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
+    install_context_overflow_wording()
     # Before the load-offload / profile-capture / keepalive wrappers so they
     # wrap the completions route too.
     install_completions_route()

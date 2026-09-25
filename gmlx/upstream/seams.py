@@ -230,6 +230,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "_check_configured_context_budget",
+         "server_patches.install_context_overflow_wording (replaced; "
+         "same check, overflow text clients match)"),
+    Seam("mlx_vlm.server.generation", "get_configured_context_limit",
+         "server_patches.install_context_overflow_wording (wrapped; "
+         "a per-model max_kv_size wins over the process-wide limit)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
          "mem_preflight.install_memory_preflight; "
          "server_patches.mtp_thinking (thinking_budget deferral)",
@@ -258,6 +264,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
          "key-merge wrap)"),
+    Seam("mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
+         "server_patches.install_context_overflow_wording (wrapped: the "
+         "overflow 400 is recorded for the endpoint wrapper)"),
+    Seam("mlx_vlm.server.anthropic", "anthropic_messages_endpoint",
+         "server_patches.install_context_overflow_wording (the streaming "
+         "preflight's 400 reaches the catch-all 500; wrapper answers 400)"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
          "history, retire capture, thinking seed, and developer-role "

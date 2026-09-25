@@ -6,6 +6,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx launch dsh` runs the DeepSeek Harness web app, 0.1.7 or newer, on a
+  local model, and `--dsh-profile` boots another dsh profile, such as a
+  terminal UI, the same way. A `--patch` file registers the server as two
+  providers, one with thinking off that also writes session titles.
+- `gmlx serve` warns at load when a model's chat template drops message text
+  that the server passes as a list of parts, as some Qwen3.5 fine-tunes do.
+  The warning names the settings that replace the template.
+
+### Fixed
+
+- `/v1/chat/completions` ignored `max_completion_tokens`, OpenAI's current
+  name for the output cap. It now sets the cap and wins over `max_tokens`
+  and a profile value, so omp and other pi-ai clients get the cap they send.
+- The server's `max_kv_size`, set for a model or with `gmlx serve
+  --max-kv-size`, did not cap the request context budget. Requests over it
+  now get the overflow 400, and `/v1/models` caps `context_length` at it.
+- A 400 for a request over the context budget or the memory preflight did
+  not read as a context overflow to agent clients, so they stopped instead of
+  compacting. Both messages now start with `prompt is too long`.
+- A streaming `/v1/messages` request that did not fit got a 500, which
+  Claude Code retries, and left a traceback in the server log. It now gets
+  the overflow 400 with no traceback.
+- `gmlx launch pi` left pi sending a `store` field the server does not read,
+  which logged an ignored-parameter warning on every request. pi now sends
+  its output cap as `max_tokens` and no `store`.
+- A `thinking` request field in the z.ai form with a `clear_thinking` key, as
+  pi-ai sends it, was ignored as unrecognized. The server now applies the switch
+  and maps `clear_thinking` onto the variable the template reads.
+
 ## [0.4.16] - 2026-09-24
 
 ### Added

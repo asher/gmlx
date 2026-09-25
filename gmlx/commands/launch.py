@@ -15,9 +15,10 @@ preloads a model the wait spans that model's load. With no config anywhere it po
 the user at ``gmlx init``. ``--no-start`` opts out; an explicit ``--base-url`` is
 never auto-started.
 
-Supports nine surfaces, each via its own native config - coding harnesses (opencode,
+Supports ten surfaces, each via its own native config - coding harnesses (opencode,
 pi, omp, claude-code), agent runtimes (hermes, goose), two chat-focused terminal UIs
-that are *not* coding harnesses (aichat, elia), and a browser chat app (open-webui):
+that are *not* coding harnesses (aichat, elia), a browser chat app (open-webui), and
+the DeepSeek Harness web app (dsh):
 
 - **opencode** - a custom OpenAI-compatible provider, injected via ``OPENCODE_CONFIG``
   so the user's ``~/.config/opencode`` is untouched.
@@ -62,13 +63,20 @@ that are *not* coding harnesses (aichat, elia), and a browser chat app (open-web
   advertises STT/TTS via its ``/v1/models`` markers (server run with ``--stt`` / ``--tts``);
   a chat-only server keeps Open WebUI's built-in browser audio. Needs a separate install
   (``pipx install open-webui --python python3.12``; Python 3.11/3.12 only, not 3.13).
+- **dsh** (DeepSeek Harness, 0.1.7 or newer) - boots a gmlx-owned ``gmlx`` profile in
+  ``$DSH_HOME``, created from the ``web`` template on first launch, with the provider,
+  default model and compaction policies passed as a ``--patch`` overlay written under
+  our namespace. The key reaches dsh as ``GMLX_API_KEY`` in the exec environment.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -348,28 +356,46 @@ def _load_json(path: Path) -> dict:
     return doc
 
 
-# pi's defaults are contextWindow 128000 / maxTokens 16384. A 32k model
-# advertised as 128k never compacts and overflows the server instead, and pi
-# pins max_tokens on every request, which gmlx's preflight prices into the KV
-# estimate - 16k of generation headroom per subagent is real memory. Cap
-# generation at this many tokens (or a quarter of the window when smaller).
-_PI_MAX_TOKENS_CAP = 8192
-_PI_MAX_TOKENS_FLOOR = 1024
+# pi-ai clients size an unsized model generously: pi at contextWindow 128000 /
+# maxTokens 16384, dsh at 262144 / 32768. A 32k model advertised as 128k never
+# compacts and overflows the server instead, and the client pins max_tokens on
+# every request, which gmlx's preflight prices into the KV estimate - 16k of
+# generation headroom per subagent is real memory. Cap generation at this many
+# tokens (or a quarter of the window when smaller, and at most half of it).
+_MAX_TOKENS_CAP = 8192
+_MAX_TOKENS_FLOOR = 1024
+
+# pi-ai request switches for a gmlx provider: the output cap goes out as
+# max_tokens, and the store, developer-role and long prompt-cache fields,
+# which the server does not read, stay off the request.
+_PI_AI_COMPAT = {
+    "maxTokensField": "max_tokens",
+    "supportsStore": False,
+    "supportsDeveloperRole": False,
+    "supportsLongCacheRetention": False,
+}
+
+
+def model_capacity(m: dict) -> tuple | None:
+    """``(context window, output cap)`` for a ``/v1/models`` entry, or None when
+    it reports no context. The window is the smaller of the trained context and
+    what fits at width 1."""
+    sizes = [v for v in (m.get("context_length"), m.get("max_context_at_width_1"))
+             if isinstance(v, int) and v > 0]
+    if not sizes:
+        return None
+    window = min(sizes)
+    out = max(_MAX_TOKENS_FLOOR, min(_MAX_TOKENS_CAP, window // 4))
+    return window, min(out, window // 2)
 
 
 def pi_model_entry(m: dict) -> dict:
     """One ``models[]`` entry for pi's ``models.json``: the id, plus
-    ``contextWindow`` / ``maxTokens`` when ``/v1/models`` reports the GGUF's
-    context (the smaller of the trained context and what fits at width 1)."""
+    ``contextWindow`` / ``maxTokens`` when ``/v1/models`` sizes the model."""
     entry = {"id": m["id"]}
-    sizes = [v for v in (m.get("context_length"), m.get("max_context_at_width_1"))
-             if isinstance(v, int) and v > 0]
-    if not sizes:
-        return entry
-    window = min(sizes)
-    entry["contextWindow"] = window
-    entry["maxTokens"] = max(_PI_MAX_TOKENS_FLOOR,
-                             min(_PI_MAX_TOKENS_CAP, window // 4))
+    capacity = model_capacity(m)
+    if capacity:
+        entry["contextWindow"], entry["maxTokens"] = capacity
     return entry
 
 
@@ -389,6 +415,7 @@ def build_pi_configs(base_url: str, models: list, *,
         "api": "openai-completions",
         # pi requires an apiKey; a placeholder when the server has no auth.
         "apiKey": api_key or provider_id,
+        "compat": dict(_PI_AI_COMPAT),
         "models": [pi_model_entry(m) for m in chat_models(models)],
     }
     models_doc["providers"] = providers
@@ -966,6 +993,277 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     return exec_fn(binary, argv, env)
 
 
+# dsh  (DeepSeek Harness - https://github.com/deepseek-ai/deepseek-harness)
+# dsh composes its runtime from Cordis patch layers. The launch boots a
+# gmlx-owned `gmlx` profile in the user's $DSH_HOME, created from the shipped
+# `web` template on first launch, and passes its rows as a `--patch` overlay:
+# the top layer, which dsh never saves, so no dsh file is edited. The provider row
+# uses the llm-pi-ai adapter over /v1/chat/completions, the same pi-ai library
+# the pi target drives. A patch layer replaces a row's whole config.
+# --dsh-profile boots another profile with the same overlay.
+_DSH_PROFILE = "gmlx"
+_DSH_TEMPLATE = "web"
+# Profiles dsh creates on first use. The stdio ones serve a program, so the
+# launch prints their command and does not run them.
+_DSH_SHIPPED = frozenset({"web", "headless", "acp", "sdk", "sdk-minimal"})
+_DSH_STDIO = frozenset({"acp", "sdk", "sdk-minimal"})
+_DSH_WEB_BUNDLE = "@deepseek-ai/dsh-web-app"
+_DSH_MIN_VERSION = (0, 1, 7)
+_DSH_WEB_PORT = 3080
+_DSH_KEY_ENV = "GMLX_API_KEY"
+_DSH_UPGRADE = "npm install -g @deepseek-ai/dsh@next"
+# Route fallbacks for a served model /v1/models does not size.
+_DSH_DEFAULT_WINDOW = 32768
+_DSH_DEFAULT_MAX_TOKENS = 8192
+# compaction-basic defaults (dsh-compaction-basic resolveCompactSpec).
+_DSH_HEADROOM = 65536
+_DSH_THRESHOLD_RATIO = 0.8
+_DSH_RETAIN_RATIO = 0.16
+_DSH_COMPACT_MIN_WINDOW = 8192
+_DSH_SMALL_WINDOW = 16384
+# A second route lists the same models with thinking off. pi-ai sends the
+# z.ai `thinking` field there, which the server maps onto each template's
+# switch, and a call that names no reasoning level gets {"type": "disabled"}.
+# pi-ai sends the field only for a model that declares a level beyond off.
+_DSH_NOTHINK_SUFFIX = "-nothink"
+_DSH_NOTHINK_COMPAT = {**_PI_AI_COMPAT, "thinkingFormat": "zai",
+                       "supportsReasoningEffort": False}
+_DSH_NOTHINK_EFFORTS = {"off": None, "high": "high"}
+# dsh's session-title-llm row, restated because a patch replaces the whole
+# config. The title call names no reasoning level, so on the second route it
+# runs with thinking off and fits dsh's 64 tokens.
+_DSH_TITLE_ROW = {"targetWords": 5, "targetCjkCharacters": 10,
+                  "maxInputBytes": 4096, "maxOutputTokens": 64,
+                  "timeoutMs": 60000}
+
+
+def dsh_compaction_resolves(window: int, out: int,
+                            headroom: int = _DSH_HEADROOM) -> bool:
+    """Whether dsh's compaction-basic can size a policy for a model: the
+    pressure budget stays above zero and the retained tail below the
+    threshold. dsh logs a warning and skips compaction for the model
+    otherwise."""
+    budget = window - out
+    pressure = budget - headroom
+    if pressure <= 0:
+        return False
+    threshold = int(min(window * _DSH_THRESHOLD_RATIO, pressure))
+    return int(budget * _DSH_RETAIN_RATIO) < threshold
+
+
+def dsh_headroom(window: int, out: int) -> int:
+    """compaction-basic ``headroomTokens`` scaled to a window: a quarter of
+    the message budget, within 4096 and dsh's default of 65536."""
+    return min(_DSH_HEADROOM, max(4096, (window - out) // 4))
+
+
+def build_dsh_overlay(base_url: str, models: list, *, default_model: str,
+                      provider_id: str = _PROVIDER_ID) -> list:
+    """The Cordis patch rows that route dsh at the gmlx server: two llm-pi-ai
+    providers listing every served chat id, one as the server serves it and
+    one with thinking off, the default model, session titles on the
+    thinking-off route, and compaction policies sized to each model's window.
+    An ``id@profile`` default is listed too, since pi-ai refuses a model id
+    its route does not list. Pure - no IO."""
+    nothink_id = provider_id + _DSH_NOTHINK_SUFFIX
+    heads = {m["id"]: m for m in chat_models(models)}
+    listed = [(m, m["id"], _display_name(m)) for m in heads.values()]
+    if default_model not in heads:
+        head = heads.get(default_model.rsplit("@", 1)[0])
+        if head is not None:
+            listed.append((head, default_model, default_model))
+    entries, policies = [], []
+    for m, model_id, name in listed:
+        entry: dict = {"id": model_id, "name": name}
+        capacity = model_capacity(m)
+        if capacity:
+            entry["contextWindow"], entry["maxTokens"] = capacity
+        if m.get("vlm"):
+            entry["input"] = ["text", "image"]
+        entries.append(entry)
+        window, out = capacity or (_DSH_DEFAULT_WINDOW, _DSH_DEFAULT_MAX_TOKENS)
+        if window >= _DSH_COMPACT_MIN_WINDOW:
+            policies.append({"provider": provider_id, "model": model_id,
+                             "headroomTokens": dsh_headroom(window, out),
+                             "maxTokens": out})
+    policies += [dict(p, provider=nothink_id) for p in policies]
+
+    def route(display_name: str, compat: dict, route_models: list) -> dict:
+        return {
+            "displayName": display_name,
+            "api": "openai-completions",
+            "baseURL": base_url,
+            # dsh resolves a key only through an env var, even for a keyless server
+            "apiKeyEnv": _DSH_KEY_ENV,
+            "compat": dict(compat),
+            "defaultContextWindow": _DSH_DEFAULT_WINDOW,
+            "defaultMaxTokens": _DSH_DEFAULT_MAX_TOKENS,
+            "models": route_models,
+        }
+
+    nothink_entries = [dict(e, reasoningEfforts=dict(_DSH_NOTHINK_EFFORTS))
+                       for e in entries]
+    providers = {
+        provider_id: route("gmlx (local)", _PI_AI_COMPAT, entries),
+        nothink_id: route("gmlx (thinking off)", _DSH_NOTHINK_COMPAT,
+                          nothink_entries),
+    }
+    rows = [
+        {"id": "llm-pi-ai", "config": {"providers": providers}},
+        {"id": "agent-default-model",
+         "config": {"provider": provider_id, "model": default_model}},
+        {"id": "session-title-llm",
+         "config": {**_DSH_TITLE_ROW, "provider": nothink_id,
+                    "model": default_model}},
+    ]
+    if policies:
+        # The web template disables this host row and runs a default-config
+        # copy per agent preset, so these policies apply to headless and acp.
+        rows.append({"id": "compaction-basic",
+                     "config": {"modelPolicies": policies}})
+    return rows
+
+
+def _dsh_home() -> Path:
+    """dsh's home: ``$DSH_HOME`` (blank counts as unset), else ``~/.dsh``."""
+    raw = os.environ.get("DSH_HOME", "").strip() or "~/.dsh"
+    return Path(os.path.expanduser(raw)).resolve()
+
+
+def _dsh_version(binary: str) -> str | None:
+    """The installed dsh version, or None when it cannot be read: the package
+    manifest above the resolved bin script, else ``dsh --version``. Seam:
+    monkeypatched in tests."""
+    here = Path(os.path.realpath(binary)).parent
+    for d in (here, *list(here.parents)[:3]):
+        try:
+            doc = json.loads((d / "package.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and doc.get("name") == "@deepseek-ai/dsh":
+            return str(doc.get("version") or "") or None
+    try:
+        done = subprocess.run([binary, "--version"], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() or None
+
+
+def _check_dsh_version(version: str | None) -> None:
+    """Refuse a dsh older than the floor. A prerelease counts as its base
+    version, and an unreadable version only warns."""
+    floor = ".".join(map(str, _DSH_MIN_VERSION))
+    m = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", version or "")
+    if m is None:
+        print(f"[launch] note: cannot read the dsh version ({version!r}); "
+              f"this launch needs dsh {floor} or newer", file=sys.stderr)
+        return
+    if tuple(int(g) for g in m.groups()) < _DSH_MIN_VERSION:
+        raise LaunchError(
+            f"dsh {version} is too old: this launch needs dsh {floor} or "
+            f"newer.\nUpgrade with:  {_DSH_UPGRADE}")
+
+
+def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
+    """Whether a dsh profile boots the web app: its manifest lists the web
+    bundle. A profile without a readable manifest is judged by name."""
+    try:
+        return _DSH_WEB_BUNDLE in json.loads(
+            manifest.read_text())["dsh"]["profile"]["bundles"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return name in (_DSH_PROFILE, _DSH_TEMPLATE)
+
+
+def _check_dsh_profile_name(name: str, config_only: bool) -> None:
+    if name in ("", ".", "..") or "/" in name or "\\" in name:
+        raise LaunchError(f"{name!r} is not a dsh profile name")
+    if name == "desktop":
+        raise LaunchError("the desktop profile belongs to the DeepSeek "
+                          "Harness desktop app")
+    if name in _DSH_STDIO and not config_only:
+        raise LaunchError(
+            f"the {name} profile serves a program over stdio. Re-run with "
+            f"--config-only and give that program the printed command.")
+
+
+def _launch_dsh(a, *, exec_fn) -> int:
+    profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
+    _check_dsh_profile_name(profile, a.config_only)
+    binary = _find_binary(
+        "dsh", a,
+        "Install it first, then re-run - see "
+        "https://github.com/deepseek-ai/deepseek-harness  "
+        f"(`{_DSH_UPGRADE}`).", label="dsh (DeepSeek Harness)")
+    if not a.config_only:
+        _check_dsh_version(_dsh_version(binary))
+    base_url, models, default_model = _probe_target(a)
+    chat = chat_models(models)
+    if not default_model and len(chat) == 1:
+        default_model = chat[0]["id"]
+    if not default_model:
+        raise LaunchError(
+            "dsh needs a default model (agent-default-model): pass --model, "
+            "or mark one default in the server config.")
+    by_id = {m["id"]: m for m in chat}
+    head = by_id.get(default_model) or by_id.get(default_model.rsplit("@", 1)[0])
+    if head is None:
+        raise LaunchError(
+            f"{default_model!r} is a service model, not a chat model: pass "
+            f"--model with one of {sorted(by_id)}")
+
+    profile_dir = _dsh_home() / "profiles" / profile
+    manifest = profile_dir / "package.json"
+    create = profile == _DSH_PROFILE and not manifest.exists()
+    if create and profile_dir.exists():
+        raise LaunchError(
+            f"{profile_dir} exists but is not a dsh profile (no package.json). "
+            f"Remove or rename it, then re-run to create the profile.")
+    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not manifest.exists():
+        raise LaunchError(
+            f"dsh has no profile {profile!r} ({manifest} is missing). Set it "
+            f"up with dsh first, then re-run.")
+    web = _dsh_runs_web_app(profile, manifest)
+
+    rows = build_dsh_overlay(base_url, models, default_model=default_model,
+                             provider_id=a.provider_id)
+    out = Path(os.path.expanduser(
+        a.config_path or f"{_CONFIG_HOME}/dsh/gmlx.cordis.yml"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _write_text_atomic(out, yaml.safe_dump(rows, sort_keys=False))
+
+    argv = ["dsh", "--profile", profile]
+    if create:
+        argv += ["--from-default-profile", _DSH_TEMPLATE]
+    argv += ["--patch", str(out)]
+    if web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
+        argv += ["--port", str(_DSH_WEB_PORT + 1)]
+    key = a.api_key or _PROVIDER_ID                  # placeholder: no auth
+
+    print(_summary("dsh", base_url, models, default_model)
+          + f"\n[launch] wrote {out}")
+    if create:
+        print(f"[launch] note: the first launch creates the dsh profile "
+              f"{profile_dir} from the {_DSH_TEMPLATE} template")
+    window, out_cap = (model_capacity(head)
+                       or (_DSH_DEFAULT_WINDOW, _DSH_DEFAULT_MAX_TOKENS))
+    if window < _DSH_SMALL_WINDOW:
+        print(f"[launch] note: {default_model} has a {window}-token context, "
+              f"which is small for an agent, so expect frequent compaction")
+    if web and not dsh_compaction_resolves(window, out_cap):
+        # The web app compacts at dsh's default headroom only.
+        need = out_cap + math.ceil(_DSH_HEADROOM / (1 - _DSH_RETAIN_RATIO))
+        print(f"[launch] note: the dsh web app compacts {default_model} only "
+              f"after the server reports an overflow. Automatic compaction "
+              f"there needs a {need}-token context, and this model has "
+              f"{window}")
+    if a.config_only:
+        print(f"[launch] run it with:  {_DSH_KEY_ENV}={key} {' '.join(argv)}")
+        return 0
+
+    return exec_fn(binary, argv, dict(os.environ, **{_DSH_KEY_ENV: key}))
+
+
 # dispatch
 _HARNESSES = {
     "opencode": _launch_opencode,
@@ -977,6 +1275,7 @@ _HARNESSES = {
     "aichat": _launch_aichat,
     "elia": _launch_elia,
     "open-webui": _launch_open_webui,
+    "dsh": _launch_dsh,
 }
 
 
@@ -1270,7 +1569,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     )
     ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
                     help="The coding harness, chat TUI (aichat/elia), or web app "
-                         "(open-webui) to configure + launch. Omit it (bare "
+                         "(open-webui, dsh) to configure + launch. Omit it (bare "
                          "`gmlx launch`) to print this help; `menubar` raises the "
                          "macOS status-bar monitor.")
     ap.add_argument("--model", default=None,
@@ -1305,12 +1604,18 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.add_argument("--no-keep", action="store_true",
                     help="Don't ask the server to keep --model resident through its "
                          "idle TTL (it may be idle-unloaded mid-session).")
+    ap.add_argument("--dsh-profile", default=None, metavar="NAME",
+                    help=f"dsh only: boot this dsh profile with the gmlx overlay "
+                         f"instead of the {_DSH_PROFILE} profile, for example "
+                         f"headless or a terminal UI profile you set up.")
     a = ap.parse_args(argv)
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
     if a.harness is None:
         ap.print_help()
         return 0
+    if a.dsh_profile is not None and a.harness != "dsh":
+        ap.error("--dsh-profile applies only to dsh")
 
     try:
         rc = _ensure_server(a)

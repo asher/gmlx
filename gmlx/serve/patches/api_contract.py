@@ -4,15 +4,20 @@ for parameters the server accepts but never reads (the request schemas are
 enforcement of ``tool_choice: "none"`` (drop the tools before the chat
 template ever sees them). ``required``/named tool_choice can't be enforced
 without per-template grammars, so a request that asked for a forced call and
-got none back logs one warning instead."""
+got none back logs one warning instead. Context-overflow errors use the
+wording agent clients match to compact and retry, and the context limit
+follows the requested model's ``max_kv_size``."""
 
 from __future__ import annotations
 
+import functools
 import importlib
 import logging
 import os
 
-from ._common import _CHAT_PATHS, _wrap_post_routes
+import gmlx.serve.bridge_vlm as serving
+
+from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
 _log = logging.getLogger(__name__)
 
@@ -67,6 +72,8 @@ CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
     "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
     "timings_per_token",
+    # OpenAI's chat spelling of the output cap (sampling.py alias transform)
+    "max_completion_tokens",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx
@@ -300,3 +307,117 @@ def install_api_contract() -> None:
     _wrap_post_routes(app, _MESSAGES_PATHS, _API_CONTRACT_FLAG,
                       _make_raw_endpoint(ANTHROPIC_CONSUMED,
                                          _MESSAGES_PATHS[-1]))
+
+
+# Context overflow wording
+# Agent clients compact the conversation and retry when an error names a
+# context overflow in words they know: Anthropic's "prompt is too long" or
+# OpenAI's "exceeds the context window". mlx-vlm's text matches neither, so
+# the client stops at the error.
+def _check_context_budget(prompt_tokens: int, max_tokens: int):
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    limit = gen.get_configured_context_limit()
+    max_gen = max(0, int(max_tokens or 0))
+    needed = prompt_tokens + max_gen
+    if limit is not None and needed > limit:
+        raise gen.PromptTooLongError(
+            f"prompt is too long: {needed} tokens > {limit} maximum. The "
+            f"request needs {prompt_tokens} prompt + {max_gen} max generation "
+            f"tokens, which exceeds the context window (max_kv_size).")
+
+
+# Per-model context limit
+# mlx-vlm reads the limit from its runtime config or the MAX_KV_SIZE
+# environment variable. gmlx sets a model's load keys in the environment
+# only while the model loads, so the request check reads a per-model
+# max_kv_size from the request's resolved model.
+_CONTEXT_LIMIT_FLAG = "_kq_gguf_model_context_limit"
+
+
+def _spec_context_limit(spec, process_limit):
+    value = (getattr(spec, "load", None) or {}).get("max_kv_size")
+    if value is not None:
+        return int(value) or None
+    return process_limit()
+
+
+def model_context_limit(spec) -> int | None:
+    """The context limit for a resolved model: its ``max_kv_size`` load
+    key, else the process-wide limit. None when neither is set. A value
+    of 0 turns the limit off for that model."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    process_limit = gen.get_configured_context_limit
+    if getattr(process_limit, _CONTEXT_LIMIT_FLAG, False):
+        process_limit = process_limit.__wrapped__
+    return _spec_context_limit(spec, process_limit)
+
+
+def _make_context_limit(original):
+    @functools.wraps(original)
+    def get_configured_context_limit():
+        return _spec_context_limit(serving.get_active_spec(), original)
+    get_configured_context_limit.__dict__[_CONTEXT_LIMIT_FLAG] = True
+    return get_configured_context_limit
+
+
+# mlx-vlm's /v1/messages handler runs the streaming preflight outside the
+# try that maps an overflow to 400. Its catch-all prints a traceback for any
+# Exception and answers 500, and a client retries instead of compacting.
+# The preflight raises the overflow as a BaseException, which passes the
+# catch-all, and the endpoint wrapper answers 400. Install both together.
+_OVERFLOW_ROUTE_FLAG = "_kq_gguf_messages_overflow"
+
+
+class _StreamOverflow(BaseException):
+    """A streaming ``/v1/messages`` overflow, carrying the 400 text."""
+
+
+def _make_overflow_preflight(original):
+    async def preflight(*args, **kwargs):
+        try:
+            return await original(*args, **kwargs)
+        except Exception as e:
+            detail = getattr(e, "detail", None)
+            if getattr(e, "status_code", None) == 400 \
+                    and isinstance(detail, str):
+                raise _StreamOverflow(detail) from None
+            raise
+    preflight.__dict__[_OVERFLOW_ROUTE_FLAG] = True
+    return preflight
+
+
+def _make_messages_overflow_endpoint(original):
+    async def endpoint(*args, **kwargs):
+        try:
+            return await original(*args, **kwargs)
+        except _StreamOverflow as e:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=400, content=_error_content(
+                _MESSAGES_PATHS[-1], 400, "invalid_request_error",
+                str(e)))
+    return endpoint
+
+
+def install_context_overflow_wording() -> None:
+    """Replace mlx-vlm's configured-context check with one that raises the
+    same error in wording clients recognize, take the limit from the
+    requested model, and answer a streaming ``/v1/messages`` overflow with
+    400. Idempotent."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    # Callers look the names up at call time. The package re-exports them.
+    gen._check_configured_context_budget = _check_context_budget
+    pkg._check_configured_context_budget = _check_context_budget
+    limit = gen.get_configured_context_limit
+    if not getattr(limit, _CONTEXT_LIMIT_FLAG, False):
+        limit = _make_context_limit(limit)
+        gen.get_configured_context_limit = limit
+        pkg.get_configured_context_limit = limit
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    hook = anthropic._preflight_stream_context_budget
+    if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
+        anthropic._preflight_stream_context_budget = \
+            _make_overflow_preflight(hook)
+    _wrap_post_routes(importlib.import_module("mlx_vlm.server.app").app,
+                      _MESSAGES_PATHS, _OVERFLOW_ROUTE_FLAG,
+                      _make_messages_overflow_endpoint)

@@ -17,6 +17,7 @@ and names the fix for anything it flags.
 | a load or validate names an unsupported codec | [A file refuses to load with an unsupported codec](#a-file-refuses-to-load-with-an-unsupported-codec) |
 | a load says the file is Hadamard-folded | [A Hadamard-folded file refuses to load](#a-hadamard-folded-file-refuses-to-load) |
 | a configured model is not listed | [A configured model is missing from /v1/models](#a-configured-model-is-missing-from-v1models) |
+| replies ignore what you sent | [A model answers as if the message were empty](#a-model-answers-as-if-the-message-were-empty) |
 | transcription or talk complains about ffmpeg | [Whisper fails because ffmpeg is not found](#whisper-fails-because-ffmpeg-is-not-found) |
 | talk never receives mic input | [The mic never works in talk](#the-mic-never-works-in-talk) |
 | serve cannot bind its port | [Port 8080 is already in use](#port-8080-is-already-in-use) |
@@ -122,6 +123,23 @@ missing files, registering new files and preserving your comments and
 hand-edits. A missing `server.embeddings` or `server.rerank` GGUF is
 handled the same way. The service is disabled with a warning and dropped
 from `/v1/models`, and chat keeps serving.
+
+## A model answers as if the message were empty
+
+Replies ignore what you sent, or read like an answer to an empty message.
+At load, `gmlx logs` shows `the chat template of <file> drops message
+text`, and a request with a system prompt can fail with a 500.
+
+For Qwen3.5 and the other model types that also take images, the server
+passes each message to the chat template as a list of parts. Some
+fine-tunes ship an older text-only template that renders only plain
+strings, so every message reaches the model empty.
+
+Replace the template with one that renders lists, usually the template of
+the base model the fine-tune started from. Pass the file with
+`--chat-template` on [gmlx serve](cli.md#gmlx-serve), or set
+`chat_template` for the model in the
+[server config](server-config.md#user-profiles).
 
 ## Whisper fails because ffmpeg is not found
 

@@ -64,6 +64,34 @@ def test_models_payload_lists_aliases_as_pickable_entries():
     assert "alias_of" not in by_id["qwen"]                      # real model unmarked
 
 
+def test_models_payload_caps_context_length_at_max_kv_size(monkeypatch):
+    import mlx_vlm.server.generation as gen
+
+    from gmlx.serve import capacity as cap
+
+    monkeypatch.setattr(cap, "trained_context_length", lambda path: 32768)
+    monkeypatch.setattr(gen.runtime.config, "max_kv_size", None)
+    monkeypatch.delenv("MAX_KV_SIZE", raising=False)
+    _register({
+        "profiles": {"short": {"load": {"max_kv_size": 2048}}},
+        "models": {
+            "capped": {"path": "/abs/qwen.gguf",
+                       "overrides": {"load": {"max_kv_size": 8192}}},
+            "plain": {"path": "/abs/g.gguf"},
+        },
+        "aliases": {"quick": "plain@short"},
+    })
+    by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    assert by_id["capped"]["context_length"] == 8192
+    assert by_id["plain"]["context_length"] == 32768
+    assert by_id["quick"]["context_length"] == 2048   # the alias's profile
+
+    monkeypatch.setenv("MAX_KV_SIZE", "16384")          # process-wide
+    by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    assert by_id["plain"]["context_length"] == 16384
+    assert by_id["capped"]["context_length"] == 8192
+
+
 def test_models_payload_marks_default():
     _register({
         "server": {"defaults": {"model": "qwen"}},

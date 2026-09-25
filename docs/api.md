@@ -63,9 +63,11 @@ All routes except `/health` require the API key when one is set.
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
-`default` markers and two context figures: `context_length`, the GGUF's
-trained window, and `max_context_at_width_1`, how much of it fits in memory
-for a single stream. A harness sizes its context window from the second. A
+`default` markers and two context figures. `context_length` is the GGUF's
+trained window, or the model's [`max_kv_size`](server-config.md#load-keys)
+when that is smaller. `max_context_at_width_1` is how much of the window
+fits in memory for a single stream. A harness sizes its context window from
+the smaller of the two. A
 resident model with KV quantization configured adds a `kv_quant` object:
 `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`, a
 `verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`
@@ -209,6 +211,7 @@ They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
+| `max_completion_tokens` | honored | ignored | ignored | OpenAI's current name for the chat output cap. It wins over `max_tokens` and a profile value |
 | `n` | ignored | ignored | ignored | always a single choice. `n > 1` on `/v1/completions` is a 400 |
 | `user` | ignored | ignored | ignored | no per-user accounting |
 | `parallel_tool_calls` | ignored | ignored | ignored | the template decides how many calls to emit |
@@ -289,6 +292,7 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
+| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](server-config.md#load-keys) |
 | the prompt alone cannot fit in memory | 400 with the estimated need and the available budget | `GMLX_PREFLIGHT_MEM=0` |
 | more requests waiting than the queue cap | 503 with `Retry-After` set to the estimated drain time, 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
 | a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |
@@ -300,9 +304,14 @@ drained. `max_tokens` counts only when the request pins it
 explicitly, and media requests are not estimated. The load gate judges a
 model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
-still returning from a recent unload. The switches in the last column, and
-the decode batch width the queue cap is derived from, are documented under
-[Server](env-vars.md#server).
+still returning from a recent unload. The environment variables in the last
+column, and the decode batch width the queue cap is derived from, are
+documented under [Server](env-vars.md#server).
+
+Both 400s for a request that does not fit start their message with `prompt
+is too long`, and the budget error also says the request `exceeds the context
+window`. Agent clients that recognize those words, pi among them, compact the
+conversation and retry instead of stopping at the error.
 
 ## Hugging Face policy
 

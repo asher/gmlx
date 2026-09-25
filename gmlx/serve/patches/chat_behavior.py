@@ -47,7 +47,7 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
     merged: dict = {}
     spec_kw = getattr(spec, "chat_template_kwargs", None) if spec is not None else None
     if isinstance(spec_kw, dict):
-        merged.update(normalize_template_kwargs(spec_kw))
+        merged.update(normalize_template_kwargs(spec_kw, template))
     thinking = getattr(spec, "thinking", None) if spec is not None else None
     effort = getattr(spec, "reasoning_effort", None) if spec is not None else None
     if thinking is not None or effort is not None:
@@ -55,7 +55,7 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
                                        warn=_warn_thinking)
     req_kw = getattr(request, "chat_template_kwargs", None)
     if isinstance(req_kw, dict):
-        merged.update(normalize_template_kwargs(req_kw))
+        merged.update(normalize_template_kwargs(req_kw, template))
     return merged
 
 

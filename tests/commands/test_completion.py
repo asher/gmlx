@@ -165,6 +165,25 @@ def test_launch_completes_harnesses_and_menubar():
     assert completion._complete(["launch", "opencode", ""]) == []
 
 
+def test_launch_labels_harnesses_by_kind():
+    labels = dict(v.split("\t", 1)
+                  for v in completion._complete(["launch", ""]))
+    assert labels["pi"] == "coding harness"
+    assert labels["goose"] == "agent runtime"
+    assert labels["elia"] == "chat TUI"
+    assert labels["dsh"] == "web app" and labels["open-webui"] == "web app"
+
+
+def test_launch_dsh_profile_completes_profiles(tmp_path, monkeypatch):
+    monkeypatch.setenv("DSH_HOME", str(tmp_path))
+    (tmp_path / "profiles" / "tui").mkdir(parents=True)
+    (tmp_path / "profiles" / "tui" / "package.json").write_text("{}")
+    (tmp_path / "profiles" / "stray").mkdir()            # no manifest
+    vals = _vals(completion._complete(
+        ["launch", "dsh", "--dsh-profile", ""]))
+    assert set(vals) == {"gmlx", "headless", "tui", "web"}
+
+
 def test_service_completes_actions():
     vals = _vals(completion._complete(["service", ""]))
     assert vals == ["install", "uninstall", "status"] or set(vals) == {

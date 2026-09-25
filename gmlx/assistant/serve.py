@@ -253,9 +253,14 @@ def _build_brain(state: _AssistantState, alias_id: str, alias, registry,
                 usage["prompt_tokens"] = int(u.get("prompt_tokens") or 0)
             yield delta
 
-    max_tokens = (request.max_tokens
-                  if "max_tokens" in request.model_fields_set
-                  else _DEFAULT_MAX_TOKENS)
+    from gmlx.serve.patches.sampling import client_max_tokens
+
+    max_tokens = client_max_tokens(
+        (request.model_extra or {}).get("max_completion_tokens"))
+    if max_tokens is None:
+        max_tokens = (request.max_tokens
+                      if "max_tokens" in request.model_fields_set
+                      else _DEFAULT_MAX_TOKENS)
     a = state.cfg.assistant
     brain = AssistantBrain(
         base_url=state.base_url, model=alias.model, api_key=state.api_key,

@@ -136,10 +136,10 @@ the YAML that configures them.
 `gmlx launch pi --model qwen3.6-27b@coding` writes the tool's native config
 without touching your dotfiles, starting the server first if it is not
 running. It works for the common coding agents, two terminal chat clients
-and Open WebUI, each listed with its quirks in
-[launch.md](https://github.com/asher/gmlx/blob/main/docs/launch.md). A menu
-bar app shows what is resident, and `gmlx service install` keeps the server
-running from login.
+and two browser apps, Open WebUI and DeepSeek Harness, each listed with its
+quirks in [launch.md](https://github.com/asher/gmlx/blob/main/docs/launch.md).
+A menu bar app shows what is resident, and `gmlx service install` keeps the
+server running from login.
 
 ### Voice chat and the assistant
 

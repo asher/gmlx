@@ -390,6 +390,81 @@ def test_install_api_contract_idempotent():
                            sp_api._API_CONTRACT_FLAG, False)
 
 
+def test_context_overflow_check_keeps_the_rule(monkeypatch):
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    for mod in (gen, pkg):
+        for name in ("_check_configured_context_budget",
+                     "get_configured_context_limit"):
+            monkeypatch.setattr(mod, name, getattr(mod, name))
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    monkeypatch.setattr(anthropic, "_preflight_stream_context_budget",
+                        anthropic._preflight_stream_context_budget)
+    sp.install_context_overflow_wording()
+    sp.install_context_overflow_wording()
+    check = gen._check_configured_context_budget
+    assert check is sp_api._check_context_budget
+    assert pkg._check_configured_context_budget is check
+
+    monkeypatch.setattr(gen, "get_configured_context_limit", lambda: 100)
+    check(80, 20)
+    check(100, None)
+    with pytest.raises(gen.PromptTooLongError,
+                       match="101 tokens > 100 maximum"):
+        check(81, 20)
+    monkeypatch.setattr(gen, "get_configured_context_limit", lambda: None)
+    check(10**6, 10**6)
+
+
+def test_context_limit_follows_the_request_model(monkeypatch):
+    # The load keys reach the environment only while a model loads, so the
+    # request check reads a per-model max_kv_size off the active spec.
+    import types
+
+    import gmlx.serve.bridge_vlm as serving
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    for mod in (gen, pkg):
+        for name in ("_check_configured_context_budget",
+                     "get_configured_context_limit"):
+            monkeypatch.setattr(mod, name, getattr(mod, name))
+    monkeypatch.setattr(anthropic, "_preflight_stream_context_budget",
+                        anthropic._preflight_stream_context_budget)
+    monkeypatch.setattr(gen.runtime.config, "max_kv_size", None)
+    monkeypatch.delenv("MAX_KV_SIZE", raising=False)
+    sp.install_context_overflow_wording()
+    sp.install_context_overflow_wording()
+    limit = gen.get_configured_context_limit
+    flag = sp_api._CONTEXT_LIMIT_FLAG
+    assert getattr(limit, flag)
+    assert not getattr(limit.__wrapped__, flag, False)  # wrapped once
+    assert pkg.get_configured_context_limit is limit
+
+    assert limit() is None
+    monkeypatch.setenv("MAX_KV_SIZE", "8192")
+    assert limit() == 8192
+    cases = ((types.SimpleNamespace(load={"max_kv_size": 4096}), 4096),
+             (types.SimpleNamespace(load={}), 8192),
+             (types.SimpleNamespace(load={"max_kv_size": 0}), None))
+    for spec, want in cases:
+        assert sp_api.model_context_limit(spec) == want
+        token = serving.set_active_spec(spec)
+        try:
+            assert limit() == want
+        finally:
+            serving.reset_active_spec(token)
+
+    token = serving.set_active_spec(cases[0][0])
+    try:
+        with pytest.raises(gen.PromptTooLongError,
+                           match="4097 tokens > 4096 maximum"):
+            gen._check_configured_context_budget(4000, 97)
+    finally:
+        serving.reset_active_spec(token)
+
+
 def _stream_response(chunks):
     """A minimal StreamingResponse stand-in: just a ``body_iterator``."""
     import types

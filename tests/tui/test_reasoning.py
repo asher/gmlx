@@ -349,6 +349,55 @@ def test_thinking_flag_zai_shapes():
     assert thinking_flag({"type": "disabled", "x": 1}) is None
     assert thinking_flag("disabled") is None
     assert thinking_flag(None) is None
+    # pi-ai's z.ai format adds clear_thinking to the enabled form.
+    assert thinking_flag({"type": "enabled", "clear_thinking": False}) is True
+    assert thinking_flag({"type": "disabled", "clear_thinking": True}) is False
+    assert thinking_flag({"type": "enabled", "clear_thinking": "no"}) is None
+
+
+_READS_CLEAR = "{% if clear_thinking %}c{% endif %}{% if enable_thinking %}t{% endif %}"
+_READS_PRESERVE = ("{% if preserve_thinking %}p{% endif %}"
+                   "{% if enable_thinking %}t{% endif %}")
+_READS_NEITHER = "{% if enable_thinking %}t{% endif %}"
+
+
+@pytest.mark.parametrize("template,expected", [
+    (_READS_CLEAR, {"clear_thinking": False}),
+    (_READS_PRESERVE, {"preserve_thinking": True}),
+    (_READS_NEITHER, {}),
+])
+def test_history_reasoning_kwargs_follows_the_template(template, expected):
+    from gmlx.tui.reasoning import history_reasoning_kwargs
+    zai = {"type": "enabled", "clear_thinking": False}
+    assert history_reasoning_kwargs(zai, template) == expected
+
+
+def test_history_reasoning_kwargs_needs_the_key():
+    from gmlx.tui.reasoning import history_reasoning_kwargs
+    assert history_reasoning_kwargs({"type": "enabled"}, _READS_PRESERVE) == {}
+    assert history_reasoning_kwargs({"type": "on"}, _READS_PRESERVE) == {}
+
+
+def test_map_thinking_controls_maps_clear_thinking():
+    from gmlx.tui.reasoning import map_thinking_controls
+    warned = []
+    out = map_thinking_controls(
+        {}, {"type": "enabled", "clear_thinking": False},
+        template=_READS_PRESERVE, warn=warned.append)
+    assert out == {"enable_thinking": True, "preserve_thinking": True}
+    assert warned == []
+
+
+def test_normalize_template_kwargs_maps_clear_thinking():
+    from gmlx.tui.reasoning import normalize_template_kwargs
+    zai = {"type": "enabled", "clear_thinking": True}
+    assert normalize_template_kwargs({"thinking": zai}, _READS_PRESERVE) == \
+        {"enable_thinking": True, "preserve_thinking": False}
+    # An explicit key wins, and with no template the key is dropped.
+    assert normalize_template_kwargs(
+        {"thinking": zai, "preserve_thinking": True}, _READS_PRESERVE) == \
+        {"enable_thinking": True, "preserve_thinking": True}
+    assert normalize_template_kwargs({"thinking": zai}) == {"enable_thinking": True}
 
 
 def test_normalize_template_kwargs_translates_thinking():

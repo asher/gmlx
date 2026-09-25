@@ -1,9 +1,10 @@
 """Sampling-surface patches: profile injection into unset request
-fields, XTC as a per-request logits processor, and the fast positioned
-sampler."""
+fields, the chat ``max_completion_tokens`` cap, XTC as a per-request logits
+processor, and the fast positioned sampler."""
 
 from __future__ import annotations
 
+import importlib
 import logging
 
 import gmlx.serve.bridge_vlm as serving
@@ -58,6 +59,48 @@ def install_gen_args_profile_injection() -> None:
         _PATCH_FLAG,
         lambda args, request, _processor:
             _inject_profile_sampling(args, request, serving.get_active_spec()))
+
+
+# max_completion_tokens on /v1/chat/completions
+# OpenAI's current chat spelling of the output cap. mlx-vlm's ChatRequest
+# declares only max_tokens, so this field arrives as an extra that nothing read.
+_MAX_COMPLETION_FLAG = "_kq_gguf_max_completion_tokens"
+
+
+def client_max_tokens(value):
+    """``value`` as a client output cap: a positive int (not a bool), else None."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _apply_max_completion_tokens(args, request, _processor):
+    """Set ``args.max_tokens`` from a chat request's ``max_completion_tokens``.
+    It wins over ``max_tokens`` and over a profile value, as in vLLM. Other
+    request shapes are untouched. Returns ``args`` (mutated)."""
+    fields = getattr(request, "model_fields_set", None) or set()
+    if "max_completion_tokens" not in fields:
+        return args
+    schemas = importlib.import_module("mlx_vlm.server.schemas")
+    if not isinstance(request, schemas.ChatRequest):
+        return args
+    value = getattr(request, "max_completion_tokens", None)
+    cap = client_max_tokens(value)
+    if cap is None:
+        _log.warning("ignoring max_completion_tokens=%r: not a positive "
+                     "integer", value)
+        return args
+    args.max_tokens = cap
+    return args
+
+
+def install_max_completion_tokens() -> None:
+    """Honor ``max_completion_tokens`` on chat requests at the gen-args seam.
+    Install after :func:`install_gen_args_profile_injection`: each install
+    wraps the previous one, so this transform runs later and a client value
+    beats a profile ``max_tokens``."""
+    _install_gen_args_transform(_MAX_COMPLETION_FLAG,
+                                _apply_max_completion_tokens)
 
 
 # XTC sampling (request extras / profile -> per-request logits processor)

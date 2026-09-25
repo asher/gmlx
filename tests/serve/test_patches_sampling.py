@@ -416,6 +416,78 @@ def test_install_xtc_wraps_and_stacks_with_profile_injection():
     assert _APP._build_gen_args is fn
 
 
+# 6b. max_completion_tokens on chat requests
+_SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
+
+
+def _chat(**kw):
+    return _SCHEMAS.ChatRequest(
+        model="m", messages=[{"role": "user", "content": "hi"}], **kw)
+
+
+def test_client_max_tokens_accepts_positive_ints_only():
+    assert sp_sampling.client_max_tokens(64) == 64
+    for bad in (0, -1, True, False, 5.0, "5", None):
+        assert sp_sampling.client_max_tokens(bad) is None
+
+
+def test_max_completion_tokens_sets_max_tokens():
+    args = types.SimpleNamespace(max_tokens=512)
+    sp_sampling._apply_max_completion_tokens(
+        args, _chat(max_completion_tokens=64), None)
+    assert args.max_tokens == 64
+
+
+def test_max_completion_tokens_wins_over_max_tokens():
+    args = types.SimpleNamespace(max_tokens=100)
+    sp_sampling._apply_max_completion_tokens(
+        args, _chat(max_tokens=100, max_completion_tokens=50), None)
+    assert args.max_tokens == 50
+
+
+def test_max_completion_tokens_invalid_warns_and_keeps(caplog):
+    for bad in (0, True, "64"):
+        args = types.SimpleNamespace(max_tokens=512)
+        with caplog.at_level("WARNING", logger=sp_sampling.__name__):
+            sp_sampling._apply_max_completion_tokens(
+                args, _chat(max_completion_tokens=bad), None)
+        assert args.max_tokens == 512
+    assert sum("max_completion_tokens" in r.message
+               for r in caplog.records) == 3
+
+
+def test_max_completion_tokens_ignored_off_chat():
+    """Only the chat dialect declares the alias: an Anthropic request that
+    happens to carry it keeps its own max_tokens."""
+    req = _SCHEMAS.AnthropicRequest(
+        model="m", max_tokens=100,
+        messages=[{"role": "user", "content": "hi"}],
+        max_completion_tokens=5)
+    args = types.SimpleNamespace(max_tokens=100)
+    sp_sampling._apply_max_completion_tokens(args, req, None)
+    assert args.max_tokens == 100
+
+
+def test_max_completion_tokens_beats_profile_on_real_gen_args():
+    """Over the real seam, installed in the server's order: the alias runs
+    after profile injection, so the client cap beats the profile's."""
+    sp.install_gen_args_profile_injection()
+    sp.install_max_completion_tokens()
+    fn = _APP._build_gen_args
+    assert getattr(fn, sp_common._PATCH_FLAG, False)      # carried forward
+    assert getattr(fn, sp_sampling._MAX_COMPLETION_FLAG, False)
+    sp.install_max_completion_tokens()                    # idempotent
+    assert _APP._build_gen_args is fn
+    tok = serving.set_active_spec(_spec(max_tokens=2048))
+    try:
+        capped = _APP._build_gen_args(_chat(max_completion_tokens=64))
+        profiled = _APP._build_gen_args(_chat())
+    finally:
+        serving.reset_active_spec(tok)
+    assert capped.max_tokens == 64
+    assert profiled.max_tokens == 2048
+
+
 # 7a2. top_k / min_p aware batch sampler (the historical dropped-top_k bug class)
 def _kept_ids(sampler, probs):
     """Vocab ids surviving the sampler's filter for one row of probs, plus the

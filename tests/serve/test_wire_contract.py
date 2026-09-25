@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import time
 
 import pytest
@@ -83,15 +84,22 @@ class _FakeResponseGenerator:
         self.prompt_tokens = 7
         self.prefill_delay_s = 0.0  # models prefill: first next() blocks
         self.iter_closed = False
+        self.overflow_on = ()       # seams that run the context check
 
     def _tokens(self):
         return self.script or [("Hello", None), (" world", None), (".", "stop")]
 
+    def _check_budget(self, seam, args):
+        if seam in self.overflow_on:
+            _GEN._check_configured_context_budget(self.prompt_tokens,
+                                                  args.max_tokens)
+
     def validate_context_budget(self, prompt, images, audio, args):
-        return None
+        self._check_budget("validate", args)
 
     def generate(self, prompt=None, images=None, audio=None, args=None):
         self.calls.append({"prompt": prompt, "args": args})
+        self._check_budget("generate", args)
         ctx = _GEN.GenerationContext(uid=1, prompt_tokens=self.prompt_tokens)
 
         def _iter():
@@ -171,6 +179,9 @@ def wire_app():
         "openai_act": getattr(openai_mod, "apply_chat_template", None),
         "anthropic_act": getattr(anthropic_mod, "apply_chat_template", None),
         "to_template_kwargs": _GEN.GenerationArguments.to_template_kwargs,
+        "gen_budget": _GEN._check_configured_context_budget,
+        "pkg_budget": _PKG._check_configured_context_budget,
+        "anthropic_preflight": anthropic_mod._preflight_stream_context_budget,
         "make_sampler": _GEN.ResponseGenerator._make_sampler,
         "make_tb_criteria": _GEN.ResponseGenerator._make_thinking_budget_criteria,
         "metrics_success": _GEN.ServerMetricsStore.record_success,
@@ -237,6 +248,10 @@ def wire_app():
     _APP._server_runtime_snapshot = saved["snapshot"]
     _UTILS.get_model_path = saved["get_model_path"]
     _GEN.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
+    _GEN._check_configured_context_budget = saved["gen_budget"]
+    _PKG._check_configured_context_budget = saved["pkg_budget"]
+    anthropic_mod._preflight_stream_context_budget = \
+        saved["anthropic_preflight"]
     _GEN.ResponseGenerator._make_sampler = saved["make_sampler"]
     _GEN.ResponseGenerator._make_thinking_budget_criteria = \
         saved["make_tb_criteria"]
@@ -667,6 +682,98 @@ def test_unknown_openai_params_tolerated(wire):
         parallel_tool_calls=True, service_tier="auto"))
     assert r.status_code == 200, r.text
     assert r.json()["choices"][0]["message"]["content"] == DEFAULT_TEXT
+
+
+# 9b. context overflow errors carry wording agent clients match, so they
+#     compact the conversation and retry instead of stopping. The patterns
+#     are copied from @earendil-works/pi-ai dist/utils/overflow.js.
+_CLIENT_OVERFLOW_PATTERNS = (
+    re.compile(r"prompt is too long", re.I),
+    re.compile(r"exceeds the context window", re.I),
+)
+
+
+def _assert_overflow_text(msg):
+    assert all(p.search(msg) for p in _CLIENT_OVERFLOW_PATTERNS), msg
+    assert "110 tokens > 100 maximum" in msg
+    assert "90 prompt + 20 max generation" in msg
+
+
+@pytest.fixture()
+def overflow(wire, monkeypatch):
+    monkeypatch.setattr(_GEN, "get_configured_context_limit", lambda: 100)
+    wire.gen.prompt_tokens = 90
+    return wire
+
+
+def test_overflow_chat_400_matches_client_patterns(overflow):
+    overflow.gen.overflow_on = ("generate",)
+    r = overflow.client.post("/v1/chat/completions",
+                             json=_chat_body(max_tokens=20))
+    assert r.status_code == 400, r.text
+    _assert_overflow_text(r.json()["error"]["message"])
+
+
+def test_overflow_chat_stream_400_before_sse(overflow):
+    overflow.gen.overflow_on = ("validate",)
+    r = overflow.client.post("/v1/chat/completions",
+                             json=_chat_body(max_tokens=20, stream=True))
+    assert r.status_code == 400, r.text
+    _assert_overflow_text(r.json()["error"]["message"])
+
+
+def test_overflow_chat_stream_error_event(overflow):
+    overflow.gen.overflow_on = ("generate",)
+    r = overflow.client.post("/v1/chat/completions",
+                             json=_chat_body(max_tokens=20, stream=True))
+    assert r.status_code == 200, r.text
+    errors = [json.loads(p)["error"] for p in _sse_data_lines(r.text)
+              if p != "[DONE]" and "error" in json.loads(p)]
+    assert len(errors) == 1
+    _assert_overflow_text(errors[0])
+
+
+def test_overflow_messages_400_matches_client_patterns(overflow):
+    overflow.gen.overflow_on = ("generate",)
+    r = overflow.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 20,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400, r.text
+    _assert_overflow_text(r.json()["error"]["message"])
+
+
+def test_overflow_messages_stream_400_before_sse(overflow, capfd):
+    # Stock mlx-vlm answers this one 500 and prints a traceback, because
+    # the preflight runs outside the 400 mapping.
+    overflow.gen.overflow_on = ("validate",)
+    capfd.readouterr()
+    r = overflow.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 20, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    _assert_overflow_text(body["error"]["message"])
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_messages_stream_other_500_untouched(overflow, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("engine down")
+    monkeypatch.setattr(overflow.gen, "validate_context_budget", boom)
+    r = overflow.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 20, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 500, r.text
+
+
+def test_overflow_completions_400_matches_client_patterns(overflow):
+    overflow.gen.overflow_on = ("generate",)
+    r = overflow.client.post("/v1/completions", json={
+        "model": MODEL_ID, "prompt": "hi", "max_tokens": 20})
+    assert r.status_code == 400, r.text
+    _assert_overflow_text(r.json()["error"]["message"])
 
 
 # 10. /v1/metrics: resident_models[] enrichment (docs/api.md, metrics) +
