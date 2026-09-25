@@ -82,6 +82,9 @@ def _entry(verb):
     if verb == "distill":
         from gmlx.commands.distill import cmd_distill
         return cmd_distill, ["cache"], set()
+    if verb == "systemone":
+        from gmlx.commands.systemone import cmd_systemone
+        return cmd_systemone, [], set()
     from gmlx.commands import manage
     return getattr(manage, f"cmd_{verb}"), [], set()
 

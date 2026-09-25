@@ -22,6 +22,7 @@ explain when to use it.
 | [`gmlx rm`](#gmlx-rm) | delete a model's files and config entry |
 | [`gmlx sync-models`](#gmlx-sync-models) | reconcile a config with the files on disk |
 | [`gmlx ps`](#gmlx-ps) | show the models resident in a running server |
+| [`gmlx systemone`](#gmlx-systemone) | answer a structured-decision request with a DiffusionGemma model |
 | [`gmlx profiles`](#gmlx-profiles) | show the family sampling defaults and intents |
 | [`gmlx talk`](#gmlx-talk) | voice chat with a served model |
 | [`gmlx train`](#gmlx-train) | train a LoRA adapter on a GGUF base |
@@ -751,6 +752,36 @@ snapshot, with the id, size, idle time, TTL, pinned state and path of each.
 
 Exit codes: 0 listed, 1 the server answered with an error or is not gmlx,
 3 no server was reachable.
+
+## gmlx systemone
+
+Sends a JSON file holding a `/v1/systemone` request body to a running
+server and prints one line per question. The body is described under
+[Structured decisions](api.md#structured-decisions). With `--model` the
+verb loads the GGUF itself and answers offline, with no server.
+
+```sh
+gmlx systemone ticket.json
+gmlx systemone ticket.json --model diffusiongemma-Q4_K_M.gguf
+```
+
+A yes or no answer prints as its probability, a choice as the chosen
+option with its confidence, and a score as the expected level with its
+confidence. A question skipped by `ask_if` prints `skipped`.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `REQUEST.json`, positional | none | the file holding the request body |
+| `--url URL` | the managed server | the server's base URL |
+| `--host H`, `--port P` | the managed server | the server to target |
+| `--api-key KEY` | the `GMLX_API_KEY` variable | the key for a keyed server |
+| `--model GGUF` | none | answer offline on this GGUF path or configured model id. Not combined with `--url`, `--host` or `--port` |
+| `--config FILE` | the first default location | the config whose model ids and `server.systemone` settings an offline run uses. Needs `--model` |
+| `--seed N` | the request's `seed` | replaces the request's seed on both paths |
+| `--json` | off | print the whole response body as JSON |
+
+Exit codes: 0 answered, 1 the file, the request or the model was refused,
+or no server was reachable, 2 a usage error.
 
 ## gmlx profiles
 

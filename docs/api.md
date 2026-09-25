@@ -10,6 +10,7 @@ in [server-config.md](server-config.md).
 - [Endpoints](#endpoints)
 - [Capacity and live-request metrics](#capacity-and-live-request-metrics)
 - [API capabilities](#api-capabilities)
+- [Structured decisions](#structured-decisions)
 - [Limits and back-pressure](#limits-and-back-pressure)
 - [Hugging Face policy](#hugging-face-policy)
 
@@ -60,6 +61,7 @@ All routes except `/health` require the API key when one is set.
 | `POST /v1/audio/speech` | text-to-speech, with `tts` configured |
 | `POST /v1/embeddings` | text embeddings, with `embeddings` configured |
 | `POST /v1/rerank` | reranking, with `rerank` configured, also at `/rerank` |
+| `POST /v1/systemone` | answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone` |
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
@@ -200,7 +202,8 @@ curl localhost:8080/v1/chat/completions -d '{
 The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
-in the server log naming them all.
+in the server log naming them all. `/v1/systemone` has its own fields,
+listed under [Structured decisions](#structured-decisions).
 
 The standard sampling parameters are honored on all three generation dialects.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
@@ -285,6 +288,117 @@ curl localhost:8080/v1/chat/completions -d '{
     {"type": "text", "text": "What is in this image?"},
     {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}}
   ]}]
+}'
+```
+
+## Structured decisions
+
+`POST /v1/systemone` answers a fixed set of questions about a state with a
+DiffusionGemma model, and returns a probability distribution for each
+question instead of generated text. The request and answer shapes are those
+of the Jev decision API, so a client written for that service works against
+the server. The route is also at `/systemone`.
+
+The questions become the system prompt and the state becomes the user
+message. The model's canvas is seeded with an answer template of one line
+per question, and one denoise step gives the distribution over each
+question's labels. That is a [structured read](glossary.md), and
+[structured-reads.md](internals/structured-reads.md) describes the
+mechanism. A decision is deterministic for a given request and `seed`.
+
+### Request body
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `model` | the fallback | a configured id, alias or `id@profile`. A name that resolves to nothing, or no name, takes the fallback below |
+| `state` | required | what the questions are about, as a string or any JSON value, which is sent as its JSON text |
+| `questions` | required | a map of question id to question, with the fields in the next table |
+| `seed` | `42` | the base seed for the random tokens placed at the label positions. Each sample offsets it |
+| `profile` | none | the [profile](server-config.md#profiles) to resolve `model` with |
+| `images` | none | refused with a 400, since the model is text-only |
+
+The fallback is [`server.systemone.model`](server-config.md#structured-decisions)
+when set, else the default model, else the only configured model. Jev
+clients send `"model": "jev-latest"`, which reaches the fallback this way. A
+name that resolves to nothing when no fallback exists gets the usual 404.
+
+A question has these fields. An id may not contain a colon or a newline.
+Past ten questions the answer template writes each label directly after
+its id, so ids such as `q1` work there and a word id can be refused with a
+422.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `type` | required | `noul` for yes or no, `choice` for one of several options, or `score` for one of ordered levels |
+| `instructions` | empty | the question as the model reads it |
+| `criteria` | none | `noul`: an object with `true` and `false` descriptions. `choice`: option name to description. `score`: a list of level names in order |
+| `depends_on` | none | question ids answered in an earlier stage, whose answers this question's read sees |
+| `ask_if` | none | question id to a list of its answers. The question is asked only when that answer is among them, else it answers `null` |
+| `alone` | `false` | read this question in a read of its own |
+
+A choice or score takes 2 to 26 alternatives. The request may also carry
+these fields, which the vLLM implementation of the route defines:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `instructions` | none | text added to the system prompt ahead of the questions |
+| `samples` | `"auto"` | how many reads with different random label tokens are averaged. `"auto"` reads once and adds more when an answer is uncertain |
+| `auto_max` | `4` | the sample count `"auto"` extends to |
+| `auto_threshold` | `0.1` | the entropy in nats at a label position above which `"auto"` extends |
+| `steps` | `1` | denoise steps per read, clamped to 1 through 8 |
+| `think` | `0` | a thought budget in tokens, 0 to 4096. The model writes a thought first, and the reads see it |
+| `ask` | every question | the ids to answer, which must include everything they depend on |
+| `chunk_rows` | the canvas | the most canvas tokens one read's answer template may take, at least 8. A larger stage is split into chunks |
+| `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with its questions only, and `"shared"` gives every chunk all of them |
+| `sequential` | `false` | read the chunks in order on one prompt, each seeing the answers before it |
+
+A request with more questions than `server.systemone.max_questions` gets
+a 422, and `samples` and `auto_max` are lowered to
+`server.systemone.max_samples`.
+
+### Answers
+
+`answers` maps each question id to one of these shapes, or to `null` for a
+question that `ask_if` skipped:
+
+```jsonc
+{"type": "noul", "noul": 0.93}                  // the probability of yes
+{"type": "choice", "choice": "infra",
+ "probabilities": {"infra": 0.81, "billing": 0.19}, "confidence": 0.81}
+{"type": "score", "score": 1.72, "legend": {"0": "low", "1": "mid", "2": "high"},
+ "probabilities": {"0": 0.07, "1": 0.14, "2": 0.79}, "confidence": 0.79}
+```
+
+`confidence` is the probability of the chosen option or level. A score is
+the expected level index, counted from 0, and `legend` names each index.
+`usage.input_tokens` is the longest prompt a read ran on, and
+`usage.output_tokens` counts the answer template tokens and the thought
+tokens. `diagnostics` shows how the decision ran: the `stages`, `chunks`
+and `skipped` questions, the `thought`, each sample's label logprobs under
+`samples.tops`, the entropies under `questions`, and `timing`.
+
+### Status codes
+
+| Status | When |
+|--------|------|
+| 400 | the body is not a JSON object, it carries images, the model is not DiffusionGemma, or the prompt does not fit the context or memory budget |
+| 404 | `model` names nothing and no fallback exists |
+| 422 | a question, `state` or `seed` is invalid. The error type is `validation_error` |
+| 503 | the queue cap or a deferred load, as under [Limits and back-pressure](#limits-and-back-pressure) |
+| 504 | the decision ran past [`token_queue_timeout_s`](server-config.md#scheduling). The error type is `timeout` |
+| 500 | the engine failed. The error type is `server_error` |
+
+A decision holds the model from its first read to its last, so a chat
+request to the same model waits behind it, as it waits behind any
+DiffusionGemma generation. The context budget is checked against the
+largest prompt the decision can build before the decision is queued.
+
+```sh
+curl localhost:8080/v1/systemone -d '{
+  "model": "jev-latest",
+  "state": {"ticket": "Everything is down and we have a demo at noon."},
+  "questions": {"urgent": {"type": "noul",
+    "instructions": "Does the customer need a reply within the hour?"}}
 }'
 ```
 

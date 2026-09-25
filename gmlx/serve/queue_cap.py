@@ -278,7 +278,8 @@ def install_queue_depth_cap() -> None:
     app = importlib.import_module("mlx_vlm.server.app").app
     paths = _CHAT_PATHS + ("/responses", "/v1/responses",
                            "/messages", "/v1/messages",
-                           "/completions", "/v1/completions")
+                           "/completions", "/v1/completions",
+                           "/systemone", "/v1/systemone")
 
     def _make(original):
         async def endpoint(*args, **kwargs):

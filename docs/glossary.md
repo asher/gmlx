@@ -12,6 +12,10 @@ See [streaming.md](streaming.md).
 Barge-in. Speaking over the assistant while it is talking. In voice chat
 the reply stops and the new utterance is taken.
 
+Canvas. The block of token positions a diffusion model such as
+DiffusionGemma writes its reply into. Each denoise step predicts every
+position of the canvas at once, instead of one token after another.
+
 Codec. The GGUF quantization type of one tensor, such as `Q4_K` or
 `IQ2_XXS`. A file mixes codecs across tensors, and each codec in a file
 needs a kernel for the file to load.
@@ -155,6 +159,13 @@ Stream (experts, cpu). The two placements for a model bigger than memory.
 `stream: experts` keeps the every-token weights and the KV cache on the GPU
 and streams the routed experts from disk. With `stream: cpu` the whole model
 runs on the CPU from the page cache.
+
+Structured read. How `/v1/systemone` answers a question with one denoise
+step. The canvas holds the answer template with each label position
+filled by a random token, and the model's distribution at that position
+over the question's labels is the answer. A sample is one such read with
+its own random tokens, and a request averages several. See
+[structured-reads.md](internals/structured-reads.md).
 
 Thinking model. A model trained to reason before answering, streaming that
 text inside markers such as `<think>`. The chat client shows it under a

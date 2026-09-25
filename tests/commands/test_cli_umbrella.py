@@ -95,6 +95,15 @@ def test_pull_verb(routes):
     assert routes["pull"] == ["hf:o/r/m.gguf", "--to", "."]
 
 
+def test_systemone_verb(routes, monkeypatch):
+    import gmlx.commands.systemone as systemone
+
+    monkeypatch.setattr(systemone, "cmd_systemone",
+                        lambda argv, prog=None: routes.__setitem__("systemone", argv) or 0)
+    assert cli.umbrella_main(["systemone", "req.json", "--json"]) == 0
+    assert routes["systemone"] == ["req.json", "--json"]
+
+
 def test_ls_aliases_list(routes, monkeypatch):
     monkeypatch.setattr(manage, "cmd_list",
                         lambda argv, prog=None: routes.__setitem__("list", argv) or 0)

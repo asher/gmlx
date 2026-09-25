@@ -24,7 +24,8 @@ _LOAD_OFFLOAD_FLAG = "_kq_gguf_load_offload"
 
 _LOAD_OFFLOAD_PATHS = _CHAT_PATHS + ("/responses", "/v1/responses",
                                      "/messages", "/v1/messages",
-                                     "/completions", "/v1/completions")
+                                     "/completions", "/v1/completions",
+                                     "/systemone", "/v1/systemone")
 
 
 async def _extract_request_model(values, inherit):
@@ -293,7 +294,8 @@ _PROFILE_CAPTURE_FLAG = "_kq_gguf_request_profile_capture"
 
 _PROFILE_CAPTURE_PATHS = _CHAT_PATHS + ("/messages", "/v1/messages",
                                         "/responses", "/v1/responses",
-                                        "/completions", "/v1/completions")
+                                        "/completions", "/v1/completions",
+                                        "/systemone", "/v1/systemone")
 
 
 async def _extract_request_profile(values) -> str | None:

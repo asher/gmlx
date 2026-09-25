@@ -16,6 +16,7 @@ import logging
 import os
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.systemone.schema import JEV_EXTENSIONS
 
 from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
@@ -105,6 +106,11 @@ COMPLETIONS_CONSUMED = (
         "echo", "suffix", "n", "best_of",
     })
 )
+
+
+SYSTEMONE_CONSUMED = frozenset({
+    "model", "state", "questions", "seed", "images", "profile",
+}) | frozenset(JEV_EXTENSIONS)
 
 
 def warn_ignored_fields(path: str, ignored) -> None:

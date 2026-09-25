@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -117,12 +117,14 @@ _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
-                          "menubar", "token_queue_timeout_s", "prefill_step_size",
+                          "systemone", "menubar", "token_queue_timeout_s", "prefill_step_size",
                           "dtype",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
+_SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
+                             "max_samples"})
 _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
                            "chat_template", "chat_template_kwargs",
                            "thinking", "reasoning_effort"})
@@ -288,6 +290,16 @@ class ServerDefaults:
     preload: object = None          # model ids to warm at startup; "all" | list
 
 
+@dataclass(frozen=True)
+class SystemoneCfg:
+    """``server.systemone``: structured decisions on POST /v1/systemone."""
+    model: str | None = None     # used when the request's model is absent or unknown
+    canvas: int = 64             # served canvas rows; a positive multiple of 16
+    constrained: bool = True     # read over the label ids only
+    max_questions: int = 64      # per request
+    max_samples: int = 32        # per question, fixed or auto
+
+
 @dataclass
 class TalkVad:
     """Endpointing knobs for the ``gmlx talk`` listener."""
@@ -413,6 +425,9 @@ class ServerCfg:
     # - a causal Qwen3 LM scored by its yes/no logits, loaded by the runtime (no
     # extra). Resolved by rerank.resolve_rerank_model at serve time.
     rerank: str | None = None
+    # POST /v1/systemone settings (structured decisions on a DiffusionGemma
+    # model).
+    systemone: SystemoneCfg = field(default_factory=SystemoneCfg)
     # Optional static API key: every endpoint except /health requires it
     # (Authorization: Bearer, or x-api-key). This config field is the sole
     # server-side source - there is no CLI flag or env override. A non-loopback
@@ -1349,6 +1364,28 @@ def _coerce_ratio(key: str, v, *, where: str = "server"):
     return _coerce_num(key, v, float, where=where)
 
 
+def _parse_systemone(raw) -> SystemoneCfg:
+    raw = _section_mapping("server.systemone", raw)
+    _warn_unknown_keys("server.systemone", raw, _SYSTEMONE_KEYS, strict=True)
+    where = "server.systemone"
+    canvas = _coerce_num("canvas", raw.get("canvas", 64), int, where=where)
+    if canvas is None or canvas <= 0 or canvas % 16:
+        raise ConfigError(
+            f"{where}.canvas: expected a positive multiple of 16, got {canvas!r}")
+    counts = {}
+    for key, default in (("max_questions", 64), ("max_samples", 32)):
+        n = _coerce_num(key, raw.get(key, default), int, where=where)
+        if n is None or n < 1:
+            raise ConfigError(f"{where}.{key}: expected a positive int, got {n!r}")
+        counts[key] = n
+    model = raw.get("model")
+    if model is not None and not isinstance(model, str):
+        raise ConfigError(f"{where}.model: expected a model id, got {model!r}")
+    return SystemoneCfg(model=model or None, canvas=canvas,
+                        constrained=bool(raw.get("constrained", True)),
+                        **counts)
+
+
 def _coerce_num(key: str, v, cast, *, where: str = "server"):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
     raising a ConfigError naming the key and the bad value. ``None`` passes."""
@@ -1755,6 +1792,7 @@ def build_config(doc: dict) -> ServerCfg:
         tts=srv.get("tts") or None,   # raw; resolved (aliases etc.) at serve time
         embeddings=srv.get("embeddings") or None,   # raw; resolved at serve time
         rerank=srv.get("rerank") or None,           # raw; resolved at serve time
+        systemone=_parse_systemone(srv.get("systemone")),
         api_key=str(srv["api_key"]) if srv.get("api_key") else None,
         no_auth=bool(srv.get("no_auth", False)),
         menubar=bool(srv.get("menubar", True)),
@@ -1894,6 +1932,20 @@ def _validate(cfg: ServerCfg) -> None:
         raise ConfigError(
             f"server.defaults.model {cfg.defaults.model!r} is not a configured "
             f"model; known: {sorted(cfg.models)}")
+
+    # The systemone fallback model, if named, must be a model id or an alias,
+    # with an optional known profile, so the fallback can always resolve.
+    so_model = cfg.systemone.model
+    if so_model:
+        head, prof = split_address(so_model, known)
+        if head not in cfg.models and head not in cfg.aliases:
+            raise ConfigError(
+                f"server.systemone.model {so_model!r} is not a configured model "
+                f"or alias; known: {sorted(cfg.models) + sorted(cfg.aliases)}")
+        if prof is not None and prof not in known:
+            raise ConfigError(
+                f"server.systemone.model {so_model!r} names unknown profile "
+                f"{prof!r}; known: {sorted(known)}")
 
     # Preload ids must be configured models.
     if isinstance(cfg.defaults.preload, list):

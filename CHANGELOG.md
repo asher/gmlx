@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /v1/systemone` answers a fixed set of questions about a state with a
+  served DiffusionGemma model, in the Jev decision API shapes, as vLLM does.
+  `server.systemone` holds its settings, and `gmlx systemone` sends a request
+  or answers one offline.
+
 ### Fixed
 
 - The `--draft-block-size` help and docs called N the drafted tokens. A round

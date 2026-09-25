@@ -23,7 +23,8 @@ _REQUEST_LOG_FLAG = "_kq_gguf_request_log"
 # route handler instead. Anything listed here must emit its own line or it goes dark.
 _TIMED_PATHS = ("/v1/chat/completions", "/v1/completions", "/v1/responses",
                 "/v1/messages", "/v1/audio/transcriptions", "/v1/audio/speech",
-                "/v1/embeddings", "/v1/images/generations", "/v1/images/edits")
+                "/v1/embeddings", "/v1/images/generations", "/v1/images/edits",
+                "/v1/systemone")
 
 # Pure-poll endpoints with no useful access signal. The models listing is
 # polled by the menu bar (4s) and by web clients (Open WebUI), so it floods

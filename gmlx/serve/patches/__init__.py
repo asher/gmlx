@@ -280,6 +280,14 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the load-offload / profile-capture / keepalive wrappers so they
     # wrap the completions route too.
     install_completions_route()
+    # engine_jobs imports mlx_vlm.server statically, so it loads here.
+    from gmlx.config import SystemoneCfg
+    from gmlx.serve.engine_jobs import install_engine_jobs
+
+    from .systemone import install_systemone_route
+
+    install_engine_jobs()
+    install_systemone_route(getattr(cfg, "systemone", None) or SystemoneCfg())
     install_chat_load_offload()
     install_optional_request_model()
     install_request_profile_capture()

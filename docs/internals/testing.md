@@ -98,6 +98,7 @@ grading and model bootstrap, in
 | `run_chat_pty_e2e.py` | the chat client in a real pseudo-terminal |
 | `run_serve_harmony_e2e.py` | the response contract of a served gpt-oss model: no harmony channel markup in content, truncation inside analysis |
 | `run_serve_stress_e2e.py` | seeded concurrent chaos against one server: mid-stream aborts, tiny budgets, warm resends, growing sessions |
+| `run_systemone_e2e.py` | `/v1/systemone` on a DiffusionGemma GGUF: answer shapes, obvious answers, seed replay, refusals, a concurrent chat, the verb |
 
 ```sh
 python tests/e2e/run_server_e2e.py --print-pull   # pull commands for the harness models
