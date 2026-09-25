@@ -877,6 +877,38 @@ def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
             "server started; `gmlx restart` loads the new code") from exc
 
 
+_TEMPLATE_PROBE_TEXT = "gmlx-template-probe"
+
+
+def _warn_if_template_drops_text(model_path: str, processor, config) -> None:
+    """Warn when the chat template drops the text of a user message.
+
+    For the model types in mlx-vlm's ``MODEL_CONFIG``, the server sends each
+    message's content to the template as a list of parts. A template that
+    renders only string content then gives the model empty messages, with
+    no error. The probe renders one user message through the same function
+    the server routes use. A render that fails is left to surface on a
+    request."""
+    import importlib
+
+    try:
+        prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+        rendered = prompt_utils.apply_chat_template(
+            processor, config,
+            [{"role": "user", "content": _TEMPLATE_PROBE_TEXT}],
+            add_generation_prompt=True)
+    except Exception:  # noqa: BLE001 - the probe must never fail a load
+        return
+    if not isinstance(rendered, str) or _TEMPLATE_PROBE_TEXT in rendered:
+        return
+    _log.warning(
+        "the chat template of %s drops message text that the server sends as a "
+        "list of parts, so requests reach the model as empty messages. To use a "
+        "template that renders lists, pass `gmlx serve --chat-template FILE` or "
+        "set `chat_template` for the model in the server config",
+        os.path.basename(model_path))
+
+
 def install_gguf_server_bridge() -> None:
     """Route ``*.gguf`` model paths in mlx-vlm's server through gmlx.
 
@@ -1051,10 +1083,13 @@ def install_gguf_server_bridge() -> None:
 
     def load_model_resources(model_path, adapter_path=None):
         try:
-            return _bridge_load(model_path, adapter_path)
+            loaded = _bridge_load(model_path, adapter_path)
         except ModuleNotFoundError as e:
             _raise_if_first_party_import(e)
             raise
+        if _is_gguf(model_path) and isinstance(loaded, tuple) and len(loaded) == 3:
+            _warn_if_template_drops_text(model_path, loaded[1], loaded[2])
+        return loaded
 
     setattr(generation, "load_model_resources", load_model_resources)
     setattr(generation, _BRIDGE_FLAG, True)

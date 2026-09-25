@@ -11,6 +11,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch dsh` runs the DeepSeek Harness web app, 0.1.7 or newer, on a
   local model. It uses a `gmlx` profile of its own and passes the provider and
   default model to dsh as a `--patch` file.
+- `gmlx serve` warns at load when a model's chat template drops message text
+  that the server passes as a list of parts, as some Qwen3.5 fine-tunes do.
+  The warning names the settings that replace the template.
 
 ### Fixed
 
