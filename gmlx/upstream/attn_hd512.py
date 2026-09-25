@@ -19,7 +19,10 @@ route is gated to qL <= GMLX_HD512_MAXQL (default 6). Output matches stock SDPA
 to bf16 rounding.
 
 The head_dim-256 verify route (qL>=2; its qL==1 decode is already fused by the
-vector path) is opt-in, off by default. Enable with GMLX_HD256_VERIFY=1.
+vector path) is on by default. Disable it with GMLX_HD256_VERIFY=0. Stock's
+vector kernel also declines a verify whose GQA fold is wider than 32 rows
+(qL x G > 32, e.g. Qwen3.x 24/4 at qL 6..8), and then materializes the scores
+at every depth, so kq.sdpa_fa_verify claims those widths from the first key.
 
 head_dim-512 verify widths (qL 3..5, kv >= 2) preferentially take the
 kq.sdpa_fa_verify d-split kernel over the same GQA fold (one flash-attention
@@ -136,7 +139,16 @@ _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
 # simdgroup-matrix flash-attention pass over the same GQA fold. One KV sweep
 # on matrix units vs the vector route's per-row strided walk; measured at
 # 24/4 hd256 bf16 (qwen3.x full-attn): qL=4 1.14x @4k -> 1.53x @131k, qL=3
-# wins from ~16k, qL=2 loses (stays on vector). The kernel takes one row
+# wins from ~16k, qL=2 loses (stays on vector). At qL 6..8 a fold wider
+# than 32 rows (qL x G > 32) is stock's materialized fallback at any depth,
+# and kq.sdpa_vector declines it: at 24/4, layers chained in series, fa runs
+# 1.43-1.53x @512, 1.67-1.77x @4k, 2.0-2.1x @32k and 1.96-2.15x @131k, one
+# 64-row tile ahead of two 32-row chunks at every depth. 16/2 (one 64-row
+# tile) gains 1.4-3.0x and 32/2 (two 64-row chunks) 1.04-2.2x from 512 to
+# 131k. Narrower qL 6..8
+# folds stay on stock's vector kernel: 16/4 (24-32 rows) gains 1.2-1.7x
+# from 16k and loses up to 0.85x at 4k, 16/8 (12-16 rows) loses at every
+# depth to 64k. The kernel takes one row
 # tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up to 4x that
 # (e.g. 32/2 gqa16 at qL 4) run as per-chunk calls over a kv-major split of
 # the GQA group -- each chunk re-sweeps the KV, still far ahead of the
@@ -145,7 +157,8 @@ _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
 # with GMLX_VERIFY_FA=0. Disable with GMLX_VERIFY_FA=0.
 _VERIFY_FA = env_bool("GMLX_VERIFY_FA", True)
 _FA_MIN_KV = env_int("GMLX_VERIFY_FA_MINKV", 4096)
-_FA_MIN_KV_QL3 = 16384
+# qL 3, and qL 6..8 folds of 24-32 rows, win from 16k only.
+_FA_MIN_KV_NARROW = 16384
 _HAS_FA_VERIFY = mlx_kquant is not None and hasattr(mlx_kquant, "sdpa_fa_verify")
 # hd256 wide-group decode (gqa > 8, i.e. qwen3.5-122b 32/2): the per-key dot
 # fan-out (16 dots/staged element) is compute-bound on the FMA-path kernels
@@ -386,9 +399,22 @@ def _fa_verify_eligible(q, k, v, mask):
     # remove; stock is par at depth (same finding as the verify_gemm gate).
     if hd == 512 and kv < 2:
         return False
-    if not 3 <= qL <= 5 or _fa_chunks(q.shape[1] // kv, qL, _fa_row_cap(hd)) is None:
+    g = q.shape[1] // kv
+    if hd == 256 and 6 <= qL <= 8:
+        # A fold over 32 rows is stock's materialized fallback at any depth.
+        if qL * g > 32:
+            min_kv = qL
+        elif qL * g >= 24:
+            min_kv = _FA_MIN_KV_NARROW
+        else:
+            return False
+    elif 3 <= qL <= 5:
+        min_kv = _FA_MIN_KV_NARROW if qL == 3 else _FA_MIN_KV
+    else:
         return False
-    if qL > k.shape[2] or k.shape[2] < (_FA_MIN_KV_QL3 if qL == 3 else _FA_MIN_KV):
+    if _fa_chunks(g, qL, _fa_row_cap(hd)) is None:
+        return False
+    if qL > k.shape[2] or k.shape[2] < min_kv:
         return False
     return isinstance(mask, str) and mask == "causal"
 
@@ -498,8 +524,6 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
             else:
                 # Oversized fold (e.g. gqa16 x qL4 = 64 rows): kv-major chunks
                 # of the GQA group, one kernel call (= one KV sweep) each.
-                # Chunks must be materialized: the kernel mis-reads strided
-                # q views (returns wrong rows for kv-head > 0).
                 qc = q.reshape(B, kv, n, (g // n) * qL, hd)
                 out = mx.concatenate(
                     [mlx_kquant.sdpa_fa_verify(mx.contiguous(qc[:, :, i]),

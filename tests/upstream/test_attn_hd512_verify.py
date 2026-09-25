@@ -264,6 +264,44 @@ def test_fa_verify_eligibility_oversized_fold():
 
 
 @_NEEDS_FA
+@pytest.mark.parametrize("qL,kL", [(8, 8), (6, 40), (8, 512), (7, 4096),
+                                   (8, 16384)])
+def test_fa_verify_wide_fold_matches_reference(qL, kL):
+    # qwen3.x full attention (24/4) at DFlash block widths: a fold over 32
+    # rows is stock's materialized fallback, so fa claims it from the first
+    # key, including a cache shorter than one key tile
+    scale = 256**-0.5
+    q, k, v = _rand(qL, kL=kL, hq=24, hkv=4, d=256)
+    assert attn_hd512._fa_verify_eligible(q, k, v, "causal")
+    attn_hd512.install_hd512_sdpa()
+    before = attn_hd512.route_counts()
+    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale,
+                                               mask="causal")
+    after = attn_hd512.route_counts()
+    grew = [key[0] for key in after if after[key] > before.get(key, 0)]
+    assert grew and all(r.startswith("fa_verify") for r in grew), grew
+    ref = _ref(q, k, v, True, scale=scale)
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"qL={qL} kL={kL} err={err}"
+
+
+def test_fa_verify_eligibility_wide_qL():
+    def elig(qL, kL, hq, hkv, d=256):
+        return attn_hd512._fa_verify_eligible(
+            *_rand(qL, kL=kL, hq=hq, hkv=hkv, d=d), "causal")
+
+    # folds of 24-32 rows (16/4) stay on stock's vector kernel below 16k
+    assert not elig(8, 4096, 16, 4)
+    assert elig(8, 16384, 16, 4)
+    assert elig(6, 16384, 16, 4)
+    # folds under 24 rows (16/8) never leave it
+    assert not elig(8, 16384, 16, 8)
+    # past the DFlash block width, and hd512 above qL 5, fall through
+    assert not elig(9, 512, 24, 4)
+    assert not elig(6, KL, 32, 4, d=512)
+
+
+@_NEEDS_FA
 def test_wrapped_sdpa_routes_verify(monkeypatch):
     # the wrapper must produce the GEMM result at verify width...
     attn_hd512.install_hd512_sdpa()

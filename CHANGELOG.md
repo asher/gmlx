@@ -30,6 +30,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   faster, on the command-buffer settings `gmlx serve` already decoded with.
 - A single `gmlx serve` request with MTP or a DFlash 2 drafter spends less
   time between speculative rounds.
+- Speculative decoding that verifies 6 to 8 tokens per round on Qwen3.x
+  targets, as DFlash 2 drafters do, runs faster, and most at long context.
 
 ### Fixed
 
