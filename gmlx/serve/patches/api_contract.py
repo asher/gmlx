@@ -67,6 +67,8 @@ CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
     "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
     "timings_per_token",
+    # OpenAI's chat spelling of the output cap (sampling.py alias transform)
+    "max_completion_tokens",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx

@@ -281,6 +281,14 @@ def test_default_max_tokens_when_unset(monkeypatch):
     assert fake.calls[0]["max_tokens"] == aserve._DEFAULT_MAX_TOKENS
 
 
+def test_max_completion_tokens_caps_each_round(monkeypatch):
+    fake = FakeStream([_PROSE_ROUND])
+    _install(_cfg({"helper": {"model": "m-a"}}), monkeypatch, stream=fake)
+    _post(TestClient(_APP.app), "helper", max_tokens=64,
+          max_completion_tokens=32)
+    assert fake.calls[0]["max_tokens"] == 32
+
+
 def test_upstream_error_is_502(monkeypatch):
     def broken(base_url, **kw):
         from gmlx.talk.client import TalkClientError

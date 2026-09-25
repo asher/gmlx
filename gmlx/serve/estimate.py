@@ -414,8 +414,12 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
             template_kwargs["tool_choice"] = tool_choice
         prompt = pkg.apply_chat_template(processor, config, msgs, num_images=0,
                                          tools=tools or None, **template_kwargs)
+        from gmlx.serve.patches.sampling import client_max_tokens
+
+        client_set = ("max_tokens" in body or client_max_tokens(
+            body.get("max_completion_tokens")) is not None)
         pinned = int(getattr(gen_args, "max_tokens", 0) or 0) \
-            if "max_tokens" in body else 0
+            if client_set else 0
     except Exception as e:
         _log.debug("estimate: prompt render failed", exc_info=True)
         return 400, {"error": {"message": f"cannot render prompt: {e}",

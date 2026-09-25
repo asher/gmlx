@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/v1/chat/completions` ignored `max_completion_tokens`, OpenAI's current
+  name for the output cap. It now sets the cap and wins over `max_tokens`
+  and a profile value, so pi requests get the cap pi sends.
+
 ## [0.4.16] - 2026-09-24
 
 ### Added

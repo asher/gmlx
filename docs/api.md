@@ -209,6 +209,7 @@ They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
+| `max_completion_tokens` | honored | ignored | ignored | OpenAI's current name for the chat output cap. It wins over `max_tokens` and a profile value |
 | `n` | ignored | ignored | ignored | always a single choice. `n > 1` on `/v1/completions` is a 400 |
 | `user` | ignored | ignored | ignored | no per-user accounting |
 | `parallel_tool_calls` | ignored | ignored | ignored | the template decides how many calls to emit |

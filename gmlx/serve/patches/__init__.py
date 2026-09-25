@@ -11,6 +11,8 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
   min_p/penalties with plain ``getattr`` against pydantic defaults, so a profile
   can only win by post-processing the built args per key, honouring
   ``request.model_fields_set`` (a client-set field always wins).
+* **Chat ``max_completion_tokens``** - OpenAI's current chat spelling of the
+  output cap sets ``max_tokens``; mlx-vlm's chat schema declares only the old one.
 * **``/v1/models`` override** - lists the configured/discovered ids (with
   resident / pinned / capability markers), never ``scan_cache_dir()``.
 * **HF-download gate** - a non-local, non-GGUF id with HF disabled raises instead
@@ -125,6 +127,7 @@ from .routes import (
 from .sampling import (
     install_fast_sampler,
     install_gen_args_profile_injection,
+    install_max_completion_tokens,
     install_xtc_sampling,
 )
 
@@ -154,6 +157,7 @@ __all__ = [
     "install_json_content_type_tolerance",
     "install_keep_route",
     "install_loopback_host_guard",
+    "install_max_completion_tokens",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_mtp_thinking_budget",
@@ -195,6 +199,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     disable_credentialed_cors()
     install_health_liveness_override()
     install_gen_args_profile_injection()
+    install_max_completion_tokens()
     install_vanilla_stream_chunks()
     install_xtc_sampling()
     if os.environ.get("GMLX_STEP_LOG"):
