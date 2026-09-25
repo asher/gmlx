@@ -28,7 +28,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not read as a context overflow to agent clients, so they stopped instead of
   compacting. Both messages now start with `prompt is too long`.
 - A streaming `/v1/messages` request that did not fit got a 500, which
-  Claude Code retries, instead of the overflow 400. It now gets the 400.
+  Claude Code retries, and left a traceback in the server log. It now gets
+  the overflow 400 with no traceback.
 - `gmlx launch pi` left pi sending a `store` field the server does not read,
   which logged an ignored-parameter warning on every request. pi now sends
   its output cap as `max_tokens` and no `store`.

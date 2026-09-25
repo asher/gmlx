@@ -742,9 +742,11 @@ def test_overflow_messages_400_matches_client_patterns(overflow):
     _assert_overflow_text(r.json()["error"]["message"])
 
 
-def test_overflow_messages_stream_400_before_sse(overflow):
-    # stock mlx-vlm answers this one 500 (preflight outside the 400 mapping)
+def test_overflow_messages_stream_400_before_sse(overflow, capfd):
+    # Stock mlx-vlm answers this one 500 and prints a traceback, because
+    # the preflight runs outside the 400 mapping.
     overflow.gen.overflow_on = ("validate",)
+    capfd.readouterr()
     r = overflow.client.post("/v1/messages", json={
         "model": MODEL_ID, "max_tokens": 20, "stream": True,
         "messages": [{"role": "user", "content": "hi"}]})
@@ -753,6 +755,7 @@ def test_overflow_messages_stream_400_before_sse(overflow):
     assert body["type"] == "error"
     assert body["error"]["type"] == "invalid_request_error"
     _assert_overflow_text(body["error"]["message"])
+    assert "Traceback" not in capfd.readouterr().err
 
 
 def test_messages_stream_other_500_untouched(overflow, monkeypatch):

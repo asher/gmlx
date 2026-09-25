@@ -10,7 +10,6 @@ follows the requested model's ``max_kv_size``."""
 
 from __future__ import annotations
 
-import contextvars
 import functools
 import importlib
 import logging
@@ -362,12 +361,15 @@ def _make_context_limit(original):
 
 
 # mlx-vlm's /v1/messages handler runs the streaming preflight outside the
-# try that maps an overflow to 400, so its catch-all answers 500 and a
-# client retries instead of compacting. The preflight records the overflow
-# text here, and the endpoint wrapper answers 400 with it.
+# try that maps an overflow to 400. Its catch-all prints a traceback for any
+# Exception and answers 500, and a client retries instead of compacting.
+# The preflight raises the overflow as a BaseException, which passes the
+# catch-all, and the endpoint wrapper answers 400. Install both together.
 _OVERFLOW_ROUTE_FLAG = "_kq_gguf_messages_overflow"
-_STREAM_OVERFLOW: contextvars.ContextVar = contextvars.ContextVar(
-    "gmlx_stream_overflow", default=None)
+
+
+class _StreamOverflow(BaseException):
+    """A streaming ``/v1/messages`` overflow, carrying the 400 text."""
 
 
 def _make_overflow_preflight(original):
@@ -378,7 +380,7 @@ def _make_overflow_preflight(original):
             detail = getattr(e, "detail", None)
             if getattr(e, "status_code", None) == 400 \
                     and isinstance(detail, str):
-                _STREAM_OVERFLOW.set(detail)
+                raise _StreamOverflow(detail) from None
             raise
     preflight.__dict__[_OVERFLOW_ROUTE_FLAG] = True
     return preflight
@@ -386,17 +388,13 @@ def _make_overflow_preflight(original):
 
 def _make_messages_overflow_endpoint(original):
     async def endpoint(*args, **kwargs):
-        token = _STREAM_OVERFLOW.set(None)
         try:
-            result = await original(*args, **kwargs)
-            detail = _STREAM_OVERFLOW.get()
-        finally:
-            _STREAM_OVERFLOW.reset(token)
-        if detail is not None and getattr(result, "status_code", None) == 500:
+            return await original(*args, **kwargs)
+        except _StreamOverflow as e:
             from fastapi.responses import JSONResponse
             return JSONResponse(status_code=400, content=_error_content(
-                _MESSAGES_PATHS[-1], 400, "invalid_request_error", detail))
-        return result
+                _MESSAGES_PATHS[-1], 400, "invalid_request_error",
+                str(e)))
     return endpoint
 
 
