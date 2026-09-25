@@ -11,6 +11,9 @@ Checks (each a failure):
     does not resolve (GitHub slug rules)
   - a ```yaml fence opener with trailing text (the docs tests would skip it)
   - non-ASCII bytes (tests/test_ascii_hygiene.py enforces this too)
+  - a page in docs/ that docs/README.md or the README's Documentation
+    section does not link (a page that says it has moved is exempt; full
+    runs only)
 
 Report-only modes, never failures:
   --ownership   backticked --flags outside docs/cli.md and env names outside
@@ -182,6 +185,24 @@ def check_file(path: Path, anchor_cache: dict) -> list:
     return problems
 
 
+def check_indexes() -> list:
+    """Every page in docs/ is linked from the docs index and from the
+    README's Documentation section, except a page that has moved."""
+    index = (_REPO / "docs" / "README.md").read_text()
+    readme = (_REPO / "README.md").read_text()
+    m = re.search(r"^## Documentation\n(.*?)^## ", readme, re.M | re.S)
+    section = m.group(1) if m else ""
+    problems = []
+    for page in sorted((_REPO / "docs").glob("*.md")):
+        if page.name == "README.md" or "This page has moved" in page.read_text():
+            continue
+        if f"]({page.name})" not in index:
+            problems.append(f"docs/README.md: unindexed {page.name}")
+        if f"/docs/{page.name})" not in section:
+            problems.append(f"README.md: unindexed docs/{page.name} under Documentation")
+    return problems
+
+
 def report_ownership(files: list) -> None:
     print("backticked flags outside docs/cli.md, env names outside their owners:")
     for path in files:
@@ -240,6 +261,8 @@ def main(argv=None) -> int:
     problems = []
     for f in files:
         problems += check_file(f, anchor_cache)
+    if not args.paths:
+        problems += check_indexes()
     for p in problems:
         print(p)
     kinds = Counter(p.split(": ", 1)[1].split(" ")[0] for p in problems)
