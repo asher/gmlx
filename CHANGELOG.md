@@ -23,6 +23,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx distill train` refuses a view aligned before this release when the
   student is a gemma-4 or gemma-1.1 GGUF, since its stop ids changed. Run
   `gmlx distill align` again.
+- Requires mlx-kquant 0.4.14. On GPUs with NAX (M5), its kernels speed up
+  speculative decoding on `Q4_0`, `Q8_0`, `Q2_K` to `Q6_K`, `PQ2_0` and
+  `PTQ1_0` targets, and batched decode on every codec.
 - DFlash 2 decoding runs faster on targets with a float output head, such as
   Q8_K_XL Qwen3.8-27B. `GMLX_DRAFT_HEAD=f16` restores the previous head.
 - `gmlx run`, `chat` and `bench` with MTP or a DFlash 2 drafter decode
