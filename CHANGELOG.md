@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.17] - 2026-09-25
+
 ### Added
 
 - `gmlx launch dsh` runs the DeepSeek Harness web app, 0.1.7 or newer, on a
