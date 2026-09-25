@@ -387,6 +387,26 @@ def test_answers_have_the_jev_shapes(app):
     assert body["usage"]["output_tokens"] > 0
 
 
+def test_ask_answers_only_the_asked_questions(app):
+    r = app.use().post("/v1/systemone", json=_ticket(ask=["urgent", "team"]))
+    assert r.status_code == 200, r.text
+    assert list(r.json()["answers"]) == ["urgent", "team"]
+    assert [e[0] for e in app.metrics.events] == ["begin", "success"]
+
+
+def test_think_settings_without_auto_are_logged_as_ignored(app, caplog):
+    caplog.set_level(logging.WARNING)
+    client = app.use()
+    r = client.post("/v1/systemone", json=_ticket(think_threshold=0.5, think_budget=8))
+    assert r.status_code == 200, r.text
+    warned = [rec.getMessage() for rec in caplog.records if "ignoring" in rec.getMessage()]
+    assert len(warned) == 1 and "think_budget, think_threshold" in warned[0]
+    caplog.clear()
+    r = client.post("/v1/systemone", json=_ticket(think="auto", think_threshold=0.5))
+    assert r.status_code == 200, r.text
+    assert not [rec for rec in caplog.records if "ignoring" in rec.getMessage()]
+
+
 def test_a_skipped_question_answers_null(app):
     body = _ticket()
     body["questions"]["why"] = {"type": "noul", "ask_if": {"urgent": ["never"]}}
@@ -452,6 +472,26 @@ def test_a_request_over_the_context_budget_is_refused_before_queueing(app, monke
     r = client.post("/v1/systemone", json=_ticket(think="auto", think_budget=4096))
     assert r.status_code == 400
     assert not any(c[0] == "think" for c in _Reader.built[0].calls)
+
+
+def test_admission_counts_every_chunk_of_an_earlier_stage():
+    from gmlx.systemone import TemplateResolver, jev_schema
+    from gmlx.systemone.decide import chunk_groups
+    from gmlx.systemone.schema import schedule
+
+    enc = _Tok().encode
+    resolver = TemplateResolver(lambda text: enc(text, add_special_tokens=False), 64)
+    qs = {f"q{i}": {"type": "noul"} for i in range(1, 4)}
+    qs["late"] = {"type": "noul", "depends_on": ["q1", "q2", "q3"]}
+    schema = jev_schema({"state": "s", "questions": qs, "chunk_rows": 8})
+    first = len(chunk_groups(schema, schedule(schema["questions"])[0], resolver))
+    assert first > 1
+    assert route._carried_canvases(schema, resolver) == first
+    schema = jev_schema({"state": "s", "questions": qs, "chunk_rows": 8,
+                         "sequential": True})
+    assert route._carried_canvases(schema, resolver) == first
+    schema = jev_schema({"state": "s", "questions": {"q1": {"type": "noul"}}})
+    assert route._carried_canvases(schema, resolver) == 0
 
 
 def test_the_logs_carry_the_prompt_count_and_one_decision_line(app, caplog):

@@ -12,8 +12,8 @@ Checks (each a failure):
   - a ```yaml fence opener with trailing text (the docs tests would skip it)
   - non-ASCII bytes (tests/test_ascii_hygiene.py enforces this too)
   - a page in docs/ that docs/README.md or the README's Documentation
-    section does not link (a page that says it has moved is exempt; full
-    runs only)
+    section does not link (a page whose first paragraph says it has moved is
+    exempt; full runs only)
 
 Report-only modes, never failures:
   --ownership   backticked --flags outside docs/cli.md and env names outside
@@ -185,20 +185,27 @@ def check_file(path: Path, anchor_cache: dict) -> list:
     return problems
 
 
+def _has_moved(page: Path) -> bool:
+    """A moved page is a title and a first paragraph that says so."""
+    paras = page.read_text().split("\n\n")
+    return len(paras) > 1 and paras[1].startswith("This page has moved")
+
+
 def check_indexes() -> list:
     """Every page in docs/ is linked from the docs index and from the
     README's Documentation section, except a page that has moved."""
     index = (_REPO / "docs" / "README.md").read_text()
     readme = (_REPO / "README.md").read_text()
-    m = re.search(r"^## Documentation\n(.*?)^## ", readme, re.M | re.S)
+    m = re.search(r"^## Documentation\n(.*?)(?=^## |\Z)", readme, re.M | re.S)
     section = m.group(1) if m else ""
     problems = []
     for page in sorted((_REPO / "docs").glob("*.md")):
-        if page.name == "README.md" or "This page has moved" in page.read_text():
+        if page.name == "README.md" or _has_moved(page):
             continue
-        if f"]({page.name})" not in index:
+        name = re.escape(page.name)
+        if not re.search(rf"\]\({name}(#[^)]*)?\)", index):
             problems.append(f"docs/README.md: unindexed {page.name}")
-        if f"/docs/{page.name})" not in section:
+        if not re.search(rf"/docs/{name}(#[^)]*)?\)", section):
             problems.append(f"README.md: unindexed docs/{page.name} under Documentation")
     return problems
 

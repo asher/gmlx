@@ -279,6 +279,15 @@ def test_one_prefill_serves_many_reads(model):
         _assert_reads_close(shared, fresh, atol=1e-6)
 
 
+@pytest.mark.parametrize("step", [0, -1])
+def test_a_step_of_zero_or_less_prefills_in_one_pass(model, step):
+    reader = _reader(model, step=step)
+    assert reader.prefill_step_size is None
+    whole = reader.read(reader.prefill(PROMPT), _req((1, 2)))
+    chunked = _reader(model).read(_reader(model).prefill(PROMPT), _req((1, 2)))
+    _assert_reads_close(whole, chunked, atol=1e-4)
+
+
 @pytest.mark.parametrize("n,path", [(1, "_update_in_place"), (8, "_update_concat")])
 def test_extend_matches_a_prefill_of_the_whole_prompt(model, n, path, monkeypatch):
     reader = _reader(model)

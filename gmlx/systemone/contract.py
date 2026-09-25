@@ -45,14 +45,29 @@ def jev_answer(q, a):
 
 
 def jev_answers(schema, body) -> dict:
+    """The answers in the Jev shapes, in question order. With ``ask`` the
+    decision answers only the questions it names, and only those appear."""
+    answered = body["answers"]
     return {
-        q["id"]: jev_answer(q, body["answers"][q["id"]])
+        q["id"]: jev_answer(q, answered[q["id"]])
         for q in schema["questions"]
+        if q["id"] in answered
     }
 
 
 def usage(input_tokens: int, output_tokens: int) -> dict:
     return {"input_tokens": int(input_tokens), "output_tokens": int(output_tokens)}
+
+
+def jev_response(schema, result, completion_tokens: int, model: str) -> dict:
+    """The response body for a decision that ``decide`` returned."""
+    diagnostics = result["diagnostics"]
+    return {
+        "model": model,
+        "answers": jev_answers(schema, result),
+        "usage": usage(int(diagnostics.get("prompt_tokens") or 0), completion_tokens),
+        "diagnostics": diagnostics,
+    }
 
 
 def log_labels(answers) -> str:

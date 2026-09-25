@@ -220,6 +220,14 @@ def parse_schema(value, limits: Limits = Limits()) -> dict:
     }
 
 
+def ignored_fields(body, schema) -> set:
+    """Request fields that parse but change nothing: the think settings when
+    ``think`` is not ``"auto"``."""
+    if schema["think_auto"] is not None:
+        return set()
+    return set(body) & set(GMLX_EXTENSIONS)
+
+
 def schedule(qs):
     """Questions in stages: a question's stage comes after the stages of
     everything it depends on. Declaration order is kept within a stage."""

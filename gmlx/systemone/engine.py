@@ -167,7 +167,9 @@ class StructuredReader:
 
     def __init__(self, model, *, prefill_step_size: int):
         self.model = model
-        self.prefill_step_size = int(prefill_step_size)
+        # A step of 0 or less prefills in one pass, as mlx-vlm's lane does.
+        step = int(prefill_step_size)
+        self.prefill_step_size = step if step > 0 else None
         self.decoder = model.model.decoder
         self.embed = self.decoder.embed_tokens
         self.vocab = int(model.config.text_config.vocab_size)
@@ -184,7 +186,7 @@ class StructuredReader:
             pixel_values=None,
             mm_token_type_ids=None,
             prefill_step_size=step,
-            chunk_prefill=len(ids) > step,
+            chunk_prefill=step is not None and len(ids) > step,
         )
         mx.eval([c.state for c in cache])
         return PromptCache(self.model, ids, cache)

@@ -11,6 +11,7 @@ import pytest
 from gmlx.systemone.reads import (
     LABEL_ID_CAP,
     PAD,
+    SEED_VOCAB,
     TURN_CLOSE,
     Slot,
     build_canvas,
@@ -251,9 +252,13 @@ def test_build_canvas_seeds_slots_in_order():
 
     slots = (Slot(1, (5, 6)), Slot(3, (7, 8)))
     canvas = build_canvas((10, 11, 12, 13, 14), slots, 16, seed=9, vocab=1000)
+    # Drawn below the proxy's vocabulary constant, then wrapped into this one.
     rng = random.Random(9)
-    first, second = rng.randrange(1000), rng.randrange(1000)
+    first, second = rng.randrange(SEED_VOCAB) % 1000, rng.randrange(SEED_VOCAB) % 1000
     assert canvas == [10, first, 12, second, 14, TURN_CLOSE] + [PAD] * 10
+    full = build_canvas((10, 11, 12, 13, 14), slots, 16, seed=9, vocab=SEED_VOCAB)
+    rng = random.Random(9)
+    assert (full[1], full[3]) == (rng.randrange(SEED_VOCAB), rng.randrange(SEED_VOCAB))
     swapped = build_canvas((10, 11, 12, 13, 14), slots[::-1], 16, seed=9, vocab=1000)
     assert (swapped[3], swapped[1]) == (first, second)
     as_dicts = [{"pos": 1, "label_ids": [5, 6]}, {"pos": 3, "label_ids": [7, 8]}]

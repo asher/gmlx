@@ -23,7 +23,6 @@ from .template import FORMATS, TemplateResolver, answer_text, system_text
 
 SAMPLE_SEED_STRIDE = 7919
 GROUP_SEED_STRIDE = 104729
-LOGPROB_FLOOR = -9999.0
 
 
 class PromptCacheLike(Protocol):
@@ -291,7 +290,10 @@ def decide(
 
     With ``think: "auto"`` the decision runs without a thought first. When
     an answer's confidence is below the threshold, it runs again with a
-    thought of the auto budget, and that run gives the answers."""
+    thought of the auto budget, and that run gives the answers, the samples,
+    the question diagnostics and the completion-token count. ``timing``
+    covers both runs, and ``think_auto`` holds the first run's confidences,
+    reads and time."""
     auto = schema.get("think_auto")
     run = functools.partial(
         _decide_once, engine=engine, resolver=resolver, chat_ids=chat_ids,
@@ -300,19 +302,23 @@ def decide(
     if not auto:
         return run(schema)
     first, first_rows = run(dict(schema, think_auto=None))
-    unsure = sorted(qid for qid, a in first["answers"].items()
-                    if a is not None and a["confidence"] < auto["threshold"])
+    confidence = {qid: a["confidence"] for qid, a in first["answers"].items()
+                  if a is not None}
+    unsure = [q["id"] for q in schema["questions"]
+              if confidence.get(q["id"], 1.0) < auto["threshold"]]
+    first_timing = first["diagnostics"]["timing"]
     info = {"threshold": auto["threshold"], "budget": auto["budget"],
-            "unsure": unsure, "thought": bool(unsure)}
+            "thought": bool(unsure), "unsure": unsure, "confidence": confidence,
+            "reads": first_timing["reads"], "total_ms": first_timing["total_ms"]}
     if not unsure:
         first["diagnostics"]["think_auto"] = info
         return first, first_rows
     body, rows = run(dict(schema, think=auto["budget"], think_auto=None))
     timing = body["diagnostics"]["timing"]
-    timing["total_ms"] += first["diagnostics"]["timing"]["total_ms"]
-    timing["reads"] += first["diagnostics"]["timing"]["reads"]
+    timing["total_ms"] += first_timing["total_ms"]
+    timing["reads"] += first_timing["reads"]
     body["diagnostics"]["think_auto"] = info
-    return body, first_rows + rows
+    return body, rows
 
 
 def _decide_once(schema, *, engine, resolver, chat_ids, seed, constrained,

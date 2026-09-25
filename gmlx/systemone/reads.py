@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 PAD = 0
 TURN_CLOSE = 106
+# The DiffusionGemma vocabulary size, a constant in the vLLM example.
+SEED_VOCAB = 262144
 LABEL_ID_CAP = 128
 
 
@@ -86,12 +88,15 @@ def _pos(slot):
 
 def build_canvas(template, slots, width: int, seed: int, vocab: int) -> list[int]:
     """The seed canvas: the template, the turn close, pad to ``width``, and
-    one random id per slot drawn in slot order from ``seed``."""
+    one random id per slot drawn in slot order from ``seed``. The draw is
+    below ``SEED_VOCAB`` whatever the model reports, as in the vLLM example,
+    so a seed gives the same canvas on both. It wraps into a smaller
+    ``vocab``."""
     rng = random.Random(seed)
     canvas = list(template) + [TURN_CLOSE]
     canvas += [PAD] * (width - len(canvas))
     for s in slots:
-        canvas[_pos(s)] = rng.randrange(vocab)
+        canvas[_pos(s)] = rng.randrange(SEED_VOCAB) % vocab
     return canvas
 
 

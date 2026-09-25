@@ -435,6 +435,7 @@ def test_a_met_ask_if_asks_the_question():
 def test_ask_limits_the_questions_answered():
     r = _run({**_qs("q1", "q2", q2={"depends_on": ["q1"]}), "ask": ["q1"]})
     assert list(r["out"]["answers"]) == ["q1"]
+    assert list(jev_answers(r["schema"], r["out"])) == ["q1"]
     assert r["out"]["diagnostics"]["stages"] == [["q1"]]
     # One stage, so the decision is not chained.
     assert r["out"]["diagnostics"]["chunk_prompt"] == "own"
@@ -453,12 +454,20 @@ class ThoughtEngine(FakeEngine):
         return super().read(prompt, req)
 
 
+THINK_AUTO_KEYS = {"threshold", "budget", "thought", "unsure", "confidence", "reads",
+                   "total_ms"}
+
+
 def test_think_auto_keeps_a_sure_first_pass():
     r = _run({**_qs("q1"), "think": "auto"})
     d = r["out"]["diagnostics"]
+    auto = d["think_auto"]
     assert r["engine"].thinks == []
-    assert d["think_auto"] == {"threshold": 0.8, "budget": 64, "unsure": [],
-                               "thought": False}
+    assert set(auto) == THINK_AUTO_KEYS
+    assert (auto["threshold"], auto["budget"], auto["thought"], auto["unsure"]) \
+        == (0.8, 64, False, [])
+    assert auto["confidence"] == {"q1": r["out"]["answers"]["q1"]["confidence"]}
+    assert auto["reads"] == d["timing"]["reads"]
     assert set(d) == DECISION_KEYS | {"think_auto"}
 
 
@@ -466,17 +475,25 @@ def test_think_auto_runs_again_with_a_thought_when_an_answer_is_unsure():
     eng = ThoughtEngine()
     r = _run({**_qs("q1", "q2"), "think": "auto", "think_budget": 48}, engine=eng)
     out, d = r["out"], r["out"]["diagnostics"]
+    auto = d["think_auto"]
     assert [t["budget"] for t in eng.thinks] == [48]
-    assert d["think_auto"] == {"threshold": 0.8, "budget": 48, "unsure": ["q1", "q2"],
-                               "thought": True}
+    assert (auto["budget"], auto["thought"], auto["unsure"]) == (48, True, ["q1", "q2"])
+    assert all(c < 0.8 for c in auto["confidence"].values())
     assert out["answers"]["q1"]["label"] == "yes"
     assert out["answers"]["q1"]["confidence"] > 0.9
     assert d["thought"]["tokens"] == len(THOUGHT)
-    # Four unsure reads, then one sure read on the thought.
+    # Four unsure reads, then one sure read on the thought. Timing covers
+    # both runs, and think_auto holds the first.
+    assert auto["reads"] == 4
     assert d["timing"]["reads"] == 5
-    first = _run({**_qs("q1", "q2")}, engine=ThoughtEngine())
+    # The rows are the returned run's, as for the same request with think 48.
     second = _run({**_qs("q1", "q2"), "think": 48}, engine=ThoughtEngine())
-    assert r["rows"] == first["rows"] + second["rows"]
+    assert r["rows"] == second["rows"]
+
+
+def test_think_auto_lists_unsure_questions_in_question_order():
+    r = _run({**_qs("zeta", "alpha"), "think": "auto"}, engine=ThoughtEngine())
+    assert r["out"]["diagnostics"]["think_auto"]["unsure"] == ["zeta", "alpha"]
 
 
 def test_think_auto_threshold_decides_what_is_unsure():

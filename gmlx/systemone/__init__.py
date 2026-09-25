@@ -6,7 +6,14 @@ label log-probabilities at each position. ``decide`` holds the decision
 logic and ``engine.StructuredReader`` runs the reads. This package module
 imports no MLX, so the decision logic loads without it."""
 
-from .contract import jev_answer, jev_answers, jev_state, log_labels, usage
+from .contract import (
+    jev_answer,
+    jev_answers,
+    jev_response,
+    jev_state,
+    log_labels,
+    usage,
+)
 from .decide import ReadEngine, decide, slot_distribution
 from .reads import (
     Cancelled,
@@ -23,6 +30,7 @@ from .schema import (
     JEV_EXTENSIONS,
     Limits,
     SchemaError,
+    ignored_fields,
     jev_schema,
     parse_seed,
 )
@@ -43,8 +51,10 @@ __all__ = [
     "TemplateResolver",
     "build_canvas",
     "decide",
+    "ignored_fields",
     "jev_answer",
     "jev_answers",
+    "jev_response",
     "jev_schema",
     "jev_state",
     "label_id_union",

@@ -101,11 +101,10 @@ def _run_offline(a, body: dict) -> dict:
         Limits,
         TemplateResolver,
         decide,
-        jev_answers,
+        jev_response,
         jev_schema,
         jev_state,
         parse_seed,
-        usage,
     )
 
     cfg, settings = _offline_settings(a.config)
@@ -147,16 +146,9 @@ def _run_offline(a, body: dict) -> dict:
             chat_ids=tokens.chat_ids, seed=seed,
             constrained=settings.constrained, canvas_len=canvas_len,
             decode=tokens.decode)
-    diagnostics = result["diagnostics"]
-    print(f"[systemone] {diagnostics['timing']['reads']} reads in "
+    print(f"[systemone] {result['diagnostics']['timing']['reads']} reads in "
           f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
-    return {
-        "model": os.path.basename(path),
-        "answers": jev_answers(schema, result),
-        "usage": usage(int(diagnostics.get("prompt_tokens") or 0),
-                       completion_tokens),
-        "diagnostics": diagnostics,
-    }
+    return jev_response(schema, result, completion_tokens, os.path.basename(path))
 
 
 def cmd_systemone(argv: list | None = None, prog: str = "gmlx systemone") -> int:

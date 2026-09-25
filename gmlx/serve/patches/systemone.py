@@ -26,13 +26,13 @@ from gmlx.systemone import (
     SchemaError,
     TemplateResolver,
     decide,
-    jev_answers,
+    ignored_fields,
+    jev_response,
     jev_schema,
     jev_state,
     log_labels,
     parse_seed,
     system_text,
-    usage,
 )
 from gmlx.systemone.decide import chunk_groups
 from gmlx.systemone.schema import schedule
@@ -120,15 +120,17 @@ def _pick_model(field, profile, cfg) -> str:
     return ""
 
 
-def _sequential_reads(schema, resolver) -> int:
-    """The most reads that can run one after another on one growing prompt:
-    one per stage, or one per chunk when chunks run in sequence."""
+def _carried_canvases(schema, resolver) -> int:
+    """How many reads' answer lines the last prompt of a decision can carry,
+    each at most one canvas. A later stage carries every chunk of every
+    earlier stage, and a chunk read in sequence also carries the chunks
+    before it in its own stage."""
     qs = [q for q in schema["questions"]
           if not schema.get("ask") or q["id"] in schema["ask"]]
-    levels = schedule(qs)
-    if not schema["sequential"]:
-        return len(levels)
-    return sum(len(chunk_groups(schema, level, resolver)) for level in levels)
+    chunks = [len(chunk_groups(schema, level, resolver)) for level in schedule(qs)]
+    if schema["sequential"]:
+        return sum(chunks) - 1
+    return sum(chunks[:-1])
 
 
 def _admit(rg, rt, tokens, schema) -> int:
@@ -144,7 +146,7 @@ def _admit(rg, rt, tokens, schema) -> int:
     bound_ids = tokens.encode_prompt(bound_text)
     growth = (think + len(resolver.thought_open) + len(resolver.thought_close)
               + len(resolver.scaffold)
-              + (_sequential_reads(schema, resolver) - 1) * rt.canvas_len)
+              + _carried_canvases(schema, resolver) * rt.canvas_len)
     preflight_prompt_memory(
         rg, bound_text,
         args=gen.GenerationArguments(max_tokens=growth + rt.canvas_len))
@@ -199,13 +201,15 @@ def make_systemone_endpoint(installed):
         shown["model"] = requested if isinstance(requested, str) else ""
         if body.get("images"):
             return fail(400, "invalid_request_error", _NO_IMAGES)
-        warn_ignored_fields(_ENDPOINT, set(body) - SYSTEMONE_CONSUMED)
+        unread = set(body) - SYSTEMONE_CONSUMED
         try:
             schema = jev_schema(body, limits, cfg.request_defaults())
             state = jev_state(body)
             seed = parse_seed(body)
         except SchemaError as e:
+            warn_ignored_fields(_ENDPOINT, unread)
             return fail(422, "validation_error", str(e))
+        warn_ignored_fields(_ENDPOINT, unread | ignored_fields(body, schema))
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
 
         app_mod = importlib.import_module("mlx_vlm.server.app")
@@ -304,8 +308,15 @@ def make_systemone_endpoint(installed):
             stop.set()
             watcher.cancel()
 
+        try:
+            content = jev_response(schema, result, completion_tokens, resolved)
+        except Exception as e:  # noqa: BLE001 - a 500 like any engine failure
+            _log.exception("systemone: response assembly failed")
+            _record_failure(runtime, resolved, str(e))
+            return _error(500, "server_error",
+                          f"decision failed ({type(e).__name__}); see the server log")
         diagnostics = result["diagnostics"]
-        input_tokens = int(diagnostics.get("prompt_tokens") or 0)
+        input_tokens = content["usage"]["input_tokens"]
         auto = diagnostics.get("think_auto") or {}
         _log.info("systemone: %s reads=%d %.0fms%s", log_labels(result["answers"]),
                   diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"],
@@ -321,12 +332,7 @@ def make_systemone_endpoint(installed):
                 request_started_s=request_start))
         except Exception:  # noqa: BLE001 - metrics must not fail the request
             _log.debug("success-metrics record raised", exc_info=True)
-        return JSONResponse(content={
-            "model": resolved,
-            "answers": jev_answers(schema, result),
-            "usage": usage(input_tokens, completion_tokens),
-            "diagnostics": diagnostics,
-        })
+        return JSONResponse(content=content)
 
     # The request wrappers copy this signature onto endpoints defined in
     # other modules, where the deferred annotation would not resolve.

@@ -29,13 +29,13 @@ from gmlx.systemone import (
     TemplateResolver,
     build_canvas,
     decide,
-    jev_answers,
+    jev_response,
     jev_schema,
     jev_state,
     label_id_union,
     parse_seed,
-    usage,
 )
+from gmlx.systemone.reads import SEED_VOCAB, pinned_positions
 
 CANVAS = 64
 VOCAB = 262144
@@ -102,14 +102,16 @@ class Table:
         self.noise = noise
         self.distractors = [tok.token_id(d) for d in distractors]
 
-    def top(self, prompt, canvas, pos, allowed, constrained):
+    def top(self, prompt, canvas, pos, allowed, constrained, steps, pinned):
         """The logprobs the engine reports at ``pos``: the whole allowed set
         normalized over it when constrained, else the argmax and the
-        allowed ids with logprobs over the full candidate vocabulary."""
+        allowed ids with logprobs over the full candidate vocabulary. The
+        step count and the pinned positions change the values, so a side
+        that forwards either one wrongly answers differently."""
         vocab = list(allowed) if constrained else sorted(
             set(allowed) | set(self.distractors) | {canvas[pos]})
-        key = hashlib.sha256(
-            json.dumps([list(prompt), list(canvas), pos]).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps(
+            [list(prompt), list(canvas), pos, steps, list(pinned)]).encode()).hexdigest()
         logits = {
             i: self.bias.get(self.tok.text_of.get(i), 0.0)
             + self.noise * _unit(key, i)
@@ -156,10 +158,12 @@ class FakeEngine:
         samples = []
         for seed in req.seeds:
             canvas = build_canvas(req.template, req.slots, req.width, seed, VOCAB)
+            pins = (pinned_positions(req.slots, req.width, req.steps)
+                    if req.pinned else [])
             reads = []
             for s in req.slots:
                 argmax, pairs = self.table.top(prompt.ids, canvas, s.pos, allowed,
-                                               req.constrained)
+                                               req.constrained, req.steps, pins)
                 reads.append(SlotRead(argmax_id=argmax, top=dict(pairs)))
             samples.append(SampleRead(seed=seed, canvas_in=tuple(canvas),
                                       slots=tuple(reads)))
@@ -183,7 +187,9 @@ def _patch_upstream(monkeypatch, tok, table):
         canvas = xargs["diffusion_seed_canvas"]
         allowed = body["logprob_token_ids"]
         constrained = bool(xargs.get("diffusion_constrained"))
-        return [table.top(prompt, canvas, pos, allowed, constrained)
+        return [table.top(prompt, canvas, pos, allowed, constrained,
+                          xargs["diffusion_max_steps"],
+                          xargs.get("diffusion_pinned", []))
                 for pos in range(len(canvas))]
 
     def upstream_chat(body, timeout=600):
@@ -225,9 +231,9 @@ def _proxy_body(body):
     return out["obj"]
 
 
-def _gmlx_body(body, tok, engine, constrained):
-    """The body gmlx/serve/patches/systemone.py assembles, from the same
-    calls."""
+def _gmlx_decision(body, tok, engine, constrained):
+    """The schema, and the decision and completion-token count that
+    ``decide`` returns for ``body``."""
     body = copy.deepcopy(body)
     schema = jev_schema(body, Limits())
     state = jev_state(body)
@@ -243,14 +249,13 @@ def _gmlx_body(body, tok, engine, constrained):
     result, completion_tokens = decide(
         schema, state, engine=engine, resolver=resolver, chat_ids=chat_ids,
         seed=seed, constrained=constrained, canvas_len=CANVAS, decode=tok.decode)
-    diagnostics = result["diagnostics"]
-    input_tokens = int(diagnostics.get("prompt_tokens") or 0)
-    return {
-        "model": MODEL,
-        "answers": jev_answers(schema, result),
-        "usage": usage(input_tokens, completion_tokens),
-        "diagnostics": diagnostics,
-    }
+    return schema, result, completion_tokens
+
+
+def _gmlx_body(body, tok, engine, constrained):
+    """The body the route and the verb return, from the same calls."""
+    schema, result, completion_tokens = _gmlx_decision(body, tok, engine, constrained)
+    return jev_response(schema, result, completion_tokens, MODEL)
 
 
 def _normalize(obj, engine):
@@ -420,3 +425,33 @@ def test_cases_cover_the_paths(monkeypatch, tok):
     assert len(diag("think_chunked")["thought"]) == len(diag("think_chunked")["chunks"])
     assert diag("indexed")["questions"]["q0"]["pos"] >= 0
     assert len(diag("indexed_chained")["stages"]) == 2
+
+
+def test_the_seed_vocabulary_is_the_proxys():
+    assert SEED_VOCAB == proxy.VOCAB
+
+
+@pytest.mark.parametrize("constrained", [True, False],
+                         ids=["constrained", "unconstrained"])
+def test_ask_matches_the_proxy_decision(monkeypatch, tok, constrained):
+    """With ``ask`` the proxy's decision answers only the asked questions,
+    and its handler then raises KeyError building answers for all of them.
+    gmlx makes the same decision and answers the asked questions."""
+    monkeypatch.setattr(proxy, "ARGS", types.SimpleNamespace(
+        model=MODEL, constrained=constrained, upstream="http://upstream.invalid"))
+    table = Table(tok, {" yes": 1.0}, 2.0, distractors=[" the", " order", ":"])
+    _patch_upstream(monkeypatch, tok, table)
+    body = {"model": "jev-latest", "state": _TICKET, "questions": _chain(),
+            "ask": ["urgent", "bucket"], "samples": 2}
+    with pytest.raises(KeyError):
+        _proxy_body(body)
+    req = copy.deepcopy(body)
+    handler = proxy.Handler.__new__(proxy.Handler)
+    code, (want, want_rows) = handler._decide(
+        proxy.jev_schema(req), proxy.jev_state(req, []), 42)
+    assert code == 200
+    schema, got, got_rows = _gmlx_decision(body, tok, FakeEngine(table), constrained)
+    assert _normalize(got, "gmlx") == _normalize(want, "vllm")
+    assert got_rows == want_rows
+    answers = jev_response(schema, got, got_rows, MODEL)["answers"]
+    assert list(answers) == ["urgent", "bucket"]
