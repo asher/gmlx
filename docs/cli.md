@@ -756,9 +756,9 @@ Exit codes: 0 listed, 1 the server answered with an error or is not gmlx,
 ## gmlx systemone
 
 Sends a JSON file holding a `/v1/systemone` request body to a running
-server and prints one line per question. The body is described under
-[Structured decisions](api.md#structured-decisions). With `--model` the
-verb loads the GGUF itself and answers offline, with no server.
+server and prints one line per question. The body is described in
+[decisions.md](decisions.md). With `--model` the verb loads the GGUF
+itself and answers offline, with no server.
 
 ```sh
 gmlx systemone ticket.json

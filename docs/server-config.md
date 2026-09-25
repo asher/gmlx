@@ -319,9 +319,9 @@ The contract is in [assistant.md](assistant.md#served-assistants).
 ### Structured decisions
 
 `server.systemone` sets how `POST /v1/systemone` answers, and the request
-body is described in [api.md](api.md#structured-decisions). The route is
-always installed, and a request that reaches a model other than
-DiffusionGemma gets a 400.
+body is described in [decisions.md](decisions.md). The route is always
+installed, and a request that reaches a model other than DiffusionGemma
+gets a 400.
 
 | Key | Default | Meaning |
 |-----|---------|---------|

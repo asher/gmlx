@@ -3,7 +3,7 @@
 How `POST /v1/systemone` turns a question set into answer distributions on
 a DiffusionGemma model, for contributors changing the route, the decision
 logic or the read engine. The request and response contract is in
-[api.md](../api.md#structured-decisions), and the timings are in
+[decisions.md](../decisions.md), and the timings are in
 [structured-read-measurements.md](structured-read-measurements.md).
 
 - [Origin](#origin)
