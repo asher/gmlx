@@ -1000,8 +1000,14 @@ def _launch_open_webui(a, *, exec_fn) -> int:
 # the top layer, which dsh never saves, so no dsh file is edited. The provider row
 # uses the llm-pi-ai adapter over /v1/chat/completions, the same pi-ai library
 # the pi target drives. A patch layer replaces a row's whole config.
+# --dsh-profile boots another profile with the same overlay.
 _DSH_PROFILE = "gmlx"
 _DSH_TEMPLATE = "web"
+# Profiles dsh creates on first use. The stdio ones serve a program, so the
+# launch prints their command and does not run them.
+_DSH_SHIPPED = frozenset({"web", "headless", "acp", "sdk", "sdk-minimal"})
+_DSH_STDIO = frozenset({"acp", "sdk", "sdk-minimal"})
+_DSH_WEB_BUNDLE = "@deepseek-ai/dsh-web-app"
 _DSH_MIN_VERSION = (0, 1, 7)
 _DSH_WEB_PORT = 3080
 _DSH_KEY_ENV = "GMLX_API_KEY"
@@ -1159,7 +1165,31 @@ def _check_dsh_version(version: str | None) -> None:
             f"newer.\nUpgrade with:  {_DSH_UPGRADE}")
 
 
+def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
+    """Whether a dsh profile boots the web app: its manifest lists the web
+    bundle. A profile without a readable manifest is judged by name."""
+    try:
+        return _DSH_WEB_BUNDLE in json.loads(
+            manifest.read_text())["dsh"]["profile"]["bundles"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return name in (_DSH_PROFILE, _DSH_TEMPLATE)
+
+
+def _check_dsh_profile_name(name: str, config_only: bool) -> None:
+    if name in ("", ".", "..") or "/" in name or "\\" in name:
+        raise LaunchError(f"{name!r} is not a dsh profile name")
+    if name == "desktop":
+        raise LaunchError("the desktop profile belongs to the DeepSeek "
+                          "Harness desktop app")
+    if name in _DSH_STDIO and not config_only:
+        raise LaunchError(
+            f"the {name} profile serves a program over stdio. Re-run with "
+            f"--config-only and give that program the printed command.")
+
+
 def _launch_dsh(a, *, exec_fn) -> int:
+    profile = _DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
+    _check_dsh_profile_name(profile, a.config_only)
     binary = _find_binary(
         "dsh", a,
         "Install it first, then re-run - see "
@@ -1182,12 +1212,18 @@ def _launch_dsh(a, *, exec_fn) -> int:
             f"{default_model!r} is a service model, not a chat model: pass "
             f"--model with one of {sorted(by_id)}")
 
-    profile_dir = _dsh_home() / "profiles" / _DSH_PROFILE
+    profile_dir = _dsh_home() / "profiles" / profile
     manifest = profile_dir / "package.json"
-    if profile_dir.exists() and not manifest.exists():
+    create = profile == _DSH_PROFILE and not manifest.exists()
+    if create and profile_dir.exists():
         raise LaunchError(
             f"{profile_dir} exists but is not a dsh profile (no package.json). "
             f"Remove or rename it, then re-run to create the profile.")
+    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not manifest.exists():
+        raise LaunchError(
+            f"dsh has no profile {profile!r} ({manifest} is missing). Set it "
+            f"up with dsh first, then re-run.")
+    web = _dsh_runs_web_app(profile, manifest)
 
     rows = build_dsh_overlay(base_url, models, default_model=default_model,
                              provider_id=a.provider_id)
@@ -1196,17 +1232,17 @@ def _launch_dsh(a, *, exec_fn) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, yaml.safe_dump(rows, sort_keys=False))
 
-    argv = ["dsh", "--profile", _DSH_PROFILE]
-    if not manifest.exists():
+    argv = ["dsh", "--profile", profile]
+    if create:
         argv += ["--from-default-profile", _DSH_TEMPLATE]
     argv += ["--patch", str(out)]
-    if (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
+    if web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
         argv += ["--port", str(_DSH_WEB_PORT + 1)]
     key = a.api_key or _PROVIDER_ID                  # placeholder: no auth
 
     print(_summary("dsh", base_url, models, default_model)
           + f"\n[launch] wrote {out}")
-    if not manifest.exists():
+    if create:
         print(f"[launch] note: the first launch creates the dsh profile "
               f"{profile_dir} from the {_DSH_TEMPLATE} template")
     window, out_cap = (model_capacity(head)
@@ -1214,7 +1250,7 @@ def _launch_dsh(a, *, exec_fn) -> int:
     if window < _DSH_SMALL_WINDOW:
         print(f"[launch] note: {default_model} has a {window}-token context, "
               f"which is small for an agent, so expect frequent compaction")
-    if not dsh_compaction_resolves(window, out_cap):
+    if web and not dsh_compaction_resolves(window, out_cap):
         # The web app compacts at dsh's default headroom only.
         need = out_cap + math.ceil(_DSH_HEADROOM / (1 - _DSH_RETAIN_RATIO))
         print(f"[launch] note: the dsh web app compacts {default_model} only "
@@ -1568,12 +1604,18 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     ap.add_argument("--no-keep", action="store_true",
                     help="Don't ask the server to keep --model resident through its "
                          "idle TTL (it may be idle-unloaded mid-session).")
+    ap.add_argument("--dsh-profile", default=None, metavar="NAME",
+                    help=f"dsh only: boot this dsh profile with the gmlx overlay "
+                         f"instead of the {_DSH_PROFILE} profile, for example "
+                         f"headless or a terminal UI profile you set up.")
     a = ap.parse_args(argv)
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
     if a.harness is None:
         ap.print_help()
         return 0
+    if a.dsh_profile is not None and a.harness != "dsh":
+        ap.error("--dsh-profile applies only to dsh")
 
     try:
         rc = _ensure_server(a)

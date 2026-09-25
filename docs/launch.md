@@ -246,6 +246,13 @@ GMLX_API_KEY=gmlx dsh --profile headless \
   --patch ~/.config/gmlx/dsh/gmlx.cordis.yml "run the tests"
 ```
 
+`--dsh-profile NAME` boots another dsh profile with the same file, for
+example a terminal UI profile you built with `dsh plugin`. dsh creates its
+shipped profiles on first use, and any other profile must exist before the
+launch. The `acp` and `sdk` profiles serve a program over stdio, so the
+launch runs them only with `--config-only` and prints the command to give
+that program.
+
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. dsh uploads a conversation to DeepSeek only with feedback
 you submit on it, and `DSH_TELEMETRY_MODE=DISABLED` turns that off.

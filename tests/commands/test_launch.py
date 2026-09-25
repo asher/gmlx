@@ -1549,6 +1549,78 @@ def test_launch_dsh_refuses_profile_dir_without_manifest(monkeypatch, tmp_path):
     assert "no package.json" in str(e.value)
 
 
+def _dsh_profile(home, name, bundles):
+    d = home / "profiles" / name
+    d.mkdir(parents=True)
+    (d / "package.json").write_text(launch.json.dumps(
+        {"dsh": {"profile": {"bundles": bundles}}}))
+
+
+def test_launch_dsh_profile_boots_a_custom_profile(monkeypatch, tmp_path,
+                                                   capsys):
+    home = _fake_dsh(monkeypatch, tmp_path, models=[
+        {"id": "m", "default": True, "context_length": 8192}])
+    _dsh_profile(home, "tui", ["@deepseek-ai/dsh-base",
+                               "@deepseek-ai/dsh-headless",
+                               "deepseek-harness-tui"])
+    _, calls = _run_dsh(tmp_path, dsh_profile="tui", port=3080,
+                        base_url="http://127.0.0.1:3080/v1")
+    # No template, and no web-app port or compaction note.
+    assert calls["argv"] == ["dsh", "--profile", "tui", "--patch",
+                             str(tmp_path / "overlay.yml")]
+    out = capsys.readouterr().out
+    assert "small for an agent" in out
+    assert "web app" not in out and "creates the dsh profile" not in out
+
+
+def test_launch_dsh_profile_shipped_needs_no_manifest(monkeypatch, tmp_path):
+    _fake_dsh(monkeypatch, tmp_path)
+    _, calls = _run_dsh(tmp_path, dsh_profile="headless")
+    assert calls["argv"] == ["dsh", "--profile", "headless", "--patch",
+                             str(tmp_path / "overlay.yml")]
+
+
+def test_launch_dsh_profile_with_the_web_bundle_moves_off_3080(monkeypatch,
+                                                               tmp_path):
+    home = _fake_dsh(monkeypatch, tmp_path)
+    _dsh_profile(home, "mine", ["@deepseek-ai/dsh-base",
+                                "@deepseek-ai/dsh-web-app"])
+    _, calls = _run_dsh(tmp_path, dsh_profile="mine", port=3080,
+                        base_url="http://127.0.0.1:3080/v1")
+    assert calls["argv"][-2:] == ["--port", "3081"]
+
+
+def test_launch_dsh_profile_refuses_a_missing_custom_profile(monkeypatch,
+                                                             tmp_path):
+    _fake_dsh(monkeypatch, tmp_path)
+    with pytest.raises(launch.LaunchError, match="has no profile 'tui'"):
+        _run_dsh(tmp_path, dsh_profile="tui")
+
+
+@pytest.mark.parametrize("name", ["", "..", "a/b", "desktop"])
+def test_launch_dsh_profile_refuses_bad_names(monkeypatch, tmp_path, name):
+    _fake_dsh(monkeypatch, tmp_path)
+    with pytest.raises(launch.LaunchError):
+        _run_dsh(tmp_path, dsh_profile=name)
+
+
+def test_launch_dsh_stdio_profile_needs_config_only(monkeypatch, tmp_path,
+                                                    capsys):
+    _fake_dsh(monkeypatch, tmp_path)
+    with pytest.raises(launch.LaunchError, match="over stdio"):
+        _run_dsh(tmp_path, dsh_profile="acp")
+    rc, calls = _run_dsh(tmp_path, dsh_profile="acp", config_only=True)
+    assert rc == 0 and calls == {}
+    assert "dsh --profile acp --patch" in capsys.readouterr().out
+
+
+def test_dsh_profile_flag_is_dsh_only(capsys):
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["pi", "--dsh-profile", "tui"])
+    assert e.value.code == 2
+    assert "--dsh-profile applies only to dsh" in capsys.readouterr().err
+
+
 def test_launch_dsh_passes_the_api_key(monkeypatch, tmp_path):
     _fake_dsh(monkeypatch, tmp_path)
     _, calls = _run_dsh(tmp_path, api_key="sekret")

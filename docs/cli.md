@@ -592,6 +592,7 @@ gmlx launch omp --config-only
 | `--no-start` | off | never start a server |
 | `--start-timeout S` | unbounded | cap the auto-start wait |
 | `--no-keep` | off | do not keep `--model` resident |
+| `--dsh-profile NAME` | `gmlx` | dsh only: the dsh profile to boot with the gmlx overlay, as [launch.md](launch.md#dsh) describes |
 
 Exit codes: 0 the tool ran or the server is ready, 1 the server is
 unreachable or died, 2 no config or a malformed one, 130 interrupted during
