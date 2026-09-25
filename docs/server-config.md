@@ -318,26 +318,24 @@ The contract is in [assistant.md](assistant.md#served-assistants).
 
 ### Structured decisions
 
-`server.systemone` sets how `POST /v1/systemone` answers, and the request
-body is described in [decisions.md](decisions.md). The route is always
-installed, and a request that reaches a model other than DiffusionGemma
-gets a 400.
+`server.systemone` sets how `POST /v1/systemone` answers. The route is
+always installed, and [decisions.md](decisions.md) describes its requests,
+answers and errors.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `model` | `null` | the model id or alias, optionally `id@profile`, for a request whose `model` is absent or names nothing |
 | `canvas` | `64` | the most tokens one read's canvas holds, a positive multiple of 16, capped at the model's own canvas length |
-| `constrained` | `true` | take label probabilities from a softmax over the read's label tokens. `false` takes them over the full vocabulary |
+| `constrained` | `true` | unembed only the read's label tokens. With `false`, the full vocabulary gives the same one-step label probabilities but other entropies and multi-step reads |
 | `max_questions` | `64` | the most questions one request may ask. A request with more gets a 422 |
 | `max_samples` | `32` | the cap on a request's `samples` and `auto_max`. A larger value is lowered to it |
 | `think` | `0` | the thought budget for a request without `think`, 0 to 4096, or `"auto"` to think only when an answer is unsure |
 | `think_threshold` | `0.8` | the confidence below which `"auto"` thinks, for a request without `think_threshold` |
 | `think_budget` | `64` | the thought budget of `"auto"`, for a request without `think_budget` |
 
-A question set whose answer template does not fit in `canvas` is split
-into chunks, each read on its own. A config with an unknown key here, or a
-`model` that is not a configured id or alias, fails to load. A reload
-applies the new settings to the next request.
+A config with an unknown key here, or a `model` that is not a configured
+id or alias, fails to load. A reload applies the new settings to the next
+request.
 
 ### Cache
 

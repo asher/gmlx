@@ -2,9 +2,9 @@
 
 The timings behind [structured-reads.md](structured-reads.md), for
 contributors who change the read engine, the route or its prompt. They show
-where the time of a `/v1/systemone` decision goes on one machine, how to
-measure again, and how the request options and the wording of a question
-change the answers.
+where the time of a `/v1/systemone` decision goes on one machine, how the
+request options and the wording of a question change the answers, and the
+commands that measure both again.
 
 - [Setup](#setup)
 - [Prefill](#prefill)
@@ -26,7 +26,7 @@ change the answers.
 | peak memory | 19.7 GB over the whole bench |
 
 `scripts/structured_read_bench.py` loaded the model in process and timed
-each arm with a device synchronisation on both sides. Every arm is the
+each arm with a device synchronization on both sides. Every arm is the
 median of five timed runs after two untimed ones, with the arm order
 reversed on every other round and 15 s of idle between blocks. `pmset`
 recorded no thermal or performance warning before or after. The schema is
@@ -35,6 +35,17 @@ the narrowest canvas it fits is 32.
 
 ```sh
 python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
+```
+
+`scripts/structured_read_accuracy.py` holds the facts, the labeled set and
+the requests behind the last three sections, and its `wording`, `labeled`
+and `mixed` modes print their tables. Every read uses seed 42, so the
+answer counts repeat from run to run while the times vary.
+
+```sh
+python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf wording
+python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf labeled
+python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf mixed
 ```
 
 ## Prefill
@@ -107,8 +118,9 @@ In process, on the 472-token prompt with the three-question schema:
 | `"auto"` | 4 | 822 |
 
 A decision is the render, the prefill and the reads, so the difference
-between one and four samples is within the run-to-run spread. On this prompt `"auto"` extended to four
-samples, which adds a second batched pass after the first read.
+between one and four samples is within the run-to-run spread. On this
+prompt `"auto"` extended to four samples, which adds a second batched pass
+after the first read.
 
 Over HTTP, `tests/e2e/run_systemone_e2e.py` measured these wall times on
 the same machine:
@@ -138,7 +150,7 @@ answered yes.
 | the state first, then the route's system text | 29 of 32 | 17 |
 | the route's system prompt, then the state with the question restated | 29 of 32 | 17 |
 | a chat prompt with the question alone, read at the first answer position | 31 of 32 | 15 |
-| the same chat prompt under the route's system text | 31 of 32 | 15 |
+| the same chat prompt under the opening paragraph of the route's system text | 31 of 32 | 15 |
 
 The system text makes no difference on its own, and moving the state ahead
 of the questions recovers one read at most. A question that names its
@@ -195,21 +207,24 @@ The labeled set asks one question per request. The 28 requests in the
 [decisions.md examples](../decisions.md#examples) and five support tickets
 with five questions each show what `think: "auto"` does on requests with
 several questions. Each request was decided with `think: 0` and with
-`think: "auto"` at seed 42.
+`think: "auto"` at seed 42, and the Q4_K_M times are the mean of one run
+before and one after the Q8_0 run.
 
 | Quantization | Requests that thought | Mean with `think: 0` | Mean with `"auto"` | Mean of a request that thought | Answers changed |
 |--------------|-----------------------|----------------------|--------------------|--------------------------------|-----------------|
-| Q4_K_M | 4 of 33 | 0.56 s | 0.99 s | 4.4 s | 1 |
-| Q8_0 | 5 of 33 | 0.41 s | 0.73 s | 2.7 s | 3 |
+| Q4_K_M | 4 of 33 | 0.36 s | 0.59 s | 2.4 s | 1 |
+| Q8_0 | 5 of 33 | 0.37 s | 0.66 s | 2.4 s | 3 |
 
 Every request that thought had two to five questions, and none of the 21
 single-question requests did, because one unsure answer runs the whole
-decision again. Most unsure answers were on questions without one right
-answer, such as a customer's tone at 0.51 or a ticket's severity, and the
-thought moved them between plausible labels. It raised one right answer's
-confidence, the euro for Bratislava from 0.42 to 0.99. It also made one
-right answer wrong, gluten in risotto alla milanese, from no at 0.68 to yes
-at 0.98, so a confident answer after a thought is not proof.
+decision again. The unsure answers were a currency, allergens, a severity
+and a customer's tone. The thought left the severity and the tones below
+the threshold, such as the tone at 0.51 before and 0.66 after on Q4_K_M.
+It raised one right answer's confidence, the euro for Bratislava from 0.42
+to 0.99. It also made one right answer wrong, gluten in risotto alla
+milanese, from no at 0.68 to yes at 0.98, so a confident answer after a
+thought is not proof.
 
-Q8_0 decisions ran about a quarter faster than Q4_K_M decisions in both
-modes on this machine.
+The two files took the same time, and the slowest request that thought
+took 3.1 s. A thought's cost depends on the prompt, as
+[Extension and thoughts](#extension-and-thoughts) shows.

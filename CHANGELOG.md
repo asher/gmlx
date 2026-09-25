@@ -9,10 +9,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `POST /v1/systemone` answers a fixed set of questions about a state with a
-  served DiffusionGemma model, in the Jev decision API shapes, as vLLM does,
-  and with `think: "auto"` writes a thought only when an answer is unsure.
-  `server.systemone` holds its settings, and `gmlx systemone` sends a request
-  or answers one offline.
+  served DiffusionGemma model, in the Jev decision API shapes.
+- `think: "auto"` on `/v1/systemone` writes a thought only when an answer is
+  unsure.
+- `gmlx systemone` sends a decision request to a server or answers it
+  offline, and `server.systemone` holds the route's settings.
 
 ### Fixed
 

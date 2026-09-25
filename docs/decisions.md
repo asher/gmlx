@@ -34,18 +34,21 @@ likely and send the uncertain tickets to a person. For a written answer, an
 explanation or an answer that cannot be listed in advance, use chat
 completions instead.
 
-The request and response follow the Jev decision API, and the route is a
-port of the one vLLM added for DiffusionGemma. A client written for either
-works against gmlx unchanged. A decision is deterministic for a given
-request and `seed`, so the same state always gets the same numbers.
+The request and response follow the
+[Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
+a hosted classifier API whose requests carry a state and typed questions.
+The route ports vLLM's structured-diffusion example server, which answers
+that API with DiffusionGemma, so a client written for either works against
+gmlx unchanged. A decision is deterministic for a given request and
+`seed`, so the same state always gets the same numbers.
 
 ## Why DiffusionGemma
 
-The route runs only on DiffusionGemma, and a request that resolves to any
-other model gets a 400. A diffusion model writes into a block of positions,
-called a [canvas](glossary.md), and predicts every position at once. The
-server fills the canvas with an answer template and leaves the answer
-positions open, so one pass of the model gives every answer's probability.
+The route answers only with DiffusionGemma models. A diffusion model
+writes into a block of positions, called a [canvas](glossary.md), and
+predicts every position at once. The server fills the canvas with an
+answer template and leaves the answer positions open, so one pass of the
+model gives every answer's probability.
 
 An autoregressive model predicts one next token at a time and has no such
 pass, so the route does not offer it. With a chat model, request
@@ -85,8 +88,8 @@ gmlx serve --config decisions.yaml
 one model, or with [`defaults.model`](server-config.md#memory-and-residency)
 set, can leave the key out.
 
-The other `server.systemone` keys set the canvas width, where label
-probabilities come from and the request limits.
+The other `server.systemone` keys set the canvas width, the unembedding,
+the request limits and the thought defaults.
 [server-config.md](server-config.md#structured-decisions) lists them.
 
 ## A first decision
@@ -162,8 +165,10 @@ that question's answers, in one of three shapes:
 `usage.input_tokens` is the longest prompt a read ran on, and
 `usage.output_tokens` counts the answer template tokens and any thought
 tokens. `diagnostics` holds the `stages` and `chunks` the decision ran, the
-`skipped` questions, the `thought`, each sample's label log-probabilities
-under `samples.tops`, the entropies under `questions`, and the `timing`.
+`skipped` questions, the `thought`, the entropies under `questions`, and
+the `timing`. `samples.tops` has one entry per sample, mapping each question
+to its top label as the answer template writes it, such as `yes` or `B`,
+with that label's probability and the entropy of the read.
 
 ## Examples
 
@@ -322,7 +327,7 @@ questions whose answer changes with the earlier one.
 ## Samples, steps and thoughts
 
 A request can also carry these fields. They set how many times each answer
-is read and how much work each read does. The vLLM route defines all of
+is read and how much work each read does. The vLLM example defines all of
 them except `think_threshold`, `think_budget` and the `"auto"` value of
 `think`, which gmlx adds:
 
@@ -343,9 +348,10 @@ them except `think_threshold`, `think_budget` and the `"auto"` value of
 
 A decision prefills its prompt once and then reads it. With the default
 `"auto"`, a confident decision stops after one read, and an uncertain one
-reads `auto_max - 1` more samples as one batch. Batched samples cost a
-fraction of a read each, so `samples: 8` takes about as long as the
-default.
+reads `auto_max - 1` more samples. Samples share a decoder pass up to the
+model's canvas length in canvas tokens, 256 for diffusiongemma-26B-A4B-it,
+so 8 samples of width 32 or 4 of width 64 take one pass. A shared pass
+costs more than one read and less than reading its samples one at a time.
 
 `steps` above 1 costs one more decoder pass per step. A thought costs the
 most, because the model writes it with its full denoise loop, which takes
@@ -354,20 +360,27 @@ has the timings.
 
 `think: "auto"` spends that cost only on unsure decisions. The decision runs
 without a thought first. When any answer's confidence is below
-`think_threshold`, it runs again with a thought of `think_budget` tokens,
-and the answers come from that run. `diagnostics.think_auto` lists the
-unsure questions and says whether the thought ran. The defaults are 0.8
-and 64 tokens. With `server.systemone.think` set to `"auto"`, a Jev client
+`think_threshold`, it runs again with a thought of `think_budget` tokens.
+The answers, `usage` and sample diagnostics then come from the second run,
+and `timing` adds up both. `diagnostics.think_auto` says whether the
+thought ran, lists the unsure questions and keeps the first run's
+confidences. With `server.systemone.think` set to `"auto"`, a Jev client
 gets the behavior without sending any of the fields.
+
+The two thresholds point in opposite directions. `think_threshold` is a
+floor on an answer's confidence, so raising it thinks more often.
+`auto_threshold` is a ceiling on the entropy at a label position, so
+raising it samples less often. Without `"auto"`, the server ignores
+`think_threshold` and `think_budget` and logs them in an `ignoring
+unsupported parameter(s)` warning.
 
 A decision with more questions runs the thought more often, since one
 unsure answer is enough. A question without one right answer, such as a
 customer's tone, often stays unsure after the thought, so the time buys
 little there. Use `"auto"` when the questions need recalled facts.
 
-`server.systemone.max_questions` caps the question count, and a request
-over it gets a 422. `samples` and `auto_max` are lowered to
-`server.systemone.max_samples`.
+The server caps the question count and the sample count, and
+[server-config.md](server-config.md#structured-decisions) gives the limits.
 
 ## When answers go wrong
 
@@ -408,8 +421,9 @@ unlike the ones you tested.
 | Status | When |
 |--------|------|
 | 400 | the body is not a JSON object, it carries `images`, the model is not DiffusionGemma, or the prompt does not fit the context or memory budget |
-| 404 | `model` names nothing and no fallback exists |
-| 422 | a question, `state` or `seed` is invalid. The error type is `validation_error` |
+| 400 | `profile` names no profile, or `model` is absent and no fallback exists. The error types are `unknown_profile` and `no_model_specified` |
+| 404 | `model` names nothing and no fallback exists, or the model's file is missing. The error types are `model_not_found` and `model_file_missing` |
+| 422 | a request field fails validation, such as a question, `state`, `seed` or the question count. The error type is `validation_error` |
 | 503 | the queue cap or a deferred load, as under [Limits and back-pressure](api.md#limits-and-back-pressure) |
 | 504 | the decision ran past [`token_queue_timeout_s`](server-config.md#scheduling). The error type is `timeout` |
 | 500 | the engine failed. The error type is `server_error` |
