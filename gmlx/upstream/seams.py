@@ -261,6 +261,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
          "key-merge wrap)"),
+    Seam("mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
+         "server_patches.install_context_overflow_wording (wrapped: the "
+         "overflow 400 is recorded for the endpoint wrapper)"),
+    Seam("mlx_vlm.server.anthropic", "anthropic_messages_endpoint",
+         "server_patches.install_context_overflow_wording (the streaming "
+         "preflight's 400 reaches the catch-all 500; wrapper answers 400)"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
          "history, retire capture, thinking seed, and developer-role "

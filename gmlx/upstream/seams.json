@@ -94,6 +94,8 @@
   "mlx_vlm.models.switch_layers:SwitchLinear.__call__": "1c91ef16afb139a811b09d76d88ce9dba7d9fddb5f7cee5964d6a3849066b685",
   "mlx_vlm.prompt_utils:apply_chat_template": "2c4393fc3e5c06a667486234f2fedcea851af8020af8f5f07904d2a9bf64efba",
   "mlx_vlm.prompt_utils:get_chat_template": "3ee9c569ce6d98e4dd108984afc161025888852fabca58074fd3a4073c8c3c4d",
+  "mlx_vlm.server.anthropic:_preflight_stream_context_budget": "85a8819869404d5baaafcd97b57eb1c2ae622de351a6c0d705963ee4f958d6cf",
+  "mlx_vlm.server.anthropic:anthropic_messages_endpoint": "7981583ed9f8814a285d4fc7a9190a66d003db596ef72264981805d9c5a9c6e8",
   "mlx_vlm.server.anthropic:apply_chat_template": "5c23f52772eb701163ed40e9eaf85715fb9abb348cc88905deb43b368d81d27a",
   "mlx_vlm.server.app:_protocol_deps": null,
   "mlx_vlm.server.app:_split_thinking_text": "ec241814dee3f11595841860cdcf2e678385762aa228e775751c8081beb10eec",

@@ -181,6 +181,7 @@ def wire_app():
         "to_template_kwargs": _GEN.GenerationArguments.to_template_kwargs,
         "gen_budget": _GEN._check_configured_context_budget,
         "pkg_budget": _PKG._check_configured_context_budget,
+        "anthropic_preflight": anthropic_mod._preflight_stream_context_budget,
         "make_sampler": _GEN.ResponseGenerator._make_sampler,
         "make_tb_criteria": _GEN.ResponseGenerator._make_thinking_budget_criteria,
         "metrics_success": _GEN.ServerMetricsStore.record_success,
@@ -249,6 +250,8 @@ def wire_app():
     _GEN.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
     _GEN._check_configured_context_budget = saved["gen_budget"]
     _PKG._check_configured_context_budget = saved["pkg_budget"]
+    anthropic_mod._preflight_stream_context_budget = \
+        saved["anthropic_preflight"]
     _GEN.ResponseGenerator._make_sampler = saved["make_sampler"]
     _GEN.ResponseGenerator._make_thinking_budget_criteria = \
         saved["make_tb_criteria"]
@@ -737,6 +740,29 @@ def test_overflow_messages_400_matches_client_patterns(overflow):
         "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 400, r.text
     _assert_overflow_text(r.json()["error"]["message"])
+
+
+def test_overflow_messages_stream_400_before_sse(overflow):
+    # stock mlx-vlm answers this one 500 (preflight outside the 400 mapping)
+    overflow.gen.overflow_on = ("validate",)
+    r = overflow.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 20, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    _assert_overflow_text(body["error"]["message"])
+
+
+def test_messages_stream_other_500_untouched(overflow, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("engine down")
+    monkeypatch.setattr(overflow.gen, "validate_context_budget", boom)
+    r = overflow.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 20, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 500, r.text
 
 
 def test_overflow_completions_400_matches_client_patterns(overflow):

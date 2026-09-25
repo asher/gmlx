@@ -9,11 +9,12 @@ wording agent clients match to compact and retry."""
 
 from __future__ import annotations
 
+import contextvars
 import importlib
 import logging
 import os
 
-from ._common import _CHAT_PATHS, _wrap_post_routes
+from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
 _log = logging.getLogger(__name__)
 
@@ -322,11 +323,59 @@ def _check_context_budget(prompt_tokens: int, max_tokens: int):
             f"tokens, which exceeds the context window (MAX_KV_SIZE).")
 
 
+# mlx-vlm's /v1/messages handler runs the streaming preflight outside the
+# try that maps an overflow to 400, so its catch-all answers 500 and a
+# client retries instead of compacting. The preflight records the overflow
+# text here, and the endpoint wrapper answers 400 with it.
+_OVERFLOW_ROUTE_FLAG = "_kq_gguf_messages_overflow"
+_STREAM_OVERFLOW: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_stream_overflow", default=None)
+
+
+def _make_overflow_preflight(original):
+    async def preflight(*args, **kwargs):
+        try:
+            return await original(*args, **kwargs)
+        except Exception as e:
+            detail = getattr(e, "detail", None)
+            if getattr(e, "status_code", None) == 400 \
+                    and isinstance(detail, str):
+                _STREAM_OVERFLOW.set(detail)
+            raise
+    preflight.__dict__[_OVERFLOW_ROUTE_FLAG] = True
+    return preflight
+
+
+def _make_messages_overflow_endpoint(original):
+    async def endpoint(*args, **kwargs):
+        token = _STREAM_OVERFLOW.set(None)
+        try:
+            result = await original(*args, **kwargs)
+            detail = _STREAM_OVERFLOW.get()
+        finally:
+            _STREAM_OVERFLOW.reset(token)
+        if detail is not None and getattr(result, "status_code", None) == 500:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=400, content=_error_content(
+                _MESSAGES_PATHS[-1], 400, "invalid_request_error", detail))
+        return result
+    return endpoint
+
+
 def install_context_overflow_wording() -> None:
     """Replace mlx-vlm's configured-context check with one that raises the
-    same error in wording clients recognize. Idempotent."""
+    same error in wording clients recognize, and answer a streaming
+    ``/v1/messages`` overflow with 400. Idempotent."""
     gen = importlib.import_module("mlx_vlm.server.generation")
     # Callers look the name up at call time. The package re-exports it.
     gen._check_configured_context_budget = _check_context_budget
     importlib.import_module("mlx_vlm.server") \
         ._check_configured_context_budget = _check_context_budget
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    hook = anthropic._preflight_stream_context_budget
+    if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
+        anthropic._preflight_stream_context_budget = \
+            _make_overflow_preflight(hook)
+    _wrap_post_routes(importlib.import_module("mlx_vlm.server.app").app,
+                      _MESSAGES_PATHS, _OVERFLOW_ROUTE_FLAG,
+                      _make_messages_overflow_endpoint)

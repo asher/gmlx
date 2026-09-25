@@ -396,6 +396,9 @@ def test_context_overflow_check_keeps_the_rule(monkeypatch):
     for mod in (gen, pkg):
         monkeypatch.setattr(mod, "_check_configured_context_budget",
                             mod._check_configured_context_budget)
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    monkeypatch.setattr(anthropic, "_preflight_stream_context_budget",
+                        anthropic._preflight_stream_context_budget)
     sp.install_context_overflow_wording()
     sp.install_context_overflow_wording()
     check = gen._check_configured_context_budget
