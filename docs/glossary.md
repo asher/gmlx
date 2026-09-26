@@ -1,179 +1,297 @@
 # Glossary
 
-The terms these docs use, in plain words, alphabetically. The guides link
-here where a term first matters, and the reference pages use the terms as
-defined here.
+This page defines, in alphabetical order, the terms that gmlx prints and
+that the rest of the docs use. The guides link each term here where it
+first matters.
 
-Arena. The wired region of GPU memory a streamed MoE model keeps its most
-used experts in. Decode reads from the arena and fetches only the misses
-from disk. The server log prints its budget as `[stream] memory budget:`.
-See [streaming.md](streaming.md).
+## Adapter and LoRA
 
-Barge-in. Speaking over the assistant while it is talking. In voice chat
-the reply stops and the new utterance is taken.
+A LoRA adapter is a small file of low-rank weight changes that adjusts a
+base model for a task without replacing its weights. gmlx trains adapters
+on the quantized GGUF and serves them with `--adapter` or the `adapter`
+key, and one base in memory can serve several adapters.
+[LoRA fine-tuning](lora.md) describes both.
 
-Canvas. The block of token positions a diffusion model such as
-DiffusionGemma writes its reply into. Each denoise step predicts every
-position of the canvas at once, instead of one token after another.
+## APC
 
-Codec. The GGUF quantization type of one tensor, such as `Q4_K` or
-`IQ2_XXS`. A file mixes codecs across tensors, and each codec in a file
-needs a kernel for the file to load.
+Automatic prefix caching, the name that mlx-vlm and the log lines tagged
+`[apc]` use for the [prompt cache](#prompt-cache).
 
-Context and depth. Everything in the model's input, measured in
-tokens, which includes the conversation so far, pasted files and the reply
-in progress. Depth is how many tokens are already there, and it is the x
-axis of the benchmark charts because attention cost grows with it.
+## Arena
 
-Drafter. The small predictor speculative decoding uses to propose tokens.
-It is either a head inside the model's own GGUF or a separate companion
-GGUF.
+The wired region of GPU memory where a streamed MoE model keeps its most
+used experts. Decoding reads experts from the arena and fetches only the
+misses from disk. The server log prints its size as `[stream] memory
+budget:`. [Models larger than memory](streaming.md) describes it.
 
-Endpointing. Deciding that an utterance has ended, from trailing silence.
-The voice chat settings for it are in [talk.md](talk.md).
+## Budget
 
-Every-token weights. The parts of a MoE model that run on every token, which
-are attention, norms, routers and shared experts. Streaming keeps them on
-the GPU and streams only the routed experts.
+The memory a server lets its resident models use, set by
+[`server.budget_gb`](config.md#serverbudget_gb). When a new model does not
+fit in the budget, the server unloads idle models to make room. A streamed
+model has its own budget for the [arena](#arena).
 
-Expert and MoE. A mixture-of-experts model is built from many small
-sub-networks, of which each token activates a few, so decode costs only
-what the active fraction costs. The `A3B` in `35B-A3B` means 3B active
-parameters. Because most experts are idle on any token, a MoE bigger than
-RAM can still run by streaming experts from disk.
+## Canvas
 
-Feeder. The two paths that move expert weights for a streamed model. One, the
-prefill feeder, stages each layer's experts directly from the GGUF into
-GPU-visible slots. The other, the decode feeder, serves decode from the arena.
+The block of token positions that a diffusion model such as DiffusionGemma
+writes its reply into. Each denoise step predicts every position of the
+canvas at once, instead of one token after another.
 
-GDN. Gated delta net, a recurrent layer kind that some newer families such
-as Qwen3.5 and 3.6 mix with ordinary attention. A recurrent layer keeps a
-fixed-size state instead of a KV cache that grows with context, which is why
-these hybrids use less memory at depth than their size suggests.
+## Codec
 
-GGUF. The single-file model format the open-model ecosystem publishes on
-Hugging Face, where a file is a ready-to-run model. Very large models are
-split into numbered shards, which gmlx treats as a single file. gmlx runs
-GGUFs exactly as published, with no conversion.
+The GGUF quantization type of one tensor, such as `Q4_K` or `IQ2_XXS`. A
+file mixes codecs across its tensors, and every codec in a file needs a
+kernel for the file to load. `gmlx validate` lists the codecs of a file.
 
-Governor. The runtime memory watchdog in the server. It watches the
-kernel's free pages and shrinks its registered caches, the arena first,
-before the machine swaps. Its state shows at `/v1/metrics`.
+## Context and depth
 
-GQA. Grouped-query attention, the common layout where several query heads
-share one key and value head. Fewer KV heads mean a smaller KV cache per
-token, so a GQA model of a given size holds a longer context than one with
-a KV head for every query head.
+The context is everything in the model's input, measured in tokens, which
+includes the conversation so far, pasted files and the reply in progress.
+Depth is how many tokens are already in the context. The benchmark charts
+plot speed against depth, because the cost of attention grows with it.
 
-Hadamard fold. A way of storing quantized weights after a fixed rotation
-of their input dimension, so that outliers are spread across each row
-before quantization. The model rotates each activation the same way at
-run time. `gmlx validate` prints `Hadamard-folded` for such a file, and
-[hadamard-fold.md](internals/hadamard-fold.md) describes how gmlx runs
-one.
+## DFlash
 
-Hugging Face. The site the open-model ecosystem publishes on. References of
-the form `hf:org/repo/file.gguf` in these docs point there. `gmlx pull`
-downloads them.
+A drafter that proposes a whole block of tokens in one pass, by block
+diffusion, instead of one token at a time. DFlash 2 drafters exist for
+Qwen3.8-27B and Muse-Glimmer-30B, as
+[DFlash 2 drafters](speculative-decoding.md#dflash-2-drafters) describes.
 
-Hybrid cache. The per-layer cache list a model uses when its layers are not
-all the same kind, for example attention layers beside recurrent or
-sliding-window ones. Each layer keeps the cache type it needs, and the
-prompt cache and KV quantization treat such a model layer by layer. mlx-lm
-calls the container `CacheList`.
+## Discovery
 
-Intent and profile. An intent is a built-in named sampling preset from a
-model family's card, such as `@coding`, addressable on any model with no
-config. A profile is a named bundle of settings you write in the server
-config. Both are selected the same way, `model@NAME` or `--profile NAME`.
+A scan of a folder for GGUF files that gives each model an id, pairs it
+with its mmproj and drafter files, and chooses load settings.
+`gmlx init`, `gmlx sync-models` and a `gmlx serve` with no config use it,
+as [Model discovery](config.md#model-discovery) describes.
 
-K-quant and IQ. The two families of GGUF quantization. K-quants such as
-`Q4_K_M` group weights with per-block scales. IQ quants such as `IQ2_M` use
-learned codebooks for the smallest files. Both are more accurate per byte
-than a plain affine quantization.
+## Drafter
 
-Keep, pin and idle. The three states of a resident model. A pinned model
-is never unloaded. A kept model is exempt from the idle timeout but can
-still be unloaded under memory pressure, and kept is what `gmlx launch` and
-voice sessions ask for. An idle model unloads after `ttl_s` seconds without
-a request.
+The small predictor that [speculative decoding](#speculative-decoding-and-mtp)
+uses to propose tokens. It is either a [native head](#native-head) inside
+the model's own GGUF or a separate companion GGUF.
 
-KV cache. The model's stored attention state for the context, kept in RAM
-beside the weights. It grows with context length, which is why a model whose
-file barely fits leaves no memory for long conversations. `--kv-bits 8` or
-`--kv-quant-scheme kvarn` compresses it.
+## Every-token weights
 
-kvarn. The KV cache quantization scheme that keeps the most accuracy per
-bit. It rotates and normalizes the cache in 128-token records before
-rounding, so no single token or channel dominates, and it leaves the first
+The parts of a MoE model that run on every token: attention, norms,
+routers and shared experts. Streaming keeps them on the GPU and reads only
+the routed experts from disk.
+
+## Expert and MoE
+
+A mixture-of-experts model is built from many small sub-networks called
+experts, of which each token uses a few, so decoding costs only what the
+active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
+Because most experts are idle on any token, a MoE model larger than memory
+can still run by [streaming](#stream) its experts from disk.
+
+## Family defaults
+
+The sampling settings that a model family's publisher recommends, such as
+temperature and top-p, together with the built-in intents of that family.
+Each request starts from them unless it sets its own values.
+[Family defaults](family-defaults.md) lists them.
+
+## Feeder
+
+The code that moves expert weights for a streamed model. During prefill it
+stages each layer's experts from the GGUF into the [ring](#ring). During
+decoding it serves experts from the [arena](#arena) and reads the misses.
+
+## GDN
+
+Gated delta net, a recurrent layer kind that Qwen3.5, 3.6, 3.8 and some
+other families mix with attention layers. A recurrent layer keeps a state
+of fixed size instead of a KV cache that grows with the context, so these
+models use less memory at depth than their size suggests.
+
+## GGUF
+
+The single-file model format that the open-model community publishes on
+Hugging Face. Very large models are split into numbered shards, which gmlx
+treats as one file. gmlx runs GGUF files as published, with no conversion.
+
+## Governor
+
+The server's memory watchdog, whose state is under `governor` in
+`GET /v1/metrics`. When memory runs short, it stops admitting requests and
+shrinks the [MLX buffer cache](memory.md#the-mlx-buffer-cache). If that is
+not enough, it halves the prefill chunk, then evicts caches such as the
+prompt cache, and as a last step it [sheds](#shed) the largest request.
+
+## Hadamard fold
+
+A way to store quantized weights after a fixed rotation of their input,
+which spreads large values across each row before quantization. The model
+rotates each activation in the same way at run time. `gmlx validate`
+prints `Hadamard-folded` for such a file, and
+[Hadamard fold](internals/hadamard-fold.md) describes how gmlx runs one.
+
+## Hugging Face
+
+The site where the open-model community publishes models. A reference of
+the form `hf:org/repo/file.gguf` points there, and `gmlx pull` downloads
+it.
+
+## Intent and profile
+
+An intent is a built-in sampling preset from a model family, such as
+`@coding`, which works on any model with no config. A profile is a named
+set of settings that you write in the config. Both are selected in the
+same way, with `model@NAME` or `--profile NAME`.
+[Profiles](config.md#profiles) describes both.
+
+## Keep, pin and idle
+
+The three states of a resident model. A pinned model is never unloaded. A
+kept model is exempt from the idle timeout but can still be unloaded when
+memory runs short, and `gmlx launch` and voice sessions keep their model.
+An idle model unloads after `ttl_s` seconds without a request.
+
+## KV cache
+
+The model's stored attention state for the context, kept in memory beside
+the weights. It grows with the context, so a model whose file barely fits
+leaves no room for long conversations. `--kv-bits 8` or
+`--kv-quant-scheme kvarn` compresses it, as
+[KV cache quantization](kv-quantization.md) describes.
+
+## kvarn
+
+The KV cache quantization scheme that keeps the most accuracy for each
+bit. It rotates and scales the cache in records of 128 tokens before it
+rounds, so that no token or channel dominates, and it keeps the first
 tokens and the newest ones at full precision. `--kv-quant-scheme kvarn`
-selects it, and [KV cache quantization](kv-quantization.md)
-compares it with plain affine quantization.
+selects it.
 
-MCP. The Model Context Protocol, a standard way for a model to call tools
-provided by separate programs. gmlx's built-in assistant supports it.
+## MCP
 
-MLA. Multi-head latent attention, the attention layout of the DeepSeek
-family and models derived from it. Keys and values are stored as one
-compressed latent vector per token rather than as separate K and V rows, so
-the KV cache is already small and only affine KV quantization applies.
+The Model Context Protocol, a standard way for a model to call tools that
+separate programs provide. The built-in [assistant](assistant.md) supports
+it.
 
-mmproj. A companion GGUF holding a vision or audio tower. Paired with its
-language model GGUF it makes a model that accepts image or audio input. See
-[vlm.md](vlm.md).
+## MLA
 
-Prefill and decode. The two phases of answering. Prefill reads the prompt
-all at once, while decode generates the reply one token at a time, and the
-two have different speeds and are reported separately.
+Multi-head latent attention, the attention layout of DeepSeek and the
+families derived from it. Keys and values are stored as one compressed
+vector for each token instead of separate K and V rows. The KV cache is
+therefore already small, and only affine KV quantization applies.
 
-Preflight. The checks the loader runs before reading any tensor bytes,
-covering the architecture gate and the codec of each tensor. A file that
-fails preflight is refused with the reason.
+## mmproj
 
-Prestage. Reading experts the router is predicted to select before the
-router runs, which overlaps the read with compute. It moves bytes only and
-never changes routing.
+A companion GGUF that holds a vision or audio encoder. Paired with its
+language model, it makes a model that accepts images or audio, as
+[Vision and audio](vlm.md) describes.
 
-Prompt cache. The server's store of prefilled prefixes. A request that shares
-a prefix with an earlier one, such as a system prompt or the conversation so
-far, skips prefilling the shared part. mlx-vlm calls it APC. Its keys are under
-[cache](config.md#prompt-cache) in the configuration keys.
+## Native head
 
-Quant. A compressed build of a model. The suffix on a GGUF name says roughly
-the number of bits per weight. Q4 files are smaller and slightly lossier,
-while Q6 or Q8 are bigger and closer to the original.
+A small prediction layer inside a model's own GGUF that drafts tokens for
+speculative decoding, as in Qwen3.5, 3.6 and 3.8. `run` and `chat` use it
+by themselves, and the `[load]` summary line shows `drafter native-head` for a
+model that uses one.
 
-Resident. A model that is loaded and ready to answer. Several stay resident
-at once within the server's budget, and `gmlx ps` lists them.
+## Prefill and decode
 
-Ring. The GPU-visible slots the prefill feeder stages expert layers through
-on a streamed model, one layer at a time.
+The two phases of a reply. Prefill reads the whole prompt at once, and
+decoding generates the reply one token at a time. The two run at different
+speeds, so gmlx reports them separately.
 
-Speculative decoding and MTP. A drafter proposes several tokens and the full
-model verifies them in one step, giving the same output with fewer full
-passes. MTP, multi-token prediction, is the form where the draft head is
-included inside the model's own GGUF. `run`, `chat` and discovered server
-entries turn it on by themselves.
+## Preflight
 
-Stream (experts, cpu). The two placements for a model bigger than memory.
-`stream: experts` keeps the every-token weights and the KV cache on the GPU
-and streams the routed experts from disk. With `stream: cpu` the whole model
-runs on the CPU from the page cache.
+The checks that run before a model loads. The loader checks the
+architecture, the codec of each tensor, the shard set and the file size
+before it reads any tensor data. `run` and `chat` also refuse a context
+that cannot fit in memory, and the server refuses a request whose prompt
+cannot fit.
 
-Structured read. How `/v1/systemone` answers a question with one denoise
-step. The canvas holds the answer template with each label position
-filled by a random token, and the model's distribution at that position
-over the question's labels is the answer. A sample is one such read with
-its own random tokens, and a request averages one or more samples. See
-[structured-reads.md](internals/structured-reads.md).
+## Prestage
 
-Thinking model. A model trained to reason before answering, streaming that
-text inside markers such as `<think>`. The chat client shows it under a
-label by default.
+Reading the experts that the router is predicted to select before the
+router runs, so that the read overlaps with compute. It moves bytes only
+and never changes which experts run.
 
-Token. The unit models read and write, about three quarters of an English
-word on average. Speeds are quoted in tokens per second.
+## Prompt cache
 
-Wired memory. Memory the GPU has pinned so the kernel cannot page it out.
-Weights and the arena are wired, and the server budgets them against the
-machine's working set instead of its total RAM.
+The server's store of prefilled prompts. A request that shares its start
+with an earlier one, such as a system prompt or the conversation so far,
+skips prefilling the shared part. [Prompt cache](prompt-cache.md)
+describes it.
+
+## Quant
+
+A compressed version of a model. The suffix of a GGUF name gives the
+approximate bits per weight, such as `Q4_K_M` or `IQ2_M`. Lower bits make a
+smaller file that loses more quality.
+
+The families are the K-quants, which store weights in blocks with scales,
+the IQ quants, which use codebooks for the smallest files, and the legacy
+`Q4_0` and `Q8_0` types. Newer files also use the 4-bit float types MXFP4
+and NVFP4, and ternary types such as `STQ1_0` and `PQ2_0` that store each
+weight in 2 bits or less.
+
+## Resident
+
+A model that is loaded and ready to answer. Several models can stay
+resident at once within the server's [budget](#budget), and `gmlx ps` lists
+them.
+
+## Ring
+
+The GPU-visible slots through which the [feeder](#feeder) stages the
+experts of a streamed model during prefill, one layer at a time.
+
+## Runfile
+
+The small file that a background server writes under `~/.cache/gmlx/`,
+with its process id, address, command line and config. `gmlx status`,
+`stop`, `restart` and `logs` find the server through it.
+
+## Shed
+
+Stopping a request early to free memory. When the [governor](#governor)
+has tried everything else, it ends the largest request with an error of
+type `server_overloaded_shed`, so that the other requests keep running.
+
+## Speculative decoding and MTP
+
+A [drafter](#drafter) proposes several tokens, and the model checks them
+in one pass. The output stays the same, with fewer full passes. MTP,
+multi-token prediction, is the form with a [native head](#native-head).
+[Speculative decoding](speculative-decoding.md) describes both.
+
+## Stream
+
+The two placements for a model larger than memory. With `stream: experts`,
+the [every-token weights](#every-token-weights) and the KV cache stay on
+the GPU, and the routed experts are read from disk. With `stream: cpu`, the
+whole model runs on the CPU from the page cache.
+
+## Structured read
+
+How [`/v1/systemone`](decisions.md) answers its questions in one denoise
+step. The [canvas](#canvas) holds an answer template with a random token at
+each answer position. The model's prediction at that position, limited to
+the question's labels, is the answer. A sample is one such read with its
+own random tokens, and a request averages one or more samples.
+
+## Thinking model
+
+A model trained to reason before it answers, which writes that reasoning
+between markers such as `<think>` and `</think>`. The chat client shows the
+reasoning under a label by default.
+
+## Token
+
+The unit that models read and write, about three quarters of an English
+word on average. Speeds are given in tokens per second.
+
+## Wired memory
+
+Memory that the GPU has pinned, so that macOS cannot page it out. Weights
+and the arena are wired, which is why the server budgets them against the
+[working set](#working-set) instead of the total RAM.
+
+## Working set
+
+The share of RAM that macOS lets the GPU use, which depends on the
+machine. Memory errors and the `cannot fit` refusal compare what a model
+needs with the working set.
