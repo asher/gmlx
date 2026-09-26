@@ -434,15 +434,16 @@ def test_chat_missing_file_errors(capsys):
     assert "no such file" in capsys.readouterr().err
 
 
-def test_chat_server_flags_require_assistant(capsys):
-    # --base-url/--host/--port target a server; without --assistant chat loads
-    # in-process, so accepting them silently loads a surprise second copy.
-    with pytest.raises(SystemExit) as ei:
-        chat.cmd_chat(["m.gguf", "--base-url", "http://127.0.0.1:8210/v1"])
-    assert ei.value.code == 2
-    assert "--assistant" in capsys.readouterr().err
-    with pytest.raises(SystemExit):
-        chat.cmd_chat(["m.gguf", "--port", "8210"])
+def test_chat_server_flags_never_load_in_process(monkeypatch):
+    # --base-url/--host/--port imply --server, so a GGUF path beside one
+    # goes down the server path instead of loading a surprise second copy.
+    seen = []
+    monkeypatch.setattr(chat, "_setup_assistant",
+                        lambda args: seen.append(args.server) or 2)
+    for flag, val in (("--base-url", "http://127.0.0.1:8210/v1"),
+                      ("--port", "8210")):
+        assert chat.cmd_chat(["m.gguf", flag, val]) == 2
+    assert seen == [True, True]
 
 
 def test_run_missing_file_errors(capsys):
