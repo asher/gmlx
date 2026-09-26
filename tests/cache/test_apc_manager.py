@@ -40,6 +40,24 @@ def test_build_reads_the_env_from_env_reads(monkeypatch):
     assert m.disk is None
 
 
+def test_disk_namespace_key_wins_over_the_model_path(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeStore:
+        def __init__(self, path, *, namespace, **kw):
+            seen["ns"] = namespace
+
+    monkeypatch.setattr(apc, "DiskBlockStore", FakeStore)
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    monkeypatch.setenv("APC_DISK_PATH", str(tmp_path))
+    monkeypatch.setenv("APC_DISK_NAMESPACE", "shared")
+    build_apc_manager(model_namespace="/m/a.gguf")
+    assert seen["ns"] == "shared"
+    monkeypatch.delenv("APC_DISK_NAMESPACE")
+    build_apc_manager(model_namespace="/m/a.gguf")
+    assert seen["ns"] == "/m/a.gguf"
+
+
 def test_build_defaults_match_stock(monkeypatch):
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
     for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):

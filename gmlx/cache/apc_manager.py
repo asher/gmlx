@@ -597,8 +597,8 @@ def build_apc_manager(model_namespace=None):
     the stock var to ``0``. Absent gate (a non-pooled embedding of the
     bridge) builds nothing - stock wiring applies there untouched. The knob
     vars keep their stock names and parsing: ``APC_BLOCK_SIZE``,
-    ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family, with the disk
-    namespace defaulting to the model path.
+    ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family. The disk namespace
+    is ``APC_DISK_NAMESPACE`` when set, else the model path.
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
@@ -611,7 +611,8 @@ def build_apc_manager(model_namespace=None):
     disk = None
     disk_path = os.environ.get("APC_DISK_PATH")
     if disk_path:
-        ns = model_namespace or os.environ.get("APC_DISK_NAMESPACE", "default")
+        ns = (os.environ.get("APC_DISK_NAMESPACE") or model_namespace
+              or "default")
         max_gb = float(os.environ.get("APC_DISK_MAX_GB", 0))
         max_bytes = int(max_gb * (1 << 30)) if max_gb > 0 else None
         workers = int(os.environ.get("APC_DISK_WORKERS", "1"))

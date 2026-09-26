@@ -63,6 +63,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `cache.disk.namespace` now names the disk-tier namespace. The model path
+  always took its place, so the key had no effect.
 - The server applies `stream_fast_disk` and `gmlx serve --stream-fast-disk`
   to the decode feeder. Only `run` and `chat` applied them.
 - A chat theme with a new name under `themes` no longer crashes the markdown
