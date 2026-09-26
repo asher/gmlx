@@ -1,6 +1,6 @@
 # Environment variables
 
-This page lists every environment variable a user can set, in one place.
+Every environment variable a user can set is listed here.
 Most of them are also reachable as a flag or a config key, and that is the
 normal way to set one, because an exported variable applies to every model
 the process loads and to every server started from that shell. The

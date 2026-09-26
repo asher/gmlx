@@ -1,10 +1,10 @@
 # Hadamard-folded GGUFs
 
-This page describes how gmlx runs a GGUF whose weights were stored under a
-Hadamard rotation, such as the PrismML Ternary Bonsai files. It is for
-contributors who change the loader, the qwen35 projection paths or the
-rotation kernels. Users need only [A Hadamard-folded file refuses to
-load](../troubleshooting.md#a-hadamard-folded-file-refuses-to-load).
+A Hadamard-folded GGUF stores its weights under a rotation, as the
+PrismML Ternary Bonsai files do, and gmlx undoes the rotation at run time
+in the loader, the qwen35 projection paths and the rotation kernels. Users
+need only
+[A Hadamard-folded file refuses to load](../troubleshooting.md#a-hadamard-folded-file-refuses-to-load).
 
 ## The fold
 

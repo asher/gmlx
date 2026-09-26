@@ -1,8 +1,8 @@
 # Troubleshooting
 
-This page lists the failures that people meet most often, grouped by the
-command that shows them, each with its cause and fix. It also says where
-gmlx keeps its logs and files.
+Most failures in a new setup have a known cause and a fix. They are grouped
+here by the command that shows them, followed by where gmlx keeps its logs
+and files.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
 kernels, the config and its model files, the background server, the login

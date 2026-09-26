@@ -1,9 +1,9 @@
 # Performance tuning
 
-This page explains what makes a local model fast on Apple Silicon, lists
-the gmlx features that change speed and memory, and shows how to measure
-your own setup. Each feature has a page of its own, linked from the table
-below.
+A local model's speed on Apple Silicon depends mostly on memory bandwidth,
+the quant and the depth of the context. gmlx has features that trade among
+speed, memory and exact output, each with a page of its own linked from the
+table below, and a benchmark mode to measure your own setup.
 
 - [What determines speed](#what-determines-speed)
 - [The features](#the-features)

@@ -1,9 +1,9 @@
 # Streaming measurements
 
-This page holds the samples and case studies behind [Models larger than
-memory](../streaming.md). It shows what the lossless over-budget path
-produces, what each lossy setting did on four models and how a setting is
-certified, as contributor evidence rather than an operator guide.
+The samples and case studies behind
+[Models larger than memory](../streaming.md) show what the lossless
+over-budget path produces, what each lossy setting did on four models, and
+how a setting is certified.
 
 ## What the over-budget case produces
 

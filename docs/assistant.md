@@ -1,9 +1,9 @@
 # Assistant
 
 The built-in assistant gives a served model tools and a long-term memory.
-This page covers the tool loop, the tools and the memory store, and the
-three ways to use the assistant from one `assistant` block of the
-configuration file:
+It runs a tool loop over MCP tools, keeps facts in a memory store, and
+works in three places from one `assistant` block of the configuration
+file:
 
 | Surface | How to start it | Where tools run |
 |---------|-----------------|-----------------|

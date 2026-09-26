@@ -1,10 +1,9 @@
 # Structured read measurements
 
-This page holds the timings behind [Structured reads](structured-reads.md),
-for contributors who change the read engine, the route or its prompt. They
-show where the time of a `/v1/systemone` decision goes on one machine, how
-the request options and the wording of a question change the answers, and
-the commands that measure both again.
+The timings behind [Structured reads](structured-reads.md) show where the
+time of a `/v1/systemone` decision goes on one machine, how the request
+options and the wording of a question change the answers, and the
+commands that measure both again.
 
 - [Setup](#setup)
 - [Prefill](#prefill)

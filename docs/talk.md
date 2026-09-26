@@ -1,8 +1,8 @@
 # Voice chat
 
-`gmlx talk` is a voice client for the models that the gmlx server serves.
-This page covers how to set it up, how a session works, and how to
-interrupt, tune and script it.
+`gmlx talk` is a voice client for the models that the gmlx server serves. It
+listens for a wake phrase, sends what you say to the model, and speaks the
+reply as it streams, and you can interrupt, tune and script it.
 
 The client records your speech, and the server turns it into text, streams
 the reply of the model, and turns each part of the reply into speech while

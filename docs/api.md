@@ -1,10 +1,11 @@
 # HTTP API
 
-This page is for anyone writing a client against `gmlx serve` or putting it
-behind a load balancer. It covers the endpoints, how a request names a
-model, the metrics a dispatcher reads, which request fields each protocol
-honors, and what the server refuses. The YAML that configures the server is
-in [Configuration](config.md).
+`gmlx serve` speaks the OpenAI and Anthropic chat protocols, plus endpoints
+for capacity, residency and the prompt cache that a client or a load
+balancer can read. A request names a model by id, profile or alias, each
+protocol honors its own set of request fields, and the server refuses what
+cannot fit with a typed error. The YAML that configures the server is in
+[Configuration](config.md).
 
 - [Addressing a model in a request](#addressing-a-model-in-a-request)
 - [Endpoints](#endpoints)

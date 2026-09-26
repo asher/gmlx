@@ -1,8 +1,8 @@
 # Memory and the KV cache
 
 A model needs memory for its weights and for the KV cache of its context.
-This page explains how to estimate both, which settings limit the KV
-cache, and how gmlx manages the memory that macOS lets the GPU use.
+Both can be estimated before a load, a few settings limit the KV cache, and
+gmlx keeps its GPU memory within the share of RAM that macOS allows.
 
 - [The weights and the KV cache](#the-weights-and-the-kv-cache)
 - [Settings that limit memory](#settings-that-limit-memory)

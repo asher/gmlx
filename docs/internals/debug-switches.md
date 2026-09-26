@@ -1,6 +1,6 @@
 # Debug switches
 
-This page lists the environment variables that change how gmlx builds or
+Debug switches are environment variables that change how gmlx builds or
 routes a model, or make it report what it did, so that a contributor can
 isolate a defect. None is a tuning setting. The disabling switches slow the
 model or turn a fix off, the logging switches cost nothing but output, and

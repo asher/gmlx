@@ -1,8 +1,8 @@
 # CLI reference
 
-Each verb of the `gmlx` command with its flags, defaults and exit codes.
-This page says what a flag does, while the guides linked from each section
-explain when to use it.
+Each verb of the `gmlx` command has its flags, defaults and exit codes
+listed here. A section says what a flag does, while the guides linked from
+it explain when to use it.
 
 | Verb | Does |
 |------|------|

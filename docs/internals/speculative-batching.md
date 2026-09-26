@@ -1,10 +1,10 @@
 # Speculative batching
 
-This page describes how the server runs speculative decoding and continuous
-batching together, for contributors. It covers the two decode loops, the
-width cap and the transitions that move a request between them without
-interrupting its token stream. What speculation is and how to enable it are
-in [Speculative decoding](../speculative-decoding.md). The cap key is
+The server runs speculative decoding and continuous batching together,
+with two decode loops, a width cap, and transitions that move a request
+between the loops without interrupting its token stream. What speculation
+is and how to enable it are in
+[Speculative decoding](../speculative-decoding.md). The cap key is
 [`speculative_width_cap`](../config.md#modelsspeculative_width_cap).
 
 ## The two decode loops

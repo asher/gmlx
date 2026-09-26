@@ -1,9 +1,9 @@
 # Serving architecture
 
-This page describes how the gmlx server serves a loaded GGUF with continuous
-batching over HTTP. It is for contributors and covers the implementation,
-while the config surface is documented in [Configuration](../config.md) and
-the endpoints in [HTTP API](../api.md).
+The gmlx server serves a loaded GGUF with continuous batching over HTTP,
+as a layer of patches and policy over mlx-vlm's server. The config surface
+is documented in [Configuration](../config.md) and the endpoints in
+[HTTP API](../api.md).
 
 The mechanism is stock mlx-vlm and the policy is gmlx. Upstream owns the
 FastAPI app object, the protocol handlers and SSE formatters, the engine's

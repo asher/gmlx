@@ -1,8 +1,8 @@
 # Glossary
 
-This page defines, in alphabetical order, the terms that gmlx prints and
-that the rest of the docs use. The guides link each term here where it
-first matters.
+Each term below is one that gmlx prints or that the rest of the docs use,
+in alphabetical order. The guides link each term here where it first
+matters.
 
 ## Adapter and LoRA
 

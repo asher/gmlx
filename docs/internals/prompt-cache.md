@@ -1,10 +1,8 @@
 # Prompt cache internals
 
-This page describes how the prompt cache chooses its tiers for each
-architecture, the counters that show whether reuse works, and the
-environment switches that tune or disable each layer. It is for
-contributors, while operators read [Prompt cache](../prompt-cache.md).
-Upstream calls the cache APC, and the switches use that name.
+The prompt cache chooses its tiers for each architecture, exposes counters
+that show whether reuse works, and has environment switches that tune or
+disable each layer. Operators read [Prompt cache](../prompt-cache.md).
 
 ## Which tier serves which architecture
 

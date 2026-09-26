@@ -1,9 +1,9 @@
 # Benchmarks
 
-This page compares the server throughput of gmlx with llama.cpp on the
-same GGUF files, one request at a time, at context depths from 512 to more
-than 200K tokens. It is for readers who want the numbers behind the speed
-claims and the guidance of the performance pages.
+gmlx serves the same GGUF files faster than llama.cpp, one request at a
+time, at context depths from 512 to more than 200K tokens. The tables and
+charts here give the numbers behind that claim and behind the guidance of
+the performance pages.
 
 gmlx prefills faster on every model at every measured depth. Above a depth
 of about 4K tokens it also decodes faster, and the gap grows as the

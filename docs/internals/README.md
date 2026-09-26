@@ -1,8 +1,9 @@
 # Internals
 
-These pages describe how gmlx works inside, for people who change its
-code. The user guides start at the [documentation home](../README.md), and
-the development setup is in the [contributing guide](../../CONTRIBUTING.md).
+The internals pages describe how gmlx works inside, for people who change
+its code. The user guides start at the [documentation home](../README.md),
+and the development setup is in the
+[contributing guide](../../CONTRIBUTING.md).
 
 ## How it works
 

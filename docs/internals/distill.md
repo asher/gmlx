@@ -1,10 +1,10 @@
 # Distillation internals
 
-This page gives the memory arithmetic of the `gmlx distill cache` head
-sub-chunk and of the training head's live set, and the measurements behind
-the guide's defaults. It is for contributors changing either. The user guide
-is [Distillation](../distill.md), the flags are under [gmlx
-distill](../cli.md#gmlx-distill), and every GB here is decimal.
+The `gmlx distill cache` head sub-chunk and the training head's live set
+follow simple memory arithmetic, and a set of measurements sits behind the
+guide's defaults. The user guide is [Distillation](../distill.md), the
+flags are under [gmlx distill](../cli.md#gmlx-distill), and every GB here
+is decimal.
 
 - [The teacher pass](#the-teacher-pass)
 - [The training head](#the-training-head)

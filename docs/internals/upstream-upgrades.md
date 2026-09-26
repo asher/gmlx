@@ -7,8 +7,7 @@ table in `gmlx/upstream/seams.py`, well over a hundred entries, and
 `python -m gmlx.upstream.seams` prints the current count with its drift
 report. Every seam is fragile by design: upstream point releases move the
 symbols, so the surface is safe only under a qualified set of versions.
-This page records that set and is the maintainer's procedure for changing
-it.
+The qualified set, and the procedure for changing it, follow.
 
 The versions are declared in `pyproject.toml` in three different ways.
 mlx-vlm is an exact pin, `mlx-vlm==X.Y.Z`, because it owns the seams.
