@@ -63,6 +63,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx launch open-webui` keeps an `AUDIO_TTS_VOICE` that you export
+  instead of replacing it with the Kokoro default.
 - The default prompt-cache disk folder follows `XDG_CACHE_HOME`, like the
   other gmlx caches.
 - `cache.disk.namespace` now names the disk-tier namespace. The model path
