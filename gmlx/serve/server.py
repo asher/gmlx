@@ -2039,9 +2039,16 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         install_ignore_eos()
         print("[server] ignore-eos: decode runs to max_tokens (EOS suppressed)")
 
-    if reload_fn is not None:
-        import signal
+    import signal
 
+    if reload_fn is None and hasattr(signal, "SIGHUP"):
+        # No file to read again. Without a handler, SIGHUP would stop the server.
+        def _ignore_sighup(_sig, _frame):
+            print("[server] SIGHUP ignored: started without a config file, "
+                  "so there is nothing to reload")
+
+        signal.signal(signal.SIGHUP, _ignore_sighup)
+    if reload_fn is not None:
         def _on_sighup(_sig, _frame):
             try:
                 print(f"[server] SIGHUP config reload: {reload_fn() or {}}")

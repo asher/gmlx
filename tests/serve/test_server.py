@@ -1333,10 +1333,17 @@ def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     assert "SIGHUP config reload" in out and "kill -HUP" in out
 
 
-def test_serve_no_sighup_without_reload_fn(monkeypatch):
+def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):
+    # A server with no config file has nothing to reload, and SIGHUP must not
+    # stop it.
+    import signal as signal_mod
+
     calls = _stub_serving_stack(monkeypatch)
     assert srv._serve(_one_model_cfg(), _ns(), None) == 0
-    assert "signal" not in calls
+    num, handler = calls["signal"]
+    assert num == signal_mod.SIGHUP
+    handler(num, None)
+    assert "SIGHUP ignored" in capsys.readouterr().out
 
 
 # token-queue timeout: config value drives mlx-vlm's per-request env knob
