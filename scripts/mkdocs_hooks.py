@@ -7,6 +7,9 @@ the file on GitHub, at the release tag when the build runs for a tag.
 A long page opens with a list of links to its own sections for readers on
 GitHub. The site shows the same list beside the page, so the hook removes
 the list from the page body.
+
+A `# doctest: build` line that opens a code block marks the block for
+tests/test_docs_config.py. The hook removes the marker from the site page.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import re
 
 _REPO_URL = "https://github.com/asher/gmlx"
 _FENCE = re.compile(r"^\s*(```|~~~)")
+_DOCTEST_MARKER = "# doctest: build"
 _CONTENTS_ITEM = re.compile(r"[-*] \[[^\]]+\]\(#[^)\s]+\)", re.DOTALL)
 _LINK = re.compile(r"(\]\(|\b(?:src|href)=\")([^)\"\s#]+)(#[^)\"\s]*)?")
 
@@ -57,9 +61,15 @@ def on_page_markdown(markdown, page, config, files):
     docs_dir = config["docs_dir"]
     out = []
     in_fence = False
+    fence_opened = False
     for line in markdown.split("\n"):
+        if fence_opened and line.strip() == _DOCTEST_MARKER:
+            fence_opened = False
+            continue
+        fence_opened = False
         if _FENCE.match(line):
             in_fence = not in_fence
+            fence_opened = in_fence
         elif not in_fence:
 
             def repl(m):
