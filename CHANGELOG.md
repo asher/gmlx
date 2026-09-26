@@ -20,6 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off. The flag could only turn it on, which it already was by default.
 - The server logs the block and exact prompt-cache tiers at load, as it
   already did for the checkpoint tier.
+- `gmlx doctor` prints the macOS version and warns when it is older than
+  26.2, the version that mlx-kquant's kernels need.
 
 ### Changed
 

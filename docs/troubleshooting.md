@@ -24,8 +24,8 @@ or chat app that does not connect, read its entry under
 
 gmlx needs macOS 26.2 or newer, because mlx-kquant's Metal kernels are built
 for that version. On an earlier version, the install fails or the
-kernels cannot run. Update macOS in System Settings, then install gmlx
-again.
+kernels cannot run. `gmlx doctor` prints the macOS version and warns
+below 26.2. Update macOS in System Settings, then install gmlx again.
 
 ### `gmlx: command not found` in a new terminal
 

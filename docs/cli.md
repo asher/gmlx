@@ -1293,8 +1293,8 @@ These flags control `gmlx distill census`:
 
 `gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
 FAIL or SKIP line for each check, with the fix named. No check accesses the
-network. The checks cover the runtime and kernels, the config, and the
-files of each configured model and service. They also cover background
+network. The checks cover the macOS version, the runtime and kernels, the
+config, and the files of each configured model and service. They also cover background
 servers, the login items and the launcher that background starts use,
 optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
 address. The last checks
