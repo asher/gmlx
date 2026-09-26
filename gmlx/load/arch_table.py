@@ -71,7 +71,7 @@ _FAMILY_NOTES = {
     "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured; Hadamard-folded files (PrismML Ternary Bonsai, PTQ1_0/PQ2_0) rotate activations at run time"),
     "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
-    "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.models.qwen4_exp.model; all norms arrive +1 baked (passthrough). The MTP head is not in the GGUF (the converter drops it): --speculative needs the qwen4exp-mtp companion GGUF (autodetected next to the target, or --draft-gguf) built from the HF mtp.* tensors. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower; mmproj and the companion MTP compose, so a --mmproj load speculates on text turns"),
+    "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.models.qwen4_exp.model; all norms arrive +1 baked (passthrough). The MTP head is not in the model shards: speculative decoding reads a companion GGUF, either the qwen4exp-mtp one built from the HF mtp.* tensors or the llama.cpp mtp-*.gguf NextN sidecar (arch qwen4exp, block num_hidden_layers, one joined eh_proj), autodetected beside the target or in an MTP/ folder, or named by --draft-gguf. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower; mmproj and the companion MTP compose, so a --mmproj load speculates on text turns"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
     "llama":          ("llama",    "Llama-2/3, Mistral-7B-as-llama, Vicuna; SPM merges reconstructed from scores. Sparse-MoE variants (Mixtral-8x7B/8x22B) ship under this arch with an expert count -> routed to model_type=mixtral (block_sparse_moe + SwitchGLU); legacy per-expert split weights are coalesced to the stacked form on load"),
     "mistral3":       ("llama",    "llama.cpp 'mistral3' = Ministral-3 / Mistral-Small-3.1, Llama layout"),
@@ -114,7 +114,7 @@ _CAVEATS = {
     "phi3": "Pass hf_source for the 128K long-context variants.",
     "hy_v3": "Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them.",
     "hyv4": "The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused.",
-    "qwen4exp": "The MTP head needs the companion GGUF next to the target or --draft-gguf.",
+    "qwen4exp": "Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`.",
     "kimi-k3": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
     "glm5next": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
     "minimax-m3": "Without indexer tensors or an indexer sidecar file, a GGUF runs dense. Its output is exact to 2048 tokens and degrades beyond that.",
@@ -169,9 +169,10 @@ MTP_DRAFTER_ARCHES = {
     # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
     "qwen3_5": ("dflash",),
     "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
-    # Qwen3.8-Flash-Next MTP head, extracted from the HF mtp.* tensors into
-    # a companion GGUF (the llama.cpp converter drops the head).
-    "qwen4_exp": ("qwen4exp-mtp",),
+    # Qwen3.8-Flash-Next MTP head: gmlx's qwen4exp-mtp companion built from
+    # the HF mtp.* tensors, or the llama.cpp mtp-*.gguf NextN sidecar, which
+    # keeps the target's arch.
+    "qwen4_exp": ("qwen4exp-mtp", "qwen4exp"),
 }
 
 

@@ -89,6 +89,44 @@ def test_companion_accepts_dflash_alone(tmp_path, monkeypatch):
     assert disc.find_mtp_companion(str(target)) == str(tmp_path / "dspark-q8.gguf")
 
 
+def test_companion_finds_a_same_arch_sidecar_in_a_sibling_mtp_folder(
+        tmp_path, monkeypatch):
+    """The Hugging Face layout keeps the quant shards in a subfolder and the
+    llama.cpp MTP sidecars in MTP/. The sidecar keeps the target's arch, so
+    only a drafter verdict makes it a companion, never the target's own
+    shards."""
+    quant, mtp = tmp_path / "UD-Q4_K_XL", tmp_path / "MTP"
+    quant.mkdir()
+    mtp.mkdir()
+    target = quant / "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+    shard = quant / "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf"
+    sidecar = mtp / "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+    for p in (target, shard, sidecar):
+        p.write_bytes(b"GGUF")
+    metas = {str(target): {"arch": "qwen4exp", "kind": "model"},
+             str(shard): {"arch": "qwen4exp", "kind": "model"},
+             str(sidecar): {"arch": "qwen4exp", "kind": "drafter"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    arches = ("qwen4exp-mtp", "qwen4exp")
+    assert disc.find_mtp_companion(str(target), arches) == str(sidecar)
+    metas[str(sidecar)]["kind"] = "model"
+    assert disc.find_mtp_companion(str(target), arches) is None
+
+
+def test_companion_prefers_the_model_folder_over_an_mtp_folder(
+        tmp_path, monkeypatch):
+    (tmp_path / "MTP").mkdir()
+    target = tmp_path / "model.gguf"
+    near, far = tmp_path / "z-mtp.gguf", tmp_path / "MTP" / "a-mtp.gguf"
+    for p in (target, near, far):
+        p.write_bytes(b"GGUF")
+    metas = {str(near): {"arch": "qwen4exp-mtp"},
+             str(far): {"arch": "qwen4exp-mtp"},
+             str(target): {"arch": "qwen4exp", "kind": "model"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target), ("qwen4exp-mtp",)) == str(near)
+
+
 def test_backbone_field_implies_drafter():
     """A future/unknown drafter arch is still caught by its target-backbone field."""
     c = _classify({"general.architecture": "gemma4-weird-draft",

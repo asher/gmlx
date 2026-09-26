@@ -524,6 +524,32 @@ def kv_line(model_id, policy: KvQuantPolicy) -> str:
     return f"{head}{policy.width_label} -> {policy.summary()}"
 
 
+def mla_kv_decline(model) -> str | None:
+    """Why this model's attention cannot read an affine-quantized cache, or
+    None. The mlx-lm MLA attention (DeepSeek-V3, Kimi-K2) and the ones
+    ported from it score the latent cache by matmul, straight off what
+    update_and_fetch returns. Every layer is checked, because a hybrid such
+    as Kimi-K3 opens on linear-attention layers. An MLA attention that
+    dequantizes its fetch sets reads_quantized_kv."""
+    lm = getattr(model, "language_model", model)
+    for layer in getattr(lm, "layers", None) or []:
+        attn = getattr(layer, "self_attn", None)
+        if (attn is not None and hasattr(attn, "kv_a_proj_with_mqa")
+                and not getattr(attn, "reads_quantized_kv", False)):
+            return (f"{_model_type(lm) or 'MLA'} attention reads the latent "
+                    "cache directly; KV stays fp16")
+    return None
+
+
+def _model_type(lm) -> str | None:
+    for src in (lm, getattr(lm, "args", None), getattr(lm, "config", None)):
+        mt = (src.get("model_type") if isinstance(src, dict)
+              else getattr(src, "model_type", None))
+        if mt:
+            return mt
+    return None
+
+
 def resolve_and_report(stack, *, model_id=None, **kwargs) -> KvQuantPolicy:
     """Resolve, print the canonical [kv] line to stderr, exit 2 on error.
     The caller handles a dropped verdict."""

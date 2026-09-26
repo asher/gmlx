@@ -62,6 +62,6 @@ family, backend, status and caveat:
 | `qwen3moe` | qwen3 | mlx-lm | loadable |  |
 | `qwen3next` | qwen | mlx-lm | loadable |  |
 | `qwen3vlmoe` | qwen3 | mlx-lm | loadable |  |
-| `qwen4exp` | qwen3 | mlx-lm | loadable | The MTP head needs the companion GGUF next to the target or --draft-gguf. |
+| `qwen4exp` | qwen3 | mlx-lm | loadable | Speculative decoding needs a companion MTP GGUF beside the model or in an `MTP` folder, or named with `--draft-gguf`. |
 | `seed_oss` | seed_oss | mlx-lm | loadable |  |
 | `smollm3` | llama | mlx-lm | loadable |  |

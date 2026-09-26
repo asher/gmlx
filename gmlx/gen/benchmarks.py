@@ -211,11 +211,14 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
 
     from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-    from gmlx.cache.kv_policy import arm_stack, resolve_and_report
+    from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
+                                      resolve_and_report)
 
+    decline = mla_kv_decline(model)
     policy = resolve_and_report(
         _mpc(model), kv_bits=kv_bits, kv_group_size=kv_group_size,
-        quantized_kv_start=quantized_kv_start)
+        quantized_kv_start=quantized_kv_start,
+        can_quantize_kv=decline is None, no_kv_reason=decline)
     if policy.verdict == "dropped":
         return {}, None
     kwargs = {

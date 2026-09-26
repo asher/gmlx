@@ -302,3 +302,33 @@ def test_mla_attention_declines_to_fp16(monkeypatch):
     pol = skv.resolve_for_load(rg, "kimi")
     assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
     assert "deepseek_v3 attention reads the latent cache" in pol.single.reason
+
+
+def test_mla_decline_checks_every_layer(monkeypatch):
+    """Kimi-K3 opens on linear-attention layers, so the MLA layers behind
+    them decline too, instead of quantizing a cache the attention reads
+    by matmul."""
+    monkeypatch.setenv("KV_BITS", "8")
+    rg = _rg()
+    rg.model.model_type = "kimi_k3"
+    rg.model.layers = [
+        SimpleNamespace(self_attn=SimpleNamespace()),
+        SimpleNamespace(self_attn=SimpleNamespace(kv_a_proj_with_mqa=object())),
+        SimpleNamespace(self_attn=SimpleNamespace()),
+        SimpleNamespace(self_attn=SimpleNamespace(kv_a_proj_with_mqa=object())),
+    ]
+    pol = skv.resolve_for_load(rg, "k3")
+    assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
+    assert "kimi_k3 attention reads the latent cache" in pol.single.reason
+
+
+def test_mla_that_reads_quantized_kv_quantizes(monkeypatch):
+    """An MLA attention that dequantizes its fetch (GLM-5.3) keeps its
+    affine KV."""
+    monkeypatch.setenv("KV_BITS", "8")
+    rg = _rg()
+    rg.model.layers = [SimpleNamespace(self_attn=SimpleNamespace(
+        kv_a_proj_with_mqa=object(), reads_quantized_kv=True))
+        for _ in range(4)]
+    pol = skv.resolve_for_load(rg, "glm")
+    assert pol.single.verdict in ("full", "partial")

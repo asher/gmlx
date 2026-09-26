@@ -174,8 +174,19 @@ def test_resolve_auto_on_for_native_head_clean(native_head, gguf):
 
 def test_resolve_auto_off_without_native_head(gguf, monkeypatch):
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_companion_drafter", lambda p: None)
     on, note = cli.resolve_speculative(_args([gguf]), gguf)
     assert not on and note == ""
+
+
+def test_resolve_auto_on_for_companion_family(gguf, monkeypatch):
+    # A Qwen3.8-Flash-Next or Muse Glimmer text run pairs its companion
+    # the way the --mmproj path does, not only a DeepSeek-V4 one.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_companion_drafter",
+                        lambda p: "/x/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf")
+    on, note = cli.resolve_speculative(_args([gguf]), gguf)
+    assert on and "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" in note
 
 
 @pytest.mark.parametrize("flag", [
@@ -354,7 +365,7 @@ def test_drafter_available_no_mtp_opts_out(gguf, mmproj, monkeypatch):
 
 def test_drafter_available_none_without_head_or_draft(gguf, mmproj, monkeypatch):
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
-    monkeypatch.setattr(cli, "_vlm_companion_drafter", lambda p: None)
+    monkeypatch.setattr(cli, "_companion_drafter", lambda p: None)
     assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is False
 
 
@@ -362,12 +373,12 @@ def test_drafter_available_companion_auto(gguf, mmproj, monkeypatch):
     # A discoverable companion for a companion-only family auto-enables
     # VLM text-only MTP, same as the text path's auto.
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
-    monkeypatch.setattr(cli, "_vlm_companion_drafter",
+    monkeypatch.setattr(cli, "_companion_drafter",
                         lambda p: "/x/mtp-companion.gguf")
     assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is True
 
 
-def test_vlm_companion_drafter_restricted_to_auto_families(monkeypatch):
+def test_companion_drafter_restricted_to_auto_families(monkeypatch):
     import gmlx.load.discovery as discovery
 
     monkeypatch.setattr(discovery, "find_mtp_companion",
@@ -375,11 +386,11 @@ def test_vlm_companion_drafter_restricted_to_auto_families(monkeypatch):
     arch = {"v": "qwen4exp"}
     monkeypatch.setattr(discovery, "header_meta",
                         lambda p: {"arch": arch["v"]})
-    assert cli._vlm_companion_drafter("/x/t.gguf") == "/x/companion.gguf"
+    assert cli._companion_drafter("/x/t.gguf") == "/x/companion.gguf"
     # qwen35 has a drafter row (dflash2) but its native head wins over a
     # sidecar: no auto.
     arch["v"] = "qwen35"
-    assert cli._vlm_companion_drafter("/x/t.gguf") is None
+    assert cli._companion_drafter("/x/t.gguf") is None
 
 
 def test_speculative_forwards_template_config_and_warns_new_drops(

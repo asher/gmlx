@@ -15,7 +15,8 @@ from dataclasses import dataclass
 
 from gmlx.serve.mem_preflight import _get, _lm_config
 from gmlx.cache.kv_policy import (KvQuantPolicy, dropped_policy, kv_line,
-                                  off_policy, resolve_kv_quant_policy)
+                                  mla_kv_decline, off_policy,
+                                  resolve_kv_quant_policy)
 
 _log = logging.getLogger(__name__)
 
@@ -146,20 +147,6 @@ def _load_window_scheme(rg) -> str:
     return scheme
 
 
-def _mla_decline(model) -> str | None:
-    """Why this model's attention cannot read a quantized cache: the
-    mlx-lm MLA attention (DeepSeek-V2/V3, Kimi-K2) scores the latent
-    cache by matmul, straight off what update_and_fetch returns."""
-    lm = model.language_model if hasattr(model, "language_model") else model
-    layers = getattr(lm, "layers", None) or []
-    attn = getattr(layers[0], "self_attn", None) if layers else None
-    if attn is not None and hasattr(attn, "kv_a_proj_with_mqa"):
-        c = _lm_config(model)
-        return (f"{_get(c, 'model_type') or 'MLA'} attention reads the "
-                "latent cache directly; KV stays fp16")
-    return None
-
-
 def resolve_for_load(rg, model_id: str):
     """Resolve both batch modes for a freshly built ResponseGenerator.
 
@@ -243,7 +230,7 @@ def resolve_for_load(rg, model_id: str):
             key_bits=getattr(rg, "kv_key_bits", None),
             value_bits=getattr(rg, "kv_value_bits", None),
             tail_tokens=_serve_tail_tokens(model_id)))
-    decline = _mla_decline(rg.model)
+    decline = mla_kv_decline(rg.model)
     if decline is not None:
         kw.update(can_quantize_kv=False, no_kv_reason=decline)
     pol = ServeKvPolicy(

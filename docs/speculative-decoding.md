@@ -27,12 +27,16 @@ models do. Other families use a separate drafter GGUF, a companion file
 such as the gemma-4 assistant drafter or a DFlash 2 drafter.
 
 On `run` and `chat`, speculation turns on by itself for a model with a
-native head, and for DeepSeek-V4 when its companion drafter is in the same
-folder. It stays off under `--stream-experts`, `--stream-cpu` and the
-[lossy MoE settings](streaming.md#the-lossy-settings). With `--adapter`, the adapted model verifies each
-draft, so the output matches plain decoding with the adapter. With `--mmproj`, the companion drafters of
-DeepSeek-V4, Qwen3.8-Flash-Next and Muse Glimmer also turn it on for text
-turns.
+native head, and for DeepSeek-V4, Qwen3.8-Flash-Next and Muse Glimmer when
+the loader finds their companion drafter. It looks in the model's folder,
+then in an `MTP` folder inside that folder or beside it, which is where a
+Hugging Face repo that keeps each quant in its own folder puts the drafters.
+With `--mmproj`, the same drafters turn it on for text turns.
+
+Speculation stays off under `--stream-experts`, `--stream-cpu` and the
+[lossy MoE settings](streaming.md#the-lossy-settings). With `--adapter`,
+the adapted model verifies each draft, so the output matches plain decoding
+with the adapter.
 
 `--speculative` turns speculation on with a native head, or with a
 companion that the loader finds beside a DeepSeek-V4, Qwen3.8-Flash-Next or

@@ -715,8 +715,9 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
 
     Precedence: --no-speculative/--no-mtp (off) > --native-mtp (the head; drops a
     configured draft_gguf) > explicit --speculative/--mtp or --draft-gguf (on) >
-    auto. Auto enables MTP iff the GGUF has a native head and no hard-incompatible
-    flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
+    auto. Auto enables MTP iff the GGUF has a native head, or a companion
+    drafter for a companion-only family, and no hard-incompatible flag
+    (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
     walk can't honor are dropped with a warning at generation (--no-mtp honors
     them via plain decoding), not deferred. The note is empty when the user was
     explicit."""
@@ -744,7 +745,7 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
         # --speculative/--mtp above still opts in.
         return False, ""
     if not _has_native_mtp_head(gguf_path):
-        companion = _deepseek4_mtp_companion(gguf_path)
+        companion = _companion_drafter(gguf_path)
         if companion is None:
             return False, ""
         return True, (
@@ -791,28 +792,12 @@ def _sibling_drafter(gguf_path: str) -> str | None:
         return None
 
 
-def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
-    """Companion MTP drafter GGUF for a deepseek4 target, if one sits next to
-    it (auto enable; the loader re-resolves the same path when
-    draft_gguf_path is not given). Header-cache peeks only."""
-    try:
-        import gmlx.load.arch_table as arch_table
-        from gmlx.load.discovery import find_mtp_companion, header_meta
-
-        meta = header_meta(gguf_path)
-        if not meta or meta.get("arch") != "deepseek4":
-            return None
-        return find_mtp_companion(gguf_path,
-                                  arch_table.drafter_arches("deepseek_v4"))
-    except Exception:
-        return None
-
-
-def _vlm_companion_drafter(gguf_path: str) -> str | None:
-    """A same-directory companion drafter for a companion-only family
-    (``MTP_COMPANION_AUTO_MODEL_TYPES``), auto-enabling VLM text-only MTP the
-    way the text path's auto does. Narrower than :func:`_sibling_drafter` on
-    purpose: qwen3_5's native head wins over a sidecar, so a DFlash2
+def _companion_drafter(gguf_path: str) -> str | None:
+    """The companion drafter of a companion-only family
+    (``MTP_COMPANION_AUTO_MODEL_TYPES``), which auto-enables MTP on the text
+    path and VLM text-only MTP alike. The loader re-resolves the same path
+    when draft_gguf_path is not given. Narrower than :func:`_sibling_drafter`
+    on purpose: qwen3_5's native head wins over a sidecar, so a DFlash2
     companion stays explicit ``--draft-gguf``. Header-cache peeks only."""
     try:
         import gmlx.load.arch_table as arch_table
@@ -850,7 +835,7 @@ def _vlm_mtp_drafter_available(args) -> bool:
     if getattr(args, "draft_gguf", None):
         return True  # companion drafter
     return (_has_native_mtp_head(args.gguf)
-            or _vlm_companion_drafter(args.gguf) is not None)
+            or _companion_drafter(args.gguf) is not None)
 
 
 def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
@@ -1789,7 +1774,8 @@ def _run_vlm(args) -> int:
         extra["thinking_start_token"] = args.thinking_start_token
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
-    if args.kv_bits is not None and not vlm_declines_kvarn(args):
+    if (args.kv_bits is not None and not vlm_declines_kvarn(args)
+            and not vlm_declines_mla(model)):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -2169,6 +2155,20 @@ def vlm_declines_kvarn(args) -> bool:
     return True
 
 
+def vlm_declines_mla(model) -> bool:
+    """Whether the VLM path must keep an fp16 cache because the model's MLA
+    attention cannot read an affine-quantized one. Prints the warning.
+    mlx-vlm quantizes every layer it is handed, with no per-layer policy."""
+    from gmlx.cache.kv_policy import mla_kv_decline
+
+    reason = mla_kv_decline(model)
+    if reason is None:
+        return False
+    print(f"warning: --kv-bits dropped on the VLM path: {reason}",
+          file=sys.stderr)
+    return True
+
+
 def maybe_load_from_config(args, parser, argv) -> int | None:
     """If the positional model isn't an on-disk file (nor a remote ref), resolve it as a
     server-config model id/alias and overlay that model's settings onto ``args`` (and
@@ -2357,11 +2357,6 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         print(f"error: no such file: {args.gguf}{hint}", file=sys.stderr)
         return 2
     args.gguf = gguf
-    rc = apply_family_defaults(args, parser, argv)
-    if rc is not None:
-        return rc
-    # After the config/family overlays: either may have seeded a cap.
-    resolve_max_tokens(args)
     for flag, val in (
         ("--mmproj", args.mmproj),
         ("--draft-gguf", args.draft_gguf),
@@ -2370,6 +2365,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
+    rc = apply_family_defaults(args, parser, argv)
+    if rc is not None:
+        return rc
+    # After the config/family overlays: either may have seeded a cap.
+    resolve_max_tokens(args)
     from gmlx.load.arch_table import UnsupportedArchError
     from gmlx.load.preflight import UnsupportedCodecError
 
@@ -2397,7 +2397,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             if not images and not audios and _vlm_mtp_drafter_available(args):
                 if (not getattr(args, "draft_gguf", None)
                         and not _has_native_mtp_head(args.gguf)):
-                    companion = _vlm_companion_drafter(args.gguf)
+                    companion = _companion_drafter(args.gguf)
                     if companion:
                         print(f"[mtp] companion MTP drafter detected: "
                               f"{os.path.basename(companion)}")

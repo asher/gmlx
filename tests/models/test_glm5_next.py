@@ -1036,3 +1036,29 @@ def test_training_skips_the_gathered_sparse_prefill(monkeypatch):
     with pytest.raises(AssertionError, match="gathered path reached"):
         model(ids)
     _default_key_step(model, 24)
+
+
+def test_affine_kv_quantizes_the_mla_latent():
+    """The MLA attention dequantizes its latent fetch, so the MLA decline
+    leaves GLM-5.3 alone and a quantized stack decodes close to fp16."""
+    from gmlx.cache.kv_policy import (mla_kv_decline, quantize_stack,
+                                      resolve_kv_quant_policy)
+
+    model = _random_model(_tiny_args(kv_lora_rank=64))
+    assert mla_kv_decline(model) is None
+    stack = model.make_cache()
+    pol = resolve_kv_quant_policy(stack, kv_bits=8, kv_group_size=64)
+    _, converted = quantize_stack(stack, pol)
+    assert converted > 0
+    ref = model.make_cache()
+    # Past _N_SELECT the prefill and the decode take the sparse routes.
+    prompt = mx.array([list(range(1, _N_SELECT + 6))])
+    model(prompt, cache=stack)
+    model(prompt, cache=ref)
+    for tok in (7, 8):
+        step = mx.array([[tok]])
+        got, want = model(step, cache=stack), model(step, cache=ref)
+        mx.eval(got, want)
+        assert bool(mx.isfinite(got).all())
+        assert float(mx.abs(got - want).max()) < 0.05
+

@@ -414,39 +414,50 @@ def find_mtp_companion(
     path: str,
     drafter_arch: str | tuple | None = None,
 ) -> str | None:
-    """Path of an MTP drafter GGUF (arch in ``drafter_arch``) sitting in the
-    same directory as ``path``, or ``None``. ``drafter_arch`` defaults to every
-    arch in :data:`arch_table.MTP_DRAFTER_ARCHES`; a caller that knows the
-    target model type passes that row instead (see
-    :func:`arch_table.drafter_arches`). Header-only peeks through
-    :func:`header_meta`'s stat-validated cache, so a directory scan costs one
-    stat per already-seen sibling. Earlier arches in the tuple win over later
-    ones (dspark over legacy nextn); within an arch, lexically first wins."""
+    """Path of an MTP drafter GGUF (arch in ``drafter_arch``) beside ``path``,
+    or ``None``. ``drafter_arch`` defaults to every arch in
+    :data:`arch_table.MTP_DRAFTER_ARCHES`; a caller that knows the target
+    model type passes that row instead (see :func:`arch_table.drafter_arches`).
+
+    The search covers the model's own folder, then an ``MTP/`` folder inside
+    it, then an ``MTP/`` folder beside it, where a Hugging Face repo that
+    keeps its quants in subfolders puts the heads. A file with a loadable
+    model arch counts only when its tensor table marks it as a NextN
+    sidecar, so the target's own shards never match. Header-only peeks
+    through :func:`header_meta`'s stat-validated cache. Earlier arches in
+    the tuple win over later ones (dspark over legacy nextn); within an
+    arch, the nearer folder wins, then the lexically first name."""
     if drafter_arch is None:
         drafter_arch = tuple(dict.fromkeys(
             a for row in _arch_table.MTP_DRAFTER_ARCHES.values() for a in row))
     arches = (drafter_arch,) if isinstance(drafter_arch, str) else tuple(drafter_arch)
     ap = os.path.abspath(os.path.expanduser(path))
     parent = os.path.dirname(ap)
-    try:
-        names = sorted(os.listdir(parent))
-    except OSError:
-        return None
+    folders = [parent, os.path.join(parent, "MTP"),
+               os.path.join(os.path.dirname(parent), "MTP")]
     best: tuple[int, str] | None = None
-    for name in names:
-        if not name.endswith(".gguf"):
+    for folder in dict.fromkeys(folders):
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
             continue
-        p = os.path.join(parent, name)
-        if p == ap:
-            continue
-        meta = header_meta(p)
-        arch = meta.get("arch") if meta else None
-        if arch in arches:
+        for name in names:
+            if not name.endswith(".gguf"):
+                continue
+            p = os.path.join(folder, name)
+            if p == ap:
+                continue
+            meta = header_meta(p)
+            arch = meta.get("arch") if meta else None
+            if arch not in arches:
+                continue
+            if arch in supported_arches() and meta.get("kind") != "drafter":
+                continue
             rank = arches.index(arch)
             if best is None or rank < best[0]:
                 best = (rank, p)
             if rank == 0:
-                break
+                return p
     return best[1] if best else None
 
 

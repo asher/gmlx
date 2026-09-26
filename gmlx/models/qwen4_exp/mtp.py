@@ -2,14 +2,21 @@
 # Copyright (c) 2026 Asher Feldman
 """Qwen3.8-Flash-Next (qwen4exp) MTP: speculative target wrapper + drafter.
 
-The MTP head ships only in the HF safetensors (``mtp.*``; the llama.cpp
-converter drops it), so it reaches gmlx as a companion GGUF (arch
-``qwen4exp-mtp``, built by the lab's ``extract-qwen4exp-mtp-gguf.py``) that
-the loader autodetects next to the target. Reference forward (ollama
+The MTP head reaches gmlx as a companion GGUF that the loader autodetects
+beside the target, in one of two layouts. Arch ``qwen4exp-mtp`` (built by
+the lab's ``extract-qwen4exp-mtp-gguf.py``) keeps the HF ``mtp.*`` tree.
+The llama.cpp ``mtp-*.gguf`` sidecar keeps arch ``qwen4exp`` and stores
+the head as block ``num_hidden_layers`` with ``nextn.*`` extras, its two
+input projections joined into one ``eh_proj`` (see
+:data:`QWEN4EXP_NEXTN_MAP`). Reference forward (ollama
 ``x/models/qwen4_exp`` mtpDraft.Forward):
 
     e = fc_embedding(pre_fc_norm_embedding(embed(next_token)))      [B,S,D]
     x = fc_hidden(pre_fc_norm_hidden(h_4d)) + e[:, :, None, :]       [B,S,4,D]
+
+The sidecar computes the same x as eh_proj over the per-stream concat
+[pre_fc_norm_embedding(e), pre_fc_norm_hidden(h_4d)], embedding half first
+(llama.cpp ``src/models/qwen4exp.cpp`` graph_mtp).
     x = layer(x)             # HC + QSA attention + HC + MoE, one layer
     logits = lm_head(hyper_connection_mixer(x))
 
@@ -49,15 +56,29 @@ from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
 MTP_ARCH = "qwen4exp-mtp"
 
+# The llama.cpp sidecar's nextn.* extras on the drafter tree. Its block
+# tensors ride the text remap (parse_gguf_name) like a native head's.
+QWEN4EXP_NEXTN_MAP = {
+    "eh_proj": "eh_proj.weight",
+    "enorm": "pre_fc_norm_embedding.weight",
+    "hnorm": "pre_fc_norm_hidden.weight",
+    "hc_head_norm": "hyper_connection_mixer.norm.weight",
+    "hc_head_down": "hyper_connection_mixer.down.weight",
+    "hc_head_up": "hyper_connection_mixer.up.weight",
+}
+
 
 @dataclass
 class Qwen4ExpMTPConfig:
     """``text`` is the target's ModelArgs; ``block_size`` the block total
-    (drafts + bonus) the engine requests by default."""
+    (drafts + bonus) the engine requests by default. ``fused_eh_proj``
+    builds the llama.cpp sidecar's single ``eh_proj`` in place of
+    ``fc_embedding`` and ``fc_hidden``."""
 
     text: Any
     block_size: int = 4
     compress_ratio: int = 4
+    fused_eh_proj: bool = False
 
 
 @dataclass
@@ -190,8 +211,11 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
             compress_ratios=[int(config.compress_ratio)],
             ple_layer_ids=[],
         )
-        self.fc_embedding = nn.Linear(D, D, bias=False)
-        self.fc_hidden = nn.Linear(D, D, bias=False)
+        if config.fused_eh_proj:
+            self.eh_proj = nn.Linear(2 * D, D, bias=False)
+        else:
+            self.fc_embedding = nn.Linear(D, D, bias=False)
+            self.fc_hidden = nn.Linear(D, D, bias=False)
         self.pre_fc_norm_embedding = nn.RMSNorm(D, eps=eps)
         self.pre_fc_norm_hidden = nn.RMSNorm(hc * D, eps=eps)
         self.layers = [q4.DecoderLayer(head_args, 0)]
@@ -261,9 +285,14 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
             raise ValueError(
                 f"Qwen4ExpMTPDrafter expects the 4-stream hidden [B,S,hc,D], "
                 f"got shape {tuple(hidden.shape)}")
-        e = self.fc_embedding(self.pre_fc_norm_embedding(
-            self._input_embed(tokens) * self._input_embed_scale))
-        x = self.fc_hidden(self._hidden_norm(hidden)) + e[:, :, None, :]
+        e = self.pre_fc_norm_embedding(
+            self._input_embed(tokens) * self._input_embed_scale)
+        h = self._hidden_norm(hidden)
+        if "eh_proj" in self:
+            e = mx.broadcast_to(e[:, :, None, :], h.shape)
+            x = self.eh_proj(mx.concatenate([e, h], axis=-1))
+        else:
+            x = self.fc_hidden(h) + self.fc_embedding(e)[:, :, None, :]
         c = (self._cache if cache is None else cache)[0]
         mask = create_attention_mask(x[:, :, 0, :], c)
         return self.layers[0](x, tokens, mask=mask, cache=c,
