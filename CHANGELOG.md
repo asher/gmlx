@@ -16,6 +16,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   offline, and `server.systemone` holds the route's settings.
 - The docs are published at https://asher.github.io/gmlx/ with navigation
   and search, rebuilt from each release.
+- `--no-gpu-keepwarm` and `server.gpu_keepwarm: false` turn GPU keep-warm
+  off. The flag could only turn it on, which it already was by default.
+- The server logs the block and exact prompt-cache tiers at load, as it
+  already did for the checkpoint tier.
 
 ### Changed
 
@@ -45,6 +49,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx init` writes only the settings you chose and the model entries,
   under a header that links the configuration reference, instead of every
   option as a commented example.
+- Only a pinned model is held for the life of the server. The default or
+  sole model of a config still loads at start, but it now unloads after its
+  idle timeout or under memory pressure like any other model.
 
 ### Fixed
 
@@ -67,6 +74,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx distill gen` with `--serve-arg=--adapter` exited because the server
   lists the adapted model and `<id>-base`. It now sends its requests to the
   adapted model.
+- A model entry with `ttl_s: null` took the server's idle timeout. It now
+  never unloads, as `null` already meant under `server.defaults`.
 
 ## [0.4.17] - 2026-09-25
 
