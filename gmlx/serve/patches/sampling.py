@@ -1,6 +1,6 @@
 """Sampling-surface patches: profile injection into unset request
-fields, the chat ``max_completion_tokens`` cap, XTC as a per-request logits
-processor, and the fast positioned sampler."""
+fields, the chat ``max_completion_tokens`` cap, the until-EOS default cap,
+XTC as a per-request logits processor, and the fast positioned sampler."""
 
 from __future__ import annotations
 
@@ -101,6 +101,67 @@ def install_max_completion_tokens() -> None:
     beats a profile ``max_tokens``."""
     _install_gen_args_transform(_MAX_COMPLETION_FLAG,
                                 _apply_max_completion_tokens)
+
+
+# Until-EOS default output cap
+# A request with no output cap from the client, a profile or --max-tokens
+# runs until the model stops or its context fills, as `gmlx run` does.
+# mlx-vlm reads its default cap from MLX_VLM_MAX_TOKENS everywhere, so the
+# server sets it to UNTIL_EOS and each request swaps that value for the room
+# its context has left, once the prompt length is known.
+UNTIL_EOS = 1 << 30
+_UNTIL_EOS_FLAG = "_kq_gguf_until_eos"
+
+
+def native_context(model) -> int | None:
+    """The context length the model was trained for, or None."""
+    for obj in (model, getattr(model, "language_model", None)):
+        for cfg in (getattr(obj, "config", None), getattr(obj, "args", None)):
+            for c in (cfg, getattr(cfg, "text_config", None)):
+                if isinstance(c, dict):
+                    v = c.get("max_position_embeddings")
+                else:
+                    v = getattr(c, "max_position_embeddings", None)
+                if isinstance(v, int) and v > 0:
+                    return v
+    return None
+
+
+def until_eos_cap(prompt_tokens: int, limit: int | None, fallback: int) -> int:
+    """The output cap that fills the context: ``limit`` less the prompt, at
+    least 1. ``fallback`` when the context length is unknown."""
+    if not limit:
+        return fallback
+    return max(1, int(limit) - int(prompt_tokens))
+
+
+def install_until_eos_default() -> None:
+    """Swap the UNTIL_EOS marker for the room left in the context, at the
+    first ResponseGenerator hook that sees both the arguments and the prompt.
+    Install after every other ``_make_thinking_budget_criteria`` patch.
+    Idempotent."""
+    from .api_contract import model_context_limit
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    cls = getattr(gen, "ResponseGenerator", None)
+    if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
+        return
+    orig = cls._make_thinking_budget_criteria
+    if getattr(orig, _UNTIL_EOS_FLAG, False):
+        return
+
+    def _make_thinking_budget_criteria(self, args, input_ids):
+        if getattr(args, "max_tokens", None) == UNTIL_EOS:
+            n = getattr(input_ids, "size", None)
+            n = int(n) if n is not None else len(input_ids)
+            limit = (model_context_limit(serving.get_active_spec())
+                     or native_context(self.model))
+            args.max_tokens = until_eos_cap(n, limit, gen.DEFAULT_MAX_TOKENS)
+        return orig(self, args, input_ids)
+
+    _make_thinking_budget_criteria.__dict__.update(getattr(orig, "__dict__", {}))
+    _make_thinking_budget_criteria.__dict__[_UNTIL_EOS_FLAG] = True
+    cls._make_thinking_budget_criteria = _make_thinking_budget_criteria
 
 
 # XTC sampling (request extras / profile -> per-request logits processor)

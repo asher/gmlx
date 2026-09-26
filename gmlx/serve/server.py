@@ -965,7 +965,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--pin", action="append", default=[], metavar="ID_OR_PATH",
                     help="Pin a model (id or path) so it is never evicted (repeatable).")
     ap.add_argument("--max-tokens", type=int, default=None,
-                    help="Server default max completion tokens.")
+                    help="Cap a request that sets no output cap of its own "
+                         "(default: until EOS or the context fills).")
     ap.add_argument("--no-family-defaults", action="store_true",
                     help="Do not seed each model family's model-card sampling "
                          "under profiles and requests (config mode: "
@@ -1810,6 +1811,9 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                           hf_source=a.hf_source)
     if a.max_tokens is not None:
         os.environ["MLX_VLM_MAX_TOKENS"] = str(a.max_tokens)
+    else:
+        from .patches.sampling import UNTIL_EOS
+        os.environ.setdefault("MLX_VLM_MAX_TOKENS", str(UNTIL_EOS))
     if getattr(a, "draft_block_size", None):
         # Read lazily at drafter-load time (server_bridge_vlm.load_drafter).
         os.environ["GMLX_DRAFT_BLOCK_SIZE"] = str(a.draft_block_size)

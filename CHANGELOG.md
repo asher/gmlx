@@ -23,6 +23,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A server request that sets no output cap runs until the model stops or its
+  context fills, as `gmlx run` does, instead of stopping at 2048 tokens.
+  `gmlx serve --max-tokens` and a profile's `max_tokens` still set a cap.
 - The package and Homebrew license metadata declare Apache-2.0 beside
   BUSL-1.1 and MIT, since gmlx ships Apache-2.0 files from omlx, misaki and
   vLLM.
