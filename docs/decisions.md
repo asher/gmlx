@@ -355,11 +355,12 @@ Each chunk is read on a prefilled prompt. Under the default
 `"shared"` chunks read one prompt. A later stage extends the prompt before
 it when the tokens allow, and a `think: "auto"` rerun prefills again.
 
-The default `"auto"` samples read a chunk once, and `auto_max - 1` more
-times when an answer is uncertain. Samples share a decoder pass up to the
-model's canvas length in canvas tokens, 256 for diffusiongemma-26B-A4B-it,
-so 8 samples of width 32 or 4 of width 64 take one pass. A shared pass
-costs more than one read and less than reading its samples one at a time.
+With the default `samples: "auto"`, each chunk is read once, and
+`auto_max - 1` more samples are read when an answer is uncertain. Samples
+share a decoder pass up to the model's canvas length in canvas tokens, 256
+for diffusiongemma-26B-A4B-it, so 8 samples of width 32 or 4 of width 64
+take one pass. A shared pass costs more than one read and less than
+reading its samples one at a time.
 
 `steps` above 1 costs up to one more decoder pass per step, since a read
 stops once it converges. A thought costs the most, because the model

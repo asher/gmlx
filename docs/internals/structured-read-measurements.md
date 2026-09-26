@@ -126,8 +126,9 @@ request below, and every thought used the whole budget.
 The thought on the e2e script's one-question ticket never converged and
 ran to the cap of 48 steps. The others stopped after 6 to 11 steps,
 including the same ticket asked five questions, so the cost depends on the
-whole prompt and not on the state alone. The last five are the requests
-that thought under [Thinking on mixed requests](#thinking-on-mixed-requests).
+whole prompt and not on the state alone. The last four are the requests
+that thought on Q4_K_M under
+[Thinking on mixed requests](#thinking-on-mixed-requests).
 
 ## Whole decisions
 
@@ -184,8 +185,8 @@ users the wording advice.
 These errors come from the model, not from the read. On the same prompt
 and canvas, a read matches mlx-vlm's own decoder step in every label
 log-probability to four decimals. A greedy generation on the decision
-prompt writes the same wrong answers, `q: yes` for both sesame questions
-about pad thai.
+prompt gives the same contradictory answers, `q: yes` to both the sesame
+question about pad thai and its negation.
 
 ## Accuracy
 

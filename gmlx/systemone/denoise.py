@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Ported from vllm/model_executor/models/diffusion_gemma.py (the unembedding,
 # the slot log-probabilities and the multi-step structured-read loop) at
-# ab3de6edf2 and modified for gmlx (Apache-2.0; see licenses/vllm-LICENSE). entropy_transfer_mask follows mlx-vlm's
-# _diffusion_entropy_transfer_mask (MIT; see licenses/mlx-vlm-LICENSE).
+# ab3de6edf2 and modified for gmlx (Apache-2.0; see licenses/vllm-LICENSE).
+# entropy_transfer_mask follows mlx-vlm's _diffusion_entropy_transfer_mask
+# (MIT; see licenses/mlx-vlm-LICENSE).
 """The read rules taken from vLLM: the unembedding, the log-probabilities a
 slot reports, and the denoise loop a read runs past one step.
 
