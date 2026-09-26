@@ -1,8 +1,8 @@
 # Hadamard-folded GGUFs
 
 A Hadamard-folded GGUF stores its weights under a rotation, as the PrismML
-Ternary Bonsai files do, and gmlx undoes the rotation at run time. Users
-need only
+Ternary Bonsai files do, and gmlx undoes the rotation at run time. The load error that such a file
+can raise is in
 [A Hadamard-folded file refuses to load](../troubleshooting.md#a-hadamard-folded-file-refuses-to-load).
 
 ## The fold

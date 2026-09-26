@@ -1,8 +1,8 @@
 # Debug switches
 
 Debug switches are environment variables that change how gmlx builds or
-routes a model, or make it report what it did, so that a contributor can
-isolate a defect with an A/B run. The user-facing variables are in
+routes a model, or make it report what it did, so that an A/B run can
+isolate a defect. The user-facing variables are in
 [Environment variables](../env-vars.md).
 
 The disabling switches slow the model or turn a fix off. Most logging

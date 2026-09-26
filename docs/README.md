@@ -6,7 +6,7 @@ MLX framework. One command, `gmlx`, chats with a model in the terminal,
 serves it over OpenAI and Anthropic compatible APIs, connects coding agents
 to it and talks to it by voice.
 
-Where to start depends on what you want:
+These pages are the starting points:
 
 - To run your first model, follow the [Quickstart](quickstart.md).
 - To serve models to apps and agents, read
@@ -94,7 +94,7 @@ Where to start depends on what you want:
 
 ## Development
 
-- [Internals](internals/README.md): How gmlx works, for contributors.
+- [Internals](internals/README.md): How gmlx works inside.
 - [Adding a GGUF architecture](internals/adding-architectures.md): What
   supporting a new model family involves.
 - [Contributing](../CONTRIBUTING.md): Development setup, tests and commit

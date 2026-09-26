@@ -464,5 +464,5 @@ template that writes each question id with its answer, with a random token
 at each answer position. One denoise step then gives the distribution over
 each question's labels. The whole procedure is a
 [structured read](glossary.md#structured-read), and
-[Structured reads](internals/structured-reads.md) describes the mechanism
-for contributors.
+[Structured reads](internals/structured-reads.md) describes the
+mechanism.

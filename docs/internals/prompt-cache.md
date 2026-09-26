@@ -1,7 +1,7 @@
 # Prompt cache internals
 
 The prompt cache chooses its tier for each architecture and exposes
-counters that show whether reuse works. Operators read
+counters that show whether reuse works. The user guide is
 [Prompt cache](../prompt-cache.md).
 
 ## Which tier serves which architecture
