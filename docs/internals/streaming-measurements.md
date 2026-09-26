@@ -332,7 +332,7 @@ aggressive. On Hy3, multi-step arithmetic broke first, well before
 coherence, formatting or code. `moe_layer_shed: 0.20` alone dropped
 arithmetic tasks, and so did `moe_layer_shed: 0.10` with
 `moe_miss_shed: 0.75`, although each of those two is clean alone. On the same
-battery, miss shed alone stayed clean down to 0.75 and expert mass down to
+battery, miss-shed alone stayed clean down to 0.75 and expert-mass down to
 0.70. Past the quality threshold, long generations show a second symptom,
 stray token substitutions such as wrong-script digits or a bullet character
 inside code.
@@ -395,10 +395,11 @@ The scene simplifies as the settings become more aggressive, well before
 anything breaks, and all of the first three pages ran clean. The black
 frame is the past-the-threshold symptom on a real run. That page failed on
 its first stray token, a bullet character where an operator belonged, with
-CJK characters spliced into two identifiers further down the file. The
-middle setting also shows the sampling interaction described under Hy3,
-since its page was generated clean at top-p 0.95 while the same setting
-sampled untruncated put one wrong-script token into an 11k-token run. The
+CJK characters spliced into two identifiers further down the file.
+
+Sampling interacts with the middle setting as described under [Hy3](#hy3).
+Its page was generated clean at top-p 0.95, while the same setting sampled
+untruncated put one wrong-script token into an 11k-token run. The
 tok/s figures are whole-run averages of these single generations at
 different lengths, not controlled A/B numbers, so for the measured
 comparison read the Hy3 table. Each screenshot links to its generated page.
@@ -458,8 +459,8 @@ medians unless noted.
 | Arena token split, second-turn prefill | Kimi-K3 UD-IQ2_XXS, M5 Max 128 GB, 48-token turn | 0.25 tok/s | 2.13 tok/s |
 | Weight pin | Kimi-K3 UD-IQ2_XXS 662 GB, 62 GB every-token set, M5 Max 128 GB | 0.10 tok/s decode, 0.62 prefill | 0.38 decode, 0.97 prefill |
 | Pin excludes converted tensors | HY4 preview release, F32 output head held as bf16 | 22.6 GB pinned | 19.7 GB pinned, 3.5% fewer expert bytes per token |
-| GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
-| GPU keep-warm | Hy3 IQ4_XS, layer shed 0.10 with miss shed 0.90 | 4.01 tok/s | 5.29 tok/s |
+| GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss-shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
+| GPU keep-warm | Hy3 IQ4_XS, layer-shed 0.10 with miss-shed 0.90 | 4.01 tok/s | 5.29 tok/s |
 | Streamable lookup table | `qwen4exp` Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
 
 Lookahead prestage recall of the next layer's actual top-k is about 78% on

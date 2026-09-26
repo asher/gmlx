@@ -10,7 +10,8 @@ gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 ```
 
 `gmlx init` writes a [configuration file](config.md) that lists your models
-and the folders that hold them. The folder can be empty or not exist yet.
+and the folders that hold them. The `~/models` folder can be empty or not
+exist yet.
 Once the file exists, `gmlx pull` downloads into its first folder and adds
 the model to the file, with an id made from the file name. Here the id is
 `qwen3.8-27b-ud-q6`, and every gmlx command accepts it in place of a path.
@@ -36,15 +37,15 @@ After the reply, `run` prints the prompt and generation speeds in tokens
 per second and the peak memory. The chat keeps its KV cache between
 turns, so each turn processes only the new message. In the chat, type
 `/help` for the commands, press Esc to stop a reply, and type `/exit` to
-quit. [Chat](chat.md) describes the rest.
+quit. Both commands also accept the path of a GGUF file, which needs no
+configuration file. [Chat](chat.md) describes the rest.
 
 Both commands start from the sampling values that the model's publisher
 recommends, which gmlx keeps as [family defaults](family-defaults.md). An
 intent such as `@coding` or `@creative` after the id selects the
 publisher's values for that kind of task, as in
 `gmlx chat qwen3.8-27b-ud-q6@creative`. `gmlx profiles` prints the values
-of every intent for each family. Both commands also accept the path of a
-GGUF file, which needs no configuration file.
+of every intent for each family.
 
 ## Serving models
 

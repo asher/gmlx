@@ -21,8 +21,9 @@ instead.
 The request and response follow the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide).
 A Jev client that sends text states works with gmlx unchanged. A decision
-is deterministic, so the same request and `seed` give the same numbers on
-the same model file and server settings.
+is deterministic. The `seed` field, 42 by default, sets the random tokens
+that each read starts from, so the same request and seed give the same
+numbers on the same model file and server settings.
 
 ## Why DiffusionGemma
 
@@ -69,7 +70,9 @@ that answers when the `model` field of a request is absent or names nothing
 that the server knows. A Jev client that sends a name such as `jev-latest`
 reaches the model this way. A file with one model, or with
 [`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
-key out. The other `server.systemone` keys set the request limits and the
+key out. A `profile` field in the request selects the
+[profile](config.md#profiles) that `model` resolves with. The other
+`server.systemone` keys set the request limits and the
 thought defaults, and
 [Structured decisions](config.md#structured-decisions) in the
 configuration reference lists them.
@@ -416,9 +419,7 @@ when its state is unlike the ones you tested.
 | 500 | The engine failed, with the error type `server_error`. |
 
 The model is text only, so the server refuses a request with `images`,
-and it refuses a multipart body. A `profile` field selects the
-[profile](config.md#profiles) that `model` resolves with. `seed`, 42 by
-default, sets the random tokens that each read starts from.
+and it refuses a multipart body.
 
 A decision holds the model from its first read to its last, so a chat
 request to the same model waits behind it. Before the server queues a

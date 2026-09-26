@@ -285,14 +285,14 @@ when fewer experts are used. Each setting reduces a different cost:
 | Setting | Flag | Config key | Reduces | Acts on |
 |---------|------|------------|---------|---------|
 | Expert cap | `--moe-experts K` | [`moe_experts`](config.md#modelsmoe_experts) | It cuts reads and compute, because each token uses K experts. | It acts on prefill and decoding. |
-| Expert mass | `--moe-expert-mass P` | [`moe_expert_mass`](config.md#modelsmoe_expert_mass) | It cuts reads and compute, because each token keeps the fewest experts that cover share P of the gate weight. | It acts on prefill and decoding. |
-| Miss shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | It cuts disk waits by dropping only experts that are not in the arena, lowest scores first, while the kept experts cover share P. | It acts on decoding, with the decode feeder. |
-| Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | It cuts the remaining disk waits, because lookahead reads only the experts that miss shed would keep. | It acts on decoding, with miss shed and lookahead. |
-| Layer shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | It cuts the fixed cost of each layer by skipping its routed experts with probability P. The shared expert still runs. | It acts on decoding. |
+| Expert-mass | `--moe-expert-mass P` | [`moe_expert_mass`](config.md#modelsmoe_expert_mass) | It cuts reads and compute, because each token keeps the fewest experts that cover share P of the gate weight. | It acts on prefill and decoding. |
+| Miss-shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | It cuts disk waits by dropping only experts that are not in the arena, lowest scores first, while the kept experts cover share P. | It acts on decoding, with the decode feeder. |
+| Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | It cuts the remaining disk waits, because lookahead reads only the experts that miss-shed would keep. | It acts on decoding, with miss-shed and lookahead. |
+| Layer-shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | It cuts the fixed cost of each layer by skipping its routed experts with probability P. The shared expert still runs. | It acts on decoding. |
 
-The expert cap and expert mass combine, so
+The expert cap and expert-mass combine, so
 `--moe-experts 6 --moe-expert-mass 0.9` uses at most 6 experts and then
-drops within those 6. How much expert mass saves depends on the router of
+drops within those 6. How much expert-mass saves depends on the router of
 the model. When a few experts carry most of the gate weight, most reads
 disappear for a small loss. When the weight is spread evenly, it saves
 almost nothing.
@@ -307,12 +307,12 @@ run it once before you put a value in a configuration file.
 Choose a setting from the share of experts found in the arena:
 
 1. Read the share from the line that the decode feeder prints at the end.
-2. When the share is low, use miss shed, because it costs quality only on
+2. When the share is low, use miss-shed, because it costs quality only on
    the reads that would wait for the disk.
 3. When the share is high and a few experts carry most of the gate
-   weight, use expert mass. When the weight is spread evenly, only layer
-   shed reduces what is left.
-4. Before you accept the quality cost of layer shed, check that GPU
+   weight, use expert-mass. When the weight is spread evenly, only
+   layer-shed reduces what is left.
+4. Before you accept the quality cost of layer-shed, check that GPU
    keep-warm is on, because a low GPU clock is a large part of the fixed
    cost.
 
@@ -350,6 +350,5 @@ fit the budget. The arena is never larger than the experts, and a value
 past the reclaimable RAM is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
 is set.
 
-A streamed load also lowers the wired memory limit for the rest
-of the process, so a dense model in memory runs without wiring from then
-on.
+Streaming also lowers the wired memory limit for the rest of the
+process, so a dense model in memory runs without wiring from then on.

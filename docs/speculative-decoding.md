@@ -30,10 +30,11 @@ On `run` and `chat`, speculation turns on by itself for a model with a
 native head, and for DeepSeek-V4 when its companion drafter is in the same
 folder. `--draft-gguf` names a drafter file, and `--speculative` turns
 speculation on with a companion that the loader finds beside the model.
-`--no-mtp` turns speculation off. When a model has both a native head and
-a companion, the companion wins, and `--native-mtp` forces the head. A
-model with a native head prints the name of a companion that it finds
-beside it, and uses it only with `--draft-gguf`.
+`--no-mtp` turns speculation off. When `--draft-gguf` or the `draft_gguf`
+key names a companion for a model with a native head, the companion wins,
+and `--native-mtp` forces the head. A model with a native head prints the
+name of a companion that it finds beside it, and uses it only with
+`--draft-gguf`.
 
 The server enables speculation for a model through its
 [`speculative`](config.md#modelsspeculative) key, and

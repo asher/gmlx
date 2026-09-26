@@ -421,11 +421,11 @@ works across families.
 
 | Family | Template variable | Values |
 |--------|-------------------|--------|
-| Qwen3.x, GLM | `enable_thinking` | `true` or `false`. |
+| Qwen3.x, GLM | `enable_thinking` | It takes `true` or `false`. |
 | MiniMax-M3 | `thinking_mode` | It has three states, so `adaptive` is accepted. |
-| Kimi K2.x | `thinking` | `true` or `false`. |
+| Kimi K2.x | `thinking` | It takes `true` or `false`. |
 | Hy3 | `reasoning_effort` | Its levels include `no_think`. |
-| gpt-oss | `reasoning_effort` | `low`, `medium` or `high`. Reasoning cannot be turned off. |
+| gpt-oss | `reasoning_effort` | It takes `low`, `medium` or `high`, and reasoning cannot be turned off. |
 
 A request's `enable_thinking` wins, then its `thinking` or
 `reasoning_effort` field, then the profile, then the template's default.

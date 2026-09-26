@@ -597,12 +597,10 @@ gmlx distill filter --in heldout-r1.jsonl --out heldout-r1-ok.jsonl \
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["kept"]/(r["kept"]+sum(r["dropped"].values())))' heldout-r1.json
 ```
 
-`--model` names whatever model `gen` serves, here the student with its
-adapter, and is the same flag as `--teacher`. `--serve-arg` passes an
-argument through to `gmlx serve`, and two of them attach the adapter.
-The `=` form is needed because the value starts with `--`. The server
-lists the adapted model beside the model without the adapter, under
-`<id>-base`, and `gen` sends its requests to the adapted one. `gen`
+`--model` here names the student with its adapter. `--serve-arg` passes
+an argument through to `gmlx serve`, and two of them attach the adapter.
+The `=` form is needed because the value starts with `--`. Of the two ids
+that the server lists, `gen` sends its requests to the adapted one. `gen`
 refuses a `--serve-arg` that would change the teacher's prompt without a
 record in the rows, such as `--thinking` or `--system-prompt`.
 
@@ -936,11 +934,11 @@ round is unchanged.
 and print exactly one line for each row that it reads.
 
 The filter dropped most rows. The rejects file names the reason per row.
-`budget` means the reasoning trace hit `--thinking-budget`, so raise it
-or drop both `--thinking` and `--thinking-budget`. `length` means the
-answer hit `--max-tokens`. `verify` with your own reason words means the
-teacher got the task wrong with the document in view, and a teacher that
-fails most of a task cannot teach it.
+For `budget`, raise `--thinking-budget` or drop both `--thinking` and
+`--thinking-budget`. For `length`, raise `--max-tokens`. Your own reason
+words under `verify` mean that the teacher got the task wrong with the
+document in view, and a teacher that fails most of a task cannot teach
+it.
 
 `align` printed a `warn:` line naming the own-group fraction `a` or the
 singleton fraction `s`. The two tokenizers split text differently enough
@@ -1071,10 +1069,9 @@ cross-entropy on the teacher's tokens, printed as `ce` and left at 0.
 `--loss paper` is the top-k term with no tail bucket, and `--loss
 renorm` rescales both distributions to sum to one over the top-k.
 
-`--lora-rank` sets the capacity of the adapter, and `--lora-alpha` its
-scale as alpha over rank. `--lr` is the peak learning rate. The rate
-rises over the first `--warmup` fraction of the steps and then falls
-along a cosine curve to zero. The defaults are rank 16, a batch of 8 and
+`--lora-alpha` scales the adapter as alpha over rank. The learning rate
+rises to `--lr` over the first `--warmup` fraction of the steps and then
+falls along a cosine curve to zero. The defaults are rank 16, a batch of 8 and
 a learning rate of 1e-4. The worked task used rank 128, alpha 64, a
 batch of 3 and 5e-5 on the 9B student. On a student of another size,
 start from those values and change one at a time, judged by the

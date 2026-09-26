@@ -28,8 +28,8 @@ A request can leave out its `model` field, set it to `default`, or send a
 name that OpenAI clients commonly send. All of these reach the configured
 model, as does the configured model's own alias, repository id or path.
 The speech and embeddings services answer any other name with a 400, so a
-client cannot make the server download a model. `/v1/models` lists each running service under the first name in its
-row:
+client cannot make the server download a model. `/v1/models` lists each
+running service under the first name in its row:
 
 | Service | Names accepted in `model` |
 |---------|---------------------------|
@@ -152,7 +152,8 @@ kinds of model:
   folder runs through
   [mlx-embeddings](https://pypi.org/project/mlx-embeddings/).
 
-`true` selects `qwen3-embed-0.6b`. These are the GGUF models, where the
+`true` selects `qwen3-embed-0.6b`, and `qwen3-embed` without a size is
+another name for it. These are the GGUF models, where the
 dimension is the width of each vector and the context is the most tokens of
 input that the model reads:
 
@@ -173,9 +174,8 @@ These are the safetensors encoders, each at its 8-bit default:
 | `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | It is a multilingual model for long inputs. |
 
 Choose a GGUF model unless you want one of the encoders for its size or its
-languages. Input longer than a model's context is cut to fit, without an
-error. `qwen3-embed` without a size is another name for
-`qwen3-embed-0.6b`.
+languages. Like the speech models, a safetensors encoder downloads once
+when it is not in the cache.
 
 A GGUF reference, written out or reached through an alias, is never
 downloaded by the server. The server finds it in your local Hugging Face
@@ -187,14 +187,14 @@ server:
 gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 ```
 
-Like the speech models, a safetensors encoder downloads once when it is
-not in the cache. `gmlx init` can also choose a quant other than the default
-and write its full reference.
+`gmlx init` can choose a quant other than the default and write its full
+reference.
 
 A request is a JSON body with `input`, which is a string or a list of
 strings. The optional fields are `model` and `encoding_format`, which is
 `float` by default or `base64`. Every model returns vectors normalized to
-length 1. The server refuses input given as token ids, and it ignores the
+length 1, and input longer than the model's context is cut to fit without
+an error. The server refuses input given as token ids, and it ignores the
 OpenAI `dimensions` field:
 
 ```sh

@@ -1109,7 +1109,7 @@ view that `train` reads.
 | `--materialize` | Off | Also write the batch tensors as view shards. |
 | `--max-disk-gb F` | None | Refuse to materialize past this size. |
 | `--force` | Off | Keep a view the own-group check would refuse. |
-| `--val-fraction F` | `0.02` | Hold this fraction of rows for validation, whole documents at a time and at least one row of a cache with two. A one-document cache splits it. |
+| `--val-fraction F` | `0.02` | Hold this fraction of rows, and at least one, for validation, whole documents at a time. A one-document cache holds back its last rows. |
 | `--seed N` | `1` | Seed the validation split. |
 | `--w-mid F` | `0.5` | Weight an intra-word shared boundary by this much. |
 | `--gamma F` | `0.001` | Drop chunks of the chunk term (ALM) whose teacher boundary mass is under this positive value. |

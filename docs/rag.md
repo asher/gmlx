@@ -27,9 +27,11 @@ gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
 gmlx restart
 ```
 
-A service whose model is missing when the server starts stays off until
-the next restart, and the server prints a warning about it. To create a new
-configuration file with both services, run
+The restart matters because a service whose model is missing at start
+stays off until the next restart, as
+[How the services run](services.md#how-the-services-run) describes.
+
+To create a new configuration file with both services, run
 `gmlx init --models-dir ~/models --with-embeddings --with-rerank`, or answer
 the questions of the `gmlx init` wizard. The larger models, the other kinds
 of embedder and the request fields are in

@@ -72,14 +72,15 @@ folders where you already keep models.
 
 To choose the optional features yourself, install with
 `uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
-[Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md) covers both routes.
+[Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md)
+covers both routes. Upgrade with `brew upgrade gmlx`, or
+`uv tool upgrade gmlx` for a uv install. To remove gmlx, follow
+[Removing gmlx](https://github.com/asher/gmlx/blob/main/docs/installation.md#removing-gmlx).
 
 The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about
 its file size plus the KV cache of the conversation, and the Quickstart
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
-for each memory size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
-gmlx` for a uv install. To remove gmlx, follow
-[Removing gmlx](https://github.com/asher/gmlx/blob/main/docs/installation.md#removing-gmlx).
+for each memory size.
 
 ### A GGUF with no setup
 

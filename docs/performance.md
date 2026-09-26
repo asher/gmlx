@@ -18,8 +18,7 @@ active weights of the model once, so tokens per second is about the
 bandwidth divided by the active bytes. Smaller quants therefore decode
 faster when nothing else limits them. A MoE model reads only the routed
 experts for a token, so it decodes at the speed of a small model with the
-quality of a large one. A chip with more memory bandwidth is faster in
-proportion.
+quality of a large one.
 
 Prefill, which reads the prompt, is limited by GPU compute instead, and
 gains more from compute and batching than from small weights. At long
