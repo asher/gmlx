@@ -1796,7 +1796,10 @@ def _wire_ptk(state: ChatState) -> bool:
                 parts.pop(next(i for i, (_, d) in enumerate(parts) if d))
         return " · ".join(p for p, _ in parts)
 
+    from prompt_toolkit.styles import DynamicStyle
+
     state.ptk_session = PromptSession(
+        style=DynamicStyle(lambda: _ptk_style(state.theme)),
         history=_ToggleableFileHistory(hist_file),
         auto_suggest=AutoSuggestFromHistory(),
         completer=_SlashCompleter(),
@@ -1806,6 +1809,18 @@ def _wire_ptk(state: ChatState) -> bool:
     )
     state.history_loaded = True
     return True
+
+
+def _ptk_style(theme):
+    """The toolbar style of ``theme``, read on each redraw so /theme applies at
+    once. prompt_toolkit draws the toolbar in reverse video by default, so a
+    theme's colors turn that off. No style when color is off."""
+    from prompt_toolkit.styles import Style
+
+    toolbar = getattr(theme, "ptk_toolbar", None)
+    if not toolbar or not any(getattr(theme, "sgr", {}).values()):
+        return Style([])
+    return Style.from_dict({"bottom-toolbar": f"noreverse {toolbar}"})
 
 
 def _wire_input(no_history: bool) -> ChatState:
