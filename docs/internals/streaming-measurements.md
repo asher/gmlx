@@ -1,10 +1,9 @@
 # Streaming measurements
 
-The samples and case studies behind
-[Models larger than memory](../streaming.md). This page shows what the lossless
-over-budget path produces, what each lossy setting did on four models and
-how a setting is certified, as contributor evidence rather than an operator
-guide.
+This page holds the samples and case studies behind [Models larger than
+memory](../streaming.md). It shows what the lossless over-budget path
+produces, what each lossy setting did on four models and how a setting is
+certified, as contributor evidence rather than an operator guide.
 
 ## What the over-budget case produces
 
@@ -446,7 +445,7 @@ medians unless noted.
 Lookahead prestage recall of the next layer's actual top-k is about 78% on
 GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the
 previous token's routing, measured with the recall probe in
-[debug-switches.md](debug-switches.md).
+[Debug switches](debug-switches.md).
 
 Keep-warm changes neither stall time nor arena hit rate, since the disk
 does the same work. The gain is clock residency. With the heartbeat alone on
@@ -455,7 +454,7 @@ rose from 58% to 99.8% at the 338 MHz floor. The real cost is holding the
 decode-level clock through the gaps, and it scales with the workload.
 Keep-warm helps a streamed model whose per-token time sits in the eval and
 sync bucket rather than in stalls, in the phase breakdown that
-`GMLX_DECODE_PHASE_STATS` in [debug-switches.md](debug-switches.md) prints.
+`GMLX_DECODE_PHASE_STATS` in [Debug switches](debug-switches.md) prints.
 
 Weight pinning matters because without it the every-token weights are
 plain file-backed pages, which the kernel evicts between uses on a machine

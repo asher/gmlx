@@ -1,8 +1,9 @@
 # Adding a GGUF architecture
 
-What is required for a new model family to become a supported architecture,
-plus the acceptance gate a family clears before its row appears in the
-[coverage matrix](../arch-coverage.md).
+This page describes what a new model family needs to become a supported
+architecture, and the acceptance gate it clears before its row appears in
+[Supported architectures](../arch-coverage.md). It is for contributors who
+add a family.
 
 A GGUF arch first needs a model class for its `model_type`, which normally
 comes from the installed mlx-lm or mlx-vlm, so gmlx supplies only the
@@ -43,7 +44,7 @@ new float formats. Do not estimate the work from the simplest case. The
 [glossary](../glossary.md) defines the attention terms used here.
 
 Vision and audio towers are a separate track with the same gate rules, and
-[vlm.md](../vlm.md) lists what is supported.
+[Vision and audio](../vlm.md) lists what is supported.
 
 ## Why the gate is strict
 
@@ -120,7 +121,7 @@ tokenization delta is misread as a model bug. If the installed mlx-lm has a
 known context limitation for the family, such as a missing sliding-window
 implementation, cap the comparison window and record that in the arch
 notes. The tiers these tests run in and how to select a GGUF-gated tier are
-in [testing.md](testing.md).
+in [Testing](testing.md).
 
 ## Requesting or contributing a family
 

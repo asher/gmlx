@@ -1,10 +1,10 @@
 # Speculative batching
 
-How the server runs speculative decoding and continuous batching together.
-This page covers the two decode loops, the width cap and the transitions that
-move a request between them without interrupting its token stream. What
-speculation is and how to enable it are in
-[Speculative decoding](../speculative-decoding.md). The cap key is
+This page describes how the server runs speculative decoding and continuous
+batching together, for contributors. It covers the two decode loops, the
+width cap and the transitions that move a request between them without
+interrupting its token stream. What speculation is and how to enable it are
+in [Speculative decoding](../speculative-decoding.md). The cap key is
 [`speculative_width_cap`](../config.md#modelsspeculative_width_cap).
 
 ## The two decode loops
@@ -118,4 +118,4 @@ gate, which keeps a batch from arming over the cap.
   returns on the round after.
 
 Both transitions have an off switch for A/B runs, the `GMLX_MTP_PREEMPT` and
-`GMLX_MTP_RESUME` rows in [env-vars.md](../env-vars.md#server).
+`GMLX_MTP_RESUME` rows in [Environment variables](../env-vars.md#server).

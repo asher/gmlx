@@ -1,11 +1,12 @@
 # Debug switches
 
-Environment variables that change how gmlx builds or routes a model, or
-make it report what it did, so that a defect can be isolated. None is a
-tuning setting. The disabling switches slow the model or turn a fix off,
-the logging switches cost nothing but output, and all of them exist so that
-an A/B run can rule a component in or out. They are read at load or on each
-call. The user-facing variables are in [env-vars.md](../env-vars.md).
+This page lists the environment variables that change how gmlx builds or
+routes a model, or make it report what it did, so that a contributor can
+isolate a defect. None is a tuning setting. The disabling switches slow the
+model or turn a fix off, the logging switches cost nothing but output, and
+all of them exist so that an A/B run can rule a component in or out. They
+are read at load or on each call. The user-facing variables are in
+[Environment variables](../env-vars.md).
 
 | Variable | Meaning |
 |----------|---------|

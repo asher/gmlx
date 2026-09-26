@@ -1,10 +1,10 @@
 # Structured read measurements
 
-The timings behind [structured-reads.md](structured-reads.md), for
-contributors who change the read engine, the route or its prompt. They show
-where the time of a `/v1/systemone` decision goes on one machine, how the
-request options and the wording of a question change the answers, and the
-commands that measure both again.
+This page holds the timings behind [Structured reads](structured-reads.md),
+for contributors who change the read engine, the route or its prompt. They
+show where the time of a `/v1/systemone` decision goes on one machine, how
+the request options and the wording of a question change the answers, and
+the commands that measure both again.
 
 - [Setup](#setup)
 - [Prefill](#prefill)
@@ -41,7 +41,7 @@ python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 the requests behind the last three sections, and its `wording`, `labeled`
 and `mixed` modes print their tables. Its `thoughts` mode prints the
 thought table, and `cases` prints the single answers that
-[decisions.md](../decisions.md#when-answers-go-wrong) quotes, with the
+[When answers go wrong](../decisions.md#when-answers-go-wrong) quotes, with the
 comparison against mlx-vlm under [Question wording](#question-wording).
 Every read uses seed 42, so the answers repeat from run to run while the
 times vary.
@@ -179,7 +179,7 @@ reads answered yes.
 The system text makes no difference on its own, and moving the state ahead
 of the questions recovers one read at most. A question that names its
 subject gains three and loses the lean toward yes. The route keeps vLLM's
-prompt, and [decisions.md](../decisions.md#when-answers-go-wrong) gives
+prompt, and [When answers go wrong](../decisions.md#when-answers-go-wrong) gives
 users the wording advice.
 
 These errors come from the model, not from the read. On the same prompt

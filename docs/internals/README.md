@@ -17,7 +17,7 @@ the development setup is in the [contributing guide](../../CONTRIBUTING.md).
 - [Hadamard-folded GGUFs](hadamard-fold.md): weights stored under a
   Hadamard rotation, the header contract and rotation sharing
 - [Distillation internals](distill.md): the memory arithmetic of the
-  teacher pass and the training head
+  teacher pass, the training head and the costs of the worked run
 
 ## Working on gmlx
 

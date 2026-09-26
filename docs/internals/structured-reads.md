@@ -1,10 +1,11 @@
 # Structured reads
 
-How `POST /v1/systemone` turns a question set into answer distributions on
-a DiffusionGemma model, for contributors changing the route, the decision
-logic or the read engine. The request and response contract is in
-[decisions.md](../decisions.md), and the timings are in
-[structured-read-measurements.md](structured-read-measurements.md).
+This page describes how `POST /v1/systemone` turns a question set into
+answer distributions on a DiffusionGemma model. It is for contributors who
+change the route, the decision logic or the read engine. The request and
+response contract is in [Structured decisions](../decisions.md), and the
+timings are in [Structured read
+measurements](structured-read-measurements.md).
 
 - [Origin](#origin)
 - [One read](#one-read)

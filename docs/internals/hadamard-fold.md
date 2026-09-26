@@ -1,10 +1,10 @@
 # Hadamard-folded GGUFs
 
-How gmlx runs a GGUF whose weights were stored under a Hadamard rotation,
-the PrismML Ternary Bonsai files being the first. For contributors who
-touch the loader, the qwen35 projection paths or the rotation kernels.
-Users need only [troubleshooting.md](../troubleshooting.md) and the
-`validate` line that names a folded file.
+This page describes how gmlx runs a GGUF whose weights were stored under a
+Hadamard rotation, such as the PrismML Ternary Bonsai files. It is for
+contributors who change the loader, the qwen35 projection paths or the
+rotation kernels. Users need only [A Hadamard-folded file refuses to
+load](../troubleshooting.md#a-hadamard-folded-file-refuses-to-load).
 
 ## The fold
 
@@ -108,4 +108,4 @@ fold target raises at resolution for the same reason.
 
 `GMLX_HADAMARD_KERNEL`, `GMLX_HADAMARD_FUSE`, `GMLX_HADAMARD_TRACE` and
 `GMLX_HADAMARD_ROTATE` are documented in
-[debug-switches.md](debug-switches.md).
+[Debug switches](debug-switches.md).

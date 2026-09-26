@@ -1,9 +1,9 @@
 # Serving architecture
 
-How the gmlx server serves a loaded GGUF as a continuously batched HTTP
-server, for contributors. This page covers the implementation, while the
-config surface is documented in [config.md](../config.md) and
-the endpoints in [api.md](../api.md).
+This page describes how the gmlx server serves a loaded GGUF with continuous
+batching over HTTP. It is for contributors and covers the implementation,
+while the config surface is documented in [Configuration](../config.md) and
+the endpoints in [HTTP API](../api.md).
 
 The mechanism is stock mlx-vlm and the policy is gmlx. Upstream owns the
 FastAPI app object, the protocol handlers and SSE formatters, the engine's
@@ -12,7 +12,7 @@ policy around that loop: admission (`admit_gate`), prioritization
 (`batch_sched` with `auto_ratio`), and resource arbitration (`governor`,
 `capacity`, `queue_cap`). All of it installs through the patch layer, whose
 seam inventory, well over a hundred entries, is in
-[upstream-upgrades.md](upstream-upgrades.md). Loads route to the gmlx
+[Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md). Loads route to the gmlx
 loader, which reads GGUF bytes through mlx-kquant's C++ reader and swaps
 model leaves for K-quant kernels, and the stock step loop executes those
 kernels in its own forward pass. There is no engine fork.
@@ -112,10 +112,11 @@ gmlx's own copy of the class mlx-vlm removed in 0.6.15, vendored in
 language-model interface the engine expects steady across upstream
 releases.
 
-The prompt cache picks its tier per architecture, as
-[prompt-cache.md](prompt-cache.md) describes, and the verify round that
-speculative decoding runs is gmlx's own, which is what keeps the prompt
-cache usable under a drafter ([speculative-batching.md](speculative-batching.md)).
+The prompt cache picks its tier for each architecture, as
+[Prompt cache internals](prompt-cache.md) describes. The verify round of
+speculative decoding is gmlx's own, which keeps the prompt cache usable
+under a drafter, as [Speculative batching](speculative-batching.md)
+describes.
 
 Two things happen before a request reaches the engine. Its sampling
 parameters resolve through the config precedence chain, from the family's
@@ -181,9 +182,10 @@ The modules interlock. The governor's band is the admit gate's hard hold.
 The admit gate's deferred set keeps `auto_ratio` from charging capacity
 waits to pacing. The pacer's observed chunk cost feeds `auto_ratio`'s
 threshold and the prefill chunk sizing. The capacity frontier bounds
-decode width, which sets the queue cap default. All of it surfaces on
-`/v1/metrics`: the capacity table, per-request rows and rate views
-([api.md](../api.md#capacity-and-live-request-metrics)).
+decode width, which sets the queue cap default. `/v1/metrics` shows all
+of it as the capacity table, the request rows and the rate views, which
+[Capacity and live-request metrics](../api.md#capacity-and-live-request-metrics)
+describes.
 
 ## The request path through the seams
 

@@ -1,10 +1,10 @@
 # Prompt cache internals
 
-How the prompt cache tiers are chosen per architecture, the counters that
-show whether reuse is working and the environment switches that tune or
-disable each layer. This page is for contributors, while operators read
-[Prompt cache](../prompt-cache.md). Upstream calls the
-cache APC, and the switches use that name.
+This page describes how the prompt cache chooses its tiers for each
+architecture, the counters that show whether reuse works, and the
+environment switches that tune or disable each layer. It is for
+contributors, while operators read [Prompt cache](../prompt-cache.md).
+Upstream calls the cache APC, and the switches use that name.
 
 ## Which tier serves which architecture
 
@@ -131,4 +131,4 @@ older batch layout refuses instead of misreading it.
 
 `GMLX_FAITHFUL_HISTORY`, which restores mlx-vlm's stock chat-history
 rebuild, is a user-facing switch and is documented in
-[env-vars.md](../env-vars.md).
+[Environment variables](../env-vars.md).

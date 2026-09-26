@@ -30,7 +30,7 @@ few tests that use array ops off the GPU path.
 The docs style and link check, `scripts/check-docs.py`, is not collected
 by pytest. CI runs it as a separate step, so run it yourself after editing
 a doc. It also fails when a page in `docs/` is not linked from
-[docs/README.md](../README.md) and from the Documentation list in the
+[documentation home](../README.md) and from the Documentation list in the
 [project README](../../README.md#documentation), so a new page needs both
 links.
 
@@ -78,7 +78,7 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
 
 A serve performance claim is likewise measured in the real server process,
 with the round profile switches listed in
-[debug-switches.md](debug-switches.md).
+[Debug switches](debug-switches.md).
 
 ## Server end-to-end harnesses
 
@@ -87,7 +87,7 @@ models on the GPU and grade the results. They are not part of the pytest
 suite, although `tests/test_e2e_harness_smoke.py` checks every harness's
 imports and argument tree in CI. Each harness is described, with its tiers,
 grading and model bootstrap, in
-[tests/e2e/README.md](../../tests/e2e/README.md).
+[end-to-end harness README](../../tests/e2e/README.md).
 
 | Harness | Exercises |
 |---------|-----------|
