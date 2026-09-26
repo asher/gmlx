@@ -176,7 +176,7 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
                          "an idle-unload / restart. A bare --disk-cache caps it at "
                          "50 GB per model, or pass a size (e.g. --disk-cache 100).")
     ap.add_argument("-r", "--recursive", action=argparse.BooleanOptionalAction,
-                    default=False,
+                    default=None,
                     help="Recurse into subdirectories when scanning --models-dir "
                          "(default: shallow).")
     ap.add_argument("--force", action="store_true",
@@ -188,7 +188,8 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
     # non-terminal use the flag-driven path. -i forces the wizard either way.
     ap.add_argument("-i", "--interactive", action="store_true",
                     help="Run the guided wizard (the default when init is given no "
-                         "scaffolding flags on a terminal).")
+                         "scaffolding flags on a terminal). Other flags pre-fill "
+                         "its answers.")
     ap.add_argument("--no-interactive", action="store_true",
                     help="Never run the wizard; scaffold from the flags as given.")
     # Optional services. A bare --with-stt uses the default alias; a value overrides
@@ -222,7 +223,7 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
     a = ap.parse_args(argv)
 
     if _want_interactive(a):
-        return _init_interactive(a)
+        return _init_interactive(a, ap)
     # No scaffolding intent and not interactive -> the help affordance (preserves
     # bare `init` on a non-terminal / under --no-interactive).
     if not _has_scaffold_intent(a):
@@ -254,13 +255,33 @@ def _want_interactive(a) -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _init_interactive(a) -> int:
+def _init_seeds(a, ap):
+    """The wizard answers that the init flags pre-fill."""
+    import gmlx.commands.wizard as wizard
+
+    services = {}
+    for key, value in (("stt", a.with_stt), ("tts", a.with_tts),
+                       ("embeddings", a.with_embeddings),
+                       ("rerank", a.with_rerank)):
+        if value is not None:
+            services[key] = None if value is _SVC_DEFAULT else value
+    return wizard.Seeds(
+        dirs=a.models_dir, recursive=a.recursive, hf_cache=a.from_hf_cache,
+        disk_cache_gb=a.disk_cache, services=services,
+        default_model=a.default_model,
+        ttl_s=_resolve_duration("--idle-ttl", a.idle_ttl, ap),
+        timeout_s=_resolve_duration("--request-timeout", a.request_timeout, ap),
+        overwrite=a.force, install=a.install, port=a.port)
+
+
+def _init_interactive(a, ap) -> int:
     import gmlx.commands.wizard as wizard
     default_out = a.out or DEFAULT_CONFIG_WRITE
+    seeds = _init_seeds(a, ap)
     try:
         outcome = wizard.run_wizard(
-            default_out=default_out, seed_dirs=a.models_dir,
-            allow_install=not a.no_install, port=a.port)
+            default_out=default_out, seeds=seeds,
+            allow_install=not a.no_install)
     except KeyboardInterrupt:
         print("\naborted.", file=sys.stderr)
         return 1
@@ -325,7 +346,7 @@ def _init_scaffold(a, ap) -> int:
     models = []
     scan_stats: dict = {}
     if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=a.recursive) for d in dirs]
+        specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive)) for d in dirs]
         models += discovery.scan_dirs(specs, dirs, progress=True,
                                       stats=scan_stats)
     if a.from_hf_cache:

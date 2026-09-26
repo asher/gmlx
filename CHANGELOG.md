@@ -66,6 +66,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx init -i` pre-fills the wizard from every flag it is given, such as
+  `--with-stt`, `--disk-cache` and `--idle-ttl`. It used only the output
+  file, the port and the first models folder.
 - A server started without a config file ignores `SIGHUP` with a log line.
   The signal stopped it.
 - `gmlx doctor` checks the MCP servers in `assistant.mcp`, which
