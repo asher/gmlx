@@ -18,16 +18,20 @@ logic or the read engine. The request and response contract is in
 The decision logic is a port of the vLLM structured-diffusion example,
 `examples/features/structured_diffusion/structured_server.py`, and the
 multi-step read loop follows the diffusion branch of vLLM's DiffusionGemma
-model. The ported files list their source in their header and in
-`licenses/vllm-LICENSE`. The example is a proxy that drives vLLM over HTTP,
-while gmlx runs the same logic in the server process against the model.
+model. The example is a proxy that drives vLLM over HTTP, while gmlx runs
+the same logic in the server process against the model. Each ported file
+keeps the Apache-2.0 header that names its source, and
+`licenses/vllm-LICENSE` lists them. Code that gmlx adds is in files of its
+own.
 
-The code splits into three layers. Apart from `engine.py`, the modules in
-`gmlx/systemone/` are pure Python. They hold the schema rules, the answer
-templates and `decide`, which runs a decision against any object with
-`prefill`, `read` and `think`. `engine.py` implements those three on the
-mlx-vlm model. The route is in `gmlx/serve/patches/systemone.py`, and
-`run_on_engine` in `gmlx/serve/engine_jobs.py` runs a decision on the
+The code splits into three layers. Apart from `engine.py` and `denoise.py`,
+the modules in `gmlx/systemone/` are pure Python. They hold the schema
+rules, the answer templates and `decide`, which runs a decision against any
+object with `prefill`, `read` and `think`. `extensions.py` adds
+`think: "auto"` and the server's request defaults. `engine.py` implements
+the three calls on the mlx-vlm model, and a read of more than one step runs
+the loop in `denoise.py`. The route is in `gmlx/serve/patches/systemone.py`,
+and `run_on_engine` in `gmlx/serve/engine_jobs.py` runs a decision on the
 model's engine thread.
 
 ## One read
@@ -114,9 +118,9 @@ state is seeded from the request seed first, so a thought also repeats.
 The reads then use the prompt with the thought appended.
 
 `think: "auto"` is a gmlx extension with no counterpart in the example.
-`decide` runs the decision without a thought, and when any answered
-question's confidence is below `think_threshold`, runs it again with a
-thought of `think_budget` tokens and returns that run. The answers,
+`extensions.decide` runs the decision without a thought, and when any
+answered question's confidence is below `think_threshold`, runs it again
+with a thought of `think_budget` tokens and returns that run. The answers,
 `usage`, samples and question diagnostics describe the returned run, while
 `timing` adds up both. `diagnostics.think_auto` keeps the first run's
 confidences, reads and time, and lists the unsure questions in question

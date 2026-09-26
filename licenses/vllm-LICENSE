@@ -6,11 +6,11 @@ ab3de6edf2 (Apache-2.0), with modifications:
 - gmlx/systemone/schema.py, gmlx/systemone/template.py,
   gmlx/systemone/decide.py, gmlx/systemone/contract.py and
   gmlx/systemone/reads.py: the schema rules, answer templates, template
-  resolution, decision logic and answer shapes of
-  examples/features/structured_diffusion/structured_server.py, restated
-  against an in-process read engine instead of HTTP calls to a vLLM server.
-- gmlx/systemone/engine.py: canvas seeding and the canvas width rule from
-  structured_server.py, and the multi-step structured-read loop (linear
+  resolution, canvas width rule, canvas seeding, decision logic and answer
+  shapes of examples/features/structured_diffusion/structured_server.py,
+  restated against an in-process read engine instead of HTTP calls to a
+  vLLM server.
+- gmlx/systemone/denoise.py: the multi-step structured-read loop (linear
   temperature schedule, entropy-bound acceptance, pinned positions,
   self-conditioning, per-request convergence) from
   vllm/model_executor/models/diffusion_gemma.py.

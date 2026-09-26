@@ -28,10 +28,10 @@ from gmlx.systemone import (
     decide,
     ignored_fields,
     jev_response,
-    jev_schema,
     jev_state,
     log_labels,
     parse_seed,
+    request_schema,
     system_text,
 )
 from gmlx.systemone.decide import chunk_groups
@@ -203,7 +203,7 @@ def make_systemone_endpoint(installed):
             return fail(400, "invalid_request_error", _NO_IMAGES)
         unread = set(body) - SYSTEMONE_CONSUMED
         try:
-            schema = jev_schema(body, limits, cfg.request_defaults())
+            schema = request_schema(body, limits, cfg.request_defaults())
             state = jev_state(body)
             seed = parse_seed(body)
         except SchemaError as e:

@@ -3,8 +3,10 @@
 A decision seeds the denoise canvas with an answer template, leaves one
 label position per question as noise, runs one denoise step and reads the
 label log-probabilities at each position. ``decide`` holds the decision
-logic and ``engine.StructuredReader`` runs the reads. This package module
-imports no MLX, so the decision logic loads without it."""
+logic ported from vLLM, ``extensions`` adds ``think: "auto"`` and the
+server's request defaults, and ``engine.StructuredReader`` runs the reads.
+This package module imports no MLX, so the decision logic loads without
+it."""
 
 from .contract import (
     jev_answer,
@@ -14,7 +16,13 @@ from .contract import (
     log_labels,
     usage,
 )
-from .decide import ReadEngine, decide, slot_distribution
+from .decide import ReadEngine, slot_distribution
+from .extensions import (
+    GMLX_EXTENSIONS,
+    decide,
+    ignored_fields,
+    request_schema,
+)
 from .reads import (
     Cancelled,
     ReadRequest,
@@ -26,11 +34,9 @@ from .reads import (
     label_id_union,
 )
 from .schema import (
-    GMLX_EXTENSIONS,
     JEV_EXTENSIONS,
     Limits,
     SchemaError,
-    ignored_fields,
     jev_schema,
     parse_seed,
 )
@@ -60,6 +66,7 @@ __all__ = [
     "label_id_union",
     "log_labels",
     "parse_seed",
+    "request_schema",
     "slot_distribution",
     "system_text",
     "usage",

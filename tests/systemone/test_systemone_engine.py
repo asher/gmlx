@@ -18,6 +18,7 @@ from mlx_vlm.tokenizer_utils import NaiveStreamingDetokenizer  # noqa: E402
 from mlx_vlm.utils import StoppingCriteria  # noqa: E402
 from test_diffusion_gemma import ARCH, _tiny_meta  # noqa: E402
 
+import gmlx.systemone.denoise as denoise  # noqa: E402
 import gmlx.systemone.engine as engine  # noqa: E402
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
 from gmlx.load.loader import build_model  # noqa: E402
@@ -225,7 +226,7 @@ def _mean_entropy_at_first_step(reader, prompt, seeds):
                        for s in seeds], dtype=mx.int32)
     h = reader.decoder(canvas, cache=prompt.views_for(len(seeds)),
                        decoder_attention_mask=None)
-    logits = reader._unembed(h, reader._label_rows(allowed))
+    logits = denoise.unembed(reader, h, reader._label_rows(allowed))
     scaled = logits / reader.config.temperature(0)
     lp = scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
     return (-(mx.exp(lp) * lp).sum(axis=-1)).mean(axis=-1).tolist()

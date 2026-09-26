@@ -12,7 +12,6 @@ stages when its tokens allow."""
 
 from __future__ import annotations
 
-import functools
 import math
 import time
 from typing import Callable, Optional, Protocol
@@ -265,9 +264,8 @@ class _Decision:
         }, len(template) + 1 + (thought["tokens"] if thought else 0)
 
 
-def decide(
+def decide_once(
     schema,
-    state_text: str,
     *,
     engine: ReadEngine,
     resolver: TemplateResolver,
@@ -278,51 +276,16 @@ def decide(
     decode: Callable[[list[int]], str],
     should_stop: Optional[Callable[[], bool]] = None,
 ):
-    """One decision over a text state. ``chat_ids(system_text, thinking)``
-    renders the chat prompt for ``state_text`` as token ids. Returns the
-    body (answers and diagnostics) and the completion-token count.
+    """One decision run, as the vLLM example's ``decide`` for a text state.
+    ``chat_ids(system_text, thinking)`` renders the chat prompt as token ids.
+    Returns the body (answers and diagnostics) and the completion-token
+    count.
 
     Questions run in stages by their dependencies. A stage is one joint
     read, chunked by the canvas, with a question marked alone in its own
     read. Later stages continue the earlier answers as a prefilled prompt. A
     question whose ask_if condition failed is skipped and its answer is
-    null.
-
-    With ``think: "auto"`` the decision runs without a thought first. When
-    an answer's confidence is below the threshold, it runs again with a
-    thought of the auto budget, and that run gives the answers, the samples,
-    the question diagnostics and the completion-token count. ``timing``
-    covers both runs, and ``think_auto`` holds the first run's confidences,
-    reads and time."""
-    auto = schema.get("think_auto")
-    run = functools.partial(
-        _decide_once, engine=engine, resolver=resolver, chat_ids=chat_ids,
-        seed=seed, constrained=constrained, canvas_len=canvas_len,
-        decode=decode, should_stop=should_stop)
-    if not auto:
-        return run(schema)
-    first, first_rows = run(dict(schema, think_auto=None))
-    confidence = {qid: a["confidence"] for qid, a in first["answers"].items()
-                  if a is not None}
-    unsure = [q["id"] for q in schema["questions"]
-              if confidence.get(q["id"], 1.0) < auto["threshold"]]
-    first_timing = first["diagnostics"]["timing"]
-    info = {"threshold": auto["threshold"], "budget": auto["budget"],
-            "thought": bool(unsure), "unsure": unsure, "confidence": confidence,
-            "reads": first_timing["reads"], "total_ms": first_timing["total_ms"]}
-    if not unsure:
-        first["diagnostics"]["think_auto"] = info
-        return first, first_rows
-    body, rows = run(dict(schema, think=auto["budget"], think_auto=None))
-    timing = body["diagnostics"]["timing"]
-    timing["total_ms"] += first_timing["total_ms"]
-    timing["reads"] += first_timing["reads"]
-    body["diagnostics"]["think_auto"] = info
-    return body, rows
-
-
-def _decide_once(schema, *, engine, resolver, chat_ids, seed, constrained,
-                 canvas_len, decode, should_stop):
+    null."""
     d = _Decision(engine, resolver, chat_ids, constrained, canvas_len, decode,
                   should_stop)
     started = time.time()

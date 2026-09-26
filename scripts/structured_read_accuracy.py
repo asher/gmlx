@@ -24,7 +24,14 @@ import time
 
 import mlx.core as mx
 
-from gmlx.systemone import ReadRequest, TemplateResolver, decide, jev_schema, jev_state
+from gmlx.systemone import (
+    ReadRequest,
+    TemplateResolver,
+    decide,
+    jev_schema,
+    jev_state,
+    request_schema,
+)
 from gmlx.systemone.contract import jev_answers
 from gmlx.systemone.engine import BoundReader, ChatTokens, StructuredReader, engine_scope
 from gmlx.systemone.reads import Slot
@@ -285,7 +292,7 @@ class Probe:
     def decide(self, body):
         """The route's decision on ``body``. A thought draws from the global
         random state, which the server seeds per request."""
-        schema = jev_schema(body)
+        schema = request_schema(body)
         tokens = ChatTokens(self.processor, jev_state(body))
         resolver = TemplateResolver(tokens.enc, CANVAS)
         mx.random.seed(SEED)

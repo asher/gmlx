@@ -42,7 +42,7 @@ from typing import Any
 import yaml
 
 import gmlx.gen.profiles as _family_profiles
-from gmlx.systemone.schema import THINK_BUDGET, THINK_THRESHOLD
+from gmlx.systemone.extensions import THINK_BUDGET, THINK_THRESHOLD
 from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
 

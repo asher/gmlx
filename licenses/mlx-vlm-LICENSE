@@ -1,14 +1,16 @@
 mlx-vlm - https://github.com/Blaizzy/mlx-vlm
 
 gmlx primarily uses mlx-vlm as an installed dependency, patched at runtime
-(see gmlx/upstream/seams.py), but two modules carry code copied or ported
-from it, with modifications:
+(see gmlx/upstream/seams.py), but three modules carry code copied or
+ported from it, with modifications:
 
-- gmlx/serve/patches/apc.py: the batched-eval store_kv_blocks replacement
-  is a verbatim copy of mlx_vlm.apc.APCManager.store_kv_blocks with the
-  per-block mx.eval hoisted into chunked batches.
+- gmlx/cache/apc_manager.py: the store_kv_blocks override is a copy of
+  mlx_vlm.apc.APCManager.store_kv_blocks with the per-block mx.eval
+  hoisted into chunked batches and gmlx's checkpoint-store policy added.
 - gmlx/gen/thinking_budget.py: ported from mlx-vlm's ThinkingBudgetCriteria
   stopping-criteria callback, reworked as an mlx-lm logits processor.
+- gmlx/systemone/denoise.py: entropy_transfer_mask follows
+  mlx_vlm.generate.diffusion._diffusion_entropy_transfer_mask.
 
 mlx-vlm is distributed under the MIT License:
 

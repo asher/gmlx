@@ -26,12 +26,6 @@ JEV_EXTENSIONS = (
     "sequential",
 )
 
-# Request fields gmlx adds to the vLLM set: the settings of ``think: "auto"``.
-GMLX_EXTENSIONS = ("think_threshold", "think_budget")
-
-THINK_THRESHOLD = 0.8
-THINK_BUDGET = 64
-
 DEFAULT_SEED = 42
 
 
@@ -190,19 +184,7 @@ def parse_schema(value, limits: Limits = Limits()) -> dict:
         raise SchemaError('schema: chunk_prompt must be "shared" or "own"')
     sequential = bool(value.get("sequential", False))
     think = value.get("think", 0)
-    think_auto = None
-    if think == "auto":
-        think_auto = {
-            "threshold": _float(value.get("think_threshold", THINK_THRESHOLD),
-                                "think_threshold"),
-            "budget": _int(value.get("think_budget", THINK_BUDGET), "think_budget"),
-        }
-        if not 0 < think_auto["threshold"] <= 1:
-            raise SchemaError("schema: think_threshold must be above 0 and at most 1")
-        if not 1 <= think_auto["budget"] <= 4096:
-            raise SchemaError("schema: think_budget must be 1 to 4096 tokens")
-        think = 0
-    elif isinstance(think, bool) or not isinstance(think, int) or not 0 <= think <= 4096:
+    if isinstance(think, bool) or not isinstance(think, int) or not 0 <= think <= 4096:
         raise SchemaError(
             'schema: think must be a thought budget in tokens, 0 to 4096, or "auto"')
     return {
@@ -211,21 +193,12 @@ def parse_schema(value, limits: Limits = Limits()) -> dict:
         "policy": policy,
         "steps": max(1, min(_int(value.get("steps", 1), "steps"), 8)),
         "think": think,
-        "think_auto": think_auto,
         "ask": ask,
         "chunk_rows": chunk_rows,
         "chunk_prompt": chunk_prompt,
         "sequential": sequential,
         "format": "lines" if len(qs) <= 10 else "indexed",
     }
-
-
-def ignored_fields(body, schema) -> set:
-    """Request fields that parse but change nothing: the think settings when
-    ``think`` is not ``"auto"``."""
-    if schema["think_auto"] is not None:
-        return set()
-    return set(body) & set(GMLX_EXTENSIONS)
 
 
 def schedule(qs):
@@ -251,9 +224,8 @@ def schedule(qs):
     return levels
 
 
-def jev_schema(body, limits: Limits = Limits(), defaults: dict | None = None) -> dict:
-    """The schema from a Jev request body. ``defaults`` holds extension
-    values, such as the server's ``think``, for fields the body omits."""
+def jev_schema(body, limits: Limits = Limits()) -> dict:
+    """The schema from a Jev request body."""
     qs = body.get("questions")
     if not isinstance(qs, dict) or not qs:
         raise SchemaError("questions: needs a non-empty map of id -> question")
@@ -296,8 +268,6 @@ def jev_schema(body, limits: Limits = Limits(), defaults: dict | None = None) ->
             if key in q:
                 item[key] = q[key]
         out.append(item)
-    schema = {k: body[k] for k in JEV_EXTENSIONS + GMLX_EXTENSIONS if k in body}
-    for k, v in (defaults or {}).items():
-        schema.setdefault(k, v)
+    schema = {k: body[k] for k in JEV_EXTENSIONS if k in body}
     schema["questions"] = out
     return parse_schema(schema, limits)

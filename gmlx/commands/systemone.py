@@ -102,15 +102,15 @@ def _run_offline(a, body: dict) -> dict:
         TemplateResolver,
         decide,
         jev_response,
-        jev_schema,
         jev_state,
         parse_seed,
+        request_schema,
     )
 
     cfg, settings = _offline_settings(a.config)
     limits = Limits(max_questions=settings.max_questions,
                     max_samples=settings.max_samples)
-    schema = jev_schema(body, limits, settings.request_defaults())
+    schema = request_schema(body, limits, settings.request_defaults())
     state = jev_state(body)
     seed = parse_seed(body)
     path = _model_path(a.model, cfg)

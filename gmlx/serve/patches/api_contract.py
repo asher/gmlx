@@ -16,7 +16,8 @@ import logging
 import os
 
 import gmlx.serve.bridge_vlm as serving
-from gmlx.systemone.schema import GMLX_EXTENSIONS, JEV_EXTENSIONS
+from gmlx.systemone.extensions import GMLX_EXTENSIONS
+from gmlx.systemone.schema import JEV_EXTENSIONS
 
 from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
