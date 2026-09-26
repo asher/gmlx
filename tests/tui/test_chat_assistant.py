@@ -420,6 +420,27 @@ def test_local_excludes_server_modes(capsys):
     assert "--local" in capsys.readouterr().err
 
 
+def test_server_target_flag_implies_server(monkeypatch):
+    """A server-targeting flag without --assistant/--server selects
+    --server instead of refusing or loading in-process."""
+    seen = {}
+
+    def fake_setup(args):
+        seen.update(server=args.server, host=args.host, port=args.port)
+        return 7
+
+    monkeypatch.setattr(chat, "_setup_assistant", fake_setup)
+    assert chat.cmd_chat(["--host", "10.0.0.2", "--port", "9000"]) == 7
+    assert seen == {"server": True, "host": "10.0.0.2", "port": 9000}
+
+
+def test_server_target_flag_with_local_refused(capsys):
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--local", "--port", "9000"])
+    assert "--port targets a server and cannot combine with --local" in (
+        capsys.readouterr().err)
+
+
 # --------------------------- automatic --server ---------------------------
 
 def _auto_env(monkeypatch, *, up=True, served=(), default=None):

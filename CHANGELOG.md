@@ -52,6 +52,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Only a pinned model is held for the life of the server. The default or
   sole model of a config still loads at start, but it now unloads after its
   idle timeout or under memory pressure like any other model.
+- `gmlx chat` with `--base-url`, `--host`, `--port`, `--api-key` or
+  `--no-start` runs as a server client, as `--server` does, instead of
+  refusing the flag.
 
 ### Fixed
 

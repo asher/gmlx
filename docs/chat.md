@@ -28,9 +28,10 @@ name no model. A GGUF path always loads in the chat process, because the
 file on disk can be newer than what the server holds, and chat prints the
 served id when the server already serves that file.
 
-A flag that changes how the model loads, or any of `--base-url`, `--host`,
-`--port` and `--no-start`, also keeps the model in the chat process.
-`--local` forces an in-process load in every case.
+Any of `--base-url`, `--host`, `--port`, `--api-key` and `--no-start`
+selects `--server` on its own. A flag that changes how the model loads keeps
+the model in the chat process, and `--local` forces an in-process load in
+every case.
 
 In server mode, the server owns the model and its chat template. Chat
 refuses flags that load the model and ignores a few others with a note. The

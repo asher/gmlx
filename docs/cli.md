@@ -512,12 +512,12 @@ These flags say where the model runs:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `gguf`, positional | Server default | Chat with this GGUF, config id or served id. |
-| `--server` | Auto when the server is running | Run as a plain client of the server. |
+| `--server` | Auto when the server is running | Run as a plain client of the server. Any server-selecting flag below turns it on. |
 | `--assistant` | Off | Chat through the server's tool-loop assistant, with MCP tools and memory. |
 | `--local` | Off | Load in-process even when the server is running. |
-| `--base-url URL` | The managed server | Connect to this server. |
-| `--host H`, `--port P`, `--api-key KEY` | The managed server | Select the server and give its key. |
-| `--no-start` | Off | Never start the server. |
+| `--base-url URL` | The managed server | Connect to this server, implying `--server`. |
+| `--host H`, `--port P`, `--api-key KEY` | The managed server | Select the server and give its key, implying `--server`. |
+| `--no-start` | Off | Never start the server, implying `--server`. |
 | `--start-timeout S` | `180` | Wait this many seconds for an auto-start. |
 | `--config FILE` | The first default location | Resolve an id against this config. |
 | `--profile NAME` | None | Apply a built-in intent or user profile. |
