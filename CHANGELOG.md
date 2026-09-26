@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-09-26
+
 ### Added
 
 - `POST /v1/systemone` answers a fixed set of questions about a state with a
