@@ -96,8 +96,8 @@ def render_md(rows) -> str:
              "by hand."),
         "",
         para("A GGUF loads when gmlx maps its `general.architecture` to a model "
-             "type that has a model class in an installed backend package and a "
-             "config synthesizer exists for the architecture. The backend is "
+             "type, an installed backend package has a model class for that type, "
+             "and a config synthesizer exists for the architecture. The backend is "
              "mlx-lm for most architectures and mlx-vlm or mlx-embeddings for a "
              "few. Without a synthesizer, pass `hf_source` to supply a "
              "config.json. The status column says which case applies:"),
