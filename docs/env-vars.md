@@ -7,10 +7,9 @@ to every model the process loads and to every server started from that
 shell.
 
 When more than one source sets a value, the flag wins, then the config
-key, then the variable. Two variables reverse that order and override the
-config. `GMLX_CACHE_LIMIT_GB` wins over `server.cache_limit_gb`, and
-`GMLX_MTP_WIDTH_CAP` wins over each model's `speculative_width_cap`.
-Variables that appear neither here nor under
+key, then the variable, except for the two variables that
+[Flags and environment variables](config.md#flags-and-environment-variables)
+names. Variables that appear neither here nor under
 [Debug switches](internals/debug-switches.md) are internal and may change
 meaning or disappear between releases.
 

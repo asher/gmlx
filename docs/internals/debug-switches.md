@@ -10,7 +10,7 @@ are read at load or on each call. The user-facing variables are in
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with that reason and the model runs fp16 KV. |
+| `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with the reason `disabled (GMLX_KVARN=0)`, and the model runs fp16 KV. |
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. It defaults to `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on DFlash-backbone drafters. |
 | `GMLX_SPEC_GATE=X` | When set, run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
 | `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Output differs at fp16 rounding only. Set this first when debugging kvarn. |

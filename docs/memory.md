@@ -79,7 +79,7 @@ limit, the pool can use up the free memory of the Mac and freeze it
 instead of failing with an error, because MLX counts the pool as free
 while macOS counts it as wired.
 
-The server therefore always limits the pool, and logs the limit on a
+The server therefore limits the pool by default, and logs the limit on a
 `[serve] MLX cache limit:` line. When the largest configured model takes
 more than 60% of the GPU working set, the limit is a quarter of the memory
 that is left. Otherwise, it is 5% of the working set. Either way, the

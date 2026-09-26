@@ -142,8 +142,8 @@ the old conversation stays saved.
 A saved session restores its settings and its conversation together.
 `--resume` at startup restores the latest session of the model, or a named
 one, and `/load-session` does the same from inside a chat. Both refuse a
-session that was recorded with another model. The restored conversation is read into the KV cache with your next
-message, not at load time.
+session that was recorded with another model. The restored conversation
+is read into the KV cache with your next message, not at load time.
 
 In server mode, `/model` lists the served ids, and `/model <id>` sends the
 next turns to another id. The conversation is kept, and the server reads it

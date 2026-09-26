@@ -428,14 +428,14 @@ decision can build. A client that disconnects cancels its decision.
 ## The command line
 
 `gmlx systemone` sends a request file to a running server and prints one
-line for each question. It can also load the GGUF itself and answer with no
-server:
+line for each question:
 
 ```sh
 gmlx systemone ticket.json
 ```
 
-Its flags and output format are listed under
+With `--model`, it loads the GGUF itself and answers with no server. Its
+flags and output format are listed under
 [`gmlx systemone`](cli.md#gmlx-systemone) in the CLI reference.
 
 ## How a decision is read

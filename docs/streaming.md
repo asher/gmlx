@@ -262,8 +262,10 @@ without work. Turn it off on battery. It does nothing for a model that
 fits in RAM.
 
 The weight pin is skipped, with a printed reason, when the every-token
-weights are larger than 60% of RAM. The settings apply to MXFP4 and NVFP4
-experts too, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL quants, and
+weights are larger than 60% of RAM.
+
+MXFP4 and NVFP4 experts, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL
+quants, use the same settings, and
 [`GMLX_NATIVE_FP`](env-vars.md#runtime) controls how gmlx lays them out.
 
 ## The lossy settings
@@ -344,10 +346,10 @@ use the whole budget by itself. When it does not fit beside pinned or
 busy models, the server defers the load with a message that names
 [`GMLX_DECODE_ARENA_GB`](env-vars.md#runtime). To keep a second model
 loaded beside a streamed one, set that variable, in GiB, so that both
-fit the budget.
-
-The arena is never larger than the experts, and a value
+fit the budget. The arena is never larger than the experts, and a value
 past the reclaimable RAM is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
-is set. A streamed load also lowers the wired memory limit for the rest
+is set.
+
+A streamed load also lowers the wired memory limit for the rest
 of the process, so a dense model in memory runs without wiring from then
 on.

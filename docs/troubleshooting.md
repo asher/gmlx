@@ -54,8 +54,9 @@ command finishes.
 
 `gmlx pull` stopped partway, or refused to start with `error: not enough
 disk space`. A dropped connection retries by itself with backoff, from the
-bytes already on disk. Raise `GMLX_PULL_RETRIES` above its default of 10 for
-a flaky host, and `GMLX_PULL_TIMEOUT` above 60 seconds for a slow one.
+bytes already on disk. Raise
+[`GMLX_PULL_RETRIES`](env-vars.md#commands) for a flaky host, and
+`GMLX_PULL_TIMEOUT` for a slow one.
 
 An interrupted pull resumes when you run the same command again, because the
 bytes so far stay in a `.part` file beside the destination. The disk check

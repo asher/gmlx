@@ -378,7 +378,7 @@ These flags control generation:
 | `--logit-bias JSON` | None | Add these biases to the logits, given as a map from token id to bias. |
 | `--stop STR` | None | Stop at this sequence. Repeat the flag for more sequences. |
 | `--seed N` | None | Seed the sampler. |
-| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, `raw` passes everything through. |
+| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, and `raw` passes everything through. |
 | `--thinking {on,off,adaptive}` | Template default | Turn reasoning on, off or adaptive through the model's template variable. |
 | `--reasoning-effort LEVEL` | Template default | Set the reasoning depth on models that support levels. |
 | `--thinking-budget N` | Unlimited | Cap reasoning tokens. |
@@ -534,7 +534,7 @@ These flags control generation. All of them can be changed during the chat:
 | `--logit-bias JSON` | None | Add these biases to the logits, given as a map from token id to bias. |
 | `--stop STR` | None | Stop at this sequence. Repeat the flag for more sequences. |
 | `--seed N` | None | Seed the sampler. |
-| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, `raw` passes everything through. |
+| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, and `raw` passes everything through. |
 | `--thinking {on,off,adaptive}`, `--reasoning-effort LEVEL` | Template default | Set the reasoning switch and depth. |
 | `--thinking-budget N` | Unlimited | Cap reasoning tokens. |
 | `--thinking-start-token STR`, `--thinking-end-token STR` | Detected | Set the model's reasoning markers when detection fails. |

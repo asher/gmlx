@@ -27,8 +27,8 @@ a time, alongside the generation of chat models.
 A request can leave out its `model` field, set it to `default`, or send a
 name that OpenAI clients commonly send. All of these reach the configured
 model, as does the configured model's own alias, repository id or path.
-Any other name gets a 400, so a client cannot make the server download a
-model. `/v1/models` lists each running service under the first name in its
+The speech and embeddings services answer any other name with a 400, so a
+client cannot make the server download a model. `/v1/models` lists each running service under the first name in its
 row:
 
 | Service | Names accepted in `model` |

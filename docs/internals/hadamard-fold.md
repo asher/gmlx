@@ -69,7 +69,7 @@ the attention output gate. Where the installed mlx-kquant has
 one kernel and offers the rotated row, and the projection's own rotation
 returns that row without a dispatch. The offer matches the array object
 and the fold, so any other row still rotates, and the projection empties
-it when it takes the row. The stock forwards and the owned tree both
+the offer when it takes the row. The stock forwards and the owned tree both
 route the activation through `glu_rotate`, which covers 80 of the 258
 rotations on the 27B.
 

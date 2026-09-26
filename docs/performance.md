@@ -30,7 +30,7 @@ weights. Each feature of gmlx targets one of these limits.
 
 | Feature | What it gains | What it costs | Page |
 |---------|---------------|---------------|------|
-| A uniform K-quant file | It decodes faster than a mixed file of the same model. | It costs nothing. | [Choosing a quant for speed](#choosing-a-quant-for-speed) |
+| A uniform K-quant file | It decodes faster than a mixed file of the same model. | It can take more memory than a mixed low-bit build. | [Choosing a quant for speed](#choosing-a-quant-for-speed) |
 | Speculative decoding | The model decodes faster with the same output. | The drafter takes memory, and the gain shrinks with many streams. | [Speculative decoding](speculative-decoding.md) |
 | The prompt cache | The server skips prefill for the start of a prompt that it has seen before. | The entries take memory or SSD space. | [Prompt cache](prompt-cache.md) |
 | Batched serving and admission pacing | Several clients get more total throughput, and streams stay steady while a long prompt arrives. | A new request starts a little later. | [Concurrent requests](concurrency.md) |

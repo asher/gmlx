@@ -105,8 +105,7 @@ Qwen3 0.6B teacher at Q8_0 and the same model at Q4_K_M as the student,
 and trains for 80 steps.
 
 Its corpus is a jsonl file, one JSON object per line, of 24
-`{"text": ...}` rows. A folder of text files also works as the corpus,
-with one document per file. A step trains on one batch of `--batch-size` rows,
+`{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
 so `train` needs at least that many training rows. `align` also holds
 back about one row in fifty for validation, whole documents at a time and
 at least one row of a cache with two or more, and never trains on them.
@@ -878,15 +877,9 @@ The other tables follow the same after and before pattern.
 ## Train on plain text or a behavior instead
 
 Fixed text is the simplest corpus and needs neither `gen` nor `filter`.
-The teacher reads a jsonl file with a `text` field in each row, a folder
-of text files, or a Hugging Face dataset id, and the student learns the
-teacher's choices over someone else's words. A folder gives one document
-for each `.txt`, `.md`, `.py`, `.json` or `.jsonl` file in it and its
-subfolders, and a `.jsonl` file gives one document for each line. A
-dataset id streams from the Hub and needs the `datasets` package in the
-environment of gmlx. This transfers general ability and is the right
-choice when the goal is a smaller model that behaves like the larger one
-on ordinary text:
+The student learns the teacher's choices over someone else's words, which
+transfers general ability. It is the right choice when the goal is a
+smaller model that behaves like the larger one on ordinary text:
 
 ```sh
 gmlx distill cache --teacher teacher-Q6_K.gguf --corpus corpus.jsonl --out cache/ \
@@ -897,6 +890,13 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
     --cache cache/ --slice prose=heldout-prose.txt --slice code=heldout-code.txt \
     --kld-cache cache/ --md eval.md --json eval.json
 ```
+
+The corpus is a jsonl file with a `text` field in each row, a folder of
+text files, or a Hugging Face dataset id. A folder gives one document for
+each `.txt`, `.md`, `.py`, `.json` or `.jsonl` file in it and its
+subfolders, and a `.jsonl` file gives one document for each line. A
+dataset id streams from the Hub and needs the `datasets` package in the
+environment of gmlx.
 
 Rows are cut into windows of at most `--max-len` teacher tokens at word
 boundaries, and without a `--frame` they are cached as plain text. An
@@ -1012,8 +1012,7 @@ For each position, the cache stores the teacher's `--top-k` most likely next
 tokens with their log-probabilities and the log-probability of the token
 that followed. It also stores the probability mass outside the top-k,
 the probability summed over every other token, and the mass on word
-boundaries. `--resume` continues after the last shard it wrote and
-verified, and `--validate DIR` checks an existing cache without loading
+boundaries. `--validate DIR` checks an existing cache without loading
 a model.
 
 Two cache flags serve MoE teachers. `--routes` stores the experts the teacher
@@ -1027,7 +1026,9 @@ default, caches plain text rows. `chat` targets every assistant turn,
 `reply` the final one, `reply-think` the final one from its reasoning
 trace onward, and `continue` wraps plain text in an assistant turn.
 `--per-turn` makes one row per assistant turn with the history before
-it. `--context-format` on `gen` and `filter` decides how the document
+it.
+
+`--context-format` on `gen` and `filter` decides how the document
 and the question combine in the teacher's prompt, and a prompt row's own
 `context` field takes precedence over `gen --context`. That is how
 several documents share one run, and how one document too long for the
@@ -1078,8 +1079,7 @@ a learning rate of 1e-4. The worked task used rank 128, alpha 64, a
 batch of 3 and 5e-5 on the 9B student. On a student of another size,
 start from those values and change one at a time, judged by the
 validation loss. `--seed` fixes the batch order and the adapter's
-initialization, and `--resume` restarts at the exact step from
-`--ckpt-dir`.
+initialization.
 
 `--view` repeats to train on several views over one
 tokenizer pair, aligned with the same chunk settings (`--gamma`,
