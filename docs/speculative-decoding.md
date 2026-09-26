@@ -28,8 +28,9 @@ such as the gemma-4 assistant drafter or a DFlash 2 drafter.
 
 On `run` and `chat`, speculation turns on by itself for a model with a
 native head, and for DeepSeek-V4 when its companion drafter is in the same
-folder. It stays off under `--stream-experts`, `--stream-cpu`, `--adapter`
-and the lossy MoE settings. With `--mmproj`, the companion drafters of
+folder. It stays off under `--stream-experts`, `--stream-cpu` and the
+lossy MoE settings. With `--adapter`, the adapted model verifies each
+draft, so the output matches plain decoding with the adapter. With `--mmproj`, the companion drafters of
 DeepSeek-V4, Qwen3.8-Flash-Next and Muse Glimmer also turn it on for text
 turns.
 
@@ -64,9 +65,10 @@ turns and decodes turns with images or audio without speculation.
 
 The gain depends on how many drafts the model accepts, and on the depth of
 the context. Speculation makes a dense model decode 1.6 to 1.9 times as
-fast at short contexts, and keeps a smaller gain deep into long ones. MoE models
-gain less, and on some of them it becomes a loss at depth, so measure
-before you rely on it. Predictable text, such as code, accepts more drafts
+fast at short contexts, and keeps a smaller gain deep into long ones. Most
+MoE models gain less, and gemma-4-26B-A4B becomes slower at depth, but
+Qwen3.8-Flash-Next gains more as the context grows, so measure before you
+rely on it. Predictable text, such as code, accepts more drafts
 than free prose. [Benchmarks](benchmarks.md) has the speedup curves of
 each model. This command measures your own model at two context depths:
 

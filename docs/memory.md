@@ -54,9 +54,9 @@ These steps reduce memory, the cheapest first:
   refuses that combination. On the server,
   [`max_kv_size`](config.md#loadmax_kv_size) limits the context of a
   request and keeps no rolling window.
-- Shrink the prefill chunk. `--prefill-step-size` makes the 2048-token
-  chunk smaller, which lowers the memory peak of a long prompt and slows
-  prefill.
+- Shrink the prefill chunk. `--prefill-step-size` makes the chunk
+  smaller than its default, which lowers the memory peak of a long prompt
+  and slows prefill.
 
 ## The GPU memory limit
 

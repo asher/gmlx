@@ -49,7 +49,7 @@ limit it, read [Memory and the KV cache](memory.md).
 # Prefill and decode speed at several prompt lengths.
 gmlx run model.gguf --bench "128,512,2048" --bench-runs 3
 
-# Decode speed at depth, such as the speed of token 16,001.
+# Decode speed at depth, timed after 0, 4096 and 16384 tokens of context.
 gmlx run model.gguf --bench-depths "0,4096,16384"
 ```
 

@@ -34,8 +34,9 @@ The first 128 tokens stay fp16, as do the newest
 [`--kv-tail-tokens`](config.md#loadkv_tail_tokens) tokens, 1024 by default.
 At 6 bits, a record takes about 40% of the memory of fp16.
 
-KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli,
-[arXiv:2606.03458](https://arxiv.org/abs/2606.03458). The gmlx cache
+The kvarn scheme implements the method of Muller, Bich, Boretti, Chang,
+Zhuang and Cavigelli, [arXiv:2606.03458](https://arxiv.org/abs/2606.03458).
+The gmlx cache
 follows the record format of
 [beellama.cpp](https://github.com/Anbeeld/beellama.cpp), including the
 fp16 tail and `--kv-tail-tokens`, and the
@@ -60,8 +61,8 @@ Head dimensions of 128, 256 and 512 are the only ones that kvarn accepts,
 so layers with a head dimension of 64, as in gpt-oss, use affine
 quantization only. The scheme also declines [MLA](glossary.md#mla)
 models. Affine still packs the pooled cache of DeepSeek-V4 and GLM-5.3, and
-Kimi K2 keeps an fp16 cache under either scheme. Turns with images or audio
-keep an fp16 cache.
+Kimi K2 keeps an fp16 cache under either scheme. With `--mmproj`, `run`
+and `chat` do not apply kvarn, and the cache stays fp16.
 
 ## Choosing a scheme by model
 

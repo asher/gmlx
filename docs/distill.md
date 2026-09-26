@@ -74,8 +74,9 @@ No step loads the teacher and the student together. `gen` and
 weights plus its training state. On the worked pair, `train` peaked near
 51 GB and `cache` near 40 GB, so a Mac with 64 GB runs it with nothing
 else large open. [What each step costs](#what-each-step-costs) says what
-to change when a model does not fit. The smoke run in the next section
-fits any Apple Silicon Mac.
+to change when a model does not fit.
+[A ten-minute smoke run](#a-ten-minute-smoke-run) fits any Apple Silicon
+Mac.
 
 Conversation rows and the chat measurements need a student with a chat
 template, the fixed text a model wraps around each turn of a

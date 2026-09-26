@@ -82,10 +82,9 @@ a `stream: cpu` model on a server of its own.
 
 | Combination | Result |
 |-------------|--------|
-| `--stream-experts` with `--mmproj` | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it. |
-| `--stream-cpu` with `--mmproj` | The command refuses it, because the CPU placement would move the vision encoder too. |
+| A placement with `--mmproj` | [Media with other features](vlm.md#media-with-other-features) gives the result of each placement with a multimodal model. |
 | `--stream-experts` with speculative decoding | It works on the command line with an explicit `--speculative`. Automatic speculation stays off under streaming. |
-| `stream` on a server entry with `speculative` | The server refuses it at load, because it loads the drafter after the placement. |
+| `stream` on a server entry with `speculative` | The server logs that the speculative load failed and serves the model streamed without speculation, because it loads the drafter after the placement. |
 | A lossy setting with speculative decoding | Automatic speculation turns off, and the setting applies. Chat refuses the combination with an explicit `--speculative`. |
 
 ## How big a model can this machine stream
@@ -103,15 +102,15 @@ ceiling, which is the GPU working set that macOS recommends, less 5%. It
 also keeps a reserve of 8 GB or 10% of RAM, whichever is larger, below
 physical RAM. Four things share the ceiling, in this order:
 
-1. The every-token weights.
-2. The KV room. It holds the KV cache for 32768 tokens, or the trained
+1. The every-token weights come first.
+2. The KV room comes next. It holds the KV cache for 32768 tokens, or the trained
    context when that is shorter. It adds room for prefill and an admission
    reserve, each the larger of 2 GB and 5% of the working set.
-3. The prefill ring, which is two copies of the expert stacks of the
-   largest layer. When the ring does not fit, prefill reads through the
+3. The prefill ring holds two copies of the expert stacks of the largest
+   layer. When the ring does not fit, prefill reads through the
    page cache instead, and the load says so. Decoding is not affected.
-4. The decode arena, which takes what is left after a host floor. The
-   floor is 5% of RAM, at least 4 GiB, plus 2.5 GiB for the page cache,
+4. The decode arena takes what is left after a host floor. The floor
+   is 5% of RAM, at least 4 GiB, plus 2.5 GiB for the page cache,
    and it keeps the rest of the Mac out of swap. A larger arena finds more
    experts in memory and decodes faster. Below 1 GiB, the decode feeder
    does not start, and decoding reads through the page cache.
@@ -139,8 +138,9 @@ the prefill room and the admission reserve, before any KV cache.
 | 256 | 206.2 | 195.9 | 20.6 | 175.2 |
 | 512 | 412.3 | 391.7 | 41.2 | 350.5 |
 
-`sudo sysctl iogpu.wired_limit_mb=<MB>` raises the working set, and the
-reserve below physical RAM still applies.
+Raising the GPU limit, as
+[The GPU memory limit](memory.md#the-gpu-memory-limit) describes, raises
+the working set, and the reserve below physical RAM still applies.
 
 ### A worked example
 
