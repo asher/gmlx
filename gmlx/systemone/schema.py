@@ -62,7 +62,10 @@ def parse_seed(body: dict) -> int:
         raise SchemaError("seed: must be an integer") from None
 
 
-def parse_schema(value, limits: Limits = Limits()) -> dict:
+def parse_schema(value, limits: Limits = Limits(), *,
+                 max_alternatives: int | None = 26) -> dict:
+    """The schema of a vLLM-shaped body. ``max_alternatives`` caps the
+    options of one question, and None removes the cap."""
     if (
         not isinstance(value, dict)
         or not isinstance(value.get("questions"), list)
@@ -108,8 +111,9 @@ def parse_schema(value, limits: Limits = Limits()) -> dict:
             raise SchemaError(f"question {qid!r}: unknown type {kind!r}")
         if len(choices) < 2:
             raise SchemaError(f"question {qid!r}: needs at least two alternatives")
-        if len(choices) > 26:
-            raise SchemaError(f"question {qid!r}: at most 26 alternatives")
+        if max_alternatives is not None and len(choices) > max_alternatives:
+            raise SchemaError(
+                f"question {qid!r}: at most {max_alternatives} alternatives")
         deps = q.get("depends_on") or []
         ask_if = q.get("ask_if") or {}
         if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
@@ -224,7 +228,8 @@ def schedule(qs):
     return levels
 
 
-def jev_schema(body, limits: Limits = Limits()) -> dict:
+def jev_schema(body, limits: Limits = Limits(), *,
+               max_alternatives: int | None = 26) -> dict:
     """The schema from a Jev request body."""
     qs = body.get("questions")
     if not isinstance(qs, dict) or not qs:
@@ -270,4 +275,4 @@ def jev_schema(body, limits: Limits = Limits()) -> dict:
         out.append(item)
     schema = {k: body[k] for k in JEV_EXTENSIONS if k in body}
     schema["questions"] = out
-    return parse_schema(schema, limits)
+    return parse_schema(schema, limits, max_alternatives=max_alternatives)

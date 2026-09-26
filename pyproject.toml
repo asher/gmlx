@@ -290,7 +290,7 @@ backlog = [
 
 [tool.ruff]
 # Vendored third-party code is linted upstream, not here.
-extend-exclude = ["gmlx/_vendor"]
+extend-exclude = ["gmlx/_vendor", "tests/systemone/_openjev_helper_ref.py"]
 
 [tool.ruff.lint]
 # S110: a silent try-except-pass needs a reason on its except line
