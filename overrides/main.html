@@ -1,6 +1,31 @@
 {% extends "base.html" %}
 
-{#- theme.favicon is the PNG fallback. Browsers that read SVG icons take this one. #}
+{#- theme.favicon is the PNG fallback. Browsers that read SVG icons take this one.
+    The Open Graph and Twitter tags give link previews the page title, the
+    description that scripts/mkdocs_hooks.py sets and the social card. #}
 {% block extrahead %}
   <link rel="icon" type="image/svg+xml" sizes="any" href="{{ 'assets/favicon.svg' | url }}">
+  {%- if page %}
+  {%- if page.title and not page.is_homepage %}
+    {%- set card_title = (page.title | striptags) ~ " - " ~ config.site_name %}
+  {%- else %}
+    {%- set card_title = config.site_name %}
+  {%- endif %}
+  {%- set card_description = page.meta.description or config.site_description %}
+  {%- set card_image = config.site_url ~ "assets/social-card.png" %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ card_title | e }}">
+  <meta property="og:description" content="{{ card_description | e }}">
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  <meta property="og:image" content="{{ card_image }}">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The gmlx wordmark and tile: the fastest way to run GGUF models on Apple Silicon.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ card_title | e }}">
+  <meta name="twitter:description" content="{{ card_description | e }}">
+  <meta name="twitter:image" content="{{ card_image }}">
+  {%- endif %}
 {% endblock %}

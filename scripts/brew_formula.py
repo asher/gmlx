@@ -190,7 +190,7 @@ class Gmlx < Formula
   include Language::Python::Virtualenv
 
   desc "Run, serve and fine-tune GGUF models natively on MLX"
-  homepage "https://github.com/asher/gmlx"
+  homepage "https://asher.github.io/gmlx/"
   url "{source["url"]}"
   sha256 "{source["sha256"]}"
   license all_of: ["BUSL-1.1", "MIT", "Apache-2.0"]

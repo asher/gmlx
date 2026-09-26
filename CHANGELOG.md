@@ -6,6 +6,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx --help` ends with the address of the docs site.
+- A docs page shared as a link previews with its title, its opening
+  sentences and the gmlx card.
+
+### Changed
+
+- The README links each page to the docs site instead of the Markdown file
+  on GitHub, and the Homebrew formula names the site as its homepage.
+
 ## [0.4.18] - 2026-09-26
 
 ### Added

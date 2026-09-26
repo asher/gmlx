@@ -30,6 +30,7 @@ import re
 import sys
 from dataclasses import dataclass
 
+from gmlx import DOCS_URL
 from gmlx.textfmt import plural_s
 import gmlx.gen.profiles as _family_profiles
 from gmlx.config import DiscoverSpec, ModelCfg
@@ -1179,7 +1180,7 @@ def family_comment(mc: ModelCfg) -> str:
     return f"sampling ({src}): {' '.join(parts)}" if parts else f"sampling ({src})"
 
 
-CONFIG_DOCS_URL = "https://asher.github.io/gmlx/config.html"
+CONFIG_DOCS_URL = f"{DOCS_URL}config.html"
 
 
 def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
