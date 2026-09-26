@@ -157,8 +157,8 @@ step is also non-linear, as on the other models: going from lossless to
 All three shed levels produced complete working pages on this long-form
 prompt, and what separates them is content drift, compared side by side in
 the Kimi-K3 screenshot table further down. One step further down broke
-form, not just content: at 0.60 a code generation on this model produced a
-nonfunctional program in one try. The usable range on this model at this
+the form of the output as well as its content. At 0.60, a code generation
+on this model produced a program that did not work in one try. The usable range on this model at this
 quant is therefore 0.65 to 0.80, and where to sit within it depends on how
 much content fidelity the workload can lose.
 

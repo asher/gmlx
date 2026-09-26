@@ -105,9 +105,9 @@ older batch layout refuses instead of misreading it.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_SPEC_APC` | The master switch. `0` turns all speculative cache layers off at once: lookups, stores, the sidecar and the checkpoint tier. |
-| `GMLX_SPEC_APC_RETIRE` | `0` turns off just the retirement store. |
-| `GMLX_SPEC_APC_SIDECAR` | `0` turns off just the drafter-KV sidecar. |
-| `GMLX_SPEC_APC_CKPT` | `0` turns off just the hybrid checkpoint tier. The exact full-clone path is used instead. |
+| `GMLX_SPEC_APC_RETIRE` | `0` turns off only the retirement store. |
+| `GMLX_SPEC_APC_SIDECAR` | `0` turns off only the drafter-KV sidecar. |
+| `GMLX_SPEC_APC_CKPT` | `0` turns off only the hybrid checkpoint tier. The exact full-clone path is used instead. |
 | `GMLX_SPEC_APC_ENTRIES` | Prefix-layer LRU entries. Default `4`. |
 | `GMLX_SPEC_APC_SIDECAR_ENTRIES` | Drafter-sidecar LRU entries. Default `12`. |
 | `GMLX_SPEC_APC_BUDGET_MB` | Byte budget for the in-memory prefix layer, in MB. Default `8192`. |

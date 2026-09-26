@@ -115,7 +115,7 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LLAMACPP_BIN=/path/to/llama-completion \
 python scripts/check-coverage.py --check --strict
 ```
 
-Two details keep the parity run honest. Prepend BOS for archs with
+Two details keep the parity run valid. Prepend BOS for archs with
 `add_bos_token=True` and match llama.cpp's prompt token count, or a
 tokenization delta is misread as a model bug. If the installed mlx-lm has a
 known context limitation for the family, such as a missing sliding-window
