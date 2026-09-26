@@ -484,6 +484,12 @@ SEAMS: tuple[Seam, ...] = (
          "engine_jobs (Prefill started line reads prompt_tokens)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._drain_cancellations",
          "engine_jobs (job should_stop)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._collect_pending_requests",
+         "engine_jobs.install_engine_jobs (wrapped: step jobs run between "
+         "batch steps; active=True never blocks, capacity 0 reads nothing)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._run_impl",
+         "engine_jobs (the batch loop calls _collect_pending_requests between "
+         "decode steps and drains cancellations after it)"),
     Seam("mlx_vlm.server.generation", "QueuedGenerationRequest",
          "engine_jobs.run_on_engine (queued job shape)"),
     Seam("mlx_vlm.server.generation", "GenerationContext",
