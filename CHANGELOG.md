@@ -66,6 +66,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With `--mmproj` and `--kv-quant-scheme kvarn`, `run` and `chat` keep the
+  KV cache in fp16, as their warning says. An explicit `--kv-bits` built an
+  affine cache instead.
 - `gmlx init -i` pre-fills the wizard from every flag it is given, such as
   `--with-stt`, `--disk-cache` and `--idle-ttl`. It used only the output
   file, the port and the first models folder.

@@ -3430,6 +3430,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     }
     if args.prefill_step_size is not None:
         kv_kwargs["prefill_step_size"] = args.prefill_step_size
+    if args.mmproj:
+        from gmlx.commands.cli import vlm_declines_kvarn
+        if vlm_declines_kvarn(args):
+            kv_kwargs["kv_bits"] = None
 
     if brain is not None:
         state.assistant_brain = brain

@@ -1789,13 +1789,7 @@ def _run_vlm(args) -> int:
         extra["thinking_start_token"] = args.thinking_start_token
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
-    if getattr(args, "kv_quant_scheme", None) == "kvarn":
-        print(
-            "warning: --kv-quant-scheme kvarn is not applied on the VLM "
-            "path yet; KV stays fp16",
-            file=sys.stderr,
-        )
-    if args.kv_bits is not None:
+    if args.kv_bits is not None and not vlm_declines_kvarn(args):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -2162,6 +2156,17 @@ def apply_family_defaults(args, parser, argv) -> int | None:
             f"[family] {src} defaults: "
             f"{', '.join(sorted(applied))}  (--no-family-defaults to disable)")
     return None
+
+
+def vlm_declines_kvarn(args) -> bool:
+    """Whether the VLM path must keep an fp16 cache because kvarn was asked for.
+    Prints the warning. The VLM path has no kvarn cache, and passing the width
+    on would build an affine cache the user did not ask for."""
+    if getattr(args, "kv_quant_scheme", None) != "kvarn":
+        return False
+    print("warning: --kv-quant-scheme kvarn is not applied on the VLM path "
+          "yet; KV stays fp16", file=sys.stderr)
+    return True
 
 
 def maybe_load_from_config(args, parser, argv) -> int | None:
