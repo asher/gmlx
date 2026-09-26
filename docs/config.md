@@ -1,10 +1,9 @@
 # Configuration
 
 `gmlx.yaml` lists the models gmlx knows by name, the settings each model
-runs with, and the settings of the server itself. `gmlx serve` reads it at
-start, and the other commands read it to turn a model name into a GGUF
-file, so a name that works in a request also works with `gmlx run` and
-`gmlx chat`. Every key has a default, so a file needs only the keys whose
+runs with, and the server's own settings. `gmlx serve` reads it at start.
+The other commands read it to turn a model name into a GGUF file, so a name
+that works in a request also works with `gmlx run` and `gmlx chat`. Every key has a default, so a file needs only the keys whose
 defaults you want to change.
 
 ## Create the file
