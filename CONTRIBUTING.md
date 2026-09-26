@@ -5,14 +5,12 @@ design context, the docs under [docs/](docs/) are authoritative.
 
 ## Dev setup
 
-gmlx needs Python 3.11 or newer on macOS with Apple Silicon, which is the
-primary target. Its kernel dependency, `mlx-kquant`, comes from PyPI as a
-prebuilt arm64 wheel for macOS 26.2 and newer. On older macOS the wheel is
-built from source, which needs full Xcode with its Metal toolchain, and on
-Linux it builds CPU-only, which is enough for the default test tier. The
-version bounds on mlx-vlm, mlx-lm, mlx-kquant and mlx, and why they are what
-they are, are explained in
-[docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
+gmlx needs Python 3.11 or newer, and macOS 26.2 or newer on Apple Silicon.
+Its kernel dependency, `mlx-kquant`, comes from PyPI as a prebuilt arm64
+wheel. On Linux, `mlx-kquant` builds CPU-only, which is enough for the
+default test tier. The version bounds on mlx-vlm, mlx-lm, mlx-kquant and mlx
+are explained in
+[Upgrading mlx-vlm, mlx-lm and mlx](docs/internals/upstream-upgrades.md).
 
 Dev setup is a venv, a clone and an editable install with the `chat` and
 `assistant` extras. CI adds `vlm` as well, an empty extra kept for older

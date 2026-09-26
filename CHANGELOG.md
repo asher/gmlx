@@ -48,6 +48,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The install docs state macOS 26.2 as the minimum for every install route.
+  They described a build from source for older macOS, which the Metal
+  kernels do not support.
 - The `--draft-block-size` help and docs called N the drafted tokens. A round
   drafts N-1, so llama-server's `--spec-draft-n-max M` matches N = M+1.
 - DiffusionGemma prompts on `gmlx run` and on the server started with two BOS

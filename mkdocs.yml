@@ -46,6 +46,7 @@ exclude_docs: |
 not_in_nav: |
   adapter-serving.md
   adding-architectures.md
+  getting-started.md
   serving-architecture.md
   server-config.md
   testing.md
@@ -83,7 +84,8 @@ nav:
   - Home: README.md
   - User guide:
       - Getting started:
-          - getting-started.md
+          - installation.md
+          - quickstart.md
           - migrating.md
       - Serving:
           - config.md

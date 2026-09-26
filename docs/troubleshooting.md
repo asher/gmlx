@@ -11,7 +11,7 @@ and names the fix for anything it flags.
 
 | Symptom | Section |
 |---------|---------|
-| the install fails on macOS before 26.2 | [The install fails compiling the Metal kernels](#the-install-fails-compiling-the-metal-kernels) |
+| the install fails on macOS before 26.2 | [The install fails on macOS before 26.2](#the-install-fails-on-macos-before-262) |
 | the command is not found in a new terminal | [gmlx: command not found in a new terminal](#gmlx-command-not-found-in-a-new-terminal) |
 | a download stopped or the disk filled | [A download was interrupted or the disk filled](#a-download-was-interrupted-or-the-disk-filled) |
 | a load or validate names an unsupported codec | [A file refuses to load with an unsupported codec](#a-file-refuses-to-load-with-an-unsupported-codec) |
@@ -29,22 +29,12 @@ and names the fix for anything it flags.
 | you need the logs and the resolved config | [Where the logs are](#where-the-logs-are) |
 | you need to find or remove what gmlx wrote | [Where files are on disk](#where-files-are-on-disk) |
 
-## The install fails compiling the Metal kernels
+## The install fails on macOS before 26.2
 
-On macOS versions before 26.2, `pip install` fails partway through
-building `mlx-kquant`. Typical messages are a compiler or SDK error, or
-`cannot execute tool 'metal'`.
-
-On older macOS the kernels build from source, and that build needs full
-Xcode: the C++ parts compile with the Command Line Tools, but the Metal
-shaders compile with `xcrun metal`, which the Command Line Tools do not
-include. Install Xcode, select it with
-`sudo xcode-select -s /Applications/Xcode.app` and re-run the pip install.
-Recent Xcode versions fetch the Metal toolchain as a separate download, so
-run `xcodebuild -downloadComponent MetalToolchain` once. If the build still
-fails after a macOS upgrade, update Xcode so its SDK matches and try again.
-On macOS 26.2 and newer none of this applies, because the kernels install
-as a prebuilt wheel.
+gmlx needs macOS 26.2 or newer, because the Metal kernels of `mlx-kquant`
+are built for that version. On an earlier version, the install fails or
+the kernels cannot run. Update macOS in System Settings, then install gmlx
+again.
 
 ## `gmlx: command not found` in a new terminal
 
@@ -54,7 +44,7 @@ found: gmlx`. That leaves `gmlx doctor` unavailable too.
 Nothing is broken. This happens with the plain-venv install route, where
 gmlx is installed in the Python venv you chose and each new terminal starts
 with that venv inactive. Run `source <install dir>/.venv/bin/activate`,
-using the directory from the [install step](getting-started.md#install),
+using the directory from the [pip install](installation.md#pip),
 and the command is available again. A background server or menu-bar app
 keeps running either way, since only the terminal command needs the venv.
 An install via `uv tool install` or pipx stays on PATH in all terminals and
@@ -254,8 +244,5 @@ config the server would run with.
 | `~/.open-webui/` | Open WebUI's chat history |
 | your model directories | the GGUFs, where `pull` writes |
 
-To remove gmlx completely, first run `gmlx service uninstall` if you
-installed the login item, then delete the directories in the table and the
-models you pulled, and uninstall the `gmlx` and `mlx-kquant` packages the
-way you installed them. For a Homebrew install that is `brew uninstall
-gmlx`, which leaves the paths in the table in place.
+[Removing gmlx](installation.md#removing-gmlx) gives the steps that remove
+gmlx and these files.

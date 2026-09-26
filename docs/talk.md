@@ -19,9 +19,10 @@ model therefore share a GPU under the server's arbitration.
 
 ## Setup
 
-Install the `talk` extra in the same form as your gmlx install, as
-[getting-started.md](getting-started.md#install) shows, and add ffmpeg,
-which Whisper uses for audio decoding:
+A Homebrew install includes everything that voice needs. A uv or pip
+install needs the `talk` extra, as
+[Optional features](installation.md#optional-features) shows, and ffmpeg,
+which Whisper uses to decode audio:
 
 ```sh
 brew install ffmpeg

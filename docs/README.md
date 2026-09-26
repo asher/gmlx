@@ -8,7 +8,7 @@ to it and talks to it by voice.
 
 Where to start depends on what you want:
 
-- To run your first model, follow the [Quickstart](getting-started.md).
+- To run your first model, follow the [Quickstart](quickstart.md).
 - To serve models to apps and agents, read
   [Configuration](config.md) and [Agents and chat apps](launch.md).
 - To look up a flag, a key or an endpoint, use the
@@ -18,8 +18,10 @@ Where to start depends on what you want:
 
 ## Getting started
 
-- [Quickstart](getting-started.md): install, a first model, and a server
-  with a client connected
+- [Installation](installation.md): Homebrew, uv and pip, the optional
+  features, upgrading and removal
+- [Quickstart](quickstart.md): a first model, the server, a request and a
+  connected client
 - [Migrating from other tools](migrating.md): what carries over from
   llama.cpp, Ollama and LM Studio
 

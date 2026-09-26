@@ -45,58 +45,55 @@ answering at 46 tokens per second.
 
 ## Quickstart
 
-gmlx needs an Apple Silicon Mac. Intel Macs and Linux are not supported. On
-macOS 26.2 or newer, install with Homebrew:
+gmlx needs an Apple Silicon Mac with macOS 26.2 or newer. Intel Macs and
+Linux are not supported. Install with Homebrew, then create a configuration
+file and download a model:
 
 ```sh
 brew install asher/gmlx/gmlx
 
-mkdir ~/gmlx && cd ~/gmlx
-gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
-gmlx run  Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
-gmlx chat Qwen3-0.6B-Q4_K_M.gguf
-gmlx serve Qwen3-0.6B-Q4_K_M.gguf --port 8080
+gmlx init --models-dir ~/models
+gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
+gmlx run  qwen3.8-27b-ud-q6 --prompt "Explain entropy in one paragraph."
+gmlx chat qwen3.8-27b-ud-q6
+gmlx serve
 
 curl localhost:8080/v1/chat/completions -d \
-  '{"model": "qwen3-0.6b", "messages": [{"role": "user", "content": "hi"}]}'
-gmlx stop
+  '{"model": "qwen3.8-27b-ud-q6", "messages": [{"role": "user", "content": "hi"}]}'
+gmlx launch pi --model qwen3.8-27b-ud-q6
 ```
 
-On older macOS, or to choose the optional features yourself, install with
+`gmlx init` writes the configuration file. `pull` downloads into the folder
+that the file names and adds the model under the id `qwen3.8-27b-ud-q6`,
+which every command then accepts in place of a path. `serve` starts the
+server in the background on port 8080, and `launch` connects the pi coding
+agent to it. Run `gmlx init` with no flags for a wizard that scans the
+folders where you already keep models.
+
+To choose the optional features yourself, install with
 `uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
-The [Quickstart](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#install)
-covers both routes and the Metal kernel build that older versions need.
+[Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md) covers both routes.
 
-Any local `.gguf` runs, chats or serves this way with no other setup. The
-curl asks for `qwen3-0.6b` because a single served file takes its filename,
-minus the quant tag, as its id. How configured models get their ids is in
-[Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md#models).
-
-A model needs memory for roughly its file size plus the conversation's KV
-cache, and getting-started.md
-[suggests models](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
-for each machine size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
+The model above is 20.5 GB. A model needs memory for about its file size
+plus the KV cache of the conversation, and the Quickstart
+[suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
+for each memory size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
 gmlx` for a uv install. To remove gmlx, follow
-[Troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
+[Removing gmlx](https://github.com/asher/gmlx/blob/main/docs/installation.md#removing-gmlx).
 
-## Set up with gmlx init
+### A GGUF with no setup
 
-`gmlx init` finds your GGUF files, names them and writes the config that the
-other commands read to `~/.config/gmlx/gmlx.yaml`. Run with no arguments it
-opens a wizard that walks through the model folders, the ids, the default
-model and the optional services.
+Any GGUF file also runs, chats and serves by its path, with no
+configuration file:
 
 ```sh
-gmlx init                 # the wizard
-gmlx serve                # finds the config, detaches, returns
-gmlx list                 # the model ids it defines
-gmlx launch pi            # connect a coding agent to the server
+gmlx run   Qwen3-4B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
+gmlx chat  Qwen3-4B-Q4_K_M.gguf
+gmlx serve Qwen3-4B-Q4_K_M.gguf
 ```
 
-After that, every command takes a model id in place of a path, and `pull`
-registers each download in the config. The wizard, its flags and what
-follows are in the
-[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#set-up-the-server).
+A server started with one file names the model after the file without its
+quant, here `qwen3-4b`, and uses it for a request that names no model.
 
 ## What you get
 
@@ -248,8 +245,10 @@ below for the latest release, with navigation and search.
 
 ### Getting started
 
-- [Quickstart](https://github.com/asher/gmlx/blob/main/docs/getting-started.md): install, a first model, and a
-  server with a client connected
+- [Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md): Homebrew, uv and pip, the optional
+  features, upgrading and removal
+- [Quickstart](https://github.com/asher/gmlx/blob/main/docs/quickstart.md): a first model, the server, a request and
+  a connected client
 - [Migrating from other tools](https://github.com/asher/gmlx/blob/main/docs/migrating.md): what carries over from
   llama.cpp, Ollama and LM Studio
 

@@ -80,7 +80,7 @@ Auto-named ids carry the quant in compact form, such as `qwen3-0.6b-q4`, and
 fall back to the full codec when two quants would collide. An empty directory
 is accepted and produces a valid config with no models. When a server is
 already running the config you rewrote, `init` signals it to reload. The
-walkthrough is in [getting-started.md](getting-started.md#set-up-the-server)
+walkthrough is in the [Quickstart](quickstart.md#serving-models)
 and the file it writes is described in [config.md](config.md).
 
 ## gmlx serve
