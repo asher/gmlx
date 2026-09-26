@@ -1,4 +1,4 @@
-# Distill a teacher into a student
+# Distillation
 
 This guide is for anyone who wants a small model to know something a
 larger one knows, without running the larger one when the small one

@@ -1,4 +1,4 @@
-# Vision and audio input
+# Vision and audio
 
 This guide is for running a multimodal GGUF, a language model paired with a
 vision or audio tower. It covers the file pairing, usage from the CLI and the

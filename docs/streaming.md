@@ -1,4 +1,4 @@
-# Streaming MoE models bigger than memory
+# Models larger than memory
 
 This guide is for running a mixture-of-experts model whose file exceeds what
 your Mac can hold in memory. It covers the quick start, the two placements,

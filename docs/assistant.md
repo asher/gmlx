@@ -1,4 +1,4 @@
-# The assistant
+# Assistant
 
 This guide is for giving a model tools and long-term memory. gmlx has a
 built-in assistant that runs a tool loop around the server's chat

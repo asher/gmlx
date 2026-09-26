@@ -96,7 +96,7 @@ so it unloads too, and until the next reload it is then managed like any
 other model. `/v1/keep` is what `gmlx launch --model` and voice sessions
 call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
-[Reloading the config](server-config.md#reloading-the-config) explains.
+[Changing the file](config.md#changing-the-file) explains.
 
 ## Capacity and live-request metrics
 

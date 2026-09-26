@@ -1,4 +1,4 @@
-# LoRA on a quantized GGUF
+# LoRA adapters
 
 This guide is for fine-tuning a GGUF model without converting it and for
 serving a base model under several adapters. The first half trains an adapter

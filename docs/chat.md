@@ -1,4 +1,4 @@
-# The chat client
+# Chat
 
 `gmlx chat` is the interactive terminal client. This page covers its
 commands, sessions, rendering and themes. The flags are under

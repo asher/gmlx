@@ -89,7 +89,7 @@ def test_family_table_in_sync_with_profiles_py():
 def _param_reference_ticks() -> set:
     """All `backticked` tokens inside the Param key reference section."""
     doc = _DOC.read_text()
-    body = doc.split("## Param key reference", 1)[1].split("## Residency", 1)[0]
+    body = doc.split("## Sampling, load and cache keys", 1)[1].split("## Family defaults", 1)[0]
     return set(re.findall(r"`([A-Za-z_0-9.]+)`", body))
 
 
@@ -141,7 +141,8 @@ def test_builtin_intents_documented():
 
 # --- yaml blocks in the split-out references must still parse ---
 
-_PARSE_DOCS = ["api.md", "services.md", "chat.md", "menubar.md", "env-vars.md"]
+_PARSE_DOCS = ["api.md", "services.md", "chat.md", "menubar.md", "env-vars.md",
+               "config.md"]
 
 
 @pytest.mark.parametrize("name", _PARSE_DOCS)

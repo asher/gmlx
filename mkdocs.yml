@@ -30,6 +30,8 @@ theme:
     - navigation.footer
     - navigation.indexes
     - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.top
     - search.highlight
     - toc.follow
@@ -77,35 +79,40 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
-  - README.md
-  - Learn:
-      - getting-started.md
-      - glossary.md
-      - migrating.md
-  - Do:
-      - launch.md
-      - chat.md
-      - menubar.md
-      - talk.md
-      - assistant.md
-      - rag.md
-      - decisions.md
-      - vlm.md
-      - lora.md
-      - distill.md
-      - streaming.md
-      - performance.md
-      - troubleshooting.md
+  - Home: README.md
+  - User guide:
+      - Getting started:
+          - getting-started.md
+          - migrating.md
+      - Serving:
+          - config.md
+          - launch.md
+          - menubar.md
+          - services.md
+          - rag.md
+          - decisions.md
+      - Clients:
+          - chat.md
+          - talk.md
+          - assistant.md
+      - Models:
+          - arch-coverage.md
+          - vlm.md
+          - streaming.md
+          - lora.md
+          - distill.md
+      - Performance and help:
+          - performance.md
+          - troubleshooting.md
+          - glossary.md
   - Reference:
       - cli.md
       - server-config.md
       - api.md
-      - services.md
       - env-vars.md
       - python.md
-      - arch-coverage.md
-      - benchmarks.md
-  - Internals:
+  - Benchmarks: benchmarks.md
+  - Developer guide:
       - internals/README.md
       - internals/serving-architecture.md
       - internals/speculative-batching.md
@@ -119,3 +126,4 @@ nav:
       - internals/hadamard-fold.md
       - internals/debug-switches.md
       - internals/distill.md
+      - Contributing: https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md

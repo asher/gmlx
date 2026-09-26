@@ -1,4 +1,4 @@
-# Voice chat
+# Voice
 
 This guide is for talking to a served model by voice with `gmlx talk`. You
 say the wake phrase and speak, and the reply is spoken back as it streams.

@@ -1,4 +1,4 @@
-# Migrating from llama.cpp, Ollama or LM Studio
+# Migrating from other tools
 
 gmlx runs the same GGUF files those tools use, so the models themselves are
 reused with no conversion. This page maps the rest: what transfers
@@ -45,7 +45,7 @@ not carry over.
   `max_tokens` sampling key, set for a model or in `profiles:` like the
   other sampling keys, and `SYSTEM` becomes `system:`.
 - Keep-alive and unload behavior is the [residency
-  system](server-config.md#residency), with an idle timeout, LRU eviction
+  system](config.md#which-models-stay-loaded), with an idle timeout, LRU eviction
   under a byte budget and `pin` for always-resident models.
 
 ## Coming from LM Studio

@@ -1,0 +1,231 @@
+# Configuration file
+
+`gmlx.yaml` lists the models gmlx knows by name, the settings each model
+runs with, and the settings of the server itself. `gmlx serve` reads it at
+start, and the other commands read it to turn a model name into a GGUF
+file, so a name that works in a request also works with `gmlx run` and
+`gmlx chat`. Every key is described in
+[Configuration keys](server-config.md).
+
+- [Create the file](#create-the-file)
+- [Where gmlx looks](#where-gmlx-looks)
+- [What the file contains](#what-the-file-contains)
+- [Models and their names](#models-and-their-names)
+- [How a request gets its settings](#how-a-request-gets-its-settings)
+- [Which models stay loaded](#which-models-stay-loaded)
+- [Changing the file](#changing-the-file)
+- [Flags and environment variables](#flags-and-environment-variables)
+
+## Create the file
+
+`gmlx init` scans a folder of GGUF files and writes a config with one entry
+for each model it finds:
+
+```sh
+gmlx init --models-dir ~/models
+```
+
+The file goes to `~/.config/gmlx/gmlx.yaml`. With no flags on a terminal,
+`init` asks its questions as a wizard instead. The scan reads only the GGUF
+headers, so it takes seconds even for a large folder. This is the part of
+the result that does the work, with the comments removed:
+
+```yaml
+server:
+  host: 127.0.0.1
+  port: 8080
+  model_dirs:
+    - ~/models
+  hf_cache: false
+  defaults:
+    ttl_s: 900
+  cache:
+    enabled: true
+    disk: false
+
+models:
+  gemma-4-12b-it-q4:
+    path: gemma-4-12b-it-Q4_K_M.gguf
+  qwen3.6-27b-q4:
+    path: Qwen3.6-27B-Q4_K_S.gguf
+```
+
+The file that `init` writes also carries every other option as a commented
+example with its default, so you can turn a setting on by removing the `#`.
+Start the server with `gmlx serve`, which finds the file on its own.
+
+## Where gmlx looks
+
+A command that needs the file uses the first of these that exists:
+
+1. `./gmlx.yaml` in the current directory
+2. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes
+3. `~/.gmlx.yaml`
+
+The file in the current directory comes first, so a project can carry its
+own models and settings. Pass `--config FILE` to read a different file.
+Without any file, `gmlx serve` scans the current directory for GGUFs and
+prints a hint to run `init`.
+
+To see the configuration a server would run with, including every default
+you did not set, run `gmlx serve --print-config`. It prints the result as
+YAML and exits without loading a model.
+
+## What the file contains
+
+The file is a YAML mapping, and every top-level key is optional. A server
+needs only `models`, and everything else has a default.
+
+| Key | Holds | Read by |
+|-----|-------|---------|
+| `server` | the address, API key, model folders, memory budget and optional services | `serve`, `launch`, `pull`, `menubar` |
+| `models` | one entry per model, with its GGUF path and settings | every command that takes a model name |
+| `aliases` | other names for a model, optionally with a profile | every command that takes a model name |
+| `profiles` | named sets of sampling, loading and prompt settings | every command that takes a model name |
+| `rules` | name patterns that give the matching models a profile | every command that takes a model name |
+| `discover` | folders scanned at each server start, whose GGUFs join `models` | `serve` |
+| `talk` | voice chat settings | `talk`, `menubar` |
+| `assistant` | tools and memory for the built-in assistant | `chat --assistant`, `talk`, `serve` |
+| `theme`, `themes` | chat colors | `chat` |
+
+[Configuration keys](server-config.md) covers `server`,
+`models`, `aliases`, `profiles`, `rules` and `discover`. The `talk` keys
+are in [Voice](talk.md), the `assistant` keys in [Assistant](assistant.md)
+and the theme keys in [Chat](chat.md).
+
+## Models and their names
+
+Each entry under `models` gives a model its id, which is the name used
+everywhere: in the `model` field of a request, in `/v1/models`, and on the
+command line of `gmlx run` and `gmlx chat`.
+
+```yaml
+models:
+  qwen3.6-27b:
+    path: Qwen3.6-27B-Q4_K_S.gguf
+    speculative: true
+  gemma-12b:
+    path: gemma-4-12b-it-Q4_K_M.gguf
+    mmproj: mmproj-gemma-4-12b-it-bf16.gguf
+```
+
+A relative `path` is looked up in each folder of `server.model_dirs` in
+order. `init` names each model after its file with the quantization in
+short form, such as `qwen3.6-27b-q4`, and you can rename an entry freely.
+An id cannot contain `@`, because `@` separates an id from a profile name.
+
+An alias gives a model a second name, and can fix a profile to it. The
+server lists each alias in `/v1/models`, which lets a client that picks
+from a menu choose a model and profile together:
+
+```yaml
+aliases:
+  fast: gemma-12b
+  coder: qwen3.6-27b@coding
+```
+
+## How a request gets its settings
+
+The sampling, loading and prompt settings of a request come from several
+layers. Each layer fills only what the layers above it leave unset:
+
+| Layer | Where it is set |
+|-------|-----------------|
+| request fields | the request body |
+| model overrides | `overrides` on the model entry |
+| profile | `profile` on the model entry, a matching `rules` entry, `server.defaults.profile`, or `@name` after the model id |
+| family defaults | built in, chosen by the model's architecture |
+
+The family defaults are the sampling values that each model's publisher
+recommends, so a new config needs no sampling settings. Some families also
+publish other operating points, such as a lower temperature for code.
+gmlx offers these as built-in profiles, called intents, which a request
+selects with a suffix:
+
+```sh
+gmlx run qwen3.6-27b@coding "Write a binary search in Go."
+```
+
+Profiles of your own go under `profiles` and can build on an intent:
+
+```yaml
+profiles:
+  review:
+    extends: coding
+    system: "You are a terse code reviewer."
+    sampling: {max_tokens: 2048}
+```
+
+`gmlx profiles` prints the family defaults and intents for every family,
+and `gmlx profiles <id>` prints the resolved settings of one model. The
+order in which profiles, rules and per-model changes combine is in the
+[precedence](server-config.md#precedence) section of the reference.
+
+## Which models stay loaded
+
+The server keeps several models in memory at once, up to the budget in
+`server.budget_gb`. The default budget is 0.8 times the working set that
+macOS recommends for the GPU. A model uses as much memory as its GGUF file
+is large, because the weights map from the file without a copy.
+
+| State | Set by | Unloads when |
+|-------|--------|--------------|
+| pinned | `pin: true`, `--pin` | never |
+| kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | the budget is full and it is the least recently used |
+| idle | any request | `ttl_s` seconds pass with no request, or the budget needs the room |
+| preloaded | `server.defaults.preload` | as idle |
+
+A model is never unloaded during a generation. Keeping is what
+`gmlx launch --model` asks for, so the model of a coding session survives
+the pauses between turns without holding budget permanently. A request
+with `{"keep": false}` to the same endpoint releases a model, and
+`POST /unload` unloads it at once.
+
+Two ids that point to the same GGUF share one loaded copy, unless a
+setting that changes how the model is loaded differs between them. Those
+settings are the `load` keys, `mmproj`, `draft_gguf`, `speculative`,
+`adapter`, `chat_template`, `stream` and the streaming keys. Sampling,
+`system` and `ttl_s` never cause a second copy. A streamed model is
+counted against the budget as described in
+[Models larger than memory](streaming.md#residency-of-a-streamed-model).
+
+## Changing the file
+
+gmlx checks the whole file when it reads it. An unknown key fails the load
+with the name of the key, so a typo such as `pinned:` for `pin:` is caught
+before the server starts. The one exception is the contents of `sampling`,
+`load` and `cache`, where an unknown key causes only a warning.
+
+A running server reads its file again on `POST /v1/reload` or on `SIGHUP`.
+Models that are already loaded stay loaded when their load settings did
+not change. A change to a load setting, such as `mmproj` or `speculative`,
+applies the next time that model loads.
+
+Several commands change the file for you, and they keep your comments and
+formatting:
+
+| Command | Change |
+|---------|--------|
+| `gmlx sync-models` | adds new GGUFs from `model_dirs` and removes entries whose file is gone |
+| `gmlx pull` | downloads a GGUF into the first folder of `model_dirs` and adds its entry |
+| `gmlx rm` | deletes a model's files and its entry |
+
+Each of them, and `gmlx init`, tells a running server to reload. Pass
+`--no-reload` to prevent that. A server started with a GGUF path instead
+of a config file has no file to read again, so it ignores the signal and
+answers `/v1/reload` as unsupported.
+
+## Flags and environment variables
+
+Some settings can also be set by a `gmlx serve` flag or by an environment
+variable. When a setting has more than one source, the first of these
+wins:
+
+1. the `serve` flag
+2. the key in the file
+3. the environment variable
+
+The MLX buffer cache limit is the exception. Its environment variable wins
+over `server.cache_limit_gb`, so that a benchmark can fix the limit without
+changing the file. The flags are in the [CLI reference](cli.md#gmlx-serve)
+and the variables in [Environment variables](env-vars.md).

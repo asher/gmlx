@@ -19,7 +19,7 @@ change meaning or disappear between releases.
 
 These are upstream mlx-vlm variables, which gmlx sets for each model from
 the `load:` and `cache:` blocks of the config, described in
-[server-config.md](server-config.md#param-key-reference).
+[Sampling, load and cache keys](server-config.md#sampling-load-and-cache-keys).
 
 | Variable | Config key |
 |----------|------------|

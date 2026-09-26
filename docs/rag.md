@@ -1,4 +1,4 @@
-# A local RAG stack
+# RAG pipelines
 
 This guide is for building retrieval-augmented generation on the server.
 RAG needs two services beside the chat model: an embedder that indexes

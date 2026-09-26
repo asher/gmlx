@@ -1,4 +1,4 @@
-# gmlx fleet serve-bench
+# Benchmarks
 
 Single-stream server throughput of gmlx against llama.cpp on the
 same GGUF across the fleet, at concurrency 1 and at KV depths from

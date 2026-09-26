@@ -1,4 +1,4 @@
-# Services
+# Speech, embeddings and rerank
 
 The server can host speech-to-text, text-to-speech, embeddings and
 reranking services beside chat models. This page is the reference for each

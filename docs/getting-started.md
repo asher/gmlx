@@ -1,4 +1,4 @@
-# Getting started
+# Quickstart
 
 This guide takes you from a fresh Mac to a served model with a client
 connected: install gmlx, generate once, pick a model that suits your

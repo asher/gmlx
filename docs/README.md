@@ -1,61 +1,86 @@
-# gmlx documentation
+# gmlx
 
-gmlx runs GGUF models on Apple Silicon. One command-line tool chats,
-serves, connects an agent or talks by voice, each behind its own verb. This
-index groups the pages by what you want to do, while the
-[project README](../README.md) is the overview.
+gmlx runs GGUF models on Apple Silicon. It runs the K-quant and IQ-quant
+files that the community publishes, unchanged, on Metal kernels for Apple's
+MLX framework. One command, `gmlx`, chats with a model in the terminal,
+serves it over OpenAI and Anthropic compatible APIs, connects coding agents
+to it and talks to it by voice.
 
-Start with [getting-started.md](getting-started.md), which takes you from
-install to a served model with a client connected. Look up flags in
-[cli.md](cli.md), config keys in [server-config.md](server-config.md) and
-the HTTP API in [api.md](api.md). The [glossary](glossary.md) defines the
-terms the rest of the docs use.
+Where to start depends on what you want:
 
-## Learn
+- To run your first model, follow the [Quickstart](getting-started.md).
+- To serve models to apps and agents, read
+  [Configuration file](config.md) and [Agents and chat apps](launch.md).
+- To look up a flag, a key or an endpoint, use the
+  [CLI reference](cli.md), [Configuration keys](server-config.md) or the
+  [HTTP API](api.md).
+- To work on gmlx itself, start with [Internals](internals/README.md).
 
-| Page | Contains |
-|------|----------|
-| [getting-started.md](getting-started.md) | install, a first model, model picks per machine size, the server, a client |
-| [glossary.md](glossary.md) | the terms these docs use, from GGUF and quant to arena and governor |
-| [migrating.md](migrating.md) | what transfers from llama.cpp, Ollama and LM Studio and what maps to what |
+## Getting started
 
-## Do
+- [Quickstart](getting-started.md): install, a first model, and a server
+  with a client connected
+- [Migrating from other tools](migrating.md): what carries over from
+  llama.cpp, Ollama and LM Studio
 
-| Task | Page |
-|------|------|
-| give Claude Code or another coding agent a local model and keep it resident | [launch.md](launch.md) |
-| use the chat REPL's commands, sessions and themes | [chat.md](chat.md) |
-| control the server from the menu bar | [menubar.md](menubar.md) |
-| talk to a model by voice | [talk.md](talk.md) |
-| give a model tools and long-term memory | [assistant.md](assistant.md) |
-| build a local RAG pipeline with embeddings and rerank | [rag.md](rag.md) |
-| ask a model fixed questions about a text and get a probability for each answer | [decisions.md](decisions.md) |
-| run a vision or audio model | [vlm.md](vlm.md) |
-| fine-tune with LoRA and serve several adapters on one base | [lora.md](lora.md) |
-| teach a small model a document without pasting it into every prompt, or distill a larger model into it | [distill.md](distill.md) |
-| run a 200B MoE on a 64 GB Mac and pick a lossy setting | [streaming.md](streaming.md) |
-| make it faster and know what each setting costs | [performance.md](performance.md) |
-| fix something that broke | [troubleshooting.md](troubleshooting.md) |
+## Serving
+
+- [Configuration file](config.md): `gmlx.yaml`, its models and how a
+  request gets its settings
+- [Agents and chat apps](launch.md): Claude Code, other coding agents and
+  Open WebUI, set up by `gmlx launch`
+- [Menu bar app](menubar.md): server status and controls in the macOS menu
+  bar
+- [Speech, embeddings and rerank](services.md): the services a server can
+  host beside chat models
+- [RAG pipelines](rag.md): retrieval with the embeddings and rerank
+  services
+- [Structured decisions](decisions.md): a probability for each answer to a
+  fixed set of questions
+
+## Clients
+
+- [Chat](chat.md): the terminal chat client, its commands, sessions and
+  themes
+- [Voice](talk.md): talking to a model with `gmlx talk`
+- [Assistant](assistant.md): tools and long-term memory for chat, voice
+  and served models
+
+## Models
+
+- [Supported architectures](arch-coverage.md): the GGUF architectures gmlx
+  loads, with their caveats
+- [Vision and audio](vlm.md): multimodal models and their `mmproj` files
+- [Models larger than memory](streaming.md): mixture-of-experts models that
+  stream their experts from disk
+- [LoRA adapters](lora.md): training an adapter and serving several on one
+  base model
+- [Distillation](distill.md): teaching a small model a document or a
+  larger model's behavior
+
+## Performance and help
+
+- [Performance tuning](performance.md): the speed features and what each
+  setting costs
+- [Benchmarks](benchmarks.md): gmlx against llama.cpp on the same files,
+  with the method
+- [Troubleshooting](troubleshooting.md): `gmlx doctor`, common failures,
+  and where gmlx keeps its files
+- [Glossary](glossary.md): the terms these pages use
 
 ## Reference
 
-| Page | Contains |
-|------|----------|
-| [cli.md](cli.md) | each verb and flag, with defaults and exit codes |
-| [server-config.md](server-config.md) | each key of the YAML config, precedence, profiles, residency |
-| [api.md](api.md) | endpoints, addressing a model, tools, structured output, logprobs, vision, limits |
-| [services.md](services.md) | the speech-to-text, text-to-speech, embeddings and rerank services |
-| [env-vars.md](env-vars.md) | the environment variables a user can set |
-| [python.md](python.md) | the Python API: load, generate, bench, preflight |
-| [arch-coverage.md](arch-coverage.md) | the generated table of supported architectures and their caveats |
-| [benchmarks.md](benchmarks.md) | the generated scorecard against llama.cpp, with method |
+- [CLI reference](cli.md): every command and flag
+- [Configuration keys](server-config.md): every key of `gmlx.yaml`
+- [HTTP API](api.md): the endpoints and request features
+- [Environment variables](env-vars.md): the variables a user can set
+- [Python API](python.md): using gmlx from Python
 
-## Internals
+## Development
 
-| Page | Contains |
-|------|----------|
-| [internals/adding-architectures.md](internals/adding-architectures.md) | what adding a model family involves and the tests that certify it |
-| [internals/README.md](internals/README.md) | the serving architecture, speculative batching, the prompt cache, testing, upstream upgrades, debug switches |
-
-[CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup and
-[CHANGELOG.md](../CHANGELOG.md) records what was released when.
+- [Internals](internals/README.md): how gmlx works, for contributors
+- [Adding a GGUF architecture](internals/adding-architectures.md): what
+  supporting a new model family involves
+- [Contributing](../CONTRIBUTING.md): development setup, tests and commit
+  style
+- [Changelog](../CHANGELOG.md): what changed in each release

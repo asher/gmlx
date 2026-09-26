@@ -25,8 +25,7 @@ mixture-of-experts model bigger than RAM still runs, by streaming its experts
 from disk.
 
 If you are coming from llama.cpp, Ollama or LM Studio,
-[migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md)
-says what carries over.
+[Migrating from other tools](https://github.com/asher/gmlx/blob/main/docs/migrating.md) says what carries over.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
@@ -35,7 +34,7 @@ says what carries over.
 
 Higher is faster, and depth is the number of tokens already in the context.
 The per-model charts and the method behind them are in
-[benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md).
+[Benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md).
 
 ![gmlx chat with a 27B model answering through a running server, with live
 tokens per
@@ -65,20 +64,20 @@ gmlx stop
 
 On older macOS, or to choose the optional features yourself, install with
 `uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
-[getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#install)
+The [Quickstart](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#install)
 covers both routes and the Metal kernel build that older versions need.
 
 Any local `.gguf` runs, chats or serves this way with no other setup. The
 curl asks for `qwen3-0.6b` because a single served file takes its filename,
-minus the quant tag, as its id. The other id rules are in
-[server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md#quick-start).
+minus the quant tag, as its id. How configured models get their ids is in
+[Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md#models-and-their-names).
 
 A model needs memory for roughly its file size plus the conversation's KV
 cache, and getting-started.md
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
 for each machine size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
 gmlx` for a uv install. To remove gmlx, follow
-[troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
+[Troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
 
 ## Set up with gmlx init
 
@@ -107,8 +106,8 @@ follows are in the
 multi-turn terminal client with markdown rendering, sessions, live sampling
 changes and image input. Both start from each model family's
 [recommended sampling](https://github.com/asher/gmlx/blob/main/docs/server-config.md#built-in-intents),
-and every flag is listed under its verb in
-[cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md).
+and every flag is listed under its verb in the
+[CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md).
 
 ### Find and download models
 
@@ -125,16 +124,15 @@ vision messages. Concurrent requests decode together, a new prompt's prefill
 is paced so that live replies keep streaming, and a prompt cache skips
 repeated prefixes. The server binds loopback by default, requires a static
 key for anything wider and never contacts Hugging Face to satisfy a request.
-[api.md](https://github.com/asher/gmlx/blob/main/docs/api.md) documents the
-endpoints and
-[server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md)
-the YAML that configures them.
+The endpoints are documented in the [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md), and
+the file that configures them in
+[Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md).
 
 A served DiffusionGemma model also answers the Jev decision API at
 `/v1/systemone`. A request asks a fixed set of yes or no, choice and score
 questions about a state, and each answer comes back as a probability for
 every option.
-[decisions.md](https://github.com/asher/gmlx/blob/main/docs/decisions.md)
+[Structured decisions](https://github.com/asher/gmlx/blob/main/docs/decisions.md)
 shows how to write the questions and act on the answers.
 
 ### Connect coding agents and chat apps
@@ -143,15 +141,15 @@ shows how to write the questions and act on the answers.
 without touching your dotfiles, starting the server first if it is not
 running. It works for the common coding agents, two terminal chat clients
 and two browser apps, Open WebUI and DeepSeek Harness, each listed with its
-quirks in [launch.md](https://github.com/asher/gmlx/blob/main/docs/launch.md).
+quirks in [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md).
 A menu bar app shows what is resident, and `gmlx service install` keeps the
 server running from login.
 
 ### Voice chat and the assistant
 
 With `gmlx talk` a wake phrase opens the mic, Whisper transcribes, and the
-reply is spoken as it streams
-([talk.md](https://github.com/asher/gmlx/blob/main/docs/talk.md)). The
+reply is spoken as it streams, as [Voice](https://github.com/asher/gmlx/blob/main/docs/talk.md)
+describes. The
 built-in [assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md)
 adds MCP tools and long-term memory to a voice session, to
 `chat --assistant`, and to assistant ids that the server exposes as models.
@@ -162,8 +160,8 @@ The server also exposes `/v1/embeddings`, `/v1/rerank`,
 `/v1/audio/transcriptions` and `/v1/audio/speech`, which together give a
 client like Open WebUI a local RAG and voice stack. The services are
 described in
-[services.md](https://github.com/asher/gmlx/blob/main/docs/services.md) and
-the RAG setup in [rag.md](https://github.com/asher/gmlx/blob/main/docs/rag.md).
+[Speech, embeddings and rerank](https://github.com/asher/gmlx/blob/main/docs/services.md) and
+the RAG setup in [RAG pipelines](https://github.com/asher/gmlx/blob/main/docs/rag.md).
 
 ### Fine-tune with LoRA
 
@@ -171,13 +169,13 @@ the RAG setup in [rag.md](https://github.com/asher/gmlx/blob/main/docs/rag.md).
 memory in fp16 still trains, and it writes the adapter as a GGUF that
 llama.cpp reads too. `--adapter` applies it at run, chat or serve, and one
 base can serve several adapters at once, which
-[lora.md](https://github.com/asher/gmlx/blob/main/docs/lora.md) walks through
+[LoRA adapters](https://github.com/asher/gmlx/blob/main/docs/lora.md) walks through
 end to end.
 
 `distill` teaches a small GGUF what a larger one knows, a document or a
 behavior, by training an adapter on the larger model's outputs without
 running the two at once.
-[distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md)
+[Distillation](https://github.com/asher/gmlx/blob/main/docs/distill.md)
 walks through it.
 
 ## Performance
@@ -188,13 +186,13 @@ with speculative decoding on both engines it decodes faster at every depth as
 well. Absolute numbers scale with the machine's memory bandwidth, so measure
 your own with `gmlx run model.gguf --bench 128,512,2048`.
 
-[performance.md](https://github.com/asher/gmlx/blob/main/docs/performance.md)
+[Performance tuning](https://github.com/asher/gmlx/blob/main/docs/performance.md)
 covers the performance features. Speculative decoding uses a model's own
 draft head, or a companion drafter on models without one, and `run` and
 `chat` turn it on by themselves. The prompt cache skips prefill for the
 repeated prefixes of agent workloads, and KV-cache quantization shrinks long
 contexts. Disk-streamed execution, described in
-[streaming.md](https://github.com/asher/gmlx/blob/main/docs/streaming.md),
+[Models larger than memory](https://github.com/asher/gmlx/blob/main/docs/streaming.md),
 runs MoE models larger than memory and makes a 200B-class model usable on a
 64 GB machine.
 
@@ -226,8 +224,8 @@ table names the caveats where an architecture has any. All 19 K-quant,
 legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair and the ternary
 STQ1_0, PTQ1_0 and PQ2_0 types. Vision models load
 as a GGUF paired with its projector, as
-[vlm.md](https://github.com/asher/gmlx/blob/main/docs/vlm.md) describes, and
-[adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md)
+[Vision and audio](https://github.com/asher/gmlx/blob/main/docs/vlm.md) describes, and
+[Adding a GGUF architecture](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md)
 explains what adding a family involves.
 
 ## Python API
@@ -241,82 +239,82 @@ print(generate(model, tokenizer, "Explain entropy.", max_tokens=128))
 
 `load_model` returns a ready-to-run mlx-lm model, the synthesized config and
 the tokenizer. The full API, including preflight and the mlx-lm server bridge,
-is in [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md).
+is in the [Python API](https://github.com/asher/gmlx/blob/main/docs/python.md) reference.
 
 ## Documentation
 
-The [documentation site](https://asher.github.io/gmlx/) has every user
-guide and reference page for the latest release, with navigation and search.
-The same pages are listed below, and the
-[documentation index](https://github.com/asher/gmlx/blob/main/docs/README.md)
-groups them by what you want to do.
+The [documentation site](https://asher.github.io/gmlx/) has every page
+below for the latest release, with navigation and search.
 
-### Start here
+### Getting started
 
-- [getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md):
-  install to a served model with a connected client.
-- [migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md):
-  what transfers from llama.cpp, Ollama and LM Studio.
-- [glossary.md](https://github.com/asher/gmlx/blob/main/docs/glossary.md): the
-  terms these docs use, from GGUF and quant to arena and governor.
+- [Quickstart](https://github.com/asher/gmlx/blob/main/docs/getting-started.md): install, a first model, and a
+  server with a client connected
+- [Migrating from other tools](https://github.com/asher/gmlx/blob/main/docs/migrating.md): what carries over from
+  llama.cpp, Ollama and LM Studio
 
-### Guides
+### Serving
 
-- [launch.md](https://github.com/asher/gmlx/blob/main/docs/launch.md): connect
-  a coding agent or chat app to a local model.
-- [chat.md](https://github.com/asher/gmlx/blob/main/docs/chat.md): the terminal
-  chat client's commands, sessions and themes.
-- [menubar.md](https://github.com/asher/gmlx/blob/main/docs/menubar.md): the
-  menu bar app that monitors and controls the server.
-- [talk.md](https://github.com/asher/gmlx/blob/main/docs/talk.md): talk to a
-  model by voice.
-- [assistant.md](https://github.com/asher/gmlx/blob/main/docs/assistant.md):
-  give a model tools and long-term memory.
-- [rag.md](https://github.com/asher/gmlx/blob/main/docs/rag.md): a local RAG
-  pipeline with embeddings and reranking.
-- [decisions.md](https://github.com/asher/gmlx/blob/main/docs/decisions.md):
-  ask fixed questions about a text and get a probability for each answer.
-- [vlm.md](https://github.com/asher/gmlx/blob/main/docs/vlm.md): run a vision
-  or audio model.
-- [lora.md](https://github.com/asher/gmlx/blob/main/docs/lora.md): fine-tune
-  with LoRA and serve several adapters on one base.
-- [distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md): teach
-  a small model a document, or distill a larger model into it.
-- [streaming.md](https://github.com/asher/gmlx/blob/main/docs/streaming.md):
-  run a MoE model larger than memory by streaming it from disk.
-- [performance.md](https://github.com/asher/gmlx/blob/main/docs/performance.md):
-  the speed features and what each setting costs.
-- [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md):
-  `gmlx doctor` first, then the common failures, where files are on disk and
-  how to remove gmlx.
+- [Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md): `gmlx.yaml`, its models and how
+  a request gets its settings
+- [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md): Claude Code, other coding
+  agents and Open WebUI, set up by `gmlx launch`
+- [Menu bar app](https://github.com/asher/gmlx/blob/main/docs/menubar.md): server status and controls in the
+  macOS menu bar
+- [Speech, embeddings and rerank](https://github.com/asher/gmlx/blob/main/docs/services.md): the services a
+  server can host beside chat models
+- [RAG pipelines](https://github.com/asher/gmlx/blob/main/docs/rag.md): retrieval with the embeddings and rerank
+  services
+- [Structured decisions](https://github.com/asher/gmlx/blob/main/docs/decisions.md): a probability for each
+  answer to a fixed set of questions
+
+### Clients
+
+- [Chat](https://github.com/asher/gmlx/blob/main/docs/chat.md): the terminal chat client, its commands, sessions
+  and themes
+- [Voice](https://github.com/asher/gmlx/blob/main/docs/talk.md): talking to a model with `gmlx talk`
+- [Assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md): tools and long-term memory for chat,
+  voice and served models
+
+### Models
+
+- [Supported architectures](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md): the GGUF
+  architectures gmlx loads, with their caveats
+- [Vision and audio](https://github.com/asher/gmlx/blob/main/docs/vlm.md): multimodal models and their `mmproj`
+  files
+- [Models larger than memory](https://github.com/asher/gmlx/blob/main/docs/streaming.md): mixture-of-experts
+  models that stream their experts from disk
+- [LoRA adapters](https://github.com/asher/gmlx/blob/main/docs/lora.md): training an adapter and serving several
+  on one base model
+- [Distillation](https://github.com/asher/gmlx/blob/main/docs/distill.md): teaching a small model a document or
+  a larger model's behavior
+
+### Performance and help
+
+- [Performance tuning](https://github.com/asher/gmlx/blob/main/docs/performance.md): the speed features and what
+  each setting costs
+- [Benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md): gmlx against llama.cpp on the same
+  files, with the method
+- [Troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md): `gmlx doctor`, common
+  failures, and where gmlx keeps its files
+- [Glossary](https://github.com/asher/gmlx/blob/main/docs/glossary.md): the terms these pages use
 
 ### Reference
 
-- [cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md): every verb and
-  flag.
-- [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md):
-  every key of the YAML config.
-- [api.md](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints
-  and request features.
-- [services.md](https://github.com/asher/gmlx/blob/main/docs/services.md): the
-  speech-to-text, text-to-speech, embeddings and rerank services.
-- [env-vars.md](https://github.com/asher/gmlx/blob/main/docs/env-vars.md): the
-  environment variables a user can set.
-- [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md): the
-  Python API.
-- [arch-coverage.md](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md):
-  the supported architectures and their caveats.
-- [benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md):
-  the scorecard against llama.cpp, with its method.
+- [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md): every command and flag
+- [Configuration keys](https://github.com/asher/gmlx/blob/main/docs/server-config.md): every key of `gmlx.yaml`
+- [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints and request features
+- [Environment variables](https://github.com/asher/gmlx/blob/main/docs/env-vars.md): the variables a user can set
+- [Python API](https://github.com/asher/gmlx/blob/main/docs/python.md): using gmlx from Python
 
 ## Contributing
 
 Pull requests are welcome. Dev setup and the rules are in
-[CONTRIBUTING.md](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md),
+the [contributing guide](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md),
 the test tiers in
-[testing.md](https://github.com/asher/gmlx/blob/main/docs/internals/testing.md),
+[Testing](https://github.com/asher/gmlx/blob/main/docs/internals/testing.md),
 and the runtime's design in
-[docs/internals](https://github.com/asher/gmlx/blob/main/docs/internals/README.md).
+[Internals](https://github.com/asher/gmlx/blob/main/docs/internals/README.md).
 
 ## Acknowledgments
 
@@ -342,4 +340,4 @@ The files listed in
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT) are MIT
 licensed and have an SPDX header saying so. Vendored third-party code is
 documented in
-[THIRD_PARTY_NOTICES.md](https://github.com/asher/gmlx/blob/main/THIRD_PARTY_NOTICES.md).
+the [third-party notices](https://github.com/asher/gmlx/blob/main/THIRD_PARTY_NOTICES.md).

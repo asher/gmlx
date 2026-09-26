@@ -1,19 +1,38 @@
 # Internals
 
-How gmlx works internally, for contributors. Users start at
-[../README.md](../README.md).
+These pages describe how gmlx works inside, for people who change its
+code. The user guides start at the [documentation home](../README.md), and
+the development setup is in the [contributing guide](../../CONTRIBUTING.md).
 
-| Page | Contains |
-|------|----------|
-| [serving-architecture.md](serving-architecture.md) | the upstream mechanism and the gmlx scheduling policy, from GGUF bytes to streamed response |
-| [speculative-batching.md](speculative-batching.md) | how speculative decoding and continuous batching run together |
-| [prompt-cache.md](prompt-cache.md) | prompt cache tiers per architecture, reuse counters, environment switches |
-| [adding-architectures.md](adding-architectures.md) | what adding a model family involves and the acceptance gate |
-| [testing.md](testing.md) | test tiers, GPU-gated invocations, the end-to-end harnesses |
-| [upstream-upgrades.md](upstream-upgrades.md) | bumping the pinned mlx-vlm, mlx-lm and mlx versions |
-| [streaming-measurements.md](streaming-measurements.md) | the measurements behind the streaming guide's lossless and lossy settings tables |
-| [structured-reads.md](structured-reads.md) | how `/v1/systemone` answers questions with one denoise step, and its parity with the vLLM example |
-| [structured-read-measurements.md](structured-read-measurements.md) | the timings of prefill, reads, samples, steps and thoughts on DiffusionGemma |
-| [hadamard-fold.md](hadamard-fold.md) | running a GGUF whose weights are stored under a Hadamard rotation: the header contract, module placement and rotation sharing |
-| [debug-switches.md](debug-switches.md) | environment variables for isolating defects |
-| [distill.md](distill.md) | the teacher pass memory arithmetic and the training head's live set |
+## How it works
+
+- [Serving architecture](serving-architecture.md): the path from GGUF bytes
+  to a streamed response, and the scheduling policy gmlx adds to mlx-vlm
+- [Speculative batching](speculative-batching.md): how speculative decoding
+  and continuous batching run together
+- [Prompt cache internals](prompt-cache.md): the cache tiers per
+  architecture, reuse counters and switches
+- [Structured reads](structured-reads.md): how `/v1/systemone` answers
+  questions with one denoise step, and its parity with the vLLM example
+- [Hadamard-folded GGUFs](hadamard-fold.md): weights stored under a
+  Hadamard rotation, the header contract and rotation sharing
+- [Distillation internals](distill.md): the memory arithmetic of the
+  teacher pass and the training head
+
+## Working on gmlx
+
+- [Adding a GGUF architecture](adding-architectures.md): what supporting a
+  model family involves, and its acceptance gate
+- [Testing](testing.md): the test tiers, GPU-gated runs and the end-to-end
+  harnesses
+- [Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md): moving the
+  pinned upstream versions
+- [Debug switches](debug-switches.md): environment variables for isolating
+  defects
+
+## Measurements
+
+- [Streaming measurements](streaming-measurements.md): the data behind the
+  lossless and lossy settings of streamed models
+- [Structured read measurements](structured-read-measurements.md): prefill,
+  read, sample, step and thought timings on DiffusionGemma

@@ -1,4 +1,4 @@
-# The menu bar app
+# Menu bar app
 
 `gmlx launch menubar` runs a macOS status-bar item that monitors a server.
 This page covers what it shows, how it starts and stops, its config editor,

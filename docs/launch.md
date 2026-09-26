@@ -1,4 +1,4 @@
-# Connect coding agents and chat apps
+# Agents and chat apps
 
 This guide covers configuring an external tool to use your server. The tool
 can be a coding harness, an agent runtime, a terminal chat client, the Open
@@ -58,7 +58,7 @@ at all.
 ## Starting the server automatically
 
 If no server answers, a background server is started from the first config
-in a [default location](server-config.md#default-config-locations) and polled
+in a [default location](config.md#where-gmlx-looks) and polled
 until it responds. With no config anywhere, the command prints `gmlx init`
 guidance and exits with code 2. Nothing is started when you pass
 `--base-url`: the launch uses that address as given and reads no config, so

@@ -1,4 +1,4 @@
-# Performance
+# Performance tuning
 
 What makes a local model fast on Apple Silicon, what each gmlx setting gains,
 and how to measure your own setup. It is written for anyone choosing a quant,

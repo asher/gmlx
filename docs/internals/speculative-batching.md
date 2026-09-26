@@ -1,4 +1,4 @@
-# Speculative decoding under continuous batching
+# Speculative batching
 
 How the server runs speculative decoding and continuous batching together.
 This page covers the two decode loops, the width cap and the transitions that
