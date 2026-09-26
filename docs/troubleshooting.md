@@ -169,10 +169,10 @@ restart`.
 ### The first request after startup is slow
 
 The server answered at once, but the first reply took many seconds, because
-that request loaded the model. At startup the server loads a pinned model,
-else [`server.defaults.model`](config.md#serverdefaultsmodel), else the
-only configured model. With several models and neither setting, mark the
-ones to load with a pin or
+that request loaded the model. At startup the server loads every pinned
+model, else [`server.defaults.model`](config.md#serverdefaultsmodel), else
+the only configured model. With several models and neither setting, pin
+the ones to keep loaded, or list the ones to load in
 [`server.defaults.preload`](config.md#serverdefaultspreload). A slow first
 turn on a long prompt is prefill instead, which the
 [prompt cache](prompt-cache.md) shortens on later turns.

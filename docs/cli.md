@@ -132,7 +132,7 @@ config, where the same settings apply to a config-mode server:
 |------|---------|---------|
 | `--budget-gb F` | 0.8x the GPU working set | Keep the weights of all [resident](glossary.md#resident) models within this many GB. |
 | `--max-models N` | None | Keep at most this many models resident. |
-| `--pin ID_OR_PATH` | None | Never evict this model. Repeat the flag for more models. |
+| `--pin ID_OR_PATH` | None | Load this model at start and never evict it. Repeat the flag for more models. |
 | `--max-tokens N` | None | Cap a completion at this many tokens when the request sets no cap. |
 | `--no-family-defaults` | Off | Do not seed each family's model-card sampling under profiles and requests. In config mode a reload restores `server.family_defaults`. |
 | `--prefill-step-size N` | `2048` | Prefill in chunks of this many tokens. A lower value caps peak memory. |

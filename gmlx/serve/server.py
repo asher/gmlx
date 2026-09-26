@@ -2074,10 +2074,20 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # and warm the model in a background thread instead - the port binds and /health
     # answers immediately while the load runs. A pinned primary keeps a retained
     # hold, exactly as the lifespan hold would have; an unpinned one is released
-    # after the warm. defaults.preload extras warm after the primary, LRU-evictable.
+    # after the warm. The other pinned models warm next, in file order, and the
+    # pool's pinned set keeps them resident; defaults.preload extras follow,
+    # LRU-evictable.
     pre = cfg.defaults.preload
-    extras = [m for m in (list(cfg.models) if pre == "all" else list(pre or ()))
-              if m != preload]
+    warm_paths = {preload_rm.path} if preload_rm is not None else set()
+    pinned_ids = []
+    for mid, rm in resolved.items():
+        if rm.path in pinned_paths and rm.path not in warm_paths:
+            warm_paths.add(rm.path)
+            pinned_ids.append(mid)
+    extras = []
+    for m in pinned_ids + (list(cfg.models) if pre == "all" else list(pre or ())):
+        if m != preload and m not in extras:
+            extras.append(m)
     if preload or extras:
         os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
         patches.spawn_preload_warm(preload, extras, retain=preload_pinned)

@@ -1256,6 +1256,30 @@ def test_serve_pinned_preload_is_retained(monkeypatch):
     assert "/m.gguf" in calls["pool"]["pinned"]
 
 
+def test_serve_warms_every_pinned_model_in_file_order(monkeypatch):
+    # The first pinned model is the retained primary; the other pinned ids
+    # warm next in file order, then defaults.preload, without repeats.
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    ns = types.SimpleNamespace
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "a": ns(path="/a.gguf", pin=False), "p1": ns(path="/p1.gguf", pin=True),
+        "b": ns(path="/b.gguf", pin=False), "p2": ns(path="/p2.gguf", pin=True),
+        "p2-alias": ns(path="/p2.gguf", pin=True)})
+    cfg = ServerCfg(
+        models={"a": ModelCfg(id="a", path="/a.gguf"),
+                "p1": ModelCfg(id="p1", path="/p1.gguf", pin=True),
+                "b": ModelCfg(id="b", path="/b.gguf"),
+                "p2": ModelCfg(id="p2", path="/p2.gguf", pin=True),
+                "p2-alias": ModelCfg(id="p2-alias", path="/p2.gguf", pin=True)},
+        defaults=ServerDefaults(preload=["b", "p2"]))
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert calls.get("preload_warm") == "p1"
+    assert calls.get("preload_retain") is True
+    assert calls.get("preload_extras") == ["p2", "b"]
+
+
 def test_serve_gpu_keepwarm_is_an_on_off_switch(monkeypatch):
     # Unset leaves the feeder default alone; the config key and the flag
     # both turn it on or off, and the flag wins.

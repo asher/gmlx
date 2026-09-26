@@ -149,11 +149,11 @@ under [`profiles`](config.md#profiles) in the config.
 
 ## Keep, pin and idle
 
-A resident model can be pinned, kept or idle. A pinned model is never
-unloaded on its own, only by `POST /unload`. A kept model is exempt from the idle timeout but can still be
-unloaded when memory runs short, and `gmlx launch` and voice sessions keep
-their model. An idle model unloads after `ttl_s` seconds without a
-request.
+A resident model can be pinned, kept or idle. A pinned model loads at
+start and is never unloaded on its own, only by `POST /unload`. A kept
+model is exempt from the idle timeout but can still be unloaded when
+memory runs short, and `gmlx launch` and voice sessions keep their model.
+An idle model unloads after `ttl_s` seconds without a request.
 
 ## KV cache
 

@@ -217,9 +217,11 @@ The default is none.
 
 ### `models.*.pin`
 
-With `true`, the model loads first at start and stays loaded. Neither the
-idle timeout nor the budget unloads it, only `POST /unload`. The default
-is `false`.
+With `true`, the model loads at start and stays loaded. Pinned models load
+in file order, before the models in
+[`server.defaults.preload`](#serverdefaultspreload). Neither the idle
+timeout nor the budget unloads one, only `POST /unload`. The default is
+`false`.
 
 ### `models.*.ttl_s`
 
@@ -951,8 +953,9 @@ request. `null` or `0` turns off the timeout. The default is `900`.
 
 #### `server.defaults.preload`
 
-The server loads these models at start, one at a time, after the first
-model. `all` loads every model. Preloaded models unload like any idle
+The server loads these models at start, one at a time, after the pinned
+models, or after the default model when none is pinned. `all` loads every
+model. Preloaded models unload like any idle
 model. The default is none.
 
 #### `server.defaults.profile`
