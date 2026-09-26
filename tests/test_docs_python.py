@@ -67,7 +67,7 @@ def test_documented_kwargs_exist(start, end, func_name):
 
 
 # Default cells that are prose, not a literal (defaults resolved at runtime).
-_NON_LITERAL_DEFAULTS = {"detected", "from GGUF", "model-aware"}
+_NON_LITERAL_DEFAULTS = {"Detected", "From the GGUF", "Model-aware"}
 
 # Full kwarg-table row: names cell + default cell.
 _ROW_WITH_DEFAULT = re.compile(

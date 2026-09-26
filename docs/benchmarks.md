@@ -1,28 +1,39 @@
 # Benchmarks
 
-Single-stream server throughput of gmlx against llama.cpp on the
-same GGUF across the fleet, at concurrency 1 and at KV depths from
-512 to 200k+ tokens. Prefill is faster on all models at all measured
-depths. Above 4k depth decode is faster too, and the gap grows as
-context deepens. Speculative decode, MTP, is measured where a native
-or preserved MTP head exists.
+This page compares the server throughput of gmlx with llama.cpp on the
+same GGUF files, one request at a time, at context depths from 512 to more
+than 200K tokens. It is for readers who want the numbers behind the speed
+claims and the guidance of the performance pages.
 
-The page also holds the measurements behind the performance pages, under
-[Serving measurements](#serving-measurements) and
-[KV cache fidelity](#kv-cache-fidelity). The machine-readable data is in
-[benchmarks.json](benchmarks.json).
-Any cell is reproducible with the bundled harness in [bench/](../bench/).
+gmlx prefills faster on every model at every measured depth. Above a depth
+of about 4K tokens it also decodes faster, and the gap grows as the
+context deepens. Speculative decoding is measured where the model has a
+native head or a companion drafter. The measurements behind the
+performance pages are under [Serving measurements](#serving-measurements)
+and [KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
+in [a JSON file](benchmarks.json), and the
+[benchmark harness](../bench/) reproduces any cell.
 
-## Fleet summary
+- [Summary](#summary)
+- [Methodology](#methodology)
+- [Model provenance](#model-provenance)
+- [Per-model detail](#per-model-detail)
+- [DeepSeek-V4 against ds4-server](#deepseek-v4-against-ds4-server)
+- [Serving measurements](#serving-measurements)
+- [KV cache fidelity](#kv-cache-fidelity)
 
-Throughput speedup vs KV depth, gmlx over the reference engine, for all models:
+## Summary
+
+The first chart shows the throughput of gmlx divided by that of the
+reference engine, for every model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
   <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
 </picture>
 
-Speculative decode lift vs KV depth, each model against its own baseline:
+The second chart shows how much faster speculative decoding is than plain
+decoding on the same server, for each model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
@@ -31,18 +42,18 @@ Speculative decode lift vs KV depth, each model against its own baseline:
 
 ## Methodology
 
-All numbers are single-stream server throughput at concurrency 1,
-gmlx against the reference engine, measured with the same GGUF weights,
-the same sampler and the same chat prompts on both engines.
+Every number is server throughput for one request at a time, measured
+with the same GGUF weights, sampler settings and chat prompts on both
+engines. This table lists the setup.
 
-| | |
+| Item | Setting |
 |---|---|
 | Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
 | gmlx | `0.1.0` (fleet default) |
 | mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
 | llama.cpp | `b9967` |
-| Build overrides | models rebenched on newer releases list their own builds under Model provenance |
-| DeepSeek-V4 reference | the dwarfstar ds4-server by antirez, ignore-eos patched: `b030961` for DeepSeek-V4-Flash IQ2_XXS, `8db1d1d` for DeepSeek-V4.1-Flash Q2 |
+| Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
+| DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
 | Dates | 2026-07-05 .. 2026-09-18 |
 | Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
@@ -304,7 +315,7 @@ one by one.
 | 110k | 31.7 (31-32.4) | 49.8 (46-55.4) | 1.57x | - | - | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) |
 | 200k | 25.3 (25.3-25.6) | 46.8 (44.9-49.7) | 1.85x | - | - | 1250 (1234.9-1275.6) | 210.8 (207-217.1) |
 
-## DeepSeek-V4 family (reference engine: ds4-server)
+## DeepSeek-V4 against ds4-server
 
 The comparison engine for these models is the dwarfstar ds4-server
 by antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
@@ -375,12 +386,15 @@ chunked prefill logits, and the other scores decoding token by token from
 the full prefill depth. KL divergence is in nats, and lower is better. The
 median is the typical position, the decode p99 is the worst hundredth,
 where a quantizer's outliers show, and top-1 is the share of generated
-positions whose most likely token matches the fp16 cache.
+positions whose most likely token matches the fp16 cache. Each table
+names the model, the context and how many layers the cache quantizes.
 
 <!-- kld-tables -->
-Qwen3.5-9B Q4_K_M, 16k context, head_dim 256, 7 of 32 layers quantized:
+### Qwen3.5-9B Q4_K_M at 16K
 
-| cache | prefill median | decode median | decode p99 | decode top-1 |
+Head dimension 256, with 7 of 32 layers quantized.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
 | affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
 | kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
@@ -395,9 +409,11 @@ Qwen3.5-9B Q4_K_M, 16k context, head_dim 256, 7 of 32 layers quantized:
 | affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
 | kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
 
-Qwen3.8-27B Q6_K_XL, 16k context, head_dim 256, 15 of 65 layers quantized:
+### Qwen3.8-27B Q6_K_XL at 16K
 
-| cache | prefill median | decode median | decode p99 | decode top-1 |
+Head dimension 256, with 15 of 65 layers quantized.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
 | affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
 | kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
@@ -412,9 +428,11 @@ Qwen3.8-27B Q6_K_XL, 16k context, head_dim 256, 15 of 65 layers quantized:
 | affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
 | kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
 
-Qwen3.8-27B Q6_K_XL, 32k context:
+### Qwen3.8-27B Q6_K_XL at 32K
 
-| cache | prefill median | decode median | decode p99 | decode top-1 |
+The same model and layers at twice the context.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
 | affine 4 | 0.00162 | 0.00205 | 0.0176 | 97.6% |
 | kvarn 4 | 0.00104 | 0.00070 | 0.0068 | 98.1% |
@@ -423,9 +441,11 @@ Qwen3.8-27B Q6_K_XL, 32k context:
 | affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
 | kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
 
-Nemotron-3.5-Lightning-30B-A3B, 16k context, Mamba2 hybrid, head_dim 128:
+### Nemotron-3.5-Lightning-30B-A3B at 16K
 
-| cache | prefill median | decode median | decode p99 | decode top-1 |
+A Mamba2 hybrid with head dimension 128.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
 | kvarn 4 | 0.00270 | 0.00163 | 0.0508 | 98.1% |
 | kvarn 6 | 0.00125 | 0.00103 | 0.0266 | 98.8% |
@@ -433,11 +453,13 @@ Nemotron-3.5-Lightning-30B-A3B, 16k context, Mamba2 hybrid, head_dim 128:
 | kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
 <!-- /kld-tables -->
 
+### Reading the tables
+
 At the same width, kvarn beats the affine cache on both legs at every width
 below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the two
-converge at 8. kvarn 6 sits between affine 6 and affine 8 on the 9B model
-and matches affine 8 on the 27B model, in three quarters of the bytes of
-the 8-bit record. At 32K, its decode median can trail affine 8 by a few
+converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8 on the
+9B model and matches affine 8 on the 27B model, in three quarters of the
+bytes of the 8-bit record. At 32K, its decode median can trail affine 8 by a few
 percent while its p99 and top-1 stay ahead. The split width k6 v5 keeps
 the median of kvarn 6 with the p99 and top-1 of kvarn 5.
 

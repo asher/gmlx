@@ -60,7 +60,7 @@ Quantization saves memory in proportion to how much of the cache grows
 with the context, and costs quality in proportion to how many layers it
 touches. The shape of the cache decides both:
 
-| Cache shape | Families | fp16 cache at 32K | What to use |
+| Cache shape | Families | Cache at 32K in fp16 | What to use |
 |---|---|---|---|
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | `--kv-bits 8`, or KVarN at 6 for the same quality in less memory. KVarN at 4 when memory is the limit. |
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |

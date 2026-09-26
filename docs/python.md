@@ -26,9 +26,9 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `arch` | detected | Override `general.architecture` detection. |
+| `arch` | Detected | Override `general.architecture` detection. |
 | `hf_source` | `None` | Load the config from this local dir or HF repo id instead of synthesizing it, for arches without a synthesizer or variants whose constants differ. |
-| `chat_template` | from GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
+| `chat_template` | From the GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
 | `target_prefix` | `""` | A prefix added to every remapped tensor name. |
 | `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap. For inspection, not inference. |
 | `fail_on_unknown` | `False` | Raise `RuntimeError` on a tensor that has no remap entry, instead of skipping it with a warning. |
@@ -90,7 +90,7 @@ These keyword arguments control long prompts, thinking models and output:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `prefill_step_size` | model-aware | Prefill chunk width. The default follows the deployed choice for the model. |
+| `prefill_step_size` | Model-aware | Prefill chunk width. The default follows the deployed choice for the model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill, on a TTY only, cleared before the first token. |
 | `thinking_budget` | `None` | Cap reasoning tokens. After roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
 | `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
@@ -117,7 +117,7 @@ loop. Its CLI equivalent is `gmlx run --bench`.
 | `decode_tokens` | `32` | Decode window measured in each run. |
 | `runs` | `2` | Runs at each length. The best is reported. |
 | `warmup` | `True` | One untimed warmup generation first. |
-| `prefill_step_size` | model-aware | As in `generate`. |
+| `prefill_step_size` | Model-aware | As in `generate`. |
 | `kv_bits` | `None` | As in `generate`. |
 | `kv_group_size` | `64` | As in `generate`. |
 | `quantized_kv_start` | `0` | As in `generate`. |
