@@ -17,11 +17,11 @@ here is decimal.
 The trunk runs over a chunk of `--trunk` tokens and keeps the hidden
 states, which are small. The head then runs over those states in
 sub-chunks of `step` positions, each of which materializes the logits
-across the whole vocabulary of the teacher. `step` is the largest size
+across the teacher's whole vocabulary. `step` is the largest size
 whose logits and reduction temporaries fit under `--logits-cap-gb`.
 `gmlx/distill/teacher.py` holds the budget per vocabulary element.
 
-The first sub-chunk of every pass measures its own peak. When the measured
+Every pass measures its first sub-chunk's peak. When the measured
 bytes exceed the budget, they replace it, and the step is derived again
 against the unchanged cap. When the step changes, the sub-chunk runs again
 from the same start at the new step to confirm that the peak fits. A
@@ -35,15 +35,15 @@ the run, so wrong logits never reach the cache.
 
 A streaming MoE teacher reads its expert stacks again on every forward,
 so its trunk chunk defaults to a larger size, which divides that traffic.
-The `throughput` block of the manifest records the forwards, the bytes
+The manifest's `throughput` block records the forwards, the bytes
 read and the stream bandwidth that the pass saw.
 
 ## The training head
 
 The student's head is fused into the loss and runs over the gathered
 positions in chunks of `--chunk` positions, with a closed-form backward.
-The memory of a chunk scales linearly with `--chunk` and with the
-vocabulary of the student, and a chunk that holds tokenizer boundaries
+A chunk's memory scales linearly with `--chunk` and with the student's
+vocabulary, and a chunk that holds tokenizer boundaries
 holds more than one that does not.
 
 `train` compares the closed form with the gradient of the head's own
@@ -52,15 +52,15 @@ the two differ is refused, so a head that changes its input before the
 projection, such as a Hadamard-folded head, never trains on a wrong
 cotangent.
 
-No head pass runs inside the gradient transform of the trunk. MLX keeps
+No head pass runs inside the trunk's gradient transform. MLX keeps
 every intermediate of a transform alive until the outer evaluation, so a
-head inside it would pin the logits of every chunk at once. The trunk
+head inside it would pin every chunk's logits at once. The trunk
 forward runs first, the head pass computes the loss and the cotangents of
 the gathered hidden states outside any transform, and a surrogate loss
 carries those cotangents back through the trunk.
 
 The trunk therefore runs twice per step. Both forwards are seeded with the
-seed of the step right before they run, so LoRA dropout draws the same
+step's seed right before they run, so LoRA dropout draws the same
 mask in both and the cotangents land on the hidden states they came from.
 A checkpointed layer replays its seed in the backward recompute. The
 replay evaluates an array, which a compiled step cannot do, so
@@ -116,7 +116,9 @@ on the teacher's tokens scored level with the sparse KL on the task
 pass rates and behind it on every retention measure, so `--ce` stays at 0.
 The hidden-state term, `cache --hidden` with `train --hs`, changed neither
 the logit terms nor the served pass rates on this task, so it is off by
-default. Whole-reply bits per byte moves by a few thousandths when one
+default.
+
+Whole-reply bits per byte moves by a few thousandths when one
 position in twenty gains a nat, which is inside the noise of a run, so
 `eval --reply-positions` restricts the reply slice to the positions the
 census found.
@@ -128,8 +130,8 @@ with the whole mass, so the student already sees them at full weight.
 
 ## The cross-tokenizer result
 
-The same schema cache, aligned onto gemma-4-12b-it at Q6_K from another
-tokenizer family and served with thinking off, gave an adapter that
+Aligned onto gemma-4-12b-it at Q6_K from another tokenizer family and
+served with thinking off, the same schema cache gave an adapter that
 reached 0.296 on the held-out questions against 0.930 with the schema
 pasted into its prompt. That is about a third of the gap. It reached 0.050
 on the kinds never trained on, where the same-tokenizer student reached
@@ -137,7 +139,7 @@ on the kinds never trained on, where the same-tokenizer student reached
 
 The adapter answered the single-table questions and failed the joins on
 column names that the schema does not have, so the alignment carried the
-shape of the replies and only part of the document. The alignment
+replies' shape and only part of the document. The alignment
 statistics read an own-group fraction of 0.83, a singleton fraction of
 0.20 and a shared-boundary fraction of 0.47. At the positions the document
 moved, the student's nats per token fell from 8.21 to 0.80.

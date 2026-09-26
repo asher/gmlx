@@ -29,6 +29,21 @@ round, so that the prompt cache stays usable under a drafter, and
 
 ## The request path
 
+A chat request can add a profile to its model id, as `id@profile`. The
+patched app first applies the queue depth cap, and an over-cap request gets
+a 503 with a Retry-After header. The residency pool then asks the serving
+layer to resolve the id and profile, and the pool binds the resolved spec
+for the request. A model already resident under the same load parameters
+returns at once.
+
+For a cold build, the pool sets the model's load-parameter and prompt cache
+environment variables around the stock load. The loader then builds the
+model and swaps its leaves for mlx-kquant modules. The patched
+`_build_gen_args` seeds sampling from the active profile. In the engine,
+the admit gate holds a join until its projected bytes fit, and the paced
+ticks run under the governor's bands, with a memory error inside a tick
+contained instead of ending the server process.
+
 ```mermaid
 sequenceDiagram
   participant C as Client
@@ -76,7 +91,7 @@ and the last one installed runs outermost.
 
 | Module | Policy |
 |---|---|
-| `batch_sched.py` | It paces prefill behind decode. A chunk runs only after decode has banked the ratio times the last chunk's time. |
+| `batch_sched.py` | It paces prefill behind decode. A chunk runs only after decode has run for the ratio times the last chunk's time. |
 | `auto_ratio.py` | It derives the pacing ratio from a retention floor. Its deadline counts only pacing waits, so a wait for capacity adds nothing. |
 | `admit_gate.py` | It projects the bytes a join would commit before a prompt batch forms, and defers the join instead of failing it. |
 | `governor.py` | It sets a band from the ticks left before memory runs out, so a band follows the rate of growth and not the level. |
@@ -94,10 +109,11 @@ past the defer ceiling the gate admits one row per tick with a warning.
 The governor keeps dwell minimums and a cap on sheds per minute, so that
 its bands do not thrash.
 
-The modules interlock. The governor's band is the admit gate's hard hold.
-The admit gate's deferred set keeps `auto_ratio` from charging capacity
-waits to pacing. The chunk cost that the pacer observes feeds the
-`auto_ratio` threshold and the prefill chunk size. The
-default decode width sets the default queue cap.
+Signals pass between the modules. The admit gate uses the governor's band
+as its hard hold, and its deferred set keeps `auto_ratio` from charging
+capacity waits to pacing. The chunk cost that the pacer observes feeds the
+`auto_ratio` threshold and the prefill chunk size, and the default decode
+width sets the default queue cap. `/v1/metrics` shows each of these
+signals, as
 [Capacity and live-request metrics](../api.md#capacity-and-live-request-metrics)
-describes how `/v1/metrics` shows each of them.
+describes.

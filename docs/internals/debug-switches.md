@@ -26,7 +26,7 @@ default.
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_DSPARK_CONF=T` | Set the block-cut confidence threshold of a DSpark drafter, in 0..1. |
+| `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes, without the gmlx performance patches and fixes. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged. |
@@ -35,9 +35,10 @@ default.
 
 ## Prompt cache
 
-The switches of each layer that
-[Prompt cache internals](prompt-cache.md#the-cache-layers) describes are
-read in `gmlx/spec/engine.py` and `gmlx/cache/`.
+The switches for each prompt cache layer are read in `gmlx/spec/engine.py`
+and `gmlx/cache/`, and
+[Prompt cache internals](prompt-cache.md#the-cache-layers) describes the
+layers.
 
 | Variable | Meaning |
 |----------|---------|
@@ -68,6 +69,9 @@ read in `gmlx/spec/engine.py` and `gmlx/cache/`.
 
 ## Attention and KV cache
 
+These switches change how attention runs or how the KV cache is stored, or
+log the attention route.
+
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build, so the model runs fp16 KV. |
@@ -79,6 +83,9 @@ read in `gmlx/spec/engine.py` and `gmlx/cache/`.
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 
 ## Model kernels
+
+These switches turn off, resize or trace individual model kernels and
+fusions.
 
 | Variable | Meaning |
 |----------|---------|
@@ -94,7 +101,7 @@ read in `gmlx/spec/engine.py` and `gmlx/cache/`.
 | `GMLX_GLM5_ABSORBED_MAX_L` | Run GLM-5.3-Flash MLA layers in the absorbed MQA form up to this many queries. `0` expands the latent per head everywhere. |
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash indexer inline instead of through the fused scorer and radix top-k. |
 | `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify. |
-| `GMLX_GLM5_KDA_FUSED_MAX_T` | Run GLM-5.3-Flash KDA steps up to this wide as one fused decode dispatch. `0` restores the op chain everywhere. |
+| `GMLX_GLM5_KDA_FUSED_MAX_T` | Run GLM-5.3-Flash KDA steps up to this width as one fused decode dispatch. `0` restores the op chain everywhere. |
 | `GMLX_GLM5_KDA_CHUNK=0` | Keep GLM-5.3-Flash KDA prefill on the token-sequential kernel instead of the chunked recurrence. |
 | `GMLX_GLM5_KDA_CONV=0` | Keep the eager GLM-5.3-Flash KDA prefill chain instead of the mlx-kquant glue kernels. |
 | `GMLX_HC_M1_MAX_ROWS` | Run hyper-connected steps up to this many rows on the fused per-row kernels. Wider steps take the GEMM route. |
@@ -122,24 +129,26 @@ read in `gmlx/spec/engine.py` and `gmlx/cache/`.
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted against actual expert routing per layer and print the recall table at exit, issuing no reads. |
 | `GMLX_PIN_CAST_EXCLUDE=0` | Pin the file bytes of every every-token tensor, including the tensors the loader converts at load. |
 | `GMLX_STREAM_PLE_COMPOSE=0` | Keep a streamable lookup table resident when the experts also stream. |
-| `GMLX_RELEASE_PAGECACHE=0` | Keep the pages of a released over-RAM model in the page cache at exit or unload. |
+| `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload. |
 
 ## Training
 
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_TRAIN_BLOCKED_ATTN=0` | Run training attention on the unfused MLX path instead of the query-block recompute in `gmlx.tune.attention`. |
-| `GMLX_TRAIN_GDN_CHUNK=0` | Run the gated delta scan of a training forward on the per-token loop of mlx-lm instead of the chunked rule in `gmlx.tune.gdn`. |
+| `GMLX_TRAIN_GDN_CHUNK=0` | Run a training forward's gated delta scan on mlx-lm's per-token loop instead of the chunked rule in `gmlx.tune.gdn`. |
 | `MLX_ENABLE_TF32=1` | Keep TF32 float32 matmul in `gmlx train` and `gmlx distill`, which otherwise turn it off. The chunked gated delta rule then takes the loop. |
 
 ## Profiling
+
+These switches time a run's parts and print or write the results.
 
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print the per-token split of a streamed decode between disk stalls and the eval and sync bucket at exit. A clock drop shows as a large sync bucket. |
-| `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and the arena misses of each token. |
-| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 decode, evaluate after each layer part and print the wall time per token of each part. |
+| `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses. |
+| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 decode, evaluate after each layer part and print each part's wall time per token. |
 | `GMLX_DECODE_LAYER_PROFILE=2` | Also evaluate inside attention and the MoE, so each sub-step is one command buffer in a GPU trace. |
 | `GMLX_DECODE_LAYER_PROFILE_LOG` | With the layer profile, write every mark to this path at exit, for aligning a Metal System Trace. |
 | `GMLX_LAYER_PROFILE_PREFILL=1` | With the layer profile, also mark the prefill chunks. The per-token figures then average over forward calls. |

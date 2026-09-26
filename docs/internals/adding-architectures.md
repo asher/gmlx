@@ -9,8 +9,8 @@ appears in [Supported architectures](../arch-coverage.md).
 Each GGUF architecture needs a model class for its `model_type`. The set
 of classes that mlx-lm and mlx-vlm ship changes with every release, so
 check the installed packages first. When one of them has the class, gmlx
-supplies only the tensor map and the config, and the `backend` field of
-the architecture-table row names the package.
+supplies only the tensor map and the config, and the architecture-table
+row's `backend` field names the package.
 
 When neither package has the class, vendor the model into `gmlx/models/`
 and add it to `_VENDORED_MLX_LM_MODULES` in `gmlx/load/arch_table.py`. A
@@ -29,13 +29,13 @@ The engine is architecture-generic and data-driven, so neither the load
 pipeline nor the module-swap code is edited per architecture. A new family
 adds three things:
 
-- A tensor-name map from the GGUF naming to the parameter paths of the
-  model class.
-- A config synthesizer that rebuilds the exact `ModelArgs` that the model
-  class expects, from the GGUF metadata or, where the metadata is lossy,
-  from tensor shapes.
-- An architecture-table row, from which the CLI, preflight and the
-  coverage table derive.
+- A tensor-name map translates the GGUF names to the model class's
+  parameter paths.
+- A config synthesizer rebuilds the exact `ModelArgs` that the model class
+  expects, from the GGUF metadata or, where the metadata is lossy, from
+  tensor shapes.
+- An architecture-table row is the source from which the CLI, preflight
+  and the coverage table derive.
 
 A family that diverges from the canonical layouts also adds the parts that
 make it diverge. These are per-tensor remap overrides, wire-byte
@@ -108,10 +108,10 @@ python scripts/check-coverage.py --check --strict
 ```
 
 For a valid parity run, prepend BOS where the tokenizer asks for it and
-match the prompt token count of llama.cpp, or a tokenization difference
+match llama.cpp's prompt token count, or a tokenization difference
 reads as a model bug. When the upstream class has a known limit for the
-family, cap the comparison window and record the limit in the notes of its
-table row. [Testing](testing.md) describes the test tiers.
+family, cap the comparison window and record the limit in its table row's
+notes. [Testing](testing.md) describes the test tiers.
 
 ## Requesting or contributing a family
 

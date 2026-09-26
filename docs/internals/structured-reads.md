@@ -23,7 +23,7 @@ HTTP, while gmlx runs the same logic in the server process. Each ported
 file keeps the Apache-2.0 header that names its source, and
 `licenses/vllm-LICENSE` lists them.
 
-The code has three layers. Apart from `engine.py` and `denoise.py`, the
+Three layers make up the code. Apart from `engine.py` and `denoise.py`, the
 modules in `gmlx/systemone/` are pure Python. They hold the schema rules,
 the answer templates and `decide`, which runs a decision against any
 object with `prefill`, `read` and `think`. `extensions.py` adds
@@ -55,7 +55,7 @@ That is why labels are `yes` and `no`, letters for choices, and digits for
 scores of up to nine levels.
 
 With `constrained` on, the unembedding multiplies the slot rows by the
-label rows of the embedding table only. With it off, the product runs over
+embedding table's label rows only. With it off, the product runs over
 the full vocabulary, and the returned ids also include the argmax token.
 At one step both modes give the same label probabilities. The mode changes
 the entropy over the returned ids, which decides whether `samples: "auto"`
@@ -68,18 +68,18 @@ patch.
 
 With `steps` above 1 the read runs its own denoise loop. Every canvas
 position other than a slot stays pinned at its seed value, the slots are
-resampled at the schedule temperature, and self-conditioning feeds the
-each step's soft embedding to the next. A sample stops when its argmax
-canvas has been stable over the model's stability window with mean
-entropy under the confidence threshold, the entropy taken over the label
-set in constrained mode, or at the step cap. Each sample converges on its
+resampled at the schedule temperature, and self-conditioning feeds
+each step's soft embedding to the next. A sample stops at the step cap, or
+earlier when its argmax canvas has been stable over the model's stability
+window with mean entropy under the confidence threshold. In constrained
+mode that entropy is taken over the label set. Each sample converges on its
 own, where vLLM converges per request.
 
 ## Samples
 
 A sample is one read with its own random slot tokens. Each sample's
 seed derives from the request seed, so a request with the same seed
-reproduces its reads exactly. The samples of one group run as one batch,
+reproduces its reads exactly. One group's samples run as one batch,
 and a wide canvas splits into several passes.
 
 The default `samples: "auto"` reads once. When the entropy at any slot,
@@ -99,8 +99,8 @@ differently.
 A stage whose answer template does not fit the canvas splits into chunks,
 read one after another. The example reads chunks in parallel, and since
 chunks share one conditioning, the order does not change the answers.
-With `sequential`, each chunk's prompt also carries the answer lines of
-the chunks before it, in both implementations.
+With `sequential`, each chunk's prompt also carries the earlier chunks'
+answer lines, in both implementations.
 
 When a request sets `think`, the server writes a thought first, through
 the mlx-vlm denoiser, seeded from the request seed so that it repeats. The
@@ -127,7 +127,7 @@ which the job checks between reads and on every thought token.
 
 Before queueing, the route checks the context and memory budgets against
 the largest prompt the decision can reach, including the thought budget
-and the answer lines of every earlier stage. The route, `run_on_engine`
+and every earlier stage's answer lines. The route, `run_on_engine`
 and the engine rely on upstream internals, each fingerprinted in
 `gmlx/upstream/seams.py`.
 

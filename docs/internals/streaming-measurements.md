@@ -28,9 +28,9 @@ screenshot links to the generated page, committed beside it in
 `docs/assets/perf/`. GitHub shows a page's source, so download one to
 watch the animation.
 
-| | |
-|---|---|
-| <a href="../assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="../assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: sunset scene, red coupe with a headlight beam under power lines, the sun low between hills"></a><br>UD-IQ2_XXS, 662 GB file. One generation of 30.8k tokens, thinking included, at 1.34 tok/s and temperature 1.0. | <a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>UD-Q2_K_XL, 861 GB file, of which 799 GB of experts stay file-backed. One generation of 23.7k tokens, thinking included, at 1.15 tok/s and temperature 1.0. |
+<a href="../assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="../assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: sunset scene, red coupe with a headlight beam under power lines, the sun low between hills"></a><br>The UD-IQ2_XXS file is 662 GB. One generation wrote 30.8k tokens, thinking included, at 1.34 tok/s and temperature 1.0.
+
+<a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>The UD-Q2_K_XL file is 861 GB, of which 799 GB of experts stay file-backed. One generation wrote 23.7k tokens, thinking included, at 1.15 tok/s and temperature 1.0.
 
 Both pages ran as generated. A model five to seven times the machine's
 RAM sustained coherent single-file programs of 24k to 31k tokens at
@@ -104,8 +104,8 @@ P=0.85, both as alternated 512-token medians. Each GB of arena added about
 
 Wider routing also moved the quality threshold. At P=0.80, which was
 clean on MiniMax-M3, a 12k-token one-page-app generation completed with
-valid markup and working code, but the page showed a sky with no road and
-no car on a prompt that asked for a car on a road. The lossless run at the
+valid markup and working code. The prompt asked for a car on a road, but
+the page showed a sky with no road and no car. The lossless run at the
 same seed drew the full scene, and so did P=0.85.
 
 ## Kimi-K3
@@ -127,8 +127,8 @@ are whole-run averages, not alternated A/Bs.
 | `moe_miss_shed: 0.65` | 30.4% | 74.2% | 1.39 tok/s (+21%) |
 
 Memory pressure sized the wired arena from 29 to 33 GB across the runs,
-so read the columns as a trend. Shedding raised the hit rate of the
-remaining experts, because the arena stops loading experts that would be
+so read the columns as a trend. Shedding raised the remaining experts'
+hit rate, because the arena stops loading experts that would be
 dropped anyway. All three shed levels produced complete working pages, as
 [Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3) shows. At
 0.60, a code generation produced a program that did not work.
@@ -182,9 +182,11 @@ the phase split that `GMLX_DECODE_PHASE_STATS=1` prints. The GPU sync time
 also halved, because a decode that does not wait on the SSD keeps the GPU
 off its clock floor.
 
-`GMLX_DECODE_LAYER_PROFILE=2` measured the two hyper-connection routes on
-the ds4 conversion over 48 greedy tokens after a 16K prompt, with the
-profile's own syncs included.
+`GMLX_DECODE_LAYER_PROFILE=2` measured the two hyper-connection routes over
+48 greedy tokens after a 16K prompt, with the profile's own syncs included.
+This run used `DeepSeek-V4.1-Flash-Q2.gguf`, the single-file ds4 conversion
+that [Benchmarks](../benchmarks.md#model-provenance) lists, instead of the
+Q2_K file.
 
 | Route | Hyper-connections, ms per token | Total ms per token | Decode |
 |---|---|---|---|
@@ -264,10 +266,13 @@ them as an illustration rather than a certification.
 
 </details>
 
-| | |
-|---|---|
-| <a href="../assets/perf/lossy-hy3-baseline.html"><img src="../assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"></a><br>Lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <a href="../assets/perf/lossy-hy3-shed-0.07-0.93.html"><img src="../assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"></a><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
-| <a href="../assets/perf/lossy-hy3-shed-0.10-0.90.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <a href="../assets/perf/lossy-hy3-shed-0.20-0.80.html"><img src="../assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"></a><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
+<a href="../assets/perf/lossy-hy3-baseline.html"><img src="../assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"></a><br>The lossless run used top-p 1.0 and wrote 13.2k tokens at 3.0 tok/s.
+
+<a href="../assets/perf/lossy-hy3-shed-0.07-0.93.html"><img src="../assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"></a><br>The run with `moe_layer_shed 0.07` and `moe_miss_shed 0.93` used top-p 0.97 and wrote 10.6k tokens at 3.5 tok/s.
+
+<a href="../assets/perf/lossy-hy3-shed-0.10-0.90.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"></a><br>The run with `moe_layer_shed 0.10` and `moe_miss_shed 0.90` used top-p 0.95 and wrote 11.1k tokens at 3.6 tok/s.
+
+<a href="../assets/perf/lossy-hy3-shed-0.20-0.80.html"><img src="../assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"></a><br>The run with `moe_layer_shed 0.20` and `moe_miss_shed 0.80` used top-p 1.0 and wrote 10.0k tokens at 4.2 tok/s.
 
 The scene simplifies as the settings become more aggressive, and the
 first three pages ran clean. The black page failed on its first stray
@@ -275,12 +280,12 @@ token, a bullet character where an operator belonged. The tok/s figures
 are whole-run averages of single generations at different lengths, so for
 the measured comparison read the [Hy3](#hy3) table.
 
-The full pair was also run once on the same prompt and build at
-temperature 0.6 and top-p 0.95.
+On the same prompt and build, the full pair also ran once at temperature
+0.6 and top-p 0.95.
 
-<a href="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
+<a href="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>The run with `moe_layer_shed 0.10` and `moe_miss_shed 0.90` used temperature 0.6 and top-p 0.95 and wrote 10.2k tokens at 3.8 tok/s.
 
-It ran clean and drew one of the strongest scenes of the set, which
+That generation ran clean and drew one of the strongest scenes of the set, which
 suggests keeping the full pair and its 13% at a slightly lower
 temperature on this model.
 
@@ -288,10 +293,13 @@ temperature on this model.
 
 These are the pages from the four runs in the [Kimi-K3](#kimi-k3) table.
 
-| | |
-|---|---|
-| <a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="lossless: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>Lossless, ranked prestage. 23.7k tokens at 1.15 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.80.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.80.png" alt="miss-shed 0.80 with keeper prestage: bright daylight scene with green fields, mountains and sun, red car with slightly misdrawn body panels"></a><br>`moe_miss_shed 0.80` + keeper prestage. 24.2k tokens at 1.19 tok/s. |
-| <a href="../assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>`moe_miss_shed 0.70` + keeper prestage. 29.6k tokens at 1.33 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence and birds, red car with oversized featureless black wheels and a light streak across the body"></a><br>`moe_miss_shed 0.65` + keeper prestage. 28.3k tokens at 1.39 tok/s. |
+<a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="lossless: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>The lossless run with ranked prestage wrote 23.7k tokens at 1.15 tok/s.
+
+<a href="../assets/perf/lossy-kimi-k3-shed-0.80.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.80.png" alt="miss-shed 0.80 with keeper prestage: bright daylight scene with green fields, mountains and sun, red car with slightly misdrawn body panels"></a><br>The run with `moe_miss_shed 0.80` and keeper prestage wrote 24.2k tokens at 1.19 tok/s.
+
+<a href="../assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>The run with `moe_miss_shed 0.70` and keeper prestage wrote 29.6k tokens at 1.33 tok/s.
+
+<a href="../assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence and birds, red car with oversized featureless black wheels and a light streak across the body"></a><br>The run with `moe_miss_shed 0.65` and keeper prestage wrote 28.3k tokens at 1.39 tok/s.
 
 All four pages ran as generated, with valid markup, a working animation
 loop and no stray tokens. What varies is the scene, and it does not worsen

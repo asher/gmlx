@@ -46,7 +46,7 @@ exercise a path.
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
-| `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the load path and batch engine of the server, and its own tier counters move. |
+| `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ~/models/qwen3-0.6b
@@ -67,8 +67,8 @@ only checks that a real model engages its cache tier.
 
 `tests/e2e/` holds standalone scripts that launch the real server, load
 models on the GPU and grade the results. They are not part of the pytest
-suite, although `tests/test_e2e_harness_smoke.py` checks the imports and
-arguments of every harness in CI.
+suite, although `tests/test_e2e_harness_smoke.py` checks every harness's
+imports and arguments in CI.
 [Server end-to-end test harness](../../tests/e2e/README.md) describes each
 harness, its tiers, its grading and its model bootstrap.
 

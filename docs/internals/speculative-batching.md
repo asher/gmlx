@@ -102,4 +102,5 @@ cap.
   on the round after.
 
 Both transitions have an off switch for A/B runs, `GMLX_MTP_PREEMPT` and
-`GMLX_MTP_RESUME`, which [Server](../env-vars.md#server) lists.
+`GMLX_MTP_RESUME`, which the
+[server environment variables](../env-vars.md#server) list.

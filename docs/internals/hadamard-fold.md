@@ -31,8 +31,8 @@ otherwise.
 
 ## Sharing one rotation
 
-Projections that read the same activation take one rotation between them
-through `shared_linears`, such as q, k and v, or gate and up.
+Projections that read the same activation, such as q, k and v or gate and
+up, take one rotation between them through `shared_linears`.
 `gmlx.upstream.hadamard_share` swaps the stock attention and MLP onto
 forwards that share it. A down or output projection reads a gated
 activation, and `glu_rotate` computes that activation and its rotation in

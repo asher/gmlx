@@ -1,8 +1,8 @@
 # Structured read measurements
 
-The timings behind [Structured reads](structured-reads.md) show where the
-time of a `/v1/systemone` decision goes on one machine, and how the request
-options and the wording of a question change the answers. The commands in
+The timings behind [Structured reads](structured-reads.md) show where a
+`/v1/systemone` decision's time goes on one machine, and how the request
+options and a question's wording change the answers. The commands in
 [Setup](#setup) measure both again.
 
 - [Setup](#setup)
@@ -20,7 +20,7 @@ options and the wording of a question change the answers. The commands in
 | Item | Value |
 |------|-------|
 | Machine | The bench ran on an Apple M3 Max with 128 GB on macOS 26.6. |
-| Model | The model is diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and the last two sections also use Q8_0. |
+| Model | The model is diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and the Accuracy and Thinking on mixed requests sections also use Q8_0. |
 | Canvas | The canvas is 64, the `server.systemone.canvas` default. |
 | Peak memory | Peak memory reached 19.7 GB over the whole bench. |
 
@@ -37,7 +37,9 @@ python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```
 
 `scripts/structured_read_accuracy.py` holds the facts, the labeled set and
-the requests behind the last three sections, and its `wording`, `labeled`
+the requests behind [Question wording](#question-wording),
+[Accuracy](#accuracy) and
+[Thinking on mixed requests](#thinking-on-mixed-requests), and its `wording`, `labeled`
 and `mixed` modes print their tables. Its `thoughts` mode prints the
 thought table, and `cases` prints the single answers that
 [When answers go wrong](../decisions.md#when-answers-go-wrong) quotes, with the
@@ -123,7 +125,7 @@ request in this table.
 | `allergen-risotto` | 8 | 1193 |
 
 The thought on the one-question ticket ran to the cap of 48 steps, while
-the same ticket asked five questions stopped after 9, so the cost depends
+the same ticket with five questions stopped after 9, so the cost depends
 on the whole prompt and not on the state alone.
 
 ## Whole decisions
@@ -155,8 +157,8 @@ and we have a demo at noon."
 
 ## Question wording
 
-The wording of a question changes the answer more than the prompt around
-it does. Sixteen facts that need recalled knowledge, such as whether hummus
+A question's wording changes the answer more than the prompt around it
+does. Sixteen facts that need recalled knowledge, such as whether hummus
 contains sesame or which currency Bratislava uses, were each asked as a yes
 or no question and as its negation. That makes 32 reads, at seed 42 with
 one sample. Half the true answers are yes, and the table counts how many
@@ -206,9 +208,10 @@ the answers worse. Reversing the label order trims the lean toward yes at
 twice the cost and fixes no answer.
 
 The default's wrong answers are mostly its unsure ones, which is what
-`think: "auto"` relies on. It wrote a thought for 15 of the 102 items and
-reached 95 right, against 89 for the default and 96 with a thought on
-every item, at 40 percent of the time of the full thought. A few answers
+`think: "auto"` relies on. With `think: "auto"`, the route wrote a thought
+for 15 of the 102 items and reached 95 right. The default reached 89, a
+thought on every item reached 96, and `"auto"` took 40 percent of the time
+that a thought on every item took. A few answers
 stay wrong with a thought, such as sesame in pad thai, so they come from
 the model's knowledge and not from the read.
 
@@ -220,8 +223,8 @@ does not fix the answers a read gets wrong.
 ## Thinking on mixed requests
 
 The labeled set asks one question per request. Twenty-eight requests built
-on the questions of the examples in [Structured
-decisions](../decisions.md#examples) and five support tickets with five
+on the example questions in
+[Structured decisions](../decisions.md#examples) and five support tickets with five
 questions each show what `think: "auto"` does on requests with several
 questions. Each request was decided with `think: 0` and with `think: "auto"`
 at seed 42, and the Q4_K_M times are the mean of one run before and one
