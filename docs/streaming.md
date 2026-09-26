@@ -368,7 +368,7 @@ unaffected.
 In a config the feeder opt-outs are `prefill_feeder: false` and
 `decode_feeder: false` beside the `stream` key. The lossy settings are the
 model keys in the settings table. All of them are listed under
-[models](server-config.md#models).
+[models](config.md#models).
 
 ## Residency of a streamed model
 

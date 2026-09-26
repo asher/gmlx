@@ -75,7 +75,7 @@ fails to start gives a warning, and the loop runs without it. A stdio
 server does not inherit your shell's environment, so a token set there
 never reaches third-party tool code unless you pass it with `env`. Every
 key of the block, with its default, is under
-[assistant](server-config.md#assistant) in the configuration keys.
+[assistant](config.md#assistant) in the configuration keys.
 
 ## Tool examples
 

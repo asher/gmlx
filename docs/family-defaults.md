@@ -44,4 +44,4 @@ The `default` row applies to architectures that no family claims. How
 the defaults combine with your own profiles is in
 [How a request gets its settings](config.md#how-a-request-gets-its-settings),
 and the `family` key of a model entry replaces the detected family, as
-[Configuration keys](server-config.md#modelsfamily) describes.
+[Configuration](config.md#modelsfamily) describes.

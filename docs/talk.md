@@ -185,7 +185,7 @@ what you heard and never leaves a half-finished tool round in the history.
 The `talk` block of the configuration file sets the model, voice, mode and
 listening thresholds, and most of its keys also have a flag under
 [gmlx talk](cli.md#gmlx-talk), which wins over the file. Every key, with
-its default, is under [talk](server-config.md#talk) in the configuration
+its default, is under [talk](config.md#voice) in the configuration
 keys. The [menu bar app](menubar.md#voice-sessions) runs the same loop
 without a terminal and can bind a tap-to-talk hotkey.
 

@@ -6,7 +6,7 @@ pure-Python core - dataclasses, the YAML loader, the ``extends`` / ``rules`` /
 precedence merge, and path/env resolution. It imports nothing heavy (no mlx-vlm,
 no mlx), so it loads and tests on any machine.
 
-Shape (see ``docs/server-config.md`` for the full reference)::
+Shape (see ``docs/config.md`` for the full reference)::
 
     server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}

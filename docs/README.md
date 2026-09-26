@@ -10,9 +10,9 @@ Where to start depends on what you want:
 
 - To run your first model, follow the [Quickstart](getting-started.md).
 - To serve models to apps and agents, read
-  [Configuration file](config.md) and [Agents and chat apps](launch.md).
+  [Configuration](config.md) and [Agents and chat apps](launch.md).
 - To look up a flag, a key or an endpoint, use the
-  [CLI reference](cli.md), [Configuration keys](server-config.md) or the
+  [CLI reference](cli.md), [Configuration](config.md) or the
   [HTTP API](api.md).
 - To work on gmlx itself, start with [Internals](internals/README.md).
 
@@ -25,8 +25,8 @@ Where to start depends on what you want:
 
 ## Serving
 
-- [Configuration file](config.md): `gmlx.yaml`, its models and how a
-  request gets its settings
+- [Configuration](config.md): `gmlx.yaml`, its models, its profiles and
+  how a request gets its settings
 - [Agents and chat apps](launch.md): Claude Code, other coding agents and
   Open WebUI, set up by `gmlx launch`
 - [Menu bar app](menubar.md): server status and controls in the macOS menu
@@ -71,7 +71,7 @@ Where to start depends on what you want:
 ## Reference
 
 - [CLI reference](cli.md): every command and flag
-- [Configuration keys](server-config.md): every key of `gmlx.yaml`
+- [Configuration](config.md#server): every key of `gmlx.yaml`
 - [Family defaults](family-defaults.md): the sampling defaults and intents
   of each model family
 - [HTTP API](api.md): the endpoints and request features

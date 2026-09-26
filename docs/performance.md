@@ -43,7 +43,7 @@ next section addresses one of these regimes.
 | streaming | runs a MoE bigger than RAM | single-digit tokens per second | [streaming.md](streaming.md) |
 
 Flags are documented in [cli.md](cli.md), config keys in
-[server-config.md](server-config.md) and env switches in
+[config.md](config.md) and env switches in
 [env-vars.md](env-vars.md).
 
 ## Measuring
@@ -168,7 +168,7 @@ width cap: speculation runs while the live batch is narrow, the batch decodes
 plain past the cap, and speculation resumes once it drains. The default cap
 depends on the drafter and on whether the target routes experts, and a
 per-model `speculative_width_cap` key overrides it, as described in
-[Configuration keys](server-config.md#modelsspeculative_width_cap). For the
+[Configuration](config.md#modelsspeculative_width_cap). For the
 transition mechanics, read
 [internals/speculative-batching.md](internals/speculative-batching.md).
 
@@ -186,7 +186,7 @@ pass, so a round costs one small forward plus one verify instead of a verify
 for each drafted token.
 
 Pair it with `--draft-gguf`. A DFlash 2 header declares its base model, so
-a [discover](server-config.md#discover) scan pairs the two even when they
+a [discover](config.md#model-discovery) scan pairs the two even when they
 sit in different directories, and the loader finds a drafter that sits
 beside its target on its own. The block defaults to the checkpoint's
 trained size, 8 on Qwen3.8 and 16 on Muse Glimmer, so a round drafts 7 or
@@ -262,7 +262,7 @@ dense models move to the exact tier, for the reason
 The optional SSD tier persists entries across restarts and holds more
 entries than RAM would. Turn it on with `gmlx init --disk-cache` or the
 `cache:` block in the config, whose keys are in
-[Configuration keys](server-config.md#cache). Entries are evicted by size
+[Configuration](config.md#prompt-cache). Entries are evicted by size
 budget, and hit and store counts are reported on `GET /v1/metrics`.
 
 Thinking templates that strip prior-turn `<think>` blocks from the
@@ -306,7 +306,7 @@ leaves single-client serving unaffected under any setting. In the serve
 benchmarks a second client arriving at 14k tokens slowed the live stream to
 4% of its decode rate under strict alternation, whereas paced it kept 80%,
 with the second client's time-to-first-token unchanged. Both keys are
-documented under [Scheduling](server-config.md#scheduling), and both are read
+documented under [Scheduling](config.md#scheduling), and both are read
 live, so a running server can be retuned.
 
 Concurrent streams often share a prefix, whether a common system prompt or
@@ -374,7 +374,7 @@ Settings, lowest cost first:
   about half the fp16 cache and stays usable down to 4. [KV cache
   quantization](#kv-cache-quantization) says what each scheme does, which
   models gain from it and what the fidelity data shows. Server-side these
-  are the [load keys](server-config.md#load).
+  are the [load keys](config.md#model-loading).
 - `--max-kv-size` caps the cache as a rolling window, dropping the oldest
   context. On `run` and `chat` the window quantizes under kvarn once the cap
   is at least the kvarn minimum, as [cli.md](cli.md#gmlx-run) describes.

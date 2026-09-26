@@ -68,7 +68,7 @@ key.
 The server binds its port as soon as it starts, and a model the config
 marks for preloading begins loading in the background at the same moment.
 Which model that is, and the `defaults.preload` key that warms more, is
-under [Memory and residency](server-config.md#memory-and-residency). A
+under [Memory and residency](config.md#memory-and-residency). A
 first turn that arrives before the load finishes waits for the rest of it.
 With nothing to preload, the first request carries the whole load, and the
 launch prints a note saying so. Passing `--model` avoids that wait, because

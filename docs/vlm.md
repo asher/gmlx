@@ -32,7 +32,7 @@ gmlx serve model.gguf --mmproj mmproj.gguf --port 8080
 
 The flags are under [gmlx run](cli.md#gmlx-run), the request shape under
 [Vision messages](api.md#vision-messages) and the per-model key under
-[models](server-config.md#models).
+[models](config.md#models).
 
 Images encode at native resolution unless `--resize-shape` shrinks them
 first. The size after resizing decides how many soft tokens an image expands

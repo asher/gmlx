@@ -88,7 +88,7 @@ card's full sampling recommendation fits on the command line. `/max-tokens
 0` removes the cap on reply length and lets replies run until the model
 stops. A bare `chat` starts from the model family's card defaults, and an
 `@profile` suffix on the model, such as `model.gguf@creative`, starts from
-another [profile](server-config.md#profiles) instead.
+another [profile](config.md#profiles) instead.
 
 [Speculative decoding](performance.md#mtp-speculative-decoding) is on
 automatically for models with a native head, and `--draft-gguf` pairs a

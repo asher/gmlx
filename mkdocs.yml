@@ -47,6 +47,7 @@ not_in_nav: |
   adapter-serving.md
   adding-architectures.md
   serving-architecture.md
+  server-config.md
   testing.md
 
 validation:
@@ -107,7 +108,6 @@ nav:
           - glossary.md
   - Reference:
       - cli.md
-      - server-config.md
       - family-defaults.md
       - api.md
       - env-vars.md

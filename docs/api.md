@@ -4,7 +4,7 @@ This page is for anyone writing a client against `gmlx serve` or putting it
 behind a load balancer. It covers the endpoints, how a request names a
 model, the metrics a dispatcher reads, which request fields each protocol
 honors, and what the server refuses. The YAML that configures the server is
-in [server-config.md](server-config.md).
+in [config.md](config.md).
 
 - [Addressing a model in a request](#addressing-a-model-in-a-request)
 - [Endpoints](#endpoints)
@@ -65,7 +65,7 @@ All routes except `/health` require the API key when one is set.
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
 `default` markers and two context figures. `context_length` is the GGUF's
-trained window, or the model's [`max_kv_size`](server-config.md#loadmax_kv_size)
+trained window, or the model's [`max_kv_size`](config.md#loadmax_kv_size)
 when that is smaller. `max_context_at_width_1` is how much of the window
 fits in memory for a single stream. A harness sizes its context window from
 the smaller of the two. A
@@ -90,7 +90,7 @@ requests are waiting and `busy` when all engines are at their decode width.
 generation routes are present but cannot serve a GGUF model.
 
 The residency routes act on what
-[Memory and residency](server-config.md#memory-and-residency) configures.
+[Memory and residency](config.md#memory-and-residency) configures.
 `/unload` outranks the hold a preloaded model has for the process lifetime,
 so it unloads too, and until the next reload it is then managed like any
 other model. `/v1/keep` is what `gmlx launch --model` and voice sessions
@@ -232,7 +232,7 @@ They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 | `stop` | honored | ignored | ignored | chat and `/v1/completions`. Anthropic uses `stop_sequences` |
 | `stop_sequences` | ignored | ignored | honored | the Anthropic-native spelling |
 | `chat_template_kwargs` | honored | honored | honored | extra template variables, request overrides profile |
-| `profile` | honored | honored | honored | a sampling and system [profile](server-config.md#profiles) by name |
+| `profile` | honored | honored | honored | a sampling and system [profile](config.md#profiles) by name |
 | `xtc_probability` | honored | honored | honored | XTC sampling, with `xtc_threshold` |
 
 ### Structured output
@@ -294,7 +294,7 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
-| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](server-config.md#loadmax_kv_size) |
+| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](config.md#loadmax_kv_size) |
 | the prompt alone cannot fit in memory | 400 with the estimated need and the available budget | `GMLX_PREFLIGHT_MEM=0` |
 | more requests waiting than the queue cap | 503 with `Retry-After` set to the estimated drain time, 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
 | a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |

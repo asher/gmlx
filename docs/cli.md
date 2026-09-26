@@ -81,7 +81,7 @@ fall back to the full codec when two quants would collide. An empty directory
 is accepted and produces a valid config with no models. When a server is
 already running the config you rewrote, `init` signals it to reload. The
 walkthrough is in [getting-started.md](getting-started.md#set-up-the-server)
-and the file it writes is described in [server-config.md](server-config.md).
+and the file it writes is described in [config.md](config.md).
 
 ## gmlx serve
 
@@ -139,7 +139,7 @@ config, where the same settings apply to a config-mode server:
 | `--ignore-eos` | off | decode each request to `max_tokens`, for throughput benchmarks |
 
 These settings apply to a positional GGUF only. In config mode the same
-things are per-model keys under [models](server-config.md#models):
+things are per-model keys under [models](config.md#models):
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -160,12 +160,12 @@ things are per-model keys under [models](server-config.md#models):
 | `--max-kv-size N` | none | cap the request context budget at N tokens |
 | `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache. Not applied under kvarn |
 
-The KV flags are the [`load` keys](server-config.md#load) of the config,
+The KV flags are the [`load` keys](config.md#model-loading) of the config,
 so `--kv-quant-scheme kvarn` on a positional model is what `load: {kv_quant_scheme: kvarn}`
 is on a config model, priced and reported the same way.
 
 These flags set a positional model's sampling defaults, the
-[`sampling` keys](server-config.md#sampling) of the config. A default applies to a
+[`sampling` keys](config.md#sampling) of the config. A default applies to a
 request that omits the field, and a request that sends the field wins, so
 `--temp 0` does not pin a client that sends its own temperature. They sit on
 top of the family defaults `gmlx profiles` prints, and an unknown `--profile`
@@ -227,7 +227,7 @@ in [services.md](services.md):
 | `--rerank [MODEL]` | off | reranking at `POST /v1/rerank`. Bare is `qwen3-rerank-0.6b`. No extra is needed |
 
 There is no `--api-key` flag on `serve`. The key lives in the config, for
-the reasons [bind and auth](server-config.md#bind-and-auth) gives.
+the reasons [Address and authentication](config.md#address-and-authentication) gives.
 
 Each completed request logs a line with the endpoint, model, token counts
 and timing:

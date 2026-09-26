@@ -2,7 +2,7 @@
 
 How the gmlx server serves a loaded GGUF as a continuously batched HTTP
 server, for contributors. This page covers the implementation, while the
-config surface is documented in [server-config.md](../server-config.md) and
+config surface is documented in [config.md](../config.md) and
 the endpoints in [api.md](../api.md).
 
 The mechanism is stock mlx-vlm and the policy is gmlx. Upstream owns the

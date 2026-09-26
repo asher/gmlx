@@ -87,12 +87,12 @@ gmlx serve --config decisions.yaml
 `server.systemone.model` names the model that answers when a request's
 `model` field is absent or names nothing the server knows. Jev clients send
 `"model": "jev-latest"`, which reaches that model this way. A config with
-one model, or with [`defaults.model`](server-config.md#memory-and-residency)
+one model, or with [`defaults.model`](config.md#memory-and-residency)
 set, can leave the key out.
 
 The other `server.systemone` keys set the canvas width, the unembedding,
 the request limits and the thought defaults.
-[server-config.md](server-config.md#structured-decisions) lists them.
+[config.md](config.md#structured-decisions) lists them.
 
 ## A first decision
 
@@ -390,7 +390,7 @@ customer's tone, often stays unsure after the thought, so the time buys
 little there. Use `"auto"` when the questions need recalled facts.
 
 The server caps the question count and the sample count, and
-[server-config.md](server-config.md#structured-decisions) gives the limits.
+[config.md](config.md#structured-decisions) gives the limits.
 
 ## When answers go wrong
 
@@ -435,11 +435,11 @@ unlike the ones you tested.
 | 404 | `model` names nothing and no fallback exists, or the model's file is missing. The error types are `model_not_found` and `model_file_missing` |
 | 422 | a request field fails validation, such as a question, `state`, `seed` or the question count. The error type is `validation_error` |
 | 503 | the queue cap or a deferred load, as under [Limits and back-pressure](api.md#limits-and-back-pressure) |
-| 504 | the decision ran past [`token_queue_timeout_s`](server-config.md#scheduling). The error type is `timeout` |
+| 504 | the decision ran past [`token_queue_timeout_s`](config.md#scheduling). The error type is `timeout` |
 | 500 | the engine failed. The error type is `server_error` |
 
 The model is text-only, so a request with `images` is refused. A `profile`
-field selects the [profile](server-config.md#profiles) that `model`
+field selects the [profile](config.md#profiles) that `model`
 resolves with, and `seed`, 42 by default, sets the random tokens each read
 starts from.
 

@@ -810,7 +810,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "`chat_template_kwargs:` key).")
     kv = ap.add_argument_group(
         "KV cache of a single positional model",
-        "Each flag is a `load:` key in config mode; see docs/server-config.md.")
+        "Each flag is a `load:` key in config mode; see docs/config.md.")
     kv.add_argument("--kv-bits", type=int, default=None, metavar="N",
                     help="Quantize the KV cache to N bits: 2, 3, 4, 6 or 8 affine, "
                          "or 2, 3, 4, 5, 6 or 8 under kvarn (`load.kv_bits`).")

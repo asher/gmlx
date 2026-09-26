@@ -184,7 +184,7 @@ gmlx stop
 
 The file has a `server` block, a `models` block with an entry for each model,
 and optional `profiles`, `rules` and `aliases`. Optional keys appear as
-commented hints with their defaults, and [server-config.md](server-config.md)
+commented hints with their defaults, and [config.md](config.md)
 is the reference for all of them.
 
 `serve` runs in the background so you keep your shell. On a macOS desktop it

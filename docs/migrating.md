@@ -41,11 +41,11 @@ not carry over.
   OpenAI-compatible endpoint work unchanged, and Ollama-native integrations
   need their OpenAI mode, pointed at port 8080.
 - Modelfile parameters map onto the config in
-  [server-config.md](server-config.md). `num_predict` becomes the
+  [config.md](config.md). `num_predict` becomes the
   `max_tokens` sampling key, set for a model or in `profiles:` like the
   other sampling keys, and `SYSTEM` becomes `system:`.
 - Keep-alive and unload behavior is the [residency
-  system](config.md#which-models-stay-loaded), with an idle timeout, LRU eviction
+  system](config.md#memory-and-residency), with an idle timeout, LRU eviction
   under a byte budget and `pin` for always-resident models.
 
 ## Coming from LM Studio

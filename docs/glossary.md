@@ -137,7 +137,7 @@ never changes routing.
 Prompt cache. The server's store of prefilled prefixes. A request that shares
 a prefix with an earlier one, such as a system prompt or the conversation so
 far, skips prefilling the shared part. mlx-vlm calls it APC. Its keys are under
-[cache](server-config.md#cache) in the configuration keys.
+[cache](config.md#prompt-cache) in the configuration keys.
 
 Quant. A compressed build of a model. The suffix on a GGUF name says roughly
 the number of bits per weight. Q4 files are smaller and slightly lossier,

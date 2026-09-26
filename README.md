@@ -70,7 +70,7 @@ covers both routes and the Metal kernel build that older versions need.
 Any local `.gguf` runs, chats or serves this way with no other setup. The
 curl asks for `qwen3-0.6b` because a single served file takes its filename,
 minus the quant tag, as its id. How configured models get their ids is in
-[Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md#models-and-their-names).
+[Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md#models).
 
 A model needs memory for roughly its file size plus the conversation's KV
 cache, and getting-started.md
@@ -126,7 +126,7 @@ repeated prefixes. The server binds loopback by default, requires a static
 key for anything wider and never contacts Hugging Face to satisfy a request.
 The endpoints are documented in the [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md), and
 the file that configures them in
-[Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md).
+[Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md).
 
 A served DiffusionGemma model also answers the Jev decision API at
 `/v1/systemone`. A request asks a fixed set of yes or no, choice and score
@@ -255,8 +255,8 @@ below for the latest release, with navigation and search.
 
 ### Serving
 
-- [Configuration file](https://github.com/asher/gmlx/blob/main/docs/config.md): `gmlx.yaml`, its models and how
-  a request gets its settings
+- [Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md): `gmlx.yaml`, its models, its
+  profiles and how a request gets its settings
 - [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md): Claude Code, other coding
   agents and Open WebUI, set up by `gmlx launch`
 - [Menu bar app](https://github.com/asher/gmlx/blob/main/docs/menubar.md): server status and controls in the
@@ -302,7 +302,7 @@ below for the latest release, with navigation and search.
 ### Reference
 
 - [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md): every command and flag
-- [Configuration keys](https://github.com/asher/gmlx/blob/main/docs/server-config.md): every key of `gmlx.yaml`
+- [Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md#server): every key of `gmlx.yaml`
 - [Family defaults](https://github.com/asher/gmlx/blob/main/docs/family-defaults.md): the sampling defaults and
   intents of each model family
 - [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints and request features
