@@ -365,6 +365,7 @@ def test_think_runs_the_denoiser_and_restores_the_stop_set(sliding_model):
     ids, info, backend = _think(reader, stop_id=63)
     assert info["tokens"] == len(ids) and len(ids) <= 24
     assert ids or info["closed"]
+    assert info["steps"] >= 1
     assert all(isinstance(t, int) and 0 <= t < reader.vocab for t in ids)
     # The denoiser adds the config EOS ids to the list; the call undoes it.
     assert backend.stopping_criteria.eos_token_ids == [EOS]
@@ -397,10 +398,11 @@ def test_think_honours_should_stop(sliding_model):
     assert backend.stopping_criteria.eos_token_ids == [EOS]
 
 
-def _result(token, n, *, finish=None, draft=False, block=False):
+def _result(token, n, *, finish=None, draft=False, block=False, steps=5):
     return types.SimpleNamespace(token=token, generation_tokens=n,
                                  finish_reason=finish, is_draft=draft,
-                                 diffusion_block_complete=block)
+                                 diffusion_block_complete=block,
+                                 diffusion_denoising_steps=steps)
 
 
 @pytest.mark.parametrize("script,want_ids,closed", [
@@ -430,6 +432,7 @@ def test_think_reads_the_denoiser_results(sliding_model, monkeypatch, script,
         [2, 5], 16, stop_id=9, canvas_width=WIDTH, processor=processor,
         backend=backend)
     assert ids == want_ids and info["closed"] is closed
+    assert info["steps"] == 5
     assert seen["eos"] == [EOS, 9]
     assert seen["ids"] == [[2, 5]] and seen["closed"]
     kw = seen["kwargs"]

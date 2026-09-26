@@ -17,22 +17,21 @@ logic or the read engine. The request and response contract is in
 
 The decision logic is a port of the vLLM structured-diffusion example,
 `examples/features/structured_diffusion/structured_server.py`, and the
-multi-step read loop follows the diffusion branch of vLLM's DiffusionGemma
-model. The example is a proxy that drives vLLM over HTTP, while gmlx runs
+unembedding and multi-step read loop follow the diffusion branch of vLLM's
+DiffusionGemma model. The example is a proxy that drives vLLM over HTTP, while gmlx runs
 the same logic in the server process against the model. Each ported file
-keeps the Apache-2.0 header that names its source, and
-`licenses/vllm-LICENSE` lists them. Code that gmlx adds is in files of its
-own.
+keeps the Apache-2.0 header that names its source and says it was modified
+for gmlx, and `licenses/vllm-LICENSE` lists them.
 
 The code splits into three layers. Apart from `engine.py` and `denoise.py`,
 the modules in `gmlx/systemone/` are pure Python. They hold the schema
 rules, the answer templates and `decide`, which runs a decision against any
 object with `prefill`, `read` and `think`. `extensions.py` adds
 `think: "auto"` and the server's request defaults. `engine.py` implements
-the three calls on the mlx-vlm model, and a read of more than one step runs
-the loop in `denoise.py`. The route is in `gmlx/serve/patches/systemone.py`,
-and `run_on_engine` in `gmlx/serve/engine_jobs.py` runs a decision on the
-model's engine thread.
+the three calls on the mlx-vlm model, and `denoise.py` holds the
+unembedding and the loop that a read of more than one step runs. The route
+is in `gmlx/serve/patches/systemone.py`, and `run_on_engine` in
+`gmlx/serve/engine_jobs.py` runs a decision on the model's engine thread.
 
 ## One read
 
@@ -141,11 +140,11 @@ checks it between reads and on every thought token.
 
 Before queueing, the route checks the context and memory budgets against
 the largest prompt the decision can reach. That bound starts from the
-system text for every question, with the sentence that chunked prompts
-add: "A reply may cover only some of the questions; answer every line that
-is present." It adds the thought budget and its tags, and one canvas of
-answer lines for each chunk of every earlier stage. With `sequential`, the
-earlier chunks of the last stage count too.
+system text for every question, plus the sentence that chunked prompts add
+to say a reply may cover only some of the questions. It adds the thought
+budget and its tags, and one canvas of answer lines for each chunk of every
+earlier stage. With `sequential`, the earlier chunks of the last stage
+count too.
 
 The route, `run_on_engine` and the engine rely on upstream internals: the
 diffusion attention's cache reads, the rotating cache update paths, the
@@ -157,12 +156,15 @@ so an mlx-vlm upgrade that changes one fails the seams test.
 
 `tests/systemone/test_systemone_proxy_parity.py` runs the vendored example
 and the gmlx decision logic on the same scripted reads and compares whole
-response bodies for single and chunked stages, `depends_on` stages, skipped
-questions, fixed and auto samples, thoughts, multi-step reads and the
-indexed format. The intended differences are few. Invalid numbers and
-seeds get a 422 instead of a 500, the template cache is bounded, chunks run
-one after another, and `ask` returns the asked answers where the example
-raises a `KeyError`.
+response bodies. The cases cover single and chunked stages, `depends_on`
+stages, skipped questions, fixed and auto samples, thoughts, multi-step
+reads and the indexed format.
+
+The intended differences are few. Invalid numbers and seeds get a 422
+instead of a 500, the template cache is bounded, chunks run one after
+another, and `ask` returns the asked answers where the example raises a
+`KeyError`. The route refuses image states and multipart bodies, and it
+does not serve the example's decisions through chat completions.
 
 The prompt ids must match too, since every parity claim depends on them.
 `scripts/check_dgemma_template.py` renders the decision prompts with the

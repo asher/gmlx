@@ -39,13 +39,19 @@ python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 
 `scripts/structured_read_accuracy.py` holds the facts, the labeled set and
 the requests behind the last three sections, and its `wording`, `labeled`
-and `mixed` modes print their tables. Every read uses seed 42, so the
-answer counts repeat from run to run while the times vary.
+and `mixed` modes print their tables. Its `thoughts` mode prints the
+thought table, and `cases` prints the single answers that
+[decisions.md](../decisions.md#when-answers-go-wrong) quotes, with the
+comparison against mlx-vlm under [Question wording](#question-wording).
+Every read uses seed 42, so the answers repeat from run to run while the
+times vary.
 
 ```sh
 python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf wording
 python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf labeled
 python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf mixed
+python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf cases
+python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf thoughts
 ```
 
 ## Prefill
@@ -102,10 +108,26 @@ position, with the entropy over the label set in constrained mode.
 Appending tokens to a prefilled prompt for a later stage costs 12.7 ms for
 one token and 33.1 ms for eight.
 
-A 64-token thought on the 472-token prompt took 2068 ms at the median, with
-a range of 1341 to 2556 ms, and every run used the whole budget. The same
-budget on the ticket example took 6.6 s end to end on the server, so the
-cost depends on how many denoise steps each thought block needs.
+A 64-token thought on the bench's 472-token prompt took 2068 ms at the
+median, with a range of 1341 to 2556 ms. A thought's time follows the
+number of denoise steps its canvas takes to converge, at about 150 ms a
+step. The `thoughts` mode wrote a 64-token thought three times for each
+request below, and every thought used the whole budget.
+
+| Request | Denoise steps | Median ms |
+|---------|---------------|-----------|
+| the e2e ticket, one question | 48 | 6951 |
+| `ticket-1`, the same ticket with five questions | 9 | 1452 |
+| `ticket-5` | 11 | 1666 |
+| `travel-vienna-bratislava` | 6 | 947 |
+| `allergen-pad-thai` | 7 | 1061 |
+| `allergen-risotto` | 8 | 1193 |
+
+The thought on the e2e script's one-question ticket never converged and
+ran to the cap of 48 steps. The others stopped after 6 to 11 steps,
+including the same ticket asked five questions, so the cost depends on the
+whole prompt and not on the state alone. The last five are the requests
+that thought under [Thinking on mixed requests](#thinking-on-mixed-requests).
 
 ## Whole decisions
 
@@ -123,24 +145,25 @@ prompt `"auto"` extended to four samples, which adds a second batched pass
 after the first read.
 
 Over HTTP, `tests/e2e/run_systemone_e2e.py` measured these wall times on
-the same machine:
+the same machine. Its ticket asks one question about "Everything is down
+and we have a demo at noon."
 
 | Request | Reads | Prompt tokens | Wall ms |
 |---------|-------|---------------|---------|
-| the ticket example, `samples` auto | 4 | 97 | 359 |
-| the ticket example, 4 samples | 4 | 97 | 246 |
+| the ticket, `samples` auto | 4 | 97 | 359 |
+| the ticket, 4 samples | 4 | 97 | 246 |
 | four questions in two stages, one skipped | 5 | 214 | 518 |
 | twelve yes or no questions, indexed format | 1 | 269 | 395 |
-| the ticket example with `think: 64` | 1 | 167 | 6582 |
+| the ticket with `think: 64` | 1 | 167 | 6582 |
 
 ## Question wording
 
 The wording of a question changes the answer more than the prompt around
 it does. Sixteen facts that need recalled knowledge, such as whether hummus
 contains sesame or which currency Bratislava uses, were each asked as a yes
-or no question and as its negation, 32 reads in all, at seed 42 with one
-sample. Half the true answers are yes, and the table counts how many reads
-answered yes.
+or no question and as its negation. That makes 32 reads, at seed 42 with
+one sample. Half the true answers are yes, and the table counts how many
+reads answered yes.
 
 | Prompt | Right | Yes answers |
 |--------|-------|-------------|
@@ -159,10 +182,10 @@ prompt, and [decisions.md](../decisions.md#when-answers-go-wrong) gives
 users the wording advice.
 
 These errors come from the model, not from the read. On the same prompt
-and canvas, a read matches the first denoise step of mlx-vlm's own
-generation loop in every label log-probability to three decimals. A full
-generation on the decision prompt writes the same wrong answers, such as
-`q: yes` for sesame in pad thai.
+and canvas, a read matches mlx-vlm's own decoder step in every label
+log-probability to four decimals. A greedy generation on the decision
+prompt writes the same wrong answers, `q: yes` for both sesame questions
+about pad thai.
 
 ## Accuracy
 
@@ -203,12 +226,12 @@ does not fix the answers a read gets wrong.
 
 ## Thinking on mixed requests
 
-The labeled set asks one question per request. The 28 requests in the
-[decisions.md examples](../decisions.md#examples) and five support tickets
-with five questions each show what `think: "auto"` does on requests with
-several questions. Each request was decided with `think: 0` and with
-`think: "auto"` at seed 42, and the Q4_K_M times are the mean of one run
-before and one after the Q8_0 run.
+The labeled set asks one question per request. Twenty-eight requests
+built on the questions of the [decisions.md examples](../decisions.md#examples)
+and five support tickets with five questions each show what
+`think: "auto"` does on requests with several questions. Each request was
+decided with `think: 0` and with `think: "auto"` at seed 42, and the Q4_K_M
+times are the mean of one run before and one after the Q8_0 run.
 
 | Quantization | Requests that thought | Mean with `think: 0` | Mean with `"auto"` | Mean of a request that thought | Answers changed |
 |--------------|-----------------------|----------------------|--------------------|--------------------------------|-----------------|
@@ -225,6 +248,6 @@ to 0.99. It also made one right answer wrong, gluten in risotto alla
 milanese, from no at 0.68 to yes at 0.98, so a confident answer after a
 thought is not proof.
 
-The two files took the same time, and the slowest request that thought
-took 3.1 s. A thought's cost depends on the prompt, as
+The two quantizations took about the same time. The slowest request that
+thought took 3.1 s, since its thought converged after 11 steps, as
 [Extension and thoughts](#extension-and-thoughts) shows.

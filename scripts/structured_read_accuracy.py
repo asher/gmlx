@@ -5,18 +5,24 @@ answers on a DiffusionGemma GGUF.
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf wording
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf labeled [--methods base,auto]
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf mixed
+    python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf cases
+    python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf thoughts
 
 ``wording`` reads 16 facts, each asked as a yes or no question and as its
 negation, under seven prompt layouts. ``labeled`` answers 102 labeled items
 with each request option. ``mixed`` decides 33 requests with several
-question types, with ``think: 0`` and with ``think: "auto"``. Every read
-uses seed 42. Loads the model in process, so run it on an idle machine.
+question types, with ``think: 0`` and with ``think: "auto"``. ``cases``
+decides the single requests the decisions guide quotes and compares one
+read with mlx-vlm's own decoder step and generation. ``thoughts`` times a
+64-token thought and counts its denoise steps. Every read uses seed 42.
+Loads the model in process, so run it on an idle machine.
 docs/internals/structured-read-measurements.md records the results.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import sys
@@ -159,7 +165,7 @@ for _s, _q, _crit, _t in CHOICE:
     ITEMS.append((_s, {"type": "choice", "instructions": _q, "criteria": _crit}, _t))
 
 
-# mixed: the docs/decisions.md examples with their candidates, and five
+# mixed: requests built on the docs/decisions.md example questions, and five
 # support tickets with five questions each
 
 REQUESTS = {}
@@ -559,10 +565,134 @@ def run_mixed(probe):
     return rows
 
 
+# cases: the single results docs/decisions.md and the measurements page quote
+
+_YEARS = {"century": {"type": "choice", "instructions": "When did the event happen?",
+                      "criteria": {"1700s": "", "1800s": "", "1900s": ""}}}
+_SESAME = ("Does the dish usually contain sesame?", "Is the dish usually free of sesame?")
+
+
+def _answer_line(schema, result):
+    parts = []
+    for qid, a in jev_answers(schema, result).items():
+        if a is None:
+            parts.append(f"{qid} null")
+        elif a["type"] == "noul":
+            parts.append(f"{qid} yes {a['noul']:.3f}")
+        else:
+            best = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])[:3]
+            parts.append(f"{qid} " + ", ".join(f"{k} {v:.3f}" for k, v in best))
+    return "; ".join(parts)
+
+
+def _stock_check(probe, state, question):
+    """A read against mlx-vlm's own decoder step on the same prompt and
+    canvas, and a greedy generation from the decision prompt."""
+    _body, _schema, resolver, ids, template, slot = _one_question(probe, state, question)
+    result = probe.reader.read(probe.reader.prefill(ids), ReadRequest(
+        template=tuple(template), slots=(slot,), width=resolver.canvas_width(template),
+        seeds=(SEED,), constrained=False))
+    sample = result.samples[0]
+    model = probe.model
+    cache = model.diffusion_prefill_cache(
+        mx.array([ids], dtype=mx.int32), attention_mask=None, cache=model.make_cache(),
+        prefill_step_size=512, chunk_prefill=False)
+    canvas = mx.array([list(sample.canvas_in)], dtype=mx.int32)
+    logits = model.diffusion_decoder_logits(
+        canvas, cache=cache, self_conditioning=None,
+        decoder_attention_mask=model.diffusion_decoder_masks(canvas, cache, None))
+    row = logits[0, slot.pos].astype(mx.float32)
+    stock = (row - mx.logsumexp(row)).tolist()
+    diff = max(abs(sample.slots[0].top[t] - stock[t]) for t in slot.label_ids)
+    generate = importlib.import_module("mlx_vlm.generate.diffusion").stream_diffusion_generate
+    out = []
+    for r in generate(model, probe.processor, probe.tok,
+                      mx.array([ids + list(resolver.scaffold)], dtype=mx.int32), None, None,
+                      max_tokens=24, skip_special_token_ids=set(), temperature=0.0,
+                      prefill_step_size=512):
+        if getattr(r, "is_draft", False) or getattr(r, "diffusion_block_complete", False):
+            continue
+        if r.token is not None and r.generation_tokens > len(out):
+            out.append(int(r.token))
+        if r.finish_reason is not None:
+            break
+    return diff, probe.tok.decode(out)
+
+
+def run_cases(probe):
+    suez = REQUESTS["era-suez"]
+    cases = {
+        "Suez, century options": suez,
+        "Suez, samples: 8": dict(suez, samples=8),
+        "Suez, steps: 4": dict(suez, steps=4),
+        "Suez, steps: 8": dict(suez, steps=8),
+        'Suez, think: "auto"': dict(suez, think="auto"),
+        "Suez, think: 128": dict(suez, think=128),
+        "Suez, options 1700s, 1800s, 1900s": dict(suez, questions=_YEARS),
+    }
+    for q in _SESAME:
+        cases[f"pad thai, {q}"] = {"state": {"dish": "pad thai"},
+                                   "questions": {"q": {"type": "noul", "instructions": q}}}
+    rows = {}
+    for name, body in cases.items():
+        schema, result = probe.decide(body)
+        rows[name] = _answer_line(schema, result)
+        print(f"{name:36} {rows[name]}", flush=True)
+    for q in _SESAME:
+        diff, text = _stock_check(probe, {"dish": "pad thai"}, q)
+        rows[f"stock, {q}"] = {"max_logprob_diff": diff, "generation": text}
+        print(f"{q:44} read vs mlx-vlm step: max diff {diff:.4f}; "
+              f"generation {text!r}", flush=True)
+    return rows
+
+
+# thoughts: the time and denoise steps of a 64-token thought on the requests
+# that wrote one in the mixed mode, and on the ticket example the e2e script
+# posts with think: 64
+
+THOUGHT_REQUESTS = {
+    "the e2e ticket, one question": {
+        "state": {"ticket": "Everything is down and we have a demo at noon."},
+        "questions": {"urgent": _TICKET_QUESTIONS["urgent"]}},
+    **{name: REQUESTS[name] for name in ("ticket-1", "ticket-5", "travel-vienna-bratislava",
+                                         "allergen-pad-thai", "allergen-risotto")},
+}
+
+
+def _thought(probe, body, budget):
+    schema = request_schema(body)
+    tokens = ChatTokens(probe.processor, jev_state(body))
+    resolver = TemplateResolver(tokens.enc, CANVAS)
+    prompt = list(tokens.chat_ids(system_text(schema), True)) + resolver.thought_open
+    mx.random.seed(SEED)
+    _ids, info = probe.engine.think(prompt, budget, stop_id=resolver.thought_close[0],
+                                    canvas_width=CANVAS)
+    return info
+
+
+def run_thoughts(probe):
+    """Three rounds, the middle one in reverse order, and the median time."""
+    _thought(probe, REQUESTS["gate-payouts"], 64)  # warm-up
+    names = list(THOUGHT_REQUESTS)
+    rows = {name: {"ms": []} for name in names}
+    for rnd in range(3):
+        for name in names[::-1] if rnd == 1 else names:
+            info = _thought(probe, THOUGHT_REQUESTS[name], 64)
+            rows[name]["ms"].append(info["ms"])
+            rows[name].update(steps=info["steps"], tokens=info["tokens"],
+                              closed=info["closed"])
+    print(f"{'request':34} {'steps':>5} {'median ms':>10} {'ms per step':>12}  runs")
+    for name, r in rows.items():
+        median = sorted(r["ms"])[1]
+        print(f"{name:34} {r['steps']:>5} {median:>10.0f} {median / r['steps']:>12.0f}  "
+              + ", ".join(f"{m:.0f}" for m in r["ms"]))
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("gguf")
-    ap.add_argument("mode", choices=("wording", "labeled", "mixed"))
+    ap.add_argument("mode", choices=("wording", "labeled", "mixed", "cases", "thoughts"))
     ap.add_argument("--methods", default=",".join(METHODS),
                     help=f"labeled mode: a comma list from {', '.join(METHODS)}")
     ap.add_argument("--json", metavar="PATH", help="also write the rows as JSON")
@@ -577,8 +707,12 @@ def main() -> int:
             rows = run_wording(probe)
         elif a.mode == "labeled":
             rows = run_labeled(probe, methods)
-        else:
+        elif a.mode == "mixed":
             rows = run_mixed(probe)
+        elif a.mode == "cases":
+            rows = run_cases(probe)
+        else:
+            rows = run_thoughts(probe)
     if a.json:
         with open(a.json, "w") as f:
             json.dump(rows, f, indent=1)

@@ -132,8 +132,8 @@ the YAML that configures them.
 
 A served DiffusionGemma model also answers the Jev decision API at
 `/v1/systemone`. A request asks a fixed set of yes or no, choice and score
-questions about a state. Each answer comes back as a probability for every
-option, read from one denoise step with no text generated.
+questions about a state, and each answer comes back as a probability for
+every option.
 [decisions.md](https://github.com/asher/gmlx/blob/main/docs/decisions.md)
 shows how to write the questions and act on the answers.
 

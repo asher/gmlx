@@ -23,9 +23,9 @@ reading the response, worked examples and what each request option costs.
 
 `POST /v1/systemone` takes a state and a set of questions with fixed
 answers, and returns a probability distribution over each question's
-answers. The model generates no text, so there is no reply to parse, and a
-decision on a short state takes a fraction of a second. The route is also
-at `/systemone`.
+answers. The answers are read from the model's predictions, so there is no
+reply to parse, and a decision on a short state takes a fraction of a
+second unless it asks for a thought. The route is also at `/systemone`.
 
 Use it when the possible answers are known before the call, the same
 decision repeats often, and your code needs a number to branch on. A
@@ -38,9 +38,11 @@ The request and response follow the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
 a hosted classifier API whose requests carry a state and typed questions.
 The route ports vLLM's structured-diffusion example server, which answers
-that API with DiffusionGemma, so a client written for either works against
-gmlx unchanged. A decision is deterministic for a given request and
-`seed`, so the same state always gets the same numbers.
+that API with DiffusionGemma. A client of either that posts text states
+works against gmlx unchanged. gmlx refuses images and multipart bodies,
+and it does not serve the example's decisions through chat completions. A
+decision is deterministic for a given request and `seed`, so the same state
+always gets the same numbers.
 
 ## Why DiffusionGemma
 
@@ -168,7 +170,9 @@ tokens. `diagnostics` holds the `stages` and `chunks` the decision ran, the
 `skipped` questions, the `thought`, the entropies under `questions`, and
 the `timing`. `samples.tops` has one entry per sample, mapping each question
 to its top label as the answer template writes it, such as `yes` or `B`,
-with that label's probability and the entropy of the read.
+with that label's probability and the entropy of the read. When a decision
+has stages, chunks or a skipped question, `samples.n`, `samples.tops` and
+`samples.policy` are lists with one entry per chunk of each stage.
 
 ## Examples
 
@@ -292,17 +296,17 @@ crewed Moon landing gets the 20th century at 0.999.
 |-------|---------|---------|
 | `type` | required | `noul` for yes or no, `choice` for one of several options, or `score` for one of ordered levels |
 | `instructions` | empty | the question as the model reads it |
-| `criteria` | none | `noul`: an object with `true` and `false` descriptions. `choice`: option name to description. `score`: a list of level names in order |
+| `criteria` | required, except for `noul` | `noul`: an object with `true` and `false` descriptions. `choice`: option name to description. `score`: a list of level names in order |
 | `depends_on` | none | question ids answered in an earlier stage, whose answers this question's read sees |
 | `ask_if` | none | question id to a list of its answers. The question is asked only when that answer is among them, else it answers `null` |
 | `alone` | `false` | read this question in a read of its own |
 
-A choice or a score takes 2 to 26 alternatives, and a yes or no question
-needs no `criteria`. Describe each option so that no two overlap, since
-probability splits between options that both fit. A question id may not
-contain a colon or a newline. Past ten questions the answer template
-writes each label directly after its id, so numbered ids such as `q1` work
-there, and a word id can be refused with a 422.
+A choice or a score takes 2 to 26 alternatives. Describe each option so
+that no two overlap, since probability splits between options that both
+fit. A question id may not contain a colon or a newline. Past ten
+questions the answer template writes each label directly after its id, so
+numbered ids such as `q1` work there, and a word id can be refused with a
+422.
 
 ## Stages and skipped questions
 
@@ -346,16 +350,21 @@ them except `think_threshold`, `think_budget` and the `"auto"` value of
 | `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with its questions only, and `"shared"` gives every chunk all of them |
 | `sequential` | `false` | read the chunks in order on one prompt, each seeing the answers before it |
 
-A decision prefills its prompt once and then reads it. With the default
-`"auto"`, a confident decision stops after one read, and an uncertain one
-reads `auto_max - 1` more samples. Samples share a decoder pass up to the
+Each chunk is read on a prefilled prompt. Under the default
+`chunk_prompt: "own"` every chunk prefills a prompt of its own, while
+`"shared"` chunks read one prompt. A later stage extends the prompt before
+it when the tokens allow, and a `think: "auto"` rerun prefills again.
+
+The default `"auto"` samples read a chunk once, and `auto_max - 1` more
+times when an answer is uncertain. Samples share a decoder pass up to the
 model's canvas length in canvas tokens, 256 for diffusiongemma-26B-A4B-it,
 so 8 samples of width 32 or 4 of width 64 take one pass. A shared pass
 costs more than one read and less than reading its samples one at a time.
 
-`steps` above 1 costs one more decoder pass per step. A thought costs the
-most, because the model writes it with its full denoise loop, which takes
-seconds. [structured-read-measurements.md](internals/structured-read-measurements.md)
+`steps` above 1 costs up to one more decoder pass per step, since a read
+stops once it converges. A thought costs the most, because the model
+writes it with its full denoise loop, which takes seconds.
+[structured-read-measurements.md](internals/structured-read-measurements.md)
 has the timings.
 
 `think: "auto"` spends that cost only on unsure decisions. The decision runs
@@ -405,7 +414,7 @@ These changes help, in order of cost:
   confidence is below `think_threshold`, so at the default 0.8 it leaves
   the Suez answer at 0.87 as it is.
 
-More samples, more steps and full-vocabulary label probabilities, set with
+More samples, more steps and the full-vocabulary unembedding, set with
 `server.systemone.constrained: false`, do not change accuracy.
 [structured-read-measurements.md](internals/structured-read-measurements.md#accuracy)
 compares the options and the wordings on a set of known facts.
@@ -453,8 +462,8 @@ gmlx systemone ticket.json
 
 The questions and their allowed answers become the system prompt, and the
 state becomes the user message. The canvas is seeded with an answer
-template of one line per question, with a random token at each answer
-position, and one denoise step gives the distribution over each question's
-labels. That is a [structured read](glossary.md), and
+template that writes each question id with its answer, with a random token
+at each answer position, and one denoise step gives the distribution over
+each question's labels. That is a [structured read](glossary.md), and
 [structured-reads.md](internals/structured-reads.md) describes the
 mechanism for contributors.

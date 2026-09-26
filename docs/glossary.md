@@ -164,7 +164,7 @@ Structured read. How `/v1/systemone` answers a question with one denoise
 step. The canvas holds the answer template with each label position
 filled by a random token, and the model's distribution at that position
 over the question's labels is the answer. A sample is one such read with
-its own random tokens, and a request averages several. See
+its own random tokens, and a request averages one or more samples. See
 [structured-reads.md](internals/structured-reads.md).
 
 Thinking model. A model trained to reason before answering, streaming that

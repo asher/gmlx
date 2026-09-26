@@ -192,7 +192,8 @@ class StructuredReader:
         """A thought: up to ``budget`` tokens from the mlx-vlm denoiser at
         temperature 1 and the served canvas width, cut at ``stop_id``.
         ``prompt_ids`` already ends with the open tag. Returns the thought
-        ids and ``{"tokens", "closed", "ms"}``."""
+        ids and ``{"tokens", "closed", "ms", "steps"}``, where ``steps``
+        counts the denoise steps of every canvas the thought took."""
         started = time.perf_counter()
         criteria = getattr(backend, "stopping_criteria", None)
         saved = list(criteria.eos_token_ids) if criteria is not None else None
@@ -200,6 +201,7 @@ class StructuredReader:
             criteria.eos_token_ids.append(int(stop_id))
         ids: list[int] = []
         closed = False
+        steps = 0
         gen = stream_diffusion_generate(
             self.model, processor, backend,
             mx.array([list(prompt_ids)], dtype=mx.int32), None, None,
@@ -214,6 +216,7 @@ class StructuredReader:
             for r in gen:
                 if should_stop is not None and should_stop():
                     raise Cancelled("thought cancelled")
+                steps = getattr(r, "diffusion_denoising_steps", steps)
                 if getattr(r, "is_draft", False) \
                         or getattr(r, "diffusion_block_complete", False):
                     continue
@@ -233,7 +236,7 @@ class StructuredReader:
             if criteria is not None and saved is not None:
                 criteria.eos_token_ids = saved
         return ids, {"tokens": len(ids), "closed": closed,
-                     "ms": (time.perf_counter() - started) * 1e3}
+                     "ms": (time.perf_counter() - started) * 1e3, "steps": steps}
 
 
 class ChatTokens:

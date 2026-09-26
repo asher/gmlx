@@ -202,7 +202,7 @@ The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
 in the server log naming them all. `/v1/systemone` has its own fields,
-listed in [decisions.md](decisions.md#questions).
+listed in [decisions.md](decisions.md#samples-steps-and-thoughts).
 
 The standard sampling parameters are honored on all three generation dialects.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
