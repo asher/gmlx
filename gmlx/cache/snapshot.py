@@ -722,6 +722,9 @@ _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
 # Strip-on-extend: newest N restorable checkpoints per chain, plus the
 # chain's anchor (see _record_insert).
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
+# Decision records a manager keeps, so a stream of decisions on new states
+# cannot push the chat records out.
+_CKPT_DECISION_ENTRIES = 8
 # Byte budget for record-owned payload (recurrent states + KV tails; chain
 # blocks are bounded by the manager pool). A GDN record can carry >100 MB
 # of state, so a count bound alone silently pins gigabytes.
@@ -874,13 +877,16 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
     return (p // block_size) * block_size
 
 
+_CKPT_KINDS = ("boundary", "anchor", "replay", "retire", "decision")
+
+
 class _CkptRecord:
-    # kind in {"boundary", "anchor", "replay", "retire"}: prefill-cursor
-    # boundaries, the chain's pinned early boundary (sibling fan-out
-    # reuse), the N-1 identical-replay record, and retirement stores.
-    # Retention differs only in _record_insert's strip-on-extend
-    # exemptions and eviction order; adoption gates only ever test for
-    # "replay".
+    # kind in _CKPT_KINDS: prefill-cursor boundaries, the chain's pinned
+    # early boundary (sibling fan-out reuse), the N-1 identical-replay
+    # record, retirement stores, and the state prefixes of letter
+    # decisions (gmlx/systemone/prefixes.py). Retention differs only in
+    # _record_insert's strip-on-extend rules and eviction order;
+    # adoption gates only ever test for "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
                  "tails", "qsa", "nbytes", "kind")
@@ -1204,6 +1210,12 @@ def _record_insert(manager, rec) -> None:
     boundary on a fresh chain is promoted instead. One anchor per
     chain: an anchor insert supersedes tagged anchors below it.
 
+    Decision records keep to themselves: one is never promoted to anchor,
+    a decision insert strips only decision records on its chain, and no
+    other insert strips a decision record. A decision insert past
+    _CKPT_DECISION_ENTRIES releases the least recently used decision
+    record. Eviction ranks them with the non-anchors.
+
     Against real memory pressure the exemptions pin little: the count
     and byte bounds evict anchors after non-anchors (LRU by last hit),
     and pool-pressure eviction (_evict_for_pool) gives anchors no
@@ -1230,10 +1242,14 @@ def _record_insert(manager, rec) -> None:
             for k in [k for k in chain if idx[k].kind == "anchor"]:
                 _release_record(manager, idx.pop(k))
         elif rec.kind == "boundary" and not any(
-                idx[k].kind != "replay" for k in chain if k in idx):
+                idx[k].kind not in ("replay", "decision")
+                for k in chain if k in idx):
             rec.kind = "anchor"         # first restorable boundary
-        chain = [k for k in chain
-                 if k in idx and idx[k].kind not in ("replay", "anchor")]
+        if rec.kind == "decision":
+            chain = [k for k in chain if k in idx and idx[k].kind == "decision"]
+        else:
+            chain = [k for k in chain if k in idx
+                     and idx[k].kind not in ("replay", "anchor", "decision")]
         # Strip-on-extend frees superseded records' main chains for the
         # pool; sub-prefix adoption survives it because those chains are
         # content-deduped and skeleton re-index re-cuts them. A record
@@ -1251,6 +1267,10 @@ def _record_insert(manager, rec) -> None:
             _release_record(manager, idx.pop(k))
         idx[key] = rec
         idx.move_to_end(key)
+        if rec.kind == "decision":
+            decisions = [k for k, r in idx.items() if r.kind == "decision"]
+            for k in decisions[:-_CKPT_DECISION_ENTRIES]:
+                _release_record(manager, idx.pop(k))
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
         total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
@@ -1278,8 +1298,8 @@ def ckpt_store(
     best-effort. ``skeleton_disk=False`` skips the skeleton write (the
     skeleton inlines recurrent state, >100 MB per GDN checkpoint --
     interval boundaries superseded minutes later do not earn that).
-    ``kind`` stamps the record's retention class (see _CkptRecord).
-    ``grid_truncate`` turns the below-window off-grid rotating decline
+    ``kind`` stamps the record's retention class (see _CkptRecord); an
+    unknown kind stores nothing. ``grid_truncate`` turns the below-window off-grid rotating decline
     into a terminal store at the largest block-aligned prefix: pre-wrap
     the buffer is a temporal prefix, so a slice is a faithful shorter
     run. Non-recurrent layouts only (state cannot rewind), memory-only
@@ -1300,6 +1320,9 @@ def ckpt_store(
         ids = [int(t) for t in token_ids]
         p = len(ids)
         bs = int(manager.block_size)
+        if kind not in _CKPT_KINDS:
+            _ckpt_decline(manager, "kind")
+            return 0
         layout = ckpt_layout(prompt_cache, bs)
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")

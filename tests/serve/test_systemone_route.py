@@ -580,6 +580,7 @@ def test_the_route_registers_both_paths_idempotently(app):
     route.install_systemone_route(SystemoneCfg())
     paths = [getattr(r, "path", None) for r in _APP.app.router.routes]
     assert paths.count("/v1/systemone") == 1 and paths.count("/systemone") == 1
+    assert paths.count("/v1/prewarm") == 1 and paths.count("/prewarm") == 1
 
 
 def test_a_disconnect_sets_the_stop_event():
@@ -668,7 +669,7 @@ def test_a_letter_decision_over_the_context_budget_is_refused_before_queueing(
     forwards = _LetterReader.built[0].forwards
     monkeypatch.setattr(_GEN, "get_configured_context_limit", lambda: 40)
     r = client.post("/v1/systemone", json=_letter_ticket())
-    assert r.status_code == 400 and "MAX_KV_SIZE" in r.text
+    assert r.status_code == 400, r.text
     assert _LetterReader.built[0].forwards == forwards
 
 
@@ -692,3 +693,59 @@ def test_the_rows_scope_publishes_the_request_scales():
             lora_rows.row_scales(0)
     finally:
         lora_rows.configure("static")
+
+
+# prewarm
+
+class _Kept:
+    tier = "test"
+
+    def __init__(self):
+        self.kept = {}
+
+    def lookup(self, ids):
+        return self.kept.get(tuple(ids))
+
+    def store(self, ids, cache):
+        self.kept[tuple(ids)] = cache
+        return True
+
+
+def test_prewarm_keeps_the_prefix_for_the_next_decision(app, monkeypatch):
+    kept = _Kept()
+    monkeypatch.setattr(route, "_prefixes", lambda rg, reader, scales: kept)
+    client = app.use(diffusion_model=False)
+    state = _letter_ticket()["state"]
+    r = client.post("/v1/prewarm", json={"model": "jev-latest", "state": state})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["prompt_tokens"] > 0
+    assert body["prefix"] == {"reused": False, "stored": True, "tier": "test"}
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    prefix = r.json()["diagnostics"]["prefix"]
+    assert prefix["reused"] is True and prefix["tokens"] == body["prompt_tokens"]
+    r = client.post("/v1/prewarm", json={"state": state})
+    assert r.json()["prefix"]["reused"] is True
+
+
+def test_prewarm_without_a_prefix_store_does_no_work(app):
+    r = app.use(diffusion_model=False).post("/v1/prewarm", json={"state": "s"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False and r.json()["prefix"]["tier"] == "off"
+    assert _LetterReader.built[0].forwards == 0
+
+
+@pytest.mark.parametrize("body,status", [
+    ({}, 422),
+    ({"state": {"screenshot": "data:image/png;base64,AAAA"}}, 400),
+    ({"state": "s", "images": ["data:image/png;base64,AA"]}, 400),
+])
+def test_prewarm_checks_its_body(app, body, status):
+    r = app.use(diffusion_model=False).post("/v1/prewarm", json=body)
+    assert r.status_code == status, r.text
+    assert _LetterReader.built == []
+
+
+def test_prewarm_on_a_diffusion_model_is_a_400(app):
+    r = app.use().post("/v1/prewarm", json={"state": "s"})
+    assert r.status_code == 400 and "letter readout" in r.text

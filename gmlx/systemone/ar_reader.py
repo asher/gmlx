@@ -240,12 +240,14 @@ class LetterTokens:
         return [i[0] for i in ids]
 
 
-def split_point(tokens: LetterTokens, state: str, first_pass: str) -> tuple[list[int], int]:
-    """The prefix ids every pass of a request shares, and their length: the
-    common start of the prompt that ends at the state and of a full pass
-    prompt. Tokens that merge across the state's end stay in the tails."""
+def split_point(tokens: LetterTokens, state: str) -> tuple[list[int], int]:
+    """The prefix ids every pass on ``state`` shares, and their length: the
+    common start of the prompt that ends at the state and of a pass prompt.
+    Every pass continues the state with the same text, so any pass gives
+    the same split. Tokens that merge across the state's end stay in the
+    tails."""
     head = tokens.ids(letters.prefix_text(state))
-    full = tokens.ids(first_pass)
+    full = tokens.ids(letters.prompt_text(state, "", []))
     n = 0
     for a, b in zip(head, full):
         if a != b:
@@ -286,7 +288,12 @@ class LetterReader:
     # -- model calls ---------------------------------------------------------
 
     def make_cache(self):
-        return self.model.make_cache()
+        from mlx_lm.models.cache import make_prompt_cache
+
+        m = self.model
+        if not hasattr(m, "make_cache") and not hasattr(m, "layers"):
+            m = getattr(m, "language_model", m)
+        return make_prompt_cache(m)
 
     def _hidden(self, x, cache):
         self.forwards += 1
@@ -432,15 +439,17 @@ class LetterReader:
 
 
 def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: str,
-                   *, prefix: Optional[tuple[list[int], Any]] = None,
-                   on_prefix: Optional[Callable[[list[int], Any], Any]] = None,
+                   *, prefixes=None,
                    should_stop: Optional[Callable[[], bool]] = None,
                    rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
     """One letter decision, as a generator that yields after each forward.
-    ``prefix`` is ``(ids, cache)`` from an earlier request with the same
-    state, and ``on_prefix(ids, cache)`` sees a freshly computed prefix.
-    ``rows_scope(rows)`` publishes the request's adapter scales around each
-    forward. Returns the decision body: answers and diagnostics."""
+    ``prefixes`` (a ``prefixes.Prefixes``) finds and keeps the state prefix
+    between requests. ``rows_scope(rows)`` publishes the request's adapter
+    scales around each forward. Returns the decision body: answers and
+    diagnostics."""
+    from .prefixes import Prefixes
+
+    prefixes = prefixes if prefixes is not None else Prefixes()
     started = time.time()
     reader.check(rows_scope)
     reader = reader.bind(rows_scope)
@@ -450,17 +459,9 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
         batch = next(read)
     except StopIteration as stop:
         batch, out = [], stop.value
-    first = batch[0].text if batch else letters.prefix_text(state)
-    ids, split = split_point(tokens, state, first)
-    reused = prefix is not None and list(prefix[0]) == ids
-    computed = 0
-    if reused:
-        cache = prefix[1]
-    else:
-        cache = yield from reader.prefill(ids)
-        computed += len(ids)
-        if on_prefix is not None:
-            on_prefix(ids, cache)
+    ids, split = split_point(tokens, state)
+    cache, reused, stored = yield from _prefix(reader, prefixes, ids)
+    computed = 0 if reused else split
     passes, prompt_tokens = 0, 0
     while batch:
         if should_stop is not None and should_stop():
@@ -492,7 +493,8 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
             "stages": out["stages"],
             "skipped": out["skipped"],
             "orderings": schema["orderings"],
-            "prefix": {"tokens": split, "reused": reused},
+            "prefix": {"tokens": split, "reused": reused, "stored": stored,
+                       "tier": prefixes.tier},
             "passes": passes,
             "computed_tokens": computed,
             "prompt_tokens": prompt_tokens,
@@ -501,6 +503,32 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
                        "reads": reader.forwards},
         },
     }
+
+
+def _prefix(reader: LetterReader, prefixes, ids: list[int]) -> Step:
+    """The prefix cache for ``ids``: a kept one, or a fresh prefill that is
+    then kept. Returns ``(cache, reused, stored)``."""
+    cache = prefixes.lookup(ids)
+    if cache is not None:
+        return cache, True, False
+    cache = yield from reader.prefill(ids)
+    return cache, False, prefixes.store(ids, cache)
+
+
+def prewarm(reader: LetterReader, tokens: LetterTokens, state: str, *, prefixes=None,
+            rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
+    """Prefill the prefix of ``state`` and keep it, so the next decision on
+    the state reads only its tails. Returns the prefix diagnostics."""
+    from .prefixes import Prefixes
+
+    prefixes = prefixes if prefixes is not None else Prefixes()
+    ids, split = split_point(tokens, state)
+    if prefixes.tier in ("off", "unsupported"):
+        return {"tokens": split, "reused": False, "stored": False, "tier": prefixes.tier}
+    reader.check(rows_scope)
+    reader = reader.bind(rows_scope)
+    _cache, reused, stored = yield from _prefix(reader, prefixes, ids)
+    return {"tokens": split, "reused": reused, "stored": stored, "tier": prefixes.tier}
 
 
 def letters_cancelled():

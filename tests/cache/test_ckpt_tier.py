@@ -1397,3 +1397,95 @@ def test_buffered_clone_declines_a_non_linear_window():
     assert _clone_single_row(buffered) is not None
     buffered.start_position += 1
     assert _clone_single_row(buffered) is None
+
+
+# -- decision records: letter-decision state prefixes --
+
+def test_a_decision_record_is_never_promoted_to_anchor():
+    from gmlx.cache.snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=96, block_size=16)
+    ids = list(range(400, 400 + 96))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=1),
+                      extra_hash=0, kind="decision")
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=1),
+                      extra_hash=0, kind="decision")
+    assert [r.kind for r in _ckpt_records(man).values()] == ["decision"]
+    assert ckpt_store(man, ids[:48], make_hybrid_cache(48, seed=2), extra_hash=0)
+    kinds = sorted((r.p, r.kind) for r in _ckpt_records(man).values())
+    assert kinds == [(32, "decision"), (48, "anchor")]
+
+
+def test_a_decision_insert_strips_only_decision_records():
+    from gmlx.cache.snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=128, block_size=16)
+    ids = list(range(400, 400 + 112))
+    assert ckpt_store(man, ids[:16], make_hybrid_cache(16, seed=1), extra_hash=0)
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=2), extra_hash=0)
+    for p in (48, 64, 80, 96):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0, kind="decision")
+    kinds = sorted((r.p, r.kind) for r in _ckpt_records(man).values())
+    assert kinds == [(16, "anchor"), (32, "boundary"),
+                     (80, "decision"), (96, "decision")]
+
+
+def test_no_other_insert_strips_a_decision_record():
+    from gmlx.cache.snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=128, block_size=16)
+    ids = list(range(400, 400 + 112))
+    for p in (16, 32):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0, kind="decision")
+    for p, kind in ((48, "boundary"), (64, "boundary"), (80, "boundary"),
+                    (96, "retire")):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0, kind=kind)
+    kinds = sorted((r.p, r.kind) for r in _ckpt_records(man).values())
+    assert kinds == [(16, "decision"), (32, "decision"), (48, "anchor"),
+                     (80, "boundary"), (96, "retire")]
+    warm, got = ckpt_lookup(man, ids[:33], extra_hash=0, min_prefix_tokens=31)
+    assert got == 32
+
+
+def test_decision_records_evict_before_anchors(monkeypatch):
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 2)
+    man = APCManager(num_blocks=96, block_size=16)
+    assert ckpt_store(man, list(range(100, 132)), make_hybrid_cache(32, seed=1),
+                      extra_hash=0)                       # anchor
+    assert ckpt_store(man, list(range(300, 332)), make_hybrid_cache(32, seed=2),
+                      extra_hash=1, kind="decision")
+    assert ckpt_store(man, list(range(500, 532)), make_hybrid_cache(32, seed=3),
+                      extra_hash=2)                       # anchor
+    assert {r.extra_hash for r in cs._ckpt_records(man).values()} == {0, 2}
+
+
+def test_decision_records_have_their_own_cap(monkeypatch):
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_DECISION_ENTRIES", 2)
+    man = APCManager(num_blocks=96, block_size=16)
+    assert ckpt_store(man, list(range(100, 132)), make_hybrid_cache(32, seed=1),
+                      extra_hash=0)
+    for i in range(3):
+        base = 300 + 100 * i
+        assert ckpt_store(man, list(range(base, base + 32)),
+                          make_hybrid_cache(32, seed=2 + i), extra_hash=1,
+                          kind="decision")
+    kept = [(r.ids[0], r.kind) for r in cs._ckpt_records(man).values()]
+    assert kept == [(100, "anchor"), (400, "decision"), (500, "decision")]
+
+
+def test_an_unknown_kind_stores_nothing():
+    import gmlx.cache.snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 432))
+    assert ckpt_store(man, ids, make_hybrid_cache(32), extra_hash=0,
+                      kind="decisoin") == 0
+    assert not cs._ckpt_records(man)
+    assert cs.ckpt_stats_snapshot(man)["ckpt_declines"] == {"kind": 1}

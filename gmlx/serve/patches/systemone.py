@@ -47,7 +47,9 @@ if TYPE_CHECKING:
     from gmlx.systemone.engine import StructuredReader
 
 SYSTEMONE_PATHS = ("/systemone", "/v1/systemone")
+PREWARM_PATHS = ("/prewarm", "/v1/prewarm")
 _ENDPOINT = "/v1/systemone"
+_PREWARM = "/v1/prewarm"
 _RUNTIME_ATTR = "_kq_systemone_runtime"
 _LETTERS_ATTR = "_kq_systemone_letters"
 _DISCONNECT_POLL_S = 0.5
@@ -111,6 +113,37 @@ def _letters_for(rg) -> _LetterRuntime:
             rt = _LetterRuntime(rg)
             setattr(rg, _LETTERS_ATTR, rt)
     return rt
+
+
+def _letter_setup(rg, state: str, resolved: str):
+    """The model's letter runtime and the request's tokens, with the state
+    prefix rendered once. A model whose tokenizer cannot render or letter
+    the prompt is a 400."""
+    try:
+        lrt = _letters_for(rg)
+        tokens = ar_reader.LetterTokens(rg.processor, lock=rg._tokenizer_lock)
+        tokens.render(letters.prefix_text(state))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=(
+            f"model {resolved!r} cannot answer letter reads: {e}")) from e
+    return lrt, tokens
+
+
+def _letter_reader(lrt: _LetterRuntime, engine_rg) -> ar_reader.LetterReader:
+    """The model's reader, built on the engine thread by the first job."""
+    if lrt.reader is None:
+        lrt.reader = ar_reader.LetterReader(engine_rg.model, lrt.letter_ids)
+    return lrt.reader
+
+
+def _prefixes(engine_rg, reader, scales):
+    """Where the engine keeps decision prefixes: its APC manager, or none."""
+    from gmlx.systemone.prefixes import ApcPrefixes, Prefixes, prefix_salt
+
+    manager = getattr(engine_rg, "apc_manager", None)
+    if manager is None:
+        return Prefixes()
+    return ApcPrefixes(manager, prefix_salt(scales), reader.make_cache)
 
 
 def _rows_scope(scales):
@@ -197,22 +230,49 @@ def _admit(rg, rt, tokens, schema) -> int:
     return len(bound_ids)
 
 
-def _admit_letters(rg, tokens, schema, state: str) -> int:
-    """Tokenize every pass the decision can send and check the longest
-    against the memory and context budgets. Returns its token count. The
-    reader holds at most one forward of tail rows beyond that prompt."""
+def _admit_letters(rg, tokens, texts: list[str], extra: int) -> int:
+    """Tokenize ``texts`` and check the longest against the memory and
+    context budgets, with ``extra`` tokens of room past it. Returns its
+    token count."""
     gen = importlib.import_module("mlx_vlm.server.generation")
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
-    tokens.ids(letters.prefix_text(state))
-    texts = letters.pass_texts(schema, state) + letters.winner_bounds(schema, state)
     longest = max(texts, key=lambda t: len(tokens.ids(t)))
     n = len(tokens.ids(longest))
-    preflight_prompt_memory(
-        rg, tokens.render(longest),
-        args=gen.GenerationArguments(max_tokens=ar_reader.FORWARD_TOKENS))
+    preflight_prompt_memory(rg, tokens.render(longest),
+                            args=gen.GenerationArguments(max_tokens=extra))
     gen._check_configured_context_budget(n, 1)
     return n
+
+
+def _resolve_engine(field, profile, cfg, runtime):
+    """Load the model a request names and return ``(rg, hold, spec,
+    model_str)``. The caller releases ``hold``."""
+    from gmlx.serve.residency import _http_from_resolver_error
+
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    # The residency seam resolves the model string with the body profile
+    # from this context variable.
+    token = serving.set_request_profile(profile)
+    try:
+        try:
+            model_str = _pick_model(field, profile, cfg)
+        except (serving.ModelNotFound, serving.ModelFileMissing,
+                serving.UnknownProfile, serving.NoModelSpecified) as e:
+            raise _http_from_resolver_error(e) from e
+        app_mod.get_cached_model(model_str)
+        spec = serving.get_active_spec()
+    finally:
+        serving.reset_request_profile(token)
+    guard = runtime.response_generator
+    rg = getattr(guard, "_rg", guard)
+    hold = getattr(guard, "_hold", None)
+    if rg is None:
+        if hold is not None:
+            hold.release()
+        raise HTTPException(status_code=500, detail=(
+            "the model engine is unavailable; restart the server"))
+    return rg, hold, spec, model_str
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -269,7 +329,6 @@ def make_systemone_endpoint(installed):
             return fail(422, "validation_error", str(parsed.error))
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
 
-        app_mod = importlib.import_module("mlx_vlm.server.app")
         stop = threading.Event()
         request_id = f"so-{uuid.uuid4().hex[:12]}"
 
@@ -316,51 +375,29 @@ def make_systemone_endpoint(installed):
             schema, state = _backend("letters")
             if letters.has_image(body.get("state")):
                 raise HTTPException(status_code=400, detail=_NO_IMAGES)
-            try:
-                lrt = _letters_for(rg)
-                tokens = ar_reader.LetterTokens(rg.processor, lock=rg._tokenizer_lock)
-                tokens.render(letters.prefix_text(state))
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=(
-                    f"model {resolved!r} cannot answer letter reads: {e}")) from e
-            admitted = _admit_letters(rg, tokens, schema, state)
-            scope = _rows_scope(lora_rows.request_scales(spec))
+            lrt, tokens = _letter_setup(rg, state, resolved)
+            ar_reader.split_point(tokens, state)
+            texts = letters.pass_texts(schema, state) + letters.winner_bounds(schema, state)
+            admitted = _admit_letters(rg, tokens, texts, ar_reader.FORWARD_TOKENS)
+            scales = lora_rows.request_scales(spec)
 
             def job(engine_rg, should_stop):
-                if lrt.reader is None:
-                    lrt.reader = ar_reader.LetterReader(engine_rg.model, lrt.letter_ids)
+                reader = _letter_reader(lrt, engine_rg)
                 return ar_reader.decide_letters(
-                    lrt.reader, tokens, schema, state,
-                    should_stop=should_stop, rows_scope=scope)
+                    reader, tokens, schema, state,
+                    prefixes=_prefixes(engine_rg, reader, scales),
+                    should_stop=should_stop, rows_scope=_rows_scope(scales))
 
             return schema, job, admitted
 
         def _run():
             from gmlx.gen.diffusion import is_diffusion_model
             from gmlx.serve.engine_jobs import run_on_engine
-            from gmlx.serve.residency import _http_from_resolver_error
 
             gen = importlib.import_module("mlx_vlm.server.generation")
-            # The residency seam resolves the model string with the body
-            # profile from this context variable.
-            token = serving.set_request_profile(profile)
+            rg, hold, spec, model_str = _resolve_engine(
+                body.get("model"), profile, cfg, runtime)
             try:
-                try:
-                    model_str = _pick_model(body.get("model"), profile, cfg)
-                except (serving.ModelNotFound, serving.ModelFileMissing,
-                        serving.UnknownProfile, serving.NoModelSpecified) as e:
-                    raise _http_from_resolver_error(e) from e
-                app_mod.get_cached_model(model_str)
-                spec = serving.get_active_spec()
-            finally:
-                serving.reset_request_profile(token)
-            guard = runtime.response_generator
-            rg = getattr(guard, "_rg", guard)
-            hold = getattr(guard, "_hold", None)
-            try:
-                if rg is None:
-                    raise HTTPException(status_code=500, detail=(
-                        "the model engine is unavailable; restart the server"))
                 resolved = spec.id if spec is not None else (model_str or shown["model"])
                 shown["model"] = resolved
                 if is_diffusion_model(getattr(rg, "model", None)):
@@ -441,12 +478,112 @@ def make_systemone_endpoint(installed):
     return systemone_endpoint
 
 
+def make_prewarm_endpoint(installed):
+    async def prewarm_endpoint(http_request: Request):
+        started = time.perf_counter()
+        cfg = _settings(installed)
+        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+
+        def fail(status: int, err_type: str, message: str) -> JSONResponse:
+            return JSONResponse(status_code=status, content=_error_content(
+                _PREWARM, status, err_type, message))
+
+        try:
+            body = json.loads(await http_request.body())
+        except Exception as e:  # noqa: BLE001 - any parse failure is a 400
+            return fail(400, "invalid_request_error", f"invalid body: {e}")
+        if not isinstance(body, dict):
+            return fail(400, "invalid_request_error",
+                        "invalid body: expected a JSON object")
+        try:
+            state = letters.state_text(body)
+        except SchemaError as e:
+            return fail(422, "validation_error", str(e))
+        if body.get("images") or letters.has_image(body.get("state")):
+            return fail(400, "invalid_request_error", _NO_IMAGES)
+        profile = body.get("profile") if isinstance(body.get("profile"), str) else None
+        stop = threading.Event()
+
+        def _run():
+            from gmlx.gen.diffusion import is_diffusion_model
+            from gmlx.serve.engine_jobs import run_on_engine
+
+            gen = importlib.import_module("mlx_vlm.server.generation")
+            rg, hold, spec, model_str = _resolve_engine(
+                body.get("model"), profile, cfg, runtime)
+            try:
+                resolved = spec.id if spec is not None else model_str
+                if is_diffusion_model(getattr(rg, "model", None)):
+                    raise HTTPException(status_code=400, detail=(
+                        f"model {resolved!r} reads decisions without a kept "
+                        "prefix; prewarm applies to the letter readout"))
+                lrt, tokens = _letter_setup(rg, state, resolved)
+                ids, _split = ar_reader.split_point(tokens, state)
+                _admit_letters(rg, tokens, [letters.prefix_text(state)], 1)
+                scales = lora_rows.request_scales(spec)
+
+                def job(engine_rg, should_stop):
+                    reader = _letter_reader(lrt, engine_rg)
+                    return ar_reader.prewarm(
+                        reader, tokens, state,
+                        prefixes=_prefixes(engine_rg, reader, scales),
+                        rows_scope=_rows_scope(scales))
+
+                prefix = run_on_engine(
+                    rg, job, request_id=f"pw-{uuid.uuid4().hex[:12]}",
+                    prompt_tokens=len(ids), stop=stop,
+                    timeout_s=gen.get_token_queue_timeout(), stepwise=True)
+                return resolved, prefix
+            finally:
+                if hold is not None:
+                    hold.release()
+
+        watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
+        try:
+            resolved, prefix = await asyncio.to_thread(_run)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 - mapped to a status below
+            from gmlx.serve.engine_jobs import JobCancelled, JobTimeout
+
+            gen = importlib.import_module("mlx_vlm.server.generation")
+            if isinstance(e, JobCancelled):
+                return Response(status_code=499)
+            if isinstance(e, JobTimeout):
+                return fail(504, "timeout", str(e))
+            if isinstance(e, gen.PromptTooLongError):
+                return fail(400, "invalid_request_error", str(e))
+            _log.exception("systemone: prewarm failed")
+            return fail(500, "server_error",
+                        f"prewarm failed ({type(e).__name__}); see the server log")
+        finally:
+            stop.set()
+            watcher.cancel()
+        _log.info("systemone: prewarm prefix=%d %s %.0fms", prefix["tokens"],
+                  "reused" if prefix["reused"]
+                  else "stored" if prefix["stored"] else f"not kept ({prefix['tier']})",
+                  (time.perf_counter() - started) * 1e3)
+        return JSONResponse(content={
+            "model": resolved,
+            "ok": bool(prefix["reused"] or prefix["stored"]),
+            "prompt_tokens": prefix["tokens"],
+            "prefix": {k: prefix[k] for k in ("reused", "stored", "tier")},
+        })
+
+    prewarm_endpoint.__signature__ = inspect.Signature([inspect.Parameter(
+        "http_request", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        annotation=Request)])
+    return prewarm_endpoint
+
+
 def install_systemone_route(cfg) -> None:
-    """Register ``POST /v1/systemone`` (+ ``/systemone``). Install before the
-    load-offload, profile-capture and queue-cap wrappers so they wrap it."""
+    """Register ``POST /v1/systemone`` and ``POST /v1/prewarm`` (and the
+    paths without ``/v1``). Install before the load-offload,
+    profile-capture and queue-cap wrappers so they wrap them."""
     app = importlib.import_module("mlx_vlm.server.app").app
-    endpoint = make_systemone_endpoint(cfg)
-    _remove_routes(app, *SYSTEMONE_PATHS)
-    for path in SYSTEMONE_PATHS:
-        app.add_api_route(path, endpoint, methods=["POST"],
-                          include_in_schema=False)
+    _remove_routes(app, *SYSTEMONE_PATHS, *PREWARM_PATHS)
+    for paths, endpoint in ((SYSTEMONE_PATHS, make_systemone_endpoint(cfg)),
+                            (PREWARM_PATHS, make_prewarm_endpoint(cfg))):
+        for path in paths:
+            app.add_api_route(path, endpoint, methods=["POST"],
+                              include_in_schema=False)

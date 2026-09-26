@@ -18,6 +18,7 @@ import pytest
 from gmlx.models import vlm_text_only
 from gmlx.systemone import ar_reader, letters
 from gmlx.systemone.ar_reader import LetterReader, plan_buckets, run_to_end
+from gmlx.systemone.prefixes import Prefixes
 
 qwen3_5 = pytest.importorskip("mlx_lm.models.qwen3_5")
 
@@ -184,14 +185,26 @@ def test_a_decision_reuses_a_given_prefix():
     }}
     schema = letters.parse(body)
     state = letters.state_text(body)
-    seen = {}
+
+    class Kept(Prefixes):
+        tier = "test"
+        kept: dict = {}
+
+        def lookup(self, ids):
+            return self.kept.get(tuple(ids))
+
+        def store(self, ids, cache):
+            self.kept[tuple(ids)] = cache
+            return True
+
     cold = run_to_end(ar_reader.decide_letters(
-        reader, tokens, schema, state, on_prefix=lambda ids, c: seen.update(p=(ids, c))))
+        reader, tokens, schema, state, prefixes=Kept()))
     warm = run_to_end(ar_reader.decide_letters(
-        reader, tokens, schema, state, prefix=seen["p"]))
+        reader, tokens, schema, state, prefixes=Kept()))
     assert cold["answers"] == warm["answers"]
     cd, wd = cold["diagnostics"], warm["diagnostics"]
     assert (cd["prefix"]["reused"], wd["prefix"]["reused"]) == (False, True)
+    assert (cd["prefix"]["stored"], wd["prefix"]["stored"]) == (True, False)
     assert cd["prefix"]["tokens"] == len(tokens.ids(letters.prefix_text(state))) - 2
     assert wd["computed_tokens"] == cd["computed_tokens"] - cd["prefix"]["tokens"]
     assert cd["prompt_tokens"] == sum(len(tokens.ids(p)) for p in (
@@ -235,6 +248,53 @@ def test_a_replaced_head_is_checked_again():
 
     model.language_model.lm_head = Wrapped(model.language_model.lm_head)
     assert reader.check() == "logits"
+
+
+def _kv_model():
+    from mlx_lm.models import qwen3
+
+    mx.random.seed(11)
+    model = qwen3.Model(qwen3.ModelArgs(
+        model_type="qwen3", hidden_size=64, num_hidden_layers=2,
+        intermediate_size=128, num_attention_heads=4, rms_norm_eps=1e-6,
+        vocab_size=128, num_key_value_heads=2, max_position_embeddings=1024,
+        rope_theta=10000, head_dim=16, tie_word_embeddings=False))
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("hybrid", [True, False], ids=["ckpt", "exact"])
+def test_a_prefix_kept_by_the_apc_manager_equals_a_cold_one(hybrid):
+    from mlx_vlm.apc import APCManager
+
+    from gmlx.systemone.prefixes import ApcPrefixes, prefix_salt
+
+    model = _model() if hybrid else _kv_model()
+    reader = LetterReader(model, LETTER_IDS)
+    manager = APCManager(num_blocks=64, block_size=16)
+    kept = ApcPrefixes(manager, prefix_salt(), reader.make_cache)
+    assert kept.tier == ("ckpt" if hybrid else "exact")
+    body = {"state": "a state long enough to fill a few blocks of the pool",
+            "questions": {"a": {"type": "noul", "instructions": "One?"},
+                          "b": {"type": "choice", "instructions": "Two?",
+                                "criteria": {"x": None, "y": None, "z": None}}}}
+    schema, state = letters.parse(body), letters.state_text(body)
+    cold = run_to_end(ar_reader.decide_letters(
+        reader, FakeTokens(), schema, state, prefixes=kept))
+    warm = run_to_end(ar_reader.decide_letters(
+        reader, FakeTokens(), schema, state, prefixes=kept))
+    assert cold["diagnostics"]["prefix"]["stored"] is True
+    assert warm["diagnostics"]["prefix"]["reused"] is True
+    assert warm["answers"] == cold["answers"]
+    ids = FakeTokens().ids(letters.prefix_text(state))[:cold["diagnostics"]["prefix"]["tokens"]]
+    fresh = run_to_end(reader.prefill(ids))
+    for c, w in zip(fresh, kept.lookup(ids)):
+        for a, b in zip(c.state, w.state):
+            assert mx.array_equal(a, b).item()
+    assert ApcPrefixes(manager, prefix_salt((1.0,)), reader.make_cache).lookup(ids) is None
+    assert kept.lookup(ids[:-1]) is None
 
 
 def test_buckets_group_similar_lengths_within_the_budget():
