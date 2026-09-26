@@ -74,7 +74,7 @@ def _get_spec_prefix_cache(model):
 class _L1View:
     """Minimal duck-typed receiver for BatchGenerator's APC lookup helpers.
 
-    Upstream's lookup ladder (``_apc_pick_for``: exact -> blocks -> disk,
+    Upstream's lookup ladder (``_apc_pick_for``: blocks -> exact -> disk,
     longest match wins, media-token guards, release-on-reject) and its hash
     salting (``_apc_extra_hash``) are reused verbatim by binding the unbound
     methods onto this attribute surface, so the owned MTP path can never

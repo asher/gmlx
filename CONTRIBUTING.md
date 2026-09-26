@@ -110,7 +110,7 @@ docs index, and the CI build of the site fails on a page missing from it.
 - Error messages follow the existing style: they say what was expected,
   what was found and what the user or upgrader should do next.
 - Install instructions show Homebrew first, then uv, and pip only for a
-  venv the user manages. Getting-started owns the install facts, and a page
+  venv the user manages. docs/installation.md owns the install facts, and a page
   that adds an extra shows the uv and pip forms, because a Homebrew install
   already has every extra.
 
