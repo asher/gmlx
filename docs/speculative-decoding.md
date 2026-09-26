@@ -3,7 +3,7 @@
 Speculative decoding makes a model generate faster without changing its
 output. gmlx turns it on by itself for most models that have a drafter,
 limits it while many requests share a batch, and can trade exact output
-for more speed when sampling.
+for more speed at a temperature above zero.
 
 A small, fast drafter proposes the next few tokens, and the model checks
 all of them in one pass. The model keeps the tokens it agrees with and
@@ -29,7 +29,7 @@ such as the gemma-4 assistant drafter or a DFlash 2 drafter.
 On `run` and `chat`, speculation turns on by itself for a model with a
 native head, and for DeepSeek-V4 when its companion drafter is in the same
 folder. It stays off under `--stream-experts`, `--stream-cpu` and the
-lossy MoE settings. With `--adapter`, the adapted model verifies each
+[lossy MoE settings](streaming.md#the-lossy-settings). With `--adapter`, the adapted model verifies each
 draft, so the output matches plain decoding with the adapter. With `--mmproj`, the companion drafters of
 DeepSeek-V4, Qwen3.8-Flash-Next and Muse Glimmer also turn it on for text
 turns.
@@ -39,9 +39,9 @@ companion that the loader finds beside a DeepSeek-V4, Qwen3.8-Flash-Next or
 Muse Glimmer model. Other families need `--draft-gguf`, which names a
 drafter file, and `--no-mtp` turns speculation off. When `--draft-gguf` or
 the `draft_gguf` key names a companion for a model with a native head, the
-companion wins, and `--native-mtp` forces the head. A model with a native
-head prints the name of a companion that it finds beside it, and uses it
-only with `--draft-gguf`.
+companion takes precedence, and `--native-mtp` forces the head. A model
+with a native head prints the name of any companion in its folder, and
+uses that companion only with `--draft-gguf`.
 
 The server enables speculation for a model through its
 [`speculative`](config.md#modelsspeculative) key, and
@@ -55,7 +55,7 @@ The verification step samples with temperature, top-p, top-k and min-p
 only. On `run`, speculation drops `--stop`, `--logit-bias`, the penalties,
 the XTC settings, `--max-kv-size`, `--quantized-kv-start`,
 `--prefill-step-size`, `--over-generation` and `--inject-critique`, with a
-warning for each. Chat keeps the system prompt, `--stop` and
+warning for each. On `chat`, speculation keeps the system prompt, `--stop` and
 `--prefill-step-size`, and drops the others. `--no-mtp` keeps these settings
 and decodes without speculation. A
 [multimodal model](vlm.md#media-with-other-features) speculates on text
@@ -67,10 +67,10 @@ The gain depends on how many drafts the model accepts, and on the depth of
 the context. Speculation makes a dense model decode 1.6 to 1.9 times as
 fast at short contexts, and keeps a smaller gain deep into long ones. Most
 MoE models gain less, and gemma-4-26B-A4B becomes slower at depth, but
-Qwen3.8-Flash-Next gains more as the context grows, so measure before you
-rely on it. Predictable text, such as code, accepts more drafts
-than free prose. [Benchmarks](benchmarks.md) has the speedup curves of
-each model. This command measures your own model at two context depths:
+Qwen3.8-Flash-Next gains more as the context grows, so measure the gain
+before you rely on speculation. The model accepts more drafts on
+predictable text, such as code, than on free prose.
+[Benchmarks](benchmarks.md) has each model's speedup curves. This command measures your own model at two context depths:
 
 ```sh
 gmlx run model.gguf --bench-depths "0,4096" --speculative
@@ -102,11 +102,11 @@ the batch switches between the two modes.
 [DFlash 2](https://inco.ai/blog/dflash2/) is a block-diffusion drafter,
 with checkpoints for Qwen3.8-27B and Muse-Glimmer-30B. One drafter pass
 proposes a whole block of tokens, and the model checks the block in one
-pass. A round therefore costs one small pass and one check, instead of a
-check for each drafted token.
+pass. A round therefore costs one small drafter pass and one check, where a
+native head runs one drafter pass for each token that it drafts.
 
-Pair the drafter with its model through `--draft-gguf`. The header of a
-DFlash 2 file names its base model, so a discover scan pairs the two even
+Pair the drafter with its model through `--draft-gguf`. A DFlash 2
+file's header names its base model, so a discover scan pairs the two even
 in different folders. Muse Glimmer finds a drafter in the same folder with
 `--speculative`, and by itself when `--mmproj` loads its vision encoder. Qwen3.8-27B keeps its native head until you pass `--draft-gguf`.
 
@@ -120,10 +120,11 @@ exact by default, and `--stochastic-mtp` applies to DFlash 2 as well.
 ## Bonsai drafters
 
 The community DSpark drafters for Ternary Bonsai 2 27B keep the DFlash
-layers and add a bigram head, which adjusts each drafted position by the
-token before it, and a confidence head. They pair through `--draft-gguf`
-in the same way, and the loader reports them as `dflash_dspark`. The first
-position drafts too, so a block-7 drafter proposes seven tokens a round.
+layers and add two heads, a bigram head and a confidence head. The bigram
+head adjusts each drafted position by the token before it. The drafters
+pair through `--draft-gguf` in the same way, and the loader reports them
+as `dflash_dspark`. The drafter also drafts the block's first position, so
+a drafter with a block of 7 proposes seven tokens a round.
 The confidence head, which cuts a block short, is off unless
 [`GMLX_DSPARK_CONF`](internals/debug-switches.md) sets a threshold. The
 output is the same either way, because acceptance is exact.
@@ -144,8 +145,9 @@ allow.
 `--stochastic-mtp`, or
 [`server.stochastic_mtp: true`](config.md#serverstochastic_mtp), removes
 that limit with rejection sampling. The drafter samples its tokens, and
-the model accepts each with probability `min(1, p/q)`, which keeps the
-sampling distribution exact. The output is still a true sample from the
+the model accepts each with probability `min(1, p/q)`, where p is the
+model's probability of the token and q is the drafter's. This rule keeps
+the sampling distribution exact. The output is still a true sample from the
 model's distribution, but the tokens are no longer identical to a run
 without speculation. Greedy requests do not change.
 

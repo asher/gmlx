@@ -80,20 +80,24 @@ gmlx serve --config decisions.yaml
 ```
 
 [`server.systemone.model`](config.md#serversystemonemodel) names the model
-that answers when the `model` field of a request is absent or names nothing
+that answers when a request's `model` field is absent or names nothing
 that the server knows. A Jev client that sends a name such as `jev-latest`
 reaches the model this way. A file with one model, or with
 [`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
-key out. A `profile` field in the request selects the
-[profile](config.md#profiles) that `model` resolves with. The other `server.systemone` keys set the request
-limits and the thought defaults, and
+key out.
+
+A `profile` field in the request selects the
+[profile](config.md#profiles) that `model` resolves with. The other
+`server.systemone` keys set the request limits and the thought defaults, and
 [Structured decisions](config.md#structured-decisions) in the
 configuration reference lists them.
 
 ## A first decision
 
-A request carries a `state` and a map of `questions`. This one triages a
-support ticket with four questions:
+A request must carry a `state` and a map of `questions`. The `state` can be
+a string or any JSON value, and a value that is not a string reaches the
+model as its JSON text. This request triages a support ticket with four
+questions:
 
 ```json
 {
@@ -144,13 +148,10 @@ rounded. The exact numbers depend on the model file.
 }
 ```
 
-A request must carry `state`. It can be a string or any JSON value, and a
-value that is not a string reaches the model as its JSON text.
-
 ## Reading the answers
 
 `answers` has one entry for each question id. Each entry is a distribution
-over the answers of that question, in one of three shapes:
+over that question's answers, in one of three shapes:
 
 - A `noul` entry answers a yes or no question, under the Jev API's name for
   it. The `noul` field is the probability of yes. The billing ticket is not
@@ -176,7 +177,7 @@ the `prompt_tokens`, and `think_auto` when that setting was used.
 
 `samples.tops` has one entry for each sample. The entry maps each question
 to its top label as the answer template writes it, with the probability of
-that label and the entropy of the read. The label of a score question is
+that label and the entropy of the read. A score question's label is
 its level counted from 1, such as `"2"` for medium, unlike the index in
 `probabilities`, which counts from 0. A score with ten or more levels uses
 the letters `A` onward instead. When a decision has stages, chunks or a
@@ -255,9 +256,9 @@ the state holds only the question and the answer:
 
 | Question | Answer | `grade` |
 |----------|--------|---------|
-| Why is the sky blue? | Because it reflects the colour of the ocean. | Wrong, 0.983 |
-| Why is the sky blue? | Air molecules scatter short blue wavelengths of sunlight much more than long red ones. | Correct, 0.993 |
-| At what temperature does water boil? | 100 degrees Celsius, always, anywhere on Earth. | Partly right, 0.988 |
+| Why is the sky blue? | Because it reflects the colour of the ocean. | `wrong`, 0.983 |
+| Why is the sky blue? | Air molecules scatter short blue wavelengths of sunlight much more than long red ones. | `correct`, 0.993 |
+| At what temperature does water boil? | 100 degrees Celsius, always, anywhere on Earth. | `partly right`, 0.988 |
 
 ### Filter passages and check rules
 
@@ -305,7 +306,7 @@ what the model knows about them:
 | `type` | Required | The type is `noul` for yes or no, `choice` for one of several options, or `score` for one of several ordered levels. |
 | `instructions` | Empty | The model reads this text as the question. |
 | `criteria` | Required, except for `noul` | A `noul` takes `true` and `false` descriptions. A `choice` maps option names to descriptions. A `score` lists level names in order. |
-| `depends_on` | None | The read of this question sees the answers of these question ids from an earlier stage. |
+| `depends_on` | None | This question's read sees the answers that the listed questions got in an earlier stage. |
 | `ask_if` | None | It maps question ids to lists of their answers. The question is asked only when that answer is in the list. |
 | `alone` | `false` | With `true`, the question is read on its own. |
 
@@ -313,7 +314,7 @@ A choice or a score takes 2 to 26 alternatives. Describe each option so
 that no two overlap, since the probability splits between options that both
 fit. A question id may not contain a colon or a newline.
 
-The answers in an `ask_if` list are the answer names of that question.
+Each list in `ask_if` holds answer names of the question whose id is its key.
 They are `"yes"` or `"no"` for a `noul` question, option names for a
 `choice`, and level names for a `score`, and each one must be an answer of
 that question.
@@ -382,9 +383,9 @@ were unsure. With
 a Jev client gets this behavior without sending any of the fields.
 
 The two thresholds point in opposite directions. `think_threshold` is a
-floor on the confidence of an answer, so raising it thinks more often.
-`auto_threshold` is a ceiling on the entropy at a label position, so
-raising it samples less often. Without `"auto"`, the server ignores
+floor on an answer's confidence, so a higher value runs a thought more
+often. `auto_threshold` is a ceiling on the entropy at a label position,
+so a higher value adds reads less often. Without `"auto"`, the server ignores
 `think_threshold` and `think_budget` and logs them in an
 `ignoring unsupported parameter(s)` warning.
 
@@ -461,7 +462,7 @@ The questions and their allowed answers become the system prompt, and the
 state becomes the user message. The canvas is seeded with an answer
 template that writes each question id with its answer, with a random token
 at each answer position. One denoise step then gives the distribution over
-the labels of each question. This is a
+each question's labels. The whole procedure is a
 [structured read](glossary.md#structured-read), and
 [Structured reads](internals/structured-reads.md) describes the mechanism
 for contributors.

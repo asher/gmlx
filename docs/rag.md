@@ -33,7 +33,7 @@ stays off until the next start, as
 
 To create a new configuration file with both services, run
 `gmlx init --models-dir ~/models --with-embeddings --with-rerank`, or answer
-the questions of the `gmlx init` wizard. The larger models, the other kinds
+the `gmlx init` wizard's questions. The larger models, the other kinds
 of embedder and the request fields are in
 [Speech, embeddings and rerank](services.md#embeddings).
 
@@ -89,8 +89,8 @@ as an `Authorization: Bearer` header to httpx.
 ## Open WebUI
 
 `gmlx launch open-webui` points Open WebUI's document embedder at the
-server. When the server runs a reranker, it also turns on Open WebUI's
-hybrid search and points its external reranker at the server. Documents
+server. When the server runs a reranker, the command also turns on Open WebUI's
+hybrid search and points Open WebUI's external reranker at the server. Documents
 that you upload in Open WebUI are then indexed and searched on your
 server. [Open WebUI](launch.md#open-webui) lists what the launch sets.
 

@@ -34,7 +34,7 @@ other counters, as [Endpoints](api.md#endpoints) lists.
 ## What each family reuses
 
 How much of a prompt the cache can reuse depends on the model family,
-because the state of a recurrent layer cannot be rolled back to an
+because a recurrent layer's state cannot be rolled back to an
 earlier token. [GDN](glossary.md#gdn), the gated delta network, is the
 recurrent layer of the Qwen3.5, Qwen3.6 and Qwen3.8 hybrids.
 
@@ -49,7 +49,8 @@ Hybrid models save checkpoints along the prompt and at the end of each
 turn. A prompt shorter than 1024 tokens saves no checkpoint for an
 identical resend, because it prefills quickly anyway.
 
-A sliding-window model under speculative decoding keeps no record of the
+In two cases, the cache reuses less than the table shows. A
+sliding-window model under speculative decoding keeps no record of the
 tokens it generated, so the next turn reuses only up to the end of the
 previous prompt, and the reply is read again. Under a
 [kvarn KV cache](kv-quantization.md), dense models reuse whole prompts
@@ -60,8 +61,8 @@ Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes
 right after the start of the last reply, so the server stores the entry
 for the reply in the form that the next turn will render. What comes after
-the change is read again, on this server as on any other, because the
-template itself changes the text.
+the change is read again on any server, because the template itself
+changes the text.
 
 ## The SSD tier
 
@@ -76,14 +77,14 @@ server:
     disk: {path: ~/.cache/gmlx/apc, max_gb: 100}
 ```
 
-Its place and size are the [`cache.disk`](config.md#cachedisk) keys, and
+The tier's place and size are the [`cache.disk`](config.md#cachedisk) keys, and
 the server removes entries to keep the tier within that size.
 
 ## What a hit restores
 
-A hit restores more than the KV cache of the prompt. The server stores the
+A hit restores more than the prompt's KV cache. The server stores the
 finished conversation again after the reply, so the next turn starts after
-the reply. For a model with speculative decoding, it also stores the KV
-cache of the drafter beside the model's. [Prompt cache
+the reply. For a model with speculative decoding, it also stores the
+drafter's KV cache beside the model's. [Prompt cache
 internals](internals/prompt-cache.md) describes the tiers, their counters
 and the switches for finding problems.

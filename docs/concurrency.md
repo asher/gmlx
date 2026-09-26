@@ -1,8 +1,8 @@
 # Concurrent requests
 
-The gmlx server decodes the requests of several clients together as one
-batch. It paces the admission of a new request so that the running streams
-do not stall, and it reads a prompt that several requests share only
+The gmlx server decodes several clients' requests together as one batch.
+It paces a new request's admission so that the running streams do not
+stall, and it reads a prompt that several requests share only
 once.
 
 - [Batched decoding](#batched-decoding)
@@ -26,7 +26,7 @@ explains.
 
 ## Admitting a new request
 
-The prompt of a new request must prefill while other requests are
+A new request's prompt must prefill while other requests are
 decoding. Prefill runs in chunks of 2048 tokens, and at a deep context one
 chunk can take as much GPU time as hundreds of decode steps. A scheduler
 that alternates one decode step with one chunk therefore lets a long
@@ -49,7 +49,7 @@ setting. The server reads both settings at start, so change them and run
 
 Requests often share the start of their prompt, such as a common system
 prompt or histories restored from the [prompt cache](prompt-cache.md).
-The server finds the shared part from the token ids of the requests, and
+The server finds the shared part from the requests' token ids, and
 decodes such a batch with a cascade kernel that reads the shared part once
 for the whole batch. The gain grows with the length of the shared part and
 the number of requests. The cascade is exact and on by default, and

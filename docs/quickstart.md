@@ -1,8 +1,8 @@
 # Quickstart
 
 gmlx runs GGUF files as they are, with no conversion step. With gmlx
-[installed](installation.md), create a configuration file and download a
-model into it:
+installed as [Installation](installation.md) describes, create a
+configuration file and download a model:
 
 ```sh
 gmlx init --models-dir ~/models
@@ -69,11 +69,11 @@ manage the server:
 
 | Command | Result |
 |---------|--------|
-| `gmlx list` | Lists the model ids in the file. |
-| `gmlx status` | Shows the process id, uptime and URL of the server. |
-| `gmlx ps` | Lists the loaded models. |
-| `gmlx logs -n 20 -f` | Shows the last 20 lines of the log and follows it. |
-| `gmlx stop` | Stops the server. |
+| `gmlx list` | It lists the model ids in the file. |
+| `gmlx status` | It shows the server's process id, uptime and URL. |
+| `gmlx ps` | It lists the loaded models. |
+| `gmlx logs -n 20 -f` | It shows the last 20 lines of the log and follows it. |
+| `gmlx stop` | It stops the server. |
 
 ## Sending requests
 
@@ -136,7 +136,7 @@ gmlx validate hf:unsloth/Qwen3-4B-GGUF
 ```
 
 For a repository, `validate` lists its GGUF files and, when it knows their
-sizes, which of them fit in the memory of your Mac. For a single file, it
+sizes, which of them fit in your Mac's memory. For a single file, it
 reads only the header and says whether gmlx can load it. A gated
 repository needs a Hugging Face token, as
 [Troubleshooting](troubleshooting.md#a-gated-or-private-repo-will-not-download)
@@ -155,7 +155,7 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 ```
 
 `launch` starts the server if it is not running, and adds a provider for
-the server to the settings of pi without changing the providers that are
+the server to pi's settings without changing the providers that are
 already there. It asks the server to load the model and keep it loaded
 through the idle timeout, and then it starts pi. The same command connects
 the other coding agents and chat apps, including Open WebUI in the

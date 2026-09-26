@@ -6,11 +6,11 @@ optional features.
 ## Requirements
 
 - gmlx needs an Apple Silicon Mac, and it does not run on Intel Macs or
-  Linux. The model you can run depends on its memory, as
+  Linux. The model you can run depends on the Mac's memory, as
   [Choosing a model](quickstart.md#choosing-a-model) shows.
-- It needs macOS 26.2 or newer, because the Metal kernels of
-  [mlx-kquant](https://github.com/asher/mlx-kquant) are built for it and
-  install prebuilt.
+- It needs macOS 26.2 or newer, because the
+  [mlx-kquant](https://github.com/asher/mlx-kquant) Metal kernels are built
+  for it and install prebuilt.
 - The models need several GB of disk space each.
 
 ## Homebrew
@@ -82,8 +82,8 @@ lists:
 uv tool install --force "gmlx[chat,talk]"
 ```
 
-With pip, run `pip install "gmlx[talk]"` in the same environment, which
-keeps the extras already there. When you turn on speech in
+With pip, run `pip install "gmlx[talk]"` in the same environment. The
+command keeps the extras that are already there. When you turn on speech in
 [`gmlx init`](config.md#create-the-file), it offers to install the extras
 that speech needs. A message that says a feature is not installed also
 gives the command for your kind of install.

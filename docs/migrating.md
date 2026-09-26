@@ -1,7 +1,7 @@
 # Migrating from other tools
 
 gmlx runs the same GGUF files as llama.cpp, LM Studio and Ollama, so a model
-needs no conversion. Most commands, flags and settings of those tools have
+needs no conversion. Most of those tools' commands, flags and settings have
 a gmlx equivalent, and an LM Studio library runs without a new download.
 
 ## llama.cpp
@@ -17,7 +17,7 @@ Most flags have a direct equivalent:
 |-----------|------|-------|
 | `-m model.gguf` | The model as the first argument | For a model split into shards, give the first shard. |
 | `-n N` | `--max-tokens N` | Both generate until end-of-sequence by default. |
-| `--temp`, `--top-k`, `--top-p`, `--min-p` | The same names | The defaults come from the [family defaults](family-defaults.md) of the model. |
+| `--temp`, `--top-k`, `--top-p`, `--min-p` | The same names | The defaults come from the model's [family defaults](family-defaults.md). |
 | `-c N` | `--max-kv-size N` | The context length comes from the GGUF, and this flag limits it. On `run` and `chat`, the cache also becomes a rotating window. |
 | `--rope-scaling`, `--yarn-*` | None | gmlx reads the scaling from the GGUF, and there is no override. |
 | `-ngl N` | None | Every layer runs on the GPU. A model larger than memory runs with `--stream-experts` or `--stream-cpu`. |
@@ -44,7 +44,7 @@ gmlx does not implement the Ollama API. A client that can use an
 OpenAI-compatible endpoint works with no changes, and an app built for
 Ollama needs its OpenAI mode, pointed at port 8080.
 
-The settings of a Modelfile map to the [configuration file](config.md):
+A Modelfile's settings map to the [configuration file](config.md):
 
 | Modelfile | gmlx |
 |-----------|------|
@@ -54,15 +54,15 @@ The settings of a Modelfile map to the [configuration file](config.md):
 | `PARAMETER num_ctx` | [`load.max_kv_size`](config.md#loadmax_kv_size) |
 | `SYSTEM` | [`system`](config.md#profilessystem) |
 
-Each of these goes in a [profile](config.md#profiles) or in the
-[`overrides`](config.md#modelsoverrides) of a model entry. A Modelfile
+Each of these goes in a [profile](config.md#profiles) or in a model
+entry's [`overrides`](config.md#modelsoverrides). A Modelfile
 `TEMPLATE` does not carry over, because gmlx uses the Jinja chat template
 in the GGUF.
 
-Ollama's keep-alive setting corresponds to the idle timeout of the server.
-A model unloads after [`ttl_s`](config.md#serverdefaultsttl_s) seconds
-without a request, or when the memory budget needs its room, and
-[`pin`](config.md#modelspin) keeps it loaded.
+Ollama's keep-alive setting corresponds to the server's idle timeout. A
+model unloads after [`ttl_s`](config.md#serverdefaultsttl_s) seconds
+without a request, or when the memory budget needs the room that the model
+takes. [`pin`](config.md#modelspin) keeps a model loaded.
 [Memory and residency](config.md#memory-and-residency) explains the rules.
 
 ## LM Studio
@@ -78,5 +78,5 @@ The `-r` flag scans the folders inside the library too. When you have no
 folder by itself. You can then rename the models and set a default model in
 the [configuration file](config.md).
 
-A client that used the OpenAI-compatible endpoint of LM Studio works with
+A client that used LM Studio's OpenAI-compatible endpoint works with
 gmlx after you change its port from 1234 to 8080.

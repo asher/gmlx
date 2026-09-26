@@ -1,6 +1,6 @@
 # Memory and the KV cache
 
-A model needs memory for its weights and for the KV cache of its context.
+A model needs memory for its weights and for its context's KV cache.
 Both can be estimated before a load, a few settings limit the KV cache, and
 gmlx keeps its GPU memory within the share of RAM that macOS allows.
 
@@ -30,9 +30,9 @@ a small fixed state on most layers and a full KV cache only on their few
 attention layers. Qwen3.6-27B, with 16 attention layers of 64, therefore
 uses 2.1 GB at 32K, against 8 GB for a dense model of the same depth.
 [MLA](glossary.md#mla) models, such as the DeepSeek family, store a
-compressed cache. The capacity planner of the server counts all of these.
+compressed cache. The server's capacity planner counts all of these.
 
-To see the numbers of a running server, read the `memory` and `capacity`
+To see a running server's numbers, read the `memory` and `capacity`
 sections of `GET /v1/metrics`. `POST /v1/estimate` estimates whether a
 request fits before you send it. [Capacity and live-request
 metrics](api.md#capacity-and-live-request-metrics) describes both.
@@ -48,8 +48,10 @@ These steps reduce memory, the cheapest first:
   server, they are the [load keys](config.md#model-loading).
 - Limit the context. On `run` and `chat`, `--max-kv-size` keeps a rolling
   window of the most recent tokens and drops the oldest ones. Under kvarn,
-  the window stays quantized if it reaches the kvarn window floor, 1280
-  tokens with the default tail, and a smaller window exits with an error.
+  the window stays quantized if it reaches the kvarn window floor, which is
+  1280 tokens with the default
+  [`--kv-tail-tokens`](config.md#loadkv_tail_tokens). With a smaller
+  window, the command exits with an error.
   Plain `--kv-bits` cannot quantize a rolling window, so the command
   refuses that combination. On the server,
   [`max_kv_size`](config.md#loadmax_kv_size) limits the context of a
@@ -75,7 +77,7 @@ MLX keeps freed GPU buffers in a pool, so that it can reuse them. This
 buffer cache is separate from the KV cache and the prompt cache, and its
 limit never removes their contents. At deep contexts, a model near the
 size of RAM leaves prefill buffers of several GB in this pool. Without a
-limit, the pool can use up the free memory of the Mac and freeze it
+limit, the pool can use up the Mac's free memory and freeze it
 instead of failing with an error, because MLX counts the pool as free
 while macOS counts it as wired.
 
@@ -83,7 +85,8 @@ The server therefore limits the pool by default, and logs the limit on a
 `[serve] MLX cache limit:` line. The memory governor also checks the free
 memory of macOS on every tick.
 
-[`server.cache_limit_gb`](config.md#servercache_limit_gb) sets the limit
-and gives its default, and [`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime)
-sets it through the environment. Set it for benchmarks, so that runs
-compare.
+[`server.cache_limit_gb`](config.md#servercache_limit_gb) sets the limit,
+and its entry in the configuration reference gives the default.
+[`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime) sets the limit through the
+environment. Set the limit for benchmarks, so that the runs are
+comparable.
