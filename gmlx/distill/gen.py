@@ -286,9 +286,12 @@ def spawn_server(opts: GenOptions, log_path: Path):
     return proc
 
 
-def pick_model_id(ids: list[str], teacher: str | None) -> str:
+def pick_model_id(ids: list[str], teacher: str | None, spawned: bool = False) -> str:
     """The served id gen sends: the only one listed or, among several,
     the one named like ``--teacher`` (its path, file name or stem).
+    A server gen started itself serves the teacher alone, and with
+    ``--serve-arg=--adapter`` it lists the adapted id beside its
+    ``<id>-base`` twin, so that pair resolves to the adapted id.
     Raises ServerError otherwise, since a request to the first id
     listed would go to a model the sidecar does not name."""
     if len(ids) == 1:
@@ -300,6 +303,10 @@ def pick_model_id(ids: list[str], teacher: str | None) -> str:
     hits = [i for i in ids if i in names or Path(i).name in names or Path(i).stem in names]
     if len(hits) == 1:
         return hits[0]
+    if spawned and not hits and len(ids) == 2:
+        adapted = [i for i in ids if f"{i}-base" in ids]
+        if len(adapted) == 1:
+            return adapted[0]
     raise ServerError(f"the server lists {len(ids)} models ({', '.join(ids)}) and "
                       f"{'several' if hits else 'none'} match --teacher {teacher!r}; point --base-url at a "
                       "server holding the teacher alone, or name the served model as --teacher")
@@ -323,7 +330,7 @@ def wait_ready(base_url: str, proc, timeout: float, teacher: str | None = None) 
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             ids, last = [], f"GET /models: {e}"
         if ids:
-            model_id = pick_model_id(ids, teacher)
+            model_id = pick_model_id(ids, teacher, spawned=proc is not None)
             body = {"model": model_id, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
             try:
                 _post_json(base_url + "/chat/completions", body, timeout=120)

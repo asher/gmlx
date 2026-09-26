@@ -64,6 +64,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tokens, where the same request sent alone decoded right.
 - With a drafter, a repeated gemma-4 prompt shorter than the sliding window
   prefilled in full unless its length fell on a block boundary.
+- `gmlx distill gen` with `--serve-arg=--adapter` exited because the server
+  lists the adapted model and `<id>-base`. It now sends its requests to the
+  adapted model.
 
 ## [0.4.17] - 2026-09-25
 

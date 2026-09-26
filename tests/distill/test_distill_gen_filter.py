@@ -1781,6 +1781,20 @@ def test_gen_picks_the_served_model_named_like_the_teacher_among_several(tmp_pat
     assert rc == 2 and "several match" in capsys.readouterr().err
 
 
+def test_pick_model_id_takes_the_adapted_id_of_a_server_gen_started():
+    """A server gen started with --serve-arg=--adapter lists the adapted id
+    beside its -base twin, named after the file rather than --teacher. The
+    adapted id serves the run. A --base-url server listing the same pair
+    still needs --teacher to name one."""
+    ids = ["qwen3.5-9b", "qwen3.5-9b-base"]
+    assert gen.pick_model_id(ids, "Qwen3.5-9B-Q6_K.gguf", spawned=True) == "qwen3.5-9b"
+    assert gen.pick_model_id(list(reversed(ids)), "Qwen3.5-9B-Q6_K.gguf", spawned=True) == "qwen3.5-9b"
+    with pytest.raises(gen.ServerError, match="none match"):
+        gen.pick_model_id(ids, "Qwen3.5-9B-Q6_K.gguf")
+    with pytest.raises(gen.ServerError, match="none match"):
+        gen.pick_model_id(["a", "b"], "Qwen3.5-9B-Q6_K.gguf", spawned=True)
+
+
 def test_filter_counts_an_input_whose_sidecar_has_no_run_block_from_its_rows(tmp_path):
     """A gen cut short leaves its sidecar with run null. filter counts
     that input's rows itself, alone or in a join, instead of writing a

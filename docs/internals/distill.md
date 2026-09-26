@@ -1,9 +1,10 @@
 # Distillation internals
 
-This page gives the memory arithmetic of the `gmlx distill cache` head sub-chunk and of the training head's live set, and the measurements behind the guide's defaults. It is for contributors changing either. The user guide is [../distill.md](../distill.md), the flags are under [gmlx distill](../cli.md#gmlx-distill), and every GB here is decimal.
+This page gives the memory arithmetic of the `gmlx distill cache` head sub-chunk and of the training head's live set, and the measurements behind the guide's defaults. It is for contributors changing either. The user guide is [Distillation](../distill.md), the flags are under [gmlx distill](../cli.md#gmlx-distill), and every GB here is decimal.
 
 - [The teacher pass](#the-teacher-pass)
 - [The training head](#the-training-head)
+- [The worked run](#the-worked-run)
 - [Why the defaults are what they are](#why-the-defaults-are-what-they-are)
 - [The cross-tokenizer result](#the-cross-tokenizer-result)
 
@@ -94,6 +95,38 @@ checkpointing instead of replaying.
 The hidden-state map of `--hs` draws its initial weights from its own
 key, so building it at the first step of a run or a resume leaves the
 run's random stream where it was.
+
+## The worked run
+
+The worked task of the guide used a Qwen3.6-27B teacher at UD-Q8_K_XL, a
+Qwen3.5-9B student at Q6_K, 615 training questions plus 264 combined
+ones, and two rounds. The whole run took about 11 hours. The census check
+before it is one `gen` over the held-out prompts, under an hour, plus two
+short caches.
+
+| Step | Memory | Time | Disk |
+|---|---|---|---|
+| `gen` | The teacher, served, 36 GB. | 52 teacher tokens per second at `--concurrency` 8, about 4 hours for the training prompts. | The replies, a few MB. |
+| `cache` | The teacher plus a few GB, about 40 GB. | About 500 teacher tokens per second. | 1.6 KB per position at top-k 256. |
+| `align` | The tokenizers only. | About 25 ms per conversation row on the CPU, under 1 ms per plain-text row. | A few MB, unless `--materialize` writes the batch tensors too. |
+| `train` | 50.7 GB peak on the 9B student. | 9.3 s per step of 3 rows, so 678 steps in 1.75 hours. | Two checkpoints under `--ckpt-dir`. |
+| `eval` | The student. | Minutes per slice, longer with the adapter attached. | Two report files. |
+
+These pass rates came out of the run, with the teacher and student on one
+tokenizer:
+
+| Pass rate on | Untouched student | After round one | After round two |
+|---|---|---|---|
+| Held-out questions of the trained kinds | 0.022 | 0.817 | 0.882 |
+| Questions of kinds never trained on | 0.017 | 0.917 | 0.925 |
+| Combined held-out questions | 0.000 | 0.767 | 0.783 |
+
+With the schema pasted into its prompt, the untouched student scored
+0.946 on the held-out questions, so the adapter reached most of what
+pasting the document gives. At the positions the document moved, the
+student's nats per token fell from 4.41 to 0.70, against the teacher's
+0.41 with the schema in view. The `--chat-sanity`, `--chat-slice` and
+`--tasks` measures of `eval` did not move outside their noise.
 
 ## Why the defaults are what they are
 
