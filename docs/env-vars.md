@@ -145,6 +145,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. It is lossy and off by default. |
 | `GMLX_SPARSE_K` | Sparse attention keeps this many tokens. The default is `2048`. |
 | `GMLX_SPARSE_MIN_S` | Sparse attention begins at this depth in tokens. The default is `8192`. |
+| `GMLX_DRAFT_HEAD` | With `q8` or `q4`, an MTP or DFlash 2 drafter drafts through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
 
 ## Commands
 
