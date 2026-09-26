@@ -171,6 +171,33 @@ def test_mode_none_warns_once_with_class_names(monkeypatch, caplog):
     assert "_MSAKVCacheStandIn" in warns[0].getMessage()
 
 
+def test_block_and_exact_tiers_log_once(monkeypatch, caplog):
+    # Every tier logs its routing, not only ckpt, so a mis-route into block
+    # or exact is visible in the server log.
+    import mlx_vlm.apc as apc
+    import gmlx.spec.engine as se
+
+    se._bind_l1_view()
+    monkeypatch.setattr(se, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(se, "_SPEC_APC_CKPT_DISABLED", True)
+
+    class _Model:
+        def make_cache(self):
+            return [KVCache()]
+
+    for tier in ("block", "exact"):
+        monkeypatch.setattr(apc, "model_apc_mode", lambda lm, t=tier: t)
+        model = _Model()
+        model._kq_apc_manager = APCManager(num_blocks=4, block_size=16)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="gmlx.spec.engine"):
+            assert se._resolve_l1(model)[1] == tier
+            assert se._resolve_l1(model)[1] == tier
+        logs = [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith("APC tier:")]
+        assert logs == [f"APC tier: {tier}"]
+
+
 def test_ckpt_tier_log_once(monkeypatch, caplog):
     import gmlx.spec.engine as se
     from test_ckpt_tier import ArraysCache
