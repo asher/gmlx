@@ -11,11 +11,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx --help` ends with the address of the docs site.
 - A docs page shared as a link previews with its title, its opening
   sentences and the gmlx card.
+- Qwen3.8-Flash-Next drafts with the llama.cpp `mtp-*.gguf` MTP files, such
+  as those in the `MTP` folder of the unsloth repo.
+- The loader looks for a companion drafter in an `MTP` folder inside or
+  beside the model's folder, as well as beside the model.
 
 ### Changed
 
 - The README links each page to the docs site instead of the Markdown file
   on GitHub, and the Homebrew formula names the site as its homepage.
+- `gmlx run` and `gmlx chat` turn speculation on by themselves when they
+  find the companion drafter of a Qwen3.8-Flash-Next or Muse Glimmer model,
+  as they already did for DeepSeek-V4.
+
+### Fixed
+
+- `--kv-bits` keeps an fp16 cache on Kimi K3, whose attention cannot read a
+  quantized one. The server quantized its attention layers and failed at the
+  first token, and `run` and `chat` did the same on Kimi K2 and K3.
+- GLM-5.3 runs with `--kv-bits`. A quantized cache failed at the first
+  token in its attention layers.
 
 ## [0.4.18] - 2026-09-26
 

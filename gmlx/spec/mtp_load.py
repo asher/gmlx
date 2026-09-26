@@ -797,8 +797,11 @@ def _load_qwen4exp_mtp_drafter(
     log=loadlog.verbose_print,
 ):
     """Build + load + bind the Qwen3.8-Flash-Next MTP drafter from its
-    companion GGUF (arch ``qwen4exp-mtp``: the HF ``mtp.*`` tree, tensor
-    names already in the drafter's layout under ``mtp.``)."""
+    companion GGUF: arch ``qwen4exp-mtp`` (the HF ``mtp.*`` tree, tensor
+    names already in the drafter's layout under ``mtp.``) or the llama.cpp
+    NextN sidecar (arch ``qwen4exp``, block ``num_hidden_layers``). A
+    shared sidecar carries no ``token_embd`` or ``output``, and the other
+    kind's copies go unread: the drafter binds the target's either way."""
     active_before = _active_now()
     arrays, kquant_meta, d_arch, meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
@@ -806,29 +809,54 @@ def _load_qwen4exp_mtp_drafter(
     from gmlx.models.qwen4_exp.model import ModelArgs, ensure_registered
     from gmlx.models.qwen4_exp.mtp import (
         MTP_ARCH,
+        QWEN4EXP_NEXTN_MAP,
         Qwen4ExpMTPConfig,
         Qwen4ExpMTPDrafter,
         remap_qwen4exp_mtp_arrays,
     )
 
-    if d_arch != MTP_ARCH:
+    sidecar = d_arch == "qwen4exp"
+    if not sidecar and d_arch != MTP_ARCH:
         raise ValueError(
-            f"{draft_gguf_path}: expected a {MTP_ARCH} drafter GGUF for a "
-            f"qwen4_exp target, got arch {d_arch!r}"
+            f"{draft_gguf_path}: expected a {MTP_ARCH} drafter GGUF or a "
+            f"qwen4exp NextN sidecar for a qwen4_exp target, got arch "
+            f"{d_arch!r}"
         )
-    log(f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
-        f"{len(kquant_meta)} kquant")
+    first_block = int(target_config_dict["num_hidden_layers"])
+    if sidecar and not any(
+            n.startswith(f"blk.{first_block}.nextn.") for n in arrays):
+        raise ValueError(
+            f"{draft_gguf_path}: no blk.{first_block}.nextn.* tensors - not "
+            f"an MTP sidecar for this target (trunk depth mismatch?)"
+        )
+    log(f"[mtp] drafter gguf ({d_arch}{' sidecar' if sidecar else ''}): "
+        f"{len(arrays)} arrays, {len(kquant_meta)} kquant")
 
     ensure_registered()
     args = ModelArgs.from_dict(target_config_dict)
-    ratio = int(meta.get(f"{MTP_ARCH}.attention.compress_ratio", 4) or 0)
+    if sidecar:
+        # The sidecar writes ratio 0 for the head because llama.cpp drafts
+        # dense, yet it ships the head's indexer. The head keeps the
+        # trunk's QSA ratio, as the qwen4exp-mtp companion does.
+        ratio = max(args.compress_ratios or [0]) or 4
+    else:
+        ratio = int(meta.get(f"{MTP_ARCH}.attention.compress_ratio", 4) or 0)
     drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(
         text=args, block_size=env_int("GMLX_Q4_MTP_BLOCK", 4),
-        compress_ratio=ratio))
+        compress_ratio=ratio, fused_eh_proj=sidecar))
     log(f"[mtp] drafter: qwen4exp MTP layer, QSA ratio={ratio} "
         f"block_size={drafter.config.block_size}")
 
-    d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(arrays, kquant_meta)
+    if sidecar:
+        d_weights, d_meta, d_stats = remap_mtp_arrays(
+            arrays, kquant_meta, d_arch, first_mtp_block=first_block,
+            n_head=read_int(meta, f"{d_arch}.attention.head_count"),
+            n_head_kv=first_nonzero_int(
+                meta, f"{d_arch}.attention.head_count_kv"),
+            nextn_map=QWEN4EXP_NEXTN_MAP)
+    else:
+        d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(
+            arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
     _install_and_load(
         drafter,
@@ -1762,7 +1790,7 @@ def _load_deepseek4_dspark_drafter(
 # muse_glimmer's drafter is always a DFlash companion.
 _COMPANION_REQUIRED_HINTS = {
     "deepseek_v4": "arch deepseek4-dspark or deepseek4_mtp_support",
-    "qwen4_exp": "arch qwen4exp-mtp, built from the HF mtp.* tensors",
+    "qwen4_exp": "arch qwen4exp-mtp, or a llama.cpp mtp-*.gguf sidecar",
     "muse_glimmer": "arch dflash",
 }
 
@@ -1785,8 +1813,8 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
     if path is None:
         raise ValueError(
             f"{model_type} MTP needs its companion drafter GGUF "
-            f"({_COMPANION_REQUIRED_HINTS[model_type]}); none found next to "
-            f"{gguf_path} - pass --draft-gguf <path>."
+            f"({_COMPANION_REQUIRED_HINTS[model_type]}); none found beside "
+            f"{gguf_path} or in an MTP folder - pass --draft-gguf <path>."
         )
     loadlog.fact("mtp_companion", os.path.basename(path))
     log(f"[mtp] companion drafter autodetected: {path}")

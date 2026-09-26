@@ -397,6 +397,7 @@ def remap_mtp_arrays(
     num_mtp_layers: int = 1,
     n_head: int | None = None,
     n_head_kv: int | None = None,
+    nextn_map: dict[str, str] | None = None,
 ) -> tuple[dict[str, mx.array], dict[str, str], dict[str, int]]:
     """Remap a GGUF's native MTP block(s) onto the drafter's ``mtp.*`` tree.
 
@@ -407,8 +408,11 @@ def remap_mtp_arrays(
 
     Self-contained (does not touch the text-path ``remap_arrays``): it reuses
     ``parse_gguf_name`` for the standard decoder tensors' name+transform decision
-    and the shared standalone transforms for emit.
+    and the shared standalone transforms for emit. ``nextn_map`` names the
+    drafter targets of the ``nextn.*`` extras (default ``_MTP_NEXTN_MAP``).
     """
+    if nextn_map is None:
+        nextn_map = _MTP_NEXTN_MAP
     hf_weights: dict[str, mx.array] = _RemapDict()
     hf_kquant_meta: dict[str, str] = {}
     stats = {
@@ -500,7 +504,7 @@ def remap_mtp_arrays(
         if rest.startswith("nextn."):
             key = rest[len("nextn.") :]
             base = key[: -len(".weight")] if key.endswith(".weight") else key
-            target = _MTP_NEXTN_MAP.get(base)
+            target = nextn_map.get(base)
             if target is None:
                 # e.g. nextn.embed_tokens / shared_head_head - shared from target.
                 stats["skipped"] += 1

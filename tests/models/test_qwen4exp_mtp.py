@@ -8,6 +8,7 @@ from gmlx.load.config_synth import synthesize_config
 from gmlx.models.qwen4_exp.model import Model, ModelArgs, ensure_registered
 from gmlx.models.qwen4_exp.mtp import (
     MTP_ARCH,
+    QWEN4EXP_NEXTN_MAP,
     Qwen4ExpMTPConfig,
     Qwen4ExpMTPDrafter,
     Qwen4ExpSpecLM,
@@ -150,6 +151,72 @@ def test_drafter_forward_and_seed_cycle():
     assert drafter._seed_token is not None
 
 
+class _Wrap(nn.Module):
+    def __init__(self, lm):
+        super().__init__()
+        self.language_model = lm
+
+
+def test_fused_eh_proj_matches_split_projections():
+    """The llama.cpp sidecar joins fc_embedding and fc_hidden into one
+    eh_proj over [enorm(e), hnorm(h)], embedding half first. With the same
+    weights the two forms draft the same streams."""
+    args = _args()
+    target = Qwen4ExpSpecLM(args)
+    _randomize(target, seed=2)
+    split = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args))
+    _randomize(split, seed=3)
+    fused = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args, fused_eh_proj=True))
+    weights = [(k, v) for k, v in nn.utils.tree_flatten(split.parameters())
+               if not k.startswith("fc_")]
+    weights.append(("eh_proj.weight", mx.concatenate(
+        [split.fc_embedding.weight, split.fc_hidden.weight], axis=1)))
+    fused.load_weights(weights, strict=True)
+    for d in (split, fused):
+        d.reset(_Wrap(target))
+    mx.random.seed(4)
+    tokens = mx.random.randint(0, args.vocab_size, (1, 3))
+    hidden = mx.random.normal((1, 3, args.hc_count, args.hidden_size))
+    want = split._forward(tokens, hidden, cache=split.make_cache())
+    got = fused._forward(tokens, hidden, cache=fused.make_cache())
+    mx.eval(want, got)
+    assert mx.abs(got - want).max() < 1e-4
+
+
+# Every tensor of unsloth's mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf, with
+# the block index written as {n}.
+_SIDECAR_TENSORS = (
+    "attn_k", "attn_k_norm", "attn_output", "attn_q", "attn_q_norm", "attn_v",
+    "ffn_down_exps", "ffn_down_shexp", "ffn_gate_exps", "ffn_gate_inp",
+    "ffn_gate_inp_shexp", "ffn_gate_shexp", "ffn_up_exps", "ffn_up_shexp",
+    "hc_attn_down", "hc_attn_inject", "hc_attn_norm", "hc_attn_up",
+    "hc_ffn_down", "hc_ffn_inject", "hc_ffn_norm", "hc_ffn_up",
+    "indexer.k_norm", "indexer.k_proj", "indexer.q_norm", "indexer.q_proj",
+    "nextn.eh_proj", "nextn.enorm", "nextn.hc_head_down", "nextn.hc_head_norm",
+    "nextn.hc_head_up", "nextn.hnorm",
+)
+
+
+def test_sidecar_remap_covers_the_fused_drafter_tree():
+    from gmlx.load.wire import remap_mtp_arrays
+
+    args = _args()
+    n = args.num_hidden_layers
+    arrays = {f"blk.{n}.{t}.weight": mx.zeros((4,)) for t in _SIDECAR_TENSORS}
+    # The self-contained sidecar also carries these, and the drafter binds
+    # the target's instead.
+    arrays["token_embd.weight"] = mx.zeros((4,))
+    arrays["output.weight"] = mx.zeros((4,))
+    w, _, stats = remap_mtp_arrays(
+        arrays, {}, "qwen4exp", first_mtp_block=n,
+        n_head=args.num_attention_heads, n_head_kv=args.num_key_value_heads,
+        nextn_map=QWEN4EXP_NEXTN_MAP)
+    drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args, fused_eh_proj=True))
+    names = {k for k, _ in nn.utils.tree_flatten(drafter.parameters())}
+    assert set(w) == names
+    assert stats["skipped"] == 0
+
+
 def test_drafter_is_b1_only():
     args = _args()
     drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args))
@@ -179,8 +246,9 @@ def test_arch_table_and_loader_rows():
     from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
     from gmlx.spec.mtp_load import _assistant_kind
 
-    assert arch_table.drafter_arches("qwen4_exp") == (MTP_ARCH,)
+    assert arch_table.drafter_arches("qwen4_exp") == (MTP_ARCH, "qwen4exp")
     assert arch_table.drafter_serves(MTP_ARCH, "qwen4exp") is True
+    assert arch_table.drafter_serves("qwen4exp", "qwen4exp") is True
     cls, build = _mtp_target_classes("qwen4_exp")
     assert cls is Qwen4ExpSpecLM
     for hook in _MTP_TARGET_HOOKS_BY_TYPE["qwen4_exp"]:

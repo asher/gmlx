@@ -712,6 +712,10 @@ class Glm5NextMLAAttention(nn.Module):
     unchanged. The cache is CacheList(KVCache latent-only, PoolingCache).
     """
 
+    # _dequantized reads an affine-quantized latent fetch, so
+    # kv_policy.mla_kv_decline lets --kv-bits quantize these layers.
+    reads_quantized_kv = True
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.num_heads = args.num_attention_heads
@@ -937,8 +941,9 @@ class Glm5NextMLAAttention(nn.Module):
             values = mx.zeros(latent.shape[:-1] + (0,), dtype=latent.dtype)
             latent_all, _ = kv_cache.update_and_fetch(latent, values)
             # Re-root the slot to a fresh constant so the chain stays depth-1.
+            # A quantized cache holds a packed tuple there, left as is.
             v = kv_cache.values
-            if v is not None and v.shape[-1] == 0:
+            if v is not None and not isinstance(v, tuple) and v.shape[-1] == 0:
                 kv_cache.values = mx.zeros(v.shape, dtype=v.dtype)
         else:
             latent_all = latent
