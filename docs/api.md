@@ -329,7 +329,7 @@ describes, whatever the id looks like. The stock model loader below that
 resolver is gated as well. Anything that reaches it with a repo id instead
 of a GGUF or local path gets a 403 of type `hf_access_disabled`, so no
 route can fetch a chat model. The service models that the config names
-download on their first use, as
+download in the background at start, as
 [Speech, embeddings and rerank](services.md) describes.
 
 An `hf:` ref in `models:` resolves from the local Hugging Face cache and

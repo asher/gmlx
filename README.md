@@ -216,10 +216,11 @@ https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
 - Hunyuan, Hy3, HY4 and Muse Glimmer
 - Granite, Nemotron-H and Falcon-H1
 
-A family appears in the generated [coverage
-table](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md) only
-after token-parity certification against llama.cpp at 16k context, and the
-table names the caveats where an architecture has any. All 19 K-quant,
+The generated [coverage
+table](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md) lists
+each mapped architecture with its status and names the caveats where an
+architecture has any. A new family counts as done only after its output
+matches llama.cpp at 16k context. All 19 K-quant,
 legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair and the ternary
 STQ1_0, PTQ1_0 and PQ2_0 types. Vision models load
 as a GGUF paired with its projector, as

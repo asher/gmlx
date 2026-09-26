@@ -110,7 +110,7 @@ until `POST /unload` or a request to `POST /v1/keep` with
 `{"keep": false}` releases it, or the server restarts. A kept model can
 still be unloaded when the memory budget needs the room, as
 [Memory and residency](config.md#memory-and-residency) describes. `--no-keep`
-skips the request.
+skips the request, and so does `--config-only`.
 
 ## Authentication
 
@@ -122,18 +122,19 @@ setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
-| `opencode` | `options.apiKey` in the injected file. |
-| `pi` | `apiKey` in the merged provider. |
-| `omp` | Nowhere, because omp has no setting for it. `launch` prints a note, and you set up omp's authentication yourself. |
-| `hermes` | `providers.custom.api_key` in the injected file. |
-| `goose` | `OPENAI_API_KEY` in the environment only, never in the file. |
-| `claude-code` | `ANTHROPIC_AUTH_TOKEN` in the environment. |
-| `aichat`, `elia` | `api_key` in the injected file. |
-| `open-webui` | `OPENAI_API_KEY` in the environment only. |
-| `dsh` | `GMLX_API_KEY` in the environment only. |
+| `opencode` | The key goes in `options.apiKey` in the injected file. |
+| `pi` | The key goes in `apiKey` in the merged provider. |
+| `omp` | The key goes nowhere, because omp has no setting for it. `launch` prints a note, and you set up omp's authentication yourself. |
+| `hermes` | The key goes in `providers.custom.api_key` in the injected file. |
+| `goose` | The key goes in `OPENAI_API_KEY` in the environment only, never in the file. |
+| `claude-code` | The key goes in `ANTHROPIC_AUTH_TOKEN` in the environment. |
+| `aichat`, `elia` | The key goes in `api_key` in the injected file. |
+| `open-webui` | The key goes in `OPENAI_API_KEY` in the environment only. |
+| `dsh` | The key goes in `GMLX_API_KEY` in the environment only. |
 
-Without a key on the server, each tool still gets a placeholder key,
-because some tools refuse to run without one.
+Without a key on the server, a tool that needs a key still gets a
+placeholder key, because it refuses to run without one. The opencode, omp
+and aichat configurations get no key.
 
 ## The clients
 
@@ -169,7 +170,7 @@ trained for at least that length.
 
 The goose file gets `GOOSE_PROVIDER`, `GOOSE_MODEL`, `OPENAI_HOST` and
 `OPENAI_BASE_PATH`, which `launch` also sets, with `OPENAI_API_KEY`, in
-the environment, where they take precedence. It runs
+the environment, where they take precedence. `launch` then runs
 `goose session`. A later `goose` with no launch still finds the server
 through the file.
 
@@ -206,11 +207,11 @@ Open WebUI gets a feature for each service that the server runs, as
 
 | Server runs | Open WebUI gets |
 |-------------|-----------------|
-| Chat models only | Chat. Its document embedder points at the server, so it starts without downloading one. |
-| `embeddings` | Document search, as [RAG pipelines](rag.md) describes. |
-| `rerank` | Hybrid search with the server's reranker at `/v1/rerank`. |
-| `stt` | Speech input through `/v1/audio/transcriptions`. |
-| `tts` | Spoken replies through `/v1/audio/speech`. |
+| Chat models only | It gets chat. Its document embedder points at the server, so it starts without downloading one. |
+| `embeddings` | It gets document search, as [RAG pipelines](rag.md) describes. |
+| `rerank` | It gets hybrid search with the server's reranker at `/v1/rerank`. |
+| `stt` | It gets speech input through `/v1/audio/transcriptions`. |
+| `tts` | It gets spoken replies through `/v1/audio/speech`. |
 
 ### dsh
 
@@ -240,11 +241,13 @@ the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
 launch from, and Add workspace in the app opens a project folder.
 
-dsh compacts a conversation by itself only when the model's context is
-large enough for its default headroom, and `launch` prints a note when it
-is not. Otherwise a conversation still compacts when the server reports
-that a request no longer fits, as
-[Limits and back-pressure](api.md#limits-and-back-pressure) describes.
+The dsh web app compacts a conversation by itself only when the model's
+context is large enough for dsh's default headroom, and `launch` prints a
+note when it is not. Otherwise a conversation still compacts when the
+server reports that a request no longer fits, as
+[Limits and back-pressure](api.md#limits-and-back-pressure) describes. The
+headless and acp profiles use compaction settings from the file, sized to
+the context of each model.
 
 The `headless` profile of dsh works with the same file. This command answers
 one task about the current folder and exits:

@@ -868,10 +868,9 @@ request that names a Hugging Face model. The default is `false`.
 
 ### Services
 
-Each service adds an endpoint, and
-[Speech, embeddings and rerank](services.md) lists the models each one
-accepts. When the model file of an embeddings or rerank service is
-missing, the server starts without that service.
+Each service adds an endpoint.
+[Speech, embeddings and rerank](services.md) lists the models that each
+one accepts and tells what happens when a model file is missing.
 
 #### `server.stt`
 
@@ -1266,7 +1265,7 @@ assistant:
   max_tool_rounds: 8
   mcp:
     - name: files
-      command: [npx, -y, "@modelcontextprotocol/server-filesystem", "~/notes"]
+      command: [npx, -y, "@modelcontextprotocol/server-filesystem", "/Users/me/notes"]
     - name: search
       url: http://127.0.0.1:8931/mcp
   memory:

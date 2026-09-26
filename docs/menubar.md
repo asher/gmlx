@@ -2,9 +2,7 @@
 
 The menu bar app shows the state of a gmlx server in the macOS menu bar. It
 lists the loaded models, starts and stops the server, edits the
-configuration file, and runs voice sessions. `gmlx serve` opens it when the
-server starts in the background on a Mac desktop, so you rarely start it
-yourself.
+configuration file, and runs voice sessions.
 
 ## What the menu shows
 

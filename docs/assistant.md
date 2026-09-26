@@ -7,9 +7,9 @@ file:
 
 | Surface | How to start it | Where tools run |
 |---------|-----------------|-----------------|
-| Voice | `gmlx talk` with `talk.brain: assistant`, as [The assistant by voice](talk.md#the-assistant-by-voice) shows. | On your Mac, as you. |
-| Text | `gmlx chat --assistant`. | On your Mac, as you. |
-| API | A served assistant id under `server.assistants`. | On the server host. |
+| Voice | Run `gmlx talk` with `talk.brain: assistant`, as [The assistant by voice](talk.md#the-assistant-by-voice) shows. | Tools run on your Mac, as you. |
+| Text | Run `gmlx chat --assistant`. | Tools run on your Mac, as you. |
+| API | Choose a served assistant id that `server.assistants` defines. | Tools run on the server host. |
 
 Short tasks suit the assistant, such as looking something up, chaining a
 few tool calls, writing a note or remembering a fact. A turn ends when the
@@ -67,9 +67,9 @@ assistant:
       url: http://127.0.0.1:8931/mcp
 ```
 
-A server that fails to start gives a warning, and the assistant runs
-without its tools. A server that has not connected after 20 seconds also
-gives a warning, which names its log file. `gmlx doctor` checks that the
+A server that fails to start, or that has not connected after 20 seconds,
+gives a warning, and the assistant runs without its tools. For a command
+server, the warning names its log file. `gmlx doctor` checks that the
 programs of the command servers exist.
 
 Command servers get only a few variables from your environment, so pass
@@ -304,5 +304,6 @@ These rules limit what a served assistant can do:
   each assistant must list its own `mcp`, with `[]` for no tools. The
   tools of each assistant are therefore a choice that you make in the
   file.
-- `gmlx doctor` warns when assistants are served beyond loopback, and
-  names the tools of each one.
+- `gmlx doctor` warns when assistants are served beyond loopback. For
+  each one, it says whether the assistant inherits `assistant.mcp` or how
+  many servers its own `mcp` list names.

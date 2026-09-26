@@ -34,7 +34,8 @@ the model in the chat process, and `--local` forces an in-process load in
 every case.
 
 In server mode, the server owns the model and its chat template. Chat
-refuses flags that load the model and ignores a few others with a note. The
+refuses `--adapter`, `--mmproj` and the chat template flags. It ignores
+the other load flags and prints a note that names them. The
 served [profile](config.md#profiles) of the model sets the sampling, and
 chat sends only the settings that you change. `/image`, `/audio`,
 `/thinking-budget` and Ctrl-T work only on a model loaded in the chat
@@ -45,6 +46,8 @@ markdown. To install it, follow
 [Optional features](installation.md#optional-features).
 
 ## Commands
+
+A line that starts with `/` runs one of these commands:
 
 | Command | Effect |
 |---------|--------|
@@ -97,12 +100,12 @@ Tab completes command names. After a command, it completes the argument:
 
 | After | Tab offers |
 |-------|------------|
-| `/history`, `/reasoning`, `/render`, `/thinking` | The values of that command. |
-| `/thinking-budget` | `off`. |
-| `/load-session` | The names of saved sessions. |
-| `/theme` | Theme names, then `cb`. |
-| `/load`, `/image`, `/audio`, `/export`, `/!` | File paths. |
-| `/model` | Served ids, in server mode. |
+| `/history`, `/reasoning`, `/render`, `/thinking` | Tab offers the values of that command. |
+| `/thinking-budget` | Tab offers `off`. |
+| `/load-session` | Tab offers the names of saved sessions. |
+| `/theme` | Tab offers theme names, and then `cb`. |
+| `/load`, `/image`, `/audio`, `/export`, `/!` | Tab offers file paths. |
+| `/model` | In server mode, Tab offers the served ids. |
 
 ## Sampling at runtime
 
@@ -114,8 +117,10 @@ name, so the sampling that a model card recommends fits on the command
 line. `/max-tokens 0` removes the limit on the length of a reply.
 
 Chat starts from the [family defaults](family-defaults.md) of the model.
-An `@profile` suffix on the model, such as `model.gguf@creative`, starts
-from another [profile](config.md#profiles) instead.
+An intent suffix on a GGUF path, such as `model.gguf@creative`, starts
+from that intent of the family defaults instead. A configured id also
+takes a [profile](config.md#profiles) of the configuration file after the
+`@`.
 
 Models with an MTP head use
 [speculative decoding](speculative-decoding.md) automatically, and
@@ -192,9 +197,9 @@ Chat chooses the renderer, and `/render` or `--render` overrides it:
 
 | Mode | Chosen when | What it shows |
 |------|-------------|---------------|
-| `rich` | The terminal has color and the `chat` extra is installed. | Tables and code blocks with syntax colors. |
-| `lite` | The terminal has color and the extra is missing. | Markdown styles, with no extra packages. |
-| `plain` | Output is not a terminal, or `NO_COLOR` is set. | The raw text. |
+| `rich` | The terminal has color and the `chat` extra is installed. | It shows tables and code blocks with syntax colors. |
+| `lite` | The terminal has color and the extra is missing. | It shows markdown styles and needs no extra packages. |
+| `plain` | Output is not a terminal, or `NO_COLOR` is set. | It shows the raw text. |
 
 ## Themes
 

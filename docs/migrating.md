@@ -79,5 +79,4 @@ folder by itself. You can then rename the models and set a default model in
 the [configuration file](config.md).
 
 A client that used the OpenAI-compatible endpoint of LM Studio works with
-gmlx after you change its port from 1234 to 8080. The Anthropic Messages
-API is available on the same port.
+gmlx after you change its port from 1234 to 8080.

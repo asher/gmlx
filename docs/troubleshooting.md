@@ -204,7 +204,10 @@ If the file is gone for good, `gmlx sync-models` removes its entry.
 A missing [`server.embeddings`](config.md#serverembeddings) or
 [`server.rerank`](config.md#serverrerank) file disables that service with a
 warning, and its route answers a plain 404 with no error type. That
-service stays off until `gmlx restart`, even after the file comes back.
+service stays off until `gmlx restart`, even after the file comes back. A
+missing absolute path is the exception. Its route answers 404 of type
+`model_file_missing` until the file is back, and then works with no
+restart.
 
 ### A model answers as if the message were empty
 

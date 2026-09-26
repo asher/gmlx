@@ -121,7 +121,7 @@ them. A line that starts with `/` runs a command:
 | `/mute` | Mutes or unmutes the microphone. |
 | `/system [text]` | Sets the system prompt, or clears it with no text. Either way, the conversation starts again. |
 | `/reset` | Starts the conversation again. |
-| `/memory` | Lists the newest 20 memories of the [assistant](assistant.md#memory). `/memory forget ID` removes one, and `/memory clear yes` removes all. |
+| `/memory` | Shows and manages the [memory of the assistant](assistant.md#memory). |
 | `/devices` | Lists the audio devices. |
 | `/help` | Lists the commands. |
 | `/quit`, `/exit`, `/q` | Quits. |

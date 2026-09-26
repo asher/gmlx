@@ -1,13 +1,13 @@
 # Installation
 
-gmlx runs on Apple Silicon Macs with macOS 26.2 or newer. It installs with
-Homebrew, or with uv or pip when you want to choose its optional features.
-Intel Macs and Linux are not supported.
+gmlx installs with Homebrew, or with uv or pip when you want to choose its
+optional features.
 
 ## Requirements
 
-- gmlx needs an Apple Silicon Mac. The model you can run depends on its
-  memory, as [Choosing a model](quickstart.md#choosing-a-model) shows.
+- gmlx needs an Apple Silicon Mac, and it does not run on Intel Macs or
+  Linux. The model you can run depends on its memory, as
+  [Choosing a model](quickstart.md#choosing-a-model) shows.
 - It needs macOS 26.2 or newer, because the Metal kernels of
   [mlx-kquant](https://github.com/asher/mlx-kquant) are built for it and
   install prebuilt.
@@ -39,7 +39,8 @@ brew install ffmpeg
 
 uv puts the `gmlx` command on your PATH in an isolated environment, and it
 downloads a suitable Python when your system has none. ffmpeg is needed
-only for voice and for audio that is not WAV.
+for voice, for speech-to-text on the server, and for speech output in a
+format other than WAV or PCM.
 
 ## pip
 
@@ -64,14 +65,14 @@ The core install serves models, loads vision models, computes embeddings
 and runs the menu bar app. Each extra adds one of the other features, and
 the Homebrew formula includes all of them.
 
-| Extra | Adds |
-|-------|------|
-| `chat` | Line editing, history and rich rendering in `gmlx chat`. |
-| `stt` | Speech-to-text on the server, with mlx-whisper. |
-| `tts` | Text-to-speech on the server, with the Kokoro phoneme front end. |
-| `talk` | The voice client, [`gmlx talk`](talk.md), with `stt` and `tts`. |
-| `assistant` | MCP tools for the built-in [assistant](assistant.md). |
-| `all` | Every extra in this list. |
+| Extra | What it adds |
+|-------|--------------|
+| `chat` | It adds a completion menu, a toolbar and rich markdown rendering to `gmlx chat`. |
+| `stt` | It adds speech-to-text to the server, with mlx-whisper. |
+| `tts` | It adds text-to-speech to the server, with the Kokoro phoneme front end. |
+| `talk` | It adds the voice client, [`gmlx talk`](talk.md), and includes `stt` and `tts`. |
+| `assistant` | It adds MCP tools to the built-in [assistant](assistant.md). |
+| `all` | It includes every extra in this list. |
 
 To add an extra to a uv install later, name every extra you want in one
 command, because uv replaces the install with exactly what the command

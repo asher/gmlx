@@ -1,8 +1,9 @@
 # Speech, embeddings and rerank
 
 Beside its chat models, the server can run services for speech-to-text,
-text-to-speech, embeddings and reranking on the same port. Each one adds
-OpenAI-compatible endpoints, so the voice client
+text-to-speech, embeddings and reranking on the same port. The speech and
+embeddings services add OpenAI-compatible endpoints, and the reranker adds
+the endpoint shape that Cohere and Jina use. The voice client
 [`gmlx talk`](talk.md), [RAG pipelines](rag.md) and apps such as
 [Open WebUI](launch.md#open-webui) can use them. A service starts when its
 key in the [configuration file](config.md#services) names a model:
@@ -48,9 +49,11 @@ Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 [Optional features](installation.md#optional-features) describes. When a
 speech service is configured and its extra is missing, the server refuses
 to start. When the model file of an embeddings or rerank service is
-missing, the server starts without that service and prints a warning. The
-service stays off until the server restarts, because a reload does not
-start it.
+missing, the server starts without that service and prints a warning. For
+an alias, an `hf:` reference or a relative path, the service stays off
+until the server restarts, because a reload does not start it. For an
+absolute path, the endpoint returns a 404 until the file is back, and then
+it works with no restart.
 
 ## Speech-to-text
 
@@ -71,8 +74,8 @@ The aliases are these:
 | `whisper-base` | `mlx-community/whisper-base-mlx` | It is smaller and faster than small. |
 | `whisper-tiny` | `mlx-community/whisper-tiny` | It is the smallest and fastest. |
 
-The server downloads the configured model from Hugging Face on first use
-when it is not already local. Naming it in the configuration file allows
+When the configured model is not already local, the server downloads it
+from Hugging Face in the background at start. Naming it in the configuration file allows
 that download, and chat models are still never downloaded.
 
 A request is a `multipart/form-data` upload with `file`, and the optional
@@ -141,8 +144,9 @@ curl localhost:8080/v1/audio/voices
 
 Open WebUI always sends a voice, and its default voice is an OpenAI name
 that Kokoro does not have. `gmlx launch open-webui` therefore sets
-`AUDIO_TTS_VOICE` to `af_heart`. With another speech model, set that
-variable in Open WebUI's environment to one of the model's own voices.
+`AUDIO_TTS_VOICE` to `af_heart`. With another speech model, export
+`AUDIO_TTS_VOICE` with one of the model's own voices before the launch,
+and the launch keeps your value.
 
 ## Embeddings
 
@@ -150,11 +154,11 @@ variable in Open WebUI's environment to one of the model's own voices.
 vectors for search. No extra is needed. The value selects one of three
 kinds of model:
 
-- A GGUF embedder: a `*.gguf` path, an `hf:<org>/<repo>/<file>.gguf`
-  reference, or a `qwen3-embed-*` alias. These are Qwen3-Embedding models,
-  loaded like any other GGUF.
+- A GGUF embedder: The value is a `*.gguf` path, an
+  `hf:<org>/<repo>/<file>.gguf` reference, or a `qwen3-embed-*` alias.
+  These are Qwen3-Embedding models, loaded like any other GGUF.
 - A GGUF encoder: `embeddinggemma-gguf` runs an EmbeddingGemma GGUF.
-- A safetensors encoder: an alias, a Hugging Face repository or a local
+- A safetensors encoder: An alias, a Hugging Face repository or a local
   folder runs through
   [mlx-embeddings](https://pypi.org/project/mlx-embeddings/).
 
