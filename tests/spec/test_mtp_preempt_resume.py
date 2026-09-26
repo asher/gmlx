@@ -208,6 +208,48 @@ def test_width_one_rejection_calls_scalar_rollback():
     assert [toks for toks, _ in out] == [[2], [3], [4]]
 
 
+class _RowSplitDrafter(_ArmableDrafter):
+    """Row 0 drafts the echo chain and accepts every draft; the other rows
+    draft a wrong first token and accept none, so each round is ragged."""
+
+    def draft_block(self, b, hidden, kv, n, sampler, dtype, **kw):
+        self.draft_calls.append(int(b.shape[0]))
+        good = (b[:, None] + mx.arange(1, n)[None, :]) % VOCAB
+        row = mx.arange(int(b.shape[0]))[:, None]
+        return mx.where(row == 0, good, (good + 7) % VOCAB).astype(dtype)
+
+
+class _ListRollbackLM(_VerifyEchoLM):
+    def __init__(self, uniform):
+        super().__init__()
+        self.requires_uniform_batch_acceptance = uniform
+        self.rollback_accepted = []
+
+    def rollback_speculative_cache(self, prompt_cache, gdn_states, accepted,
+                                   block_size):
+        self.rollback_accepted.append(list(accepted))
+
+
+@pytest.mark.parametrize("uniform", [False, True])
+def test_batch_rollback_gets_uniform_accepts_when_flagged(uniform):
+    """A flagged target's rollback sees one accept count for every row, the
+    smallest; an unflagged one sees each row's own. The streams stay the
+    echo chain either way."""
+    d = _RowSplitDrafter(cap=0)
+    lm = _ListRollbackLM(uniform)
+    out, _, _ = _drive_armless(d, B=2, max_tokens=12, lm=lm)
+    assert lm.rollback_accepted
+    ragged = [a for a in lm.rollback_accepted if len(set(a)) > 1]
+    if uniform:
+        assert not ragged
+        assert all(a == [0, 0] for a in lm.rollback_accepted)
+    else:
+        assert ragged
+    for row in range(2):
+        stream = [toks[row] for toks, _ in out if toks[row] is not None]
+        assert stream == list(range(row + 2, row + 2 + len(stream)))
+
+
 # -- resume (gated batch drains under the cap) ----------------------------
 
 
