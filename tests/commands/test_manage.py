@@ -133,6 +133,32 @@ def test_validate_unknown_arch_fails(tmp_path, capsys):
     assert "[unsupported]" in out
 
 
+def test_validate_hadamard_fold_outside_loader_support_fails(tmp_path, capsys):
+    # The loader applies the fold only for version 1 on HADAMARD_ARCHES, so a
+    # folded llama file must not grade loadable.
+    p = tmp_path / "folded.gguf"
+    w = GGUFWriter(str(p), "llama")
+    w.add_uint32("prism.hadamard.version", 1)
+    w.add_tensor("blk.0.attn_q.weight", _weight(GT.Q4_0), raw_dtype=GT.Q4_0)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "not loadable" in out and "Hadamard fold" in out
+
+
+def test_hadamard_fold_error_matches_loader_gate():
+    from gmlx.load.preflight import hadamard_fold_error
+
+    assert hadamard_fold_error("llama", None) is None
+    assert hadamard_fold_error("qwen35", 1) is None
+    assert "version 1" in hadamard_fold_error("qwen35", 2)
+    assert "llama" in hadamard_fold_error("llama", 1)
+
+
 def test_validate_json(tmp_path, capsys):
     p = tmp_path / "ok.gguf"
     _mint(p, codec=GT.Q4_0)

@@ -125,6 +125,21 @@ class HadamardFoldError(Exception):
     its header version or architecture."""
 
 
+def hadamard_fold_error(arch: str | None, fold_version) -> str | None:
+    """Why a Hadamard-folded file cannot run, or None when it can or is not
+    folded. The loader rotates the folded projections only for these
+    architectures, so any other file would run with unrotated weights."""
+    if fold_version is None:
+        return None
+    from .hadamard import HADAMARD_ARCHES
+
+    if fold_version == 1 and arch in HADAMARD_ARCHES:
+        return None
+    return (f"GGUF (arch={arch!r}) is Hadamard-folded (prism.hadamard "
+            f"v{fold_version}); the run-time fold is supported for "
+            f"version 1 on {', '.join(sorted(HADAMARD_ARCHES))} only.")
+
+
 @dataclass(frozen=True)
 class Preflight:
     arch: str
@@ -175,17 +190,10 @@ def preflight(gguf_path: str, *, arch: str | None = None,
 
     if unsupported:
         raise UnsupportedCodecError(detected, unsupported)
-    fold_version = scan0.kv.get("prism.hadamard.version")
-    if fold_version is not None:
-        # The loader rotates every folded projection of these architectures
-        # at run time; any other file would run its weights unrotated.
-        from .hadamard import HADAMARD_ARCHES
-
-        if fold_version != 1 or detected not in HADAMARD_ARCHES:
-            raise HadamardFoldError(
-                f"GGUF (arch={detected!r}) is Hadamard-folded (prism.hadamard "
-                f"v{fold_version}); the run-time fold is supported for "
-                f"version 1 on {', '.join(sorted(HADAMARD_ARCHES))} only.")
+    fold_err = hadamard_fold_error(
+        detected, scan0.kv.get("prism.hadamard.version"))
+    if fold_err:
+        raise HadamardFoldError(fold_err)
 
     entry = _gate_arch(detected, hf_source=hf_source)
     return Preflight(arch=detected, entry=entry, shards=shards,

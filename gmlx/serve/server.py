@@ -1053,7 +1053,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Text-to-speech: serve POST /v1/audio/speech via "
                          "mlx-audio (needs the tts extra; non-wav "
                          "formats need ffmpeg on PATH). MODEL is an alias "
-                         "(kokoro, kokoro-8bit/4bit, qwen3-tts), any HF repo in "
+                         "(kokoro, kokoro-8bit/4bit, qwen3-tts, qwen3-tts-small), "
+                         "any HF repo in "
                          "MLX-audio format, or a local model dir; bare --tts "
                          "picks kokoro. Works in every serve mode and overrides "
                          "a config `server.tts:`.")

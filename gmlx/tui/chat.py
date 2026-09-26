@@ -738,7 +738,7 @@ def _print_shim_help(state: ChatState) -> None:
         "- '/system [text|off]' show or set the system prompt "
         "(setting restarts the chat)"
     )
-    print("- '/thinking [on|off|default]' the model's reasoning switch")
+    print("- '/thinking [on|off|adaptive|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
     print("- '/adapter [on|off|SCALE]' toggle or scale the --adapter LoRA live")
     print(
@@ -1303,11 +1303,6 @@ def _slash_thinking_budget(cmd, arg, state):
             print(f"[chat] /thinking-budget needs an int or 'off', got {arg!r}")
             return None
         print(f"[chat] thinking-budget = {arg} (next reply)")
-        if (state.model_info or {}).get("drafter"):
-            print(
-                "[chat] note: not applied on MTP-decoded replies "
-                "(restart with --no-mtp to honor it)"
-            )
         return None
     if arg == "off":
         state.thinking_budget = None

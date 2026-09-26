@@ -18,8 +18,8 @@ Three backends, chosen by what ``embeddings:`` points at:
 
 * **mlx-embeddings safetensors** (an alias / mlx-community repo id / local dir) -
   BERT / XLM-RoBERTa / ModernBERT encoders that are not mlx-lm decoder arches, via
-  the optional `mlx-embeddings <https://pypi.org/project/mlx-embeddings/>`_ package
-  (``pip install 'gmlx[embeddings]'``). It returns pooled, L2-normalized
+  the `mlx-embeddings <https://pypi.org/project/mlx-embeddings/>`_ package, a
+  core dependency. It returns pooled, L2-normalized
   vectors in ``outputs.text_embeds`` (the pooling is the model's own - mean for
   BERT, last-token for Qwen3 - so that code is arch-agnostic).
 
@@ -57,7 +57,7 @@ from .subservice import (
 #    ``hf:`` refs into the official Qwen GGUF repos; ``quants`` lists only the
 #    rungs those repos actually ship (0.6B has just Q8_0 / f16).
 #  * tier ``mlx`` - mlx-embeddings safetensors encoders (Gemma3 / XLM-RoBERTa /
-#    ModernBERT) that need the optional ``[embeddings]`` extra. Values are
+#    ModernBERT) through mlx-embeddings. Values are
 #    mlx-community repo ids; ``quants`` are the bit-width variants.
 #
 # ``dim`` is the vector width (bigger = larger index + more storage/RAM per

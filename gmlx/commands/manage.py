@@ -232,6 +232,9 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
+    from gmlx.load.preflight import hadamard_fold_error
+    fold_err = hadamard_fold_error(report.arch, report.hadamard)
+    runs = report.loadable_codecs and arch_ok and fold_err is None
     from gmlx.load.memfit import classify_fit, total_ram_bytes
     ram = total_ram_bytes()
     return {
@@ -258,14 +261,15 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "codecs_loadable": report.loadable_codecs,
         # prism.hadamard.version when the weights are stored rotated.
         "hadamard": report.hadamard,
+        "hadamard_error": fold_err,
         # The streaming plan (every-token weights, experts, this Mac's
         # arena and verdict) for a MoE file; None for a dense one.
         "stream": (_stream_plan(scans)
                    if not (mmproj or adapter or drafter) else None),
-        "loadable": report.loadable_codecs and arch_ok,
+        "loadable": runs,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
-        "usable": (report.loadable_codecs and arch_ok)
+        "usable": runs
                   or ((mmproj or adapter or drafter)
                       and report.loadable_codecs),
     }
@@ -314,6 +318,8 @@ def _print_report(v: dict) -> None:
         print(f"    {name:<8} x{n}{mark}")
     if v.get("hadamard") is not None:
         print(f"  weights: Hadamard-folded (prism.hadamard v{v['hadamard']})")
+        if v.get("hadamard_error"):
+            print(f"    {v['hadamard_error']}")
     if v["loadable"]:
         print("  => loadable")
     elif v.get("mmproj") and v["codecs_loadable"]:
@@ -337,6 +343,8 @@ def _print_report(v: dict) -> None:
         if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
                                             or v.get("drafter")):
             reasons.append("architecture not supported")
+        if v.get("hadamard_error"):
+            reasons.append("Hadamard fold not supported for this file")
         print(f"  => not loadable: {'; '.join(reasons)}")
 
 

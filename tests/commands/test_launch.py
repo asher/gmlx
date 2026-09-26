@@ -32,6 +32,7 @@ def _default_server_up(monkeypatch):
     # happens to be live on this box; the down-path tests below override it. The
     # stale-source warn reads real runfiles - silence it the same way.
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: True)
+    monkeypatch.setattr(launch, "_auth_required", lambda base: False)
     monkeypatch.setattr(launch, "_warn_if_stale_server", lambda host, port: None)
 
 
@@ -277,6 +278,34 @@ def test_ensure_server_tolerates_a_malformed_base_url_port(monkeypatch):
                               host=None, port=None, api_key=None)
     assert launch._ensure_server(a) is None
     assert a.port == 8080
+
+
+def test_ensure_server_running_takes_the_config_key(monkeypatch):
+    """A running server that answers 401 without a key gets the config's
+    server.api_key, as an auto-started one does. An explicit --base-url gets
+    no config key."""
+    import types
+
+    import gmlx.serve.lifecycle as lifecycle
+
+    monkeypatch.setattr(lifecycle, "auto_target",
+                        lambda host, port: ("127.0.0.1", 8080))
+    monkeypatch.setattr(launch, "_auth_required", lambda base: True)
+    monkeypatch.setattr(launch, "_discover_config", lambda: (
+        types.SimpleNamespace(api_key="sk-config"), "/cfg.yaml"))
+    a = types.SimpleNamespace(base_url=None, host=None, port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "sk-config"
+
+    a = types.SimpleNamespace(base_url=None, host=None, port=None,
+                              api_key="sk-flag")
+    assert launch._ensure_server(a) is None
+    assert a.api_key == "sk-flag"                 # the flag wins
+
+    a = types.SimpleNamespace(base_url="http://10.0.0.5:3000/v1", host=None,
+                              port=None, api_key=None)
+    assert launch._ensure_server(a) is None
+    assert a.api_key is None
 
 
 def test_open_webui_picks_a_free_port_against_a_3000_server(monkeypatch, tmp_path):

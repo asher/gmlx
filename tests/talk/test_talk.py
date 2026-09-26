@@ -712,6 +712,8 @@ def test_slash_commands():
     assert loop.voice == "bm_lewis"
     loop._slash("/speed 1.5")
     assert loop.speed == 1.5
+    loop._slash("/speed 9")                       # outside the server's range
+    assert loop.speed == 1.5
     loop._slash("/mode wake")
     assert loop.m.mode == "wake"
     loop._slash("/reset")
@@ -796,6 +798,14 @@ def test_merged_settings_precedence():
     s = _merged_settings(args, cfg)
     assert s["model"] == "from-config"
     assert s["max_tokens"] is None                # unset = until the model stops
+
+
+def test_speed_flag_range(capsys):
+    from gmlx.talk.main import _build_parser
+    assert _build_parser("t").parse_args(["--speed", "4"]).speed == 4.0
+    with pytest.raises(SystemExit):
+        _build_parser("t").parse_args(["--speed", "5"])
+    assert "between 0.25 and 4" in capsys.readouterr().err
 
 
 def test_pick_model_order():

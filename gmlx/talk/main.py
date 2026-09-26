@@ -850,10 +850,10 @@ class TalkLoop:
                             "pass a name)"))
         elif cmd == "/speed":
             try:
-                self.speed = float(arg)
+                self.speed = _speed(arg)
                 self._print(f"[talk] speed -> {self.speed:g}")
-            except ValueError:
-                self._print("[talk] usage: /speed 1.2")
+            except argparse.ArgumentTypeError as e:
+                self._print(f"[talk] {e} (usage: /speed 1.2)")
         elif cmd == "/mode":
             prev = self.m.mode
             try:
@@ -979,7 +979,7 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                          "else the server's default).")
     ap.add_argument("--voice", default=None,
                     help="TTS voice (default: talk.voice, else server default).")
-    ap.add_argument("--speed", type=float, default=None,
+    ap.add_argument("--speed", type=_speed, default=None,
                     help="Speech speed 0.25-4 (default 1.0).")
     ap.add_argument("--language", default=None,
                     help="Whisper language hint (default: auto).")
@@ -1029,6 +1029,20 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
     ap.add_argument("--list-voices", action="store_true",
                     help="List the server's TTS voices and exit.")
     return ap
+
+
+def _speed(value) -> float:
+    """Argparse type (and ``/speed`` parser) for a speech speed in the
+    server's accepted range."""
+    from gmlx.serve.tts import SPEED_MAX, SPEED_MIN
+    try:
+        spd = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}")
+    if not SPEED_MIN <= spd <= SPEED_MAX:
+        raise argparse.ArgumentTypeError(
+            f"speed must be between {SPEED_MIN:g} and {SPEED_MAX:g}, got {value}")
+    return spd
 
 
 def _load_talk_cfg(config_path: str | None):
@@ -1272,8 +1286,8 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
     model = _pick_model(s["model"], caps)
     if not model:
         ids = ", ".join(caps.get("chat_ids") or []) or "(none)"
-        print(f"error: no model selected and the server has no default - "
-              f"pass --model one of: {ids}", file=sys.stderr)
+        print(f"error: no model selected and the server has no default. "
+              f"Name one of: {ids}  ({prog} <model>)", file=sys.stderr)
         return 2
 
     try:
