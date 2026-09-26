@@ -196,7 +196,7 @@ def gather(reads: list[Read]) -> Read:
     pending: dict[int, list[Pass]] = {}
     for i, r in enumerate(reads):
         try:
-            pending[i] = r.send(None)
+            pending[i] = next(r)
         except StopIteration as e:
             values[i] = e.value
     while pending:

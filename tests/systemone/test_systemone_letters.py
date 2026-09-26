@@ -78,7 +78,7 @@ def _gmlx_body(body):
     read = letters.decision(schema, letters.state_text(body))
     texts = []
     try:
-        batch = read.send(None)
+        batch = next(read)
         while True:
             texts += [p.text for p in batch]
             batch = read.send([[score(p.text, i) for i in range(p.letters)]
@@ -231,6 +231,6 @@ def test_image_states_are_recognized():
 def test_a_non_finite_score_fails_the_read():
     read = letters.decision(letters.parse(
         {"state": "s", "questions": {"q": SERVE_EXAMPLE["angry"]}}), "s")
-    read.send(None)
+    next(read)
     with pytest.raises(letters.ReadoutIncomplete):
         read.send([[0.0, float("nan")]])
