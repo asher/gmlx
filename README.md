@@ -1,4 +1,9 @@
-# gmlx
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/wordmark.svg" alt="gmlx" height="56">
+  </picture>
+</h1>
 
 [![CI build
 status](https://github.com/asher/gmlx/actions/workflows/test.yml/badge.svg)](https://github.com/asher/gmlx/actions/workflows/test.yml)

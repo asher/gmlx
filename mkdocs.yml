@@ -10,6 +10,8 @@ use_directory_urls: false
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
   palette:
     - media: "(prefers-color-scheme)"
       toggle:
