@@ -604,14 +604,15 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
     )
     grp.add_argument(
         "--gpu-keepwarm",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Hold GPU clocks up during streamed decode with a tiny "
         "background heartbeat kernel. Streamed decode idles the GPU "
         "between per-layer bursts and each burst pays the clock ramp; "
         "the heartbeat removes that (lossless, costs a few watts while "
         "decoding; parks after GMLX_KEEPWARM_IDLE_S seconds idle, "
-        "default 1). Default on for streamed installs; "
-        "GMLX_GPU_KEEPWARM=0 disables.",
+        "default 1). On by default with the decode feeder; "
+        "--no-gpu-keepwarm turns it off.",
     )
 
 
@@ -1461,8 +1462,9 @@ def _apply_placement(args, model) -> None:
         return
 
     gguf_path = getattr(args, "gguf", None)
-    if getattr(args, "gpu_keepwarm", False):
-        os.environ["GMLX_GPU_KEEPWARM"] = "1"
+    keepwarm = getattr(args, "gpu_keepwarm", None)
+    if keepwarm is not None:
+        os.environ["GMLX_GPU_KEEPWARM"] = "1" if keepwarm else "0"
     fast_disk = getattr(args, "stream_fast_disk", None)
     if fast_disk:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk

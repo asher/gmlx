@@ -496,7 +496,7 @@ class ServerCfg:
     # Hold GPU clocks up while a streamed model is decoding (loader gate;
     # only acts on models with a decode feeder). The heartbeat parks when
     # no request is decoding, so an idle server pays nothing.
-    gpu_keepwarm: bool = False
+    gpu_keepwarm: bool | None = None   # None => on with the decode feeder
     defaults: ServerDefaults = field(default_factory=ServerDefaults)
     profiles: dict[str, Profile] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
@@ -1839,7 +1839,8 @@ def build_config(doc: dict) -> ServerCfg:
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),
         stochastic_mtp=bool(srv.get("stochastic_mtp", False)),
-        gpu_keepwarm=bool(srv.get("gpu_keepwarm", False)),
+        gpu_keepwarm=(None if srv.get("gpu_keepwarm") is None
+                      else bool(srv.get("gpu_keepwarm"))),
         defaults=ServerDefaults(
             profile=dft.get("profile"),
             ttl_s=_coerce_num("defaults.ttl_s", dft.get("ttl_s", 900.0), float),

@@ -768,13 +768,14 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "non-speculative sampling, not token-identical; higher "
                          "acceptance at temp > 0. Same as config "
                          "server.stochastic_mtp; greedy requests unaffected.")
-    ap.add_argument("--gpu-keepwarm", action="store_true",
+    ap.add_argument("--gpu-keepwarm", action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Hold GPU clocks up while a streamed model is decoding "
                          "(tiny heartbeat kernel; parks when no request is "
                          "decoding, so an idle server pays nothing). Only acts "
-                         "on models streaming with a decode feeder. Same as "
-                         "config server.gpu_keepwarm. Default on for "
-                         "streamed installs; GMLX_GPU_KEEPWARM=0 disables.")
+                         "on models streaming with a decode feeder, where it is "
+                         "on by default; --no-gpu-keepwarm turns it off. Same "
+                         "as config server.gpu_keepwarm.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="Speculative block size. Each round drafts N-1 tokens "
                          "and checks them in one N-token target pass, so "
@@ -1816,11 +1817,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if dtype is not None:
         os.environ["GMLX_ACTIVATION_DTYPE"] = str(dtype)
         print(f"[server] activation dtype: {dtype}")
-    if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
+    keepwarm = getattr(a, "gpu_keepwarm", None)
+    if keepwarm is None:
+        keepwarm = cfg.gpu_keepwarm
+    if keepwarm is not None:
         # Startup-only. The loader's gate starts the heartbeat when a
         # streamed model with a decode feeder loads; the heartbeat itself
         # parks whenever no request is decoding (keepwarm.touch()).
-        os.environ["GMLX_GPU_KEEPWARM"] = "1"
+        os.environ["GMLX_GPU_KEEPWARM"] = "1" if keepwarm else "0"
     # The config's token-queue timeout is authoritative for this server: it drives
     # mlx-vlm's per-request "wait for the next token" guard (default 600s; <=0 waits
     # forever). Read per request from the env, so setting it here is enough.

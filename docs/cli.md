@@ -210,7 +210,7 @@ These flags stream a model bigger than memory, as
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the streamed-decode prefetch policy under `--stream-experts`. `auto` probes the drive. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
 | `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired, popularity-managed expert [arena](glossary.md#arena). |
-| `--gpu-keepwarm` | On for streamed loads | Keep GPU clocks high while a streamed model decodes. |
+| `--gpu-keepwarm`, `--no-gpu-keepwarm` | On with the decode feeder | Keep GPU clocks high while a streamed model decodes, or turn that off. |
 | `--moe-experts K` | Trained | Cap the router at K experts for each token, which is lossy. |
 | `--moe-expert-mass P` | Off | Keep the smallest expert set covering share P of gate mass, which is lossy. |
 | `--moe-miss-shed P` | Off | Drop experts that would miss the arena down to share P, which is lossy. |
@@ -468,7 +468,7 @@ These flags stream a model bigger than memory, which
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
 | `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired, popularity-managed expert arena. |
-| `--gpu-keepwarm` | On for streamed loads | Keep GPU clocks high while decoding. |
+| `--gpu-keepwarm`, `--no-gpu-keepwarm` | On with the decode feeder | Keep GPU clocks high while a streamed model decodes, or turn that off. |
 | `--moe-experts K` | Trained | Cap the router at K experts for each token, which is lossy. |
 | `--moe-expert-mass P` | Off | Keep the smallest expert set covering share P of gate mass, which is lossy. |
 | `--moe-expert-probe` | Off | Run lossless and print how many experts each token needed at candidate P values. |
@@ -561,7 +561,7 @@ the same as they do there:
 | Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
 | Multimodal | `--mmproj`, `--resize-shape` |
 | Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
-| Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm` |
+| Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
 
 None of them applies when the chat is a server client. A base model with no

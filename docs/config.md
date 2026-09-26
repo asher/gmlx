@@ -1022,8 +1022,9 @@ describes it. The default is `false`.
 A streamed model with a decode feeder keeps the GPU clock up between
 tokens by default, as
 [Models larger than memory](streaming.md#the-lossless-settings) describes,
-and no other model is affected. `true` turns that on even when
-`GMLX_GPU_KEEPWARM=0` is set. The default is `false`.
+and no other model is affected. `false` turns it off and `true` turns
+it on, overriding `GMLX_GPU_KEEPWARM`. The default is none, which leaves
+keep-warm on for every streamed model with a decode feeder.
 
 #### `server.menubar`
 

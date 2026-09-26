@@ -1256,6 +1256,20 @@ def test_serve_pinned_preload_is_retained(monkeypatch):
     assert "/m.gguf" in calls["pool"]["pinned"]
 
 
+def test_serve_gpu_keepwarm_is_an_on_off_switch(monkeypatch):
+    # Unset leaves the feeder default alone; the config key and the flag
+    # both turn it on or off, and the flag wins.
+    import os
+    for cfg_v, flag_v, want in ((None, None, None), (False, None, "0"),
+                                (True, None, "1"), (True, False, "0"),
+                                (None, True, "1")):
+        _stub_serving_stack(monkeypatch)
+        monkeypatch.delenv("GMLX_GPU_KEEPWARM", raising=False)
+        assert srv._serve(_one_model_cfg(gpu_keepwarm=cfg_v),
+                          _ns(gpu_keepwarm=flag_v), None) == 0
+        assert os.environ.get("GMLX_GPU_KEEPWARM") == want
+
+
 def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     import signal as signal_mod
 

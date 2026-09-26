@@ -1560,9 +1560,11 @@ def test_stochastic_mtp_key():
 
 def test_gpu_keepwarm_key():
     doc = _doc()
-    assert build_config(doc).gpu_keepwarm is False
+    assert build_config(doc).gpu_keepwarm is None      # unset: the feeder default
     doc["server"]["gpu_keepwarm"] = True
     assert build_config(doc).gpu_keepwarm is True
+    doc["server"]["gpu_keepwarm"] = False
+    assert build_config(doc).gpu_keepwarm is False     # an off switch, not unset
 
 
 def test_kill_switch_rejects_intent_refs():

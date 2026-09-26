@@ -125,7 +125,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, for measurement. `--stream-cpu` forces them too. |
 | `GMLX_TABLE_MAX_BUFFER` | A lookup table may hold this many bytes in one GPU buffer. The default is the device limit. A table past it is read from the GGUF row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Each file-backed lookup table uses this many reader threads. The default is `32`. |
-| `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models. |
+| `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models that use the decode feeder. |
 | `GMLX_KEEPWARM_IDLE_S` | The keep-warm heartbeat pauses after this many seconds without streamed decode. The default is `1`, and `0` runs continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |
 | `GMLX_DECODE_LOOKAHEAD_K` | The decode feeder considers this many ranked predictions on each call. The default is `6`. |
