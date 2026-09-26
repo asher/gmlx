@@ -19,3 +19,6 @@ venv/
 
 # Open WebUI writes this if `gmlx launch open-webui` runs from the repo root
 .webui_secret_key
+
+# mkdocs build output
+/site/

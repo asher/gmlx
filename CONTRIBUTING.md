@@ -47,6 +47,7 @@ tests, in
 ```sh
 ruff check .
 python scripts/check-docs.py   # docs style and link check, also a CI step
+pip install --group docs && mkdocs serve   # preview the docs site locally
 pre-commit install             # optional, runs ruff on each commit
 pip install "pyright[nodejs]==1.1.414" && pyright   # seam drift check, needs the deps installed
 ```
@@ -66,6 +67,11 @@ ruff's S110 rule flags a `try`/`except Exception: pass`. Either log the
 failure, or say where the error goes on the except line:
 `except Exception:  # noqa: S110 - <reason>`. A bare marker without a
 reason is not accepted in review. Tests are exempt.
+
+The docs site is built from `docs/` by MkDocs and published by the release
+workflow for each release tag, so a docs change reaches the site with the
+next release. A new page goes in the `nav` of `mkdocs.yml` as well as the
+docs index, and the CI build of the site fails on a page missing from it.
 
 ## Things to know before you patch
 

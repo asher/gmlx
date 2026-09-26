@@ -245,9 +245,11 @@ is in [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md).
 
 ## Documentation
 
-Every user guide and reference page is listed below. The
+The [documentation site](https://asher.github.io/gmlx/) has every user
+guide and reference page for the latest release, with navigation and search.
+The same pages are listed below, and the
 [documentation index](https://github.com/asher/gmlx/blob/main/docs/README.md)
-groups the same pages by what you want to do.
+groups them by what you want to do.
 
 ### Start here
 

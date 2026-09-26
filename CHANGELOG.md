@@ -14,6 +14,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsure.
 - `gmlx systemone` sends a decision request to a server or answers it
   offline, and `server.systemone` holds the route's settings.
+- The docs are published at https://asher.github.io/gmlx/ with navigation
+  and search, rebuilt from each release.
 
 ### Changed
 
