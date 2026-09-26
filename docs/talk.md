@@ -13,7 +13,7 @@ model therefore share a GPU under the server's arbitration.
 - [Modes](#modes)
 - [Keys and slash commands](#keys-and-slash-commands)
 - [The assistant by voice](#the-assistant-by-voice)
-- [Configuration reference](#configuration-reference)
+- [Settings](#settings)
 - [Remote server and scripting](#remote-server-and-scripting)
 - [Latency and interruption](#latency-and-interruption)
 
@@ -180,43 +180,14 @@ Answers that need several tool rounds take longer than plain chat. A
 barge-in during a tool round is still handled correctly: the loop commits
 what you heard and never leaves a half-finished tool round in the history.
 
-## Configuration reference
+## Settings
 
-All keys sit in a top-level `talk:` block of the YAML the server reads. The
-block configures the client, which is why it is not under `server:`. Most
-keys have a matching flag under [gmlx talk](cli.md#gmlx-talk), although
-`vad.pre_roll_ms` and `push_to_talk_modifier` are config-only. Precedence
-is defaults, then YAML, then flags.
-
-The `system` key is the only one with a subtlety. Leave it out and the
-assistant speaks with the default prompt, which asks for speakable output.
-Set it to `null` or `""` and there is no persona at all, which is not the
-same as the default.
-
-```yaml
-talk:
-  model: qwen3.6-27b@instruct   # id[@profile], default the server's default model
-  voice: af_heart               # a Kokoro preset or qwen3-tts speaker
-  speed: 1.0
-  system: null                  # spoken persona, see above
-  language: null                # whisper language hint
-  max_tokens: null              # reply cap, unset means until the model stops
-  mode: wake                    # wake | vad | ptt | text
-  wake_word: "hey assistant"    # any text phrase
-  wake_threshold: 0.3           # higher = fewer false fires
-  vad:
-    threshold: 0.6              # silero speech probability
-    silence_ms: 550             # pause length that ends an utterance
-    min_speech_ms: 300          # shorter captures are dropped
-    pre_roll_ms: 400            # audio kept from before speech onset
-  input_device: null            # sounddevice name substring or index
-  output_device: null
-  chime: true                   # sounds on wake and turn end
-  brain: chat                   # chat | assistant
-```
-
-The [menu bar app](menubar.md#voice-sessions) runs the same loop without a
-terminal and can bind a tap-to-talk hotkey.
+The `talk` block of the configuration file sets the model, voice, mode and
+listening thresholds, and most of its keys also have a flag under
+[gmlx talk](cli.md#gmlx-talk), which wins over the file. Every key, with
+its default, is under [talk](server-config.md#talk) in the configuration
+keys. The [menu bar app](menubar.md#voice-sessions) runs the same loop
+without a terminal and can bind a tap-to-talk hotkey.
 
 ## Remote server and scripting
 

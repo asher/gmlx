@@ -72,6 +72,8 @@ Where to start depends on what you want:
 
 - [CLI reference](cli.md): every command and flag
 - [Configuration keys](server-config.md): every key of `gmlx.yaml`
+- [Family defaults](family-defaults.md): the sampling defaults and intents
+  of each model family
 - [HTTP API](api.md): the endpoints and request features
 - [Environment variables](env-vars.md): the variables a user can set
 - [Python API](python.md): using gmlx from Python

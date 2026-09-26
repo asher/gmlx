@@ -126,40 +126,67 @@ aliases:
 
 ## How a request gets its settings
 
-The sampling, loading and prompt settings of a request come from several
-layers. Each layer fills only what the layers above it leave unset:
-
-| Layer | Where it is set |
-|-------|-----------------|
-| request fields | the request body |
-| model overrides | `overrides` on the model entry |
-| profile | `profile` on the model entry, a matching `rules` entry, `server.defaults.profile`, or `@name` after the model id |
-| family defaults | built in, chosen by the model's architecture |
-
-The family defaults are the sampling values that each model's publisher
-recommends, so a new config needs no sampling settings. Some families also
-publish other operating points, such as a lower temperature for code.
-gmlx offers these as built-in profiles, called intents, which a request
-selects with a suffix:
+Every model starts from its [family defaults](family-defaults.md), the
+sampling values that its publisher recommends, so a new file needs no
+sampling settings. Some publishers also recommend other values for a task,
+such as a lower temperature for code. gmlx offers these as built-in
+profiles called intents, which a request selects by adding `@name` to the
+model id:
 
 ```sh
 gmlx run qwen3.6-27b@coding "Write a binary search in Go."
 ```
 
-Profiles of your own go under `profiles` and can build on an intent:
+A profile of your own is a named set of settings under `profiles`. It can
+hold four kinds of setting:
+
+- [`sampling`](server-config.md#sampling): defaults for request fields
+  such as [`temperature`](server-config.md#samplingtemperature) and
+  [`max_tokens`](server-config.md#samplingmax_tokens)
+- [`load`](server-config.md#load): how the model is built, such as
+  [KV cache quantization](server-config.md#loadkv_bits)
+- [`cache`](server-config.md#cache): the prompt cache
+- prompt settings: a [`system`](server-config.md#profilessystem)
+  prompt, a [`chat_template`](server-config.md#profileschat_template)
+  and the reasoning controls
+  [`thinking`](server-config.md#profilesthinking) and
+  [`reasoning_effort`](server-config.md#profilesreasoning_effort)
+
+A profile can start from an intent with
+[`extends`](server-config.md#profilesextends) and change only what it
+sets:
 
 ```yaml
 profiles:
   review:
     extends: coding
     system: "You are a terse code reviewer."
-    sampling: {max_tokens: 2048}
+    sampling:
+      temperature: 0.3
+      max_tokens: 2048
 ```
 
-`gmlx profiles` prints the family defaults and intents for every family,
-and `gmlx profiles <id>` prints the resolved settings of one model. The
-order in which profiles, rules and per-model changes combine is in the
-[precedence](server-config.md#precedence) section of the reference.
+A model gets a profile from its own entry, from a matching rule, from the
+server default, or from the request. When a setting comes from more than
+one place, the layer lower in this table wins:
+
+| Layer | Set where |
+|-------|-----------|
+| family defaults | built in, per detected family |
+| server default profile | [`server.defaults.profile`](server-config.md#serverdefaultsprofile) |
+| rule profile | the first matching [`rules`](server-config.md#rules) entry |
+| model profile | [`models.*.profile`](server-config.md#modelsprofile), or `@name` on the request |
+| per-model profile change | [`models.*.profiles`](server-config.md#modelsprofiles) |
+| model overrides | [`models.*.overrides`](server-config.md#modelsoverrides) |
+| request fields | the request body |
+
+A request's `@name` replaces the model's own profile rather than adding to
+it, and an unknown name gets a 400. A profile's `system` prompt applies
+only to a request without a system message. Its `chat_template` applies
+when the model loads, so a request cannot change it.
+
+`gmlx profiles <id>` prints the sampling values a model resolves to under
+each of its profiles, with every layer applied.
 
 ## Which models stay loaded
 

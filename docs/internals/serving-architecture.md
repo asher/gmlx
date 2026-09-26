@@ -120,7 +120,7 @@ cache usable under a drafter ([speculative-batching.md](speculative-batching.md)
 Two things happen before a request reaches the engine. Its sampling
 parameters resolve through the config precedence chain, from the family's
 model-card defaults up to the request's own fields
-([Precedence](../server-config.md#precedence)). And a request to a served
+([How a request gets its settings](../config.md#how-a-request-gets-its-settings)). And a request to a served
 assistant id never reaches the HTTP layer as itself: the tool loop runs on a
 worker thread and each round re-enters the server as an ordinary loopback
 client ([served assistants](../assistant.md#served-assistants)).

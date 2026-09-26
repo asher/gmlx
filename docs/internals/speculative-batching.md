@@ -5,7 +5,7 @@ This page covers the two decode loops, the width cap and the transitions that
 move a request between them without interrupting its token stream. What
 speculation is and how to enable it are in
 [performance.md](../performance.md#mtp-speculative-decoding). The cap key is
-in [server-config.md](../server-config.md#speculative_width_cap).
+[`speculative_width_cap`](../server-config.md#modelsspeculative_width_cap).
 
 ## The two decode loops
 

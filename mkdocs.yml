@@ -108,6 +108,7 @@ nav:
   - Reference:
       - cli.md
       - server-config.md
+      - family-defaults.md
       - api.md
       - env-vars.md
       - python.md

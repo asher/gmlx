@@ -65,7 +65,7 @@ All routes except `/health` require the API key when one is set.
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
 `default` markers and two context figures. `context_length` is the GGUF's
-trained window, or the model's [`max_kv_size`](server-config.md#load-keys)
+trained window, or the model's [`max_kv_size`](server-config.md#loadmax_kv_size)
 when that is smaller. `max_context_at_width_1` is how much of the window
 fits in memory for a single stream. A harness sizes its context window from
 the smaller of the two. A
@@ -294,7 +294,7 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
-| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](server-config.md#load-keys) |
+| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](server-config.md#loadmax_kv_size) |
 | the prompt alone cannot fit in memory | 400 with the estimated need and the available budget | `GMLX_PREFLIGHT_MEM=0` |
 | more requests waiting than the queue cap | 503 with `Retry-After` set to the estimated drain time, 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
 | a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |

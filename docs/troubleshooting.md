@@ -138,8 +138,8 @@ strings, so every message reaches the model empty.
 Replace the template with one that renders lists, usually the template of
 the base model the fine-tune started from. Pass the file with
 `--chat-template` on [gmlx serve](cli.md#gmlx-serve), or set
-`chat_template` for the model in the
-[server config](server-config.md#user-profiles).
+[`chat_template`](server-config.md#profileschat_template) in a profile
+or in the model's `overrides`.
 
 ## Whisper fails because ffmpeg is not found
 
@@ -212,7 +212,7 @@ The weights plus KV cache exceed available RAM. Check the arithmetic in
 quantize the KV cache or pick a smaller quant. On `run` and `chat` the KV
 flags are `--kv-bits 8` and `--max-kv-size`. On the server the same
 settings are the `kv_bits` and `max_kv_size`
-[load keys](server-config.md#load-keys) under a profile or a model. For an
+[load keys](server-config.md#load) under a profile or a model. For an
 over-budget MoE model use `--stream-cpu`, or `--stream-experts` for
 long-context work with a quantized KV cache, as [streaming.md](streaming.md)
 describes. On a multi-model server, lower `--budget-gb` or `--max-models` so

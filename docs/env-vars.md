@@ -18,8 +18,9 @@ change meaning or disappear between releases.
 ## Load and cache keys
 
 These are upstream mlx-vlm variables, which gmlx sets for each model from
-the `load:` and `cache:` blocks of the config, described in
-[Sampling, load and cache keys](server-config.md#sampling-load-and-cache-keys).
+the `load:` and `cache:` blocks of the config, described under
+[load](server-config.md#load) and [cache](server-config.md#cache) in the
+configuration keys.
 
 | Variable | Config key |
 |----------|------------|

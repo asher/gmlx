@@ -17,6 +17,7 @@ import yaml  # noqa: E402
 from gmlx import config  # noqa: E402
 
 _DOC = Path(__file__).resolve().parent.parent / "docs" / "server-config.md"
+_FAMILY_DOC = _DOC.parent / "family-defaults.md"
 _FENCE = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 
 
@@ -74,7 +75,7 @@ def test_family_table_in_sync_with_profiles_py():
     and must appear verbatim - a changed base value, arch list, or intent delta
     in code fails here until the doc row is updated."""
     import gmlx.gen.profiles as fp
-    doc = _DOC.read_text()
+    doc = _FAMILY_DOC.read_text()
     for row in fp.describe():
         fam = row["family"]
         arches = ", ".join(f"`{a}`" for a in row["arches"]) or "(anything else)"
@@ -87,10 +88,13 @@ def test_family_table_in_sync_with_profiles_py():
 
 
 def _param_reference_ticks() -> set:
-    """All `backticked` tokens inside the Param key reference section."""
+    """All `backticked` tokens in the sampling, load and cache sections."""
     doc = _DOC.read_text()
-    body = doc.split("## Sampling, load and cache keys", 1)[1].split("## Family defaults", 1)[0]
-    return set(re.findall(r"`([A-Za-z_0-9.]+)`", body))
+    body = doc.split("## sampling", 1)[1].split("## rules", 1)[0]
+    ticks = set(re.findall(r"`([A-Za-z_0-9.]+)`", body))
+    # Key headings carry their block path (`sampling.temperature`), so the
+    # last segment is the key itself.
+    return ticks | {t.rsplit(".", 1)[-1] for t in ticks}
 
 
 def test_sampling_keys_documented():

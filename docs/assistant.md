@@ -56,42 +56,26 @@ model is Qwen3.5-9B, at the cost of more tool-call errors.
 
 ## The assistant block
 
-The full block, with defaults:
+The `assistant` block of the configuration file lists the tool servers and
+sets up memory. This block connects one tool server that runs as a local
+command and one that answers over HTTP:
 
 ```yaml
-assistant:                    # the built-in tool-loop assistant used by talk,
-                              # chat --assistant, and server.assistants
-  max_tool_rounds: 8          # tool-call rounds per turn, then it must answer
-  tool_timeout_s: 60          # per tool invocation
-  mcp:                        # tool servers (Model Context Protocol)
-    - name: files             # stdio, command is the argv to spawn
+assistant:
+  mcp:
+    - name: files
       command: [npx, -y, "@modelcontextprotocol/server-filesystem", "~/notes"]
-    - name: search            # or streamable HTTP
+    - name: search
       url: http://127.0.0.1:8931/mcp
-  memory:
-    enabled: true             # long-term memory (needs server embeddings:)
-    path: null                # default ~/.local/share/gmlx/assistant-memory.db
-    top_k: 4                  # memories injected per turn
-    extract: true             # distill turns into facts (false = raw transcripts)
-    ttl_days: null            # expire older memories (null = keep forever)
-    max_items: 20000          # store cap, evicts least-recalled oldest first
 ```
 
 [MCP](glossary.md), the Model Context Protocol, is the standard way for a
-model to call tools provided by separate programs. Each `mcp:` entry is
-either a stdio server, where `command` is the argv to spawn plus an optional
-`env` map, or a streamable-HTTP endpoint given as `url`. When two servers
-offer a tool of the same name, the tool gets the server's name as a prefix.
-An MCP server that fails to start produces a warning, and the loop runs
-without it. A missing `assistant` extra is reported the same way, with an
-install hint. Each stdio server's stderr goes to its own log at
-`~/.cache/gmlx/mcp-<name>.log`.
-
-A stdio tool server starts with the MCP SDK's default environment, which
-on macOS is `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and `LOGNAME`, plus
-whatever `env:` adds. Nothing else from your shell is inherited, so a token
-set in your environment never reaches third-party tool code unless you pass
-it.
+model to call tools that separate programs provide. A tool server that
+fails to start gives a warning, and the loop runs without it. A stdio
+server does not inherit your shell's environment, so a token set there
+never reaches third-party tool code unless you pass it with `env`. Every
+key of the block, with its default, is under
+[assistant](server-config.md#assistant) in the configuration keys.
 
 ## Tool examples
 

@@ -35,10 +35,11 @@ explain when to use it.
 `--help-all` for their full flag set. `gmlx ls` is an alias for `gmlx list`.
 
 Many settings exist as a flag, a config key and an environment variable.
-How they combine is under [Precedence](server-config.md#precedence) in the
-config reference, and the variables are in [env-vars.md](env-vars.md).
+How they combine is in
+[Flags and environment variables](config.md#flags-and-environment-variables),
+and the variables are in [Environment variables](env-vars.md).
 Sampling flags you leave unset take the model's
-[family defaults](server-config.md#family-defaults).
+[family defaults](family-defaults.md).
 
 ## gmlx init
 
@@ -159,12 +160,12 @@ things are per-model keys under [models](server-config.md#models):
 | `--max-kv-size N` | none | cap the request context budget at N tokens |
 | `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache. Not applied under kvarn |
 
-The KV flags are the `load` keys of [server-config.md](server-config.md#load-keys),
+The KV flags are the [`load` keys](server-config.md#load) of the config,
 so `--kv-quant-scheme kvarn` on a positional model is what `load: {kv_quant_scheme: kvarn}`
 is on a config model, priced and reported the same way.
 
-These flags set a positional model's sampling defaults, the `sampling` keys of
-[server-config.md](server-config.md#sampling-keys). A default applies to a
+These flags set a positional model's sampling defaults, the
+[`sampling` keys](server-config.md#sampling) of the config. A default applies to a
 request that omits the field, and a request that sends the field wins, so
 `--temp 0` does not pin a client that sends its own temperature. They sit on
 top of the family defaults `gmlx profiles` prints, and an unknown `--profile`

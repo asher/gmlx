@@ -105,7 +105,7 @@ follows are in the
 `run` generates, benchmarks or prints the load plan of one file. `chat` is a
 multi-turn terminal client with markdown rendering, sessions, live sampling
 changes and image input. Both start from each model family's
-[recommended sampling](https://github.com/asher/gmlx/blob/main/docs/server-config.md#built-in-intents),
+[recommended sampling](https://github.com/asher/gmlx/blob/main/docs/family-defaults.md),
 and every flag is listed under its verb in the
 [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md).
 
@@ -303,6 +303,8 @@ below for the latest release, with navigation and search.
 
 - [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md): every command and flag
 - [Configuration keys](https://github.com/asher/gmlx/blob/main/docs/server-config.md): every key of `gmlx.yaml`
+- [Family defaults](https://github.com/asher/gmlx/blob/main/docs/family-defaults.md): the sampling defaults and
+  intents of each model family
 - [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints and request features
 - [Environment variables](https://github.com/asher/gmlx/blob/main/docs/env-vars.md): the variables a user can set
 - [Python API](https://github.com/asher/gmlx/blob/main/docs/python.md): using gmlx from Python
