@@ -188,10 +188,10 @@ for each drafted token.
 Pair it with `--draft-gguf`. A DFlash 2 header declares its base model, so
 a [discover](server-config.md#discover) scan pairs the two even when they
 sit in different directories, and the loader finds a drafter that sits
-beside its target on its own. The drafted depth defaults to the
-checkpoint's trained block, 8 on Qwen3.8 and 16 on Muse Glimmer, and
-`--draft-block-size` lowers it. Because the drafter is single-stream, the
-server width cap is 1.
+beside its target on its own. The block defaults to the checkpoint's
+trained size, 8 on Qwen3.8 and 16 on Muse Glimmer, so a round drafts 7 or
+15 tokens, and `--draft-block-size` lowers it. Because the drafter is
+single-stream, the server width cap is 1.
 
 Acceptance is exact-match by default, so greedy output is token-identical to
 plain decoding and sampled output follows the target's sampler, and

@@ -18,7 +18,7 @@ directly, what has a different name and what is different by design.
 | `--rope-scaling`, `--yarn-*` | none | read from the GGUF metadata, with no override |
 | `-ngl` | none needed | everything runs on the GPU, and `--stream-experts` and `--stream-cpu` are the over-RAM MoE placements in [streaming.md](streaming.md) |
 | `--cache-type-k/-v q8_0` | `--kv-bits 8` | same purpose, with `--kv-group-size` |
-| `--draft-model`, `--spec-draft-n-max` | `--draft-gguf`, `--draft-block-size` | models with a native head need no companion drafter |
+| `--draft-model`, `--spec-draft-n-max M` | `--draft-gguf`, `--draft-block-size M+1` | the block counts the token the drafts extend, and models with a native head need no companion drafter |
 | `--chat-template` | `--chat-template STR_OR_PATH` | per model in server configs under `overrides` |
 | `--ignore-eos` | `--ignore-eos` | same benchmarking semantics |
 | `--api-key K` | `server.api_key` in the config | config-only, so the key never appears in process listings or shell history |
