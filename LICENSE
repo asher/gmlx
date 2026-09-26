@@ -26,10 +26,8 @@ For information about alternative licensing arrangements for the Licensed Work,
 please contact asher_feldman@icloud.com.
 
 File-level exception: files that carry an "SPDX-License-Identifier: MIT"
-header (the DSpark draft-model module and the DSpark sidecar converter, the
-mlx-lm-style model modules for kimi-k3, minimax-m3, hy-v3, and muse-glimmer,
-the mlx-vlm-style vision module for muse-glimmer, and the kimi-k3 tests) are
-licensed under the MIT license (see LICENSE-MIT), not under this License.
+header, such as the mlx-lm-style model modules, are licensed under the MIT
+license (see LICENSE-MIT), not under this License.
 
 Notice
 
@@ -88,32 +86,35 @@ Apple Inc.), mlx-vlm (MIT, Copyright © Prince Canuma), and the GGUF file
 format defined by the ggml/llama.cpp project (MIT, Copyright (c) Georgi
 Gerganov).
 
-Some third-party code is vendored or adapted into the gmlx tree. Each such
-source file states its provenance in its header, and the licenses/
-directory reproduces every upstream license together with a note on what
-was taken:
+Some third-party code is vendored or adapted into the gmlx tree, and that
+code keeps its project's license. Each such source file states its
+provenance in its header. The licenses/ directory, which every gmlx
+distribution includes, reproduces each project's license with the files
+that carry its code, and THIRD_PARTY_NOTICES.md summarizes what was used
+from each project:
 
-- gmlx/_vendor/misaki: a snapshot of the misaki grapheme-to-phoneme
-  library (Apache License 2.0, Copyright © hexgrad; see
-  gmlx/_vendor/misaki/LICENSE and licenses/misaki-LICENSE), which itself
-  incorporates components adapted from g2pK and PaddleSpeech as noted in
-  its subdirectory READMEs.
-- Model and cache classes vendored from unmerged mlx-lm pull requests
-  (MIT, Copyright © Apple Inc.; licenses/mlx-lm-LICENSE):
-  gmlx/deepseek_v4_model.py, gmlx/deepseek_v4_hyper_connection.py, and
-  gmlx/deepseek_v4_cache.py (PR #1192), gmlx/minimax_m3_model.py
-  (PR #1401), and gmlx/hy_v3_model.py (PR #1485).
-- DeepSeek-V4-Flash MTP, cache-rollback, and stochastic-acceptance code
-  ported from omlx (Apache License 2.0; licenses/omlx-LICENSE), with
-  QAT and sink-attention semantics reimplemented from the ds4.c reference
-  engine (MIT; licenses/ds4.c-LICENSE).
-- gmlx/server_patches/apc.py and gmlx/thinking_budget.py carry code
-  copied or ported from mlx-vlm (MIT, Copyright © Prince Canuma;
-  licenses/mlx-vlm-LICENSE).
-- The pre-tokenizer split regex patterns in gmlx/tokenizer.py, and the
-  Muse Glimmer vision graph, grid index math, and image preprocessing in
-  gmlx/muse_glimmer_vlm_model.py and gmlx/vlm.py, come from llama.cpp
-  (MIT; licenses/llama.cpp-LICENSE).
+- misaki (Apache License 2.0, Copyright © hexgrad): a snapshot vendored at
+  gmlx/_vendor/misaki (see gmlx/_vendor/misaki/LICENSE and
+  licenses/misaki-LICENSE), which itself incorporates components adapted
+  from g2pK and PaddleSpeech as noted in its subdirectory READMEs.
+- mlx-lm (MIT, Copyright © Apple Inc.): licenses/mlx-lm-LICENSE.
+- mlx-vlm (MIT, Copyright © Prince Canuma): licenses/mlx-vlm-LICENSE.
+- omlx (Apache License 2.0, Copyright (c) the omlx contributors):
+  licenses/omlx-LICENSE.
+- ds4.c (MIT, Copyright (c) 2026 The ds4.c authors):
+  licenses/ds4.c-LICENSE.
+- The DeepSeek-V4-Flash-0731 reference inference code (MIT, Copyright (c)
+  2023 DeepSeek): licenses/deepseek-v4-LICENSE.
+- llama.cpp and ggml (MIT, Copyright (c) The ggml authors):
+  licenses/llama.cpp-LICENSE.
+- beellama.cpp (MIT, Copyright (c) The ggml authors, Anbeeld):
+  licenses/beellama.cpp-LICENSE.
+- vLLM (Apache License 2.0, Copyright contributors to the vLLM project):
+  licenses/vllm-LICENSE.
+- The OpenJev helper (Apache License 2.0): licenses/openjev-LICENSE, which
+  also reproduces the OpenJev repository's NOTICE.
+- system-one-adapter-python (MIT, Copyright (c) 2026 TypeSafe AI):
+  licenses/system-one-adapter-LICENSE.
 
 The test asset tests/e2e/assets/cats.jpg is reproduced from the mlx-vlm
 repository (MIT License, Copyright © Prince Canuma); see

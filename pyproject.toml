@@ -11,7 +11,7 @@ requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a l
 # MIT covers the files with an SPDX MIT header (LICENSE-MIT). MIT and
 # Apache-2.0 also cover the third-party files that licenses/ lists.
 license = "BUSL-1.1 AND MIT AND Apache-2.0"
-license-files = ["LICENSE", "LICENSE-MIT", "licenses/*"]
+license-files = ["LICENSE", "LICENSE-MIT", "licenses/*", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
     "Development Status :: 4 - Beta",
