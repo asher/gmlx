@@ -1108,14 +1108,18 @@ This configured model answers for the assistant. The key is required.
 #### `server.assistants.*.memory`
 
 With `true`, the assistant has long-term memory, in one store that all
-its clients share. The default is `false`.
+its clients share. The store is `assistant-<id>.db` beside the default
+memory file, and it ignores `assistant.memory.enabled` and
+`assistant.memory.path`. The default is `false`.
 
 #### `server.assistants.*.mcp`
 
 These are the tool servers of the assistant, with the keys of
 [`assistant.mcp`](#assistantmcp). `null` uses `assistant.mcp`, and `[]`
-gives the assistant no tools. An assistant on a server beyond loopback
-must set this key. The default is `null`.
+gives the assistant no tools. With
+[`server.assistant_allow_remote`](#serverassistant_allow_remote) set and a
+non-empty `assistant.mcp`, every assistant must set this key. The default
+is `null`.
 
 #### `server.assistant_allow_remote`
 
@@ -1297,14 +1301,18 @@ none.
 
 ### `assistant.memory.enabled`
 
-With `true`, the assistant remembers facts across conversations. Memory
-needs [`server.embeddings`](#serverembeddings), and without it the
-assistant runs with a warning and no memory. The default is `true`.
+With `true`, `gmlx chat --assistant` and `gmlx talk` remember facts
+across conversations. Memory needs
+[`server.embeddings`](#serverembeddings), and without it the assistant
+warns the first time that it uses memory and continues without it. The
+default is `true`.
 
 ### `assistant.memory.path`
 
 The memory is stored in this database file. The default is
-`~/.local/share/gmlx/assistant-memory.db`.
+`$XDG_DATA_HOME/gmlx/assistant-memory.db`, which is
+`~/.local/share/gmlx/assistant-memory.db` when `XDG_DATA_HOME` is not
+set.
 
 ### `assistant.memory.top_k`
 
@@ -1324,9 +1332,9 @@ default it keeps facts forever.
 
 ### `assistant.memory.max_items`
 
-The store holds at most this many facts. When it is full, the oldest
-facts that were never recalled go first. The value is at least 1. The
-default is `20000`.
+The store holds at most this many facts. When it holds more, the facts
+recalled the fewest times go first, and the oldest go first among equals.
+The value is at least 1. The default is `20000`.
 
 
 ## Chat themes
