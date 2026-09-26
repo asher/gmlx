@@ -61,17 +61,17 @@ describes.
 ## Optional features
 
 The core install serves models, loads vision models, computes embeddings
-and runs the menu bar app. The extras below add the rest. The Homebrew
-formula includes all of them.
+and runs the menu bar app. Each extra adds one of the other features, and
+the Homebrew formula includes all of them.
 
 | Extra | Adds |
 |-------|------|
-| `chat` | Line editing, history and rich rendering in `gmlx chat` |
-| `stt` | Speech-to-text on the server, with mlx-whisper |
-| `tts` | Text-to-speech on the server, with the Kokoro phoneme front end |
-| `talk` | The voice client, [`gmlx talk`](talk.md), with `stt` and `tts` |
-| `assistant` | MCP tools for the built-in [assistant](assistant.md) |
-| `all` | Every extra above |
+| `chat` | Line editing, history and rich rendering in `gmlx chat`. |
+| `stt` | Speech-to-text on the server, with mlx-whisper. |
+| `tts` | Text-to-speech on the server, with the Kokoro phoneme front end. |
+| `talk` | The voice client, [`gmlx talk`](talk.md), with `stt` and `tts`. |
+| `assistant` | MCP tools for the built-in [assistant](assistant.md). |
+| `all` | Every extra in this list. |
 
 To add an extra to a uv install later, name every extra you want in one
 command, because uv replaces the install with exactly what the command
@@ -107,7 +107,7 @@ Upgrade with the tool that installed gmlx:
 |---------|-----------------|
 | Homebrew | `brew upgrade gmlx` |
 | uv | `uv tool upgrade gmlx` |
-| pip | `pip install -U gmlx`, in its environment |
+| pip | `pip install -U gmlx` in its environment |
 
 A server that is running during an upgrade keeps the old code until you run
 `gmlx restart`. A server installed as a login item with `--headless` is
@@ -119,7 +119,7 @@ command that does it.
 To remove gmlx completely:
 
 1. If you installed the login item, run `gmlx service uninstall`.
-2. Uninstall the package with the tool that installed it:
+2. Uninstall the package with the tool that installed it, which is
    `brew uninstall gmlx`, `uv tool uninstall gmlx`, or
    `pip uninstall gmlx mlx-kquant` in its environment.
 3. Delete the files that gmlx wrote, which

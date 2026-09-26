@@ -1,14 +1,13 @@
 # Benchmarks
 
 gmlx serves the same GGUF files faster than llama.cpp, one request at a
-time, at context depths from 512 to more than 200K tokens. The tables and
-charts here give the numbers behind that claim and behind the guidance of
-the performance pages.
+time, at context depths from 512 to more than 200K tokens. Its prefill is
+faster on every model at every measured depth. Above a depth of about 4K
+tokens its decoding is faster too, and the gap grows as the context
+deepens.
 
-gmlx prefills faster on every model at every measured depth. Above a depth
-of about 4K tokens it also decodes faster, and the gap grows as the
-context deepens. Speculative decoding is measured where the model has a
-native head or a companion drafter. The measurements behind the
+Speculative decoding is measured where the model has a native head or a
+companion drafter. The measurements behind the guidance of the
 performance pages are under [Serving measurements](#serving-measurements)
 and [KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
 in [a JSON file](benchmarks.json), and the
@@ -44,24 +43,24 @@ decoding on the same server, for each model, against the context depth.
 
 Every number is server throughput for one request at a time, measured
 with the same GGUF weights, sampler settings and chat prompts on both
-engines. This table lists the setup.
+engines, on this setup:
 
 | Item | Setting |
 |---|---|
-| Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
-| gmlx | `0.1.0` (fleet default) |
-| mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
+| Hardware | Apple M5 Max with 128 GB of unified memory, in a MacBook Pro. |
+| gmlx | `0.1.0` for most models. |
+| mlx-kquant | `0.3.5` for most models, with the K-quant and performance kernels. |
 | llama.cpp | `b9967` |
 | Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
 | DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
-| Dates | 2026-07-05 .. 2026-09-18 |
-| Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
-| Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
-| Speculative draft | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
-| Aggregation | 4 requests/cell x 2 thermal-alternated rounds, median reported |
-| Thermal protocol | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
-| Decode metric | median decode tok/s over full-length samples (>=150 output tokens) |
-| Prefill metric | median prefill tok/s over all successful samples |
+| Dates | 2026-07-05 to 2026-09-18. |
+| Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
+| Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
+| Speculative draft | Three draft tokens a round, from the native MTP head or from gemma-4's companion drafter. |
+| Aggregation | Four requests for each cell in two rounds that alternate the engines, with the median reported. |
+| Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
+| Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
+| Prefill metric | Median prefill tokens per second over all successful samples. |
 
 MTP@N in the tables means speculative decoding with N draft tokens in
 each round on both engines. The baseline column is the same server with
@@ -69,11 +68,11 @@ it off.
 
 ## Model provenance
 
-Chart labels are sanitized, so abliterated community builds render as
-the base model. This table is the weight mapping for reproduction.
-The Builds column names the gmlx and mlx-kquant builds each model's
-rows were measured on. Models are rebenched independently, so a newer
-build on one row does not apply to the others. The Measured column
+Chart labels give the base model, even for an abliterated community
+build, so each row names the GGUF file behind a label for reproduction.
+The Builds column names the gmlx and mlx-kquant builds that each model's
+rows were measured on. Models are measured again independently, so a
+newer build on one row does not apply to the others. The Measured column
 gives the date of the newest run still contributing cells to the row,
 because a partial rerun replaces the cells of an older depth series
 one by one.
@@ -317,11 +316,11 @@ one by one.
 
 ## DeepSeek-V4 against ds4-server
 
-The comparison engine for these models is the dwarfstar ds4-server
-by antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
-llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path. Ratios below
-are gmlx / ds4-server. Each model's tested ds4-server commit is in
-its Model provenance row.
+llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path, so these models
+are compared with the dwarfstar ds4-server by antirez, a DeepSeek-V4
+server, with the ignore-eos patch. Each ratio is gmlx divided by
+ds4-server, and each model's ds4-server commit is in its
+[Model provenance](#model-provenance) row.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
@@ -364,8 +363,8 @@ its Model provenance row.
 ## Serving measurements
 
 These measurements back the guidance of the performance pages. Unless a
-line names another machine, they come from the M5 Max of the methodology
-table.
+row names another machine, they come from the M5 Max listed under
+[Methodology](#methodology).
 
 | Measurement | Result |
 |---|---|
@@ -386,8 +385,7 @@ chunked prefill logits, and the other scores decoding token by token from
 the full prefill depth. KL divergence is in nats, and lower is better. The
 median is the typical position, the decode p99 is the worst hundredth,
 where a quantizer's outliers show, and top-1 is the share of generated
-positions whose most likely token matches the fp16 cache. Each table
-names the model, the context and how many layers the cache quantizes.
+positions whose most likely token matches the fp16 cache.
 
 <!-- kld-tables -->
 ### Qwen3.5-9B Q4_K_M at 16K
@@ -478,8 +476,8 @@ same models and legs, fell between the other two. It was ahead of affine
 at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind kvarn at
 each width on all measures, so gmlx does not offer it.
 
-On a dense model whose decoding is limited by the KV read, Qwen3-0.6B Q8
-with 27 of 28 layers quantized, kvarn 6 decoded at 0.81x fp16 and 0.69x
-affine 8 at 16K, and at 0.98x and 0.75x at 32K, with prefill within 10% of
-both. On GDN hybrids and gemma-4, all three caches ran within the spread
+Speed was measured on Qwen3-0.6B Q8 with 27 of 28 layers quantized, a
+dense model whose decoding is limited by the KV read. At 16K, kvarn 6
+decoded at 0.81x fp16 and 0.69x affine 8, and at 32K at 0.98x and 0.75x.
+Prefill stayed within 10% of both. On GDN hybrids and gemma-4, all three caches ran within the spread
 between runs.

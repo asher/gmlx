@@ -14,6 +14,8 @@ and the folders that hold them. The folder can be empty or not exist yet.
 Once the file exists, `gmlx pull` downloads into its first folder and adds
 the model to the file, with an id made from the file name. Here the id is
 `qwen3.8-27b-ud-q6`, and every gmlx command accepts it in place of a path.
+A server that is already running reads the file again, so a pulled model is
+available at once.
 
 This model is 20.5 GB. On a Mac with less memory, choose a smaller model
 from [Choosing a model](#choosing-a-model). To answer questions in a
@@ -59,11 +61,11 @@ manage the server:
 
 | Command | Result |
 |---------|--------|
-| `gmlx list` | Lists the model ids in the file |
-| `gmlx status` | Shows the process id, uptime and URL of the server |
-| `gmlx ps` | Lists the loaded models |
-| `gmlx logs -n 20 -f` | Shows the last 20 lines of the log and follows it |
-| `gmlx stop` | Stops the server |
+| `gmlx list` | Lists the model ids in the file. |
+| `gmlx status` | Shows the process id, uptime and URL of the server. |
+| `gmlx ps` | Lists the loaded models. |
+| `gmlx logs -n 20 -f` | Shows the last 20 lines of the log and follows it. |
+| `gmlx stop` | Stops the server. |
 
 ## Sending requests
 
@@ -105,10 +107,10 @@ conversation:
 
 | Mac memory | Model | Notes |
 |------------|-------|-------|
-| 16 GB | Qwen3-4B, Q4_K_M, 2.5 GB | A fast and capable small model |
-| 32 GB | Qwen3.5-9B, Q6_K, 8 GB | Its MTP head turns on speculative decoding by itself |
-| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | A strong general model for chat, code and tool calls |
-| 96 GB or more | Qwen3.6-35B-A3B, Q6_K, 29 GB, or gpt-oss-120b, MXFP4, 63 GB | Mixture-of-experts models, with large-model quality at small-model speed |
+| 16 GB | Qwen3-4B, Q4_K_M, 2.5 GB | A fast and capable small model. |
+| 32 GB | Qwen3.5-9B, Q6_K, 8 GB | Its MTP head turns on speculative decoding by itself. |
+| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | A strong general model for chat, code and tool calls. |
+| 96 GB or more | Qwen3.6-35B-A3B, Q6_K, 29 GB, or gpt-oss-120b, MXFP4, 63 GB | Mixture-of-experts models, with large-model quality at small-model speed. |
 
 A loaded model needs memory for its weights, about its file size, and for
 its KV cache, which grows with the conversation. In a long session the KV
@@ -127,10 +129,8 @@ gmlx validate hf:unsloth/Qwen3-4B-GGUF
 
 For a repository, `validate` lists its GGUF files and, when it knows their
 sizes, which of them fit in the memory of your Mac. For a single file, it
-reads only the header and says whether gmlx can load it. When `pull` adds a
-model, it also tells a running server to read the configuration file again,
-so the new model is available at once. A gated repository needs a Hugging
-Face token, as
+reads only the header and says whether gmlx can load it. A gated
+repository needs a Hugging Face token, as
 [Troubleshooting](troubleshooting.md#a-gated-or-private-repo-will-not-download)
 describes.
 

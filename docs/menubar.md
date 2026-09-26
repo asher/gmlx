@@ -13,7 +13,7 @@ The dot is filled while the server is up, ringed while it is generating,
 empty while it is down, and half filled when the server needs an API key
 that the app does not have.
 
-The first rows show the process id and port of the server, and how many
+Under the title, rows show the process id and port of the server, and how many
 requests are generating and queued. The Loaded models submenu lists each
 loaded model with its size, a marker when it is the default, pinned or
 kept, and the time until an idle model unloads. Selecting a model unloads
@@ -72,7 +72,8 @@ Edit config opens the configuration file of the server in a panel:
 
 ## Voice sessions
 
-When the server runs both [speech services](services.md), the menu gains a
+When the server runs both speech services of
+[Speech, embeddings and rerank](services.md), the menu gains a
 Talk to item, named after [`talk.model`](config.md#talkmodel) or the
 default model of the server. It starts a voice session inside the app,
 with no terminal window. The menu bar icon shows a microphone while the
@@ -98,8 +99,8 @@ background, so the microphone opens without waiting for it.
 
 ### Tap-to-talk hotkey
 
-The app can turn on a hotkey that works from any app: Space pressed while
-the Globe key is held. A tap unmutes the microphone if it was muted, and
+The app can turn on a hotkey that works from any app, which is Space
+pressed while the Globe key is held. A tap unmutes the microphone if it was muted, and
 then acts on the session:
 
 | Session state | A tap |
@@ -122,7 +123,7 @@ The right-hand keys are offered because Command and Space opens Spotlight,
 and Option and Space is a common launcher shortcut. Your Globe key setting
 in macOS still works for a plain press of Globe.
 
-The hotkey item appears when the `talk` extra is installed. To keep Space
+With the `talk` extra installed, the menu shows the hotkey item. To keep Space
 from reaching the app in front, the hotkey needs Accessibility permission.
 The app asks for it each time you turn on the hotkey without it, and never
 at startup. The hotkey stays on across restarts, and the app turns it back

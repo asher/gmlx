@@ -1,9 +1,9 @@
 # Concurrent requests
 
-The gmlx server decodes the requests of several clients together. This
-page explains what batching gains, how the server admits a new request
-without stalling the others, and how it speeds up requests that share a
-prompt.
+The gmlx server decodes the requests of several clients together as one
+batch. It paces the admission of a new request so that the running streams
+do not stall, and it reads a prompt that several requests share only
+once.
 
 - [Batched decoding](#batched-decoding)
 - [Admitting a new request](#admitting-a-new-request)

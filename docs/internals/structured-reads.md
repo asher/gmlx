@@ -18,12 +18,12 @@ engine. The request and response contract is in
 The decision logic is a port of the vLLM structured-diffusion example,
 `examples/features/structured_diffusion/structured_server.py`, and the
 unembedding and multi-step read loop follow the diffusion branch of vLLM's
-DiffusionGemma model. The example is a proxy that drives vLLM over HTTP, while gmlx runs
-the same logic in the server process against the model. Each ported file
-keeps the Apache-2.0 header that names its source and says it was modified
-for gmlx, and `licenses/vllm-LICENSE` lists them.
+DiffusionGemma model. The example is a proxy that drives vLLM over HTTP,
+while gmlx runs the same logic in the server process against the model. Each
+ported file keeps the Apache-2.0 header that names its source and says it
+was modified for gmlx, and `licenses/vllm-LICENSE` lists them.
 
-The code splits into three layers. Apart from `engine.py` and `denoise.py`,
+Three layers make up the code. Apart from `engine.py` and `denoise.py`,
 the modules in `gmlx/systemone/` are pure Python. They hold the schema
 rules, the answer templates and `decide`, which runs a decision against any
 object with `prefill`, `read` and `think`. `extensions.py` adds
@@ -110,11 +110,11 @@ reads chunks in parallel. Chunks share one conditioning, so the order does
 not change the answers. With `sequential`, each chunk's prompt also carries
 the answer lines of the chunks before it, in both implementations.
 
-A request with `think` writes a thought first. The thought runs through
-the mlx-vlm denoiser at temperature 1 and the served canvas width, with
-the close tag added to the stop set for the call. The global MLX random
-state is seeded from the request seed first, so a thought also repeats.
-The reads then use the prompt with the thought appended.
+When a request sets `think`, the server writes a thought first. The thought
+runs through the mlx-vlm denoiser at temperature 1 and the served canvas
+width, with the close tag added to the stop set for the call. The global MLX
+random state is seeded from the request seed first, so a thought also
+repeats. The reads then use the prompt with the thought appended.
 
 `think: "auto"` is a gmlx extension with no counterpart in the example.
 `extensions.decide` runs the decision without a thought, and when any
@@ -146,10 +146,10 @@ budget and its tags, and one canvas of answer lines for each chunk of every
 earlier stage. With `sequential`, the earlier chunks of the last stage
 count too.
 
-The route, `run_on_engine` and the engine rely on upstream internals: the
-diffusion attention's cache reads, the rotating cache update paths, the
-server's diffusion loop and request types, and the prefill-log and
-cancellation helpers. Each is fingerprinted in `gmlx/upstream/seams.py`,
+The route, `run_on_engine` and the engine rely on upstream internals. These
+include the diffusion attention's cache reads, the rotating cache update
+paths, the server's diffusion loop and request types, and the prefill-log
+and cancellation helpers. Each is fingerprinted in `gmlx/upstream/seams.py`,
 so an mlx-vlm upgrade that changes one fails the seams test.
 
 ## Parity with the vLLM example
@@ -166,7 +166,7 @@ another, and `ask` returns the asked answers where the example raises a
 `KeyError`. The route refuses image states and multipart bodies, and it
 does not serve the example's decisions through chat completions.
 
-The prompt ids must match too, since every parity claim depends on them.
+Every parity claim depends on the prompt ids, so those must match too.
 `scripts/check_dgemma_template.py` renders the decision prompts with the
 GGUF's embedded template and compares them with the Hugging Face tokenizer
 of `google/diffusiongemma-26B-A4B-it`, the tokenizer the example uses. The
@@ -179,7 +179,7 @@ The render passes message content as strings. The mlx-vlm prompt helper
 turns content into a list of text parts, and the Gemma 4 template ends
 each text part of a system message with a space, which adds one token
 before the turn close. Run the script again after a template or tokenizer
-change:
+change.
 
 ```sh
 python scripts/check_dgemma_template.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf

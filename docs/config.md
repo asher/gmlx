@@ -4,8 +4,8 @@
 runs with, and the settings of the server itself. `gmlx serve` reads it at
 start, and the other commands read it to turn a model name into a GGUF
 file, so a name that works in a request also works with `gmlx run` and
-`gmlx chat`. This page explains each part of the file and documents every
-key it accepts.
+`gmlx chat`. Every key has a default, so a file needs only the keys that
+change one.
 
 ## Create the file
 
@@ -49,9 +49,8 @@ models:
 
 The comment above each model shows the sampling values it starts from,
 which come from its [family defaults](family-defaults.md) and from the
-GGUF itself. Every other key
-has a default and is documented on this page, so add a key only to change
-it. Start the server with `gmlx serve`, which finds the file on its own.
+GGUF itself. Start the server with `gmlx serve`, which finds the file on
+its own.
 
 
 ## Where gmlx looks
@@ -79,18 +78,17 @@ optional. A server needs only `models`, and everything else has a default.
 
 | Block | What it sets |
 |-------|--------------|
-| [`models`](#models) | The models gmlx can run, one entry each, with its GGUF file and its own settings |
-| [`aliases`](#aliases) | Extra names for models, such as `coder` for `qwen3.8-27b-ud-q6@coding` |
-| [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use |
-| [`rules`](#rules) | A profile for every model whose id matches a pattern, such as all ids that contain `coder` |
-| [`discover`](#model-discovery) | Folders the server scans at each start, adding every GGUF it finds without an entry of its own |
-| [`server`](#server) | Where the server listens, its API key, the folders that hold models, how much memory models may use, and optional services such as speech and embeddings |
-| [`talk`](#voice) | The voice client's model, voice, wake phrase and listening thresholds |
-| [`assistant`](#assistant) | Tool servers and long-term memory for the built-in assistant |
-| [`theme`, `themes`](#chat-themes) | Colors of the terminal chat |
+| [`models`](#models) | The models gmlx can run, one entry each, with its GGUF file and its own settings. |
+| [`aliases`](#aliases) | Extra names for models, such as `coder` for `qwen3.8-27b-ud-q6@coding`. |
+| [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use. |
+| [`rules`](#rules) | A profile for every model whose id matches a pattern, such as all ids that contain `coder`. |
+| [`discover`](#model-discovery) | Folders the server scans at each start, adding every GGUF it finds without an entry of its own. |
+| [`server`](#server) | Where the server listens, its API key, the folders that hold models, how much memory models may use, and optional services. |
+| [`talk`](#voice) | The voice client's model, voice, wake phrase and listening thresholds. |
+| [`assistant`](#assistant) | Tool servers and long-term memory for the built-in assistant. |
+| [`theme`, `themes`](#chat-themes) | Colors of the terminal chat. |
 
-Each block has a section below that explains it and then lists its keys.
-A key's heading is its full path, such as `server.port`. A path such as
+A key is named by its full path, such as `server.port`. A path such as
 `models.*.pin` means the `pin` key of any entry under `models`. After you
 edit the file, a running server reads it again as
 [Changing the file](#changing-the-file) describes.
@@ -198,18 +196,16 @@ costs little for one request and a lot for several. Past the cap, the
 batch switches to plain decoding, and it speculates again once it
 shrinks.
 
-`null` takes the drafter's measured default. That is no cap for a native
-head on a dense Qwen model, `2` for the Gemma assistant drafter and for
-families without a measurement, and `1` for every mixture-of-experts model
-and for the drafters that handle one sequence at a time, such as Hy3,
-DeepSeek-V4, Muse, Qwen3.8-Flash-Next and GLM5-next. `0` removes the cap,
-except on a single-sequence drafter, which stays at `1` whatever the
-value. The default is `null`.
+`null` takes the drafter's default. A native head on a dense Qwen model
+has no cap, and the Gemma assistant drafter and families without a
+measurement get `2`. Every mixture-of-experts model gets `1`, as do the
+drafters that handle one sequence at a time. Those are Hy3, DeepSeek-V4,
+Muse Glimmer, Qwen3.8-Flash-Next, GLM-5.3-Flash and the DFlash 2
+drafters. `0` removes the cap, except on a single-sequence drafter, which
+stays at `1` whatever the value. The default is `null`.
 
-The switch is described in
-[Speculative batching](internals/speculative-batching.md), and the
-measurements behind the defaults in
-[Benchmarks](benchmarks.md).
+[Speculative batching](internals/speculative-batching.md) describes how a
+batch switches between the two kinds of decoding.
 
 ### `models.*.adapter`
 
@@ -239,8 +235,9 @@ multimodal model. The old key `cpu_moe` is read as `stream`, with a
 warning. The default is no streaming.
 
 [Models larger than memory](streaming.md) explains how to choose between
-the two and how to size the lossy keys below. Every key from here to
-`stream_fast_disk` needs `stream`.
+the two and how to size the lossy `moe_*` keys. The `moe_*` keys, the two
+feeder keys and `stream_fast_disk` apply only to a model with `stream`
+set.
 
 ### `models.*.moe_experts`
 
@@ -302,7 +299,7 @@ aliases:
   coder: qwen3.8-27b-ud-q6@coding
 ```
 
-An alias may not contain `@` or match a model id, and its target must
+Each alias must not contain `@` or match a model id, and its target must
 exist.
 
 
@@ -350,7 +347,7 @@ profiles:
 
 A model gets a profile from its own entry, from a matching rule, from the
 server default, or from the request. When a setting comes from more than
-one place, the layer lower in this table wins:
+one place, a later layer wins over an earlier one:
 
 | Layer | Set where |
 |-------|-----------|
@@ -475,8 +472,9 @@ The models that match get this profile. This key is required.
 A `sampling` block sets defaults for the request fields that control
 generation, such as temperature and length. It goes in a profile or in a
 model's `overrides`. Each key is also a request field of the same name,
-and a field in the request wins. The defaults marked "family" come from
-the model's [family defaults](family-defaults.md).
+and a field in the request wins. A default taken from the model's
+[family defaults](family-defaults.md) is the value that `gmlx profiles`
+prints for that model.
 
 ```yaml
 profiles:
@@ -628,8 +626,9 @@ quantization. `kvarn` normalizes the variance first and keeps the newest
 tokens in fp16. A model where no layer converts under `kvarn` runs fp16
 and logs why, and it never falls back to affine. Under `uniform`,
 speculative models quantize only while they serve one request. Under
-`kvarn` they stay quantized at any batch size. [KV cache quantization](kv-quantization.md) lists which
-architectures convert. The default is `uniform`.
+`kvarn` they stay quantized at any batch size.
+[KV cache quantization](kv-quantization.md) lists which architectures
+convert. The default is `uniform`.
 
 ### `load.kv_group_size`
 
@@ -676,19 +675,18 @@ default is `false`.
 
 ### `cache.block_size`
 
-Each cache block holds this many tokens. When the key is unset, the
-server picks the smallest of 16, 32, 64, 128 and 256 that lets the pool
-fill its memory share without passing the Metal limit on the number of
-buffers. The server chooses the default for each model.
+Each cache block holds this many tokens. The default, chosen for each
+model, is the smallest of 16, 32, 64, 128 and 256 that lets the pool fill
+its memory share without passing the Metal limit on the number of
+buffers.
 
 ### `cache.num_blocks`
 
-The pool that all cached prompts share holds this many blocks. When the
-key is unset, the pool starts at 2048 blocks and grows after the model
-loads until it could fill half of the memory left over, within the Metal
-limit on the number of buffers. Blocks cost memory only once they hold a
-prompt, and a full pool drops the oldest prompts. Set a number to fix the
-size. The server chooses the default for each model.
+The pool that all cached prompts share holds this many blocks. Blocks
+cost memory only once they hold a prompt, and a full pool drops the oldest
+prompts. By default the pool starts at 2048 blocks and grows after the
+model loads until it could fill half of the memory left over, within the
+Metal limit on the number of buffers.
 
 ### `cache.exact_entries`
 
@@ -741,8 +739,9 @@ bytes with plain file reads, and `mmap` maps the files. The default is
 
 The `discover` block lists folders that the server scans at each start.
 Every GGUF that it finds without an entry under `models` becomes a
-model, so new files appear after a restart. The scan reads only the GGUF headers. To
-write entries once instead, run `gmlx init` or `gmlx sync-models`.
+model, so new files appear after a restart. The scan reads only the GGUF
+headers. To write entries once instead, run `gmlx init` or
+`gmlx sync-models`.
 
 ```yaml
 discover:
@@ -750,7 +749,7 @@ discover:
     recursive: true
 ```
 
-The name of each model comes from its file. The scan removes the shard
+Each model is named after its file. The scan removes the shard
 suffix, markers such as `mmproj`, `assistant`, `draft` and `mtp`, and
 imatrix tags, and adds the quantization in short form, such as `-q4`.
 When two files would get the same name, both get the full quantization,
@@ -786,9 +785,8 @@ no drafter. The default is `auto`.
 The `server` block sets up the server process. It says where the server
 listens, who may call it, where models are found, how much memory they
 may use, how requests share the GPU, and which extra services run beside
-the models.
-Every key has a default, and a file with no `server` block runs a server
-on `127.0.0.1:8080` with the prompt cache off.
+the models. A file with no `server` block runs a server on
+`127.0.0.1:8080` with the prompt cache off.
 
 ```yaml
 server:
@@ -819,8 +817,9 @@ Every request must present this key, as `Authorization: Bearer <key>` or
 `x-api-key: <key>`. Only `/health` and CORS preflight requests pass
 without it. The server reads its key only from this file, never from a
 flag or the environment, so the key stays out of process listings and
-shell history. The client commands `ps`, `status`, `launch` and `menubar`
-take `--api-key` to present it. The default is no key.
+shell history. The client commands `chat`, `talk`, `ps`, `systemone`,
+`launch` and `launch menubar` take `--api-key` to present it. The default
+is no key.
 
 A loopback server refuses a request whose `Host` header is not a loopback
 name, which blocks DNS rebinding. It answers CORS with `*` and no
@@ -887,8 +886,8 @@ none.
 
 The server keeps several models in memory at once, up to the budget in
 `server.budget_gb`. The default budget is 0.8 times the working set that
-macOS recommends for the GPU. A model uses as much memory as its GGUF file
-is large, because the weights map from the file without a copy.
+macOS recommends for the GPU. A model takes about the size of its GGUF
+file in memory, because the weights map from the file without a copy.
 
 | State | Set by | Unloads when |
 |-------|--------|--------------|
@@ -909,8 +908,8 @@ settings are the `load` and `cache` keys, `mmproj`, `draft_gguf`,
 `speculative`, `speculative_width_cap`, `chat_template`, `stream` and the
 streaming keys. Ids that differ only in `adapter` share one copy, as
 [LoRA adapters](lora.md#serving-one-base-with-many-adapters) describes.
-Sampling, `system` and `ttl_s` never cause a second copy. A streamed model is
-counted against the budget as described in
+Sampling, `system` and `ttl_s` never cause a second copy. How a streamed
+model counts against the budget is in
 [Models larger than memory](streaming.md#residency-of-a-streamed-model).
 
 #### `server.budget_gb`
@@ -928,13 +927,13 @@ after the budget. The default is no limit.
 This key limits the MLX buffer cache, in GiB. MLX keeps freed GPU memory in
 this cache for reuse instead of returning it to macOS, and at deep context
 it can grow to tens of GB. It is not the KV cache or the prompt cache, and
-its limit never removes their contents. When the
-key is unset, the server sets a limit from 4 to 12 GiB. It is a quarter of
-the memory that the weights leave free when they take more than 60 percent
-of the GPU working set, and 5 percent of the working set otherwise. `0`
-turns the buffer cache off, and a negative value removes the limit.
-[The MLX buffer cache](memory.md#the-mlx-buffer-cache)
-explains when to change it. The server chooses the default at start.
+its limit never removes their contents. `0` turns the buffer cache off,
+and a negative value removes the limit.
+[The MLX buffer cache](memory.md#the-mlx-buffer-cache) explains when to
+change it. By default the server sets a limit from 4 to 12 GiB at start.
+It is a quarter of the memory that the weights leave free when they take
+more than 60 percent of the GPU working set, and 5 percent of the working
+set otherwise.
 
 #### `server.defaults.model`
 
@@ -1016,8 +1015,8 @@ With `true`, the server accepts speculative tokens by rejection sampling,
 which accepts more of them. The sampling distribution stays exact, but the
 output is no longer token-identical to plain decoding. Greedy requests do
 not change, and a reload does not change this key.
-[Stochastic acceptance](speculative-decoding.md#stochastic-acceptance) describes it. The
-default is `false`.
+[Stochastic acceptance](speculative-decoding.md#stochastic-acceptance)
+describes it. The default is `false`.
 
 #### `server.gpu_keepwarm`
 
@@ -1041,8 +1040,9 @@ changes them. The default is the cache turned off.
 ### Structured decisions
 
 These keys set up `POST /v1/systemone`, which
-[Structured decisions](decisions.md) describes. An unknown key, or a `model` that is not a configured id or
-alias, fails the load. A reload applies new values to the next request.
+[Structured decisions](decisions.md) describes. An unknown key, or a
+`model` that is not a configured id or alias, fails the load. A reload
+applies new values to the next request.
 
 #### `server.systemone.model`
 
@@ -1080,13 +1080,13 @@ unsure. The default is `0`.
 
 #### `server.systemone.think_threshold`
 
-With `"auto"`, the model thinks when its confidence is below this value.
-A request can set its own. The default is `0.8`.
+When `think` is `"auto"`, the model thinks when its confidence is below
+this value. A request can set its own. The default is `0.8`.
 
 #### `server.systemone.think_budget`
 
-With `"auto"`, this is the thought budget in tokens. A request can set
-its own. The default is `64`.
+When `think` is `"auto"`, a thought gets this budget in tokens. A
+request can set its own. The default is `64`.
 
 ### Served assistants
 
@@ -1133,9 +1133,9 @@ refuses to start with them. The default is `false`.
 ## Voice
 
 The `talk` block sets up [`gmlx talk`](talk.md), the voice client, and the
-voice sessions of the menu bar app: which model answers, the voice, how
-listening starts and when an utterance ends. Most keys also have a
-[`gmlx talk` flag](cli.md#gmlx-talk), which wins over the file.
+voice sessions of the menu bar app. It chooses which model answers, the
+voice, how listening starts and when an utterance ends. Most keys also
+have a [`gmlx talk` flag](cli.md#gmlx-talk), which wins over the file.
 
 ```yaml
 talk:
@@ -1162,10 +1162,9 @@ Replies are spoken at this multiple of normal speed. The default is
 
 ### `talk.system`
 
-This system prompt sets the spoken persona. When the key is absent, gmlx
-uses a prompt that asks for speakable text without markdown. `null` or
-`""` sends no system prompt at all, which is not the same as leaving the
-key out. The default is the speakable-text prompt.
+This system prompt sets the spoken persona. `null` or `""` sends no
+system prompt at all, which is not the same as leaving the key out. The
+default is a prompt that asks for speakable text without markdown.
 
 ### `talk.language`
 
@@ -1329,8 +1328,8 @@ are. The default is `true`.
 
 ### `assistant.memory.ttl_days`
 
-At start, the assistant forgets facts older than this many days. By
-default it keeps facts forever.
+At start, the assistant forgets facts older than this many days. The
+default is to keep facts forever.
 
 ### `assistant.memory.max_items`
 
@@ -1382,9 +1381,9 @@ formatting:
 
 | Command | Change |
 |---------|--------|
-| `gmlx sync-models` | Adds new GGUFs from `model_dirs` and removes the entries whose file is gone |
-| `gmlx pull` | Downloads a GGUF into the first folder of `model_dirs` and adds its entry |
-| `gmlx rm` | Deletes the files of a model and its entry |
+| `gmlx sync-models` | Adds new GGUFs from `model_dirs` and removes the entries whose file is gone. |
+| `gmlx pull` | Downloads a GGUF into the first folder of `model_dirs` and adds its entry. |
+| `gmlx rm` | Deletes the files of a model and its entry. |
 
 Each of them, and `gmlx init`, tells a running server to reload. Pass
 `--no-reload` to prevent that. A server started with a GGUF path instead
@@ -1402,15 +1401,16 @@ wins:
 2. The key in the file
 3. The environment variable
 
-The MLX buffer cache limit is the exception. Its environment variable wins
-over `server.cache_limit_gb`, so that a benchmark can fix the limit without
+Two variables are the exception. `GMLX_CACHE_LIMIT_GB` wins over
+`server.cache_limit_gb`, and `GMLX_MTP_WIDTH_CAP` wins over each model's
+`speculative_width_cap`, so that a benchmark can fix either without
 changing the file. The flags are in the [CLI reference](cli.md#gmlx-serve)
 and the variables in [Environment variables](env-vars.md).
 
 
 ## Complete example
 
-This file uses every block, and it loads without errors.
+This file combines the common blocks, and it loads without errors.
 
 ```yaml
 # doctest: build

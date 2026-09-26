@@ -1,8 +1,8 @@
 # CLI reference
 
-Each verb of the `gmlx` command has its flags, defaults and exit codes
-listed here. A section says what a flag does, while the guides linked from
-it explain when to use it.
+The `gmlx` command has one verb per task, and each verb's section gives
+its flags, defaults and exit codes. A section says what a flag does, while
+the guides it links explain when to use it.
 
 | Verb | Does |
 |------|------|
@@ -43,10 +43,10 @@ Sampling flags you leave unset take the model's
 
 ## gmlx init
 
-Scans your model directories and writes a starter config. Run bare on a
-terminal, it opens a wizard that lets you rename models, set a default and
-aliases, and enable the prompt cache and the speech, embedding and rerank
-services. With flags it writes the file without asking.
+`gmlx init` scans your model directories and writes a starter config. Run
+bare on a terminal, it opens a wizard that lets you rename models, set a
+default and aliases, and enable the prompt cache and the speech, embedding
+and rerank services. With flags it writes the file without asking.
 
 ```sh
 gmlx init                                  # the wizard
@@ -85,10 +85,11 @@ and the file it writes is described in [Configuration](config.md).
 
 ## gmlx serve
 
-Runs the server. It detaches by default and returns at once, so the same
-shell can run `gmlx launch` next. `--foreground` keeps it attached instead.
-A background server keeps a runfile and a log under `~/.cache/gmlx/` and, on
-a macOS desktop session, raises the [menu bar app](menubar.md).
+`gmlx serve` runs the server. It detaches by default and returns at once, so
+the same shell can run `gmlx launch` next. `--foreground` keeps it attached
+instead. A background server keeps a runfile and a log under
+`~/.cache/gmlx/` and, on a macOS desktop session, raises the [menu bar
+app](menubar.md).
 
 ```sh
 gmlx serve                                  # the config in the default location
@@ -160,9 +161,10 @@ things are per-model keys under [models](config.md#models):
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
 | `--quantized-kv-start N` | `0` | Tokens kept unquantized at the start of the cache. Not applied under kvarn. |
 
-The KV flags are the [`load` keys](config.md#model-loading) of the config,
-so `--kv-quant-scheme kvarn` on a positional model is what `load: {kv_quant_scheme: kvarn}`
-is on a config model, priced and reported the same way.
+The KV flags are the [`load` keys](config.md#model-loading) of the config.
+`--kv-quant-scheme kvarn` on a positional model is the same as
+`load: {kv_quant_scheme: kvarn}` on a config model, priced and reported the
+same way.
 
 These flags set a positional model's sampling defaults, the
 [`sampling` keys](config.md#sampling) of the config. A default applies to a
@@ -226,8 +228,9 @@ in [Speech, embeddings and rerank](services.md):
 | `--embeddings [MODEL]` | Off | Embeddings at `POST /v1/embeddings`. Bare is `qwen3-embed-0.6b`. No extra is needed. |
 | `--rerank [MODEL]` | Off | Reranking at `POST /v1/rerank`. Bare is `qwen3-rerank-0.6b`. No extra is needed. |
 
-There is no `--api-key` flag on `serve`. The key lives in the config, for
-the reasons [Address and authentication](config.md#address-and-authentication) gives.
+`serve` has no `--api-key` flag, because the key lives in the config.
+[Address and authentication](config.md#address-and-authentication) gives
+the reasons.
 
 Each completed request logs a line with the endpoint, model, token counts
 and timing:
@@ -238,9 +241,10 @@ and timing:
 
 ## gmlx stop
 
-Stops a background server with SIGTERM to the process group, then SIGKILL
-after the timeout. The pid is checked to be ours before signalling, and any
-stale runfiles found during the check are cleared and reported.
+`gmlx stop` stops a background server with SIGTERM to the process group,
+then SIGKILL after the timeout. Before it signals, it checks that the pid
+belongs to the gmlx server, and it clears and reports any stale runfiles
+found during the check.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -251,9 +255,9 @@ stale runfiles found during the check are cleared and reported.
 
 ## gmlx status
 
-Prints a background server's pid, uptime, URL, log path and how it is
-managed. It uses `/health`, so it needs no API key. Stale runfiles are listed
-with the reason and their age.
+`gmlx status` prints a background server's pid, uptime, URL, log path and
+how it is managed. It uses `/health`, so it needs no API key. Stale runfiles
+are listed with the reason and their age.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -265,8 +269,8 @@ The command exits 0 when a server is running and 3 when none is.
 
 ## gmlx restart
 
-Stops the server and relaunches it with the arguments recorded in its
-runfile, from any directory.
+`gmlx restart` stops the server and relaunches it with the arguments
+recorded in its runfile, from any directory.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -277,8 +281,8 @@ runfile, from any directory.
 
 ## gmlx logs
 
-Prints the tail of a background server's log. The menu bar's health polls
-are filtered out of it.
+`gmlx logs` prints the tail of a background server's log. The menu bar's
+health polls are filtered out of it.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -290,12 +294,12 @@ are filtered out of it.
 
 ## gmlx service
 
-Installs a launchd login item on macOS. By default the item is the menu bar
-app, which starts the server at login unless `--no-autostart` is set. A
-server run this way gets its own identity, so macOS attributes permission
-prompts to gmlx instead of to your terminal. `install` takes the `serve`
-flags, and the server it starts now is the one it starts again at each
-login.
+`gmlx service` installs a launchd login item on macOS. By default the item
+is the menu bar app, which starts the server at login unless
+`--no-autostart` is set. A server run this way gets its own identity, so
+macOS attributes permission prompts to gmlx instead of to your terminal.
+`install` takes the `serve` flags, and the server it starts now is the one
+it starts again at each login.
 
 ```sh
 gmlx service install --config ~/.config/gmlx/gmlx.yaml
@@ -322,9 +326,9 @@ host and port. For the menu bar side, read [Menu bar app](menubar.md).
 
 ## gmlx list
 
-Lists the models a config defines, which is the set of ids a request can
-address rather than the files on disk. Discovered models are tagged, aliases
-follow, and the default model is marked with `*`.
+`gmlx list` lists the models a config defines, which is the set of ids a
+request can address rather than the files on disk. Discovered models are
+tagged, aliases follow, and the default model is marked with `*`.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -336,9 +340,9 @@ Exit code 2 means no config was found. The message names `gmlx init`.
 
 ## gmlx run
 
-Loads a GGUF and generates a completion, runs a benchmark, or prints the
-load plan. `--help` shows the common flags, and `--help-all` shows every flag
-in the tables that follow.
+`gmlx run` loads a GGUF and generates a completion, runs a benchmark, or
+prints the load plan. `--help` shows the common flags, and `--help-all`
+shows every flag.
 
 ```sh
 gmlx run model.gguf --prompt "Explain entropy." --max-tokens 128
@@ -431,8 +435,8 @@ These flags are multimodal. [Vision and audio](vlm.md) describes them:
 | `--audio PATH_OR_URL` | None | Audio to prepend, comma separated. Needs an audio tower. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
-`--stop` and the XTC flags are ignored with `--mmproj`, with a warning,
-while the bench, report and streaming flags error with it.
+With `--mmproj`, `--stop` and the XTC flags are ignored with a warning,
+and the bench, report and streaming flags exit with an error.
 
 These flags control speculative decoding, which
 [Speculative decoding](speculative-decoding.md) describes:
@@ -490,11 +494,11 @@ or file error, and 130 when interrupted.
 
 ## gmlx chat
 
-An interactive chat in the terminal. Locally the model loads once and each
-turn prefills only the new message. When the config's server is running, a
-bare `gmlx chat` or one naming a served id becomes a client of that server
-instead of loading a second copy. The commands, sessions, rendering and
-themes are in [Chat](chat.md).
+`gmlx chat` is an interactive chat in the terminal. Locally the model loads
+once and each turn prefills only the new message. When the config's server
+is running, a bare `gmlx chat` or one naming a served id becomes a client of
+that server instead of loading a second copy. The commands, sessions,
+rendering and themes are in [Chat](chat.md).
 
 ```sh
 gmlx chat model.gguf --temp 0.7 --system-prompt "You are terse."
@@ -549,8 +553,8 @@ These flags control display and sessions:
 | `--resume [NAME]` | Off | Resume a saved session. Bare is this model's latest. |
 | `-v`, `--verbose` | Off | Full load diagnostics. |
 
-A local load takes the same flags as [`gmlx run`](#gmlx-run), with the
-same meanings, so they are not repeated here:
+A local load also takes these [`gmlx run`](#gmlx-run) flags, which mean
+the same as they do there:
 
 | Group | Flags shared with `run` |
 |-------|-------------------------|
@@ -567,11 +571,11 @@ send turns verbatim with `--no-chat-template`.
 
 ## gmlx launch
 
-Writes an external tool's configuration to point at a gmlx server, starts
-the server if none is reachable, and runs the tool. It never installs the
-tool. Most clients get a configuration of their own under `~/.config/gmlx`,
-while pi, omp and goose get a provider merged into their own files.
-[Agents and chat apps](launch.md) describes each client.
+`gmlx launch` writes an external tool's configuration to point at a gmlx
+server, starts the server if none is reachable, and runs the tool. It never
+installs the tool. Most clients get a configuration of their own under
+`~/.config/gmlx`, while pi, omp and goose get a provider merged into their
+own files. [Agents and chat apps](launch.md) describes each client.
 
 ```sh
 gmlx launch opencode
@@ -618,8 +622,8 @@ background `serve` starts it automatically. What it shows is in
 
 ## gmlx pull
 
-Checks a remote GGUF's header and, when it will load, downloads all its
-shards into your model library as plain files. A file saved under a
+`gmlx pull` checks a remote GGUF's header and, when it will load, downloads
+all its shards into your model library as plain files. A file saved under a
 `model_dirs` root is registered in the config immediately, and any running
 server is signalled to reload it.
 
@@ -651,11 +655,11 @@ the `.part` file on the next run. A gated or private repo needs a token in
 
 ## gmlx validate
 
-Reports whether a GGUF will load, from the header alone. A remote reference
-is range-read, so the check reads a few megabytes rather than the whole
-file. The report names the architecture, the quant codecs, the total size
-across shards, whether it fits this Mac's RAM and, for a MoE model, the
-streaming plan.
+`gmlx validate` reports whether a GGUF will load, from the header alone. A
+remote reference is range-read, so the check reads a few megabytes rather
+than the whole file. The report names the architecture, the quant codecs,
+the total size across shards, whether it fits this Mac's RAM and, for a MoE
+model, the streaming plan.
 
 ```sh
 gmlx validate ~/models/Qwen3.8-27B-UD-Q6_K.gguf
@@ -690,7 +694,7 @@ when the reference cannot be resolved or read.
 
 ## gmlx rm
 
-Deletes a model's GGUF files, its partial-download files and its
+`gmlx rm` deletes a model's GGUF files, its partial-download files and its
 companions, and removes the entry from the config. A file another model
 still references is kept. Aliases to the removed id are dropped, and if the
 removed id was the default model, the default is cleared. Before anything
@@ -716,11 +720,11 @@ file could not be deleted, and 2 for an unknown id or a missing config.
 
 ## gmlx sync-models
 
-Rescans the model directories and updates the `models` block to match disk.
-Existing entries keep their comments and edits, entries whose file is gone
-are dropped, and new files are added, with a sibling drafter pairing into
-the model it serves. Run it after adding files to the directory or pulling
-them.
+`gmlx sync-models` rescans the model directories and updates the `models`
+block to match disk. Existing entries keep their comments and edits, entries
+whose file is gone are dropped, and new files are added, with a sibling
+drafter pairing into the model it serves. Run it after adding files to the
+directory or pulling them.
 
 ```sh
 gmlx sync-models
@@ -742,8 +746,9 @@ cache is unreadable, is kept and reported instead of dropped.
 
 ## gmlx ps
 
-Shows the models resident in a running server from its `/v1/metrics`
-snapshot, with the id, size, idle time, TTL, pinned state and path of each.
+`gmlx ps` shows the models resident in a running server from its
+`/v1/metrics` snapshot, with the id, size, idle time, TTL, pinned state and
+path of each.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -757,8 +762,8 @@ with an error or is not gmlx, and 3 when no server was reachable.
 
 ## gmlx systemone
 
-Sends a JSON file holding a `/v1/systemone` request body to a running
-server and prints one line per question. The body is described in
+`gmlx systemone` sends a JSON file holding a `/v1/systemone` request body
+to a running server and prints one line per question. The body is described in
 [Structured decisions](decisions.md). With `--model` the verb loads the GGUF
 itself and answers offline, with no server.
 
@@ -788,10 +793,10 @@ reachable.
 
 ## gmlx profiles
 
-Prints the family sampling table with its intents, then the config's user
-profiles and each model's family. With a model id it prints that model's
-resolved sampling for its base and each intent, plus the layers that
-produced it. Without a config it prints the family table alone.
+`gmlx profiles` prints the family sampling table with its intents, then the
+config's user profiles and each model's family. With a model id it prints
+that model's resolved sampling for its base and each intent, plus the layers
+that produced it. Without a config it prints the family table alone.
 
 ```sh
 gmlx profiles
@@ -806,10 +811,11 @@ gmlx profiles qwen3.8-27b-ud-q6
 
 ## gmlx talk
 
-Voice chat with a served model. Say the wake phrase, speak, and the reply
-streams back as speech. It is a client of the server's speech and chat
-endpoints, so the server needs `stt` and `tts` configured. Setup, the config
-block and the in-session keys are in [Voice chat](talk.md).
+`gmlx talk` holds a voice chat with a served model. Say the wake phrase,
+speak, and the reply streams back as speech. It is a client of the server's
+speech and chat endpoints, so the server needs `stt` and `tts` configured.
+Setup, the config block and the in-session keys are in [Voice
+chat](talk.md).
 
 ```sh
 gmlx talk
@@ -818,8 +824,9 @@ gmlx talk --mode vad
 gmlx talk --once
 ```
 
-Most flags override a key of the [`talk` block](config.md#voice) with the
-same name, and the defaults below apply when neither is set.
+Most flags override the key of the same name in the
+[`talk` block](config.md#voice), and a flag's default applies when neither
+is set.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -849,9 +856,10 @@ same name, and the defaults below apply when neither is set.
 
 ## gmlx train
 
-Trains a LoRA adapter on a quantized GGUF base and writes it as a GGUF
-adapter. The base stays quantized throughout, so a model that does not fit
-in fp16 can still be fine-tuned. For the walkthrough, read [LoRA adapters](lora.md).
+`gmlx train` trains a LoRA adapter on a quantized GGUF base and writes it
+as a GGUF adapter. The base stays quantized throughout, so a model that
+does not fit in fp16 can still be fine-tuned. For the walkthrough, read
+[LoRA adapters](lora.md).
 
 ```sh
 gmlx train base-Q8_0.gguf --data ./my-data --adapter-out my-lora.gguf
@@ -930,8 +938,8 @@ The prompt file holds one `{"id", "messages", "context"}` object per line
 whose messages end on a user turn. A row's context, or the file given by
 `--context`, goes in front of the last user turn for the teacher, and
 either one must hold text. A row that took a context is written with the
-teacher's list under `messages`
-and the prompt as given under `student_messages`, and a row without one
+teacher's list under `messages` and the prompt as given under
+`student_messages`, and a row without one
 carries `messages` alone. Prompt ids already in the output are skipped,
 so a run resumes where it stopped. A resume checks that each skipped id
 still names the prompt it answered and refuses when one differs or is
@@ -990,22 +998,22 @@ switch and budget with gen's own flags, template variables with
 `--chat-template-kwargs`, sampling with gen's sampling flags, and a
 system prompt as a system turn in the prompt rows. A template override
 has no gen form, since `cache` renders the rows with the teacher's own
-template. Beside `--thinking-budget`,
-`--native-mtp`, `--speculative` and `--draft-gguf` are refused too,
-because a drafted server does not hold each request to the budget.
+template. `--native-mtp`, `--speculative` and `--draft-gguf` are refused
+beside `--thinking-budget` too, because a drafted server does not hold each
+request to the budget.
 
 ### distill filter
 
-Checks run in a fixed order and the first failure names the reason,
-one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
-`tokens` and `verify`, each defined in
-[Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
-guide. The checker, the `--verify` command, reads the surviving rows as
-jsonl on stdin and prints one line per row, `ok` or a reason word. `--context` rebuilds
+Checks run in a fixed order and the first failure names the reason, one of
+`length`, `budget`, `empty`, `marker`, `repeat`, `ascii`, `tokens` and
+`verify`, each defined in [Round
+one](distill.md#round-one-trains-on-the-teachers-replies) of the guide. The
+checker, the `--verify` command, reads the surviving rows as jsonl on stdin
+and prints one line per row, `ok` or a reason word. `--context` rebuilds
 every kept row with the context on the teacher's side and the prompt as
-given under `student_messages`, which prepares a second round from
-replies a student wrote without it. It refuses a row that already
-carries `student_messages`, since that row was generated with a context.
+given under `student_messages`, which prepares a second round from replies a
+student wrote without it. It refuses a row that already carries
+`student_messages`, since that row was generated with a context.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1027,8 +1035,8 @@ carries `student_messages`, since that row was generated with a context.
 
 ### distill cache
 
-The flags of the teacher pass, in the order `--help` prints them.
-`--messages-key` picks which list of a row the teacher reads, and
+`cache` takes the flags of the teacher pass, listed in the order `--help`
+prints them. `--messages-key` picks which list of a row the teacher reads, and
 `--student-messages-key` only names the list the student's render reads
 later, in `align` and `eval`. A reply or reply-think row whose final
 turn has no content, such as a tool call, has nothing to target and is
@@ -1085,7 +1093,7 @@ started, and a resume and the student's render in `align` keep that day.
 
 ### distill align
 
-Alignment flags, in the order `--help` prints them.
+`align` takes these flags, listed in the order `--help` prints them.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1109,7 +1117,7 @@ Alignment flags, in the order `--help` prints them.
 
 ### distill train
 
-Training flags, in the order `--help` prints them.
+`train` takes these flags, in `--help` order.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1152,8 +1160,8 @@ Training flags, in the order `--help` prints them.
 
 ### distill eval
 
-Evaluation flags, in the order `--help` prints them. Task files are
-jsonl files. `arc_easy.jsonl` and `hellaswag.jsonl` hold
+`eval` takes these flags, in `--help` order. Its task files are jsonl
+files. `arc_easy.jsonl` and `hellaswag.jsonl` hold
 `{id, query, choices, gold}` rows, `gsm8k.jsonl` holds
 `{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the worked
 examples shown before each question.
@@ -1194,19 +1202,22 @@ examples shown before each question.
 
 ### distill census
 
-Pairs the reply rows of a cache made without a context with the same
-rows in one or more caches made with one. It reports how much more
-likely the context makes each token the teacher wrote, the distance
-between the two stored top-k distributions with everything outside the
-top-k pooled, and, with several contexts, the part no single adapter can
-learn. With several `--with` caches, every cache decides which rows
-pair and which positions count, while the effect, the histogram and
-the positions map come from the first. Runs on the CPU. Exits 2 when a
-cache has no manifest or one it cannot read, when a `--with` cache was
-made with another teacher, tokenizer, top-k or head width than
-`--without`, when a reply-think cache records no `content_start` (one
-written before rows carried it), or when no rows pair. A `--corpus` that names no file, or holds a line
-that is not a JSON object, also exits 2.
+`census` pairs the reply rows of a cache made without a context with the
+same rows in one or more caches made with one, and runs on the CPU. It
+reports how much more likely the context makes each token the teacher
+wrote, and the distance between the two stored top-k distributions with
+everything outside the top-k pooled. With several contexts it also reports
+the part no single adapter can learn.
+
+With several `--with` caches, every cache decides which rows pair and
+which positions count, while the effect, the histogram and the positions
+map come from the first. The action exits 2 when a cache has no manifest
+or one it cannot read, or when no rows pair. It also exits 2 when a
+`--with` cache was made with another teacher, tokenizer, top-k or head
+width than `--without`, and when a reply-think cache records no
+`content_start`, as one written before rows carried it does. A `--corpus`
+that names no file, or holds a line that is not a JSON object, exits 2 as
+well.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1221,13 +1232,13 @@ that is not a JSON object, also exits 2.
 
 ## gmlx doctor
 
-Checks what a working setup needs and prints a PASS, WARN or FAIL line
-for each check, with the fix named. It covers the runtime and kernels, the
-config, the files of each configured model and service, background
+`gmlx doctor` checks what a working setup needs and prints a PASS, WARN or
+FAIL line for each check, with the fix named. No check accesses the
+network. The checks cover the runtime and kernels, the config, and the
+files of each configured model and service. They also cover background
 servers, the login items and the launcher that background starts use,
-optional extras, ffmpeg, MCP tools, assistant exposure, the Hugging Face
-token, RAM against each model's size, and disk space. No check accesses
-the network.
+optional extras, ffmpeg, MCP tools and assistant exposure. The last checks
+are the Hugging Face token, RAM against each model's size, and disk space.
 
 ```sh
 gmlx doctor
@@ -1245,10 +1256,11 @@ usage error.
 
 ## gmlx completion
 
-Prints a completion script for zsh, bash or fish. The script is a shim that
-queries the installed `gmlx` for candidates on each tab, so it completes
-verbs, each verb's flags, model ids from your config, client names for
-`launch` and the host, port and URL of servers you have backgrounded.
+`gmlx completion` prints a completion script for zsh, bash or fish. The
+script is a shim that asks the installed `gmlx` for candidates on each
+tab. It completes verbs, each verb's flags, model ids from your config and
+client names for `launch`, plus the host, port and URL of servers you have
+backgrounded.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc

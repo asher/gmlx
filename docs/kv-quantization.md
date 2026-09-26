@@ -1,9 +1,9 @@
 # KV cache quantization
 
 Quantizing the KV cache stores the context of a request in fewer bits, so
-a long context uses less memory. This page describes the two schemes that
-gmlx offers, which layers and models they apply to, and what they cost in
-quality and speed.
+a long context uses less memory. gmlx offers two schemes, affine and
+KVarN, which apply to the attention layers whose cache grows with the
+context and cost a little quality and, on some models, speed.
 
 - [The two schemes](#the-two-schemes)
 - [Which layers quantize](#which-layers-quantize)
@@ -88,9 +88,9 @@ and quality, and affine for the most speed on such a model.
 A quantized cache lowers the share of accepted drafts in
 [speculative decoding](speculative-decoding.md). Under affine
 quantization, a speculative model quantizes only while it serves one
-request. Under KVarN, it stays quantized at any batch size. On a shared
+request. Under KVarN, it stays quantized at any batch size. In a shared
 batch, a drafter with a block wider than four drafts three tokens a round,
-and a request keeps that limit until it ends once it has shared a batch.
+and a request that has shared a batch keeps that limit until it ends.
 A drafter that handles one sequence at a time, such as DFlash 2, decodes
 without speculation in a batch, and drafting resumes for the last request
 left.

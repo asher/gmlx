@@ -2,8 +2,8 @@
 
 A local model's speed on Apple Silicon depends mostly on memory bandwidth,
 the quant and the depth of the context. gmlx has features that trade among
-speed, memory and exact output, each with a page of its own linked from the
-table below, and a benchmark mode to measure your own setup.
+speed, memory and exact output, each with a page of its own, and a benchmark
+mode that measures your own setup.
 
 - [What determines speed](#what-determines-speed)
 - [The features](#the-features)
@@ -24,7 +24,7 @@ proportion.
 Prefill, which reads the prompt, is limited by GPU compute instead, and
 gains more from compute and batching than from small weights. At long
 contexts, more of the time goes to the KV cache and attention than to the
-weights. Each feature below helps in one of these cases.
+weights. Each feature of gmlx targets one of these limits.
 
 ## The features
 
@@ -35,8 +35,8 @@ weights. Each feature below helps in one of these cases.
 | The prompt cache | Skips prefill for the start of a prompt that the server has seen before. | Memory or SSD space for the entries. | [Prompt cache](prompt-cache.md) |
 | Batched serving and admission pacing | More total throughput for several clients, and steady streams while a long prompt arrives. | A new request starts a little later. | [Concurrent requests](concurrency.md) |
 | A quantized KV cache | A half to a quarter of the KV cache memory. | A small quality cost at 4 bits, and fewer accepted drafts. | [KV cache quantization](kv-quantization.md) |
-| Sparse attention | Attention cost that stops growing past 8K tokens. | Changes the output. Opt-in, llama family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
-| Streaming | Runs a MoE model larger than RAM. | A few tokens per second. | [Models larger than memory](streaming.md) |
+| Sparse attention | Attention cost that stops growing past 8K tokens. | It changes the output, is opt-in, and applies to the llama family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
+| Streaming | Runs a MoE model larger than RAM. | Decoding runs at a few tokens per second. | [Models larger than memory](streaming.md) |
 
 [Memory and the KV cache](memory.md) explains how much memory a model and
 its context take, and the settings that limit it.

@@ -1,26 +1,25 @@
 # Environment variables
 
-Every environment variable a user can set is listed here.
-Most of them are also reachable as a flag or a config key, and that is the
-normal way to set one, because an exported variable applies to every model
-the process loads and to every server started from that shell. The
-variables exist so that a benchmark or an A/B can change one setting
-without editing the config. When a setting is set more than one way, the
-flag wins, then the config key, then the variable. Two variables invert
-that order and override the config:
-`GMLX_CACHE_LIMIT_GB` over `server.cache_limit_gb`, and `GMLX_MTP_WIDTH_CAP`
-over each model's `speculative_width_cap`.
+Environment variables let a benchmark or an A/B run change one setting
+without editing the config. Most of them are also a flag or a config key,
+which is the usual way to set them, because an exported variable applies
+to every model the process loads and to every server started from that
+shell.
 
-Anything not listed here or in
-[Debug switches](internals/debug-switches.md) is internal and may
-change meaning or disappear between releases.
+When a setting is set more than one way, the flag wins, then the config
+key, then the variable. Two variables reverse that order and override the
+config. `GMLX_CACHE_LIMIT_GB` wins over `server.cache_limit_gb`, and
+`GMLX_MTP_WIDTH_CAP` wins over each model's `speculative_width_cap`.
+Variables that appear neither here nor under
+[Debug switches](internals/debug-switches.md) are internal and may change
+meaning or disappear between releases.
 
 ## Load and cache keys
 
-These are upstream mlx-vlm variables, which gmlx sets for each model from
-the `load:` and `cache:` blocks of the config, described under
-[load](config.md#model-loading) and [cache](config.md#prompt-cache) in the
-configuration keys.
+gmlx sets these upstream mlx-vlm variables for each model from the `load`
+and `cache` blocks of the config, which
+[Model loading](config.md#model-loading) and
+[Prompt cache](config.md#prompt-cache) describe.
 
 | Variable | Config key |
 |----------|------------|
@@ -62,8 +61,9 @@ describes.
 
 ## Server
 
-These change how `gmlx serve` schedules and admits requests. The ones
-marked as read per tick or per chunk take effect on a running server.
+The server variables change how `gmlx serve` schedules and admits
+requests. A variable read per tick or per chunk takes effect on a running
+server.
 
 | Variable | Meaning |
 |----------|---------|
@@ -84,9 +84,9 @@ marked as read per tick or per chunk take effect on a running server.
 
 ## Runtime
 
-Streaming, memory-governor and kernel-route switches. The mechanisms are
-explained in [Models larger than memory](streaming.md) and
-[Performance tuning](performance.md).
+The runtime variables switch streaming, the memory governor and kernel
+routes. [Models larger than memory](streaming.md) and
+[Performance tuning](performance.md) explain the mechanisms.
 
 | Variable | Meaning |
 |----------|---------|

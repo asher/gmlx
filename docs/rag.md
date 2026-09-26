@@ -100,5 +100,5 @@ Any RAG framework that supports an OpenAI-compatible embeddings endpoint
 works with the base URL `http://127.0.0.1:8080/v1`, and any API key unless
 the server has one. The built-in [assistant](assistant.md) uses the same
 endpoints for its long-term memory. To give the assistant a search over
-your documents as a tool, add a vector store as an MCP server, as the
-[tool examples](assistant.md#tool-examples) show.
+your documents as a tool, add a vector store as an MCP server, as
+[Tool examples](assistant.md#tool-examples) shows.

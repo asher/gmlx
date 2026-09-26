@@ -1,8 +1,8 @@
 # Vision and audio
 
-A multimodal GGUF model reads images or audio as well as text. This page
-covers how to pair its two files, how to send media from the command line
-and the server, which model families work, and which features combine with
+A multimodal GGUF model reads images or audio as well as text. It comes as
+two files that gmlx pairs, it takes media from the command line, chat and
+the server, and most of its features still work when a turn carries
 media.
 
 ## The two files

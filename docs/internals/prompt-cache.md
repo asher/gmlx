@@ -9,7 +9,7 @@ disable each layer. Operators read [Prompt cache](../prompt-cache.md).
 The cache routes each model by its cache shape once, at load, and logs the
 routing as `APC tier:` so that a silent mis-route is visible. The tiers
 differ in storage layout, not in whether hits happen, so every shape in the
-table gets reuse except one: a MiniMax-M3 file with its sparse-attention
+table gets reuse except one. A MiniMax-M3 file with its sparse-attention
 indexer armed, the MSA row, gets none. In the table, [GDN](../glossary.md#gdn)
 is the gated delta network recurrence of the Qwen3.5 and 3.6 hybrids, and
 a CacheList model is one whose layers each hold several caches of different
@@ -17,16 +17,16 @@ kinds, the mlx-lm class of that name.
 
 | Cache shape | Example archs | Tier |
 |-------------|---------------|------|
-| plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | block |
-| hybrid GDN, recurrent plus KV layers | qwen3.5/3.6 dense and MoE, qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | ckpt |
-| sliding-window attention | gemma3, gemma-4 including E4B and 3n, gpt-oss, SWA llama | ckpt |
-| CacheList or pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | exact |
-| MSA indexer armed | minimax-m3 indexer GGUFs | none, with a logged warning. The indexless GGUF serves through the block tier. |
+| Plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | `block` |
+| Hybrid GDN, recurrent plus KV layers | qwen3.5/3.6 dense and MoE, qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | `ckpt` |
+| Sliding-window attention | gemma3, gemma-4 including E4B and 3n, gpt-oss, SWA llama | `ckpt` |
+| CacheList or pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | `exact` |
+| MSA indexer armed | minimax-m3 indexer GGUFs | None, with a logged warning. The indexless GGUF serves through the block tier. |
 
 ## The cache layers
 
-A request passes through the layers below in order, and all of them are on
-by default. The first three serve every model, and the last two exist for
+A request passes through five layers in order, and all of them are on by
+default. The first three serve every model, and the last two exist for
 speculative and checkpoint-tier models.
 
 - Prefix layer. An in-memory LRU of post-prefill KV and hidden state. A
@@ -43,7 +43,8 @@ speculative and checkpoint-tier models.
   KV is rebuilt. A small sidecar entry therefore saves the drafter's KV
   beside the target's, so a warm hit restores both.
 - Checkpoints. Hybrid models save restore points piecewise along a prefill
-  and while generating, plus targeted ones at the end of the system prompt,  one token before the prompt end and at the predicted next-turn boundary.
+  and while generating, plus targeted ones at the end of the system prompt,
+  one token before the prompt end and at the predicted next-turn boundary.
   The system-prompt one is what lets parallel agents sharing a prompt
   restore from it, and a checkpoint's copy on the disk tier is called its
   skeleton. Because a batched prefill takes no checkpoints, prompt prefill
@@ -59,12 +60,12 @@ mislead there, because a checkpoint lookup increments the shared hit
 counters on success but records nothing on a miss, and the token totals
 include window snapshots that can never be shared.
 
-`disk_writes` counts write operations: one for each exact-format entry,
-checkpoint skeletons and drafter sidecars included, plus one for each block
-of a block shard.
+`disk_writes` counts write operations. Each exact-format entry counts one,
+checkpoint skeletons and drafter sidecars included, and a block shard counts
+one for each of its blocks.
 
-| Field | What it tells you |
-|-------|-------------------|
+| Field | Meaning |
+|-------|---------|
 | `ckpt_stores` | Prefixes saved for reuse. Still zero after a few requests on a checkpoint-tier model means nothing is being cached. |
 | `ckpt_hits`, `ckpt_matched_tokens` | Requests that warm-started from a saved prefix, with the prompt tokens they skipped. On repeat-heavy traffic matched tokens approach total prompt tokens. |
 | `ckpt_declines` | Saves the server skipped, by reason. Occasional entries are normal. All requests counted under one reason means reuse is not working for that traffic. |
@@ -74,15 +75,15 @@ of a block shard.
 | `sidecar_writes` | Draft-model cache entries saved next to their target entries. Speculative decoding only. |
 | `retire_fallback_suppressed` | Whole-sequence retirement stores skipped because the predicted next-turn render had diverged, so the entry could never match. The turn checkpoint covers them. |
 
-The server watches for both conditions and warns once per model: after
-`GMLX_APC_CKPT_TRIPWIRE` completed requests with zero stores, or after that
-many unusable matches with zero hits, with a default of 5. Either warning
+The server watches for two failures and warns once per model. One is
+`GMLX_APC_CKPT_TRIPWIRE` completed requests with zero stores, and the other
+is that many unusable matches with zero hits, with a default of 5. Either warning
 means prefix reuse is not working for that model, so file an issue with the
 `/v1/cache/stats` snapshot.
 
 ## Under kvarn KV
 
-Tier routing matches fp16 KV with one change: dense models use the exact
+Tier routing matches fp16 KV with one change. Dense models use the exact
 tier, since the 16-token block tier cannot split kvarn's 128-token records.
 Checkpoint-shaped stacks, which are the hybrid-GDN and sliding-window
 families in the reuse table whose attention head_dim is 128, 256 or 512,

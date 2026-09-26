@@ -19,85 +19,84 @@ Where to start depends on what you want:
 ## Getting started
 
 - [Installation](installation.md): Homebrew, uv and pip, the optional
-  features, upgrading and removal
-- [Quickstart](quickstart.md): a first model, the server, a request and a
-  connected client
-- [Migrating from other tools](migrating.md): what carries over from
-  llama.cpp, Ollama and LM Studio
+  features, upgrading and removal.
+- [Quickstart](quickstart.md): A first model, the server, a request and a
+  connected client.
+- [Migrating from other tools](migrating.md): What carries over from
+  llama.cpp, Ollama and LM Studio.
 
 ## Serving
 
-- [Configuration](config.md): `gmlx.yaml`, its models, its profiles and
-  how a request gets its settings
-- [Agents and chat apps](launch.md): Claude Code, other coding agents and
-  Open WebUI, set up by `gmlx launch`
-- [Menu bar app](menubar.md): server status and controls in the macOS menu
-  bar
-- [Speech, embeddings and rerank](services.md): the services a server can
-  host beside chat models
-- [RAG pipelines](rag.md): retrieval with the embeddings and rerank
-  services
-- [Structured decisions](decisions.md): a probability for each answer to a
-  fixed set of questions
+- [Configuration](config.md): `gmlx.yaml`, its models, its profiles and how a
+  request gets its settings.
+- [Agents and chat apps](launch.md): Claude Code, other coding agents and Open
+  WebUI, set up by `gmlx launch`.
+- [Menu bar app](menubar.md): Server status and controls in the macOS menu
+  bar.
+- [Speech, embeddings and rerank](services.md): The services a server can host
+  beside chat models.
+- [RAG pipelines](rag.md): Retrieval with the embeddings and rerank services.
+- [Structured decisions](decisions.md): A probability for each answer to a
+  fixed set of questions.
 
 ## Clients
 
-- [Chat](chat.md): the terminal chat client, its commands, sessions and
-  themes
-- [Voice chat](talk.md): talking to a model with `gmlx talk`
-- [Assistant](assistant.md): tools and long-term memory for chat, voice
-  and served models
+- [Chat](chat.md): The terminal chat client, its commands, sessions and
+  themes.
+- [Voice chat](talk.md): Talking to a model with `gmlx talk`.
+- [Assistant](assistant.md): Tools and long-term memory for chat, voice and
+  served models.
 
 ## Models
 
-- [Supported architectures](arch-coverage.md): the GGUF architectures gmlx
-  loads, with their caveats
-- [Vision and audio](vlm.md): multimodal models and their `mmproj` files
-- [Models larger than memory](streaming.md): mixture-of-experts models that
-  stream their experts from disk
-- [LoRA adapters](lora.md): training an adapter and serving several on one
-  base model
-- [Distillation](distill.md): teaching a small model a document or a
-  larger model's behavior
+- [Supported architectures](arch-coverage.md): The GGUF architectures gmlx
+  loads, with their caveats.
+- [Vision and audio](vlm.md): Multimodal models and their `mmproj` files.
+- [Models larger than memory](streaming.md): Mixture-of-experts models that
+  stream their experts from disk.
+- [LoRA adapters](lora.md): Training an adapter and serving several on one
+  base model.
+- [Distillation](distill.md): Teaching a small model a document or a larger
+  model's behavior.
 
 ## Performance
 
-- [Performance tuning](performance.md): what makes a model fast, measuring,
-  and choosing a quant
-- [Speculative decoding](speculative-decoding.md): faster decoding with a drafter,
-  with the same output
-- [Prompt cache](prompt-cache.md): skipping prefill for prompts the server
-  has seen
-- [Concurrent requests](concurrency.md): batching, admission pacing and shared
-  prompts
-- [Memory and the KV cache](memory.md): how much memory a model and its
-  context take
-- [KV cache quantization](kv-quantization.md): storing the context in fewer
-  bits
-- [Benchmarks](benchmarks.md): gmlx against llama.cpp on the same files,
-  with the method
+- [Performance tuning](performance.md): What makes a model fast, measuring,
+  and choosing a quant.
+- [Speculative decoding](speculative-decoding.md): Faster decoding with a
+  drafter, with the same output.
+- [Prompt cache](prompt-cache.md): Skipping prefill for prompts the server has
+  seen.
+- [Concurrent requests](concurrency.md): Batching, admission pacing and shared
+  prompts.
+- [Memory and the KV cache](memory.md): How much memory a model and its
+  context take.
+- [KV cache quantization](kv-quantization.md): Storing the context in fewer
+  bits.
+- [Benchmarks](benchmarks.md): gmlx against llama.cpp on the same files, with
+  the method.
 
 ## Help
 
-- [Troubleshooting](troubleshooting.md): `gmlx doctor`, common failures,
-  and where gmlx keeps its files
-- [Glossary](glossary.md): the terms these pages use
+- [Troubleshooting](troubleshooting.md): `gmlx doctor`, common failures, and
+  where gmlx keeps its files.
+- [Glossary](glossary.md): The terms these pages use.
 
 ## Reference
 
-- [CLI reference](cli.md): every command and flag
-- [Configuration](config.md): every key of `gmlx.yaml`
-- [Family defaults](family-defaults.md): the sampling defaults and intents
-  of each model family
-- [HTTP API](api.md): the endpoints and request features
-- [Environment variables](env-vars.md): the variables a user can set
-- [Python API](python.md): using gmlx from Python
+- [CLI reference](cli.md): Every command and flag.
+- [Configuration](config.md): Every key of `gmlx.yaml`.
+- [Family defaults](family-defaults.md): The sampling defaults and intents of
+  each model family.
+- [HTTP API](api.md): The endpoints and request features.
+- [Environment variables](env-vars.md): The variables a user can set.
+- [Python API](python.md): Using gmlx from Python.
 
 ## Development
 
-- [Internals](internals/README.md): how gmlx works, for contributors
-- [Adding a GGUF architecture](internals/adding-architectures.md): what
-  supporting a new model family involves
-- [Contributing](../CONTRIBUTING.md): development setup, tests and commit
-  style
-- [Changelog](../CHANGELOG.md): what changed in each release
+- [Internals](internals/README.md): How gmlx works, for contributors.
+- [Adding a GGUF architecture](internals/adding-architectures.md): What
+  supporting a new model family involves.
+- [Contributing](../CONTRIBUTING.md): Development setup, tests and commit
+  style.
+- [Changelog](../CHANGELOG.md): What changed in each release.

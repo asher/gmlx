@@ -1,8 +1,8 @@
 # Migrating from other tools
 
 gmlx runs the same GGUF files as llama.cpp, LM Studio and Ollama, so a model
-needs no conversion. The sections below map the commands, flags and
-settings of each tool to their gmlx equivalents.
+needs no conversion. Most commands, flags and settings of those tools have
+a gmlx equivalent, and an LM Studio library runs without a new download.
 
 ## llama.cpp
 

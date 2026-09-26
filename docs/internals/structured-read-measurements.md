@@ -19,10 +19,10 @@ commands that measure both again.
 
 | Item | Value |
 |------|-------|
-| machine | Apple M3 Max, 128 GB, macOS 26.6 |
-| model | diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and Q8_0 in the last two sections |
-| canvas | 64, the `server.systemone.canvas` default |
-| peak memory | 19.7 GB over the whole bench |
+| Machine | Apple M3 Max, 128 GB, macOS 26.6. |
+| Model | diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and Q8_0 in the last two sections. |
+| Canvas | 64, the `server.systemone.canvas` default. |
+| Peak memory | 19.7 GB over the whole bench. |
 
 `scripts/structured_read_bench.py` loaded the model in process and timed
 each arm with a device synchronization on both sides. Every arm is the
@@ -115,23 +115,24 @@ request below, and every thought used the whole budget.
 
 | Request | Denoise steps | Median ms |
 |---------|---------------|-----------|
-| the e2e ticket, one question | 48 | 6951 |
+| The e2e ticket, one question | 48 | 6951 |
 | `ticket-1`, the same ticket with five questions | 9 | 1452 |
 | `ticket-5` | 11 | 1666 |
 | `travel-vienna-bratislava` | 6 | 947 |
 | `allergen-pad-thai` | 7 | 1061 |
 | `allergen-risotto` | 8 | 1193 |
 
-The thought on the e2e script's one-question ticket never converged and
-ran to the cap of 48 steps. The others stopped after 6 to 11 steps,
-including the same ticket asked five questions, so the cost depends on the
-whole prompt and not on the state alone. The last four are the requests
-that thought on Q4_K_M under
-[Thinking on mixed requests](#thinking-on-mixed-requests).
+The thought on the e2e script's one-question ticket never converged and ran
+to the cap of 48 steps. The others stopped after 6 to 11 steps, including
+the same ticket asked five questions, so the cost depends on the whole
+prompt and not on the state alone. The last four are the requests that
+thought on Q4_K_M under [Thinking on mixed
+requests](#thinking-on-mixed-requests).
 
 ## Whole decisions
 
-In process, on the 472-token prompt with the three-question schema:
+In process, on the 472-token prompt with the three-question schema, whole
+decisions took these times.
 
 | Samples | Reads | Decision ms |
 |---------|-------|-------------|
@@ -150,11 +151,11 @@ and we have a demo at noon."
 
 | Request | Reads | Prompt tokens | Wall ms |
 |---------|-------|---------------|---------|
-| the ticket, `samples` auto | 4 | 97 | 359 |
-| the ticket, 4 samples | 4 | 97 | 246 |
-| four questions in two stages, one skipped | 5 | 214 | 518 |
-| twelve yes or no questions, indexed format | 1 | 269 | 395 |
-| the ticket with `think: 64` | 1 | 167 | 6582 |
+| The ticket, `samples` auto | 4 | 97 | 359 |
+| The ticket, 4 samples | 4 | 97 | 246 |
+| Four questions in two stages, one skipped | 5 | 214 | 518 |
+| Twelve yes or no questions, indexed format | 1 | 269 | 395 |
+| The ticket with `think: 64` | 1 | 167 | 6582 |
 
 ## Question wording
 
@@ -167,13 +168,13 @@ reads answered yes.
 
 | Prompt | Right | Yes answers |
 |--------|-------|-------------|
-| the route's prompt, subject only in the state, such as "Does the dish usually contain sesame?" | 28 of 32 | 20 |
-| the same, with the state as plain text instead of JSON | 26 of 32 | 20 |
-| the route's prompt, subject named in the question | 31 of 32 | 15 |
-| the state first, then the route's system text | 29 of 32 | 17 |
-| the route's system prompt, then the state with the question restated | 29 of 32 | 17 |
-| a chat prompt with the question alone, read at the first answer position | 31 of 32 | 15 |
-| the same chat prompt under the opening paragraph of the route's system text | 31 of 32 | 15 |
+| The route's prompt, subject only in the state, such as "Does the dish usually contain sesame?" | 28 of 32 | 20 |
+| The same, with the state as plain text instead of JSON | 26 of 32 | 20 |
+| The route's prompt, subject named in the question | 31 of 32 | 15 |
+| The state first, then the route's system text | 29 of 32 | 17 |
+| The route's system prompt, then the state with the question restated | 29 of 32 | 17 |
+| A chat prompt with the question alone, read at the first answer position | 31 of 32 | 15 |
+| The same chat prompt under the opening paragraph of the route's system text | 31 of 32 | 15 |
 
 The system text makes no difference on its own, and moving the state ahead
 of the questions recovers one read at most. A question that names its
@@ -197,9 +198,9 @@ fixed question set does, and every read and thought uses seed 42.
 
 | Method | Yes or no right | Yes answers, 38 true | Choice right | Log loss | Seconds per item |
 |--------|-----------------|----------------------|--------------|----------|------------------|
-| the default, `samples` auto | 66 of 76 | 40 | 23 of 26 | 0.44 | 0.29 |
+| The default, `samples` auto | 66 of 76 | 40 | 23 of 26 | 0.44 | 0.29 |
 | `samples: 4` | 67 of 76 | 39 | 23 of 26 | 0.45 | 0.25 |
-| full-vocabulary unembedding, 4 samples | 67 of 76 | 39 | 23 of 26 | 0.45 | 0.28 |
+| Full-vocabulary unembedding, 4 samples | 67 of 76 | 39 | 23 of 26 | 0.45 | 0.28 |
 | `steps: 4`, 4 samples | 67 of 76 | 35 | 23 of 26 | 0.61 | 0.64 |
 | `think: 64` | 71 of 76 | 35 | 25 of 26 | 0.28 | 1.60 |
 | `think: "auto"`, threshold 0.8, budget 64 | 69 of 76 | 39 | 26 of 26 | 0.37 | 0.65 |
@@ -219,19 +220,20 @@ every item, at 40 percent of the time of the full thought. A few answers
 stay wrong with a thought, such as sesame in pad thai, so they come from
 the model's knowledge and not from the read.
 
-The Q8_0 file, 26.9 GB, gives the same result. It gets 88 right by
+A Q8_0 file of 26.9 GB gives the same result. It gets 88 right by
 default, 93 with `think: "auto"` and 96 with a thought on every item, and
 12 of its 14 wrong answers are also wrong on Q4_K_M. A larger quantization
 does not fix the answers a read gets wrong.
 
 ## Thinking on mixed requests
 
-The labeled set asks one question per request. Twenty-eight requests
-built on the questions of the [decisions.md examples](../decisions.md#examples)
-and five support tickets with five questions each show what
-`think: "auto"` does on requests with several questions. Each request was
-decided with `think: 0` and with `think: "auto"` at seed 42, and the Q4_K_M
-times are the mean of one run before and one after the Q8_0 run.
+The labeled set asks one question per request. Twenty-eight requests built
+on the questions of the examples in [Structured
+decisions](../decisions.md#examples) and five support tickets with five
+questions each show what `think: "auto"` does on requests with several
+questions. Each request was decided with `think: 0` and with `think: "auto"`
+at seed 42, and the Q4_K_M times are the mean of one run before and one
+after the Q8_0 run.
 
 | Quantization | Requests that thought | Mean with `think: 0` | Mean with `"auto"` | Mean of a request that thought | Answers changed |
 |--------------|-----------------------|----------------------|--------------------|--------------------------------|-----------------|

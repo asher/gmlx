@@ -20,7 +20,8 @@ A launch has three steps:
 
 1. It asks the server for its models, aliases and default model. A tool
    that offers a model menu gets these as its choices.
-2. It writes the tool's configuration, in one of the three styles below.
+2. It writes the tool's configuration by injection, merge or environment
+   variables.
 3. It runs the tool in its own place, already connected to the server.
 
 `--config-only` stops after the second step and prints the command that
@@ -51,11 +52,11 @@ The three styles differ in which files they touch:
 | `open-webui` | A chat app for the browser | Environment | `OPENAI_API_BASE_URL` and related variables |
 | `dsh` | DeepSeek Harness, an agent app for the browser | Injection | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
 
-`--config-path` moves the written configuration. For each client it names
-what the table's last column names: a file for opencode, hermes and dsh, a
-directory for pi, omp and aichat, the goose `config.yaml`, the
-`XDG_CONFIG_HOME` directory for elia, and the data directory for Open
-WebUI.
+`--config-path` moves the written configuration to the path you give,
+which takes the place of the location that the table lists for the client.
+It names a file for opencode, hermes and dsh, and a directory for pi, omp
+and aichat. For goose it names the `config.yaml`, for elia the
+`XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
 
 ## Starting the server
 
@@ -88,8 +89,8 @@ models the server loads at start is under
 gets the server's default model. An id with a profile, such as
 `--model qwen3.8-27b-ud-q6@coding`, applies that profile to every request
 from the tool. `launch` checks the id against the models that the server
-lists. Four clients cannot start without a model: `claude-code`, `dsh`,
-`goose` and `hermes`. For them, pass `--model` or set
+lists. The `claude-code`, `dsh`, `goose` and `hermes` clients cannot start
+without a model, so pass `--model` for them or set
 [`server.defaults.model`](config.md#serverdefaultsmodel). `dsh` also starts
 when the server has exactly one chat model.
 
@@ -112,18 +113,18 @@ setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
-| `opencode` | `options.apiKey` in the injected file |
-| `pi` | `apiKey` in the merged provider |
+| `opencode` | `options.apiKey` in the injected file. |
+| `pi` | `apiKey` in the merged provider. |
 | `omp` | Nowhere, because omp has no setting for it. `launch` prints a note, and you set up omp's authentication yourself. |
-| `hermes` | `providers.custom.api_key` in the injected file |
-| `goose` | `OPENAI_API_KEY` in the environment only, never in the file |
-| `claude-code` | `ANTHROPIC_AUTH_TOKEN` in the environment |
-| `aichat`, `elia` | `api_key` in the injected file |
-| `open-webui` | `OPENAI_API_KEY` in the environment only |
-| `dsh` | `GMLX_API_KEY` in the environment only |
+| `hermes` | `providers.custom.api_key` in the injected file. |
+| `goose` | `OPENAI_API_KEY` in the environment only, never in the file. |
+| `claude-code` | `ANTHROPIC_AUTH_TOKEN` in the environment. |
+| `aichat`, `elia` | `api_key` in the injected file. |
+| `open-webui` | `OPENAI_API_KEY` in the environment only. |
+| `dsh` | `GMLX_API_KEY` in the environment only. |
 
-A server without a key still gets a placeholder key, because some tools
-refuse to run without one.
+Without a key on the server, each tool still gets a placeholder key,
+because some tools refuse to run without one.
 
 ## The clients
 
@@ -134,8 +135,8 @@ Claude Code uses the server's Anthropic API. `launch` sets
 `ANTHROPIC_AUTH_TOKEN`, and it removes an inherited `ANTHROPIC_API_KEY` so
 that the token takes effect. It does not change `~/.claude`.
 
-Claude Code sends a very long system prompt and often rewrites the start of
-its requests, so processing the prompt takes most of the time of a turn.
+Its system prompt is very long, and it often rewrites the start of its
+requests, so processing the prompt takes most of the time of a turn.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
 a Mac with fast prefill.
 
@@ -191,16 +192,16 @@ history is stored in `~/.open-webui`, or in the folder that
 `WEBUI_AUTH=false` to its environment before the first launch on a new
 data directory.
 
-Open WebUI gets a feature for each service that the server runs, as the
-[services](services.md) page describes:
+Open WebUI gets a feature for each service that the server runs, as
+[Speech, embeddings and rerank](services.md) describes:
 
 | Server runs | Open WebUI gets |
 |-------------|-----------------|
 | Chat models only | Chat. Its document embedder points at the server, so it starts without downloading one. |
-| `embeddings` | Document search, as [RAG pipelines](rag.md) describes |
-| `rerank` | Hybrid search with the server's reranker at `/v1/rerank` |
-| `stt` | Speech input through `/v1/audio/transcriptions` |
-| `tts` | Spoken replies through `/v1/audio/speech` |
+| `embeddings` | Document search, as [RAG pipelines](rag.md) describes. |
+| `rerank` | Hybrid search with the server's reranker at `/v1/rerank`. |
+| `stt` | Speech input through `/v1/audio/transcriptions`. |
+| `tts` | Spoken replies through `/v1/audio/speech`. |
 
 ### dsh
 
@@ -220,13 +221,13 @@ in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
 different default model or an edit to the gmlx providers. Run `launch`
 again with `--model` to change the default.
 
-The file lists the server twice. Under `gmlx (local)`, the server and its
+Two entries in the file point at the server. Under `gmlx (local)`, the server and its
 profiles decide whether a model thinks. Under `gmlx (thinking off)`, the
 same models answer without thinking, and dsh writes its session titles
 there with the default model.
 
-The web app runs on port 3080, or on 3081 when the gmlx server uses 3080,
-and it opens a browser. It starts in
+Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
+the launch opens a browser. It starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
 launch from, and Add workspace in the app opens a project folder. The app
 compacts a conversation by itself only when the model's context is large
@@ -235,8 +236,8 @@ not. Otherwise a conversation still compacts when the server reports that a
 request no longer fits, as
 [Limits and back-pressure](api.md#limits-and-back-pressure) describes.
 
-The same file works with dsh's `headless` profile. This command answers one
-task about the current folder and exits:
+dsh's `headless` profile works with the same file. This command answers
+one task about the current folder and exits:
 
 ```sh
 GMLX_API_KEY=gmlx dsh --profile headless \

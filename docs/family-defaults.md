@@ -3,20 +3,21 @@
 gmlx reads each model's family from its GGUF header and starts every
 request from the sampling values that the family's publisher recommends.
 Some families also publish other operating points, which gmlx offers as
-intents such as `@coding` and `@reasoning-high`. This table lists both for
-every family, as `gmlx profiles` prints them.
+intents such as `@coding` and `@reasoning-high`. `gmlx profiles` prints
+both for every family, and with a model id it prints that model's
+resolved values.
 
 ```sh
-gmlx profiles              # this table
-gmlx profiles qwen3.8-27b-ud-q6  # the resolved values of one configured model
+gmlx profiles                     # every family and its intents
+gmlx profiles qwen3.8-27b-ud-q6   # the resolved values of one configured model
 ```
 
-The second column lists the GGUF architectures of each family. An intent
+Each family covers the GGUF architectures in the second column. An intent
 is shown with the family values it keeps, and an intent that a family does
 not define gives the family defaults. The reasoning level goes by three
-names. It is `reasoning_effort` for gpt-oss, Hy3 and Hy4, `thinking_effort`
-for Kimi, and `reasoning_strength` for Muse. Each value comes from the model card
-cited in `gmlx/gen/profiles.py`.
+names. It is `reasoning_effort` for gpt-oss, Hy3 and Hy4,
+`thinking_effort` for Kimi, and `reasoning_strength` for Muse. Each value
+comes from the model card cited in `gmlx/gen/profiles.py`.
 
 | Family | GGUF architectures | Base values | Intents |
 |--------|-------------|--------------------|----------------|
@@ -40,8 +41,8 @@ cited in `gmlx/gen/profiles.py`.
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3 top_p=0.95; `@creative`: temperature=1.0 top_p=0.95 min_p=0.05; `@instruct`: temperature=0.7 top_p=0.95 |
 
-The `default` row applies to architectures that no family claims. How
-the defaults combine with your own profiles is in
-[How a request gets its settings](config.md#how-a-request-gets-its-settings),
-and the `family` key of a model entry replaces the detected family, as
-[Configuration](config.md#modelsfamily) describes.
+The `default` row applies to architectures that no family claims.
+[How a request gets its settings](config.md#how-a-request-gets-its-settings)
+explains how the defaults combine with your own profiles, and
+[`models.*.family`](config.md#modelsfamily) replaces the detected family of
+one model.

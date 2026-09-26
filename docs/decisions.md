@@ -8,14 +8,15 @@ reply text to parse. The route is also served at `/systemone`.
 
 ## What the endpoint does
 
-A request carries a state, which is the text that the questions are about,
-and questions whose answers are known in advance: yes or no, one of several
-options, or one of several ordered levels. The response gives a probability
-distribution over each question's answers, so your code can branch on a
-number. A triage tool, for example, can page someone only when an outage is
-more than 90 percent likely and send the uncertain tickets to a person. For
-a written answer, or an answer that cannot be listed in advance, use chat
-completions instead.
+A request carries a state, which is the text that the questions are
+about, and questions whose answers are known in advance. Each question
+is yes or no, one of several options, or one of several ordered levels.
+The response gives a probability distribution over each question's
+answers, so your code can branch on a number. A triage tool, for
+example, can page someone only when an outage is more than 90 percent
+likely and send the uncertain tickets to a person. For a written answer,
+or an answer that cannot be listed in advance, use chat completions
+instead.
 
 The request and response follow the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide).
@@ -126,8 +127,8 @@ rounded. The exact numbers depend on the model file.
 }
 ```
 
-The `state` is required. It can be a string or any JSON value, and a value
-that is not a string reaches the model as its JSON text.
+A request must carry `state`. It can be a string or any JSON value, and a
+value that is not a string reaches the model as its JSON text.
 
 ## Reading the answers
 
@@ -412,11 +413,10 @@ when its state is unlike the ones you tested.
 | 504 | The decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s), counted from when it left the queue. The type is `timeout`. |
 | 500 | The engine failed, with the error type `server_error`. |
 
-The model is text only, so the server refuses a request with `images`, and
-it refuses a multipart body. A
-`profile` field selects the [profile](config.md#profiles) that `model`
-resolves with. `seed`, 42 by default, sets the random tokens that each read
-starts from.
+The model is text only, so the server refuses a request with `images`,
+and it refuses a multipart body. A `profile` field selects the
+[profile](config.md#profiles) that `model` resolves with. `seed`, 42 by
+default, sets the random tokens that each read starts from.
 
 A decision holds the model from its first read to its last, so a chat
 request to the same model waits behind it. Before the server queues a
@@ -442,6 +442,7 @@ The questions and their allowed answers become the system prompt, and the
 state becomes the user message. The canvas is seeded with an answer
 template that writes each question id with its answer, with a random token
 at each answer position. One denoise step then gives the distribution over
-the labels of each question. This is a [structured read](glossary.md#structured-read), and
+the labels of each question. This is a
+[structured read](glossary.md#structured-read), and
 [Structured reads](internals/structured-reads.md) describes the mechanism
 for contributors.

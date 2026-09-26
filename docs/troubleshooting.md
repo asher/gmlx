@@ -1,14 +1,14 @@
 # Troubleshooting
 
-Most failures in a new setup have a known cause and a fix. They are grouped
-here by the command that shows them, followed by where gmlx keeps its logs
-and files.
+Most failures in a new setup have a known cause and fix, grouped here by
+the command that shows them. Where gmlx keeps its logs and files comes
+last.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
 kernels, the config and its model files, the background server, the login
 items, the optional extras, ffmpeg, the Hugging Face token, memory and
-disk, and it names the fix for each check that fails. A coding agent or
-chat app that does not connect is covered with its client in
+disk, and it names the fix for each check that fails. For a coding agent
+or chat app that does not connect, read its entry under
 [The clients](launch.md#the-clients).
 
 - [Installing](#installing)
@@ -43,10 +43,10 @@ terminal.
 
 Voice chat stops with `voice chat requires the optional talk extra`, or
 speech on the server or the assistant's MCP tools report a missing extra in
-the same way. These features come
-in [optional extras](installation.md#optional-features). The message gives
-the install command for your kind of install, so run it and start the
-command again.
+the same way. These features come in
+[optional extras](installation.md#optional-features). The message gives the
+install command for your kind of install, and the feature works once that
+command finishes.
 
 ## Downloading and loading models
 
@@ -67,21 +67,20 @@ pass `--to DIR` for another volume, or pass `--force` to skip the check.
 The pull stops with `stale partial download: <file>.part has N bytes but the
 remote file is M`. The repo replaced the file after the earlier attempt, so
 the partial bytes belong to an older version. Delete the `.part` file it
-names and run the pull again.
+names, and the next pull fetches that file from the start.
 
 ### A gated or private repo will not download
 
 `gmlx validate` or `gmlx pull` gets a 401 or 403 from Hugging Face. gmlx
 sends the token from `HF_TOKEN`, else `HUGGING_FACE_HUB_TOKEN`, else the
 one that `hf auth login` stored. Accept the repo's terms on its Hugging
-Face page, make sure one of those tokens has access, and run the command
-again.
+Face page, and check that one of those tokens has access to it.
 
 ### A load says the file is incomplete or truncated
 
 A load stops with `incomplete split GGUF: N/M shard(s) missing`, or with
 `truncated GGUF` and the size the file should have. The download did not
-finish. Run the same `gmlx pull` again, which fetches only what is missing.
+finish, and the same `gmlx pull` fetches only what is missing.
 
 ### The architecture is not supported
 
@@ -112,7 +111,7 @@ is a folded drafter.
 `gmlx validate` prints a `weights: Hadamard-folded` line for such a file.
 Read that line before you download, because the `loadable` verdict below it
 does not cover the fold. Pick an unfolded quant of the same model instead.
-[Hadamard-folded GGUFs](internals/hadamard-fold.md) describes the file contract.
+The file contract is in [Hadamard-folded GGUFs](internals/hadamard-fold.md).
 
 ## Starting the server
 
@@ -121,9 +120,10 @@ does not cover the fold. Pick an unfolded quant of the same model instead.
 Started in the background with no config in the
 [default locations](config.md#where-gmlx-looks), `gmlx serve` prints
 `note: no config found` and serves a discovery scan of the directory you
-started it from, which may hold no GGUFs. Run [`gmlx init --models-dir DIR`](config.md#create-the-file)
-to write a config, or pass `--models-dir DIR`. `gmlx sync-models` has no such
-fallback and stops with `no config found in the default locations`.
+started it from, which may hold no GGUFs. Run
+[`gmlx init --models-dir DIR`](config.md#create-the-file) to write a
+config, or pass `--models-dir DIR`. `gmlx sync-models` has no such fallback
+and stops with `no config found in the default locations`.
 
 ### `gmlx status` reports 0 models served
 
@@ -181,7 +181,7 @@ turn on a long prompt is prefill instead, which the
 ### A request names a model the server does not have
 
 The server answers 404 of type `model_not_found`, with the ids it serves in
-`available_models`. The server never downloads on a request. Use an id from
+`available_models`, and it never downloads on a request. Use an id from
 `gmlx list`, or fetch the model with `gmlx pull`, which registers it when it
 lands under a `model_dirs` folder. A file saved elsewhere with `--to` needs
 `gmlx sync-models` or a [`models`](config.md#models) entry.
@@ -249,9 +249,9 @@ with `cannot fit:` and the numbers. A context that grows past memory
 during the reply stops with `out of GPU memory mid-run`. Both show how much
 the model needs and what the GPU may use.
 
-The weights plus the KV cache are more than the GPU may use.
-[Memory and the KV cache](memory.md) shows how to estimate both and which
-settings reduce them. The usual fixes are a
+In each case, the weights plus the KV cache need more memory than the GPU
+may use. [Memory and the KV cache](memory.md) shows how to estimate both
+and which settings reduce them. The usual fixes are a
 [quantized KV cache](kv-quantization.md), a smaller context, a smaller
 quant, or [streaming](streaming.md) for a MoE model larger than memory. On a
 server with several models, lower

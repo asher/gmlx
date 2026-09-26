@@ -37,16 +37,15 @@ model's own forward on eight tokens before the pass, and again before
 logits refuses the run, so a model that changes its logits in a way the
 head does not carry never reaches the cache.
 
-`step` is the largest halving tier of 4096 positions with `step * V *
-bytes` under `--logits-cap-gb`, from `gmlx.gen.prefill_plan`. The first
-sub-chunk of every pass runs after a peak-memory reset, and the measured
-bytes per
+`step` is the largest halving tier of 4096 positions with `step * V * bytes`
+under `--logits-cap-gb`, from `gmlx.gen.prefill_plan`. The first sub-chunk
+of every pass runs after a peak-memory reset, and the measured bytes per
 V-element replace the budget when they exceed it. The step is then
 re-derived against the unchanged cap and a second sub-chunk confirms the
-peak fits. A second miss refuses the pass with the measured constant in
-the message, and both constants land in `progress.json` and the manifest.
-Bytes per V-element is a ratio of the head's own live set, so shrinking
-the cap alone could never change what the probe measures.
+peak fits. A second miss refuses the pass with the measured constant in the
+message, and both constants land in `progress.json` and the manifest. Bytes
+per V-element is a ratio of the head's own live set, so shrinking the cap
+alone could never change what the probe measures.
 
 The trunk chunk is bounded by attention activations and by the headroom
 `gmlx.gen.prefill_decay` reports after the buffer cache is cleared, with a
@@ -69,7 +68,7 @@ pair. A chunk with no boundaries holds 12. At the default 512 positions
 and a 262144-token student vocabulary that is 3.2 GB, which `--chunk`
 scales linearly.
 
-The closed form takes the cotangent of the logits back to the hidden
+This closed form takes the cotangent of the logits back to the hidden
 states through the dequantized head weight. A Hadamard-folded head
 rotates its input before that weight, so the closed form also takes the
 cotangent back through the rotation, in the MLX-op form that has a
@@ -96,7 +95,8 @@ the backward recompute, so the recompute sees the mask the forward drew.
 The draw evaluates an array, which the eager distill loop allows and a
 compiled step does not, so `gmlx train` refuses dropout with
 checkpointing instead of replaying.
-The hidden-state map of `--hs` draws its initial weights from its own
+
+For `--hs`, the hidden-state map draws its initial weights from its own
 key, so building it at the first step of a run or a resume leaves the
 run's random stream where it was.
 
@@ -136,7 +136,7 @@ student's nats per token fell from 4.41 to 0.70, against the teacher's
 
 The guide's settings come from a schema task on a Qwen3.6-27B
 teacher at Q8 and a Qwen3.5-9B student at Q6_K, measured by the served
-pass rate on held-out questions. Each figure below is one served sample
+pass rate on held-out questions. Each figure here is one served sample
 of one adapter. Serving the same adapter again moves a pass rate by
 three or four items in a hundred, so differences of that size between
 adapters are sampling.
@@ -175,10 +175,9 @@ third of the gap, and 0.050 on the kinds never trained on. The
 same-tokenizer student reached 0.882 and 0.925 on the same slices.
 
 The adapter answered the single-table questions and failed the joins on
-column names the schema does not have, so the alignment carried the
-shape of the replies and only part of the document. The alignment
-statistics for the pair read an own-group fraction of 0.83, a
-singleton fraction of 0.20 and a shared-boundary fraction of 0.47, which
-is where the tokenizations diverge. At the
-positions the document moved the student's nats per token fell from
+column names the schema does not have, so the alignment carried the shape of
+the replies and only part of the document. The alignment statistics for the
+pair read an own-group fraction of 0.83, a singleton fraction of 0.20 and a
+shared-boundary fraction of 0.47, which is where the tokenizations diverge.
+At the positions the document moved the student's nats per token fell from
 8.21 to 0.80.

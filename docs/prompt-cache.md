@@ -1,8 +1,8 @@
 # Prompt cache
 
 The prompt cache lets the server skip prefill for the start of a prompt
-that it has seen before. This page covers how to turn it on, how much each
-model family can reuse, and the optional cache tier on the SSD.
+that it has seen before. It is off by default, reuses more or less of a
+prompt depending on the model family, and can keep entries on the SSD.
 
 Agents and long chats gain the most, because they send the same system
 prompt and history again on every turn. With the cache, a 32K-token
@@ -29,7 +29,7 @@ server:
 block in a profile or in a model's `overrides` changes them for some
 models. The server chooses the block size and the size of the pool for
 each model. `GET /v1/cache/stats` reports the hits, the stores and the
-other counters, and [API reference](api.md#endpoints) lists it.
+other counters, as [Endpoints](api.md#endpoints) lists.
 
 ## What each family reuses
 
@@ -76,8 +76,8 @@ server:
     disk: {path: ~/.cache/gmlx/apc, max_gb: 100}
 ```
 
-The [`cache.disk`](config.md#cachedisk) keys set its place and its size,
-and the server removes entries to keep the tier within that size.
+Its place and size are the [`cache.disk`](config.md#cachedisk) keys, and
+the server removes entries to keep the tier within that size.
 
 ## What a hit restores
 

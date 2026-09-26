@@ -11,7 +11,7 @@ file:
 | Text | `gmlx chat --assistant`. | On your Mac, as you. |
 | API | A served assistant id under `server.assistants`. | On the server host. |
 
-The assistant suits short tasks, such as looking something up, chaining a
+Short tasks suit the assistant, such as looking something up, chaining a
 few tool calls, writing a note or remembering a fact. A turn ends when the
 model answers, and no work continues afterwards. The coding agents that
 `gmlx launch` connects have loops of their own and use the server only for
@@ -79,8 +79,8 @@ exist.
 ## Tool examples
 
 Every stdio or streamable HTTP MCP server is configured in the same way.
-Each example below is a complete `assistant` block, and the first two need
-no account or key.
+Each example is a complete `assistant` block, and the first two need no
+account or key.
 
 ### Web search without an API key
 
@@ -110,7 +110,7 @@ assistant:
 
 ### Web search with an API key
 
-The official Brave server gives richer results with a free API key, which
+Brave's official server gives richer results with a free API key, which
 reaches it through `env`:
 
 ```yaml
@@ -257,9 +257,8 @@ answer joins the text of every round. A stream carries the reasoning of
 the model and a comment line such as `: assistant using NAME` for each
 tool, which also keeps the connection alive.
 
-The sampling fields and `stop` of the request apply to every round, and
-`response_format` does not, because it would stop the model from calling
-tools. `max_tokens` limits each round and defaults to 4096, and
+Every round uses the sampling fields and `stop` of the request, but not
+`response_format`, because it would stop the model from calling tools. `max_tokens` limits each round and defaults to 4096, and
 `max_completion_tokens` wins over it. The reported usage adds up the
 completion tokens of all rounds and gives the prompt tokens of the last
 round.

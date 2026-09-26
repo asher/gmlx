@@ -24,8 +24,8 @@ are never unloaded to make room for chat models, so indexing documents and
 chatting do not push each other out. The requests of one service run one at
 a time, alongside the generation of chat models.
 
-The `model` field of a request can be left out, can be `default`, or can be
-a name that OpenAI clients commonly send. All of these reach the configured
+A request can leave out its `model` field, set it to `default`, or send a
+name that OpenAI clients commonly send. All of these reach the configured
 model, as does the configured model's own alias, repository id or path.
 Any other name gets a 400, so a client cannot make the server download a
 model. `/v1/models` lists each running service under the first name in its
@@ -51,19 +51,19 @@ start it.
 `server.stt` adds `POST /v1/audio/transcriptions`, which turns speech into
 text with [mlx-whisper](https://pypi.org/project/mlx-whisper/). Whisper
 models are not GGUF files, so the server loads them in MLX format. The
-value is an alias from this table, a Hugging Face repository in
-MLX-Whisper format, or a local folder with a converted model, and `true`
-selects `whisper-turbo`:
+value is an alias, a Hugging Face repository in MLX-Whisper format, or a
+local folder with a converted model, and `true` selects `whisper-turbo`.
+The aliases are these:
 
 | Alias | Repository | Notes |
 |-------|------------|-------|
-| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | The default, with large-v3 quality at about six times its speed |
-| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | A 4-bit version, about 600 MB |
-| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | The full large-v3 model |
-| `whisper-medium` | `mlx-community/whisper-medium-mlx` | Smaller and faster |
-| `whisper-small` | `mlx-community/whisper-small-mlx` | Smaller and faster |
-| `whisper-base` | `mlx-community/whisper-base-mlx` | Smaller and faster |
-| `whisper-tiny` | `mlx-community/whisper-tiny` | The smallest and fastest |
+| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | The default, with large-v3 quality at about six times its speed. |
+| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | A 4-bit version, about 600 MB. |
+| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | The full large-v3 model. |
+| `whisper-medium` | `mlx-community/whisper-medium-mlx` | Smaller and faster. |
+| `whisper-small` | `mlx-community/whisper-small-mlx` | Smaller and faster. |
+| `whisper-base` | `mlx-community/whisper-base-mlx` | Smaller and faster. |
+| `whisper-tiny` | `mlx-community/whisper-tiny` | The smallest and fastest. |
 
 The server downloads the configured model from Hugging Face on first use
 when it is not already local. Naming it in the configuration file allows
@@ -72,7 +72,8 @@ that download, and chat models are still never downloaded.
 A request is a `multipart/form-data` upload with `file`, and the optional
 fields `model`, `language`, `prompt`, `temperature` and `response_format`.
 `response_format` is `json`, `text`, `verbose_json`, `srt` or `vtt`, and
-`temperature` defaults to 0. Decoding audio needs ffmpeg on your PATH:
+`temperature` defaults to 0. Decoding audio needs ffmpeg on your PATH.
+This request transcribes a clip:
 
 ```sh
 curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
@@ -90,17 +91,17 @@ curl localhost:8080/v1/audio/translations -F file=@japanese.ogg -F model=whisper
 
 `server.tts` adds `POST /v1/audio/speech`, which turns text into speech with
 [mlx-audio](https://pypi.org/project/mlx-audio/). Speech models also load in
-MLX format. The value is an alias from this table, a Hugging Face
-repository in MLX-Audio format, or a local folder with a converted model,
-and `true` selects `kokoro`:
+MLX format. The value is an alias, a Hugging Face repository in MLX-Audio
+format, or a local folder with a converted model, and `true` selects
+`kokoro`. The aliases are these:
 
 | Alias | Repository | Notes |
 |-------|------------|-------|
-| `kokoro` | `mlx-community/Kokoro-82M-bf16` | The default, a small English model with many preset voices |
-| `kokoro-8bit` | `mlx-community/Kokoro-82M-8bit` | A smaller Kokoro |
-| `kokoro-4bit` | `mlx-community/Kokoro-82M-4bit` | The smallest Kokoro |
-| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | A larger multilingual model with named voices |
-| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | A smaller Qwen3-TTS |
+| `kokoro` | `mlx-community/Kokoro-82M-bf16` | The default, a small English model with many preset voices. |
+| `kokoro-8bit` | `mlx-community/Kokoro-82M-8bit` | A smaller Kokoro. |
+| `kokoro-4bit` | `mlx-community/Kokoro-82M-4bit` | The smallest Kokoro. |
+| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | A larger multilingual model with named voices. |
+| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | A smaller Qwen3-TTS. |
 
 Kokoro also downloads a small English language model from Hugging Face the
 first time it speaks, so a server without internet access needs that
@@ -156,19 +157,19 @@ input that the model reads:
 
 | Alias | Repository and default quant | Dimension | Context | Notes |
 |-------|------------------------------|-----------|---------|-------|
-| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | The default, small, fast and multilingual, about 0.6 GB |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | Better retrieval, about 4.3 GB |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | The best of the family, about 8 GB, with the largest index |
-| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | A small multilingual encoder from Google, about 0.3 GB |
+| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | The default, small, fast and multilingual, about 0.6 GB. |
+| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | Better retrieval, about 4.3 GB. |
+| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | The best of the family, about 8 GB, with the largest index. |
+| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | A small multilingual encoder from Google, about 0.3 GB. |
 
 These are the safetensors encoders, each at its 8-bit default:
 
 | Alias | Repository | Dimension | Context | Notes |
 |-------|------------|-----------|---------|-------|
-| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | A small multilingual model from Google, about 0.3 GB |
-| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | A multilingual model for long inputs |
-| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | A widely used English model for long inputs |
-| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | A multilingual model for long inputs |
+| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | A small multilingual model from Google, about 0.3 GB. |
+| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | A multilingual model for long inputs. |
+| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | A widely used English model for long inputs. |
+| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | A multilingual model for long inputs. |
 
 Choose a GGUF model unless you want one of the encoders for its size or its
 languages. Input longer than a model's context is cut to fit, without an
@@ -185,8 +186,8 @@ server:
 gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 ```
 
-A safetensors encoder downloads once when it is not in the cache, like the
-speech models. `gmlx init` can also choose a quant other than the default
+Like the speech models, a safetensors encoder downloads once when it is
+not in the cache. `gmlx init` can also choose a quant other than the default
 and write its full reference.
 
 A request is a JSON body with `input`, a string or a list of strings, and

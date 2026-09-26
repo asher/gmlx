@@ -1,8 +1,9 @@
 # Chat
 
-`gmlx chat` is the interactive terminal client for talking to a model. This
-page covers where the model runs, the commands, sessions, rendering and
-themes, and the flags are listed under [gmlx chat](cli.md#gmlx-chat).
+`gmlx chat` is the interactive terminal client for talking to a model. It
+loads the model itself or sends turns to a running server, saves sessions,
+and renders replies as markdown in a color theme. The flags are listed
+under [gmlx chat](cli.md#gmlx-chat).
 
 - [Where the model runs](#where-the-model-runs)
 - [Commands](#commands)
@@ -50,7 +51,7 @@ to install it.
 | `/reset`, `/clear` | Starts the conversation again. `/clear` also clears the screen. |
 | `/system [text\|off]` | Shows or sets the system prompt. Setting it starts the conversation again. |
 | `/retry`, `/undo` | `/retry` generates the last reply again, and `/undo` removes the last exchange. |
-| `/temp`, `/top-p` and the other sampling commands | Change the sampling of the next replies. `/sampling` shows the current values. |
+| `/temp`, `/top-p` and the other sampling commands | Changes the sampling of the next replies. `/sampling` shows the current values. |
 | `/thinking [on\|off\|adaptive\|default]` | Turns the reasoning of a thinking model on or off for the next turns. |
 | `/thinking-budget [N\|off]` | Limits the reasoning tokens of each reply. |
 | `/reasoning show\|hide\|raw` | Sets how reasoning is shown. |
@@ -59,11 +60,11 @@ to install it.
 | `/model`, `/stats` | `/model` shows the model card, and `/stats` shows the session totals. In server mode, `/model <id>` switches the served id. |
 | `/adapter [on\|off\|SCALE]` | Turns the `--adapter` LoRA off or on, or scales it, for the next turns. With no argument, it shows the scale. |
 | `/history [on\|off\|clear]` | Turns saving of prompt history on or off, or clears it. |
-| `/save [name]`, `/sessions`, `/load-session <name\|N>` | Save, list and restore sessions. |
+| `/save [name]`, `/sessions`, `/load-session <name\|N>` | Saves, lists and restores sessions. |
 | `/export [file.md]` | Writes the conversation as markdown, by default to the session name in the current folder. |
 | `/load <file>` | Puts the text of a file in the prompt for you to edit and send. |
 | `/! <command>` | Runs a shell command and attaches its output to the next message. `/drop` discards what is attached. |
-| `/image <file>`, `/audio <file>` | Attach a local file to the next message on a multimodal model. |
+| `/image <file>`, `/audio <file>` | Attaches a local file to the next message on a multimodal model. |
 | `/copy` | Copies the last answer, without its reasoning, to the clipboard. |
 | `/memory` | Shows or edits the [memory of the assistant](assistant.md#memory) in `--assistant` mode. |
 

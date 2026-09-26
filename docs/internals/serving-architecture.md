@@ -5,17 +5,19 @@ as a layer of patches and policy over mlx-vlm's server. The config surface
 is documented in [Configuration](../config.md) and the endpoints in
 [HTTP API](../api.md).
 
-The mechanism is stock mlx-vlm and the policy is gmlx. Upstream owns the
+Stock mlx-vlm supplies the mechanism and gmlx supplies the policy. Upstream owns the
 FastAPI app object, the protocol handlers and SSE formatters, the engine's
 step loop, and the fp16 `BatchKVCache` layout. gmlx owns the scheduling
-policy around that loop: admission (`admit_gate`), prioritization
-(`batch_sched` with `auto_ratio`), and resource arbitration (`governor`,
-`capacity`, `queue_cap`). All of it installs through the patch layer, whose
-seam inventory, well over a hundred entries, is in
-[Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md). Loads route to the gmlx
-loader, which reads GGUF bytes through mlx-kquant's C++ reader and swaps
-model leaves for K-quant kernels, and the stock step loop executes those
-kernels in its own forward pass. There is no engine fork.
+policy around that loop, which covers admission in `admit_gate`,
+prioritization in `batch_sched` with `auto_ratio`, and resource arbitration
+in `governor`, `capacity` and `queue_cap`. All of it installs through the
+patch layer, whose seam inventory of well over a hundred entries is in
+[Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md).
+
+Loads route to the gmlx loader, which reads GGUF bytes through mlx-kquant's
+C++ reader and swaps model leaves for K-quant kernels. The stock step loop
+then runs those kernels in its own forward pass, so there is no engine
+fork.
 
 ## From file to response
 
@@ -73,7 +75,7 @@ flowchart TD
         BG --- MTP
     end
 
-    subgraph PROTO["HTTP: mlx-vlm FastAPI, ~20 gmlx route patches incl. added /v1/completions"]
+    subgraph PROTO["HTTP: mlx-vlm FastAPI, gmlx route patches incl. added /v1/completions"]
         direction LR
         TOOLS["tool-call extractor<br/>mlx_lm.tool_parsers (from chat template)"]
         ANTH["/v1/messages (Anthropic)"]
@@ -98,10 +100,10 @@ flowchart TD
 ```
 
 Eight wrappers assign `BatchGenerator._next`, shown in install order in the
-tick-policy box. Six install by default; memtrace and step timing are
-env-gated. The live-requests publisher sits beside the stack, not in it: it
-wraps `ResponseGenerator._step` to publish per-request rows and never steps
-the engine.
+tick-policy box. Six install by default, and memtrace and step timing are
+gated by environment variables. The live-requests publisher sits beside the
+stack, not in it. It wraps `ResponseGenerator._step` to publish per-request
+rows and never steps the engine.
 
 ## What the diagram leaves out
 
@@ -112,7 +114,7 @@ gmlx's own copy of the class mlx-vlm removed in 0.6.15, vendored in
 language-model interface the engine expects steady across upstream
 releases.
 
-The prompt cache picks its tier for each architecture, as
+For each architecture the prompt cache picks its tier, as
 [Prompt cache internals](prompt-cache.md) describes. The verify round of
 speculative decoding is gmlx's own, which keeps the prompt cache usable
 under a drafter, as [Speculative batching](speculative-batching.md)
@@ -120,11 +122,12 @@ describes.
 
 Two things happen before a request reaches the engine. Its sampling
 parameters resolve through the config precedence chain, from the family's
-model-card defaults up to the request's own fields
-([How a request gets its settings](../config.md#how-a-request-gets-its-settings)). And a request to a served
-assistant id never reaches the HTTP layer as itself: the tool loop runs on a
-worker thread and each round re-enters the server as an ordinary loopback
-client ([served assistants](../assistant.md#served-assistants)).
+model-card defaults up to the request's own fields, as
+[How a request gets its settings](../config.md#how-a-request-gets-its-settings)
+describes. A request to a [served assistant](../assistant.md#served-assistants)
+id never reaches the HTTP layer as itself. The tool loop runs on a worker
+thread, and each round enters the server again as an ordinary loopback
+client.
 
 ## Scheduling policy
 
@@ -133,50 +136,52 @@ wrappers around the stock step loop.
 
 | Module | Policy |
 |---|---|
-| `batch_sched.py` | decode-priority prefill pacing: a chunk runs only after decode has banked ratio x last chunk time |
-| `auto_ratio.py` | derives the pacing ratio from a retention floor, with hysteresis, dwell and a pacing-attributable deadline |
-| `admit_gate.py` | projects committed bytes before a prompt batch forms and defers the join instead of failing |
-| `governor.py` | ticks-to-collision banding with separate rate and one-shot accounting |
-| `queue_cap.py` | rejects over-cap requests with a 503 and a computed Retry-After instead of holding sockets |
-| `capacity.py` | derives the depth-width frontier at boot and sets decode concurrency from it |
+| `batch_sched.py` | Paces prefill behind decode. A chunk runs only after decode has banked the ratio times the last chunk's time. |
+| `auto_ratio.py` | Derives the pacing ratio from a retention floor, with hysteresis, dwell and a deadline that counts only pacing waits. |
+| `admit_gate.py` | Projects committed bytes before a prompt batch forms, and defers the join instead of failing. |
+| `governor.py` | Sets a band from the ticks left before memory runs out, with separate rate and one-shot accounting. |
+| `queue_cap.py` | Rejects over-cap requests with a 503 and a computed Retry-After instead of holding sockets. |
+| `capacity.py` | Derives the depth-width frontier at boot and sets decode concurrency from it. |
 
-Stock `_next` runs one decode step then, unconditionally, one 2048-token
-prefill chunk per tick. At depth that chunk head-of-line blocks decode:
-measured at d50k, 80 to 84 percent of decode wall is stall, and about 56
-percent at d14k. The pacer admits a chunk only once decode has accumulated
-ratio x last_chunk_time since the previous chunk. Prefill runs at full
-speed whenever no decode batch is live, so single-stream TTFT is untouched.
+Stock `_next` runs one decode step and then, unconditionally, one 2048-token
+prefill chunk per tick. At depth that chunk blocks decode. At a depth of 50K
+tokens, 80 to 84 percent of the decode wall time was stall, and about 56
+percent at 14K. The pacer admits a chunk only once decode has accumulated
+ratio x last_chunk_time since the previous chunk. Prefill runs at full speed
+whenever no decode batch is live, so single-stream TTFT is untouched.
 
 `auto_ratio` resolves `decode_prefill_ratio: auto` per tick. A retention
-floor rho, default 0.5, fixes the paced ratio at rho/(1-rho), and the
-resolver selects that ratio or zero using an incumbency rule, a chunk-cost
-threshold with hysteresis and dwell, and a deadline that ages
-pacing-attributable seconds only, so capacity-blocked waits accrue nothing.
-There is no queue-depth term.
+floor rho, default 0.5, fixes the paced ratio at rho/(1-rho). The resolver
+selects that ratio or zero with an incumbency rule, a chunk-cost threshold
+with hysteresis and dwell, and a deadline. The deadline counts only seconds
+spent waiting on pacing, so waits blocked on capacity add nothing, and no
+term depends on queue depth.
 
 The admit gate prices the bytes a candidate join would commit against
 measured headroom before the stock admission arm forms a prompt batch, and
 hides the pending list for the tick while the projection does not fit. Two
-anti-deadlock rules bound it: an idle server is never declined, and past
-the defer ceiling it admits one row per tick, loudly.
+rules keep it from deadlocking. An idle server is never declined, and past
+the defer ceiling the gate admits one row per tick with a warning.
 
-The governor computes ticks-to-collision from one shared accounting and
-walks a band ladder from green to red. Bands are rates, not levels: a deep
-batch at flat headroom is green, a shallow one growing fast is not. Rate
-and one-shot costs are accounted separately, and dwell minimums plus a cap
-on sheds per minute prevent thrash.
+Each tick, the governor computes ticks-to-collision from one shared accounting and
+walks a band ladder from green to red. Bands follow rates, not levels, so a
+deep batch at flat headroom is green and a shallow one growing fast is not.
+Rate and one-shot costs are accounted separately, and dwell minimums plus a
+cap on sheds per minute prevent thrash.
 
 The queue cap rejects before enqueue with an HTTP 503, a body naming the
 cap and depth, and a Retry-After set to the estimated drain time clamped
 between 2 and 60 seconds, instead of holding sockets until the queue
 timeout.
 
-Capacity derives a table at model build time from the same admit-side cost
-model requests are priced with: max context at width 1, max width at
-representative depths, and the depth-width frontier. Decode concurrency is
-min(`GMLX_DECODE_BATCH`, frontier width) and the queue cap default follows
-it. A configuration that cannot fit at width 1 is refused at boot with
-numbers; `GMLX_OVERCOMMIT=1` disables the refusal and the derived ceilings.
+At model build time, the capacity module derives a table from the same
+cost model that prices requests at admission. The table holds the largest
+context at width 1, the largest width at representative depths, and the
+depth-width frontier. Decode concurrency is the smaller of
+`GMLX_DECODE_BATCH` and the frontier width, and the queue cap default
+follows it. A configuration that cannot fit at width 1 is refused at boot
+with numbers, and `GMLX_OVERCOMMIT=1` disables the refusal and the derived
+ceilings.
 
 The modules interlock. The governor's band is the admit gate's hard hold.
 The admit gate's deferred set keeps `auto_ratio` from charging capacity
@@ -220,8 +225,9 @@ sequenceDiagram
 
 On this path the patched seams shown are the queue cap, the residency
 lookup, the load call, the generation argument builder, the admit gate and
-the wrapped tick. The registry in `gmlx/upstream/seams.py` declares 124
-seams, 71 of them critical; the largest clusters sit on
-`mlx_vlm.generate.ar` (23), `mlx_vlm.apc` (19) and `mlx_vlm.models.cache`
-(18). The step loop inside the wrappers is stock. The policy around it is
-not.
+the wrapped tick. The registry in `gmlx/upstream/seams.py` declares every
+seam, and `python -m gmlx.upstream.seams` checks each one against the
+installed upstream and prints the count. The largest clusters sit on
+`mlx_vlm.generate.ar`, `mlx_vlm.server.generation`, `mlx_vlm.apc` and
+`mlx_vlm.models.cache`. The step loop inside the wrappers is stock, and the
+policy around it is gmlx's.

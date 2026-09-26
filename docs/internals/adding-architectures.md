@@ -4,17 +4,17 @@ A new model family becomes a supported architecture once gmlx can map its
 tensors and config, and it clears an acceptance gate before its row
 appears in [Supported architectures](../arch-coverage.md).
 
-A GGUF arch first needs a model class for its `model_type`, which normally
-comes from the installed mlx-lm or mlx-vlm, so gmlx supplies only the
-tensor map and the config.
+Each GGUF architecture needs a model class for its `model_type`. The class
+normally comes from the installed mlx-lm or mlx-vlm, so gmlx supplies only
+the tensor map and the config.
 
-A few families, kimi-k3 and muse-glimmer among them, have no upstream class at
-all. gmlx vendors the model math for those in its own module, inserted into
-the upstream namespace so a later upstream implementation takes precedence.
-Vendoring is the exception, justified only when the family cannot
-otherwise be supported, because it adds two obligations: the vendored math
-must match llama.cpp numerically, and a collision check must report once
-upstream publishes its own class.
+Some families, kimi-k3 and muse-glimmer among them, have no upstream class
+at all. gmlx vendors the model math for those in its own module, inserted
+into the upstream namespace so that a later upstream implementation takes
+precedence. Vendoring is the exception, justified only when the family
+cannot otherwise be supported, because it adds two obligations. The
+vendored math must match llama.cpp numerically, and a collision check must
+report once upstream publishes its own class.
 
 ## What the work involves
 
@@ -22,25 +22,25 @@ The engine is architecture-generic and data-driven, so neither the load
 pipeline nor the module-swap code is edited per arch. A new family adds
 three things:
 
-- a tensor-name map from the GGUF's naming to the mlx-lm model class's
-  parameter paths,
-- a config synthesizer that reconstructs the exact `ModelArgs` the model
-  class expects from the GGUF's key-value metadata, or from tensor shapes
-  where the metadata is lossy,
-- an architecture-table row that the CLI, preflight and coverage matrix
-  derive from.
+- A tensor-name map from the GGUF's naming to the parameter paths of the
+  mlx-lm model class.
+- A config synthesizer that rebuilds the exact `ModelArgs` the model class
+  expects, from the GGUF's key-value metadata or, where the metadata is
+  lossy, from tensor shapes.
+- An architecture-table row, from which the CLI, preflight and the coverage
+  matrix derive.
 
 A family that diverges from the canonical layouts also adds the parts that
-make it diverge: per-tensor remap overrides, wire-byte transforms for fused
-or permuted weight layouts and occasionally a new module class or a
-tokenizer-classifier branch. That is where the effort goes. A clean
-Llama-layout family can be supported with almost no per-arch code in a few
-hours. Hybrids and exotic layouts take significant engineering and
-debugging time: state-space (SSM) layers mixed with attention, multi-head
-latent attention (MLA, the compressed-KV attention of the DeepSeek
-lineage), MoE variants with biased projections, fused expert tensors and
-new float formats. Do not estimate the work from the simplest case. The
-[glossary](../glossary.md) defines the attention terms used here.
+make it diverge. These are per-tensor remap overrides, wire-byte transforms
+for fused or permuted weight layouts, and occasionally a new module class
+or a tokenizer-classifier branch. That is where the effort goes. A clean
+Llama-layout family needs almost no per-arch code and a few hours of work.
+Hybrids and unusual layouts take much more engineering and debugging time.
+Examples are state-space layers mixed with attention, the compressed-KV
+[MLA](../glossary.md#mla) attention of the DeepSeek lineage, MoE variants
+with biased projections, fused expert tensors and new float formats.
+Estimate the work from the hardest part of the family, not the simplest
+case.
 
 Vision and audio towers are a separate track with the same gate rules, and
 [Vision and audio](../vlm.md) lists what is supported.
@@ -51,8 +51,8 @@ The characteristic failure modes of a mis-ported architecture are silent.
 A wrong rope layout or a bias assigned to a quantized weight slot still
 produces fluent, plausible text on short prompts. The error appears only
 far into a long context, which is why fluent generation does not count as
-done and why parity is required at 16k tokens. The standard also applies in
-reverse: when every public GGUF of a family is broken upstream, as with
+done and why parity is required at 16k tokens. The same standard works in
+reverse. When every public GGUF of a family is broken upstream, as with
 `gemma3n`, the loader gates the family off by name with the reason instead
 of loading cleanly into wrong weights.
 
@@ -127,5 +127,5 @@ in [Testing](testing.md).
 To request a family, open an issue with a link to the GGUF or its Hugging
 Face repo and the model's `general.architecture` string, which
 `gmlx validate <ref>` prints without downloading the file. Contributions
-are welcome, and a new-architecture PR is reviewed against the acceptance
-gate above.
+are welcome, and a new-architecture PR is reviewed against
+[the acceptance gate](#the-acceptance-gate).

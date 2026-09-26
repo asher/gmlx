@@ -1,8 +1,8 @@
 # Speculative decoding
 
 Speculative decoding makes a model generate faster without changing its
-output. This page covers how gmlx turns it on, the kinds of drafter, how
-it behaves with several requests, and the option to trade exact output
+output. gmlx turns it on by itself for most models that have a drafter,
+limits it while many requests share a batch, and can trade exact output
 for more speed when sampling.
 
 A small, fast drafter proposes the next few tokens, and the model checks
@@ -35,9 +35,9 @@ a companion, the companion wins, and `--native-mtp` forces the head. A
 model with a native head prints the name of a companion that it finds
 beside it, and uses it only with `--draft-gguf`.
 
-On the server, the [`speculative`](config.md#modelsspeculative) key of a
-model enables speculation, and [`draft_gguf`](config.md#modelsdraft_gguf)
-names the drafter. `gmlx pull` and a [discover](config.md#model-discovery)
+The server enables speculation for a model through its
+[`speculative`](config.md#modelsspeculative) key, and
+[`draft_gguf`](config.md#modelsdraft_gguf) names the drafter. `gmlx pull` and a [discover](config.md#model-discovery)
 scan pair a drafter that they find with its model.
 
 ## Settings that speculation drops

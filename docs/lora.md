@@ -1,9 +1,9 @@
 # LoRA adapters
 
 A LoRA adapter is a small file that changes how a model answers without
-changing the model file. This page covers training an adapter on a GGUF
-model with `gmlx train`, using it, and serving one model under several
-adapters at once.
+changing the model file. `gmlx train` trains one on a GGUF model, `run`,
+`chat` and `serve` apply it at load, and one server can offer a model
+under several adapters at once.
 
 - [Training on the quantized model](#training-on-the-quantized-model)
 - [Train an adapter](#train-an-adapter)
@@ -15,9 +15,8 @@ adapters at once.
 ## Training on the quantized model
 
 `gmlx train` fine-tunes a quantized GGUF model as it is, and writes the
-adapter as a small GGUF file. `run`, `chat` and `serve` apply the adapter
-at load with `--adapter`. One loaded model can serve any number of
-adapted versions.
+adapter as a small GGUF file. The model is never converted, and
+`--adapter` applies the result at load.
 
 The usual way to fine-tune is to convert the model to full precision,
 train, and quantize again. Training on the quantized model skips all
@@ -34,11 +33,11 @@ quantized model is all that fits.
 
 ## Train an adapter
 
-This walkthrough teaches Qwen3-0.6B to talk like a pirate. It uses a
-dense Q8_0 model, which is the tested case. The trainer accepts the other
-GGUF codecs and plain MLX models too. Download the model into the folder
-of your [configuration file](config.md), which registers it as
-`qwen3-0.6b-q8`:
+Teaching Qwen3-0.6B to talk like a pirate shows the whole flow. The
+example uses a dense Q8_0 model, which is the tested case. The trainer
+accepts the other GGUF codecs and plain MLX models too. Download the
+model into the folder of your [configuration file](config.md), which
+registers it as `qwen3-0.6b-q8`:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf

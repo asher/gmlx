@@ -1,10 +1,10 @@
 # Speculative batching
 
-The server runs speculative decoding and continuous batching together,
-with two decode loops, a width cap, and transitions that move a request
-between the loops without interrupting its token stream. What speculation
-is and how to enable it are in
-[Speculative decoding](../speculative-decoding.md). The cap key is
+The server runs speculative decoding and continuous batching together, with
+two decode loops, a width cap, and transitions that move a request between
+the loops without interrupting its token stream. What speculation is and how
+to enable it are in [Speculative decoding](../speculative-decoding.md). The
+cap key is
 [`speculative_width_cap`](../config.md#modelsspeculative_width_cap).
 
 ## The two decode loops
@@ -17,29 +17,31 @@ share coupled RNG streams, so a sampled draft can be accepted against a
 sampled target, which gives the highest acceptance rate. That makes it the
 fastest path, and it is the common case.
 
-The batch loop serves two or more. For each row it tracks the KV offset,
-the budget, a finished flag and the bonus token, which is the first token a
-verify round accepts beyond the drafted run and the point the next round
-starts from. Drafting is greedy, since coupled RNG does not extend across
-rows. Under kvarn KV each row of the batch cache keeps its own physical
-start and end, so a verify round's rollback trims each row by its own
-rejected count while the fp16 layers and the shared mask keep upstream's
-right-justified geometry, and the block is capped at four queries a row, the
-width the decode kernels verify at, for the generator's life. The cap
-follows the batch cache, not the width: a batch drained to one row, a row
-adopted onto an emptied batch and a lone row lifted by an admission all
-verify through the batch route at four queries.
+Two or more decoding requests run in the batch loop. For each row it
+tracks the KV offset, the budget, a finished flag and the bonus token, which
+is the first token a verify round accepts beyond the drafted run and the
+point the next round starts from. Drafting is greedy, since coupled RNG does
+not extend across rows.
 
-The loop also checks the per-model width cap. A batch wider than the cap
+Under kvarn KV, each row of the batch cache keeps its own physical start and
+end. A verify round's rollback therefore trims each row by its own rejected
+count, while the fp16 layers and the shared mask keep upstream's
+right-justified geometry. For the generator's life the block is capped at
+four queries a row, the width the decode kernels verify at. This cap follows
+the batch cache and not the width. A batch drained to one row, a row adopted
+onto an emptied batch and a lone row lifted by an admission all verify
+through the batch route at four queries.
+
+Each round also checks the per-model width cap. A batch wider than the cap
 decodes plain, because verification widens each row's weight reads and past
 the measured width the batch is faster without drafting.
 
 New requests join between verify rounds, when the loop drains an injection
 queue, extends the target KV cache and the drafter with the new rows and
-re-checks the cap. A batch that comes back under the cap re-arms itself
-with a capture round, a single plain-cost forward that collects the hidden
-state the drafter needs, described under
-[Re-arming a drained batch](#re-arming-a-drained-batch).
+re-checks the cap. A batch that comes back under the cap re-arms itself with
+a capture round, a single plain-cost forward that collects the hidden state
+the drafter needs, described under [Re-arming a drained
+batch](#re-arming-a-drained-batch).
 
 ```mermaid
 stateDiagram-v2
@@ -88,9 +90,9 @@ sequence on fresh captures instead of reusing per-row state:
    dispatches the next round's forward before it reads the current round's
    tokens, and that forward has already appended its KV, so one more plain
    round runs without dispatching a successor.
-2. The next round is the capture round: a one-position verify forward of
-   each row's pending bonus token with hidden-state and shared-KV capture
-   on, which emits one token per row at plain-decode cost.
+2. The next round is the capture round. It runs a one-position verify
+   forward of each row's pending bonus token with hidden-state and shared-KV
+   capture on, and emits one token per row at plain-decode cost.
 3. The drafter is reset and cold-started from the capture. Drafters that
    teacher-force a prompt seed from target hidden state accept the one-token
    capture and recover acceptance over the next rounds. Shared-KV drafters

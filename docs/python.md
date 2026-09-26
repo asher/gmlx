@@ -1,8 +1,8 @@
 # Python API
 
-The CLI is the primary interface, and this page is for embedding gmlx in
-your own Python. The stable surface is exactly what the package root
-exports as `gmlx.__all__`, all of which is documented here.
+The `gmlx` package loads and runs GGUF models from your own Python code.
+Its stable surface is exactly what the package root exports as
+`gmlx.__all__`, and every export is documented below.
 
 Exports resolve lazily, so `import gmlx` returns immediately and never
 imports MLX, which makes it safe in tooling that only inspects metadata. The
@@ -35,10 +35,10 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 | `zero_copy` | `True` | Load tensors as no-copy mmap views. `False` copies into fresh buffers. |
 | `verbose` | `False` | Print load diagnostics such as `[arch]`, `[gguf]` and `[patch]`. |
 
-There are no vision or draft-model kwargs here. Pairing a model with an mmproj
-file and speculative decoding are CLI and server features, covered in
+`load_model` takes no vision or drafter arguments. Pairing a model with an
+mmproj file and speculative decoding are CLI and server features, as
 [Vision and audio](vlm.md) and
-[Speculative decoding](speculative-decoding.md).
+[Speculative decoding](speculative-decoding.md) describe.
 
 ## Generate
 
@@ -137,8 +137,9 @@ pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 `preflight(gguf_path, *, arch=None, hf_source=None)` checks a GGUF before
 a load. It finds the shards, counts the tensors of each codec, refuses
 unsupported codecs by name and checks the architecture. It reads only the
-GGUF header, so a file of many GB is checked in well under a second. `load_model` runs it internally, and you can call it yourself to
-check a file first. Its CLI equivalent is `gmlx validate`.
+GGUF header, so a file of many GB is checked in well under a second.
+`load_model` runs it internally, and you can call it yourself to check a
+file first. Its CLI equivalent is `gmlx validate`.
 
 `preflight` and `load_model` raise the same exceptions:
 
@@ -153,9 +154,9 @@ check a file first. Its CLI equivalent is `gmlx validate`.
 
 `ARCH_TABLE` maps each supported GGUF architecture id to its runtime entry,
 with the fields `gguf_arch`, `model_type`, `family`, `remap_alias`,
-`notes`, `backend` and `caveat`. [Supported architectures](arch-coverage.md) is
-the generated human-readable view of the same data, with validation
-status.
+`notes`, `backend` and `caveat`. [Supported architectures](arch-coverage.md)
+is the generated view of the same data for people to read, with the
+validation status of each entry.
 
 ## Tokenizer without the model
 
@@ -174,15 +175,16 @@ scores metadata. It is the same synthesis `load_model` runs, taken on its
 own. `detect_arch(reader)` reads `general.architecture` from the header.
 Neither touches tensor bytes.
 
-Use these when a tool needs the tokenizer before deciding whether to load
-weights at all, such as an eval harness doing tokenizer parity checks,
-corpus pre-tokenization, or template inspection. `chat_template_override`,
+A tool that needs the tokenizer before it decides whether to load weights
+uses these, such as an eval harness that checks tokenizer parity,
+pre-tokenizes a corpus or inspects a template. `chat_template_override`,
 an inline Jinja string, replaces the GGUF's chat template. The loader
 infers the model's turn-ending tokens from the template it ends up with, so
 an override changes which tokens stop generation as well.
 
 Three helpers read a tokenizer's vocabulary as bytes, for tools that line
-up two tokenizers over the same text, such as `gmlx distill align`. They take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
+up two tokenizers over the same text, such as `gmlx distill align`. They
+take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
 
 ```python
 from gmlx import token_bytes, whitespace_start_mask, vocab_map_hash
@@ -211,10 +213,10 @@ from gmlx import install_gguf_bridge
 install_gguf_bridge()
 ```
 
-Idempotently patches `mlx_lm.server.ModelProvider` so that any `*.gguf`
-model path loads through `load_model`. Non-GGUF paths pass through
-unchanged, which lets a single `mlx_lm.server` process mix GGUF and
-ordinary MLX checkpoints. GGUF requests are pinned to mlx-lm's validated
+`install_gguf_bridge` patches `mlx_lm.server.ModelProvider` so that any
+`*.gguf` model path loads through `load_model`, and a second call changes
+nothing. Other paths pass through unchanged, so one `mlx_lm.server` process
+can mix GGUF files and ordinary MLX checkpoints. GGUF requests are pinned to mlx-lm's validated
 sequential path, with no batching. A `--draft-model` is ignored for GGUF
 models with a warning, and `--adapter` on one raises, since adapters are
 wired only in `gmlx serve`. Use the bridge to add GGUF support to an
@@ -227,16 +229,17 @@ The swapped leaves are `KQuantLinear`, `KQuantEmbedding`,
 `mlx_kquant.nn`, re-exported here. Each stores the GGUF file bytes directly
 as a `uint8` `weight` and dispatches through the `mlx_kquant` Metal kernels
 on a stock `mlx` wheel, so dequantization happens inside the kernel, never
-as a separate materialized pass. `install_kquant_modules(model, hf_kquant_meta)`
-is the swap step. It visits the leaf modules of a constructed model and
-replaces each one whose weight carries a codec. It keys on
-codec strings, not on the architecture, so a custom loader can use it on
-any model.
+as a separate materialized pass.
+
+`install_kquant_modules(model, hf_kquant_meta)` is the swap step. It visits
+the leaf modules of a constructed model and replaces each one whose weight
+carries a codec. Because it keys on codec strings instead of the
+architecture, a custom loader can use it on any model.
 
 ## Beyond the stable surface
 
 Other modules are importable but internal, among them the VLM loader,
-embeddings and rerank, the CPU-offload paths and the server, and their
-signatures change without notice. `generate` additionally accepts
-experimental parameters that are intentionally undocumented here. If you
-need an internal piece as a public API, open an issue.
+embeddings and rerank, the CPU-offload paths and the server. Their
+signatures change without notice. `generate` also accepts experimental
+parameters, which are left out on purpose. To have an internal piece made
+public, open an issue.

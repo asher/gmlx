@@ -14,9 +14,6 @@ cannot fit with a typed error. The YAML that configures the server is in
 - [Limits and back-pressure](#limits-and-back-pressure)
 - [Hugging Face policy](#hugging-face-policy)
 
-Tool calling, structured output, logprobs and vision messages each have a
-subsection under API capabilities.
-
 ## Addressing a model in a request
 
 ```jsonc
@@ -39,8 +36,9 @@ addressing works on the CLI, as `gmlx run <id-or-path>@coding` or
 
 ## Endpoints
 
-The standard generation and listing routes work. gmlx adds operational ones.
-All routes except `/health` require the API key when one is set.
+Beside the OpenAI and Anthropic generation routes, the server has routes
+for metrics, capacity, residency, the prompt cache and the optional
+services. Every route except `/health` needs the API key when one is set.
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -64,21 +62,22 @@ All routes except `/health` require the API key when one is set.
 | `POST /v1/rerank` | Reranking, with `rerank` configured, also at `/rerank`. |
 | `POST /v1/systemone` | Answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [Structured decisions](decisions.md). |
 
-`GET /v1/models` lists configured and discovered ids plus alias presets.
-Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
-`default` markers and two context figures. `context_length` is the GGUF's
-trained window, or the model's [`max_kv_size`](config.md#loadmax_kv_size)
-when that is smaller. `max_context_at_width_1` is how much of the window
-fits in memory for a single stream. A harness sizes its context window from
-the smaller of the two. A
-resident model with KV quantization configured adds a `kv_quant` object:
-`scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`, a
-`verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`
-for a speculative model, which differs from `verdict` under `uniform`, or
-under kvarn on an mlx-kquant older than 0.4.9, where the model runs fp16 KV
-while batched. Under [kvarn](glossary.md#kvarn) it also carries `value_bits` and
-`tail_tokens`. The
-Hugging Face cache is never listed.
+`GET /v1/models` lists configured and discovered ids plus alias presets,
+and never the Hugging Face cache. Each entry carries `resident`, `pinned`,
+`speculative`, `vlm`, `profile` and `default` markers and two context
+figures. `context_length` is the GGUF's trained window, or the model's
+[`max_kv_size`](config.md#loadmax_kv_size) when that is smaller.
+`max_context_at_width_1` is how much of the window fits in memory for a
+single stream. A harness sizes its context window from the smaller of the
+two.
+
+A resident model with KV quantization configured adds a `kv_quant` object
+with `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16` and a
+`verdict` of `full`, `partial`, `dropped` or `error`. Under
+[kvarn](glossary.md#kvarn) it also carries `value_bits` and `tail_tokens`.
+A speculative model adds `verdict_batched`, which differs from `verdict`
+when the model runs fp16 KV while batched. That happens under `uniform`,
+and under kvarn on an mlx-kquant older than 0.4.9.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
@@ -181,8 +180,8 @@ configure. Streaming works too, and a parsed call ends the stream with
 | `auto` | The default. The model decides. |
 | `required` and named-function forms | Forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call. |
 
-This is the client-side loop, where the server parses the calls and the
-client executes them and sends results back. To run the loop server-side
+In this loop the server parses the calls, and the client runs them and
+sends the results back. To run the loop server-side
 with config-allowlisted MCP tools, serve an
 [assistant id](assistant.md#served-assistants).
 
@@ -206,12 +205,13 @@ accepted and skipped, and a request that sets any produces one warning line
 in the server log naming them all. `/v1/systemone` has its own fields,
 listed in [Samples, steps and thoughts](decisions.md#samples-steps-and-thoughts).
 
-The standard sampling parameters are honored on all three generation dialects.
+All three generation dialects honor the standard sampling parameters.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 `top_k`, `min_p`, `top_n_sigma`, `p_less`, `typical_p`, `repetition_penalty`,
 `presence_penalty`, `frequency_penalty` and their `*_context_size` companions,
 `enable_thinking`, `thinking_budget` and the OpenAI `reasoning` and
-`reasoning_effort` controls. This table lists the other parameters:
+`reasoning_effort` controls. Support for the other parameters differs by
+route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -219,18 +219,18 @@ They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 | `n` | Ignored | Ignored | Ignored | Always a single choice. `n > 1` on `/v1/completions` is a 400. |
 | `user` | Ignored | Ignored | Ignored | No per-user accounting. |
 | `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
-| `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms are template-dependent, as the previous table says. |
+| `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
 | `metadata` | Ignored | Ignored | Ignored | Accepted for Anthropic compatibility, never read. |
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
 | `logit_bias` | Honored | Honored | Honored | Token-id keyed. |
 | `seed` | Honored | Honored | Honored | Per-request sampling seed. |
-| `presence_penalty` | Honored | Honored | Honored |  |
-| `frequency_penalty` | Honored | Honored | Honored |  |
+| `presence_penalty` | Honored | Honored | Honored | OpenAI semantics. |
+| `frequency_penalty` | Honored | Honored | Honored | OpenAI semantics. |
 | `stream_options` | Honored | Ignored | Ignored | `include_usage` adds the final usage chunk on chat and `/v1/completions`. |
 | `timings_per_token` | Honored | Ignored | Ignored | Streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count, following llama.cpp. |
-| `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`. Unknown types are rejected, as Structured output explains. |
+| `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`. Unknown types are rejected, as [Structured output](#structured-output) explains. |
 | `logprobs` | Honored | Ignored | Ignored | Chat only. `/v1/completions` never returns logprobs. |
-| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K`, as Logprobs explains. |
+| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K`, as [Logprobs](#logprobs) explains. |
 | `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions`. Anthropic uses `stop_sequences`. |
 | `stop_sequences` | Ignored | Ignored | Honored | The Anthropic-native spelling. |
 | `chat_template_kwargs` | Honored | Honored | Honored | Extra template variables, request overrides profile. |
@@ -271,7 +271,7 @@ curl localhost:8080/v1/chat/completions -d '{
 asks for the N most likely alternatives for each token. The alternatives are
 capped by the server-side `TOP_LOGPROBS_K` variable, 0 to 20, with a default
 of 0, so until the server is started with the cap raised the lists stay
-empty. It is an engine variable with no config key:
+empty. No config key sets it, so set it in the server's environment:
 
 ```sh
 TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
@@ -309,9 +309,9 @@ drained. `max_tokens` counts only when the request pins it
 explicitly, and media requests are not estimated. The load gate judges a
 model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
-still returning from a recent unload. The environment variables in the last
-column, and the decode batch width the queue cap is derived from, are
-documented under [Server](env-vars.md#server).
+still returning from a recent unload. The switch variables, and the decode
+batch width that sets the queue cap, are listed under
+[Server](env-vars.md#server).
 
 Both 400s for a request that does not fit start their message with `prompt
 is too long`, and the budget error also says the request `exceeds the context
@@ -321,11 +321,12 @@ conversation and retry instead of stopping at the error.
 ## Hugging Face policy
 
 The server never downloads on a request. A generation request whose
-`model` is not a configured id gets the 404 described under Addressing a
-model, whatever the id looks like. Below that resolver, the stock model
-loader is gated as well: anything that reaches it with a repo id rather
-than a GGUF or local path is refused with a 403 of type
-`hf_access_disabled`, so no route can trigger a fetch.
+`model` is not a configured id gets the 404 that
+[Addressing a model in a request](#addressing-a-model-in-a-request)
+describes, whatever the id looks like. The stock model loader below that
+resolver is gated as well. Anything that reaches it with a repo id instead
+of a GGUF or local path gets a 403 of type `hf_access_disabled`, so no
+route can trigger a fetch.
 
 `server.hf_cache: true` changes what the config may reference, not what a
 request may name. With it on, `hf:` refs in `models:` and the `gmlx init

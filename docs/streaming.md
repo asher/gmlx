@@ -89,7 +89,7 @@ a `stream: cpu` model on a server of its own.
 
 ## How big a model can this machine stream
 
-The size of the file does not set the limit. The every-token weights do.
+The every-token weights set the limit, not the size of the file.
 
 A MoE GGUF holds two kinds of tensors. The routed experts are read a few
 at a time for each token and stream from disk, so their size sets the
@@ -97,10 +97,10 @@ speed of decoding but not the fit. The every-token weights are read by
 every token and stay in memory. They are attention, shared experts, dense
 layers, routers, norms, embeddings and the output head.
 
-The memory [governor](glossary.md#governor) keeps tracked memory under a ceiling,
-which is the GPU working set that macOS recommends, less 5%. It also keeps
-a reserve of 8 GB or 10% of RAM, whichever is larger, below physical RAM.
-Four things share the ceiling, in this order:
+The memory [governor](glossary.md#governor) keeps tracked memory under a
+ceiling, which is the GPU working set that macOS recommends, less 5%. It
+also keeps a reserve of 8 GB or 10% of RAM, whichever is larger, below
+physical RAM. Four things share the ceiling, in this order:
 
 1. The every-token weights.
 2. The KV room. It holds the KV cache for 32768 tokens, or the trained
@@ -121,9 +121,8 @@ room fit under the ceiling. Everything else changes only the speed.
 ### The ceiling by machine size
 
 The default working set is two thirds of RAM below 36 GB and three
-quarters from 36 GB up. The sizes in this table are decimal GB. The KV
-room floor is the prefill room and the admission reserve, before any KV
-cache.
+quarters from 36 GB up. Sizes are in decimal GB, and the KV room floor is
+the prefill room and the admission reserve, before any KV cache.
 
 | RAM | Working set | Ceiling | KV room floor | Left for weights and KV cache |
 |---|---|---|---|---|
@@ -155,7 +154,7 @@ Kimi-K3 UD-Q2_K_XL is an 861 GB file, and its every-token weights are
 | Recurrent layers | 6.9 |
 | Embeddings and output head | 2.4 |
 
-The routed experts are 799 GB, with 896 experts in each of 92 layers and
+Its routed experts are 799 GB, with 896 experts in each of 92 layers and
 16 read for each token. On a 128 GB Mac with the default working set, the
 ceiling is 97.9 GB and the KV room is 11.7 GB. That leaves 24 GB, where the
 22.7 GB ring fits and the host floor takes the rest, so there is no arena.
@@ -170,10 +169,10 @@ under no ceiling below 192 GB.
 
 ### What changes the limit
 
-The bits of the every-token tensors matter most. A quant that keeps
-attention and the shared experts at Q8 doubles what stays in memory, so
-choose a quant with smaller non-expert tensors before a smaller expert
-quant.
+Most of the limit comes from the bits of the every-token tensors. A
+quant that keeps attention and the shared experts at Q8 doubles what
+stays in memory, so choose a quant with smaller non-expert tensors
+before a smaller expert quant.
 
 The KV room trades against the arena. A smaller room gives a larger arena
 and a shorter safe context, and `--kv-bits 8` halves the KV cache part of
@@ -329,8 +328,9 @@ one token, so a second request at the same time slows both, and fewer
 experts are found in the arena. Prefill is not affected.
 
 The feeder settings are the [`prefill_feeder`](config.md#modelsprefill_feeder)
-and [`decode_feeder`](config.md#modelsdecode_feeder) keys beside `stream`,
-and the lossy settings are the model keys in the table above.
+and [`decode_feeder`](config.md#modelsdecode_feeder) keys beside `stream`.
+Each lossy setting has the model key that
+[The lossy settings](#the-lossy-settings) names.
 
 ## Residency of a streamed model
 
@@ -339,12 +339,13 @@ The server counts a `stream: experts` entry against
 plus its arena and its prefill ring, and the routed experts stay on disk.
 A `stream: cpu` entry counts at the full size of its file.
 
-The arena takes what the ceiling leaves, so a streamed model can use the
-whole budget by itself. When it does not fit beside pinned or busy models,
-the server defers the load with a message that names
+A streamed model's arena takes what the ceiling leaves, so the model can
+use the whole budget by itself. When it does not fit beside pinned or
+busy models, the server defers the load with a message that names
 [`GMLX_DECODE_ARENA_GB`](env-vars.md#runtime). To keep a second model
-loaded beside a streamed one, set that variable, in GiB, so that both fit
-the budget. The arena is never larger than the experts, and a value past
-the reclaimable RAM is reduced unless `GMLX_DECODE_ARENA_FORCE=1` is set.
-A streamed load also lowers the wired memory limit for the rest of the
-process, so a dense model in memory runs without wiring from then on.
+loaded beside a streamed one, set that variable, in GiB, so that both
+fit the budget. The arena is never larger than the experts, and a value
+past the reclaimable RAM is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
+is set. A streamed load also lowers the wired memory limit for the rest
+of the process, so a dense model in memory runs without wiring from then
+on.

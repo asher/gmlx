@@ -66,9 +66,9 @@ you: what's a good name for a gray cat?
 ```
 
 Each thing you say prints after `you:`, and each part of the reply prints
-indented as it is spoken. A status line at the bottom shows the state of
-the session: idle, listening, capturing, transcribing, thinking, speaking
-or muted. A rising chime means that the microphone is open, and a falling
+indented as it is spoken. A status line at the bottom shows whether the
+session is idle, listening, capturing, transcribing, thinking, speaking or
+muted. A rising chime means that the microphone is open, and a falling
 chime means that it has closed.
 
 To type a message instead, start typing. The first key opens a line
@@ -86,8 +86,8 @@ The mode sets how a turn starts:
 | `ptt` | Space opens the microphone. The turn ends after a pause, or when you press Space again. |
 | `text` | You type every message, and the replies are spoken. |
 
-The wake phrase is any English text, with no training needed. The default
-is "hey assistant", and `/wake` changes it during a session. Choose a
+Any English text works as the wake phrase, with no training needed. The
+default is "hey assistant", and `/wake` changes it during a session. Choose a
 phrase that the model is unlikely to say, because the client also hears
 the speakers. When the wake phrase model cannot load, the client prints
 why and uses `vad` mode instead.

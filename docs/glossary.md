@@ -1,16 +1,16 @@
 # Glossary
 
-Each term below is one that gmlx prints or that the rest of the docs use,
-in alphabetical order. The guides link each term here where it first
-matters.
+gmlx prints these terms in its logs, help and errors, and the rest of the
+docs use them in the same sense. The guides link each term here where it
+first matters.
 
 ## Adapter and LoRA
 
 A LoRA adapter is a small file of low-rank weight changes that adjusts a
 base model for a task without replacing its weights. gmlx trains adapters
 on the quantized GGUF and serves them with `--adapter` or the `adapter`
-key, and one base in memory can serve several adapters.
-[LoRA adapters](lora.md) describes both.
+key, and one base in memory can serve several adapters. Training and
+serving are in [LoRA adapters](lora.md).
 
 ## APC
 
@@ -22,7 +22,8 @@ Automatic prefix caching, the name that mlx-vlm and the log lines tagged
 The wired region of GPU memory where a streamed MoE model keeps its most
 used experts. Decoding reads experts from the arena and fetches only the
 misses from disk. The server log prints its size as `[stream] memory
-budget:`. [Models larger than memory](streaming.md) describes it.
+budget:`, and [Models larger than memory](streaming.md) explains its part
+in streaming.
 
 ## Budget
 
@@ -72,9 +73,9 @@ the model's own GGUF or a separate companion GGUF.
 
 ## Every-token weights
 
-The parts of a MoE model that run on every token: attention, norms,
-routers and shared experts. Streaming keeps them on the GPU and reads only
-the routed experts from disk.
+The parts of a MoE model that run on every token, which are attention,
+norms, routers and shared experts. Streaming keeps them on the GPU and
+reads only the routed experts from disk.
 
 ## Expert and MoE
 
@@ -123,8 +124,8 @@ prompt cache, and as a last step it [sheds](#shed) the largest request.
 A way to store quantized weights after a fixed rotation of their input,
 which spreads large values across each row before quantization. The model
 rotates each activation in the same way at run time. `gmlx validate`
-prints `Hadamard-folded` for such a file, and
-[Hadamard-folded GGUFs](internals/hadamard-fold.md) describes how gmlx runs one.
+prints `Hadamard-folded` for such a file. How gmlx runs one is in
+[Hadamard-folded GGUFs](internals/hadamard-fold.md).
 
 ## Hugging Face
 
@@ -137,8 +138,8 @@ it.
 An intent is a built-in sampling preset from a model family, such as
 `@coding`, which works on any model with no config. A profile is a named
 set of settings that you write in the config. Both are selected in the
-same way, with `model@NAME` or `--profile NAME`.
-[Profiles](config.md#profiles) describes both.
+same way, with `model@NAME` or `--profile NAME`. Your own profiles go
+under [`profiles`](config.md#profiles) in the config.
 
 ## Keep, pin and idle
 
@@ -152,8 +153,8 @@ An idle model unloads after `ttl_s` seconds without a request.
 The model's stored attention state for the context, kept in memory beside
 the weights. It grows with the context, so a model whose file barely fits
 leaves no room for long conversations. `--kv-bits 8` or
-`--kv-quant-scheme kvarn` compresses it, as
-[KV cache quantization](kv-quantization.md) describes.
+`--kv-quant-scheme kvarn` compresses it, and
+[KV cache quantization](kv-quantization.md) compares the two.
 
 ## kvarn
 
@@ -186,8 +187,8 @@ language model, it makes a model that accepts images or audio, as
 
 A small prediction layer inside a model's own GGUF that drafts tokens for
 speculative decoding, as in Qwen3.5, 3.6 and 3.8. `run` and `chat` use it
-by themselves, and the `[load]` summary line shows `drafter native-head` for a
-model that uses one.
+by themselves, and the `[load]` summary line shows `drafter native-head`
+for a model that uses one.
 
 ## Prefill and decode
 
@@ -213,8 +214,8 @@ and never changes which experts run.
 
 The server's store of prefilled prompts. A request that shares its start
 with an earlier one, such as a system prompt or the conversation so far,
-skips prefilling the shared part. [Prompt cache](prompt-cache.md)
-describes it.
+skips prefilling the shared part. Its settings and counters are in
+[Prompt cache](prompt-cache.md).
 
 ## Quant
 
