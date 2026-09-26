@@ -24,7 +24,7 @@ The server items act on the server that the app tracks:
 | Item | Action |
 |------|--------|
 | Start server | Starts the server again. It appears only while the server is down. |
-| Stop server | Stops a server that runs in the background. A login-item server shows how to remove it instead. |
+| Stop server | Stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
 | Restart server | Restarts the server. |
 | Reload config | Tells the server to read its configuration file again. |
 | Copy server URL | Copies the address of the server. |

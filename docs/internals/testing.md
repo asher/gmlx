@@ -65,7 +65,7 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LONGCTX_TOKENS=4096 \
 | `-k <arch>` | Restricts the run to one architecture. Without it the suite sweeps each arch present. |
 | `KQUANT_LONGCTX_TOKENS=4096` | Shrinks the long-context length from the 16384 default. |
 | `KQUANT_LLAMACPP_BIN=/path/to/llama-completion` | Enables the llama.cpp parity tests. An interactive-only `llama-cli` fails the run with a message naming `llama-completion`. |
-| `-m integration` | Runs only the parity modules that carry the marker. |
+| `-m integration` | Runs only the tests marked `integration`: the parity modules, the engagement gate and the VLM integration tests. |
 
 Before a release, run the engagement gate with the big rows enabled. CI has
 no GGUFs, which makes this the one check that proves a real served model

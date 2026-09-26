@@ -53,7 +53,7 @@ services. Every route except `/health` needs the API key when one is set.
 | `GET /v1/capacity/plan` | It says whether `width` streams fit at `depth` tokens each, and whether they may start now. |
 | `GET /v1/cache/stats` | It returns prompt cache statistics, or `{"enabled": false}`. |
 | `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
-| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, or all with an empty body. It answers 409 while streams are in flight. |
+| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, which answers 409 while it streams, or every idle model with an empty body. |
 | `POST /v1/keep` | Keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. SIGHUP does the same. |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
@@ -93,8 +93,8 @@ generation routes are present but cannot serve a GGUF model.
 The residency routes act on what
 [Memory and residency](config.md#memory-and-residency) configures.
 `/unload` also unloads a pinned model, which stays pinned when the next
-request loads it again. `/v1/keep` is what `gmlx launch --model` and voice sessions
-call, and a kept model stays LRU-evictable under memory pressure.
+request loads it again. `/v1/keep` is what `gmlx launch --model` and voice
+sessions call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Changing the file](config.md#changing-the-file) explains.
 

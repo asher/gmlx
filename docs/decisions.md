@@ -178,8 +178,9 @@ the `prompt_tokens`, and `think_auto` when that setting was used.
 to its top label as the answer template writes it, with the probability of
 that label and the entropy of the read. The label of a score question is
 its level counted from 1, such as `"2"` for medium, unlike the index in
-`probabilities`, which counts from 0. When a decision has stages, chunks or
-a skipped question, `samples.n`, `samples.tops` and `samples.policy` are
+`probabilities`, which counts from 0. A score with ten or more levels uses
+the letters `A` onward instead. When a decision has stages, chunks or a
+skipped question, `samples.n`, `samples.tops` and `samples.policy` are
 lists with one entry for each chunk of each stage.
 
 ## Examples

@@ -23,9 +23,9 @@ full-width index from the top-k selection, and one temporary at a time
 for the tail mass and the boundary mass. Those run as separate steps, so
 at most one full-width temporary is live beyond the log-softmax. That is 14
 bytes per V-element, budgeted as 16 without `--floor` and 20 with it. The
-sub-chunk's logits are cast to bfloat16 before the reduction whatever the
-activation dtype, which is what that budget counts, and the stored top-K
-values are float16 in any case.
+budget counts the sub-chunk's logits at two bytes each. They stay float16
+when the projection returns float16 and are cast to bfloat16 otherwise,
+and the stored top-K values are float16 in any case.
 
 Some families scale their logits after the projection, and the head
 carries that scale beside the softcap. Granite divides by
@@ -43,7 +43,8 @@ of every pass runs after a peak-memory reset, and the measured bytes per
 V-element replace the budget when they exceed it. The step is then
 re-derived against the unchanged cap and a second sub-chunk confirms the
 peak fits. A second miss refuses the pass with the measured constant in the
-message, and both constants land in `progress.json` and the manifest. Bytes
+message. `progress.json` records the constant in force and the measured
+one, and the manifest records the constant in force and the budget. Bytes
 per V-element is a ratio of the head's own live set, so shrinking the cap
 alone could never change what the probe measures.
 

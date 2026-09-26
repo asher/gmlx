@@ -231,7 +231,7 @@ records the gain of each setting on real models.
 | Decode feeder | It keeps the most used experts of each layer in the arena, and reads only the others from disk. | `--no-decode-feeder` |
 | Lookahead prestage | It predicts the experts of the next layer while the current layer computes, and reads missing ones early. It changes which bytes are read, never the routing. | `GMLX_DECODE_LOOKAHEAD=0` |
 | Weight pin | It locks the every-token weights in memory, so that macOS cannot evict them between tokens. | `GMLX_PIN_WEIGHTS=0` |
-| GPU keep-warm | It runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `GMLX_GPU_KEEPWARM=0` |
+| GPU keep-warm | It runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `--no-gpu-keepwarm` |
 | Streamed lookup tables | It streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
 | Stack unmap | It releases the GPU mapping of the expert stacks once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
 | Tail merge | It widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
@@ -258,8 +258,8 @@ force the choice.
 GPU keep-warm matters because streamed decoding alternates short GPU work
 with pauses for the host and the disk, and the GPU clock drops in each
 pause. It uses power only while decoding, and it stops after one second
-without work. Turn it off on battery. It does nothing for a model that
-fits in RAM.
+without work. It does nothing for a model that fits in RAM. On battery,
+turn it off with `--no-gpu-keepwarm`.
 
 The weight pin is skipped, with a printed reason, when the every-token
 weights are larger than 60% of RAM.

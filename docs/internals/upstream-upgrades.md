@@ -4,8 +4,8 @@ gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs late-bound
 patches over private upstream symbols, deep-imports model internals, and
 leaves everything between those seams stock. The inventory is the `SEAMS`
 table in `gmlx/upstream/seams.py`, well over a hundred entries, and
-`python -m gmlx.upstream.seams` prints the current count with its drift
-report. Every seam is fragile by design. Upstream point releases move the
+`python -m gmlx.upstream.seams` prints the seam count when every seam
+matches, and the drift report otherwise. Every seam is fragile by design. Upstream point releases move the
 symbols, so the surface is safe only under a qualified set of versions.
 
 The versions are declared in `pyproject.toml` in three different ways.

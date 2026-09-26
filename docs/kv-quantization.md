@@ -18,7 +18,8 @@ Affine quantization, with `--kv-bits N` or the
 mlx-lm. It splits the K and V rows of each token into groups of
 `--kv-group-size` values, 64 by default, and stores N-bit codes with an
 fp16 scale and offset for each group. The widths are 2, 3, 4, 6 and 8, and
-`--quantized-kv-start` keeps the first tokens of the context in fp16.
+`--quantized-kv-start` keeps the whole cache in fp16 until the context
+reaches that many tokens.
 `--kv-bits 8` about halves the cache with almost no loss.
 
 The kvarn scheme, with `--kv-quant-scheme kvarn` or
@@ -58,8 +59,9 @@ describes.
 Head dimensions of 128, 256 and 512 are the only ones that kvarn accepts,
 so layers with a head dimension of 64, as in gpt-oss, use affine
 quantization only. The scheme also declines [MLA](glossary.md#mla)
-models such as DeepSeek-V4, GLM-5.3 and Kimi K2 and K3, whose compressed
-cache affine quantization still packs. Turns with images or audio keep an fp16 cache.
+models. Affine still packs the pooled cache of DeepSeek-V4 and GLM-5.3, and
+Kimi K2 keeps an fp16 cache under either scheme. Turns with images or audio
+keep an fp16 cache.
 
 ## Choosing a scheme by model
 
@@ -72,7 +74,7 @@ touches. The shape of the cache decides both, as the table shows.
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | Use `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, and kvarn at 4 when memory is the limit. |
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Quantize only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
 | Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme gives a small saving, since only the global layers quantize. |
-| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | The architecture already compresses it. | Use affine, since kvarn declines MLA models. |
+| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | The architecture already compresses it. | Use affine on DeepSeek-V4 and GLM-5.3, which pool their cache. Kimi K2 keeps an fp16 cache under either scheme. |
 | Head dimension 64 | gpt-oss | Each token adds little cache. | Use affine, since kvarn needs a head dimension of 128, 256 or 512. |
 
 ## Quality

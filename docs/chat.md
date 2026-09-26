@@ -77,8 +77,9 @@ partial reply stays in the conversation, so `/retry` generates it again and
 ## Editing and history
 
 The arrow keys, Ctrl-A and Ctrl-E edit the line. The up arrow recalls
-earlier prompts, which chat saves in `$XDG_CACHE_HOME/gmlx/chat_history`
-across sessions. `--no-history` keeps a session out of that file, and
+earlier prompts, which chat saves across sessions in
+`$XDG_CACHE_HOME/gmlx/chat_history`, or in `chat_history.ptk` beside it
+with the `chat` extra. `--no-history` keeps a session out of the file, and
 `/history off` stops saving mid-session.
 
 With the `chat` extra, a completion menu opens as you type a command, and

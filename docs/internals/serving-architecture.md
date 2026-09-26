@@ -47,7 +47,7 @@ flowchart TD
         WRAP --> STOP --> REG
     end
 
-    subgraph TICK["gmlx tick policy: wrappers on BatchGenerator._next, install order"]
+    subgraph TICK["gmlx tick policy: wrappers on BatchGenerator._next, call order"]
         direction LR
         TG["tick guard<br/>OOM / GPU-fault"]
         GOV["governor<br/>collision bands"]
@@ -99,8 +99,9 @@ flowchart TD
     TICK -.- LR
 ```
 
-Eight wrappers assign `BatchGenerator._next`, shown in install order in the
-tick-policy box. Six install by default, and memtrace and step timing are
+Eight wrappers assign `BatchGenerator._next`. The tick-policy box shows
+them in call order, outermost first, which is the reverse of install
+order. Six install by default, and memtrace and step timing are
 gated by environment variables. The live-requests publisher sits beside the
 stack, not in it. It wraps `ResponseGenerator._step` to publish per-request
 rows and never steps the engine.

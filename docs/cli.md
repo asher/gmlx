@@ -161,7 +161,7 @@ things are per-model keys under [models](config.md#models):
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or [kvarn](glossary.md#kvarn) quantization. Under kvarn `--kv-bits` defaults to 6. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, keep this many newest tokens fp16, a multiple of 128. |
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
-| `--quantized-kv-start N` | `0` | Keep this many tokens unquantized at the start of the cache. The flag does not apply under kvarn. |
+| `--quantized-kv-start N` | `5000`, or `0` under kvarn | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. Batches and kvarn quantize from the first token. |
 
 The KV flags are the [`load` keys](config.md#model-loading) of the config.
 `--kv-quant-scheme kvarn` on a positional model is the same as
@@ -197,7 +197,7 @@ These flags control speculative decoding:
 |------|---------|---------|
 | `--speculative` | Off | Speculate with the model's own MTP head or `--draft-gguf`. A config `discover` scan enables it on its own. |
 | `--draft-gguf PATH` | None | Draft with this separate [drafter](glossary.md#drafter) GGUF, which implies `--speculative`. |
-| `--native-mtp` | Off | Prefer the model's own head when `--draft-gguf` is also set. |
+| `--native-mtp` | Off | Draft with the model's own head, even when `--draft-gguf` is set. The flag implies `--speculative`. |
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
 | `--speculative-width-cap N` | Drafter default | Speculate only while at most N requests decode together. `0` removes the cap. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
@@ -337,7 +337,8 @@ tagged, aliases follow, and the default model is marked with `*`.
 | `-v`, `--paths` | Off | Also show each model's GGUF path. |
 | `--json` | Off | Emit JSON. |
 
-Exit code 2 means no config was found. The message names `gmlx init`.
+Exit code 2 means no config was found or it failed to load. When none was
+found, the message names `gmlx init`.
 
 ## gmlx run
 
@@ -405,7 +406,7 @@ These flags control memory:
 | `--kv-group-size N` | `64` | Set the affine quantization group size. |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or `kvarn`, the variance-normalized quantization that [KV cache quantization](kv-quantization.md) describes. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, the newest N tokens stay fp16. N is a multiple of 128, and `0` disables the tail. |
-| `--quantized-kv-start N` | `0` | Keep this many tokens unquantized at the start of the cache. The flag does not apply under kvarn. |
+| `--quantized-kv-start N` | `0` | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. The flag does not apply under kvarn. |
 | `--prefill-step-size N` | `2048`, `8192` when streaming | Prefill in chunks of this many tokens. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 
@@ -436,8 +437,9 @@ These flags are multimodal. [Vision and audio](vlm.md) describes them:
 | `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
-Under `--mmproj`, the run ignores `--stop` and the XTC flags with a warning,
-and the bench, report and streaming flags exit with an error.
+Under `--mmproj`, the run ignores `--stop` and the XTC flags with a warning.
+The bench and report flags and `--stream-cpu` exit with an error, while
+`--stream-experts` still works.
 
 These flags control speculative decoding, which
 [Speculative decoding](speculative-decoding.md) describes:
@@ -447,7 +449,7 @@ These flags control speculative decoding, which
 | `--speculative`, `--mtp` | Auto for an MTP head or a DeepSeek-V4 companion, off under `--stream-experts` | Force speculation on. |
 | `--no-speculative`, `--no-mtp` | Off | Force speculation off. |
 | `--draft-gguf PATH` | None, or the companion beside a DeepSeek-V4 file | Draft with this separate drafter GGUF, which implies `--speculative`. |
-| `--native-mtp` | Off | Prefer the model's own head when a drafter is also present. |
+| `--native-mtp` | Off | Draft with the model's own head, even when a drafter is set. The flag forces speculation on, and a GGUF with no head exits 2. |
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
 
@@ -605,9 +607,11 @@ These flags control `gmlx launch`:
 | `--no-keep` | Off | Do not keep `--model` resident. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
 
-The command exits 0 when the tool ran or the server is ready, 1 when the
-server is unreachable or died, 2 when the config is missing or malformed,
-and 130 when interrupted during the start wait.
+Once the tool starts, it replaces gmlx, so the exit status is the tool's
+own. Before that, the command exits 0 after `--config-only` and 1 when the
+server is unreachable, died or timed out, or the tool is not installed. It
+exits 2 when the config is missing or malformed, and 130 when interrupted
+during the start wait.
 
 ### launch menubar
 
@@ -722,7 +726,9 @@ gmlx rm old-model --keep-files
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
 The command exits 0 when the model was removed, 1 when you declined or a
-file could not be deleted, and 2 for an unknown id or a missing config.
+file could not be deleted, and 2 for an unknown id or a missing or invalid
+config. It also exits 2 without `--yes` when there is no terminal or
+`--json` is set.
 
 ## gmlx sync-models
 
@@ -753,8 +759,8 @@ cache is unreadable, is kept and reported instead of dropped.
 ## gmlx ps
 
 `gmlx ps` shows the models resident in a running server from its
-`/v1/metrics` snapshot, with the id, size, idle time, TTL, pinned state and
-path of each.
+`/v1/metrics` snapshot, with the id, size, idle time, TTL, pinned and kept
+state, and path of each.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1260,8 +1266,8 @@ These flags control `gmlx distill census`:
 
 ## gmlx doctor
 
-`gmlx doctor` checks what a working setup needs and prints a PASS, WARN or
-FAIL line for each check, with the fix named. No check accesses the
+`gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
+FAIL or SKIP line for each check, with the fix named. No check accesses the
 network. The checks cover the runtime and kernels, the config, and the
 files of each configured model and service. They also cover background
 servers, the login items and the launcher that background starts use,
@@ -1280,7 +1286,7 @@ gmlx doctor --deep
 | `--json` | Off | Emit JSON. |
 
 The command exits 0 when no check failed, 1 when a check failed, and 2 on a
-usage error.
+usage error or a `--config` file that does not exist.
 
 ## gmlx completion
 

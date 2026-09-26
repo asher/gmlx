@@ -61,7 +61,8 @@ of loading cleanly into wrong weights.
 An architecture is done when all of the following pass.
 
 - Strict load: `load_model` builds and swaps, and `load_weights` leaves no
-  parameter unfilled. The loader's unfilled-params warning must be empty.
+  parameter unfilled. The loader must not print its `model params not
+  loaded` warning.
 - Coherent short generation: A chat model answers "capital of France?" with
   Paris in 20 greedy tokens.
 - No looping: About 300 greedy tokens contain no 8-token n-gram repeated
@@ -73,8 +74,9 @@ An architecture is done when all of the following pass.
   grouped-query (GQA) head-layout and permute bugs surface only at depth.
 - Degeneration check: In `test_long_decode_integrity`, a long
   EOS-suppressed greedy decode keeps each token id in range and each step's
-  logprob finite, with no single-token repetition. Semantic looping on a tiny
-  model is expected. NaNs and out-of-range ids are not.
+  logprob finite. No single token may repeat 256 times in a row within the
+  first 2048 tokens. Semantic looping on a tiny model is expected. NaNs and
+  out-of-range ids are not.
 - Bench sanity: Prefill and decode throughput on one real model are compared
   against llama.cpp on the same file. A large unexplained deficit is usually
   a contiguity or layout bug, not MLX itself.

@@ -20,13 +20,16 @@ transformed and then signed.
 
 The header keys live under `prism.hadamard.`, and `gmlx.load.hadamard`
 parses them with the checks that the reference loader applies. It requires
-version 1, a power-of-two block, the fixed transform and axis strings, one
-sign vector per input width, `weight_names` for the folded tensors and
-`inverse_weight_names` for the embedding. `gdn_v_grouped` means that the
-`ssm_out` input is first permuted from tiled to grouped value-head order,
-`(rep, n_k, head)` from `(n_k, rep, head)`, with the counts from the
-`ssm.time_step_rank` and `ssm.group_count` keys. The forward fold applies
-the sign before the transform, and the inverse applies the transform first.
+version 1, a power-of-two block, the fixed transform and axis strings, a
+sign mode of `identity` or `explicit`, and `weight_names` for the folded
+tensors. Explicit mode also needs one sign vector per input width. The
+optional `inverse_weight_names` may name only `token_embd.weight`.
+
+`gdn_v_grouped` means that the `ssm_out` input is first permuted from the
+tiled value-head order `(rep, n_k, head)` to the grouped order
+`(n_k, rep, head)`, with the counts from the `ssm.time_step_rank` and
+`ssm.group_count` keys. The forward fold applies the sign before the
+transform, and the inverse applies the transform first.
 
 ## Where the rotation runs
 
@@ -40,9 +43,9 @@ the one place every route passes through, including the fused GDN decode
 body and the drafter binders that call `embed_tokens` and `lm_head`
 directly, so no layer code needs to know about the fold.
 
-The rotation is `kq.hadamard_rotate` when the installed mlx-kquant has it
-and the GPU is the default device. Otherwise, and on the CPU, it runs as MLX
-ops, which are an f32 upcast, the sign multiply and `mx.hadamard_transform`
+The rotation is `kq.hadamard_rotate` when the installed mlx-kquant has it,
+the GPU is the default device and the block is a width the kernel is built
+for, from 256 to 4096. Otherwise it runs as MLX ops, which are an f32 upcast, the sign multiply and `mx.hadamard_transform`
 for each block. Both forms round once, to the activation dtype.
 
 Two paths bypass module calls and are guarded. The occupancy fuse skips

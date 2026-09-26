@@ -578,11 +578,11 @@ The default is the template's own.
 
 gmlx closes the thinking block after this many reasoning tokens. The
 count starts when a thinking block opens, whether the template or the
-model opens it. On a speculative model the block closes at the end of a
-draft round, so the budget can be exceeded by one round. A request that
-runs in a batch, or resumes after preemption, has no budget, and a
-speculative model with a separate drafter refuses the key. `gmlx run` and
-`gmlx chat` honor it too. The default is no limit.
+model opens it. On a model with a native MTP head, the block closes at the
+end of a draft round, so the budget can be exceeded by one round. Such a
+model drops the budget of a request that runs in a batch or resumes after
+preemption. A model with a separate drafter refuses the key. `gmlx run`
+and `gmlx chat` honor it too. The default is no limit.
 
 ### `sampling.thinking_start_token`
 
@@ -647,8 +647,10 @@ a multiple of 128. The default is `1024`.
 
 ### `load.quantized_kv_start`
 
-This many tokens at the start of the cache stay unquantized, and `kvarn`
-ignores the key. The default is `0`.
+The cache stays fp16 until it holds this many tokens, and then all of it
+is quantized. Batched requests and `kvarn` quantize from the first token.
+The default is `5000` on the server and `0` for `gmlx run` and
+`gmlx chat`.
 
 ### `load.max_kv_size`
 

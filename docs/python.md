@@ -82,7 +82,7 @@ Six keyword arguments set the KV cache:
 | `max_kv_size` | `None` | Cap the KV cache with a rotating window. |
 | `kv_bits` | `None` | Quantize the KV cache to this many bits. |
 | `kv_group_size` | `64` | It sets the KV quantization group size. |
-| `quantized_kv_start` | `0` | KV quantization begins at this position. |
+| `quantized_kv_start` | `0` | Quantize the KV cache once it holds this many tokens. |
 | `kv_quant_scheme` | `None` | It selects `uniform` for the standard affine scheme or `kvarn` for variance-normalized quantization. |
 | `kv_tail_tokens` | `1024` | Under `kvarn`, this many recent tokens also stay fp16. It is a multiple of 128, and `0` disables the tail. |
 

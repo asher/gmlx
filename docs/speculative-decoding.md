@@ -28,13 +28,19 @@ such as the gemma-4 assistant drafter or a DFlash 2 drafter.
 
 On `run` and `chat`, speculation turns on by itself for a model with a
 native head, and for DeepSeek-V4 when its companion drafter is in the same
-folder. `--draft-gguf` names a drafter file, and `--speculative` turns
-speculation on with a companion that the loader finds beside the model.
-`--no-mtp` turns speculation off. When `--draft-gguf` or the `draft_gguf`
-key names a companion for a model with a native head, the companion wins,
-and `--native-mtp` forces the head. A model with a native head prints the
-name of a companion that it finds beside it, and uses it only with
-`--draft-gguf`.
+folder. It stays off under `--stream-experts`, `--stream-cpu`, `--adapter`
+and the lossy MoE settings. With `--mmproj`, the companion drafters of
+DeepSeek-V4, Qwen3.8-Flash-Next and Muse Glimmer also turn it on for text
+turns.
+
+`--speculative` turns speculation on with a native head, or with a
+companion that the loader finds beside a DeepSeek-V4, Qwen3.8-Flash-Next or
+Muse Glimmer model. Other families need `--draft-gguf`, which names a
+drafter file, and `--no-mtp` turns speculation off. When `--draft-gguf` or
+the `draft_gguf` key names a companion for a model with a native head, the
+companion wins, and `--native-mtp` forces the head. A model with a native
+head prints the name of a companion that it finds beside it, and uses it
+only with `--draft-gguf`.
 
 The server enables speculation for a model through its
 [`speculative`](config.md#modelsspeculative) key, and
@@ -46,9 +52,10 @@ find with its model.
 
 The verification step samples with temperature, top-p, top-k and min-p
 only. On `run`, speculation drops `--stop`, `--logit-bias`, the penalties,
-the XTC settings, `--max-kv-size`, `--quantized-kv-start` and
-`--prefill-step-size`, with a warning for each. Chat keeps the system
-prompt and `--stop`, and drops the others. `--no-mtp` keeps these settings
+the XTC settings, `--max-kv-size`, `--quantized-kv-start`,
+`--prefill-step-size`, `--over-generation` and `--inject-critique`, with a
+warning for each. Chat keeps the system prompt, `--stop` and
+`--prefill-step-size`, and drops the others. `--no-mtp` keeps these settings
 and decodes without speculation. A
 [multimodal model](vlm.md#media-with-other-features) speculates on text
 turns and decodes turns with images or audio without speculation.
@@ -98,8 +105,8 @@ check for each drafted token.
 
 Pair the drafter with its model through `--draft-gguf`. The header of a
 DFlash 2 file names its base model, so a discover scan pairs the two even
-in different folders. Muse Glimmer finds a drafter in the same folder by
-itself. Qwen3.8-27B keeps its native head until you pass `--draft-gguf`.
+in different folders. Muse Glimmer finds a drafter in the same folder with
+`--speculative`, and by itself when `--mmproj` loads its vision encoder. Qwen3.8-27B keeps its native head until you pass `--draft-gguf`.
 
 The block defaults to the size that the checkpoint was trained with, 8 on
 Qwen3.8 and 16 on Muse Glimmer, so a round drafts 7 or 15 tokens.
