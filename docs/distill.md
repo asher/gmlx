@@ -1118,7 +1118,7 @@ Memory and the measurements behind these defaults are on the
 
 - The student is a K-quant GGUF, a file in one of the K-quant formats
   such as Q4_K_M or Q6_K, with a LoRA adapter. [Why train on the
-  quant](lora.md#why-train-on-the-quant) says why. Full-parameter
+  quant](lora.md#training-on-the-quantized-model) says why. Full-parameter
   training and MLX checkpoints are library features without an action.
 - An adapter is trained from the base weights each time. A changed
   document means a new round one, not a top-up of the old adapter.

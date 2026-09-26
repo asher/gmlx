@@ -906,9 +906,11 @@ with `{"keep": false}` to the same endpoint releases a model, and
 
 Two ids that point to the same GGUF share one loaded copy, unless a
 setting that changes how the model is loaded differs between them. Those
-settings are the `load` keys, `mmproj`, `draft_gguf`, `speculative`,
-`adapter`, `chat_template`, `stream` and the streaming keys. Sampling,
-`system` and `ttl_s` never cause a second copy. A streamed model is
+settings are the `load` and `cache` keys, `mmproj`, `draft_gguf`,
+`speculative`, `speculative_width_cap`, `chat_template`, `stream` and the
+streaming keys. Ids that differ only in `adapter` share one copy, as
+[LoRA adapters](lora.md#serving-one-base-with-many-adapters) describes.
+Sampling, `system` and `ttl_s` never cause a second copy. A streamed model is
 counted against the budget as described in
 [Models larger than memory](streaming.md#residency-of-a-streamed-model).
 

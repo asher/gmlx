@@ -1,118 +1,121 @@
 # Vision and audio
 
-This guide is for running a multimodal GGUF, a language model paired with a
-vision or audio tower. It covers the file pairing, usage from the CLI and the
-server, the supported families and the known defects in community files.
+A multimodal GGUF model reads images or audio as well as text. This page
+covers how to pair its two files, how to send media from the command line
+and the server, which model families work, and which features combine with
+media.
 
-A multimodal model in GGUF is two files. The language model is quantized as
-usual, and a companion `mmproj` GGUF holds the encoder and the projector.
-Hugging Face repos ship the companion as an `mmproj-*.gguf` sibling of the
-language model, and `gmlx validate` recognizes one and names the file it
-pairs with. Vision and audio support is in the base install, and the
-language model GGUF alone still loads and runs as a plain text model.
+## The two files
 
-`--mmproj` pairs the two. The text tower runs on the K-quant kernels exactly
-as in text-only mode, and so do the matmuls of a quantized encoder, while
-float encoder weights stay native. The image processor and chat template are
-built from the metadata of the two files, and `--hf-source` fills in only
-what a file omits.
-
-## Usage
+A multimodal model in GGUF is two files. The language model GGUF is
+quantized as usual, and a companion `mmproj` GGUF holds the encoder that
+turns images or audio into tokens for the language model. Hugging Face
+repositories ship the companion as an `mmproj-*.gguf` file beside the
+language model. Download both in one command, where the second name is a
+file in the same repository:
 
 ```sh
-# one-shot generation with an image file or URL
-gmlx run model.gguf --mmproj mmproj.gguf --image photo.jpg --prompt "What is this?"
-
-# interactive chat with /image, /audio, or a file dragged into the prompt
-gmlx chat model.gguf --mmproj mmproj.gguf
-
-# serve one model with its companion. A config pairs them with mmproj: per model
-gmlx serve model.gguf --mmproj mmproj.gguf --port 8080
+gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf mmproj-BF16.gguf
 ```
 
-The flags are under [gmlx run](cli.md#gmlx-run), the request shape under
-[Vision messages](api.md#vision-messages) and the per-model key under
-[models](config.md#models).
+When both files land in a folder of
+[`server.model_dirs`](config.md#servermodel_dirs), `pull` registers the
+model with its companion and prints `(vlm)` after the id. For a model that
+is already registered, add the [`models.*.mmproj`](config.md#modelsmmproj)
+key to its entry. [`discover[].pair_mmproj`](config.md#discoverpair_mmproj)
+pairs the files that a folder scan finds.
 
-Images encode at native resolution unless `--resize-shape` shrinks them
-first. The size after resizing decides how many soft tokens an image expands
-to, and those tokens dominate prefill cost, so a square cap such as `448` is
-the usual choice when prefill time matters more than fine detail.
+`--mmproj` pairs the two files for one command. `gmlx validate` recognizes
+a companion and says to pair it with its language model. The language
+model alone still runs as a text model, and media support needs no extra.
 
-Audio works the same way on a companion that carries an audio encoder, as
-with gemma-4 omni and Qwen3-Omni. `--audio` on `run` and `/audio` in chat
+gmlx builds the image processor and the chat template from the metadata
+of the two files. For a family whose files leave something out,
+`--hf-source` names a Hugging Face repository, and the whole processor,
+including the tokenizer and chat template, then comes from that
+repository.
+
+## Sending media
+
+```sh
+# One reply about an image file or URL.
+gmlx run model.gguf --mmproj mmproj.gguf --image photo.jpg --prompt "What is this?"
+
+# A chat, with /image, /audio, or a file dragged into the prompt.
+gmlx chat model.gguf --mmproj mmproj.gguf
+
+# A server for one model and its companion.
+gmlx serve model.gguf --mmproj mmproj.gguf
+```
+
+`run` takes local files and URLs, and chat takes local files. Image files
+can be PNG, JPEG, GIF, WebP, BMP, TIFF or HEIC, and audio files can be WAV,
+MP3, FLAC, M4A, Ogg, Opus or AIFF. A request to the server carries images
+as the [Vision messages](api.md#vision-messages) section of the API
+reference shows. The flags are listed under [gmlx run](cli.md#gmlx-run).
+
+Each family resizes images to its own limits before encoding. The size
+sets how many tokens an image becomes, and those tokens make up most of
+the time to read a prompt with images. `--resize-shape`, such as `448` or
+`672x448`, shrinks images first, which helps when speed matters more than
+fine detail.
+
+Audio works in the same way on a companion with an audio encoder, such as
+gemma-4 E-series and Qwen3-Omni. `--audio` on `run` and `/audio` in chat
 attach a clip to the next turn.
 
 ## Supported families
 
-The companion's `clip.*` metadata names the projector. Where several
-families share a projector, the language model's architecture tells them
-apart, and an unsupported pairing fails at load with the projector and
-architecture it found in the error.
+The metadata of the companion names its projector. When several families
+share a projector, the architecture of the language model tells them
+apart. A pairing that gmlx does not support fails at load, and the error
+names the projector and architecture that it found.
 
-| Family | Projector and arch | Examples | Notes |
-|--------|--------------------|----------|-------|
-| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | pass `--hf-source llava-hf/llava-1.5-7b-hf`, because the image processor is not in the GGUF |
-| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | vision quality limited by a conversion defect, described under Known GGUF defects |
-| Qwen3.5 and 3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
-| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | vision and audio, experimental. Text on the thinker tower is reliable |
-| gemma-4 omni | `gemma4v`, `gemma4a` | gemma-4-E2B, E4B | vision and audio |
-| gemma-4 unified | `gemma4uv` | gemma-4-12B | encoder-free unified embedder |
-| Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | vision tower and processor implemented in gmlx, so no `--hf-source` is needed |
-| Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | over-RAM MoE, needs `--stream-experts` |
-| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | the unsloth UD builds | differs in a few ways, described below |
-| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | the antirez encoder GGUF | vision tower and processor implemented in gmlx, so no `--hf-source` is needed |
+| Family | Projector and architecture | Examples | Notes |
+|--------|----------------------------|----------|-------|
+| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | Needs `--hf-source llava-hf/llava-1.5-7b-hf`, because the GGUF has no image processor. |
+| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | Vision quality is poor, because the published companion files were converted with a defect. |
+| Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
+| Qwen3.8-Flash-Next | `qwen3vl_merger` with `qwen4exp` | Qwen3.8-Flash-Next | |
+| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | Vision and audio. |
+| gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | Vision and audio. |
+| gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | Vision, and audio when the companion has it. |
+| GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
+| Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
+| Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | Larger than RAM on most Macs, so it needs `--stream-experts`. |
+| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | See the notes below the table. |
+| DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | The antirez encoder GGUF | |
 
-Qwen2-VL and Qwen2.5-VL companions, projector `qwen2vl_merger`, are not
-supported yet. That load fails immediately and the error names the family.
-On LLaVA the loader reports two unfilled `post_layernorm` parameters, which
-is expected: the conversion omits them and LLaVA never uses them.
+Qwen2-VL and Qwen2.5-VL companions, with the projector `qwen2vl_merger`,
+are not supported, and the load fails with a message that names the
+family. On LLaVA, the loader reports two unfilled `post_layernorm`
+parameters, which is expected, because LLaVA does not use them.
 
-DeepSeek-V4-Flash-Vision-Exp differs from the other families in three
-ways. First, image turns need an unquantized KV cache and run one at a time
-on the server, so `--kv-bits` applies to text turns only. Second, each
-image expands to a block of up to 384 tokens that prefills as one chunk,
-and the prompt cache keys on those blocks, so a conversation that repeats
-its earlier image turns verbatim hits the cache. Third, its text output is
-not token-for-token comparable with the text-only release.
+On DeepSeek-V4-Flash-Vision-Exp, image turns need a KV cache without
+quantization, so `--kv-bits` applies to text turns only, and the server
+runs image turns one at a time. Each image becomes a block of up to 384
+tokens. The prompt cache recognizes these blocks, so a conversation that
+repeats its earlier image turns unchanged reuses the cache. On V4.1, each
+image becomes up to 1024 tokens, and image turns have no such limits.
 
-The V4.1 encoder is not a `clip.*` conversion. It declares its own
-architecture and keeps the checkpoint's own tensor names, with the q, k
-and v rows fused and the gate and up rows fused, and the loader splits them
-at load. The tower itself is the V4 tower with a larger token budget and no
-width cap.
+## Media with other features
 
-V4.1 image turns are ordinary text turns to the language model. Each image
-expands to a block of up to 1024 tokens in plain reading order, which the
-language model attends to causally and which may be split across prefill
-chunks. Nothing special applies to `--kv-bits`, to chunking or to how many
-requests run at once.
-
-## Combining with other features
+Most features of the language model work with media. These combinations
+have limits:
 
 | Combination | Result |
 |-------------|--------|
-| `--stream-experts` | works with one request in flight. The text tower streams and the vision tower stays on the GPU |
-| `--stream-cpu` | refused, because that placement would move the vision tower to the CPU too |
-| `--speculative` | works with any drafter: a native head, a `--draft-gguf` companion or an autodetected one. Text turns speculate and media turns decode plain |
-| `--adapter` | refused, because live LoRA is text-path only |
+| [Speculative decoding](performance.md#mtp-speculative-decoding) | Text turns use speculation, and turns with media decode without it. It needs a drafter, which is a native head or a `--draft-gguf` companion. |
+| [`--stream-experts`](streaming.md) | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it, and a served model cannot combine it with speculation. |
+| `--stream-cpu` | Refused, because it would move the vision encoder to the CPU too. |
+| The lossy MoE settings, such as `--moe-experts` | Chat refuses them with `--mmproj`. |
+| `--adapter` | Refused, because a LoRA adapter applies only to text models. |
+| `--stop`, `--xtc-probability`, `--xtc-threshold` | `run` ignores them with a warning. |
 
-The two front ends place media differently. `chat` keeps each image on the
-turn that sent it, so a later question about an earlier image is answered
-against the right history, but once media enters a conversation every turn
-re-prefills the whole transcript and re-encodes the media, because the
-KV-cached fast path is text-only. The serve chat endpoint instead renders all
-of a conversation's images on its last user message, so a follow-up after an
-image turn misses the prompt cache from the point where the images moved.
-
-## Known GGUF defects
-
-Some community companion files are mis-converted upstream, independent of
-this loader. You can recognize one because llama.cpp's multimodal CLI
-produces the same degraded output from the same file, while the native
-weights of the same checkpoint render correctly.
-
-Pixtral companions carry corrupted vision attention q and k projections
-from a RoPE layout mismatch in the conversion. There is no exact
-loader-side inverse, so GGUF Pixtral vision quality is limited until a
-re-converted companion appears. The text tower is unaffected.
+Chat and the server place media differently in a conversation. Chat keeps
+each image with the turn that sent it, so a later question about an
+earlier image reads the right history. Once a conversation holds media,
+though, chat reads the whole conversation and encodes the media again on
+every turn. The server puts all the images of a conversation on its last
+user message, so a follow-up question after an image misses the prompt
+cache from the point where the images moved.
