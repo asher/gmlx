@@ -559,6 +559,42 @@ def _iter_gguf_files(root: str, recursive: bool):
         yield p
 
 
+def discovered_models(cfg, *, progress=False) -> list[ModelCfg]:
+    """The models the config's ``discover`` scans find beyond ``cfg.models``.
+
+    Configured entries win: the scan skips their ids and their resolved paths.
+    A scan that fails prints one warning and finds nothing, so a flaky folder
+    never stops the caller."""
+    if not cfg.discover:
+        return []
+    from gmlx.config import ConfigError, resolve_path
+
+    known_paths = set()
+    for m in cfg.models.values():
+        known_paths.add(m.path)
+        try:
+            rp = resolve_path(m.path, cfg.model_dirs)
+        except ConfigError:
+            rp = None
+        if rp:
+            known_paths.add(rp)
+    try:
+        return scan_dirs(cfg.discover, cfg.model_dirs,
+                         known_ids=set(cfg.models), known_paths=known_paths,
+                         progress=progress)
+    except Exception as e:                       # noqa: BLE001 - a flaky scan dir
+        print(f"warning: discover scan failed: {e}", file=sys.stderr)
+        return []
+
+
+def merge_discovered(cfg, *, progress=False) -> list[ModelCfg]:
+    """Add :func:`discovered_models` to ``cfg.models`` and return them."""
+    found = discovered_models(cfg, progress=progress)
+    for m in found:
+        cfg.models.setdefault(m.id, m)
+    return found
+
+
 def scan_dirs(
     specs,
     model_dirs,

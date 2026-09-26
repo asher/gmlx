@@ -63,6 +63,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx serve`, `gmlx run` and `gmlx chat` serve the models that a config's
+  `discover` block finds. Only `gmlx list` and `gmlx rm` saw them, so a
+  request for a discovered id failed.
 - The install docs state macOS 26.2 as the minimum for every install route.
   They described a build from source for older macOS, which the Metal
   kernels do not support.

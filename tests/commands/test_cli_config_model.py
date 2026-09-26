@@ -457,3 +457,20 @@ def test_no_stream_no_cap_change(tmp_path, monkeypatch):
     _, args = _resolve(["m", "--config", _config(tmp_path)[0]])
     cli._ensure_stream_cb_caps(args)
     assert calls == []
+
+
+def test_discovered_id_resolves(tmp_path, monkeypatch):
+    # An id that only the config's discover scan finds resolves like an entry.
+    from gmlx.config import ModelCfg
+    import gmlx.load.discovery as discovery
+
+    loose = tmp_path / "loose.gguf"
+    loose.write_bytes(b"GGUF")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs: [{tmp_path}]\n"
+                   "discover:\n  - {}\n")
+    monkeypatch.setattr(discovery, "scan_dirs", lambda *a, **k: [
+        ModelCfg(id="loose", path=str(loose))])
+    rc, args = _resolve(["loose", "--config", str(cfg)])
+    assert rc is None
+    assert args.gguf == str(loose)

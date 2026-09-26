@@ -302,6 +302,29 @@ def test_discovery_cfg_wraps_scan(monkeypatch):
     assert cfg.port == 9000
 
 
+def test_config_mode_serves_discover_scan(monkeypatch, tmp_path):
+    # A config's discover block adds its models at start and again on each
+    # reload; a configured entry keeps its id.
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  mine: {path: /m/mine.gguf}\n"
+                    "discover:\n  - {dir: /m}\n")
+    scans = []
+
+    def fake_scan(specs, dirs, *, known_ids=(), known_paths=(), **kw):
+        scans.append(set(known_ids))
+        return [ModelCfg(id="loose", path="/m/loose.gguf")]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    registered = []
+    monkeypatch.setattr("gmlx.serve.bridge_vlm.register_resolved_models",
+                        lambda cfg: registered.append(set(cfg.models)))
+    cfg, reload_fn = srv._resolve_mode_cfg(_ns(config=str(conf)))
+    assert set(cfg.models) == {"mine", "loose"}
+    assert scans == [{"mine"}]
+    assert reload_fn() == {"models": 2}
+    assert registered == [{"mine", "loose"}]
+
+
 # preload pick: pinned > defaults.model > sole > none
 def test_preload_prefers_pinned():
     cfg = ServerCfg(models={

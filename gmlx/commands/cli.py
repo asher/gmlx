@@ -2190,7 +2190,9 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
             return None
         # Family detection before resolution, so the family base layer (and
         # family-resolved @intents) shape the overlay exactly like the server.
-        from gmlx.load.discovery import fill_families
+        from gmlx.load.discovery import fill_families, merge_discovered
+        if raw.split("@", 1)[0] not in cfg.models and raw not in cfg.aliases:
+            merge_discovered(cfg)
         fill_families(cfg)
         rm = cfgmod.resolve_cli_model(
             raw, cfg, request_profile=getattr(args, "profile", None))

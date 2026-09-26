@@ -1544,7 +1544,7 @@ def _resolve_cfg(a) -> tuple:
 def _resolve_mode_cfg(a) -> tuple:
     if a.config:
         path = a.config
-        return load_config(path), _make_reload_fn(path)
+        return _load_with_discover(path), _make_reload_fn(path)
     if a.models_dir:
         return _discovery_cfg(a.models_dir, a), None
     if a.model:
@@ -1557,17 +1557,27 @@ def _resolve_mode_cfg(a) -> tuple:
     for p in default_config_paths():
         if p.exists():
             print(f"[server] loading config {p}", file=sys.stderr)
-            return load_config(p), _make_reload_fn(str(p))
+            return _load_with_discover(p), _make_reload_fn(str(p))
     print("[server] no config found; discovering the current directory "
           "(pass --models-dir DIR, or `gmlx init` to save a config)",
           file=sys.stderr)
     return _discovery_cfg([_DEFAULT_DISCOVER_DIR], a), None
 
 
+def _load_with_discover(path) -> ServerCfg:
+    """Load the config and add the models its ``discover`` scans find."""
+    cfg = load_config(path)
+    found = discovery.merge_discovered(cfg)
+    if found:
+        print(f"[server] discover: {', '.join(m.id for m in found)}",
+              file=sys.stderr)
+    return cfg
+
+
 def _make_reload_fn(path):
     def _reload():
         from .bridge_vlm import register_resolved_models
-        cfg = load_config(path)
+        cfg = _load_with_discover(path)
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         return {"models": len(cfg.models)}
     return _reload
