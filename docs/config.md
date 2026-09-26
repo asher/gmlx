@@ -235,9 +235,9 @@ the timeout. The default is the server-wide value.
 
 This key runs a model that does not fit in memory. `experts` streams the
 routed experts of a mixture-of-experts model from disk and keeps the rest
-of the model on the GPU. `cpu` runs the whole model on the CPU. The load
-refuses `stream` on a speculative model, and `stream: cpu` on a
-multimodal model. The old key `cpu_moe` is read as `stream`, with a
+of the model on the GPU. `cpu` runs the whole model on the CPU. A
+speculative model with `stream` loads streamed without speculation, and
+the load refuses `stream: cpu` on a multimodal model. The old key `cpu_moe` is read as `stream`, with a
 warning. The default is no streaming.
 
 [Models larger than memory](streaming.md) explains how to choose between

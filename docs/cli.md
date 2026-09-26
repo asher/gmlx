@@ -87,8 +87,9 @@ and the file it writes is described in [Configuration](config.md).
 
 ## gmlx serve
 
-`gmlx serve` runs the server. It detaches by default and returns at once, so
-the same shell can run `gmlx launch` next. `--foreground` keeps it attached
+`gmlx serve` runs the server. It detaches by default and returns when the
+server is ready or `--start-timeout` runs out, so the same shell can run
+`gmlx launch` next. `--foreground` keeps it attached
 instead. A background server keeps a runfile and a log under
 `~/.cache/gmlx/` and, on a macOS desktop session, raises the [menu bar
 app](menubar.md).
@@ -233,11 +234,12 @@ in [Speech, embeddings and rerank](services.md):
 [Address and authentication](config.md#address-and-authentication) gives
 the reasons.
 
-Each completed request logs a line with the endpoint, model, token counts
-and timing:
+Each completed request logs a line with the endpoint, model, token counts,
+timing and the MLX memory in use afterwards. A finish reason other than
+`stop` adds `finish=<reason>` before the memory fields:
 
 ```text
-[req] 2026-06-15 16:07:42 /chat/completions qwen3-0.6b prompt=19 gen=3 ttft=0.47s prefill=45t/s decode=172.6t/s total=0.51s
+[req] 2026-06-15 16:07:42 /chat/completions qwen3-0.6b prompt=19 gen=3 ttft=0.47s prefill=45t/s decode=172.6t/s total=0.51s active=1.3G cache=0.2G
 ```
 
 ## gmlx stop
@@ -343,8 +345,7 @@ found, the message names `gmlx init`.
 ## gmlx run
 
 `gmlx run` loads a GGUF and generates a completion, runs a benchmark, or
-prints the load plan. `--help` shows the common flags, and `--help-all`
-shows every flag.
+prints the load plan.
 
 ```sh
 gmlx run model.gguf --prompt "Explain entropy." --max-tokens 128
@@ -407,7 +408,7 @@ These flags control memory:
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or `kvarn`, the variance-normalized quantization that [KV cache quantization](kv-quantization.md) describes. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, the newest N tokens stay fp16. N is a multiple of 128, and `0` disables the tail. |
 | `--quantized-kv-start N` | `0` | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. The flag does not apply under kvarn. |
-| `--prefill-step-size N` | `2048`, `8192` when streaming | Prefill in chunks of this many tokens. |
+| `--prefill-step-size N` | `2048`, `8192` when streaming, `4096` for HY4 when streaming | Prefill in chunks of this many tokens. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 
 A width outside the scheme's list exits 2, and so does a `--max-kv-size`
@@ -453,10 +454,10 @@ These flags control speculative decoding, which
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
 
-Speculation honors `--temp`, `--top-p`, `--top-k`, `--min-p` and
-`--system-prompt`. A flag it cannot honor, such as `--stop`, a penalty,
-`--logit-bias` or `--max-kv-size`, is dropped with a warning, and
-`--no-mtp` decodes on the plain path, which honors everything. KV
+Speculation drops a flag it cannot honor with a warning, and `--no-mtp`
+decodes on the plain path, which honors every flag.
+[Settings that speculation drops](speculative-decoding.md#settings-that-speculation-drops)
+lists those flags. KV
 quantization works on the speculative path and quantizes the same layers
 `serve` would. The exceptions are kvarn on a sliding-window stack and on an
 architecture whose drafter reads the target KV. There kvarn declines, and
@@ -514,7 +515,7 @@ These flags say where the model runs:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `gguf`, positional | Server default | Chat with this GGUF, config id or served id. |
-| `--server` | Auto when the server is running | Run as a plain client of the server. Any server-selecting flag below turns it on. |
+| `--server` | Auto when the server is running | Run as a plain client of the server. |
 | `--assistant` | Off | Chat through the server's tool-loop assistant, with MCP tools and memory. |
 | `--local` | Off | Load in-process even when the server is running. |
 | `--base-url URL` | The managed server | Connect to this server, implying `--server`. |
@@ -569,7 +570,10 @@ the same as they do there:
 | Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
 
-None of them applies when the chat is a server client. A base model with no
+When the chat is a server client, `--adapter`, `--mmproj`,
+`--chat-template` and `--no-chat-template` exit with code 2, and the other
+flags in this table do not apply. `--chat-template-config` also exits with
+code 2 there. A base model with no
 chat template refuses to start until you pass one with `--chat-template` or
 send turns verbatim with `--no-chat-template`.
 
@@ -577,9 +581,10 @@ send turns verbatim with `--no-chat-template`.
 
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
-installs the tool. Most clients get a configuration of their own under
-`~/.config/gmlx`, while pi, omp and goose get a provider merged into their
-own files. [Agents and chat apps](launch.md) describes each client.
+installs the tool. opencode, hermes, aichat, elia and dsh get a
+configuration of their own under `~/.config/gmlx`. pi, omp and goose get a
+provider merged into their own files, and claude-code and open-webui get
+environment variables only. [Agents and chat apps](launch.md) describes each client.
 
 ```sh
 gmlx launch opencode
@@ -699,8 +704,9 @@ A split model is checked across all its shards, because a codec used by a
 single tensor can appear only in a later shard. Projector GGUFs are
 recognized as companions and are not checked as models.
 
-The command exits 0 when the file will load, 1 when it will not, and 2
-when the reference cannot be resolved or read.
+The command exits 0 when the file will load or when it lists the quants
+of a folder or repo, 1 when the file will not load, and 2 when the
+reference cannot be resolved or read.
 
 ## gmlx rm
 
