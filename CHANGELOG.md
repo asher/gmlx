@@ -15,6 +15,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx systemone` sends a decision request to a server or answers it
   offline, and `server.systemone` holds the route's settings.
 
+### Changed
+
+- The package and Homebrew license metadata declare Apache-2.0 beside
+  BUSL-1.1 and MIT, since gmlx ships Apache-2.0 files from omlx, misaki and
+  vLLM.
+
 ### Fixed
 
 - The `--draft-block-size` help and docs called N the drafted tokens. A round

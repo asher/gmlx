@@ -10,9 +10,10 @@ ab3de6edf2 (Apache-2.0), with modifications:
   shapes of examples/features/structured_diffusion/structured_server.py,
   restated against an in-process read engine instead of HTTP calls to a
   vLLM server.
-- gmlx/systemone/denoise.py: the multi-step structured-read loop (linear
-  temperature schedule, entropy-bound acceptance, pinned positions,
-  self-conditioning, per-request convergence) from
+- gmlx/systemone/denoise.py: the unembedding, the log-probabilities a slot
+  reports and the multi-step structured-read loop (linear temperature
+  schedule, entropy-bound acceptance, pinned positions, self-conditioning,
+  convergence per sample where vLLM converges per request) from
   vllm/model_executor/models/diffusion_gemma.py.
 - tests/systemone/_systemone_proxy_ref.py: structured_server.py vendored
   for the parity test, with pybase64 replaced by the standard base64 module.
