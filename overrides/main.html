@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+
+{#- theme.favicon is the PNG fallback. Browsers that read SVG icons take this one. #}
+{% block extrahead %}
+  <link rel="icon" type="image/svg+xml" sizes="any" href="{{ 'assets/favicon.svg' | url }}">
+{% endblock %}
