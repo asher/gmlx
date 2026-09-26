@@ -1,7 +1,7 @@
 # Streaming measurements
 
-The samples and case studies behind the tables in
-[streaming.md](../streaming.md). This page shows what the lossless
+The samples and case studies behind
+[Models larger than memory](../streaming.md). This page shows what the lossless
 over-budget path produces, what each lossy setting did on four models and
 how a setting is certified, as contributor evidence rather than an operator
 guide.
@@ -297,6 +297,18 @@ tokens after a 16K prompt, the profile's own syncs included:
 At 64K the fused route's hyper-connections cost 19.0 ms per token, so the
 term does not grow with depth.
 
+## Settings that passed
+
+These lossy settings passed the certification procedure below on the
+models they were measured on:
+
+| Model | Setting | Quality verdict |
+|-------|---------|-----------------|
+| Hy3 IQ4_XS | `moe_layer_shed: 0.10` with `moe_miss_shed: 0.90` | No defects at temperature 0.6. Lower to 0.07 and 0.93 at the card's temperature of 0.9. |
+| MiniMax-M3 Q4_K_M | `moe_miss_shed: 0.80` | No defects over two 10k-token generations. |
+| GLM-5.2 UD-IQ3_XXS | `moe_miss_shed: 0.85` | No defects. 0.80 dropped scene content while keeping valid form. |
+| Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | Working pages throughout, with content drift growing as P falls. 0.60 broke code. |
+
 ## Certifying a setting
 
 Quality degrades in a consistent order as the settings become more
@@ -417,7 +429,7 @@ and ranking neighboring levels takes more samples than one.
 ## Lossless setting measurements
 
 The numbers behind the lossless settings table in
-[streaming.md](../streaming.md#the-lossless-settings). All are alternated A/B
+[The lossless settings](../streaming.md#the-lossless-settings). All are alternated A/B
 medians unless noted.
 
 | Setting | Model and machine | Without | With |
