@@ -41,16 +41,13 @@ configuration keys.
 | `APC_DISK_READ_MODE` | `cache.disk.read_mode` |
 | `APC_DISK_NAMESPACE` | `cache.disk.namespace` |
 
-Three more upstream variables have no row in the table because they are
-not set per model. `KV_KEY_BITS` and `KV_VALUE_BITS` give
-[kvarn](glossary.md#kvarn) KV split key and value widths server-wide and override
-`GMLX_KVARN_BITS`.
-
-`PREFILL_STEP_SIZE` is mlx-vlm's name for the prefill chunk size, which
-`--prefill-step-size` and `server.prefill_step_size` set per server.
-
-`TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for, as
-[Logprobs](api.md#logprobs) describes.
+Four more upstream variables apply to the whole server instead of one
+model. `KV_KEY_BITS` and `KV_VALUE_BITS` give [kvarn](glossary.md#kvarn)
+keys and values different widths, and they override `GMLX_KVARN_BITS`.
+`PREFILL_STEP_SIZE` is the prefill chunk size, which `--prefill-step-size`
+and `server.prefill_step_size` also set. `TOP_LOGPROBS_K` caps the
+`top_logprobs` that a request may ask for, as [Logprobs](api.md#logprobs)
+describes.
 
 ## Residency
 
@@ -61,7 +58,7 @@ not set per model. `KV_KEY_BITS` and `KV_VALUE_BITS` give
 | `MLX_VLM_PINNED_MODELS` | Comma-separated model paths to pin. Combined with `--pin` and `pin: true` entries, so it only adds pins. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper entirely. LRU eviction under pressure still applies. |
 | `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds, default `30`. |
-| `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a queued request waits for a decode slot before a 503. `server.token_queue_timeout_s` sets the same limit, and `1800` applies when neither is set. |
+| `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a request may wait for its next token before it fails. `server.token_queue_timeout_s` sets the same limit, and `1800` applies when neither is set. |
 
 ## Server
 
@@ -144,8 +141,9 @@ explained in [Models larger than memory](streaming.md) and
 | `GMLX_DRAFT_HEAD` | MTP and DFlash 2 drafter head on a float-head target. `q8` (default) or `q4` loads a q8_0 or q4_0 copy, `f16` uses the target's. Output is unchanged. |
 | `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, with `0` uncapped. Overrides each model's `speculative_width_cap` and is read on each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`. Same as `--ignore-eos`, for forced-length benchmarking. |
-| `GMLX_API_KEY` | Client-side default key for `ps` when `--api-key` is not passed. The server reads its key only from `server.api_key`. |
+| `GMLX_API_KEY` | The key that `ps` and `systemone` send when `--api-key` is not passed. The server reads its own key only from `server.api_key`. |
 | `GMLX_PULL_RETRIES` | Consecutive failed attempts `pull` accepts on one file, default `10`. An attempt that moves bytes resets the count. `0` fails on the first error. |
 | `GMLX_PULL_TIMEOUT` | Socket timeout in seconds for a `pull` transfer, default `60`. It is also the budget for one stalled read. |
-| `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for `validate` and `pull` on gated or private repos. |
-| `XDG_CACHE_HOME` | The root of the `gmlx/` cache directory, which holds `chat`'s prompt history, backgrounded servers' runfiles and logs, and the models `talk` downloads. |
+| `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | The Hugging Face token that `validate` and `pull` send, checked in that order. Without either, they use the token that `hf auth login` stored. |
+| `XDG_CACHE_HOME` | Root of the `gmlx/` cache directory, with the chat input history, server runfiles and logs, and the `talk` models. Default `~/.cache`. |
+| `XDG_DATA_HOME` | The root of the `gmlx/` data directory, which holds saved chat sessions and the assistant's memory. Default `~/.local/share`. |

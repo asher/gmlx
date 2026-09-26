@@ -29,7 +29,9 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 | `arch` | detected | Override `general.architecture` detection. |
 | `hf_source` | `None` | Load the config from this local dir or HF repo id instead of synthesizing it, for arches without a synthesizer or variants whose constants differ. |
 | `chat_template` | from GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
+| `target_prefix` | `""` | A prefix added to every remapped tensor name. |
 | `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap. For inspection, not inference. |
+| `fail_on_unknown` | `False` | Raise `RuntimeError` on a tensor that has no remap entry, instead of skipping it with a warning. |
 | `zero_copy` | `True` | Load tensors as no-copy mmap views. `False` copies into fresh buffers. |
 | `verbose` | `False` | Print load diagnostics such as `[arch]`, `[gguf]` and `[patch]`. |
 
@@ -50,7 +52,7 @@ A string prompt goes through the tokenizer's chat template when one is
 present, while a pre-tokenized `list[int]` prompt is used as-is. The return
 value is the generated text.
 
-Sampling:
+These keyword arguments control sampling:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -65,7 +67,7 @@ Sampling:
 | `logit_bias` | `None` | `{token_id: bias}` added to the logits. |
 | `stop` | `None` | Stop strings. Generation ends when one appears. The match is trimmed. |
 
-Prompt handling:
+These keyword arguments control how the prompt is rendered:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -73,7 +75,7 @@ Prompt handling:
 | `system_prompt` | `None` | Prepended as a system message on the templated path. |
 | `template_kwargs` | `None` | Extra `apply_chat_template` kwargs, such as `{"enable_thinking": False}`. |
 
-KV cache:
+These keyword arguments control the KV cache:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -84,7 +86,7 @@ KV cache:
 | `kv_quant_scheme` | `None` | `uniform` for the standard affine scheme, or `kvarn` for variance-normalized quantization. |
 | `kv_tail_tokens` | `1024` | Under `kvarn`, the most recent tokens that also stay fp16. A multiple of 128, and `0` disables the tail. |
 
-Long prompts and thinking models:
+These keyword arguments control long prompts, thinking models and output:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -116,11 +118,11 @@ loop. Its CLI equivalent is `gmlx run --bench`.
 | `runs` | `2` | Runs at each length. The best is reported. |
 | `warmup` | `True` | One untimed warmup generation first. |
 | `prefill_step_size` | model-aware | As in `generate`. |
-| `kv_bits` | `None` | As in `generate`, with `kv_group_size` and `quantized_kv_start`. |
-| `kv_group_size` | `64` | |
-| `quantized_kv_start` | `0` | |
-| `kv_quant_scheme` | `None` | As in `generate`, with `kv_tail_tokens`. |
-| `kv_tail_tokens` | `1024` | |
+| `kv_bits` | `None` | As in `generate`. |
+| `kv_group_size` | `64` | As in `generate`. |
+| `quantized_kv_start` | `0` | As in `generate`. |
+| `kv_quant_scheme` | `None` | As in `generate`. |
+| `kv_tail_tokens` | `1024` | As in `generate`. |
 
 ## Preflight and errors
 
@@ -132,20 +134,22 @@ pf = preflight("model.gguf")
 pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 ```
 
-`preflight(gguf_path, *, arch=None, hf_source=None)` validates a GGUF
-before committing to a load: it discovers shards, histograms the tensor
-codecs, refuses unsupported ones by name and gates on the architecture. It
-reads only the GGUF header, so a multi-GB file is checked in well under a
-second. `load_model` runs it internally, and you can call it yourself to
+`preflight(gguf_path, *, arch=None, hf_source=None)` checks a GGUF before
+a load. It finds the shards, counts the tensors of each codec, refuses
+unsupported codecs by name and checks the architecture. It reads only the
+GGUF header, so a file of many GB is checked in well under a second. `load_model` runs it internally, and you can call it yourself to
 check a file first. Its CLI equivalent is `gmlx validate`.
 
-Failures raise one of two exceptions, from `preflight` or `load_model`
-alike:
+`preflight` and `load_model` raise the same exceptions:
 
 - `UnsupportedCodecError` means a tensor codec with no kernel here. It
   carries `.arch` and `.unsupported`, a `{codec: count}` dict.
 - `UnsupportedArchError` means a GGUF architecture the loader cannot build
   a model for.
+- `HadamardFoldError`, from `gmlx.load.preflight`, means a Hadamard-folded
+  file whose fold version or architecture the loader does not support.
+- `FileNotFoundError` means missing shards of a split file, and
+  `ValueError` means a truncated file or a header without an architecture.
 
 `ARCH_TABLE` maps each supported GGUF architecture id to its runtime entry,
 with the fields `gguf_arch`, `model_type`, `family`, `remap_alias`,
@@ -224,8 +228,8 @@ The swapped leaves are `KQuantLinear`, `KQuantEmbedding`,
 as a `uint8` `weight` and dispatches through the `mlx_kquant` Metal kernels
 on a stock `mlx` wheel, so dequantization happens inside the kernel, never
 as a separate materialized pass. `install_kquant_modules(model, hf_kquant_meta)`
-is the swap step itself: it iterates over a constructed model's leaf
-modules and replaces each one whose weight carries a codec. It keys on
+is the swap step. It visits the leaf modules of a constructed model and
+replaces each one whose weight carries a codec. It keys on
 codec strings, not on the architecture, so a custom loader can use it on
 any model.
 
