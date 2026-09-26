@@ -10,7 +10,7 @@ A LoRA adapter is a small file of low-rank weight changes that adjusts a
 base model for a task without replacing its weights. gmlx trains adapters
 on the quantized GGUF and serves them with `--adapter` or the `adapter`
 key, and one base in memory can serve several adapters.
-[LoRA fine-tuning](lora.md) describes both.
+[LoRA adapters](lora.md) describes both.
 
 ## APC
 
@@ -124,7 +124,7 @@ A way to store quantized weights after a fixed rotation of their input,
 which spreads large values across each row before quantization. The model
 rotates each activation in the same way at run time. `gmlx validate`
 prints `Hadamard-folded` for such a file, and
-[Hadamard fold](internals/hadamard-fold.md) describes how gmlx runs one.
+[Hadamard-folded GGUFs](internals/hadamard-fold.md) describes how gmlx runs one.
 
 ## Hugging Face
 

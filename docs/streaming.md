@@ -17,7 +17,7 @@ settings that make streaming faster, with and without a cost in quality.
 
 ## What to expect
 
-A [MoE](glossary.md) model uses only a few of its experts for each token,
+A [MoE](glossary.md#expert-and-moe) model uses only a few of its experts for each token,
 so one token reads a small part of the file. gmlx keeps the parts that
 every token reads in memory and reads the routed experts from disk. This
 lets a model of about 200 billion parameters run on a Mac with 64 GB.
@@ -97,7 +97,7 @@ speed of decoding but not the fit. The every-token weights are read by
 every token and stay in memory. They are attention, shared experts, dense
 layers, routers, norms, embeddings and the output head.
 
-The memory [governor](glossary.md) keeps tracked memory under a ceiling,
+The memory [governor](glossary.md#governor) keeps tracked memory under a ceiling,
 which is the GPU working set that macOS recommends, less 5%. It also keeps
 a reserve of 8 GB or 10% of RAM, whichever is larger, below physical RAM.
 Four things share the ceiling, in this order:
@@ -149,7 +149,7 @@ Kimi-K3 UD-Q2_K_XL is an 861 GB file, and its every-token weights are
 
 | Group | GB |
 |---|---|
-| Attention, which is [MLA](glossary.md) on this model | 31.8 |
+| Attention, which is [MLA](glossary.md#mla) on this model | 31.8 |
 | Shared experts, 2 per layer | 12.9 |
 | Dense FFN and routers | 8.2 |
 | Recurrent layers | 6.9 |

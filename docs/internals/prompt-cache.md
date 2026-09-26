@@ -12,7 +12,7 @@ The cache routes each model by its cache shape once, at load, and logs the
 routing as `APC tier:` so that a silent mis-route is visible. The tiers
 differ in storage layout, not in whether hits happen, so every shape in the
 table gets reuse except one: a MiniMax-M3 file with its sparse-attention
-indexer armed, the MSA row, gets none. In the table, [GDN](../glossary.md)
+indexer armed, the MSA row, gets none. In the table, [GDN](../glossary.md#gdn)
 is the gated delta network recurrence of the Qwen3.5 and 3.6 hybrids, and
 a CacheList model is one whose layers each hold several caches of different
 kinds, the mlx-lm class of that name.

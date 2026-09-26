@@ -149,7 +149,7 @@ alike:
 
 `ARCH_TABLE` maps each supported GGUF architecture id to its runtime entry,
 with the fields `gguf_arch`, `model_type`, `family`, `remap_alias`,
-`notes`, `backend` and `caveat`. [arch-coverage.md](arch-coverage.md) is
+`notes`, `backend` and `caveat`. [Supported architectures](arch-coverage.md) is
 the generated human-readable view of the same data, with validation
 status.
 

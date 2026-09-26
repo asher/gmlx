@@ -29,7 +29,7 @@ models, such as Qwen3.5, Qwen3.6, Qwen3.8, Granite 4 and Nemotron-H, keep
 a small fixed state on most layers and a full KV cache only on their few
 attention layers. Qwen3.6-27B, with 16 attention layers of 64, therefore
 uses 2.1 GB at 32K, against 8 GB for a dense model of the same depth.
-[MLA](glossary.md) models, such as the DeepSeek family, store a compressed
+[MLA](glossary.md#mla) models, such as the DeepSeek family, store a compressed
 cache. The capacity planner of the server counts all of these.
 
 To see the numbers of a running server, read the `memory` and `capacity`

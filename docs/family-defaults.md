@@ -8,7 +8,7 @@ every family, as `gmlx profiles` prints them.
 
 ```sh
 gmlx profiles              # this table
-gmlx profiles qwen3.6-27b  # the resolved values of one configured model
+gmlx profiles qwen3.8-27b-ud-q6  # the resolved values of one configured model
 ```
 
 The second column lists the GGUF architectures of each family. An intent
@@ -18,7 +18,7 @@ names. It is `reasoning_effort` for gpt-oss, Hy3 and Hy4, `thinking_effort`
 for Kimi, and `reasoning_strength` for Muse. Each value comes from the model card
 cited in `gmlx/gen/profiles.py`.
 
-| family | GGUF arches | base (general use) | family intents |
+| Family | GGUF architectures | Base values | Intents |
 |--------|-------------|--------------------|----------------|
 | `qwen3.6` | `qwen35`, `qwen35moe`, `qwen3next`, `qwen4exp` | temperature=1.0 top_p=0.95 top_k=20 min_p=0.0 | `@coding`: temperature=0.6 top_p=0.95 top_k=20 min_p=0.0; `@instruct`: temperature=0.7 top_p=0.8 top_k=20 min_p=0.0 presence_penalty=1.5 enable_thinking=False |
 | `qwen3` | `qwen3`, `qwen3moe`, `qwen3vlmoe` | temperature=0.6 top_p=0.95 top_k=20 min_p=0.0 | `@instruct`: temperature=0.7 top_p=0.8 top_k=20 min_p=0.0 enable_thinking=False |

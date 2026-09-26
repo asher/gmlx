@@ -35,7 +35,7 @@ other counters, and [API reference](api.md#endpoints) lists it.
 
 How much of a prompt the cache can reuse depends on the model family,
 because the state of a recurrent layer cannot be rolled back to an
-earlier token. [GDN](glossary.md), the gated delta network, is the
+earlier token. [GDN](glossary.md#gdn), the gated delta network, is the
 recurrent layer of the Qwen3.5, Qwen3.6 and Qwen3.8 hybrids.
 
 | Family | Identical prompt | Next turn | Edited or regenerated turn |

@@ -4,7 +4,7 @@ This page is for anyone writing a client against `gmlx serve` or putting it
 behind a load balancer. It covers the endpoints, how a request names a
 model, the metrics a dispatcher reads, which request fields each protocol
 honors, and what the server refuses. The YAML that configures the server is
-in [config.md](config.md).
+in [Configuration](config.md).
 
 - [Addressing a model in a request](#addressing-a-model-in-a-request)
 - [Endpoints](#endpoints)
@@ -19,18 +19,19 @@ subsection under API capabilities.
 ## Addressing a model in a request
 
 ```jsonc
-{"model": "qwen3.6-27b"}                                 // the model's configured profile, else the family base
-{"model": "qwen3.6-27b@coding"}                          // a built-in intent, resolved for the model's family
-{"model": "qwen3.6-27b@qwen-coder"}                      // an inline user profile, which overrides model.profile
-{"model": "coder"}                                        // an alias, here for qwen3.6-27b@qwen-coder
-{"model": "qwen3.6-27b", "profile": "coding",            // the profile field, via extra_body in the OpenAI SDK
+{"model": "qwen3.8-27b-ud-q6"}                                 // the model's configured profile, else the family base
+{"model": "qwen3.8-27b-ud-q6@coding"}                          // a built-in intent, resolved for the model's family
+{"model": "qwen3.8-27b-ud-q6@qwen-coder"}                      // an inline user profile, which overrides model.profile
+{"model": "coder"}                                        // an alias, here for qwen3.8-27b-ud-q6@qwen-coder
+{"model": "qwen3.8-27b-ud-q6", "profile": "coding",            // the profile field, via extra_body in the OpenAI SDK
  "temperature": 0.1}                                      //   plus an explicit field that overrides the profile
 ```
 
 The `@profile` suffix is split on the last `@` and only treated as a profile
 when it names a known one, so an id that itself contains an `@` stays
-intact. An unknown id returns 404 listing the available ids, and an unknown
-profile returns 400 listing the valid ones. With `model` empty, the server
+intact. An unknown id returns 404 of type `model_not_found`, with the
+served ids in `available_models`. An unknown profile returns 400 of type
+`unknown_profile`, which lists the valid ones. With `model` empty, the server
 uses its default model, else the sole model, else returns 400. The same
 addressing works on the CLI, as `gmlx run <id-or-path>@coding` or
 `--profile coding`.
@@ -42,25 +43,25 @@ All routes except `/health` require the API key when one is set.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /v1/chat/completions` | OpenAI chat completions, the primary route |
-| `POST /v1/responses` | OpenAI Responses |
-| `POST /v1/messages` | Anthropic Messages. `/v1/messages/count_tokens` counts a body's input tokens |
-| `POST /v1/completions` | classic text completions, with a single string prompt, a single choice and no chat template |
-| `GET /v1/models` | configured ids and aliases with their markers, also at `/models` |
-| `GET /health` | liveness. `?ready=1` adds a readiness verdict |
-| `GET /v1/metrics` | the runtime snapshot, also at `/metrics` and as Prometheus text with `?format=prometheus` |
-| `POST /v1/estimate` | dry-run admission for a chat body |
-| `GET /v1/capacity/plan` | can `width` streams run at `depth` tokens each, and may they start now |
-| `GET /v1/cache/stats` | prompt cache statistics, or `{"enabled": false}` |
-| `POST /v1/cache/reset` | clear the prompt cache for all resident models, or one with `{"model": "<id>"}` |
-| `POST /unload` | evict a resident model with `{"model": "<id>"}`, or all with an empty body. 409 while streams are in flight |
-| `POST /v1/keep` | keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it |
-| `POST /v1/reload` | re-read the config and re-register models, keeping entries whose load parameters are unchanged. Same as SIGHUP |
-| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | speech-to-text, with `stt` configured as in [services.md](services.md) |
-| `POST /v1/audio/speech` | text-to-speech, with `tts` configured |
-| `POST /v1/embeddings` | text embeddings, with `embeddings` configured |
-| `POST /v1/rerank` | reranking, with `rerank` configured, also at `/rerank` |
-| `POST /v1/systemone` | answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [decisions.md](decisions.md) |
+| `POST /v1/chat/completions` | OpenAI chat completions, the primary route. |
+| `POST /v1/responses` | OpenAI Responses. |
+| `POST /v1/messages` | Anthropic Messages. `/v1/messages/count_tokens` counts a body's input tokens. |
+| `POST /v1/completions` | Classic text completions, with a single string prompt, a single choice and no chat template. |
+| `GET /v1/models` | Configured ids and aliases with their markers, also at `/models`. |
+| `GET /health` | Liveness. `?ready=1` adds a readiness verdict. |
+| `GET /v1/metrics` | The runtime snapshot, also at `/metrics` and as Prometheus text with `?format=prometheus`. |
+| `POST /v1/estimate` | Dry-run admission for a chat body. |
+| `GET /v1/capacity/plan` | Can `width` streams run at `depth` tokens each, and may they start now. |
+| `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}`. |
+| `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
+| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, or all with an empty body. 409 while streams are in flight. |
+| `POST /v1/keep` | Keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it. |
+| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. Same as SIGHUP. |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech-to-text, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
+| `POST /v1/audio/speech` | Text-to-speech, with `tts` configured. |
+| `POST /v1/embeddings` | Text embeddings, with `embeddings` configured. |
+| `POST /v1/rerank` | Reranking, with `rerank` configured, also at `/rerank`. |
+| `POST /v1/systemone` | Answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [Structured decisions](decisions.md). |
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
@@ -74,14 +75,14 @@ resident model with KV quantization configured adds a `kv_quant` object:
 `verdict` of `full`, `partial`, `dropped` or `error`, and `verdict_batched`
 for a speculative model, which differs from `verdict` under `uniform`, or
 under kvarn on an mlx-kquant older than 0.4.9, where the model runs fp16 KV
-while batched. Under [kvarn](glossary.md) it also carries `value_bits` and
+while batched. Under [kvarn](glossary.md#kvarn) it also carries `value_bits` and
 `tail_tokens`. The
 Hugging Face cache is never listed.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
 or 503 with a one-word `reason` and a `Retry-After` header. The reason is
-`pressure` when the [governor](glossary.md) is orange or red, `queue` when
+`pressure` when the [governor](glossary.md#governor) is orange or red, `queue` when
 requests are waiting and `busy` when all engines are at their decode width.
 
 `POST /v1/completions` supports `max_tokens`, `temperature`, `top_p`, `seed`,
@@ -107,21 +108,21 @@ instead of failing the snapshot.
 
 | Section | Fields | Meaning |
 |---|---|---|
-| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | the decode width, the queue cap, streams generating now and requests waiting for a slot |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | the waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now |
-| `requests[]` | one row for each request | queued rows first. `state` is `queued`, `prefill` or `decode`, and the other fields are listed below the table |
-| `resident_models[]` | for each model, `in_flight`, `pinned`, `kept` and bytes | the number for each model to compare against `decode_batch`, since each model decodes on a separate engine |
-| `governor` | `band`, counters | the memory governor's band and shed history |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the [arena's](glossary.md) bytes, capacity and hit rate |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | the boot capacity table, absent for a Hugging Face fall-through load |
-| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean |
+| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The decode width, the queue cap, streams generating now and requests waiting for a slot. |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
+| `requests[]` | One row for each request | Queued rows first. `state` is `queued`, `prefill` or `decode`, and the other fields are listed below the table. |
+| `resident_models[]` | For each model, `in_flight`, `pinned`, `kept` and bytes | The number for each model to compare against `decode_batch`, since each model decodes on a separate engine. |
+| `governor` | `band`, counters | The memory governor's band and shed history. |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the [arena's](glossary.md#arena) bytes, capacity and hit rate. |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table, absent for a Hugging Face fall-through load. |
+| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean. |
 
 A request row carries `id`, `model`, `state`, `position`, `prompt_tokens`,
 `generated`, `max_tokens`, `elapsed_s`, `ttft_s` and `decode_tok_s`, and
 two structured fields. `cache` holds the tier its prefix hit, one of
 `exact`, `block`, `ckpt`, `anchor` and `miss`, or `hit` when only the reused
 token count is known, plus the `warm_tokens` it reused. `speculative` holds
-the [drafter's](glossary.md) rounds, drafted and accepted counts and accept
+the [drafter's](glossary.md#drafter) rounds, drafted and accepted counts and accept
 rate, exact at batch width 1 and shared across a wider batch, or `null`
 without a drafter. Rows refresh at most four times a second on each engine.
 
@@ -156,11 +157,11 @@ profile. `requests[]` is high-cardinality and contributes only its count.
 
 ## API capabilities
 
-The protocol surface follows mlx-vlm's, with gmlx patches on the handlers
-(around twenty route-level patches, including the added `/v1/completions`
-route), so upstream request features work on GGUF models. Context windows
-come from the GGUF's metadata, with no server-side override or
-request-level context setting.
+The protocol surface follows mlx-vlm's. gmlx patches its handlers so that
+upstream request features work on GGUF models, and adds the
+`/v1/completions` route. A model's context window comes from its GGUF
+metadata. A request cannot change it, and the
+[`max_kv_size`](config.md#loadmax_kv_size) load key can only lower it.
 
 ### Tool calling
 
@@ -175,9 +176,9 @@ configure. Streaming works too, and a parsed call ends the stream with
 
 | Value | Behavior |
 |-------|----------|
-| `none` | enforced. The tools are stripped before the template runs, so the model cannot emit a call |
-| `auto` | the default. The model decides |
-| `required` and named-function forms | forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call |
+| `none` | Enforced. The tools are stripped before the template runs, so the model cannot emit a call. |
+| `auto` | The default. The model decides. |
+| `required` and named-function forms | Forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call. |
 
 This is the client-side loop, where the server parses the calls and the
 client executes them and sends results back. To run the loop server-side
@@ -186,7 +187,7 @@ with config-allowlisted MCP tools, serve an
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
-  "model": "qwen3.6-27b",
+  "model": "qwen3.8-27b-ud-q6",
   "messages": [{"role": "user", "content": "Weather in Paris?"}],
   "tools": [{"type": "function", "function": {
     "name": "get_weather",
@@ -202,38 +203,38 @@ The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
 in the server log naming them all. `/v1/systemone` has its own fields,
-listed in [decisions.md](decisions.md#samples-steps-and-thoughts).
+listed in [Samples, steps and thoughts](decisions.md#samples-steps-and-thoughts).
 
 The standard sampling parameters are honored on all three generation dialects.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 `top_k`, `min_p`, `top_n_sigma`, `p_less`, `typical_p`, `repetition_penalty`,
 `presence_penalty`, `frequency_penalty` and their `*_context_size` companions,
 `enable_thinking`, `thinking_budget` and the OpenAI `reasoning` and
-`reasoning_effort` controls. The rest:
+`reasoning_effort` controls. This table lists the other parameters:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
-| `max_completion_tokens` | honored | ignored | ignored | OpenAI's current name for the chat output cap. It wins over `max_tokens` and a profile value |
-| `n` | ignored | ignored | ignored | always a single choice. `n > 1` on `/v1/completions` is a 400 |
-| `user` | ignored | ignored | ignored | no per-user accounting |
-| `parallel_tool_calls` | ignored | ignored | ignored | the template decides how many calls to emit |
-| `tool_choice` | none/auto enforced | template-dependent | none/auto enforced | `required` and named forms are template-dependent, as the previous table says |
-| `metadata` | ignored | ignored | ignored | accepted for Anthropic compatibility, never read |
-| `output_config` | ignored | ignored | honored | Anthropic `json_schema` format maps onto structured output |
-| `logit_bias` | honored | honored | honored | token-id keyed |
-| `seed` | honored | honored | honored | per-request sampling seed |
-| `presence_penalty` | honored | honored | honored | |
-| `frequency_penalty` | honored | honored | honored | |
-| `stream_options` | honored | ignored | ignored | `include_usage` adds the final usage chunk on chat and `/v1/completions` |
-| `timings_per_token` | honored | ignored | ignored | streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count, following llama.cpp |
-| `response_format` | honored | honored | honored | `json_schema` or `json_object`. Unknown types are rejected, as Structured output explains |
-| `logprobs` | honored | ignored | ignored | chat only. `/v1/completions` never returns logprobs |
-| `top_logprobs` | honored | ignored | ignored | capped by `TOP_LOGPROBS_K`, as Logprobs explains |
-| `stop` | honored | ignored | ignored | chat and `/v1/completions`. Anthropic uses `stop_sequences` |
-| `stop_sequences` | ignored | ignored | honored | the Anthropic-native spelling |
-| `chat_template_kwargs` | honored | honored | honored | extra template variables, request overrides profile |
-| `profile` | honored | honored | honored | a sampling and system [profile](config.md#profiles) by name |
-| `xtc_probability` | honored | honored | honored | XTC sampling, with `xtc_threshold` |
+| `max_completion_tokens` | Honored | Ignored | Ignored | OpenAI's current name for the chat output cap. It wins over `max_tokens` and a profile value. |
+| `n` | Ignored | Ignored | Ignored | Always a single choice. `n > 1` on `/v1/completions` is a 400. |
+| `user` | Ignored | Ignored | Ignored | No per-user accounting. |
+| `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
+| `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms are template-dependent, as the previous table says. |
+| `metadata` | Ignored | Ignored | Ignored | Accepted for Anthropic compatibility, never read. |
+| `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
+| `logit_bias` | Honored | Honored | Honored | Token-id keyed. |
+| `seed` | Honored | Honored | Honored | Per-request sampling seed. |
+| `presence_penalty` | Honored | Honored | Honored |  |
+| `frequency_penalty` | Honored | Honored | Honored |  |
+| `stream_options` | Honored | Ignored | Ignored | `include_usage` adds the final usage chunk on chat and `/v1/completions`. |
+| `timings_per_token` | Honored | Ignored | Ignored | Streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count, following llama.cpp. |
+| `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`. Unknown types are rejected, as Structured output explains. |
+| `logprobs` | Honored | Ignored | Ignored | Chat only. `/v1/completions` never returns logprobs. |
+| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K`, as Logprobs explains. |
+| `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions`. Anthropic uses `stop_sequences`. |
+| `stop_sequences` | Ignored | Ignored | Honored | The Anthropic-native spelling. |
+| `chat_template_kwargs` | Honored | Honored | Honored | Extra template variables, request overrides profile. |
+| `profile` | Honored | Honored | Honored | A sampling and system [profile](config.md#profiles) by name. |
+| `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold`. |
 
 ### Structured output
 
@@ -253,7 +254,7 @@ request-level logits processors, so a structured request to one errors.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
-  "model": "qwen3.6-27b",
+  "model": "qwen3.8-27b-ud-q6",
   "messages": [{"role": "user", "content": "Name a city and its population."}],
   "response_format": {"type": "json_schema", "json_schema": {"schema": {
     "type": "object",
@@ -294,11 +295,12 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
-| the prompt plus `max_tokens` exceeds the context budget | 400 with both token counts and the budget | [`max_kv_size`](config.md#loadmax_kv_size) |
-| the prompt alone cannot fit in memory | 400 with the estimated need and the available budget | `GMLX_PREFLIGHT_MEM=0` |
-| more requests waiting than the queue cap | 503 with `Retry-After` set to the estimated drain time, 2 to 60 seconds | `GMLX_QUEUE_DEPTH_CAP` |
-| a model cannot be loaded beside what is resident and busy | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After` | |
-| a streaming request is silent, as during a long prefill | an SSE comment line every 15 seconds so read timeouts do not drop the connection | `GMLX_SSE_KEEPALIVE_S` |
+| The prompt plus `max_tokens` exceeds the context budget. | 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
+| The prompt alone cannot fit in memory. | 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
+| More requests are waiting than the queue cap. | 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time, 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
+| A model cannot load beside the resident models that are busy. | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | |
+| Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
+| A streaming request is silent, as during a long prefill. | An SSE comment line every 15 seconds, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight estimates the prompt's KV cache from the model's per-token KV
 size, plus the prefill transient, against the working set with the batch

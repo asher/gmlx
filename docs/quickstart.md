@@ -99,7 +99,7 @@ fields that each one accepts.
 ## Choosing a model
 
 The suffix of a GGUF file name, such as `Q6_K`, is its
-[quant](glossary.md), which trades file size against accuracy. These
+[quant](glossary.md#quant), which trades file size against accuracy. These
 instruct models fit each memory size with room left for a long
 conversation:
 

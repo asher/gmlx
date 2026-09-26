@@ -26,7 +26,7 @@ same model file and server settings.
 ## Why DiffusionGemma
 
 The route answers only with DiffusionGemma models. A diffusion model writes
-into a block of positions, called a [canvas](glossary.md), and predicts
+into a block of positions, called a [canvas](glossary.md#canvas), and predicts
 every position at once. The server fills the canvas with an answer template
 and leaves the answer positions open, so one pass of the model gives the
 probability of every answer.
@@ -442,6 +442,6 @@ The questions and their allowed answers become the system prompt, and the
 state becomes the user message. The canvas is seeded with an answer
 template that writes each question id with its answer, with a random token
 at each answer position. One denoise step then gives the distribution over
-the labels of each question. This is a [structured read](glossary.md), and
+the labels of each question. This is a [structured read](glossary.md#structured-read), and
 [Structured reads](internals/structured-reads.md) describes the mechanism
 for contributors.

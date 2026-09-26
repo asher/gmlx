@@ -42,8 +42,8 @@ models:
   gemma-4-12b-it-q4:
     path: gemma-4-12b-it-Q4_K_M.gguf
   # sampling (qwen3.6): t=1 top_p=0.95 top_k=20
-  qwen3.6-27b-q4:
-    path: Qwen3.6-27B-Q4_K_S.gguf
+  qwen3.8-27b-ud-q6:
+    path: Qwen3.8-27B-UD-Q6_K.gguf
     speculative: true
 ```
 
@@ -80,7 +80,7 @@ optional. A server needs only `models`, and everything else has a default.
 | Block | What it sets |
 |-------|--------------|
 | [`models`](#models) | The models gmlx can run, one entry each, with its GGUF file and its own settings |
-| [`aliases`](#aliases) | Extra names for models, such as `coder` for `qwen3.6-27b@coding` |
+| [`aliases`](#aliases) | Extra names for models, such as `coder` for `qwen3.8-27b-ud-q6@coding` |
 | [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use |
 | [`rules`](#rules) | A profile for every model whose id matches a pattern, such as all ids that contain `coder` |
 | [`discover`](#model-discovery) | Folders the server scans at each start, adding every GGUF it finds without an entry of its own |
@@ -102,14 +102,14 @@ Each entry under `models` is one model gmlx can run. The key of the entry
 is the model's id. A request names the model by its id in the `model`
 field, `/v1/models` lists it, and `gmlx run` and `gmlx chat` take it on
 the command line. `gmlx init` names each model after its file with the
-quantization in short form, such as `qwen3.6-27b-q4`, and you can rename
+quantization in short form, such as `qwen3.8-27b-ud-q6`, and you can rename
 an entry freely. An id cannot contain `@`, because `@` separates an id
 from a profile name.
 
 ```yaml
 models:
-  qwen3.6-27b:
-    path: Qwen3.6-27B-Q4_K_S.gguf
+  qwen3.8-27b-ud-q6:
+    path: Qwen3.8-27B-UD-Q6_K.gguf
     speculative: true
     pin: true
   gemma-12b:
@@ -145,8 +145,8 @@ only when its name is the profile of the request. The default is none.
 
 ```yaml
 models:
-  qwen3.6-27b:
-    path: Qwen3.6-27B-Q4_K_S.gguf
+  qwen3.8-27b-ud-q6:
+    path: Qwen3.8-27B-UD-Q6_K.gguf
     profiles:
       coding: {sampling: {min_p: 0.05}}
 ```
@@ -181,7 +181,7 @@ default is `false`.
 
 ### `models.*.draft_gguf`
 
-This separate [drafter](glossary.md) GGUF proposes tokens for the model,
+This separate [drafter](glossary.md#drafter) GGUF proposes tokens for the model,
 and setting it turns on `speculative`. `gmlx init` and `discover` pair a
 drafter with the model next to it. The default is none.
 
@@ -257,7 +257,7 @@ most 1, and it changes the output. The default is off.
 ### `models.*.moe_miss_shed`
 
 The model drops the experts of a token that are not in the decode
-[arena](glossary.md), as long as the kept experts still cover this share
+[arena](glossary.md#arena), as long as the kept experts still cover this share
 of the gate weight. The value is above 0 and at most 1, and it changes
 the output. The default is off.
 
@@ -299,7 +299,7 @@ profile together.
 ```yaml
 aliases:
   fast: gemma-12b
-  coder: qwen3.6-27b@coding
+  coder: qwen3.8-27b-ud-q6@coding
 ```
 
 An alias may not contain `@` or match a model id, and its target must
@@ -319,7 +319,7 @@ intents. They are `@coding`, `@instruct`, `@creative`,
 it to the model id:
 
 ```sh
-gmlx run qwen3.6-27b@coding "Write a binary search in Go."
+gmlx run qwen3.8-27b-ud-q6@coding --prompt "Write a binary search in Go."
 ```
 
 Profiles of your own go under `profiles`. A profile can hold
@@ -456,7 +456,7 @@ and above [`server.defaults.profile`](#serverdefaultsprofile).
 ```yaml
 rules:
   - {match: "*coder*", profile: review}
-  - {match: "qwen3.6-*", profile: agent}
+  - {match: "qwen3.8-*", profile: agent}
 ```
 
 ### `rules[].match`
@@ -798,7 +798,7 @@ server:
   cache: {enabled: true}
   defaults:
     ttl_s: 900
-    model: qwen3.6-27b
+    model: qwen3.8-27b-ud-q6
 ```
 
 ### Address and authentication
@@ -1021,10 +1021,11 @@ default is `false`.
 
 #### `server.gpu_keepwarm`
 
-With `true`, every model keeps the GPU clock up between tokens. Streamed
-models with a decode feeder do this already, as
-[Models larger than memory](streaming.md#the-lossless-settings) describes.
-The default is `false`.
+A streamed model with a decode feeder keeps the GPU clock up between
+tokens by default, as
+[Models larger than memory](streaming.md#the-lossless-settings) describes,
+and no other model is affected. `true` turns that on even when
+`GMLX_GPU_KEEPWARM=0` is set. The default is `false`.
 
 #### `server.menubar`
 
@@ -1098,7 +1099,7 @@ model and gets tools without a loop of its own, as
 server:
   assistants:
     helper:
-      model: qwen3.6-27b
+      model: qwen3.8-27b-ud-q6
       mcp: []
 ```
 
@@ -1138,7 +1139,7 @@ listening starts and when an utterance ends. Most keys also have a
 
 ```yaml
 talk:
-  model: qwen3.6-27b@instruct
+  model: qwen3.8-27b-ud-q6@instruct
   voice: af_heart
   mode: vad
   vad: {silence_ms: 450}
@@ -1272,7 +1273,7 @@ One tool call may take at most this many seconds. The value is at least
 
 ### `assistant.mcp`
 
-These [MCP](glossary.md) servers provide the tools, as a list. Each entry
+These [MCP](glossary.md#mcp) servers provide the tools, as a list. Each entry
 has a `name` and exactly one of `command` and `url`. A server that fails
 to start gives a warning, and the assistant runs without its tools. The
 default is none.
@@ -1434,12 +1435,12 @@ server:
       read_mode: direct
   family_defaults: true
   assistants:
-    helper: {model: qwen3.6-27b, memory: false, mcp: null}
+    helper: {model: qwen3.8-27b-ud-q6, memory: false, mcp: null}
   assistant_allow_remote: false
   defaults:
     profile: null
     ttl_s: 900
-    model: qwen3.6-27b
+    model: qwen3.8-27b-ud-q6
     preload: null
 profiles:
   brief:
@@ -1459,8 +1460,8 @@ profiles:
 rules:
   - {match: "*coder*", profile: qwen-coder}
 models:
-  qwen3.6-27b:
-    path: Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf
+  qwen3.8-27b-ud-q6:
+    path: unsloth__Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
     profile: qwen-creative
     speculative: true
     overrides: {sampling: {max_tokens: 2048}}
@@ -1481,7 +1482,7 @@ models:
     overrides: {sampling: {thinking_budget: 2048}}   # wins over the profile
 aliases:
   fast: gemma-e4b-vlm
-  coder: qwen3.6-27b@qwen-coder
+  coder: qwen3.8-27b-ud-q6@qwen-coder
 assistant:
   max_tool_rounds: 8
   tool_timeout_s: 60

@@ -52,7 +52,7 @@ in their tool calls.
 
 ## Tools
 
-Tools come from [MCP](glossary.md) servers, which are separate programs
+Tools come from [MCP](glossary.md#mcp) servers, which are separate programs
 that offer tools to a model through the Model Context Protocol. The
 [`assistant.mcp`](config.md#assistantmcp) list names them. This block
 connects one server that runs as a local command and one that answers over

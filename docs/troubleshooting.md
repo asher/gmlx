@@ -5,8 +5,8 @@ command that shows them, each with its cause and fix. It also says where
 gmlx keeps its logs and files.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
-kernels, the config and its model paths, the background server, the client
-launchers, the optional extras, ffmpeg, the Hugging Face token, memory and
+kernels, the config and its model files, the background server, the login
+items, the optional extras, ffmpeg, the Hugging Face token, memory and
 disk, and it names the fix for each check that fails. A coding agent or
 chat app that does not connect is covered with its client in
 [The clients](launch.md#the-clients).
@@ -112,7 +112,7 @@ is a folded drafter.
 `gmlx validate` prints a `weights: Hadamard-folded` line for such a file.
 Read that line before you download, because the `loadable` verdict below it
 does not cover the fold. Pick an unfolded quant of the same model instead.
-[Hadamard fold](internals/hadamard-fold.md) describes the file contract.
+[Hadamard-folded GGUFs](internals/hadamard-fold.md) describes the file contract.
 
 ## Starting the server
 

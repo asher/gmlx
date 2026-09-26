@@ -12,7 +12,7 @@ that order and override the config:
 over each model's `speculative_width_cap`.
 
 Anything not listed here or in
-[internals/debug-switches.md](internals/debug-switches.md) is internal and may
+[Debug switches](internals/debug-switches.md) is internal and may
 change meaning or disappear between releases.
 
 ## Load and cache keys
@@ -43,14 +43,14 @@ configuration keys.
 
 Three more upstream variables have no row in the table because they are
 not set per model. `KV_KEY_BITS` and `KV_VALUE_BITS` give
-[kvarn](glossary.md) KV split key and value widths server-wide and override
+[kvarn](glossary.md#kvarn) KV split key and value widths server-wide and override
 `GMLX_KVARN_BITS`.
 
 `PREFILL_STEP_SIZE` is mlx-vlm's name for the prefill chunk size, which
 `--prefill-step-size` and `server.prefill_step_size` set per server.
 
 `TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for, as
-[api.md](api.md#logprobs) describes.
+[Logprobs](api.md#logprobs) describes.
 
 ## Residency
 
