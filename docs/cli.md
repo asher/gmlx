@@ -193,7 +193,7 @@ These flags control speculative decoding:
 | `--speculative` | off | speculate with the model's own MTP head or `--draft-gguf`. A config `discover` scan enables it on its own |
 | `--draft-gguf PATH` | none | a separate [drafter](glossary.md) GGUF, which implies `--speculative` |
 | `--native-mtp` | off | prefer the model's own head when `--draft-gguf` is also set |
-| `--draft-block-size N` | drafter default | draft tokens in each round |
+| `--draft-block-size N` | drafter default | block size of each round, which drafts N-1 tokens and checks them in one N-token target pass |
 | `--speculative-width-cap N` | drafter default | speculate only while at most N requests decode together. `0` uncapped |
 | `--stochastic-mtp` | off | accept sampled drafts by rejection sampling. More accepted, not token-identical |
 
@@ -441,7 +441,7 @@ These flags control speculative decoding, which
 | `--no-speculative`, `--no-mtp` | off | force it off |
 | `--draft-gguf PATH` | detected sibling | a separate drafter GGUF, which implies `--speculative` |
 | `--native-mtp` | off | prefer the model's own head when a drafter is also present |
-| `--draft-block-size N` | drafter default | draft tokens in each round |
+| `--draft-block-size N` | drafter default | block size of each round, which drafts N-1 tokens and checks them in one N-token target pass |
 | `--stochastic-mtp` | off | accept sampled drafts by rejection sampling. More accepted, not token-identical |
 
 Speculation honors `--temp`, `--top-p`, `--top-k`, `--min-p` and

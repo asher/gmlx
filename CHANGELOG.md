@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The `--draft-block-size` help and docs called N the drafted tokens. A round
+  drafts N-1, so llama-server's `--spec-draft-n-max M` matches N = M+1.
+
 ## [0.4.17] - 2026-09-25
 
 ### Added

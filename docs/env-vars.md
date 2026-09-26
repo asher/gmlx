@@ -139,7 +139,7 @@ explained in [streaming.md](streaming.md) and
 | `GMLX_SPARSE_K` | Sparse-attention kept-token budget, default `2048`. |
 | `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention begins, default `8192`. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` and `chat`. Same as `--no-family-defaults`. |
-| `GMLX_DRAFT_BLOCK_SIZE` | Draft tokens in each speculative round for `serve`. Same as `--draft-block-size`. |
+| `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, which drafts one token fewer. Same as `--draft-block-size`. |
 | `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, with `0` uncapped. Overrides each model's `speculative_width_cap` and is read on each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`. Same as `--ignore-eos`, for forced-length benchmarking. |
 | `GMLX_API_KEY` | Client-side default key for `ps` when `--api-key` is not passed. The server reads its key only from `server.api_key`. |
