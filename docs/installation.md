@@ -6,12 +6,12 @@ Intel Macs and Linux are not supported.
 
 ## Requirements
 
-- An Apple Silicon Mac. The model you can run depends on its memory, as
-  [Choosing a model](quickstart.md#choosing-a-model) shows.
-- macOS 26.2 or newer. The Metal kernels of
-  [mlx-kquant](https://github.com/asher/mlx-kquant) are built for it, and
-  they install prebuilt.
-- Disk space for the models, which are several GB each.
+- gmlx needs an Apple Silicon Mac. The model you can run depends on its
+  memory, as [Choosing a model](quickstart.md#choosing-a-model) shows.
+- It needs macOS 26.2 or newer, because the Metal kernels of
+  [mlx-kquant](https://github.com/asher/mlx-kquant) are built for it and
+  install prebuilt.
+- The models need several GB of disk space each.
 
 ## Homebrew
 
@@ -126,5 +126,5 @@ To remove gmlx completely:
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
    lists, and the models you downloaded.
 
-The uninstall step leaves your configuration, caches and models in place,
-so a later install finds them again.
+Steps 1 and 2 leave your configuration, caches and models in place, so a
+later install finds them again.

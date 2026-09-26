@@ -24,6 +24,13 @@ wizard instead, run `gmlx init` with no flags. The wizard scans the
 folders that you already keep models in, lets you rename the models, and
 turns on optional services such as speech and embeddings.
 
+- [Running a model](#running-a-model)
+- [Serving models](#serving-models)
+- [Sending requests](#sending-requests)
+- [Choosing a model](#choosing-a-model)
+- [Connecting a client](#connecting-a-client)
+- [Next steps](#next-steps)
+
 ## Running a model
 
 Give the model a prompt, or chat with it in the terminal:
@@ -42,9 +49,9 @@ configuration file. [Chat](chat.md) describes the rest.
 
 Both commands start from the sampling values that the model's publisher
 recommends, which gmlx keeps as [family defaults](family-defaults.md). An
-intent such as `@coding` or `@creative` after the id selects the
+intent such as `@coding` or `@instruct` after the id selects the
 publisher's values for that kind of task, as in
-`gmlx chat qwen3.8-27b-ud-q6@creative`. `gmlx profiles` prints the values
+`gmlx chat qwen3.8-27b-ud-q6@instruct`. `gmlx profiles` prints the values
 of every intent for each family.
 
 ## Serving models

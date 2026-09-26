@@ -15,6 +15,12 @@ server:
   rerank: qwen3-rerank-0.6b
 ```
 
+- [How the services run](#how-the-services-run)
+- [Speech-to-text](#speech-to-text)
+- [Text-to-speech](#text-to-speech)
+- [Embeddings](#embeddings)
+- [Reranking](#reranking)
+
 ## How the services run
 
 The server loads each configured service model in the background at

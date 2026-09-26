@@ -317,13 +317,15 @@ conversation and retry instead of stopping at the error.
 
 ## Hugging Face policy
 
-The server never downloads on a request. A generation request whose
-`model` is not a configured id gets the 404 that
+A request never makes the server download the model it names. A
+generation request whose `model` is not a configured id gets the 404 that
 [Addressing a model in a request](#addressing-a-model-in-a-request)
 describes, whatever the id looks like. The stock model loader below that
 resolver is gated as well. Anything that reaches it with a repo id instead
 of a GGUF or local path gets a 403 of type `hf_access_disabled`, so no
-route can trigger a fetch.
+route can fetch a chat model. The service models that the config names
+download on their first use, as
+[Speech, embeddings and rerank](services.md) describes.
 
 `server.hf_cache: true` changes what the config may reference, not what a
 request may name. With it on, `hf:` refs in `models:` and the `gmlx init

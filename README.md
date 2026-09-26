@@ -121,7 +121,8 @@ Messages, all streaming, with tool calling, structured output, logprobs and
 vision messages. Concurrent requests decode together, a new prompt's prefill
 is paced so that live replies keep streaming, and a prompt cache skips
 repeated prefixes. The server binds loopback by default, requires a static
-key for anything wider and never contacts Hugging Face to satisfy a request.
+key or `--no-auth` for anything wider, and never downloads a chat model to
+satisfy a request.
 The endpoints are documented in the [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md), and
 the file that configures them in
 [Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md).
@@ -369,9 +370,10 @@ the server app, generation step loop and vision towers. Speech uses
 gmlx is released under the [Business Source License
 1.1](https://github.com/asher/gmlx/blob/main/LICENSE), which is
 source-available but not open source. You may use, modify and run gmlx for
-your own purposes, including commercial work. You may not redistribute or
-sublicense it, incorporate it into another product, or offer it as a hosted
-service. Each released version converts to the Apache License 2.0 four years
+your own purposes, including commercial work, and you may redistribute
+unmodified copies free of charge. You may not sell gmlx or a derivative of
+it, incorporate either into a commercial product or service, or offer
+either to others as a hosted service. Each released version converts to the Apache License 2.0 four years
 after its release, and downloaded model weights have their own licenses.
 
 The files listed in

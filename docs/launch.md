@@ -14,6 +14,12 @@ gmlx never installs the tool itself. When the tool is not on your PATH,
 `launch` prints how to install it and exits. The flags and exit codes are
 in the [CLI reference](cli.md#gmlx-launch).
 
+- [How a launch works](#how-a-launch-works)
+- [Starting the server](#starting-the-server)
+- [Choosing the model](#choosing-the-model)
+- [Authentication](#authentication)
+- [The clients](#the-clients)
+
 ## How a launch works
 
 A launch has three steps:
@@ -22,7 +28,8 @@ A launch has three steps:
    that offers a model menu gets these as its choices.
 2. It writes the tool's configuration by injection, merge or environment
    variables.
-3. It runs the tool in its own place, already connected to the server.
+3. It replaces itself with the tool, which starts already connected to the
+   server.
 
 `--config-only` stops after the second step and prints the command that
 would run the tool, for inspection or for a script. It also skips the check
@@ -160,9 +167,9 @@ trained for at least that length.
 
 ### goose
 
-`launch` merges `GOOSE_PROVIDER`, `GOOSE_MODEL`, `OPENAI_HOST` and
-`OPENAI_BASE_PATH` into the goose file and also sets them, with
-`OPENAI_API_KEY`, in the environment, where they take precedence. It runs
+The goose file gets `GOOSE_PROVIDER`, `GOOSE_MODEL`, `OPENAI_HOST` and
+`OPENAI_BASE_PATH`, which `launch` also sets, with `OPENAI_API_KEY`, in
+the environment, where they take precedence. It runs
 `goose session`. A later `goose` with no launch still finds the server
 through the file.
 
@@ -174,8 +181,8 @@ tools and agents work with the server. Running tools also needs aichat's
 
 ### elia
 
-Each served model becomes an OpenAI-compatible model in elia, and `launch`
-starts elia on the selected model. elia 1.x or newer is required. An older
+elia lists each served model as an OpenAI-compatible model, and `launch`
+starts it on the selected model. elia 1.x or newer is required. An older
 elia starts but lists no local models, so upgrade it with
 `pipx upgrade elia-chat`.
 
