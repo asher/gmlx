@@ -18,7 +18,7 @@ Most flags have a direct equivalent:
 | `-m model.gguf` | The model as the first argument | For a model split into shards, give the first shard. |
 | `-n N` | `--max-tokens N` | Both generate until end-of-sequence by default. |
 | `--temp`, `--top-k`, `--top-p`, `--min-p` | The same names | The defaults come from the [family defaults](family-defaults.md) of the model. |
-| `-c N` | `--max-kv-size N` | The window comes from the GGUF, and this flag limits it. On `run` and `chat`, the cache also becomes a rotating window. |
+| `-c N` | `--max-kv-size N` | The context length comes from the GGUF, and this flag limits it. On `run` and `chat`, the cache also becomes a rotating window. |
 | `--rope-scaling`, `--yarn-*` | None | gmlx reads the scaling from the GGUF, and there is no override. |
 | `-ngl N` | None | Every layer runs on the GPU. A model larger than memory runs with `--stream-experts` or `--stream-cpu`. |
 | `--cache-type-k q8_0`, `--cache-type-v q8_0` | `--kv-bits 8` | `--kv-group-size` sets the group size. |

@@ -139,7 +139,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_GOV_KERNEL_FLOOR_GB` | Under this many GB of reclaimable pages, the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
 | `GMLX_GOV_RESERVE_GB` | The server leaves this much RAM to the kernel and other processes when it computes its memory limit. The default is the larger of `8` and 10% of RAM. |
 | `GMLX_CACHE_LIMIT_GB` | It sets the `serve` buffer-cache limit in GiB, over `server.cache_limit_gb`. `0` disables caching, and a negative value, `off`, `none` or `unlimited` lifts it. |
-| `GMLX_NATIVE_FP` | It sets the MXFP4 and NVFP4 expert layout. `wire` keeps the file bytes, `packed` repacks them at load, and `auto` picks wire to stream or near the budget. |
+| `GMLX_NATIVE_FP` | It sets the MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | The cascade route handles shared prefixes of at least this many tokens. The default is `1024`. |
 | `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. It is lossy and off by default. |

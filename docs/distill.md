@@ -105,7 +105,8 @@ Qwen3 0.6B teacher at Q8_0 and the same model at Q4_K_M as the student,
 and trains for 80 steps.
 
 Its corpus is a jsonl file, one JSON object per line, of 24
-`{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
+`{"text": ...}` rows. A folder of text files also works as the corpus,
+with one document per file. A step trains on one batch of `--batch-size` rows,
 so `train` needs at least that many training rows. `align` also holds
 back about one row in fifty for validation, whole documents at a time and
 at least one row of a cache with two or more, and never trains on them.
@@ -129,8 +130,7 @@ gmlx distill eval --student Qwen3-0.6B-Q4_K_M.gguf --adapter smoke.gguf --before
     --slice smoke=smoke.txt --max-len 128 --md smoke.md --json smoke.json
 ```
 
-A folder of text files also works as the corpus, with one document per
-file. A slice is a held-out text file that `eval` scores. Here it is the
+A slice is a held-out text file that `eval` scores. Here it is the
 training text on purpose, so `bpb after` in `smoke.md`, the student's
 bits per byte with the adapter, must come out below `bpb before`. The run
 passes when the loss on the `[train] it` lines falls and `eval` writes
@@ -284,8 +284,9 @@ A task with no mechanical check can use a judge in the same place, a
 script that asks a served model whether the reply matches a reference
 answer you wrote under `check.answer`. This judge asks whatever model
 `gmlx serve` has on port 8080. Any instruct model larger than the
-student serves as the judge, the teacher included. Save it as
-`judge.py`, run `chmod +x judge.py`, and give it to `filter` as
+student serves as the judge, the teacher included.
+
+Save the script as `judge.py`, run `chmod +x judge.py`, and give it to `filter` as
 `--verify ./judge.py`. `filter` runs after `gen` has stopped its own
 server, so the judge model has the memory to itself. Start that model
 with `gmlx serve <judge>.gguf` before `filter` and stop it with
@@ -822,7 +823,9 @@ validation row of any view is left out as well, and `train` logs how
 many. The prompt is what the teacher read, context included. Documents
 are matched by their text, so two caches of one corpus cut at other
 sizes still pair up. Within one view, a one-document cache keeps the
-split `align` made. `best` is the lowest of the earlier validations, so
+split `align` made.
+
+`best` is the lowest of the earlier validations, so
 a `val` below it is a new best, and the first validation line has no
 `best` yet. A validation loss that rises while the training loss keeps
 falling means the adapter is memorizing the rows, and fewer steps or a
@@ -1013,8 +1016,7 @@ boundaries. `--resume` continues after the last shard it wrote and
 verified, and `--validate DIR` checks an existing cache without loading
 a model.
 
-Two cache flags serve MoE teachers. A MoE teacher larger than memory
-streams its experts from disk. `--routes` stores the experts the teacher
+Two cache flags serve MoE teachers. `--routes` stores the experts the teacher
 chose, so `eval --kld-cache` on the teacher's own quantization measures
 the error the quantization adds and nothing else. `--hidden` stores a
 sketch of the teacher's final hidden state, a fixed-width compressed
@@ -1047,15 +1049,16 @@ tokenizations agree on a boundary. At each one it maps the teacher's
 top-k onto groups of student tokens that start with the same bytes, so a
 digit run or a longer merge becomes a target for a sum of student
 probabilities. Between boundaries the student is trained to match the
-teacher's probability of the whole chunk of bytes. The own-group
-fraction, `a` on the `align` summary line, is how much of the teacher's
-mass has a direct target. The singleton fraction, `s` on that line, is
-how much of it lands on groups of one student token, an exact
-one-to-one target. `view.json` also records the shared-boundary
+teacher's probability of the whole chunk of bytes.
+
+The own-group fraction, `a` on the `align` summary line, is how much of
+the teacher's mass has a direct target. The singleton fraction, `s` on
+that line, is how much of it lands on groups of one student token, an
+exact one-to-one target. `view.json` also records the shared-boundary
 fraction, how much of the text the boundaries cover, and the rest of the
-summary line is diagnostics. A mean own-group fraction under 0.90, or a
-singleton fraction under 0.50, prints a warning. An own-group fraction
-under 0.70 refuses and writes no view unless `--force` is given.
+summary line is diagnostics.
+[When something goes wrong](#when-something-goes-wrong) gives the values
+of `a` and `s` at which `align` warns and refuses.
 
 The training loss is a sparse KL over the top-k plus a tail bucket for
 the mass outside it, so the student is never asked to put all of its

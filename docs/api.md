@@ -123,8 +123,8 @@ two structured fields. `cache` holds the tier its prefix hit, one of
 `exact`, `block`, `ckpt`, `anchor` and `miss`, or `hit` when only the reused
 token count is known, plus the `warm_tokens` it reused. `speculative` holds
 the [drafter's](glossary.md#drafter) rounds, drafted and accepted counts
-and accept rate, exact at batch width 1 and shared across a wider batch, or `null`
-without a drafter. Rows refresh at most four times a second on each engine.
+and accept rate, exact at batch width 1 and shared across a wider batch, or
+`null` without a drafter. Rows refresh at most four times a second on each engine.
 
 Two routes use the same numbers to tell a dispatcher whether to proceed before
 sending a request.
@@ -298,7 +298,7 @@ curl localhost:8080/v1/chat/completions -d '{
 | Condition | Response | Switch |
 |-----------|----------|--------|
 | The prompt plus `max_tokens` exceeds the context budget. | The server answers 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
-| The prompt alone cannot fit in memory. | The server answers 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
+| The prompt cannot fit in memory. | The server answers 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
 | A model cannot load beside the resident models that are busy. | The server answers 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | None |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |

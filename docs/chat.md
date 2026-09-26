@@ -87,7 +87,7 @@ sampling settings, attached items, how full the context is and the speed of
 the last reply.
 
 The extra also keeps the line breaks of pasted text, and Alt-Enter
-inserts a newline. Shift-Enter also inserts one when your terminal sends
+inserts a newline. Shift-Enter does the same when your terminal sends
 ESC CR for it. Without the extra, readline edits the line and completes
 with Tab.
 
@@ -141,8 +141,8 @@ the old conversation stays saved.
 
 A saved session restores its settings and its conversation together.
 `--resume` at startup restores the latest session of the model, or a named
-one, and `/load-session` does the same from inside a chat. Both refuse a session that was recorded with another
-model. The restored conversation is read into the KV cache with your next
+one, and `/load-session` does the same from inside a chat. Both refuse a
+session that was recorded with another model. The restored conversation is read into the KV cache with your next
 message, not at load time.
 
 In server mode, `/model` lists the served ids, and `/model <id>` sends the

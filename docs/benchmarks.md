@@ -471,10 +471,10 @@ errors back in. The corpus is wikitext under teacher forcing, so these
 tables rank caches against each other and do not predict a task score.
 
 TurboQuant, the scheme of mlx-vlm
-([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), measured on the
-same models and legs, fell between the other two. It was ahead of affine
-at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind kvarn at
-each width on all measures, so gmlx does not offer it.
+([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), was measured on
+the same models and legs. It was ahead of affine at 2 and 3 bits, level
+at 4 and behind at 6 and 8. It trailed kvarn at each width on all
+measures, so gmlx does not offer it.
 
 Speed was measured on Qwen3-0.6B Q8 with 27 of 28 layers quantized, a
 dense model whose decoding is limited by the KV read. At 16K, kvarn 6

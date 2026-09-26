@@ -344,7 +344,9 @@ use the whole budget by itself. When it does not fit beside pinned or
 busy models, the server defers the load with a message that names
 [`GMLX_DECODE_ARENA_GB`](env-vars.md#runtime). To keep a second model
 loaded beside a streamed one, set that variable, in GiB, so that both
-fit the budget. The arena is never larger than the experts, and a value
+fit the budget.
+
+The arena is never larger than the experts, and a value
 past the reclaimable RAM is reduced unless `GMLX_DECODE_ARENA_FORCE=1`
 is set. A streamed load also lowers the wired memory limit for the rest
 of the process, so a dense model in memory runs without wiring from then

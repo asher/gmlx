@@ -10,15 +10,16 @@ The cache routes each model by its cache shape once, at load, and logs the
 routing as `APC tier:` so that a silent mis-route is visible. The tiers
 differ in storage layout, not in whether hits happen, so every shape in the
 table gets reuse except one. A MiniMax-M3 file with its sparse-attention
-indexer armed, the MSA row, gets none. In the table, [GDN](../glossary.md#gdn)
-is the gated delta network recurrence of the Qwen3.5 and 3.6 hybrids, and
-a CacheList model is one whose layers each hold several caches of different
-kinds, the mlx-lm class of that name.
+indexer armed, the MSA row, gets none. In the table, a hybrid mixes
+recurrent layers, such as the [GDN](../glossary.md#gdn) layers of the
+Qwen3.5 and 3.6 hybrids, with KV layers. A CacheList model is one whose
+layers each hold several caches of different kinds, the mlx-lm class of
+that name.
 
 | Cache shape | Example archs | Tier |
 |-------------|---------------|------|
 | Plain KV, dense or MoE | llama, qwen2, qwen3, qwen3moe, glm4, glm4moe, deepseek2, phi3, granite, hunyuan-moe, minimax-m2, gemma2 | `block` |
-| Hybrid GDN, recurrent plus KV layers | qwen35, qwen35moe, qwen3next, kimi-k3, nemotron_h_moe, granitehybrid | `ckpt` |
+| Hybrid, recurrent plus KV layers | qwen35, qwen35moe, qwen3next, kimi-k3, nemotron_h_moe, granitehybrid | `ckpt` |
 | Sliding-window attention | gemma3, gemma4, gpt-oss | `ckpt` |
 | CacheList or pure recurrent | falcon-h1, deepseek4 | `exact` |
 | MSA indexer armed | minimax-m3 indexer GGUFs | None, with a logged warning. The indexless GGUF serves through the block tier. |
@@ -86,7 +87,7 @@ means prefix reuse is not working for that model, so file an issue with the
 
 Tier routing matches fp16 KV with one change. Dense models use the exact
 tier, since the 16-token block tier cannot split kvarn's 128-token records.
-Checkpoint-shaped stacks, which are the hybrid-GDN and sliding-window
+Checkpoint-shaped stacks, which are the hybrid and sliding-window
 families in the reuse table whose attention head_dim is 128, 256 or 512,
 keep full checkpoint-tier reuse and store kvarn records. The attention
 payload lives inline in the record and not in pool blocks, so
@@ -99,9 +100,10 @@ instead of reading a stale format. Cascade shared-prefix decode is off
 under kvarn and logs that once.
 
 Speculative rollback into a sealed record reopens it from its codes, one
-lossy round trip, while rows still in the fp16 tail roll back exactly. A batch of kvarn rows snapshots each row's
-own start, end and tail window with its buffers, and a restore from an
-older batch layout refuses instead of misreading it.
+lossy round trip, while rows still in the fp16 tail roll back exactly. A
+batch of kvarn rows snapshots each row's own start, end and tail window
+with its buffers, and a restore from an older batch layout refuses instead
+of misreading it.
 
 ## Environment switches
 

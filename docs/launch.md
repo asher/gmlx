@@ -221,8 +221,7 @@ The providers, the default model and the title and compaction settings go
 in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
 `--patch`. dsh applies that file above its own settings and never saves
 it, so the web app cannot save a different default model or an edit to the
-gmlx providers. Run `launch`
-again with `--model` to change the default.
+gmlx providers. Run `launch` again with `--model` to change the default.
 
 Two entries in the file point at the server. Under `gmlx (local)`, the
 server and its profiles decide whether a model thinks. Under

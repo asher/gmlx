@@ -399,7 +399,7 @@ These flags control memory:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--max-kv-size N` | None | Cap the KV cache with a rotating window. Combines with [kvarn](glossary.md#kvarn) but not with affine `--kv-bits`. |
-| `--kv-bits N` | Off | Quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, default 6. |
+| `--kv-bits N` | Off | Quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, where it defaults to 6. |
 | `--kv-group-size N` | `64` | Set the affine quantization group size. |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or `kvarn`, the variance-normalized quantization that [KV cache quantization](kv-quantization.md) describes. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, the newest N tokens stay fp16. N is a multiple of 128, and `0` disables the tail. |
@@ -431,7 +431,7 @@ These flags are multimodal. [Vision and audio](vlm.md) describes them:
 |------|---------|---------|
 | `--mmproj PATH` | None | Load this projector GGUF. |
 | `--image PATH_OR_URL` | None | Prepend these comma-separated images. |
-| `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files, which needs an audio tower. |
+| `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
 With `--mmproj`, `--stop` and the XTC flags are ignored with a warning,
@@ -710,8 +710,8 @@ gmlx rm old-model --keep-files
 | `ID`, positional | Required | Remove the model with this id, alias or discovered id. |
 | `--config FILE` | The first default location | Read this config. |
 | `--keep-files` | Off | Remove only the config entry. |
-| `--yes` | Off | Skip the confirmation, which is required without a terminal. |
-| `--json` | Off | Emit the result as JSON, which needs `--yes`. |
+| `--yes` | Off | Skip the confirmation. The flag is required without a terminal. |
+| `--json` | Off | Emit the result as JSON. The flag needs `--yes`. |
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
 The command exits 0 when the model was removed, 1 when you declined or a

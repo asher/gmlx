@@ -1272,9 +1272,9 @@ One tool call may take at most this many seconds. The value is at least
 ### `assistant.mcp`
 
 These [MCP](glossary.md#mcp) servers provide the tools, as a list. Each
-entry has a `name` and exactly one of `command` and `url`. A server that fails
-to start gives a warning, and the assistant runs without its tools. The
-default is none.
+entry has a `name` and exactly one of `command` and `url`. A server that
+fails to start gives a warning, and the assistant runs without its tools.
+The default is none.
 
 ### `assistant.mcp[].name`
 
