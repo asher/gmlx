@@ -44,15 +44,15 @@ position of the canvas at once, instead of one token after another.
 
 A codec is the GGUF quantization type of one tensor, such as `Q4_K` or
 `IQ2_XXS`. A file mixes codecs across its tensors, and every codec in a
-file needs a kernel for the file to load. `gmlx validate` lists the codecs
-of a file.
+file needs a kernel for the file to load. `gmlx validate` lists a file's
+codecs.
 
 ## Context and depth
 
 The context is everything in the model's input, measured in tokens, which
 includes the conversation so far, pasted files and the reply in progress.
 Depth is how many tokens are already in the context. The benchmark charts
-plot speed against depth, because the cost of attention grows with it.
+plot speed against depth, because attention's cost grows with depth.
 
 ## DFlash
 
@@ -94,16 +94,16 @@ are needed.
 ## Family defaults
 
 The family defaults are the sampling settings that a model family's
-publisher recommends, such as temperature and top-p, together with the
-built-in intents of that family. Each request starts from them unless it
+publisher recommends, such as temperature and top-p, together with that
+family's built-in intents. Each request starts from them unless it
 sets its own values. [Family defaults](family-defaults.md) gives the
 values for each family.
 
 ## Feeder
 
-The feeder is the code that moves expert weights for a streamed model.
-During prefill it stages each layer's experts from the GGUF into the
-[ring](#ring). During decoding it serves experts from the [arena](#arena)
+A feeder is the code that moves expert weights for a streamed model. The
+prefill feeder stages each layer's experts from the GGUF into the
+[ring](#ring). The decode feeder serves experts from the [arena](#arena)
 and reads the misses.
 
 ## GDN
@@ -214,7 +214,7 @@ two run at different speeds, so gmlx reports them separately.
 ## Preflight
 
 Preflight is the set of checks that run before a model loads. The loader
-checks the architecture, the codec of each tensor, the shard set and the
+checks the architecture, each tensor's codec, the shard set and the
 file size before it reads any tensor data. `run` and `chat` also refuse a
 context that cannot fit in memory, and the server refuses a request whose
 prompt cannot fit.
@@ -235,7 +235,7 @@ show whether reuse works.
 
 ## Quant
 
-A quant is a compressed version of a model. The suffix of a GGUF name
+A quant is a compressed version of a model. A GGUF name's suffix
 gives the approximate bits per weight, such as `Q4_K_M` or `IQ2_M`. Lower
 bits make a smaller file that loses more quality.
 
@@ -254,7 +254,7 @@ lists them.
 ## Ring
 
 The ring is the set of GPU-visible slots through which the
-[feeder](#feeder) stages the experts of a streamed model during prefill,
+prefill [feeder](#feeder) stages a streamed model's experts during prefill,
 one layer at a time.
 
 ## Runfile
@@ -274,8 +274,8 @@ requests keep running.
 
 A [drafter](#drafter) proposes several tokens, and the model checks them
 in one pass. By default the output stays the same, with fewer full
-passes. MTP, for multi-token prediction, is the name that the flags and
-logs of gmlx give to speculative decoding with any drafter, a
+passes. MTP, for multi-token prediction, is the name that gmlx's flags
+and logs give to speculative decoding with any drafter, whether a
 [native head](#native-head) or a companion GGUF.
 [Speculative decoding](speculative-decoding.md) describes both.
 

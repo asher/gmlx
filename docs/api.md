@@ -39,6 +39,8 @@ addressing works on the CLI, as `gmlx run <id-or-path>@coding` or
 Beside the OpenAI and Anthropic generation routes, the server has routes
 for metrics, capacity, residency, the prompt cache and the optional
 services. Every route except `/health` needs the API key when one is set.
+mlx-vlm's image generation routes are present but cannot serve a GGUF
+model.
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -52,10 +54,10 @@ services. Every route except `/health` needs the API key when one is set.
 | `POST /v1/estimate` | It runs a dry-run admission check for a chat body. |
 | `GET /v1/capacity/plan` | It says whether `width` streams fit at `depth` tokens each, and whether they may start now. |
 | `GET /v1/cache/stats` | It returns prompt cache statistics, or `{"enabled": false}`. |
-| `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
-| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, which answers 409 while it streams, or every idle model with an empty body. |
-| `POST /v1/keep` | Keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it. |
-| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. |
+| `POST /v1/cache/reset` | It clears the prompt cache for all resident models, or for one with `{"model": "<id>"}`. |
+| `POST /unload` | It evicts the resident model that `{"model": "<id>"}` names, or every idle model when the body is empty. The route answers 409 while that model streams. |
+| `POST /v1/keep` | With `{"model": "<id>"}`, it keeps that model resident past the idle timeout and warms it. `"warm": false` skips the warm-up, and `"keep": false` releases it. |
+| `POST /v1/reload` | It re-reads the config and re-registers models, keeping entries whose load parameters are unchanged. |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
 | `POST /v1/audio/speech` | It turns text into speech, with `tts` configured. |
 | `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured. |
@@ -65,14 +67,16 @@ services. Every route except `/health` needs the API key when one is set.
 `GET /v1/models` lists configured and discovered ids plus alias presets,
 and never the Hugging Face cache. Each entry carries `resident`, `pinned`,
 `speculative`, `vlm`, `profile` and `default` markers and two context
-figures. `context_length` is the GGUF's trained window, or the model's
+figures.
+
+`context_length` is the GGUF's trained window, or the model's
 [`max_kv_size`](config.md#loadmax_kv_size) when that is smaller.
 `max_context_at_width_1` is how much of the window fits in memory for a
 single stream. It is `null` for every model except the one that the boot
 capacity table was built for, and for that model too when there is no
 table or `GMLX_OVERCOMMIT=1` is set. A harness sizes its context window
-from the smaller of the two, or from `context_length` when this field is
-`null`.
+from the smaller of the two, or from `context_length` when
+`max_context_at_width_1` is `null`.
 
 A resident model with KV quantization configured adds a `kv_quant` object
 with `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16` and a
@@ -91,8 +95,7 @@ decode width.
 
 `POST /v1/completions` honors the standard sampling parameters, `seed`,
 `stop`, `stream`, `stream_options` and `profile`. List or token-array prompts, `n > 1`, `echo`,
-`suffix` and `best_of > 1` are rejected with a 400. mlx-vlm's image
-generation routes are present but cannot serve a GGUF model.
+`suffix` and `best_of > 1` are rejected with a 400.
 
 The residency routes act on what
 [Memory and residency](config.md#memory-and-residency) configures.
@@ -112,12 +115,12 @@ instead of failing the snapshot.
 | Section | Fields | Meaning |
 |---|---|---|
 | `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | They give the decode width, the queue cap, the streams generating now and the requests waiting for a slot. |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | They give the waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | They give the waiting count, its cap, the drain estimate that `Retry-After` would carry now, the queue-cap rejection count and the last rejection's reason. |
 | `requests[]` | Each request has one row. | Queued rows come first. `state` is `queued`, `prefill` or `decode`. |
 | `resident_models[]` | Each model has `in_flight`, `pinned`, `kept` and bytes. | Each model decodes on a separate engine, so compare each model's `in_flight` with `decode_batch`. |
 | `governor` | `band`, counters | They give the memory governor's band and shed history. |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | They hold MLX's active and cached bytes, the gate's free memory, and a streamed model's [arena](glossary.md#arena) bytes, capacity and hit rate. |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a Hugging Face fall-through load. |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | They hold MLX's active and cached bytes, the measured free working set, and a streamed model's [arena](glossary.md#arena) bytes, capacity and hit rate. |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a non-GGUF model that the stock model loader loads. |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | They give the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean. |
 
 A request row carries `id`, `model`, `state`, `position`, `prompt_tokens`,
@@ -130,12 +133,12 @@ and accept rate, exact at batch width 1 and shared across a wider batch, or
 `null` without a drafter. Rows refresh at most four times a second on each engine.
 
 Two routes use the same numbers to tell a dispatcher whether to proceed before
-sending a request.
+sending a request. `POST /v1/estimate` takes a chat-completions body and
+returns an admission estimate for a resident model. `prompt_tokens`,
+`warm_tokens` and `cache_tier` say how much of the prefix the cache already
+holds and on which tier, which is the routing signal across machines.
 
-`POST /v1/estimate` takes a chat-completions body and returns an admission
-estimate for a resident model. `prompt_tokens`, `warm_tokens` and `cache_tier`
-say how much of the prefix the cache already holds and on which tier, which is
-the routing signal across machines. `need_bytes` is the prompt's KV plus the
+`need_bytes` is the prompt's KV plus the
 prefill transient, plus `max_tokens` when the body pins one. `fits_now` and
 `fits_drained` judge that against the current free memory and the drained
 working set, while `context_ok` judges it against `context_limit`.
@@ -157,17 +160,15 @@ that fails.
 
 The Prometheus rendering of `/v1/metrics` flattens its sections to gauges
 such as `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
-`gmlx_governor_band` with a `band` label, `gmlx_capacity_max_ctx` with a
-`width` label and per-model series with a `model` label, plus a `profile`
-label on entries that carry a profile. `requests[]` is high-cardinality and contributes only its count.
+`gmlx_governor_band` with a `band` label and `gmlx_capacity_max_ctx` with a
+`width` label. Per-model series carry a `model` label, and entries that carry
+a profile add a `profile` label. `requests[]` is high-cardinality and contributes only its count.
 
 ## API capabilities
 
 The protocol surface follows mlx-vlm's. gmlx patches its handlers so that
 upstream request features work on GGUF models, and adds the
-`/v1/completions` route. A model's context window comes from its GGUF
-metadata. A request cannot change it, and the
-[`max_kv_size`](config.md#loadmax_kv_size) load key can only lower it.
+`/v1/completions` route.
 
 ### Tool calling
 
@@ -297,12 +298,16 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ## Limits and back-pressure
 
+A model's context window comes from its GGUF metadata. A request cannot
+change it, and the [`max_kv_size`](config.md#loadmax_kv_size) load key can
+only lower it.
+
 | Condition | Response | Switch |
 |-----------|----------|--------|
 | The prompt plus `max_tokens` exceeds the context budget. | The server answers 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
 | The prompt cannot fit in memory. | The server answers 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
-| A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
+| A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the load gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
@@ -311,9 +316,9 @@ The preflight uses the same estimate as `POST /v1/estimate`, which
 describes. The load gate judges a model's weights against what is resident and
 pinned or busy and against the governor's floor, after waiting up to 3 seconds for memory the kernel is
 still returning from a recent unload. The switch variables, and the decode
-batch width that sets the queue cap, are listed under
-[Server](env-vars.md#server), except `GMLX_GOVERNOR`, which is under
-[Runtime](env-vars.md#runtime).
+batch width that sets the queue cap, are listed among the
+[server environment variables](env-vars.md#server), except `GMLX_GOVERNOR`,
+which is among the [runtime environment variables](env-vars.md#runtime).
 
 Both 400s for a request that does not fit start their message with `prompt
 is too long`, and the budget error also says the request `exceeds the context
@@ -325,8 +330,8 @@ conversation and retry instead of stopping at the error.
 A request never makes the server download the model it names. A
 generation request whose `model` is not a configured id gets the 404 that
 [Addressing a model in a request](#addressing-a-model-in-a-request)
-describes, whatever the id looks like. The stock model loader below that
-resolver is gated as well. Anything that reaches it with a repo id instead
+describes, whatever the id looks like. The stock model loader that runs after
+that resolver is gated as well. Anything that reaches it with a repo id instead
 of a GGUF or local path gets a 403 of type `hf_access_disabled`, so no
 route can fetch a chat model. The service models that the config names
 download in the background at start, as

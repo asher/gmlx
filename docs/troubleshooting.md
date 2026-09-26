@@ -22,8 +22,8 @@ or chat app that does not connect, read its entry under
 
 ### The install fails on macOS before 26.2
 
-gmlx needs macOS 26.2 or newer, because the Metal kernels of mlx-kquant are
-built for that version. On an earlier version, the install fails or the
+gmlx needs macOS 26.2 or newer, because mlx-kquant's Metal kernels are built
+for that version. On an earlier version, the install fails or the
 kernels cannot run. Update macOS in System Settings, then install gmlx
 again.
 
@@ -54,10 +54,11 @@ command finishes.
 disk space`. A dropped connection retries by itself with backoff, from the
 bytes already on disk. Raise
 [`GMLX_PULL_RETRIES`](env-vars.md#commands) for a flaky host, and
-`GMLX_PULL_TIMEOUT` for a slow one.
+`GMLX_PULL_TIMEOUT` for a slow one. An interrupted pull resumes when you run
+the same command again, because the bytes so far stay in a `.part` file
+beside the destination.
 
-An interrupted pull resumes when you run the same command again, because the
-bytes so far stay in a `.part` file beside the destination. The disk check
+The disk check
 names how much space the file needs and how much is free. Free some space,
 pass `--to DIR` for another volume, or pass `--force` to skip the check.
 
@@ -71,8 +72,9 @@ names, and the next pull fetches that file from the start.
 ### A gated or private repo will not download
 
 `gmlx validate` or `gmlx pull` gets a 401 or 403 from Hugging Face. gmlx
-sends the Hugging Face token that [Commands](env-vars.md#commands)
-describes. Accept the repo's terms on its Hugging Face page, and check
+sends the Hugging Face token that the
+[command environment variables](env-vars.md#commands)
+describe. Accept the repo's terms on its Hugging Face page, and check
 that this token has access to it.
 
 ### A load says the file is incomplete or truncated
@@ -205,8 +207,9 @@ A missing [`server.embeddings`](config.md#serverembeddings) or
 [`server.rerank`](config.md#serverrerank) file disables that service with a
 warning, and its route answers a plain 404 with no error type. That
 service stays off until `gmlx restart`, even after the file comes back. A
-missing absolute path is the exception. Its route answers 404 of type
-`model_file_missing` until the file is back, and then works with no
+service file set by an absolute path is the exception. When that file is
+missing, its route answers 404 of type `model_file_missing` until the file
+is back, and then works with no
 restart.
 
 ### A model answers as if the message were empty
@@ -218,8 +221,8 @@ server passes each message to the chat template as a list of parts. Some
 fine-tunes ship an older template that renders only plain strings, so every
 message arrives empty.
 
-Replace the template with one that renders lists, usually the template of
-the base model. Pass the file with `--chat-template` on
+Replace the template with one that renders lists, usually the base model's
+template. Pass the file with `--chat-template` on
 [gmlx serve](cli.md#gmlx-serve), or set
 [`chat_template`](config.md#profileschat_template) in a profile or in the
 model's `overrides`.
@@ -293,7 +296,7 @@ Run `brew install ffmpeg`, then `gmlx restart`.
 effect is small, `train` runs out of memory, or the served adapter scores
 near zero. [When something goes wrong](distill.md#when-something-goes-wrong)
 in the distillation guide covers each case, and
-[gmlx distill](cli.md#gmlx-distill) lists the exit codes of every action.
+[gmlx distill](cli.md#gmlx-distill) lists every action's exit codes.
 
 ## Logs and files
 
@@ -314,8 +317,8 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | Path | Contents |
 |------|----------|
 | `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
-| `~/.config/gmlx/` | `gmlx launch` writes the configs of injected clients here. |
-| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these client files, as [The clients](launch.md#the-clients) describes. Remove those settings and keep the files. |
+| `~/.config/gmlx/` | `gmlx launch` writes injected clients' configs here. |
+| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. To remove gmlx, delete those settings and keep the files. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on and has no `path` of its own. |
 | `~/.cache/gmlx/talk/` | The first `talk` fetches the wake-word and voice-activity models here. |

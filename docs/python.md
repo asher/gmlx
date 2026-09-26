@@ -25,6 +25,8 @@ other code written for ordinary mlx-lm checkpoints run it unchanged. The
 config and tokenizer are both synthesized from the GGUF metadata. Sharded
 files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
+`load_model` takes these keyword arguments:
+
 | Kwarg | Default | Meaning |
 |---|---|---|
 | `arch` | Detected | Override `general.architecture` detection. |
@@ -68,11 +70,11 @@ Sampling takes these keyword arguments:
 | `logit_bias` | `None` | Each `{token_id: bias}` entry is added to the logits. |
 | `stop` | `None` | Generation ends when one of these strings appears, and the match is trimmed. |
 
-The rendering of the prompt follows these keyword arguments:
+Prompt rendering follows these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `apply_chat_template` | `True` | Set `False` for base models or pre-templated text. |
+| `apply_chat_template` | `True` | `False` skips the chat template, which suits base models and pre-templated text. |
 | `system_prompt` | `None` | It is prepended as a system message on the templated path. |
 | `template_kwargs` | `None` | These extra kwargs go to `apply_chat_template`, such as `{"enable_thinking": False}`. |
 
@@ -91,9 +93,9 @@ The remaining keyword arguments control long prompts, thinking models and output
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `prefill_step_size` | Model-aware | It sets the prefill chunk width, and the default follows the deployed choice for the model. |
+| `prefill_step_size` | Model-aware | It sets the prefill chunk width, and the default is the width that gmlx picks for the model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill, on a TTY only, cleared before the first token. |
-| `thinking_budget` | `None` | Cap reasoning tokens. After about N thinking tokens a `</think>` is forced so the model answers. A model that never opens `<think>` is unaffected. |
+| `thinking_budget` | `None` | Cap reasoning tokens. After about this many thinking tokens a `</think>` is forced so the model answers. A model that never opens `<think>` is unaffected. |
 | `thinking_start_token` / `thinking_end_token` | `None` | They set the reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
 | `reasoning` | `None` | It sets how a verbose stream shows thinking. `show` styles it, `hide` folds it into the timing line and `raw` streams it. The return value is always raw. |
@@ -109,8 +111,10 @@ bench(model, tokenizer, lengths=(512, 4096, 16384))
 
 `bench` measures prefill and decode throughput at each prompt length through
 the real generation path, with chunked prefill and the async one-step-ahead
-decode pipeline. The numbers therefore match deployed throughput, not a
-naive forward loop. Its CLI equivalent is `gmlx run --bench`.
+decode pipeline. The numbers therefore match deployed throughput instead of a
+naive forward loop's speed. Its CLI equivalent is `gmlx run --bench`.
+
+`bench` takes these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -156,8 +160,8 @@ The same exceptions come from `preflight` and `load_model`:
 `ARCH_TABLE` maps each supported GGUF architecture id to its runtime entry,
 with the fields `gguf_arch`, `model_type`, `family`, `remap_alias`,
 `notes`, `backend` and `caveat`. [Supported architectures](arch-coverage.md)
-is the generated view of the same data for people to read, with the
-validation status of each entry.
+is the generated view of the same data for people to read, with each
+entry's validation status.
 
 ## Tokenizer without the model
 
@@ -174,11 +178,11 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 builds an HF fast tokenizer from the GGUF's embedded vocab, merges and
 scores metadata. It is the same synthesis `load_model` runs, taken on its
 own. `detect_arch(reader)` reads `general.architecture` from the header.
-Neither touches tensor bytes.
+Neither touches tensor bytes. These suit a tool that needs the tokenizer
+before it decides whether to load weights, such as an eval harness that
+checks tokenizer parity, pre-tokenizes a corpus or inspects a template.
 
-These suit a tool that needs the tokenizer before it decides whether to
-load weights, such as an eval harness that checks tokenizer parity,
-pre-tokenizes a corpus or inspects a template. `chat_template_override`,
+`chat_template_override`,
 an inline Jinja string, replaces the GGUF's chat template. The loader
 infers the model's turn-ending tokens from the template it ends up with, so
 an override changes which tokens stop generation as well.
