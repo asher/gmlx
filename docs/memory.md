@@ -45,7 +45,8 @@ These steps reduce memory, the cheapest first:
   almost no quality cost, and `--kv-quant-scheme kvarn` keeps that quality
   at 6 bits in less memory. [KV cache quantization](kv-quantization.md)
   describes both schemes and the models that gain from them. On the
-  server, they are the [load keys](config.md#model-loading).
+  server, [load keys](config.md#model-loading) take the place of these two
+  flags.
 - Limit the context. On `run` and `chat`, `--max-kv-size` keeps a rolling
   window of the most recent tokens and drops the oldest ones. Under kvarn,
   the window stays quantized if it reaches the kvarn window floor, which is
@@ -62,8 +63,8 @@ These steps reduce memory, the cheapest first:
 
 ## The GPU memory limit
 
-macOS limits how much memory the GPU may wire to a share of RAM that
-depends on the machine. The server keeps its loaded models within
+The GPU may wire only as much memory as macOS allows, which is a share of
+RAM that depends on the machine. The server keeps its loaded models within
 [`server.budget_gb`](config.md#serverbudget_gb), and gmlx streams a MoE
 model that does not fit, as [Models larger than memory](streaming.md)
 describes. If one dense model and its cache sit right at the limit on a
@@ -82,8 +83,8 @@ instead of failing with an error, because MLX counts the pool as free
 while macOS counts it as wired.
 
 The server therefore limits the pool by default, and logs the limit on a
-`[serve] MLX cache limit:` line. The memory governor also checks the free
-memory of macOS on every tick.
+`[serve] MLX cache limit:` line. On every tick, the memory
+governor also checks the free memory that macOS reports.
 
 [`server.cache_limit_gb`](config.md#servercache_limit_gb) sets the limit,
 and its entry in the configuration reference gives the default.

@@ -35,7 +35,7 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # adds numerical parity against real GG
 python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the GPU
 ```
 
-A PR should keep the default `pytest` tier passing, and if your change
+A PR should keep the default `pytest` tier passing. If your change
 touches loading or numerics, say which integration tests you ran and on
 which model. A new architecture has its own acceptance gate and required
 tests, in
@@ -51,8 +51,8 @@ pre-commit install             # optional, runs ruff on each commit
 pip install "pyright[nodejs]==1.1.414" && pyright   # seam drift check, needs the deps installed
 ```
 
-pyright is a guard against upstream symbol and signature drift, not a type
-checker for the tree. It covers the files in `[tool.pyright].include`, all
+pyright guards against upstream symbol and signature drift, and it does not
+type-check the whole tree. It covers the files in `[tool.pyright].include`, all
 of them at zero errors. The other files that import mlx_vlm or mlx_lm
 statically are listed in `[tool.gmlx.pyright].backlog` and join the gate
 one file at a time as each reaches zero. `tests/test_pyright_scope.py`

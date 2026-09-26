@@ -243,7 +243,7 @@ a request can hit, including the 400 for a prompt that cannot fit.
 
 A streaming reply stops early with an error of type
 `server_overloaded_shed`, code `row_shed` and `finish_reason` `shed`. The
-memory governor ran out of other ways to free memory, so it retired this
+memory governor ran out of other ways to free memory, so it shed this
 request to keep the others running. Send it again, and read
 [Memory](#memory) if it happens often.
 

@@ -11,18 +11,17 @@ gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
 
 `gmlx init` writes a [configuration file](config.md) that lists your models
 and the folders that hold them. The `~/models` folder can be empty or not
-exist yet.
+exist yet. To answer questions in a wizard instead, run `gmlx init` with
+no flags. The wizard scans the folders that you already keep models in,
+lets you rename the models, and turns on optional services such as speech
+and embeddings.
+
 Once the file exists, `gmlx pull` downloads into its first folder and adds
 the model to the file, with an id made from the file name. Here the id is
 `qwen3.8-27b-ud-q6`, and every gmlx command accepts it in place of a path.
 A server that is already running reads the file again, so a pulled model is
-available at once.
-
-This model is 20.5 GB. On a Mac with less memory, choose a smaller model
-from [Choosing a model](#choosing-a-model). To answer questions in a
-wizard instead, run `gmlx init` with no flags. The wizard scans the
-folders that you already keep models in, lets you rename the models, and
-turns on optional services such as speech and embeddings.
+available at once. This model is 20.5 GB. On a Mac with less memory, choose
+a smaller model from [Choosing a model](#choosing-a-model).
 
 - [Running a model](#running-a-model)
 - [Serving models](#serving-models)
@@ -128,7 +127,7 @@ to estimate it and how to make it smaller. A mixture-of-experts model that
 is larger than memory can still run, as
 [Models larger than memory](streaming.md) describes.
 
-To see the files of a repository before you download one, run
+To see a repository's files before you download one, run
 `gmlx validate`:
 
 ```sh
@@ -164,7 +163,7 @@ browser, as [Agents and chat apps](launch.md) describes.
 ## Next steps
 
 - [Configuration](config.md) explains profiles, aliases, the prompt cache
-  and the memory limits of the server.
+  and the server's memory limits.
 - [Voice chat](talk.md) sets up `gmlx talk`, which answers spoken questions
   aloud.
 - [Menu bar app](menubar.md) describes the login item, which keeps the

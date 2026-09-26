@@ -50,16 +50,16 @@ Each client uses one or two of these styles:
 
 | Client | What it is | Style | Where the configuration goes |
 |--------|------------|-------|------------------------------|
-| `claude-code` | It is Anthropic's Claude Code. | Environment | `ANTHROPIC_*` variables |
-| `opencode` | It is a coding agent. | Injection | `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG` |
-| `pi` | It is a coding agent. | Merge | `~/.pi/agent/models.json` and `settings.json` |
-| `omp` | It is oh-my-pi, a coding agent. | Merge | `~/.omp/agent/models.yml` and `config.yml` |
-| `hermes` | It is NousResearch hermes-agent. | Injection | `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG` |
-| `goose` | It is Block's agent runtime. | Merge and environment | `~/.config/goose/config.yaml` |
-| `aichat` | It is a terminal chat client with tools. | Injection | `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR` |
-| `elia` | It is a terminal chat app. | Injection | `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME` |
-| `open-webui` | It is a chat app for the browser. | Environment | `OPENAI_API_BASE_URL` and related variables |
-| `dsh` | It is DeepSeek Harness, an agent app for the browser. | Injection | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
+| `claude-code` | It is Anthropic's Claude Code. | Environment | The configuration goes in `ANTHROPIC_*` variables. |
+| `opencode` | It is a coding agent. | Injection | The configuration goes in `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG`. |
+| `pi` | It is a coding agent. | Merge | The configuration goes in `~/.pi/agent/models.json` and `settings.json`. |
+| `omp` | It is oh-my-pi, a coding agent. | Merge | The configuration goes in `~/.omp/agent/models.yml` and `config.yml`. |
+| `hermes` | It is NousResearch hermes-agent. | Injection | The configuration goes in `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG`. |
+| `goose` | It is Block's agent runtime. | Merge and environment | The configuration goes in `~/.config/goose/config.yaml`. |
+| `aichat` | It is a terminal chat client with tools. | Injection | The configuration goes in `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR`. |
+| `elia` | It is a terminal chat app. | Injection | The configuration goes in `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME`. |
+| `open-webui` | It is a chat app for the browser. | Environment | The configuration goes in `OPENAI_API_BASE_URL` and related variables. |
+| `dsh` | It is DeepSeek Harness, an agent app for the browser. | Injection | The configuration goes in `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch`. |
 
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
@@ -78,8 +78,8 @@ server responds. On a Mac desktop, starting the server also opens the
 configuration file anywhere, `launch` says to run `gmlx init` and exits
 with code 2.
 
-The wait has no fixed limit. Only the server process exiting counts as a
-failure. Ctrl-C stops the wait, and the server keeps starting in the
+The wait has no fixed limit, and only the server process exiting counts as
+a failure. Ctrl-C stops the wait, and the server keeps starting in the
 background. `--start-timeout SECONDS` limits the wait for scripts, and
 `--no-start` turns off starting entirely, so the command fails when no
 server runs.
@@ -227,8 +227,8 @@ without a `package.json` is refused, so remove or rename it first.
 
 The providers, the default model and the title and compaction settings go
 in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
-`--patch`. dsh applies that file above its own settings and never saves
-it, so the web app cannot save a different default model or an edit to the
+`--patch`. The settings in that file override dsh's own settings, and dsh
+never saves the file, so the web app cannot save a different default model or an edit to the
 gmlx providers. Run `launch` again with `--model` to change the default.
 
 Two entries in the file point at the server. Under `gmlx (local)`, the
@@ -266,4 +266,5 @@ command to give that program. `launch` refuses the `desktop` profile.
 
 dsh's `web_search` tool uses DeepSeek's search service and needs
 `DEEPSEEK_API_KEY`. dsh sends a conversation to DeepSeek only with feedback
-that you submit, and `DSH_TELEMETRY_MODE=DISABLED` turns that off.
+that you submit, and `DSH_TELEMETRY_MODE=DISABLED` stops dsh from
+sending the conversation.

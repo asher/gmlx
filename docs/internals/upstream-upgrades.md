@@ -1,8 +1,9 @@
 # Upgrading mlx-vlm, mlx-lm and mlx
 
 gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs
-late-bound patches over private upstream symbols, deep-imports model
-internals, and leaves everything between those seams stock. Upstream point
+late-bound patches over private upstream symbols and deep-imports model
+internals. Each patch point and deep import is a seam, and everything
+between the seams stays stock. Upstream point
 releases move the symbols, so the patch layer is safe only under a
 qualified set of versions.
 

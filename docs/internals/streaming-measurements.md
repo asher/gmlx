@@ -83,9 +83,9 @@ of all token-layer calls stall.
 
 Expert-mass removed reads, but most of them were arena hits that cost
 nothing, so its router-side filtering cost more than the stalls it saved.
-Miss-shed drops mass only where a stall is otherwise certain. At P=0.80
-the probe predicts 12% dropped mass, while the residency-aware shed
-dropped 2.9%. Two 10k-token generations at temperature 0.6 and top-p 0.95
+Miss-shed drops mass only where a stall is otherwise certain. With
+`moe_miss_shed` set to a share P of 0.80, the probe predicts 12% dropped
+mass, while the residency-aware shed dropped 2.9%. Two 10k-token generations at temperature 0.6 and top-p 0.95
 ran clean.
 
 ## GLM-5.2
@@ -156,7 +156,8 @@ tables as every-token weights and the arena falls to 11 GB.
 
 A table past the size of a 1-D Metal window was once copied into Metal
 memory instead of mapped. mlx-kquant now gives such a window a second
-dimension. Loading one tensor per file alone gives these figures.
+dimension. These figures come from loading each file on its own,
+once with the table copied and once with a 2-D window.
 
 | | Copied | 2-D window |
 |---|---|---|

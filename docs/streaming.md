@@ -110,7 +110,9 @@ physical RAM. Four things share the ceiling, in this order:
    page cache instead, and the load says so. Decoding is not affected.
 4. The decode arena takes what is left after a host floor. The floor
    is 5% of RAM, at least 4 GiB, plus 2.5 GiB for the page cache,
-   and it keeps the rest of the Mac out of swap. A larger arena finds more
+   and it keeps the rest of the Mac out of swap. Buffered reads, such as
+   prefill without the ring and decoding from the page cache, slow sharply
+   when the page cache has too little memory. A larger arena finds more
    experts in memory and decodes faster. Below 1 GiB, the decode feeder
    does not start, and decoding reads through the page cache.
 
@@ -221,7 +223,7 @@ so its arena can be smaller than the one in the plan.
 
 These settings do not change the output, and all of them are on by
 default for `stream: experts`, with one exception. Lookahead prestage is
-off by default on GLM-5.2, the `glm-dsa` architecture, and
+off by default on GLM-5.2, whose architecture is `glm-dsa`.
 `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
 [Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements)
 records the gain of each setting on real models.
@@ -239,8 +241,8 @@ records the gain of each setting on real models.
 
 On a short prompt, the prefill feeder reads only the experts that the
 router chose, which shortens the time to the first token. Its reads bypass
-the page cache, so a prefill does not push other programs' files out of
-memory.
+the page cache, because a prefill reads each expert once and caching those
+reads would push other programs' files out of memory.
 
 The arena starts warm. While prefill passes through each layer, the
 prompt's most used experts are copied into the arena, so the first decoded

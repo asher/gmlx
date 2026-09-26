@@ -1,8 +1,8 @@
 # Structured reads
 
 `POST /v1/systemone` turns a question set into answer distributions on a
-DiffusionGemma model through its route, its decision logic and a read
-engine. The request and response contract is in
+DiffusionGemma model. A server route, the decision logic and a read engine
+do the work. The request and response contract is in
 [Structured decisions](../decisions.md), and the timings are in
 [Structured read measurements](structured-read-measurements.md).
 
@@ -27,8 +27,9 @@ Three layers make up the code. Apart from `engine.py` and `denoise.py`, the
 modules in `gmlx/systemone/` are pure Python. They hold the schema rules,
 the answer templates and `decide`, which runs a decision against any
 object with `prefill`, `read` and `think`. `extensions.py` adds
-`think: "auto"` and the server's request defaults. `engine.py`
-implements the three calls on the mlx-vlm model, and `denoise.py` holds
+`think: "auto"` and the server's request defaults.
+
+`engine.py` implements the three calls on the mlx-vlm model, and `denoise.py` holds
 the unembedding and the loop that a read of more than one step runs. The route
 is in `gmlx/serve/patches/systemone.py`, and `run_on_engine` in
 `gmlx/serve/engine_jobs.py` runs a decision on the model's engine
@@ -82,9 +83,10 @@ seed derives from the request seed, so a request with the same seed
 reproduces its reads exactly. One group's samples run as one batch,
 and a wide canvas splits into several passes.
 
-The default `samples: "auto"` reads once. When the entropy at any slot,
-over the returned ids, is above `auto_threshold`, it reads up to
-`auto_max` samples in total. Each answer is the mean of the per-sample
+`samples: "auto"` adds reads as
+[Samples, steps and thoughts](../decisions.md#samples-steps-and-thoughts)
+describes. It checks the first read's entropy over the returned ids, and
+one slot above `auto_threshold` is enough to add reads. Each answer is the mean of the per-sample
 label probabilities.
 
 ## Stages, chunks and thoughts
@@ -107,9 +109,9 @@ the mlx-vlm denoiser, seeded from the request seed so that it repeats. The
 reads then use the prompt with the thought appended.
 
 `think: "auto"` is a gmlx extension with no counterpart in the example.
-`extensions.decide` runs the decision without a thought, and when any
-answered question's confidence is below `think_threshold`, runs it
-again with a thought and returns that run. `timing` adds up both runs, and
+`extensions.decide` implements the two runs that
+[Samples, steps and thoughts](../decisions.md#samples-steps-and-thoughts)
+describes. `timing` adds up both runs, and
 `diagnostics.think_auto` keeps what the first run saw.
 
 ## Running on the server

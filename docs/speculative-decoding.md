@@ -70,6 +70,7 @@ MoE models gain less, and gemma-4-26B-A4B becomes slower at depth, but
 Qwen3.8-Flash-Next gains more as the context grows, so measure the gain
 before you rely on speculation. The model accepts more drafts on
 predictable text, such as code, than on free prose.
+
 [Benchmarks](benchmarks.md) has each model's speedup curves. This command measures your own model at two context depths:
 
 ```sh
@@ -84,7 +85,7 @@ speculation is on, keep the KV cache at full precision if you can, and use
 ## Several requests at once
 
 Speculation and batching compete for the same memory bandwidth. Checking a
-draft widens the weight reads of each request, which costs little while
+draft widens each request's weight reads, which costs little while
 one stream decodes and much more when several do. The server therefore
 applies a width cap to each model. It speculates while the batch is
 narrow, decodes without speculation past the cap, and speculates again
@@ -123,8 +124,10 @@ The community DSpark drafters for Ternary Bonsai 2 27B keep the DFlash
 layers and add two heads, a bigram head and a confidence head. The bigram
 head adjusts each drafted position by the token before it. The drafters
 pair through `--draft-gguf` in the same way, and the loader reports them
-as `dflash_dspark`. The drafter also drafts the block's first position, so
-a drafter with a block of 7 proposes seven tokens a round.
+as `dflash_dspark`.
+
+These drafters also draft the block's first position, so a drafter with a
+block of 7 proposes seven tokens a round.
 The confidence head, which cuts a block short, is off unless
 [`GMLX_DSPARK_CONF`](internals/debug-switches.md) sets a threshold. The
 output is the same either way, because acceptance is exact.
@@ -137,8 +140,8 @@ with the Qwen3.8 drafter, and measure the others on your own work.
 ## Stochastic acceptance
 
 By default, the model accepts a draft only when it matches the token that
-the model would choose, which keeps the output identical. When sampling
-at a temperature above zero, this also limits speed, because a draft
+the model would choose, which keeps the output identical. At a
+temperature above zero, exact matching also limits speed, because a draft
 cannot match a sampled token more often than the model's probabilities
 allow.
 

@@ -40,8 +40,8 @@ or exact output.
 | Sparse attention | The cost of attention stops growing past 8K tokens. | It changes the output, is opt-in, and applies to the `llama` family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
 | Streaming | A MoE model larger than RAM can run. | Decoding runs at a few tokens per second. | [Models larger than memory](streaming.md) |
 
-To see how much memory a model and its context take, and which settings
-limit it, read [Memory and the KV cache](memory.md).
+[Memory and the KV cache](memory.md) shows how much memory a model and its
+context take, and which settings limit that memory.
 
 ## Measuring
 
@@ -90,8 +90,8 @@ quality at a low average size. K-quants reach about half the KL divergence
 of MLX's native affine quantization at the same size, as the
 [mlx-kquant KLD table](https://github.com/asher/mlx-kquant#why) shows.
 
-A mixed file decodes slower. When one stream decodes, the slowest matrix
-product of each layer sets the time per token, and the raised Q8_0 and
+A mixed file decodes slower. When one stream decodes, each layer's slowest
+matrix product sets the time per token, and the raised Q8_0 and
 float tensors run slower than the K-quant kernels. The gap is largest on
 dense models, and [Benchmarks](benchmarks.md) has examples. Follow these
 rules:

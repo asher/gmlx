@@ -51,27 +51,27 @@ A line that starts with `/` runs one of these commands:
 
 | Command | Effect |
 |---------|--------|
-| `/help` | Lists the commands. An unknown command also lists them. |
-| `/exit`, `/quit`, Ctrl-D | Quits. Ctrl-C at an empty prompt also quits. |
-| `/reset`, `/clear` | Starts the conversation again. `/clear` also clears the screen. |
-| `/system [text\|off]` | Shows or sets the system prompt. Setting it starts the conversation again. |
+| `/help` | It lists the commands. An unknown command also lists them. |
+| `/exit`, `/quit`, Ctrl-D | Each one quits chat. Ctrl-C at an empty prompt also quits. |
+| `/reset`, `/clear` | Both start the conversation again. `/clear` also clears the screen. |
+| `/system [text\|off]` | It shows or sets the system prompt. Setting it starts the conversation again. |
 | `/retry`, `/undo` | `/retry` generates the last reply again, and `/undo` removes the last exchange. |
-| `/temp`, `/top-p` and the other sampling commands | Changes the sampling of the next replies. `/sampling` shows the current values. |
-| `/thinking [on\|off\|adaptive\|default]` | Turns a thinking model's reasoning on or off for the next turns. |
-| `/thinking-budget [N\|off]` | Limits each reply's reasoning tokens. |
-| `/reasoning show\|hide\|raw` | Sets how reasoning is shown. |
-| `/render rich\|lite\|plain` | Sets the markdown renderer. |
-| `/theme NAME [cb]` | Sets the color theme. `cb` adds colorblind-safe accents. |
+| `/temp`, `/top-p` and the other sampling commands | Each one changes the sampling of the next replies. `/sampling` shows the current values. |
+| `/thinking [on\|off\|adaptive\|default]` | It turns a thinking model's reasoning on or off for the next turns. |
+| `/thinking-budget [N\|off]` | It limits each reply's reasoning tokens. |
+| `/reasoning show\|hide\|raw` | It sets how reasoning is shown. |
+| `/render rich\|lite\|plain` | It sets the markdown renderer. |
+| `/theme NAME [cb]` | It sets the color theme. `cb` adds colorblind-safe accents. |
 | `/model`, `/stats` | `/model` shows the model card, and `/stats` shows the session totals. In server mode, `/model <id>` switches the served id. |
-| `/adapter [on\|off\|SCALE]` | Turns the `--adapter` LoRA off or on, or scales it, for the next turns. With no argument, it shows the scale. |
-| `/history [on\|off\|clear]` | Turns saving of prompt history on or off, or clears it. |
-| `/save [name]`, `/sessions`, `/load-session <name\|N>` | Saves, lists and restores sessions. |
-| `/export [file.md]` | Writes the conversation as markdown, by default to the session name in the current folder. |
-| `/load <file>` | Puts a file's text in the prompt for you to edit and send. |
-| `/! <command>` | Runs a shell command and attaches its output to the next message. `/drop` discards what is attached. |
-| `/image <file>`, `/audio <file>` | Attaches a local file to the next message on a multimodal model. |
-| `/copy` | Copies the last answer, without its reasoning, to the clipboard. |
-| `/memory` | Shows or edits the [assistant's memory](assistant.md#memory) in `--assistant` mode. |
+| `/adapter [on\|off\|SCALE]` | It turns the `--adapter` LoRA off or on, or scales it, for the next turns. With no argument, it shows the scale. |
+| `/history [on\|off\|clear]` | It turns saving of prompt history on or off, or clears the history. |
+| `/save [name]`, `/sessions`, `/load-session <name\|N>` | These commands save, list and restore sessions. |
+| `/export [file.md]` | It writes the conversation as markdown, by default to the session name in the current folder. |
+| `/load <file>` | It puts a file's text in the prompt for you to edit and send. |
+| `/! <command>` | It runs a shell command and attaches its output to the next message. `/drop` discards what is attached. |
+| `/image <file>`, `/audio <file>` | Each one attaches a local file to the next message on a multimodal model. |
+| `/copy` | It copies the last answer, without its reasoning, to the clipboard. |
+| `/memory` | It shows or edits the [assistant's memory](assistant.md#memory) in `--assistant` mode. |
 
 Esc or Ctrl-C during a reply cancels it and returns to the prompt. The
 partial reply stays in the conversation, so `/retry` generates it again and

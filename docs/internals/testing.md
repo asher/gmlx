@@ -59,8 +59,8 @@ long-context tests for a smoke run. `KQUANT_LLAMACPP_BIN` must name
 `llama-completion`, because the interactive `llama-cli` cannot run the
 comparison.
 
-Before a release, run the engagement gate with the big rows enabled. CI
-has no GGUFs, so this gate and the server end-to-end harnesses are the
+Before a release, run `tests/serve/test_serve_apc_engagement.py` with
+the big rows enabled. CI has no GGUFs, so this test and the server end-to-end harnesses are the
 only checks that a real model engages its cache tier.
 
 ## Server end-to-end harnesses
@@ -85,7 +85,7 @@ lists.
 ## Voice loop manual pass
 
 Run this checklist by hand before merging a change to the `gmlx talk`
-loop. The unit tests fake audio and HTTP and cover none of it.
+loop. The unit tests fake audio and HTTP and cover none of the checklist.
 
 1. With the server down, `gmlx talk` starts it, and the prompt appears.
 2. A question after the wake phrase gets a spoken reply.

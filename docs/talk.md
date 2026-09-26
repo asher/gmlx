@@ -75,7 +75,7 @@ muted. A rising chime means that the microphone is open, and a falling
 chime means that it has closed.
 
 To type a message instead, start typing. The first key opens a line
-editor, and Enter sends the line. The reply is spoken as usual. A line
+editor, Enter sends the line, and the reply is spoken as usual. A line
 that you type while the model is still answering is dropped.
 
 ## Listening modes
@@ -105,27 +105,27 @@ These keys work while the status line shows:
 
 | Key | Effect |
 |-----|--------|
-| Space or Esc | Stops the reply while the model transcribes, thinks or speaks. In `ptt` mode, Space also opens and closes the microphone. |
-| `m` | Mutes or unmutes the microphone, at any time. |
-| `q` or Ctrl-D | Quits, when no reply is in progress. |
-| Any other letter | Opens the line editor with that letter. |
+| Space or Esc | Either key stops the reply while the model transcribes, thinks or speaks. In `ptt` mode, Space also opens and closes the microphone. |
+| `m` | It mutes or unmutes the microphone, at any time. |
+| `q` or Ctrl-D | Either key quits the client when no reply is in progress. |
+| Any other printable key | It opens the line editor, and the line starts with that character. |
 
 Because `q`, `m` and Space act at once, a typed message cannot start with
 them. A line that starts with `/` runs a command:
 
 | Command | Effect |
 |---------|--------|
-| `/voice [name]` | Lists the server's voices, or switches to one. |
-| `/speed <number>` | Sets the speech speed. The server accepts 0.25 to 4. |
-| `/mode wake\|vad\|ptt\|text` | Switches the listening mode. |
-| `/wake [phrase]` | Shows or changes the wake phrase. |
-| `/mute` | Mutes or unmutes the microphone. |
-| `/system [text]` | Sets the system prompt, or clears it with no text. Either way, the conversation starts again. |
-| `/reset` | Starts the conversation again. |
-| `/memory` | Shows and manages the [assistant's memory](assistant.md#memory). |
-| `/devices` | Lists the audio devices. |
-| `/help` | Lists the commands. |
-| `/quit`, `/exit`, `/q` | Quits. |
+| `/voice [name]` | It lists the server's voices, or switches to one. |
+| `/speed <number>` | It sets the speech speed. The server accepts 0.25 to 4. |
+| `/mode wake\|vad\|ptt\|text` | It switches the listening mode. |
+| `/wake [phrase]` | It shows or changes the wake phrase. |
+| `/mute` | It mutes or unmutes the microphone. |
+| `/system [text]` | It sets the system prompt, or clears it with no text. Either way, the conversation starts again. |
+| `/reset` | It starts the conversation again. |
+| `/memory` | It shows and manages the [assistant's memory](assistant.md#memory). |
+| `/devices` | It lists the audio devices. |
+| `/help` | It lists the commands. |
+| `/quit`, `/exit`, `/q` | Each one quits the client. |
 
 ## Interrupting a reply
 

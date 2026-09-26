@@ -21,13 +21,13 @@ The server items act on the server that the app tracks:
 
 | Item | Action |
 |------|--------|
-| Start server | Starts the server again. It appears only while the server is down. |
-| Stop server | Stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
-| Restart server | Restarts the server. |
-| Reload config | Tells the server to read its configuration file again. |
-| Copy server URL | Copies the server's address. |
-| Open logs | Opens a panel with the recent log lines from the server and the app. |
-| Quit | Quits the app. The server keeps running. |
+| Start server | It starts the server again. It appears only while the server is down. |
+| Stop server | It stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
+| Restart server | It restarts the server. |
+| Reload config | It tells the server to read its configuration file again. |
+| Copy server URL | It copies the server's address. |
+| Open logs | It opens a panel with the recent log lines from the server and the app. |
+| Quit | It quits the app. The server keeps running. |
 
 When the server exits unexpectedly or stops responding, the app posts a
 macOS notification. A stop or restart from the menu posts none.
@@ -103,11 +103,11 @@ if it was muted, and then acts on the session:
 
 | Session state | A tap |
 |---------------|-------|
-| No session | Starts one. |
-| Idle | Opens the microphone. |
-| Listening | Closes the microphone. In `vad` mode, listening is the idle state, and a tap does nothing. |
-| Capturing an utterance | Ends the utterance. |
-| Transcribing, thinking or speaking | Interrupts, and opens the microphone. |
+| No session | A tap starts one. |
+| Idle | A tap opens the microphone. |
+| Listening | A tap closes the microphone. In `vad` mode, listening is the idle state, and a tap does nothing. |
+| Capturing an utterance | A tap ends the utterance. |
+| Transcribing, thinking or speaking | A tap interrupts the reply and opens the microphone. |
 
 On a keyboard without a Globe key, choose another key in `gmlx init`, or
 set it in the configuration file:

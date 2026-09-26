@@ -58,7 +58,7 @@ settings and chat prompts on the setup in this table.
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
 | Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
 | Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
-| Aggregation | Four requests for each cell in two rounds that alternate the engines, with the median reported. |
+| Aggregation | Four requests for each cell in two rounds that alternate the engines. A cell gives the median, then the lowest and highest sample in parentheses. |
 | Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
 | Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
 | Prefill metric | Median prefill tokens per second over all successful samples. |

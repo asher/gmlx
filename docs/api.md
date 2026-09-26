@@ -120,7 +120,7 @@ instead of failing the snapshot.
 | `resident_models[]` | Each model has `in_flight`, `pinned`, `kept` and bytes. | Each model decodes on a separate engine, so compare each model's `in_flight` with `decode_batch`. |
 | `governor` | `band`, counters | They give the memory governor's band and shed history. |
 | `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | They hold MLX's active and cached bytes, the measured free working set, and a streamed model's [arena](glossary.md#arena) bytes, capacity and hit rate. |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a non-GGUF model that the stock model loader loads. |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a non-GGUF model that the mlx-vlm model loader loads. |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | They give the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean. |
 
 A request row carries `id`, `model`, `state`, `position`, `prompt_tokens`,
@@ -132,14 +132,15 @@ the [drafter's](glossary.md#drafter) rounds, drafted and accepted counts
 and accept rate, exact at batch width 1 and shared across a wider batch, or
 `null` without a drafter. Rows refresh at most four times a second on each engine.
 
-Two routes use the same numbers to tell a dispatcher whether to proceed before
-sending a request. `POST /v1/estimate` takes a chat-completions body and
+Two routes use the figures that `/v1/metrics` reports to tell a dispatcher
+whether to proceed before sending a request. `POST /v1/estimate` takes a chat-completions body and
 returns an admission estimate for a resident model. `prompt_tokens`,
 `warm_tokens` and `cache_tier` say how much of the prefix the cache already
 holds and on which tier, which is the routing signal across machines.
 
-`need_bytes` is the prompt's KV plus the
-prefill transient, plus `max_tokens` when the body pins one. `fits_now` and
+`need_bytes` is the prefill transient plus the
+KV for the prompt's tokens and, when the body pins `max_tokens`, for that
+many more. `fits_now` and
 `fits_drained` judge that against the current free memory and the drained
 working set, while `context_ok` judges it against `context_limit`.
 
@@ -166,8 +167,8 @@ a profile add a `profile` label. `requests[]` is high-cardinality and contribute
 
 ## API capabilities
 
-The protocol surface follows mlx-vlm's. gmlx patches its handlers so that
-upstream request features work on GGUF models, and adds the
+The protocol surface follows mlx-vlm's. gmlx patches mlx-vlm's handlers so that
+upstream request features work on GGUF models, and it adds the
 `/v1/completions` route.
 
 ### Tool calling
@@ -187,7 +188,7 @@ configure. Streaming works too, and a parsed call ends the stream with
 | `auto` | This is the default, and the model decides whether to call a tool. |
 | `required` and named-function forms | They reach the template as a variable and work only if the template implements them. A forced call that produces no call logs a warning. |
 
-The server only parses the calls. The client runs them and sends the
+The server only parses the calls, and the client runs them and sends the
 results back. To have the server run config-allowlisted MCP tools itself,
 serve an [assistant id](assistant.md#served-assistants).
 
@@ -211,7 +212,7 @@ accepted and skipped, and a request that sets any produces one warning line
 in the server log naming them all. `/v1/systemone` has its own fields,
 listed in [Samples, steps and thoughts](decisions.md#samples-steps-and-thoughts).
 
-All three generation dialects honor the standard sampling parameters.
+The generation routes honor the standard sampling parameters.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
 `top_k`, `min_p`, `top_n_sigma`, `p_less`, `typical_p`, `repetition_penalty`,
 `presence_penalty`, `frequency_penalty` and their `*_context_size` companions,
@@ -313,10 +314,14 @@ only lower it.
 
 The preflight uses the same estimate as `POST /v1/estimate`, which
 [Capacity and live-request metrics](#capacity-and-live-request-metrics)
-describes. The load gate judges a model's weights against what is resident and
-pinned or busy and against the governor's floor, after waiting up to 3 seconds for memory the kernel is
-still returning from a recent unload. The switch variables, and the decode
-batch width that sets the queue cap, are listed among the
+describes. The load gate judges a model's weights against the memory left
+beside the resident models that are pinned or busy, and against the
+governor's floor. When a load would leave less than the floor, the gate
+first waits up to 3 seconds for memory that the kernel is still returning
+from a recent unload.
+
+Each switch variable, and the decode batch width that sets the queue cap,
+is listed among the
 [server environment variables](env-vars.md#server), except `GMLX_GOVERNOR`,
 which is among the [runtime environment variables](env-vars.md#runtime).
 
@@ -330,8 +335,8 @@ conversation and retry instead of stopping at the error.
 A request never makes the server download the model it names. A
 generation request whose `model` is not a configured id gets the 404 that
 [Addressing a model in a request](#addressing-a-model-in-a-request)
-describes, whatever the id looks like. The stock model loader that runs after
-that resolver is gated as well. Anything that reaches it with a repo id instead
+describes, whatever the id looks like. The mlx-vlm model loader, which runs
+after the id lookup, is gated as well. Anything that reaches it with a repo id instead
 of a GGUF or local path gets a 403 of type `hf_access_disabled`, so no
 route can fetch a chat model. The service models that the config names
 download in the background at start, as
@@ -340,6 +345,6 @@ download in the background at start, as
 An `hf:` ref in `models:` resolves from the local Hugging Face cache and
 never from the network, so a repo that another tool downloaded can be
 served without copying the file. `server.hf_cache: true` runs the Hugging
-Face libraries offline and lets a repo id that reaches the stock loader
-resolve from that cache instead of getting the 403. It never changes what
+Face libraries offline and lets a repo id that reaches the mlx-vlm model
+loader resolve from that cache instead of getting the 403. It never changes what
 a request may name.

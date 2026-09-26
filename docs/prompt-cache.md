@@ -27,8 +27,8 @@ server:
 
 [`server.cache`](config.md#prompt-cache) holds the settings, and a `cache`
 block in a profile or in a model's `overrides` changes them for some
-models. The server chooses the block size and the size of the pool for
-each model. `GET /v1/cache/stats` reports the hits, the stores and the
+models. The server chooses each model's block size and pool
+size. `GET /v1/cache/stats` reports the hits, the stores and the
 other counters, as [Endpoints](api.md#endpoints) lists.
 
 ## What each family reuses

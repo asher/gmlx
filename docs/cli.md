@@ -123,7 +123,7 @@ These flags control the process and its lifecycle:
 |------|---------|---------|
 | `--host ADDR` | Config or `127.0.0.1` | Bind to this address. A non-loopback bind needs `server.api_key` or `--no-auth`. |
 | `--port N` | Config or `8080` | Bind to this port. |
-| `--no-auth` | Off | Allow a non-loopback bind with no key, for auth handled by a proxy in front of the server. |
+| `--no-auth` | Off | Allow a non-loopback bind with no key. |
 | `-f`, `--foreground` | Off | Stay attached to the terminal. |
 | `--no-menubar` | Off | Do not raise the menu bar app. |
 | `--log FILE` | `~/.cache/gmlx/server-<host>-<port>.log` | Write the background log here. Each start rotates the last one to `.1`. |
@@ -144,7 +144,7 @@ config, where the same settings apply to a config-mode server:
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 | `--decode-prefill-ratio R` | `auto` | Make each prefill chunk wait until decoding streams have had this multiple of its GPU time. `0` restores stock scheduling. |
 | `--prefill-tick-ms MS` | `500` | Give each prefill chunk this wall-clock budget while streams decode. `0` never halves a chunk. |
-| `--ignore-eos` | Off | Decode each request to its output cap, for throughput benchmarks. |
+| `--ignore-eos` | Off | Decode each request to its output cap. |
 
 These settings apply to a positional GGUF only. In config mode the same
 things are per-model keys under [models](config.md#models):
@@ -168,14 +168,14 @@ things are per-model keys under [models](config.md#models):
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
 | `--quantized-kv-start N` | `0` | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. Batches and kvarn quantize from the first token. |
 
-The KV flags are the [`load` keys](config.md#model-loading) of the config.
+The KV flags are the config's [`load` keys](config.md#model-loading).
 `--kv-quant-scheme kvarn` on a positional model is the same as
 `load: {kv_quant_scheme: kvarn}` on a config model, priced and reported the
 same way.
 
 These flags set a positional model's sampling defaults on top of the
 family defaults that `gmlx profiles` prints. They are the
-[`sampling` keys](config.md#sampling) of the config. A default applies to a
+config's [`sampling` keys](config.md#sampling). A default applies to a
 request that omits the field, and a request that sends the field wins, so
 `--temp 0` does not pin a client that sends its own temperature.
 
@@ -421,7 +421,7 @@ A `--kv-bits` value outside the scheme's list exits 2, and so does a
 the smallest window that kvarn accepts, and
 [KV cache quantization](kv-quantization.md) describes the models kvarn
 declines. A declined model prints the reason and runs fp16
-KV, and the VLM media path always keeps fp16.
+KV, and the VLM path under `--mmproj` declines kvarn the same way.
 
 These flags control loading:
 
@@ -430,12 +430,12 @@ These flags control loading:
 | `--arch NAME` | Detected | Override architecture detection. |
 | `--hf-source ID_OR_DIR` | None | Take the config, processor and template from this repo or directory. |
 | `--chat-template STR_OR_PATH` | The GGUF's | Replace the chat template with inline Jinja or a `.jinja` or `.txt` file. |
-| `--no-chat-template` | Off | Pass the prompt verbatim, for base models. |
+| `--no-chat-template` | Off | Pass the prompt verbatim. |
 | `--no-remap` | Off | Keep raw GGUF tensor names. |
 | `--no-zero-copy` | Off | Copy tensors out of the mmap instead of viewing them. |
 | `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
 
-These flags are multimodal. [Vision and audio](vlm.md) describes them:
+These flags control multimodal input. [Vision and audio](vlm.md) describes them:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -461,10 +461,11 @@ These flags control speculative decoding, which
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
 
 Speculation drops, with a warning, each flag it cannot honor, and `--no-mtp`
-decodes on the plain path, which honors every flag.
+switches to plain decoding, which honors every flag.
 [Settings that speculation drops](speculative-decoding.md#settings-that-speculation-drops)
-lists those flags. KV
-quantization works on the speculative path and quantizes the same layers
+lists those flags.
+
+KV quantization works on the speculative path and quantizes the same layers
 `serve` would. The exceptions are kvarn on a sliding-window stack and on an
 architecture whose drafter reads the target KV. There kvarn declines, and
 the `[kv]` line gives the reason.
@@ -534,7 +535,9 @@ These flags say where the model runs:
 
 Slash commands in the chat change the system prompt, the sampling and
 penalty settings, `--reasoning`, `--thinking` and `--thinking-budget`. The
-other flags last for the whole chat. These flags control generation:
+other flags last for the whole chat.
+
+These flags control generation:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -579,9 +582,8 @@ the same as they do there:
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
 
 When the chat is a server client, `--adapter`, `--mmproj`,
-`--chat-template` and `--no-chat-template` exit with code 2, and the other
-flags in this table do not apply. `--chat-template-config` also exits with
-code 2 there. A base model with no
+`--chat-template`, `--no-chat-template` and `--chat-template-config` exit
+with code 2, and the other shared `run` flags do not apply. A base model with no
 chat template refuses to start until you pass one with `--chat-template` or
 send turns verbatim with `--no-chat-template`.
 
@@ -1018,7 +1020,7 @@ These flags control `gmlx distill gen`:
 | `--thinking` | Off | Turn thinking on and keep the reasoning trace as `reasoning_content` on the reply. Without it, gen turns thinking off. |
 | `--thinking-budget N` | None | With `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter`. |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | Count the reasoning trace against the budget with this tokenizer when `--base-url` is given. |
-| `--serve-arg ARG` | None | Pass this argument to `gmlx serve`, repeatable and checked on a resume. A flag that changes the prompt or thinking is refused, as is a drafter with a budget. |
+| `--serve-arg ARG` | None | Pass this argument to `gmlx serve`. The flag repeats, and a resume checks it. Flags that alter the prompt or thinking, and a drafter with a budget, are refused. |
 | `--startup-timeout S` | `900` | Wait this many seconds for the served teacher. |
 | `--concurrency N` | `8` | Keep this many requests in flight. |
 | `--max-tokens N` | `1024` | Give each request this answer budget. With `--thinking-budget` the trace gets its own budget plus the forced close. Without it, the trace shares this budget. |
@@ -1062,7 +1064,7 @@ These flags control `gmlx distill filter`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--in PATH` | Required | Read this generated corpus jsonl, repeatable and joined in order. Sidecars that disagree, inputs filtered differently or a shared row id are refused. |
+| `--in PATH` | Required | Read this generated corpus jsonl. The flag repeats, and inputs join in order. Sidecars that disagree, inputs filtered differently or shared row ids are refused. |
 | `--out PATH` | Required | Write the filtered corpus here, with `<out>.gen.json` beside it. |
 | `--report JSON` | None | Write the kept and dropped counts here. |
 | `--rejects PATH` | None | Write one `{id, reason}` line per dropped row here, with the checker's word under `detail`. |
@@ -1082,9 +1084,10 @@ These flags control `gmlx distill filter`:
 
 `cache` runs the teacher pass. `--messages-key` picks which list of a row
 the teacher reads, and `--student-messages-key` only names the list the
-student's render reads later, in `align` and `eval`. A reply or reply-think row whose final
-turn has no content, such as a tool call, has nothing to target and is
-dropped, counted in the `[cache] frame` line. That line also counts the
+student's render reads later, in `align` and `eval`.
+
+Reply and reply-think rows whose final turn has no content, such as a
+tool call, have nothing to target and are dropped, counted in the `[cache] frame` line. That line also counts the
 reply-think rows whose reasoning trace the teacher's template does not
 render, which train on the reply alone, and a reply-think pass in which
 no row keeps its trace is refused.
@@ -1121,7 +1124,7 @@ These flags control `gmlx distill cache`:
 | `--source TAG` | `human`, or `synthetic` with a generator sidecar | Write this source tag on every row. |
 | `--frame KIND` | `none` | Place the targets in the chat template by frame, `none`, `continue`, `chat`, `reply` or `reply-think`. `reply-think` starts at the final turn's reasoning trace. |
 | `--per-turn` | Off | With the chat or reply frame, write one reply row per assistant turn. |
-| `--student-messages-key KEY` | `student_messages` | Name the corpus key of the student's own message list on reply rows. |
+| `--student-messages-key KEY` | `student_messages` | Name the corpus key that holds the student's own message list on reply rows. |
 | `--frame-instruction TEXT` | `Continue the following text.` | Use this user turn for the continue frame. |
 | `--messages-key KEY` | `messages` | Read the conversation from this column for the chat and reply frames. |
 | `--close-final-windows` | Off | With the continue frame, close the last window of a document with the turn-end marker. |
@@ -1135,7 +1138,7 @@ These flags control `gmlx distill cache`:
 | `--hidden` | Off | Also store a seeded random sketch of the teacher's final hidden state per position, for `train --hs`. |
 | `--hidden-dim N` | `256` | Set the width of the hidden sketch. |
 | `--hidden-seed N` | `1` | Seed the sketch matrix. |
-| `--cpu` | Off | Run on the CPU device, for smoke tests. |
+| `--cpu` | Off | Run on the CPU device. |
 
 ### distill align
 
@@ -1159,10 +1162,10 @@ These flags control `gmlx distill align`:
 | `--w-mid F` | `0.5` | Weight an intra-word shared boundary by this much. |
 | `--gamma F` | `0.001` | In the chunk term (ALM), drop chunks whose teacher boundary mass is under this positive value. |
 | `--tau-alm F` | `1.0` | Set the positive temperature of the chunk term (ALM). |
-| `--T-dk F` | `1.0` | Set the positive temperature of the KL term's group softmaxes, under every `--loss` form. |
+| `--T-dk F` | `1.0` | Set the positive temperature that the KL term's group softmaxes use, under every `--loss` form. |
 | `--max-chunk-len N` | `8` | Cap ALM chunks at this many tokens on either side, at least 1. |
 | `--frame-kwargs JSON` | None | Pass these chat-template kwargs to every student render and store them in the view, over those the cache recorded and its `gen` thinking switch. |
-| `--cpu` | Off | Run on the CPU device, for smoke tests. |
+| `--cpu` | Off | Run on the CPU device. |
 
 ### distill train
 
@@ -1208,7 +1211,7 @@ These flags control `gmlx distill train`:
 | `--hf-source ID` | None | Replace the config synthesized from the GGUF with this Hugging Face repo's config.json. The tokenizer always comes from the GGUF. |
 | `--no-wired-limit` | Off | Leave the wired limit where it is. |
 | `--cache-limit-gb F` | `8.0` | Cap the MLX buffer cache at this many GB. |
-| `--cpu` | Off | Run on the CPU device, for smoke tests. |
+| `--cpu` | Off | Run on the CPU device. |
 
 ### distill eval
 
@@ -1252,7 +1255,7 @@ These flags control `gmlx distill eval`:
 | `--cache-limit-gb F` | `4.0` | Cap the MLX buffer cache at this many GB. |
 | `--decontam-threshold F` | `0.01` | Void a slice's gate when more than this fraction of its windows is found in the corpus. |
 | `--hf-source ID` | None | Replace the config synthesized from the GGUF with this Hugging Face repo's config.json. The tokenizer always comes from the GGUF. |
-| `--cpu` | Off | Run on the CPU device, for smoke tests. |
+| `--cpu` | Off | Run on the CPU device. |
 
 ### distill census
 
@@ -1263,7 +1266,7 @@ wrote, and the distance between the two stored top-k distributions with
 everything outside the top-k pooled. With several contexts it also reports
 the part no single adapter can learn. Every `--with` cache then decides
 which rows pair and which positions count, while the effect, the histogram
-and the positions map come from the first.
+and the positions map come from the first `--with` cache.
 
 The action exits 2 when a cache has no manifest
 or one it cannot read, or when no rows pair. It also exits 2 when a
@@ -1293,7 +1296,8 @@ FAIL or SKIP line for each check, with the fix named. No check accesses the
 network. The checks cover the runtime and kernels, the config, and the
 files of each configured model and service. They also cover background
 servers, the login items and the launcher that background starts use,
-optional extras, ffmpeg, MCP tools and assistant exposure. The last checks
+optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
+address. The last checks
 are the Hugging Face token, RAM against each model's size, and disk space.
 
 ```sh

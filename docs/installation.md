@@ -37,10 +37,10 @@ uv tool install "gmlx[all]"
 brew install ffmpeg
 ```
 
-uv puts the `gmlx` command on your PATH in an isolated environment, and it
-downloads a suitable Python when your system has none. ffmpeg is needed
-for voice, for speech-to-text on the server, and for speech output in a
-format other than WAV or PCM.
+The uv tool puts the `gmlx` command on your PATH in an isolated
+environment, and it downloads a suitable Python when your system has none.
+Voice, speech-to-text on the server, and speech output in a
+format other than WAV or PCM need ffmpeg.
 
 ## pip
 

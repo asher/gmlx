@@ -2,8 +2,8 @@
 
 The gmlx server decodes several clients' requests together as one batch.
 It paces a new request's admission so that the running streams do not
-stall, and it reads a prompt that several requests share only
-once.
+stall, and when several requests share a prompt, it reads that prompt
+only once.
 
 - [Batched decoding](#batched-decoding)
 - [Admitting a new request](#admitting-a-new-request)
@@ -32,7 +32,7 @@ chunk can take as much GPU time as hundreds of decode steps. A scheduler
 that alternates one decode step with one chunk therefore lets a long
 prompt stall the streams that are already running. When chunks are short,
 slowing admission only delays the new request and narrows the batch. Two
-settings handle the two cases:
+settings handle these stalls, one for each symptom:
 
 | Symptom | Setting | Default | Effect |
 |---------|---------|---------|--------|

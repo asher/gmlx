@@ -25,7 +25,7 @@ the gather for an embedding.
 
 The module is the one place every route passes through, so no layer code
 needs to know about the fold. The two paths that bypass module calls, the
-occupancy fuse and table streaming, refuse a folded module. The rotation
+occupancy fusion and table streaming, refuse a folded module. The rotation
 runs on an mlx-kquant kernel when one fits the block width, and as MLX ops
 otherwise.
 

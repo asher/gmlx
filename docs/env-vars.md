@@ -108,17 +108,17 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 routed rows and training are not covered. |
 | `GMLX_BATCH_INVARIANT_MAX_OUT` | The batch-invariant kernel takes float projections of up to this many outputs. The default is `512`. |
 | `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the reclaimable RAM less the host floor. |
-| `GMLX_STREAM_KV_CTX` | The arena leaves room for this many tokens of KV cache. The default is `32768`, capped at the trained context. Raise it for deep prompts. |
+| `GMLX_STREAM_KV_CTX` | The [KV room](streaming.md#what-changes-the-limit) holds this many tokens of KV cache. The default is `32768`, capped at the trained context. |
 | `GMLX_STREAM_KV_WIDTH` | The KV room is sized for this many concurrent streams. The default is `1`, and each extra stream takes its KV room out of the arena. |
 | `GMLX_KVARN_BITS` | It gives kvarn keys and values separate widths in `k6v5` form and overrides `kv_bits`. A value not of that form is ignored with a warning. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the estimated KV room with a flat reserve in GiB. The fallback is `8` when the KV size cannot be computed from the header. |
-| `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache. By default the ring bypasses it, since a ring pass reads each expert once. |
-| `GMLX_PREFILL_RING_SLOTS` | The prefill ring holds this many layer slots, `2` by default. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the arena. |
+| `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache. By default the ring bypasses it, as [The lossless settings](streaming.md#the-lossless-settings) explains. |
+| `GMLX_PREFILL_RING_SLOTS` | The prefill ring holds this many layer slots. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the arena. The default is `2`. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | The arena serves expert calls of up to this many tokens by reading only their routed experts, instead of by whole-layer staging. The default is `64`. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | The arena splits expert calls of up to this many tokens when their routed set exceeds the arena. The default is `256`, and `0` disables splitting. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure. By default it shrinks, keeping its most routed experts, then regrows when pressure clears. |
 | `GMLX_DECODE_RAM_FLOOR_GB` | Arena sizing keeps this many GiB free for the rest of the machine. The default is 5% of RAM, and at least `4`. |
-| `GMLX_DECODE_PAGECACHE_GB` | Arena sizing adds this page-cache reserve in GiB to the host floor, `2.5` by default. Buffered reads slow sharply when the page cache has too little memory. |
+| `GMLX_DECODE_PAGECACHE_GB` | Arena sizing adds this page-cache reserve in GiB to the host floor. The default is `2.5`. |
 | `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Pinning is on by default. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights and the decode arena into the Metal residency set on streamed models. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after the prefill and decode feeders take a layer. By default the buffers are dropped at that point. |
@@ -131,7 +131,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |
 | `GMLX_DECODE_LOOKAHEAD_K` | The decode feeder considers this many ranked predictions on each call. The default is `6`. |
 | `GMLX_DECODE_LOOKAHEAD_WORKERS` | The dedicated prestage read pool has this many threads. The default is `6`. |
-| `GMLX_DECODE_LOOKAHEAD_NORM` | It selects the prediction input, `ratio` by default, or `raw`, which skips the norm-gain rescale. |
+| `GMLX_DECODE_LOOKAHEAD_NORM` | It selects the prediction input, `ratio` or `raw`. `raw` skips the norm-gain rescale. The default is `ratio`. |
 | `GMLX_DECODE_LOOKAHEAD_MIN_P` | A prediction rank stops being submitted when its reliability falls under this floor. The default is `0.5`. |
 | `GMLX_DECODE_LOOKAHEAD_CANCEL=0` | Let unrouted predictions read to completion instead of cancelling the unstarted ones. |
 | `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage read pool at default disk priority. By default it uses utility I/O priority on a disk that the fast-disk policy did not call fast. |
@@ -157,7 +157,7 @@ its files.
 | `GMLX_TOOL_PREFLIGHT=0` | Skip the fit check that `run` and `chat` make from the header before a load, and that `cannot fit:` refusals name. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` and `chat`, as `--no-family-defaults` does. |
 | `GMLX_API_KEY` | `ps` and `systemone` send this key when `--api-key` is not passed. The server reads its own key only from `server.api_key`. |
-| `GMLX_PULL_RETRIES` | `pull` accepts this many consecutive failed attempts on one file, `10` by default. An attempt that moves bytes resets the count, and `0` fails at once. |
+| `GMLX_PULL_RETRIES` | `pull` accepts this many consecutive failed attempts on one file. An attempt that moves bytes resets the count, and `0` fails at once. The default is `10`. |
 | `GMLX_PULL_TIMEOUT` | `pull` uses this socket timeout in seconds, which also bounds one stalled read. The default is `60`. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | `validate` and `pull` send this Hugging Face token, checking the two in that order. Without either, they use the token that `hf auth login` stored. |
 | `XDG_CACHE_HOME` | It sets the root of the `gmlx/` cache directory, which [Where files are on disk](troubleshooting.md#where-files-are-on-disk) lists. The default is `~/.cache`. |

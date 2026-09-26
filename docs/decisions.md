@@ -26,9 +26,11 @@ A request carries a state, which is the text that the questions are
 about, and questions whose answers are known in advance. Each question
 is yes or no, one of several options, or one of several ordered levels.
 The response gives a probability distribution over each question's
-answers, so your code can branch on a number. A triage tool, for
-example, can page someone only when an outage is more than 90 percent
-likely and send the uncertain tickets to a person. For a written answer,
+answers, so your code can branch on a number.
+
+With these probabilities, a triage tool can page someone only when an
+outage is more than 90 percent likely and send the uncertain tickets to a
+person. For a written answer,
 or an answer that cannot be listed in advance, use chat completions
 instead.
 
@@ -187,7 +189,7 @@ lists with one entry for each chunk of each stage.
 ## Examples
 
 Each example gives a `questions` map and typical answers for a few states,
-with the default settings. Post it with a `state`, as in
+with the default settings. Post the map with a `state`, as in
 [A first decision](#a-first-decision).
 
 ### Gate on priority
@@ -319,7 +321,7 @@ They are `"yes"` or `"no"` for a `noul` question, option names for a
 `choice`, and level names for a `score`, and each one must be an answer of
 that question.
 
-Each answer label must be a single token in the answer template, or the
+Every answer label must be a single token in the answer template, or the
 request gets a 422. With more than ten questions, the template writes each
 label directly after its question id, so a numbered id such as `q1` is the
 safe choice there. A question whose template is longer than the canvas
@@ -373,9 +375,10 @@ stages or `sequential: true`, every read uses the full question list,
 
 A thought is the costliest of these settings. The model writes it with its
 full denoise loop, which takes seconds, while a read without one takes a
-single pass. `think: "auto"` spends that cost only on unsure decisions. The
-decision runs without a thought first, and when the confidence of any
-answer is below `think_threshold`, it runs again with a thought of
+single pass. `think: "auto"` spends that cost only on unsure decisions.
+
+Under `"auto"`, the decision first runs without a thought, and when any
+answer's confidence is below `think_threshold`, it runs again with a thought of
 `think_budget` tokens. The answers then come from the second run, and
 `diagnostics.think_auto` says whether the thought ran and which questions
 were unsure. With

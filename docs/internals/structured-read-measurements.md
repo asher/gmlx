@@ -41,9 +41,9 @@ the requests behind [Question wording](#question-wording),
 [Accuracy](#accuracy) and
 [Thinking on mixed requests](#thinking-on-mixed-requests), and its `wording`, `labeled`
 and `mixed` modes print their tables. Its `thoughts` mode prints the
-thought table, and `cases` prints the single answers that
-[When answers go wrong](../decisions.md#when-answers-go-wrong) quotes, with the
-comparison against mlx-vlm under [Question wording](#question-wording).
+thought table. Its `cases` mode prints the single answers that
+[When answers go wrong](../decisions.md#when-answers-go-wrong) quotes, and the
+comparison against mlx-vlm that [Question wording](#question-wording) reports.
 Every read uses seed 42, so the answers repeat from run to run while the
 times vary.
 
@@ -178,7 +178,7 @@ A question that names its subject gains three and loses the lean toward
 yes, while the system text and the order of the state make little
 difference. The route keeps vLLM's prompt, and
 [When answers go wrong](../decisions.md#when-answers-go-wrong) gives the
-wording advice. These errors come from the model, not from the read. On
+wording advice. The wrong answers in the table come from the model and not from the read. On
 the same prompt and canvas, a read matches mlx-vlm's own decoder step in
 every label log-probability to four decimals.
 

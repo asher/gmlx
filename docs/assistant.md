@@ -180,9 +180,9 @@ either client, these commands manage the store:
 
 | Command | Effect |
 |---------|--------|
-| `/memory` | Lists the newest 20 facts, with their ids. |
-| `/memory forget ID` | Removes one fact. |
-| `/memory clear yes` | Removes every fact. Without `yes`, it asks you to confirm. |
+| `/memory` | It lists the newest 20 facts, with their ids. |
+| `/memory forget ID` | It removes one fact. |
+| `/memory clear yes` | It removes every fact. Without `yes`, it asks you to confirm. |
 
 ## Text chat
 

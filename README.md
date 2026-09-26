@@ -24,8 +24,7 @@ at the long contexts that coding agents and long sessions use. A
 mixture-of-experts model bigger than RAM still runs, by streaming its experts
 from disk.
 
-If you are coming from llama.cpp, Ollama or LM Studio,
-[Migrating from other tools](https://github.com/asher/gmlx/blob/main/docs/migrating.md) says what carries over.
+[Migrating from other tools](https://github.com/asher/gmlx/blob/main/docs/migrating.md) says what carries over from llama.cpp, Ollama and LM Studio.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
@@ -78,9 +77,9 @@ covers both routes. Upgrade with `brew upgrade gmlx`, or
 [Removing gmlx](https://github.com/asher/gmlx/blob/main/docs/installation.md#removing-gmlx).
 
 The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about
-its file size plus the conversation's KV cache, and the Quickstart
-[suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
-for each memory size.
+its file size plus the conversation's KV cache, and
+[Choosing a model](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
+in the Quickstart suggests models for each memory size.
 
 ### A GGUF with no setup
 
@@ -138,8 +137,8 @@ shows how to write the questions and act on the answers.
 
 `gmlx launch pi --model qwen3.8-27b-ud-q6@coding` writes the tool's
 configuration so that it uses the server, starts the server first if it is
-not running, and then runs the tool. It works for the common coding
-agents, two terminal chat clients and two browser apps, Open WebUI and
+not running, and then runs the tool. `gmlx launch` works for the common
+coding agents, two terminal chat clients and two browser apps, Open WebUI and
 DeepSeek Harness, each listed with its quirks in [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md).
 A menu bar app shows what is resident, and `gmlx service install` keeps the
 server running from login.

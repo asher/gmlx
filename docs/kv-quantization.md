@@ -36,8 +36,8 @@ The first 128 tokens stay fp16, as do the newest
 [`--kv-tail-tokens`](config.md#loadkv_tail_tokens) tokens, 1024 by default.
 At 6 bits, a record takes about 40% of the memory of fp16.
 
-Muller, Bich, Boretti, Chang, Zhuang and Cavigelli published the method
-that the kvarn scheme implements as
+The kvarn scheme implements a method that Muller, Bich, Boretti, Chang,
+Zhuang and Cavigelli published as
 [arXiv:2606.03458](https://arxiv.org/abs/2606.03458).
 The gmlx cache
 follows the record format of

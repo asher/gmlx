@@ -84,7 +84,7 @@ keeps them on the GPU and reads only the routed experts from disk.
 
 ## Expert and MoE
 
-A mixture-of-experts model is built from many small sub-networks called
+A mixture-of-experts (MoE) model is built from many small sub-networks called
 experts, of which each token uses a few, so decoding costs only what the
 active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
 Because most experts are idle on any token, a MoE model larger than memory

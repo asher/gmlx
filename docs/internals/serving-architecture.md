@@ -29,50 +29,29 @@ round, so that the prompt cache stays usable under a drafter, and
 
 ## The request path
 
-A chat request can add a profile to its model id, as `id@profile`. The
-patched app first applies the queue depth cap, and an over-cap request gets
-a 503 with a Retry-After header. The residency pool then asks the serving
-layer to resolve the id and profile, and the pool binds the resolved spec
-for the request. A model already resident under the same load parameters
-returns at once.
+A chat request, such as `POST /v1/chat/completions`, can add a profile to
+its model id, as `id@profile`. The patched app first applies the queue
+depth cap, and an over-cap request gets a 503 with a Retry-After header.
+The app then calls the patched `get_cached_model`. There the residency pool
+asks the serving layer's `resolve_request_model` for the absolute path and
+the `ResolvedModel`, and binds the resolved spec for the request with
+`set_active_spec`. The cache key includes the load parameters, so a model
+already resident under the same parameters returns at once.
 
 For a cold build, the pool sets the model's load-parameter and prompt cache
-environment variables around the stock load. The loader then builds the
-model and swaps its leaves for mlx-kquant modules. The patched
-`_build_gen_args` seeds sampling from the active profile. In the engine,
-the admit gate holds a join until its projected bytes fit, and the paced
-ticks run under the governor's bands, with a memory error inside a tick
-contained instead of ending the server process.
+environment variables around mlx-vlm's stock `get_cached_model` load. That
+load calls the patched `load_model_resources` on the engine's worker
+thread. The patched call runs `load_model`, `load_mtp_model` or
+`load_vlm_model`, which builds the model and swaps its leaves for `kq.*`
+modules. Both the resident path and the cold build return the model,
+processor and config. The patched `_build_gen_args` then seeds sampling
+from the active profile, and the app passes the request to the engine.
 
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as mlx-vlm app
-  participant R as residency pool
-  participant S as serving (resolver + bridge)
-  participant L as loader + kquant swap
-  participant E as gmlx tick stack + stock step loop
-  C->>A: POST /v1/chat/completions (model "id@profile")
-  A->>A: queue depth cap, over-cap gets 503 + Retry-After   [patched]
-  A->>R: get_cached_model(id)   [patched]
-  R->>S: resolve_request_model(id@profile)
-  S-->>R: abspath + ResolvedModel
-  R->>R: set_active_spec(spec)
-  alt resident (cache key includes the load parameters)
-    R-->>A: model, processor, config
-  else cold build
-    R->>R: set load-param + APC env window
-    R->>S: load_model_resources(path)   [patched]
-    S->>L: load_model / load_mtp_model / load_vlm_model
-    L-->>S: model (leaves = kq.* modules)
-    S-->>R: model, processor, config
-  end
-  A->>A: _build_gen_args seeds sampling from the active profile   [patched]
-  A->>E: generate(...)
-  E->>E: admit gate holds the join until projected bytes fit   [patched]
-  E->>E: paced ticks, governor bands, contained faults   [patched]
-  E-->>C: stream tokens
-```
+In the engine, the admit gate holds a waiting request until its projected
+bytes fit. The paced ticks run under the governor's bands, and a memory
+error inside a tick is contained instead of ending the server process.
+Both run as gmlx patches around the stock step loop, which streams the
+tokens back to the client.
 
 Two things happen before a request reaches the engine. Its sampling
 parameters resolve through the precedence chain that
@@ -93,7 +72,7 @@ and the last one installed runs outermost.
 |---|---|
 | `batch_sched.py` | It paces prefill behind decode. A chunk runs only after decode has run for the ratio times the last chunk's time. |
 | `auto_ratio.py` | It derives the pacing ratio from a retention floor. Its deadline counts only pacing waits, so a wait for capacity adds nothing. |
-| `admit_gate.py` | It projects the bytes a join would commit before a prompt batch forms, and defers the join instead of failing it. |
+| `admit_gate.py` | It projects the bytes that a waiting request would commit before a prompt batch forms, and defers the request instead of failing it. |
 | `governor.py` | It sets a band from the ticks left before memory runs out, so a band follows the rate of growth and not the level. |
 | `queue_cap.py` | It rejects an over-cap request with a 503 before it is queued, instead of holding its socket until the queue timeout. |
 | `capacity.py` | It derives the depth-width frontier at boot, which bounds the default decode width. |

@@ -37,8 +37,8 @@ accepts.
 
 Ollama stores its models as blobs named by their hash, not as `.gguf`
 files, and `gmlx init` finds only `.gguf` files. Download the models that
-you use again with `gmlx pull`. `gmlx validate hf:<org>/<repo>` lists the
-files of a repository first.
+you use again with `gmlx pull`. Before you download,
+`gmlx validate hf:<org>/<repo>` lists a repository's files.
 
 gmlx does not implement the Ollama API. A client that can use an
 OpenAI-compatible endpoint works with no changes, and an app built for

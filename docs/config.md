@@ -193,11 +193,10 @@ With `true`, the model drafts with the GGUF's own MTP head even when
 ### `models.*.speculative_width_cap`
 
 The model speculates only while at most this many requests generate
-together. Checking a draft makes every weight read
-process several tokens for each request instead of one, which costs little
-for one request and a lot for several. Past the cap, the
-batch switches to plain decoding, and it speculates again once it
-shrinks.
+together. Past the cap, the batch switches to plain decoding, and it
+speculates again once the batch shrinks.
+[Several requests at once](speculative-decoding.md#several-requests-at-once)
+explains why speculation costs more as the batch grows.
 
 `null` takes the drafter's default. A native head on a dense Qwen model
 has no cap, and the Gemma assistant drafter and every family without a
@@ -272,7 +271,7 @@ output. The default is off.
 
 ### `models.*.moe_prestage`
 
-This key selects which experts are read ahead of need. `ranked` reads the
+This key selects which experts are read before they are needed. `ranked` reads the
 predicted experts. `keepers` reads only those that `moe_miss_shed` would
 keep, so it needs that key. The default is `ranked`.
 
@@ -369,7 +368,7 @@ one place, a later layer wins over an earlier one:
 | Model overrides | [`models.*.overrides`](#modelsoverrides) sets them. |
 | Request fields | The request body sets them. |
 
-The `@name` of a request replaces the model's own profile rather than
+A request's `@name` replaces the model's own profile rather than
 adding to it, and an unknown name gets a 400. `gmlx profiles <id>`
 prints the sampling values a model resolves to under each of its
 profiles, with every layer applied.
@@ -379,7 +378,8 @@ load, and so does a cycle of `extends`.
 
 ### `profiles.*.extends`
 
-The profile starts from this profile or intent and changes its keys. With
+The profile starts from this profile or intent, and each key that the
+profile sets replaces the inherited value. With
 an intent, each model starts from the intent as its own family defines
 it. The default is none.
 
@@ -900,7 +900,9 @@ none.
 
 The server keeps several models in memory at once, up to the budget in
 `server.budget_gb`. A model takes about the size of its GGUF file in
-memory, because the weights map from the file without a copy.
+memory, because the weights map from the file without a copy. How a
+streamed model counts against the budget is in
+[Models larger than memory](streaming.md#residency-of-a-streamed-model).
 
 | State | Set by | When it unloads |
 |-------|--------|-----------------|
@@ -921,9 +923,7 @@ settings are the `load` and `cache` keys, `mmproj`, `draft_gguf`,
 `speculative`, `speculative_width_cap`, `chat_template`, `stream` and the
 streaming keys. Ids that differ only in `adapter` share one copy, as
 [LoRA adapters](lora.md#serving-one-base-with-many-adapters) describes.
-Sampling, `system` and `ttl_s` never cause a second copy. How a streamed
-model counts against the budget is in
-[Models larger than memory](streaming.md#residency-of-a-streamed-model).
+Sampling, `system` and `ttl_s` never cause a second copy.
 
 #### `server.budget_gb`
 
@@ -978,7 +978,7 @@ These keys apply to every model. Each one except
 #### `server.prefill_step_size`
 
 Prefill processes the prompt in chunks of this many tokens. A lower value
-lowers the memory peak of a long prompt and slows prefill. The default is
+lowers a long prompt's memory peak and slows prefill. The default is
 `2048`.
 
 #### `server.dtype`
@@ -990,7 +990,7 @@ The weights on disk never change. The default is `auto`.
 
 #### `server.decode_prefill_ratio`
 
-This key sets how the prefill of a new request shares the GPU with
+This key sets how a new request's prefill shares the GPU with
 requests that are generating. With `auto`, prefill slows only when a
 generating request would drop below half its speed. A number such as
 `1.0` makes each prefill chunk wait until the generating requests have
@@ -1026,7 +1026,7 @@ available. `false` turns off both. The default is `true`.
 With `true`, the server accepts speculative tokens by rejection sampling,
 which accepts more of them. The sampling distribution stays exact, but the
 output is no longer token-identical to plain decoding. Greedy requests do
-not change, and a reload does not change this key.
+not change, and a reload does not apply a new value of this key.
 [Stochastic acceptance](speculative-decoding.md#stochastic-acceptance)
 describes it. The default is `false`.
 
@@ -1398,7 +1398,7 @@ formatting:
 |---------|--------|
 | `gmlx sync-models` | It adds new GGUFs from `model_dirs` and removes the entries whose file is gone. |
 | `gmlx pull` | It adds the entry of each GGUF it downloads. |
-| `gmlx rm` | It deletes the files of a model and its entry. |
+| `gmlx rm` | It deletes a model's files and its entry. |
 
 Each of them, and `gmlx init`, tells a running server to reload. Pass
 `--no-reload` to `init`, `sync-models` or `rm` to prevent that.

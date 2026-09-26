@@ -12,9 +12,10 @@ never sees it. You get a LoRA adapter, a small GGUF file of extra weights
 for the student, which you attach with `--adapter`. The student then
 answers the questions without the document in its prompt.
 
-On the worked task, the student with the adapter came close to the
-student with the document pasted into every prompt, and without either it
-answered almost none. [The worked run](internals/distill.md#the-worked-run)
+The worked task on this page teaches a student a database schema. On that
+task, the student with the adapter came close to the student with the
+document pasted into every prompt, and without either it answered almost
+none of the questions. [The worked run](internals/distill.md#the-worked-run)
 has the figures. The same steps also train a student on plain text, or on
 a behavior such as answering in a fixed format.
 
@@ -46,7 +47,8 @@ under [Advanced settings](#advanced-settings), but on the worked task it
 closed only about a third of the gap that the same-family student
 closed. Measure such a pair on your own document before you rely on it.
 
-Check a pair in minutes before hours of caching. Run `cache --max-rows 8`
+Before you spend hours on caching, check a pair with a run that takes
+minutes. Run `cache --max-rows 8`
 on any corpus, then `align` with the student, and read `a` on the
 `align` summary line, where 1.000 is the ideal.
 [A ten-minute smoke run](#a-ten-minute-smoke-run) shows both commands.
@@ -109,8 +111,9 @@ and trains for 80 steps.
 Its corpus is a jsonl file, one JSON object per line, of 24
 `{"text": ...}` rows. A step trains on one batch of `--batch-size` rows,
 so `train` needs at least that many training rows. `align` also holds
-back about one row in fifty for validation, whole documents at a time and
-at least one row of a cache with two or more, and never trains on them.
+back about one row in fifty for validation and never trains on those rows.
+It holds back whole documents at a time, and at least one row from a cache
+that has two or more rows.
 A cache made from one document splits that document. Here 24 rows leave
 23 for a batch of 4.
 
@@ -189,7 +192,9 @@ unchanged, so the checker finds it there:
  "check": {"sql": "SELECT COUNT(*) FROM manifests m JOIN haulers h ON m.hauler_id = h.hauler_id WHERE h.hull_class = 'Kestrel' AND m.arrived_at IS NULL", "ordered": false}}
 ```
 
-Write four prompt sets, one to train on and three to measure with:
+Write four prompt sets, one to train on and three to measure with. Every
+set carries the `check` field, since the pass rate runs the checker over
+the replies to the three measurement sets too. The sets are these:
 
 - `prompts-train.jsonl` covers every kind of question the document
   answers, with several hundred rows and at least three phrasings of
@@ -202,9 +207,6 @@ Write four prompt sets, one to train on and three to measure with:
   the training questions.
 - `prompts-heldout-combined.jsonl` holds held-out questions that combine
   two kinds, scored on their own because they are the hardest.
-
-Every set carries the `check` field, since the pass rate runs the
-checker over the replies to the three measurement sets too.
 
 Include training prompts that combine two kinds of question in one, such
 as a count over a join. Without them the student answers each kind and
@@ -505,7 +507,8 @@ student's own variable, so it needs no flag of its own.
 piece, in teacher tokens. A longer text row is cut into windows at word
 boundaries. A longer reply row loses its oldest turns first, and is
 dropped and counted on the `[cache] frame` line when the last exchange
-alone does not fit. 2560 holds a 1180-token reply behind a prompt.
+alone does not fit. A `--max-len` of 2560 holds a 1180-token reply behind
+a prompt.
 `--top-k` is how many next-token candidates are stored per position,
 256 by default, and is unrelated to the sampler's `--top-k` on `gen`.
 
@@ -530,7 +533,8 @@ batch size:
 python3 -c 'import json,math,sys; n=sum(e["split"]=="train" for v in sys.argv[1:] for e in json.load(open(v+"/view.json"))["index"]); print(n, 2*math.ceil(n/3))' view-r1/
 ```
 
-300 is that figure for the worked view's 450 training rows.
+For the worked view's 450 training rows, the one-liner's step count for two
+passes is 300.
 `--lora-rank` is the adapter's capacity, `--lora-alpha` its scale, how
 strongly the adapter's change is applied, and `--lr` the peak learning
 rate, how far each step moves the adapter. `--ckpt-dir` is where the run
@@ -556,7 +560,7 @@ gmlx serve Qwen3.5-9B-Q6_K.gguf --adapter r1.gguf --thinking on
 
 A student trained with `--frame reply-think` learned to reason before
 answering, so serve it with thinking on. The Qwen template turns thinking on
-by default, and `--thinking on` makes sure. The switch holds for every
+by default, and `--thinking on` turns it on explicitly. The switch holds for every
 request, and a request turns it off with
 `"chat_template_kwargs": {"enable_thinking": false}` in its body, listed
 under [Parameter support](api.md#parameter-support). Adding
@@ -729,8 +733,8 @@ A cache takes 6 x K + 22 bytes per position plus the text, where K is the
 about 1.2 GB at the default K. `--max-disk-gb` refuses a cache whose
 estimate is larger, and every size flag counts decimal GB.
 
-When a run is over, the checkpoint folders, the server logs and the
-sidecar files can go. A view reads its cache on every `train`, so keep the
+When a run is over, you can delete the checkpoint folders, the server logs
+and the sidecar files. A view reads its cache on every `train`, so keep the
 cache as long as you use the view. The adapter and the reports are what
 you keep.
 
@@ -767,9 +771,9 @@ the section that it needs in its own `context` field, as
 Four numbers carry most of what the reports print:
 
 - A pass rate is the share of held-out questions the checker accepted,
-  the one figure that says whether the task works. One served run moves
-  it by three or four items in a hundred, so differences of that size
-  between adapters mean nothing.
+  the one figure that says whether the task works. For one adapter, the
+  pass rate varies by three or four items in a hundred from one served run
+  to the next, so differences of that size between adapters mean nothing.
 - A loss is what training minimizes, the gap between the student's
   next-token choices and the teacher's. Only its trend matters.
 - Nats per token is the student's average surprise at the tokens the
@@ -799,16 +803,17 @@ The train line has these fields.
 - `loss` should fall through the first third of the run and then flatten.
 - `dk` and `alm` are the two terms that make up `loss`. `dk` is the main term, the distance
   between the student's next-token probabilities and the teacher's stored
-  ones, with the probability outside the top-k pooled in one bucket,
-  which `--loss bucketed`, the default, selects. `alm` compares whole
+  ones, with the probability outside the top-k pooled in one bucket.
+  `--loss bucketed`, the default, selects this form of the term. `alm` compares whole
   chunks of text. It is 0 when `align` logs `path=identity`, meaning the
   student reads every row as exactly the teacher's tokens. On the worked
-  pair the two models share a vocabulary, so `a` is 1.000, but every
-  reply row carries `student_messages`, the prompt without the document,
+  pair, the two models share a vocabulary, so `a` is 1.000. Every reply
+  row still carries `student_messages`, the prompt without the document,
   so the student reads other tokens than the teacher did. `align`
-  therefore logged `student render differs`, with the count of rows that
-  carry their own student message list, and `path=general`, which is
-  expected for any run with a document, and `alm` is nonzero there.
+  therefore logged `student render differs` with the count of rows that
+  carry their own student message list. It also logged `path=general`,
+  which is expected for any run with a document, and `alm` is nonzero on
+  that path.
 - `ce` is a third term that is measured but not trained on unless `--ce`
   is set.
 - `floored` counts support slots (a group of student tokens at one
@@ -843,8 +848,9 @@ task's figures:
 |---|---|---|---|---|---|---|
 | heldout | 0.2225 | 1.4131 | 0.6946 | 4.4116 | 0.0056 | 173 |
 
-`after` is with the adapter and `before` without it, filled in by
-`--before`. With `--reply-positions` the rows are scored at the
+Columns marked `after` score the student with the adapter, and columns
+marked `before` score it without the adapter. `--before` fills in the
+`before` columns. With `--reply-positions` the rows are scored at the
 positions the document moved only, and the log line says so.
 
 Judge the nats per token figure against the teacher's own at the same
@@ -870,9 +876,10 @@ The other tables follow the same after and before pattern.
   structure as `compliance` and the share the budget cut as
   `truncated_rate`. `refusal_rate` is the share of refusal prompts the
   student refused, and `task_refusal_rate` the share of task prompts it
-  refused. `ref_nll_nats` is the student's surprise at the replies of an
-  earlier report given by `--chat-refs`, or under `--before` at the
-  adapter-off replies, which then win. `refs_source` in the JSON names
+  refused. `ref_nll_nats` is the student's surprise at the replies in an
+  earlier report that `--chat-refs` names. Under `--before`, it is the
+  surprise at the adapter-off replies instead, and `eval` ignores
+  `--chat-refs`. `refs_source` in the JSON names
   the source that applied, the report path or `before`.
 - The KL table gives the KL divergence, a distance between the student's
   next-token probabilities and the teacher's stored ones, in nats.
@@ -950,8 +957,8 @@ it.
 `align` printed a `warn:` line naming the own-group fraction `a` or the
 singleton fraction `s`. The two tokenizers split text differently enough
 that part of the teacher's output has no direct student target. An `a`
-under 0.90 or an `s` under 0.50 means the run works with less signal,
-and an `a` under 0.70 refuses and writes no view. Pick a student from
+under 0.90 or an `s` under 0.50 means the run works with less signal.
+With an `a` under 0.70, `align` refuses and writes no view. Pick a student from
 the teacher's family, or pass `--force` and expect a weaker result.
 
 The census effect is small. The document changes little of what the
@@ -1034,8 +1041,8 @@ it.
 
 `--context-format` on `gen` and `filter` decides how the document
 and the question combine in the teacher's prompt, and a prompt row's own
-`context` field takes precedence over `gen --context`. That is how
-several documents share one run, and how one document too long for the
+`context` field takes precedence over `gen --context`. A row's own `context`
+field is how several documents share one run, and how one document too long for the
 context window is split into sections.
 
 `align` writes `view.json`, with the row index and the train and

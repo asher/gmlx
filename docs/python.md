@@ -148,7 +148,8 @@ file first. Its CLI equivalent is `gmlx validate`.
 
 The same exceptions come from `preflight` and `load_model`:
 
-- `UnsupportedCodecError` means a tensor codec with no kernel here. It
+- `UnsupportedCodecError` means a tensor codec that the `mlx_kquant`
+  kernels do not cover. It
   carries `.arch` and `.unsupported`, a `{codec: count}` dict.
 - `UnsupportedArchError` means a GGUF architecture the loader cannot build
   a model for.
@@ -204,9 +205,10 @@ below `width`, which defaults to the vocabulary size. Specials and unfilled
 ids are `None`. ByteLevel vocabularies go through the GPT-2 byte decoder,
 and SentencePiece vocabularies map the U+2581 marker to a space and
 `<0xNN>` pieces to that byte.
-
 `whitespace_start_mask(tokenizer, width, token_bytes_list=None)` marks the
-ids whose bytes start with ASCII whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
+ids whose bytes start with ASCII whitespace plus the end-of-sequence ids.
+
+`vocab_map_hash(tokenizer)`
 hashes the id-to-token map with specials left out. Equal hashes mean
 equal maps, not identical tokenization, since merges, the pre-tokenizer
 and the normalizer are not covered.
@@ -233,7 +235,7 @@ everything else.
 
 The swapped leaves are `KQuantLinear`, `KQuantEmbedding`,
 `KQuantSwitchLinear` and `KQuantMultiLinear`, the canonical classes in
-`mlx_kquant.nn`, re-exported here. Each stores the GGUF file bytes directly
+`mlx_kquant.nn`, re-exported from the `gmlx` package root. Each stores the GGUF file bytes directly
 as a `uint8` `weight` and dispatches through the `mlx_kquant` Metal kernels
 on a stock `mlx` wheel, so dequantization happens inside the kernel, never
 as a separate materialized pass.
