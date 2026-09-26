@@ -7,8 +7,9 @@ Checks (each a failure):
   - "&" in a heading
   - a table cell over 160 characters (the generated family table and
     raw-HTML image gallery cells are exempt)
-  - a relative link, image, or in-repo GitHub link whose file or #anchor
-    does not resolve (GitHub slug rules)
+  - a relative link, image, in-repo GitHub link or docs site link whose
+    file or #anchor does not resolve (GitHub slug rules, with the site's
+    underscore numbering for a repeated anchor)
   - a ```yaml fence opener with trailing text (the docs tests would skip it)
   - non-ASCII bytes (tests/test_ascii_hygiene.py enforces this too)
   - a page in docs/ that docs/README.md or the README's Documentation
@@ -38,6 +39,7 @@ _REPO = Path(__file__).resolve().parent.parent
 _CELL_MAX = 160
 _GITHUB_BLOB = re.compile(r"https://github\.com/asher/gmlx/blob/main/([^)#\s\"]+)(#[^)\s\"]*)?")
 _GITHUB_RAW = re.compile(r"https://raw\.githubusercontent\.com/asher/gmlx/main/([^)\s\"]+)")
+_SITE = re.compile(r"https://asher\.github\.io/gmlx/([^)#\s\"]*)(#[^)\s\"]*)?")
 _MD_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _MD_IMG = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 _HTML_REF = re.compile(r"\b(?:href|src|srcset)=\"([^\"]+)\"")
@@ -72,7 +74,10 @@ def slugify(heading: str) -> str:
     return h
 
 
-def anchors_of(path: Path) -> set:
+def anchors_of(path: Path, dup_sep: str = "-") -> set:
+    """The heading anchors of a page. GitHub numbers a repeated anchor
+    with a hyphen and the site's toc extension with an underscore, so pass
+    dup_sep="_" for site links."""
     seen: Counter = Counter()
     out = set()
     in_fence = False
@@ -88,7 +93,7 @@ def anchors_of(path: Path) -> set:
         s = slugify(m.group(2))
         n = seen[s]
         seen[s] += 1
-        out.add(s if n == 0 else f"{s}-{n}")
+        out.add(s if n == 0 else f"{s}{dup_sep}{n}")
     return out
 
 
@@ -105,6 +110,19 @@ def prose_lines(text: str):
 
 def _is_family_row(line: str) -> bool:
     return line.startswith("|") and "temperature=" in line
+
+
+def site_source(page: str) -> Path:
+    """The docs/ source of a site path: the Markdown page for an .html
+    path and the file itself for an asset."""
+    if page == "" or page.endswith("/"):
+        page += "index.html"
+    if not page.endswith(".html"):
+        return _REPO / "docs" / page
+    stem = page[: -len(".html")]
+    if stem == "index" or stem.endswith("/index"):
+        stem = stem[: -len("index")] + "README"
+    return _REPO / "docs" / f"{stem}.md"
 
 
 def check_file(path: Path, anchor_cache: dict) -> list:
@@ -157,9 +175,15 @@ def check_file(path: Path, anchor_cache: dict) -> list:
         if t.startswith(("mailto:", "data:")):
             continue
         anchor = None
+        dup_sep = "-"
         if t.startswith("http"):
             m = _GITHUB_BLOB.match(t)
-            if m:
+            site = _SITE.match(t)
+            if site:
+                target = site_source(site.group(1))
+                anchor = (site.group(2) or "")[1:] or None
+                dup_sep = "_"
+            elif m:
                 target = _REPO / m.group(1)
                 anchor = (m.group(2) or "")[1:] or None
             else:
@@ -178,9 +202,10 @@ def check_file(path: Path, anchor_cache: dict) -> list:
             problems.append(f"{rel}: broken link {t}")
             continue
         if anchor and target.suffix == ".md":
-            if target not in anchor_cache:
-                anchor_cache[target] = anchors_of(target)
-            if anchor not in anchor_cache[target]:
+            key = (target, dup_sep)
+            if key not in anchor_cache:
+                anchor_cache[key] = anchors_of(target, dup_sep)
+            if anchor not in anchor_cache[key]:
                 problems.append(f"{rel}: missing anchor {t}")
     return problems
 
@@ -205,7 +230,8 @@ def check_indexes() -> list:
         name = re.escape(page.name)
         if not re.search(rf"\]\({name}(#[^)]*)?\)", index):
             problems.append(f"docs/README.md: unindexed {page.name}")
-        if not re.search(rf"/docs/{name}(#[^)]*)?\)", section):
+        site_page = re.escape(f"https://asher.github.io/gmlx/{page.stem}.html")
+        if not re.search(rf"\]\({site_page}(#[^)]*)?\)", section):
             problems.append(f"README.md: unindexed docs/{page.name} under Documentation")
     return problems
 

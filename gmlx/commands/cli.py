@@ -2467,6 +2467,7 @@ _VERB_ALIASES = {"ls": "list"}
 
 
 def _print_umbrella_help(prog: str = "gmlx") -> None:
+    from gmlx import DOCS_URL
     print(
         f"{prog} - a local inference platform for Apple Silicon: run, chat "
         "with, serve, and fine-tune GGUF models\n\n"
@@ -2502,7 +2503,8 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         f"(start the server) ->  {prog} launch <harness>\n"
         f"or one-shot:  {prog} run <model.gguf | id> --prompt \"...\"\n\n"
         f"run `{prog} <command> --help` for a command's options; "
-        f"`{prog} --version` prints the installed version."
+        f"`{prog} --version` prints the installed version.\n"
+        f"documentation: {DOCS_URL}"
     )
 
 

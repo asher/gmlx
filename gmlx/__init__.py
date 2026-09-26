@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import importlib
 
+DOCS_URL = "https://asher.github.io/gmlx/"
+
 # Exports are resolved lazily (PEP 562) so that importing the package - e.g.
 # for `gmlx --help` / `validate` / `pull`, which never touch a model -
 # doesn't pay the MLX + kernel-extension import, and so a broken runtime

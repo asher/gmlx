@@ -117,6 +117,11 @@ def test_no_args_prints_help(routes, capsys):
     assert routes == {}                  # nothing dispatched
 
 
+def test_help_links_the_docs_site(routes, capsys):
+    assert cli.umbrella_main(["--help"]) == 0
+    assert "documentation: https://asher.github.io/gmlx/" in capsys.readouterr().out
+
+
 def test_unknown_verb_errors(routes, capsys):
     rc = cli.umbrella_main(["frobnicate"])
     assert rc == 2
