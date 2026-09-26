@@ -658,6 +658,7 @@ def _coupled_walk_batch(
     draft_tokens: mx.array,
     sampler,
     budgets: list[int],
+    uniform: bool = False,
 ) -> tuple[list[int], list[list[int]]]:
     """Batched rejection walk with a single host sync.
 
@@ -665,7 +666,8 @@ def _coupled_walk_batch(
     graph evaluated with a single mx.eval. Returns
     (accepted_list, new_tokens_list) where each row's new_tokens is the
     accepted drafts plus the bonus at the first rejection, clamped to that
-    row's budget.
+    row's budget. ``uniform`` clamps every row to the smallest count, with
+    the target's own token as each row's bonus (see _uniform_batch_accept).
     """
     B = int(draft_tokens.shape[0])
     n_draft = int(draft_tokens.shape[1])
@@ -692,7 +694,28 @@ def _coupled_walk_batch(
         acc_list.append(a)
         new = drf[i][:a] + [tgt[i][a]]
         new_tokens_list.append(new[:budgets[i]])
+    if uniform and len(set(acc_list)) > 1:
+        a = min(acc_list)
+        acc_list = [a] * B
+        new_tokens_list = [(drf[i][:a] + [tgt[i][a]])[:budgets[i]]
+                           for i in range(B)]
     return acc_list, new_tokens_list
+
+
+def _uniform_batch_accept(drafter, lm) -> bool:
+    """Whether batched rounds clamp every row to the smallest accept count.
+    The gemma4 rollback in mlx-vlm 0.6 zeroes a shorter row's rejected KV
+    tail instead of trimming it, so the zeroed keys stay attended and the
+    row's positions run ahead of its tokens. mlx-vlm 0.7 flags such targets
+    requires_uniform_batch_acceptance and clamps the same way. The hook is
+    read from the class, since harden_mtp_rollback wraps it per instance.
+    The reported acceptance and the adaptive block depth see the clamped
+    counts."""
+    if any(getattr(o, "requires_uniform_batch_acceptance", False)
+           for o in (drafter, lm)):
+        return True
+    hook = getattr(type(lm), "rollback_speculative_cache", None)
+    return getattr(hook, "__module__", None) == "mlx_vlm.models.gemma4.language"
 
 
 def _next_forced_chunk(hook, queue: list, block_total: int):
@@ -1578,8 +1601,10 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
     first token is already out, so the store cost (only-new blocks plus the
     recurrent-state sidecar) lands on the gap before the second token, the
     same place the drafter prefill already sits. This is the key a
-    continuation turn hits when no retirement happened. Best-effort; never
-    raises.
+    continuation turn hits when no retirement happened. A rotating layer
+    below its window stores the block-grid prefix (grid_truncate), since
+    the retirement store cannot snapshot the buffered rotating caches the
+    rounds leave behind. Best-effort; never raises.
     """
     try:
         manager = getattr(model, "_kq_apc_manager", None)
@@ -1591,11 +1616,11 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
             return
-        if ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                      extra_hash=int(retire_ctx.get("extra_hash", 0))):
-            if meta is not None:
-                meta.setdefault("ckpt_stored_boundaries", []).append(
-                    len(retire_ctx["full_ids"]))
+        stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
+                            extra_hash=int(retire_ctx.get("extra_hash", 0)),
+                            grid_truncate=True)
+        if stored and meta is not None:
+            meta.setdefault("ckpt_stored_boundaries", []).append(stored)
     except Exception:
         _log.warning("APC ckpt post-prefill failed; continuing",
                      exc_info=True)
@@ -1833,7 +1858,9 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             # The drafter sidecar pairs with a same-key main entry; its KV
             # covers the full sequence and cannot be rewound to the LCP.
             return
-        if (ok and drafter is not None and not _SIDECAR_DISABLED
+        # A ckpt retirement can land a grid prefix or an older decode
+        # snapshot; a sidecar keyed past it would have no target record.
+        if (ok == len(seq) and drafter is not None and not _SIDECAR_DISABLED
                 and getattr(drafter, "_kq_head_covered", False)
                 and (sidecar_ctx is None
                      or getattr(drafter, "_kq_head_request", None)
@@ -2472,6 +2499,7 @@ def _owned_decode_rounds_batch(
     _has_accept_batch = callable(_accept_batch_fn)
     _rollback_fn = getattr(lm, "rollback_speculative_cache", None)
     _has_rollback = callable(_rollback_fn)
+    _uniform_accept = _uniform_batch_accept(drafter, lm)
     _draft_hidden_fn = getattr(lm, "speculative_draft_hidden", None)
     _has_draft_hidden = callable(_draft_hidden_fn)
     _walk_sampler = None if greedy else sampler
@@ -2872,7 +2900,8 @@ def _owned_decode_rounds_batch(
                 max_tok[active_idx[j]] - emitted[active_idx[j]]
                 for j in range(n_active)]
             accepted_list, new_tokens_list = _coupled_walk_batch(
-                lm, verify, draft_tokens, _walk_sampler, budgets)
+                lm, verify, draft_tokens, _walk_sampler, budgets,
+                uniform=_uniform_accept)
             _t1 = time.perf_counter()
             sampler_rng.target_sampled(sync_draft=True)
             # Gated rounds stay out of the accept stats: 0-accept plain rounds
@@ -2927,10 +2956,9 @@ def _owned_decode_rounds_batch(
 
         if any(a < bs - 1 for a in accepted_list) and _has_rollback:
             with mx.stream(generation_stream):
-                # Rollback hooks are scalar-only: every model that defines
-                # one is B=1-limited, so spec rounds with a rollback only
-                # run at width 1 here (wider batches gate at formation).
-                # Pass that row's int, not a one-element list.
+                # A lone row passes its int, a batch the per-row list.
+                # Targets whose hook cannot trim ragged rows arrive with
+                # uniform accepts (_uniform_batch_accept).
                 acc = accepted_list[0] if n_active == 1 else accepted_list
                 _rollback_fn(prompt_cache, verify.gdn_states, acc, bs)
 

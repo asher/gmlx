@@ -35,6 +35,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   some did not stop on `<eos>`, so a reply could run past its end.
 - gemma-1.1 GGUFs that type `<end_of_turn>` as text did not stop on it, so a
   reply could show the tag or run on past the turn.
+- Concurrent requests on a gemma-4 model with a drafter could decode wrong
+  tokens, where the same request sent alone decoded right.
+- With a drafter, a repeated gemma-4 prompt shorter than the sliding window
+  prefilled in full unless its length fell on a block boundary.
 
 ## [0.4.17] - 2026-09-25
 

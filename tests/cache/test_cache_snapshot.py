@@ -383,6 +383,31 @@ def test_retire_b1_skips_on_offset_mismatch():
         mgr.close()
 
 
+@pytest.mark.parametrize("shorter", [False, True])
+def test_retire_b1_sidecar_only_beside_a_full_length_record(monkeypatch,
+                                                           shorter):
+    """A ckpt retirement can store a grid prefix or an older decode
+    snapshot. The drafter sidecar keys the full sequence, so it is stored
+    only when the target record covers it too."""
+    import types
+
+    import gmlx.cache.snapshot as cs
+    from gmlx.spec.speculative import _retire_b1
+    full_ids = list(range(1, 10))
+    generated = [50, 51, 52]
+    seq = full_ids + generated
+    keyed = []
+    monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
+    monkeypatch.setattr(cs, "retirement_store",
+                        lambda *a, **k: len(seq) - 4 if shorter else len(seq))
+    monkeypatch.setattr(cs, "drafter_sidecar_store",
+                        lambda man, drafter, ids, n, h: keyed.append(n) or True)
+    _retire_b1(_fake_model(object()), [_kv_row(len(seq), 0)], generated,
+               {"full_ids": full_ids, "extra_hash": 0, "mode": "ckpt"},
+               drafter=types.SimpleNamespace(_kq_head_covered=True))
+    assert keyed == ([] if shorter else [len(seq)])
+
+
 def test_retire_b1_noop_without_manager_or_context():
     from gmlx.spec.speculative import _retire_b1
     cache = [_kv_row(6, 0)]

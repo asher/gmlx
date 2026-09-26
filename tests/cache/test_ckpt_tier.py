@@ -418,6 +418,27 @@ def test_grid_truncate_beyond_window_stores_full():
     assert_swa_warm_matches(warm, cache, p)
 
 
+def test_mtp_post_prefill_stores_grid_prefix_below_window():
+    """The MTP rounds leave buffered rotating caches that retirement cannot
+    snapshot, so a below-window prompt's only record is the post-prefill
+    store. It truncates to the block grid and records the stored length,
+    never the prompt length, in ckpt_stored_boundaries."""
+    import gmlx.cache.snapshot as cs
+    from gmlx.spec.speculative import _ckpt_post_prefill
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 20                                    # < W and unaligned
+    cache = make_swa_cache(p, seed=5)
+    ids = list(range(300, 300 + p))
+    meta = {}
+    _ckpt_post_prefill(SimpleNamespace(_kq_apc_manager=man), cache,
+                       {"full_ids": ids, "extra_hash": 2, "apc_meta": meta})
+    assert meta["ckpt_stored_boundaries"] == [16]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [16]
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=2)
+    assert got == 16
+    assert_grid_warm_matches(warm, cache, 16)
+
+
 def test_retirement_rotating_short_prompt_stores_grid_prefix():
     """A below-window off-grid rotating retirement with no decode
     snapshot stores the block-grid prefix (grid_truncate), not nothing.
