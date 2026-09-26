@@ -1907,15 +1907,20 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                       "per-model speculative_width_cap config key")
 
     resolved = serving.resolved_models()
-    preload = _preload_id(cfg)
-    if preload:
-        os.environ["MLX_VLM_PRELOAD_MODEL"] = preload
-
     pinned_paths = {rm.path for rm in resolved.values() if rm.pin}
     for p in a.pin:
         rp = resolved.get(p)
         pinned_paths.add(rp.path if rp is not None
                          else os.path.abspath(os.path.expanduser(p)))
+
+    # Only an explicit pin (`pin: true`, --pin, or the single-GGUF positional)
+    # holds the preload for the process lifetime. A default or sole model
+    # preloads too, but stays TTL- and budget-evictable.
+    preload = _preload_id(cfg)
+    preload_rm = resolved.get(preload) if preload else None
+    preload_pinned = preload_rm is not None and preload_rm.path in pinned_paths
+    if preload and preload_pinned:
+        os.environ["MLX_VLM_PRELOAD_MODEL"] = preload
 
     install_gguf_server_bridge()
     budget_gb = a.budget_gb if a.budget_gb is not None else cfg.budget_gb
@@ -2061,17 +2066,17 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # synchronously *before* the port accepts connections, so a big model makes the
     # whole server unreachable (menu bar / health probes see "down") until it
     # finishes. The env was already consumed by the residency-pool install above
-    # (it pins the preload); pop it now so the lifespan skips the blocking load, and
-    # warm the model in a background thread instead - the port binds and /health
-    # answers immediately while the load runs (the retained hold keeps it resident,
-    # exactly as the lifespan hold would have). defaults.preload extras warm after
-    # the primary, LRU-evictable.
+    # (it pins a pinned preload); pop it now so the lifespan skips the blocking load,
+    # and warm the model in a background thread instead - the port binds and /health
+    # answers immediately while the load runs. A pinned primary keeps a retained
+    # hold, exactly as the lifespan hold would have; an unpinned one is released
+    # after the warm. defaults.preload extras warm after the primary, LRU-evictable.
     pre = cfg.defaults.preload
     extras = [m for m in (list(cfg.models) if pre == "all" else list(pre or ()))
               if m != preload]
     if preload or extras:
         os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
-        patches.spawn_preload_warm(preload, extras)
+        patches.spawn_preload_warm(preload, extras, retain=preload_pinned)
         if extras:
             print(f"[server] preload: warming {', '.join(extras)} in background")
 

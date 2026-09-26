@@ -1124,9 +1124,10 @@ def _stub_serving_stack(monkeypatch):
                         lambda cfg, reload_fn=None:
                         calls.__setitem__("patches_cfg", cfg))
     monkeypatch.setattr(sp_mod, "spawn_preload_warm",
-                        lambda mid, extras=():
+                        lambda mid, extras=(), retain=True:
                         (calls.__setitem__("preload_warm", mid),
-                         calls.__setitem__("preload_extras", list(extras))))
+                         calls.__setitem__("preload_extras", list(extras)),
+                         calls.__setitem__("preload_retain", retain)))
     monkeypatch.setattr(uvicorn, "run",
                         lambda *a, **kw: calls.__setitem__("uvicorn", kw))
     monkeypatch.setattr(signal, "signal",
@@ -1226,6 +1227,33 @@ def test_serve_preload_extras_from_config(monkeypatch):
     assert srv._serve(cfg, _ns(), None) == 0
     assert calls.get("preload_warm") == "m"
     assert calls.get("preload_extras") == ["e1", "e2"]
+
+
+def test_serve_unpinned_preload_is_not_retained(monkeypatch):
+    # A sole or default model preloads, but only an explicit pin holds it for
+    # the process lifetime; otherwise it stays TTL- and budget-evictable.
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "m": types.SimpleNamespace(path="/m.gguf", pin=False)})
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert calls.get("preload_warm") == "m"
+    assert calls.get("preload_retain") is False
+    assert "/m.gguf" not in (calls["pool"].get("pinned") or ())
+
+
+def test_serve_pinned_preload_is_retained(monkeypatch):
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "m": types.SimpleNamespace(path="/m.gguf", pin=True)})
+    cfg = ServerCfg(models={"m": ModelCfg(id="m", path="/m.gguf", pin=True)})
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert calls.get("preload_warm") == "m"
+    assert calls.get("preload_retain") is True
+    assert "/m.gguf" in calls["pool"]["pinned"]
 
 
 def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):

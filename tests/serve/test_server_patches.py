@@ -1386,6 +1386,34 @@ def test_spawn_preload_warm_retains_hold(monkeypatch):
         sp_routes._PRELOAD_HOLDS.clear()
 
 
+def test_spawn_preload_warm_unretained_releases_hold(monkeypatch):
+    import gmlx.serve.residency as residency
+
+    class FakeHold:
+        def __init__(self):
+            self.released = False
+
+        def release(self):
+            self.released = True
+
+    holds = []
+
+    def fake_gcm(model_id, *a, **k):
+        h = FakeHold()
+        holds.append(h)
+        residency._active_hold.set(h)
+        return (object(), None, None)
+
+    monkeypatch.setattr(_APP, "get_cached_model", fake_gcm)
+    sp_routes._PRELOAD_HOLDS.clear()
+    try:
+        sp.spawn_preload_warm("m", retain=False).join(timeout=5)
+        assert sp_routes._PRELOAD_HOLDS == []
+        assert holds and holds[0].released is True     # evictable after the warm
+    finally:
+        sp_routes._PRELOAD_HOLDS.clear()
+
+
 def test_spawn_preload_warm_retries_deferred(monkeypatch):
     # A LoadDeferred at boot is a neighbor-teardown transient, not a
     # verdict: the preload must retry with backoff, not silently give

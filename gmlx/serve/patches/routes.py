@@ -968,12 +968,14 @@ def _warm_context_lengths() -> None:
         pass
 
 
-def spawn_preload_warm(model_id: str | None, extras=()):
-    """Background-load the preload set without blocking startup. The primary
-    ``model_id`` keeps its busy hold for the process lifetime so it stays
-    eviction-proof - the same effect mlx-vlm's lifespan preload has, but off
-    the startup path so the port binds and ``/health`` answers immediately
-    while the load runs. ``extras`` (``server.defaults.preload``) warm
+def spawn_preload_warm(model_id: str | None, extras=(), *, retain: bool = True):
+    """Background-load the preload set without blocking startup. With
+    ``retain`` (a pinned primary), ``model_id`` keeps its busy hold for the
+    process lifetime so it stays eviction-proof - the same effect mlx-vlm's
+    lifespan preload has, but off the startup path so the port binds and
+    ``/health`` answers immediately while the load runs. Without it, the
+    primary's hold is released after the warm, so it stays TTL- and
+    budget-evictable like any unpinned model. ``extras`` (``server.defaults.preload``) warm
     afterwards, sequentially, through ``_warm_and_release`` so they stay
     LRU/TTL-evictable (retained holds on a multi-model set would wedge the
     pool); over-budget streaming extras are skipped with a notice. Best-effort
@@ -997,7 +999,9 @@ def spawn_preload_warm(model_id: str | None, extras=()):
             while True:
                 try:
                     hold = _load_resident(model_id)
-                    if hold is not None:
+                    if hold is not None and not retain:
+                        hold.release()
+                    elif hold is not None:
                         _PRELOAD_HOLDS.append(hold)   # retain -> eviction-proof
                         pool = _get_pool()
                         if pool is not None and hasattr(pool, "mark_retained"):
