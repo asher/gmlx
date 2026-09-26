@@ -14,8 +14,9 @@ key, and one base in memory can serve several adapters.
 
 ## APC
 
-APC stands for automatic prefix caching, the name that mlx-vlm and the log
-lines tagged `[apc]` use for the [prompt cache](#prompt-cache).
+APC stands for automatic prefix caching, the name that mlx-vlm uses for
+the [prompt cache](#prompt-cache). The server log lines about the prompt
+cache start with `APC`, such as `APC tier:`.
 
 ## Arena
 
@@ -29,7 +30,8 @@ explains its part in streaming.
 
 The budget is the memory that a server lets its resident models use, set
 by [`server.budget_gb`](config.md#serverbudget_gb). When a new model does
-not fit in the budget, the server unloads idle models to make room. A
+not fit in the budget, the server unloads the least recently used models
+that are not pinned and have no request in progress. A
 streamed model has its own budget for the [arena](#arena).
 
 ## Canvas
@@ -86,14 +88,16 @@ A mixture-of-experts model is built from many small sub-networks called
 experts, of which each token uses a few, so decoding costs only what the
 active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
 Because most experts are idle on any token, a MoE model larger than memory
-can still run by [streaming](#stream) its experts from disk.
+can still run when gmlx [streams](#stream) the experts from disk as they
+are needed.
 
 ## Family defaults
 
 The family defaults are the sampling settings that a model family's
 publisher recommends, such as temperature and top-p, together with the
 built-in intents of that family. Each request starts from them unless it
-sets its own values. [Family defaults](family-defaults.md) lists them.
+sets its own values. [Family defaults](family-defaults.md) gives the
+values for each family.
 
 ## Feeder
 
@@ -151,8 +155,9 @@ under [`profiles`](config.md#profiles) in the config.
 
 A resident model can be pinned, kept or idle. A pinned model loads at
 start and is never unloaded on its own, only by `POST /unload`. A kept
-model is exempt from the idle timeout but can still be unloaded when
-memory runs short, and `gmlx launch` and voice sessions keep their model.
+model is exempt from the idle timeout but can still be unloaded when the
+[budget](#budget) needs room. `gmlx launch` and voice sessions keep their
+model.
 An idle model unloads after `ttl_s` seconds without a request.
 
 ## KV cache
@@ -182,7 +187,9 @@ tools that separate programs provide. The built-in
 MLA, or multi-head latent attention, is the attention layout of DeepSeek
 and the families derived from it. Keys and values are stored as one
 compressed vector for each token instead of separate K and V rows. The KV
-cache is therefore already small, and only affine KV quantization applies.
+cache is therefore already small, and kvarn does not apply to it.
+[Choosing a scheme by model](kv-quantization.md#choosing-a-scheme-by-model)
+tells which MLA models take affine quantization.
 
 ## mmproj
 
@@ -233,10 +240,10 @@ gives the approximate bits per weight, such as `Q4_K_M` or `IQ2_M`. Lower
 bits make a smaller file that loses more quality.
 
 The families are the K-quants, which store weights in blocks with scales,
-the IQ quants, which use codebooks for the smallest files, and the legacy
-`Q4_0` and `Q8_0` types. Newer files also use the 4-bit float types MXFP4
-and NVFP4, the ternary types `STQ1_0` and `PTQ1_0`, and the 2-bit `PQ2_0`,
-which store each weight in 2 bits or less.
+the IQ quants, which use codebooks for the smallest files, and legacy
+types such as `Q4_0` and `Q8_0`. Newer files also use the 4-bit float
+types `MXFP4` and `NVFP4`. The ternary types `STQ1_0` and `PTQ1_0` and the
+2-bit `PQ2_0` store each weight in 2 bits or less.
 
 ## Resident
 
@@ -266,8 +273,10 @@ requests keep running.
 ## Speculative decoding and MTP
 
 A [drafter](#drafter) proposes several tokens, and the model checks them
-in one pass. The output stays the same, with fewer full passes. MTP,
-multi-token prediction, is the form with a [native head](#native-head).
+in one pass. By default the output stays the same, with fewer full
+passes. MTP, for multi-token prediction, is the name that the flags and
+logs of gmlx give to speculative decoding with any drafter, a
+[native head](#native-head) or a companion GGUF.
 [Speculative decoding](speculative-decoding.md) describes both.
 
 ## Stream
@@ -280,7 +289,7 @@ cpu`, the whole model runs on the CPU from the page cache.
 ## Structured read
 
 A structured read is how [`/v1/systemone`](decisions.md) answers its
-questions in one denoise step. The [canvas](#canvas) holds an answer
+questions, in one denoise step by default. The [canvas](#canvas) holds an answer
 template with a random token at each answer position. The model's
 prediction at that position, limited to the question's labels, is the
 answer. A sample is one such read with its own random tokens, and a

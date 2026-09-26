@@ -4,10 +4,8 @@ Most failures in a new setup have a known cause and a fix, grouped by the
 step where they appear. [Logs and files](#logs-and-files) says where gmlx
 writes its logs, runfiles, caches and sessions.
 
-Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
-kernels, the config and its model files, the background server, the login
-items, the optional extras, ffmpeg, the Hugging Face token, memory and
-disk, and it names the fix for each check that fails. For a coding agent
+Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks each part of a
+working setup, and it names the fix for each check that fails. For a coding agent
 or chat app that does not connect, read its entry under
 [The clients](launch.md#the-clients).
 
@@ -73,15 +71,16 @@ names, and the next pull fetches that file from the start.
 ### A gated or private repo will not download
 
 `gmlx validate` or `gmlx pull` gets a 401 or 403 from Hugging Face. gmlx
-sends the token from `HF_TOKEN`, else `HUGGING_FACE_HUB_TOKEN`, else the
-one that `hf auth login` stored. Accept the repo's terms on its Hugging
-Face page, and check that one of those tokens has access to it.
+sends the Hugging Face token that [Commands](env-vars.md#commands)
+describes. Accept the repo's terms on its Hugging Face page, and check
+that this token has access to it.
 
 ### A load says the file is incomplete or truncated
 
 A load stops with `incomplete split GGUF: N/M shard(s) missing`, or with
 `truncated GGUF` and the size the file should have. The download did not
-finish, and the same `gmlx pull` fetches only what is missing.
+finish. The same `gmlx pull` fetches a missing shard, but it skips a file
+that already exists, so delete a truncated file before you pull it again.
 
 ### The architecture is not supported
 
@@ -105,8 +104,8 @@ K-quant also [decodes fastest](performance.md#choosing-a-quant-for-speed).
 
 A load stops with `is Hadamard-folded` and names the fold version. Such a
 file stores its weights under a rotation that gmlx undoes at run time only
-for fold version 1 on the Qwen3.5 architecture, which covers Qwen3.5, 3.6
-and 3.8. Any other folded file is refused before a tensor is read, and so
+for fold version 1 on the `qwen35` architecture, which covers the dense
+Qwen3.5, 3.6 and 3.8 models. Any other folded file is refused before a tensor is read, and so
 is a folded drafter.
 
 `gmlx validate` prints a `weights: Hadamard-folded` line for such a file.
@@ -161,7 +160,8 @@ port, or serve on another one with `--port 8081`.
 
 ### `gmlx status` says the source changed on disk
 
-The status line adds `source changed on disk since this server started`.
+`gmlx status` prints `source changed on disk since this server started`
+under the status line.
 gmlx was upgraded, or its checkout switched, while the server kept running
 the old code. Requests can fail with import errors until you run `gmlx
 restart`.
@@ -185,7 +185,8 @@ The server answers 404 of type `model_not_found`, with the ids it serves in
 `available_models`, and it never downloads on a request. Use an id from
 `gmlx list`, or fetch the model with `gmlx pull`, which registers it when it
 lands under a `model_dirs` folder. A file saved elsewhere with `--to` needs
-`gmlx sync-models` or a [`models`](config.md#models) entry.
+`gmlx sync-models --models-dir DIR` or a [`models`](config.md#models)
+entry.
 
 A suffix such as `@coding` that names no intent or profile gets 400 of type
 `unknown_profile`, which lists the valid names. A 403 of type
@@ -274,9 +275,11 @@ dismissed the prompt long ago, turn the entry off and on to get a new one.
 
 ### Transcription or speech fails because ffmpeg is not found
 
-`/v1/audio/transcriptions` fails with `audio decoding needs ffmpeg on PATH`,
-or speech in mp3, flac or opus fails the same way. Whisper decodes its input
-through ffmpeg, and speech needs it for every format except wav and pcm.
+`/v1/audio/transcriptions`, or speech in mp3, flac or opus, answers 500,
+and the request line in the server log names the cause. Transcription logs
+`audio decoding needs ffmpeg on PATH`, and speech logs `ffmpeg not found`.
+Whisper decodes its input through ffmpeg, and speech needs it for every
+format except wav and pcm.
 Run `brew install ffmpeg`, then `gmlx restart`.
 
 ## Distillation
@@ -308,11 +311,12 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | Path | Contents |
 |------|----------|
 | `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
-| `~/.config/gmlx/` | `gmlx launch` writes client configs here. |
+| `~/.config/gmlx/` | `gmlx launch` writes the configs of injected clients here. |
+| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these client files, as [The clients](launch.md#the-clients) describes. Remove those settings and keep the files. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
-| `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on. |
+| `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on and has no `path` of its own. |
 | `~/.cache/gmlx/talk/` | The first `talk` fetches the wake-word and voice-activity models here. |
-| `~/.cache/huggingface/` | `hf:` references resolve from these files when `server.hf_cache` is on. |
+| `~/.cache/huggingface/` | `hf:` references resolve from these files. |
 | `~/.local/share/gmlx/chats/` | Saved chat sessions are kept here. |
 | `~/.local/share/gmlx/assistant-memory.db` | It holds the assistant's memory, with `assistant-<id>.db` beside it for each served assistant. |
 | `~/Library/Application Support/gmlx/` | The menu bar runs from an app bundle that gmlx writes here. |

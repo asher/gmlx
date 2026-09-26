@@ -55,7 +55,7 @@ services. Every route except `/health` needs the API key when one is set.
 | `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
 | `POST /unload` | Evict a resident model with `{"model": "<id>"}`, which answers 409 while it streams, or every idle model with an empty body. |
 | `POST /v1/keep` | Keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it. |
-| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. SIGHUP does the same. |
+| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
 | `POST /v1/audio/speech` | It turns text into speech, with `tts` configured. |
 | `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured. |
@@ -68,15 +68,19 @@ and never the Hugging Face cache. Each entry carries `resident`, `pinned`,
 figures. `context_length` is the GGUF's trained window, or the model's
 [`max_kv_size`](config.md#loadmax_kv_size) when that is smaller.
 `max_context_at_width_1` is how much of the window fits in memory for a
-single stream. A harness sizes its context window from the smaller of the
-two.
+single stream. It is `null` for every model except the one that the boot
+capacity table was built for, and for that model too when there is no
+table or `GMLX_OVERCOMMIT=1` is set. A harness sizes its context window
+from the smaller of the two, or from `context_length` when this field is
+`null`.
 
 A resident model with KV quantization configured adds a `kv_quant` object
 with `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16` and a
-`verdict` of `full`, `partial`, `dropped` or `error`. Under
+`verdict` of `full`, `partial` or `dropped`. Under
 [kvarn](glossary.md#kvarn) it also carries `value_bits` and `tail_tokens`.
-A speculative model adds `verdict_batched`, which differs from `verdict`
-when the model runs fp16 KV while batched, as it does under `uniform`.
+The object also carries `verdict_batched`, which differs from `verdict`
+when the model runs fp16 KV while batched, as a speculative model does
+under `uniform`.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
@@ -85,8 +89,8 @@ or 503 with a one-word `reason` and a `Retry-After` header. The reason is
 `queue` when requests are waiting and `busy` when all engines are at their
 decode width.
 
-`POST /v1/completions` supports `max_tokens`, `temperature`, `top_p`, `seed`,
-`stop`, `stream` and `profile`. List or token-array prompts, `n > 1`, `echo`,
+`POST /v1/completions` honors the standard sampling parameters, `seed`,
+`stop`, `stream`, `stream_options` and `profile`. List or token-array prompts, `n > 1`, `echo`,
 `suffix` and `best_of > 1` are rejected with a 400. mlx-vlm's image
 generation routes are present but cannot serve a GGUF model.
 
@@ -109,8 +113,8 @@ instead of failing the snapshot.
 |---|---|---|
 | `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | They give the decode width, the queue cap, the streams generating now and the requests waiting for a slot. |
 | `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | They give the waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
-| `requests[]` | One row for each request | Queued rows come first. `state` is `queued`, `prefill` or `decode`. |
-| `resident_models[]` | For each model, `in_flight`, `pinned`, `kept` and bytes | Each model decodes on a separate engine, so compare each model's `in_flight` with `decode_batch`. |
+| `requests[]` | Each request has one row. | Queued rows come first. `state` is `queued`, `prefill` or `decode`. |
+| `resident_models[]` | Each model has `in_flight`, `pinned`, `kept` and bytes. | Each model decodes on a separate engine, so compare each model's `in_flight` with `decode_batch`. |
 | `governor` | `band`, counters | They give the memory governor's band and shed history. |
 | `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | They hold MLX's active and cached bytes, the gate's free memory, and a streamed model's [arena](glossary.md#arena) bytes, capacity and hit rate. |
 | `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a Hugging Face fall-through load. |
@@ -144,16 +148,18 @@ request is rendered but not estimated. `"dry_run": true` on
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
 at the smallest tabulated width at or above `W`. It answers `admit_now` when
-in addition the governor is not orange or red, nothing is waiting and at
-least `W` decode slots are free. Under a yellow band only one free slot is
-counted, so a wider fan-out waits for the band to clear. `reason` names the
-first condition that fails.
+the geometry does not fail, the governor is not orange or red, nothing is
+waiting and at least `W` decode slots are free. Without a capacity table,
+or with `GMLX_OVERCOMMIT=1`, `ok` is `null` and `admit_now` judges only the
+timing. Under a yellow band only one free slot is counted, so a wider
+fan-out waits for the band to clear. `reason` names the first condition
+that fails.
 
-The Prometheus rendering flattens these to gauges such as
-`gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`, `gmlx_governor_band` with a
-`band` label, `gmlx_capacity_max_ctx` with a `width` label and per-model
-series with a `model` label, plus a `profile` label on entries that carry a
-profile. `requests[]` is high-cardinality and contributes only its count.
+The Prometheus rendering of `/v1/metrics` flattens its sections to gauges
+such as `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
+`gmlx_governor_band` with a `band` label, `gmlx_capacity_max_ctx` with a
+`width` label and per-model series with a `model` label, plus a `profile`
+label on entries that carry a profile. `requests[]` is high-cardinality and contributes only its count.
 
 ## API capabilities
 
@@ -180,10 +186,9 @@ configure. Streaming works too, and a parsed call ends the stream with
 | `auto` | This is the default, and the model decides whether to call a tool. |
 | `required` and named-function forms | They reach the template as a variable and work only if the template implements them. A forced call that produces no call logs a warning. |
 
-In this loop the server parses the calls, and the client runs them and
-sends the results back. To run the loop server-side with
-config-allowlisted MCP tools, serve an
-[assistant id](assistant.md#served-assistants).
+The server only parses the calls. The client runs them and sends the
+results back. To have the server run config-allowlisted MCP tools itself,
+serve an [assistant id](assistant.md#served-assistants).
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -219,7 +224,7 @@ route:
 | `n` | Ignored | Ignored | Ignored | The server always returns a single choice. |
 | `user` | Ignored | Ignored | Ignored | The server keeps no per-user accounting. |
 | `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
-| `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
+| `tool_choice` | None/auto enforced | None/auto enforced | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
 | `metadata` | Ignored | Ignored | Ignored | The server accepts it for Anthropic compatibility and never reads it. |
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
 | `logit_bias` | Honored | Honored | Honored | Its keys are token ids. |
@@ -297,14 +302,14 @@ curl localhost:8080/v1/chat/completions -d '{
 | The prompt plus `max_tokens` exceeds the context budget. | The server answers 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
 | The prompt cannot fit in memory. | The server answers 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
-| A model cannot load beside the resident models that are busy. | The server answers 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | None |
+| A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight uses the same estimate as `POST /v1/estimate`, which
 [Capacity and live-request metrics](#capacity-and-live-request-metrics)
-describes. The load gate judges a model's weights against what is resident and busy and against the
-governor's floor, after waiting up to 3 seconds for memory the kernel is
+describes. The load gate judges a model's weights against what is resident and
+pinned or busy and against the governor's floor, after waiting up to 3 seconds for memory the kernel is
 still returning from a recent unload. The switch variables, and the decode
 batch width that sets the queue cap, are listed under
 [Server](env-vars.md#server), except `GMLX_GOVERNOR`, which is under
@@ -327,8 +332,9 @@ route can fetch a chat model. The service models that the config names
 download on their first use, as
 [Speech, embeddings and rerank](services.md) describes.
 
-`server.hf_cache: true` changes what the config may reference, not what a
-request may name. With it on, `hf:` refs in `models:` and the `gmlx init
---from-hf-cache` scan resolve from the local Hugging Face cache, still never
-the network, so a repo that was downloaded by another tool can be served
-without copying the file.
+An `hf:` ref in `models:` resolves from the local Hugging Face cache and
+never from the network, so a repo that another tool downloaded can be
+served without copying the file. `server.hf_cache: true` runs the Hugging
+Face libraries offline and lets a repo id that reaches the stock loader
+resolve from that cache instead of getting the 403. It never changes what
+a request may name.

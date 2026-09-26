@@ -17,7 +17,9 @@ is shown with the family values it keeps, and an intent that a family does
 not define gives the family defaults. The reasoning level goes by three
 names. It is `reasoning_effort` for gpt-oss, DeepSeek-V4.1, Hy3 and HY4,
 `thinking_effort` for Kimi K3, and `reasoning_strength` for Muse. Each value
-comes from the model card cited in `gmlx/gen/profiles.py`.
+comes from the model card or generation config cited in
+`gmlx/gen/profiles.py`, and the values of HY4 come from its GGUF. The
+`default` row holds generic values that no model card backs.
 
 | Family | GGUF architectures | Base values | Intents |
 |--------|-------------|--------------------|----------------|
@@ -41,7 +43,6 @@ comes from the model card cited in `gmlx/gen/profiles.py`.
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3 top_p=0.95; `@creative`: temperature=1.0 top_p=0.95 min_p=0.05; `@instruct`: temperature=0.7 top_p=0.95 |
 
-The `default` row applies to architectures that no family claims.
 [How a request gets its settings](config.md#how-a-request-gets-its-settings)
 explains how the defaults combine with your own profiles, and
 [`models.*.family`](config.md#modelsfamily) replaces the detected family of

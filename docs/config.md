@@ -125,9 +125,10 @@ running. `gmlx sync-models` removes such entries.
 
 This is the GGUF file of the model. The path can be absolute, relative
 to a folder in [`server.model_dirs`](#servermodel_dirs), or an
-`hf:<org>/<repo>/<file.gguf>[@rev]` reference when
-[`server.hf_cache`](#serverhf_cache) is on. For a model split into
-shards, name the first shard. This key is required.
+`hf:<org>/<repo>/<file.gguf>[@rev]` reference. Such a reference resolves
+from the local Hugging Face cache or from the `gmlx pull` folders under
+`model_dirs`. For a model split into shards, name the first shard. This
+key is required.
 
 ### `models.*.profile`
 
@@ -139,8 +140,9 @@ is no profile.
 ### `models.*.profiles`
 
 This key changes a profile for this model only, keyed by the profile or
-intent name. Each value takes the same keys as a profile, and applies
-only when its name is the profile of the request. The default is none.
+intent name. Each value takes the same keys as
+[`overrides`](#modelsoverrides), and applies only when its name is the
+profile of the request. The default is none.
 
 ```yaml
 models:
@@ -364,9 +366,7 @@ one place, a later layer wins over an earlier one:
 | Request fields | The request body sets them. |
 
 The `@name` of a request replaces the model's own profile rather than
-adding to it, and an unknown name gets a 400. A profile's `system` prompt applies
-only to a request without a system message. Its `chat_template` applies
-when the model loads, so a request cannot change it. `gmlx profiles <id>`
+adding to it, and an unknown name gets a 400. `gmlx profiles <id>`
 prints the sampling values a model resolves to under each of its
 profiles, with every layer applied.
 
@@ -388,8 +388,7 @@ none.
 ### `profiles.*.load`
 
 These keys change how the model is built, as listed under
-[Model loading](#model-loading). Two ids that differ in a load key are two
-loaded copies of the model. The default is none.
+[Model loading](#model-loading). The default is none.
 
 ### `profiles.*.cache`
 
@@ -518,7 +517,10 @@ default comes from the family defaults.
 
 ### `sampling.max_tokens`
 
-Generation stops after this many tokens. The default is no limit.
+Generation stops after this many tokens. The default is no limit, so
+generation runs until the model stops or the context fills.
+[`gmlx serve --max-tokens`](cli.md#gmlx-serve) sets a cap for server
+requests that set none of their own.
 
 ### `sampling.seed`
 
@@ -532,7 +534,8 @@ different batch shape changes the logits slightly. The default is none.
 Generation ends when it produces this string, or any string in this list.
 A stop string can end generation in the middle of a token, and the
 response then has `finish_reason: "stop"`. The key applies to chat
-completions, and the Anthropic endpoint uses its own `stop_sequences`.
+completions and `/v1/completions`, and the Anthropic endpoint uses its
+own `stop_sequences`.
 The default is none.
 
 ### `sampling.repetition_penalty`
@@ -712,13 +715,14 @@ processes and costs more per token. The default is `fast`.
 
 This key adds a second cache tier on the SSD, so that a prompt survives
 the model unloading or the server restarting. `true` puts the tier at
-`~/.cache/gmlx/apc`, and a mapping sets the `cache.disk.*` keys. The
-default is `false`.
+the default [`path`](#cachediskpath), and a mapping sets the
+`cache.disk.*` keys. The default is `false`.
 
 ### `cache.disk.path`
 
 The SSD tier is stored in this folder, and setting the key turns the tier
-on. The default is `~/.cache/gmlx/apc` when `disk` is `true`.
+on. The default is `$XDG_CACHE_HOME/gmlx/apc`, or `~/.cache/gmlx/apc`
+when `XDG_CACHE_HOME` is not set.
 
 ### `cache.disk.max_gb`
 
@@ -744,10 +748,11 @@ bytes with plain file reads, and `mmap` maps the files. The default is
 
 ## Model discovery
 
-The `discover` block lists folders that the server scans at each start.
-Every GGUF that it finds without an entry under `models` becomes a
-model, so new files appear after a restart. The scan reads only the GGUF
-headers. To write entries once instead, run `gmlx init` or
+The `discover` block lists folders that the server scans at each start
+and reload. Every GGUF that it finds without an entry under `models`
+becomes a model, so new files appear after a restart or a reload.
+`gmlx run`, `gmlx list` and `gmlx rm` scan the same folders. The scan
+reads only the GGUF headers. To write entries once instead, run `gmlx init` or
 `gmlx sync-models`.
 
 ```yaml
@@ -761,7 +766,7 @@ suffix, markers such as `mmproj`, `assistant`, `draft` and `mtp`, and
 imatrix tags, and adds the quantization in short form, such as `-q4`.
 When two files would get the same name, both get the full quantization,
 such as `-q4-k-m` and `-q4-k-s`, and a remaining clash gets a number. The
-server prints the names at start.
+server prints the names in a `[server] discover:` line.
 
 ### `discover[].dir`
 
@@ -781,10 +786,12 @@ that it matches. The default is `true`.
 
 This key turns on speculative decoding for the models found. `auto` and
 `true` turn it on for models with an MTP head, and `false` never does. A
-drafter GGUF in the same folder becomes a model's `draft_gguf` when their
-architecture, hidden size and file name agree. A drafter whose header
-names its base model pairs only with that model, and streamed models get
-no drafter. The default is `auto`.
+drafter GGUF in the same folder becomes a model's `draft_gguf` when its
+architecture can draft for the model, their hidden sizes agree, and their
+file names match. When only one model in the folder qualifies, it gets
+the drafter whatever its file name. A drafter whose header names its base
+model pairs with that model in any scanned folder, and streamed models
+get no drafter. The default is `auto`.
 
 
 ## Server
@@ -851,11 +858,11 @@ no folders.
 
 #### `server.hf_cache`
 
-With `true`, a model `path` can be an `hf:<org>/<repo>/<file.gguf>[@rev]`
-reference, which resolves from the local Hugging Face cache. The Hugging
-Face libraries then run offline, and the server never downloads.
-`gmlx init --from-hf-cache` and `gmlx sync-models --from-hf-cache` write
-such entries and set this key. The
+With `true`, the Hugging Face libraries run offline, and the server never
+downloads. An `hf:` model [`path`](#modelspath) works whatever the value
+of this key. `gmlx init --from-hf-cache` and
+`gmlx sync-models --from-hf-cache` write such entries and set this key,
+and `sync-models` then also scans the cache. The
 [HTTP API](api.md#hugging-face-policy) describes how the server treats a
 request that names a Hugging Face model. The default is `false`.
 
@@ -863,8 +870,8 @@ request that names a Hugging Face model. The default is `false`.
 
 Each service adds an endpoint, and
 [Speech, embeddings and rerank](services.md) lists the models each one
-accepts. A service whose model is missing is turned off with a warning,
-and the server still starts.
+accepts. When the model file of an embeddings or rerank service is
+missing, the server starts without that service.
 
 #### `server.stt`
 
@@ -905,7 +912,7 @@ memory, because the weights map from the file without a copy.
 A model is never unloaded during a generation. Keeping is what
 `gmlx launch --model` asks for, so the model of a coding session survives
 the pauses between turns without holding budget permanently. A request
-with `{"keep": false}` to the same endpoint releases a model, and
+to `POST /v1/keep` with `{"keep": false}` releases a model, and
 `POST /unload` unloads it at once.
 
 Two ids that point to the same GGUF share one loaded copy, unless a
@@ -932,8 +939,7 @@ after the budget. The default is no limit.
 
 This key limits the MLX buffer cache, in GiB. MLX keeps freed GPU memory in
 this cache for reuse instead of returning it to macOS, and at deep context
-it can grow to tens of GB. It is not the KV cache or the prompt cache, and
-its limit never removes their contents. `0` turns the buffer cache off,
+it can grow to tens of GB. `0` turns the buffer cache off,
 and a negative value removes the limit.
 [The MLX buffer cache](memory.md#the-mlx-buffer-cache) explains when to
 change it. By default the server sets a limit from 4 to 12 GiB at start.
@@ -956,7 +962,6 @@ request. `null` or `0` turns off the timeout. The default is `900`.
 
 The server loads these models at start, one at a time, after the pinned
 models, or after the default model when none is pinned. `all` loads every
-model. Preloaded models unload like any idle
 model. The default is none.
 
 #### `server.defaults.profile`
@@ -966,7 +971,8 @@ profile. The default is none.
 
 ### Scheduling
 
-These keys apply to every model, and each has a
+These keys apply to every model. Each one except
+`server.token_queue_timeout_s` also has a
 [`gmlx serve` flag](cli.md#gmlx-serve).
 
 #### `server.prefill_step_size`
@@ -1026,12 +1032,12 @@ describes it. The default is `false`.
 
 #### `server.gpu_keepwarm`
 
-A streamed model with a decode feeder keeps the GPU clock up between
-tokens by default, as
-[Models larger than memory](streaming.md#the-lossless-settings) describes,
-and no other model is affected. `false` turns it off and `true` turns
-it on, overriding `GMLX_GPU_KEEPWARM`. The default is none, which leaves
-keep-warm on for every streamed model with a decode feeder.
+This key controls GPU keep-warm, which keeps the GPU clock up between
+tokens for a streamed model with a decode feeder, as
+[Models larger than memory](streaming.md#the-lossless-settings) describes.
+No other model is affected. `false` turns it off and `true` turns it on,
+overriding `GMLX_GPU_KEEPWARM`. The default is none, which leaves
+keep-warm on.
 
 #### `server.menubar`
 
@@ -1280,15 +1286,15 @@ One tool call may take at most this many seconds. The value is at least
 ### `assistant.mcp`
 
 These [MCP](glossary.md#mcp) servers provide the tools, as a list. Each
-entry has a `name` and exactly one of `command` and `url`. A server that
-fails to start gives a warning, and the assistant runs without its tools.
-The default is none.
+entry has a `name` and exactly one of `command` and `url`. The default is
+none.
 
 ### `assistant.mcp[].name`
 
 This name identifies the server, and it must be unique in the list. When
-two servers offer a tool with the same name, each tool gets its server's
-name as a prefix. This key is required.
+a tool has the same name as a tool from a server earlier in the list, the
+later tool gets its server's name and an underscore as a prefix. This key
+is required.
 
 ### `assistant.mcp[].command`
 
@@ -1312,9 +1318,8 @@ none.
 
 With `true`, `gmlx chat --assistant` and `gmlx talk` remember facts
 across conversations. Memory needs
-[`server.embeddings`](#serverembeddings), and without it the assistant
-warns the first time that it uses memory and continues without it. The
-default is `true`.
+[`server.embeddings`](#serverembeddings), as
+[Memory](assistant.md#memory) describes. The default is `true`.
 
 ### `assistant.memory.path`
 
@@ -1341,9 +1346,8 @@ default is to keep facts forever.
 
 ### `assistant.memory.max_items`
 
-The store holds at most this many facts. When it holds more, the facts
-recalled the fewest times go first, and the oldest go first among equals.
-The value is at least 1. The default is `20000`.
+The store holds at most this many facts, and [Memory](assistant.md#memory)
+describes which facts go first. The value is at least 1. The default is `20000`.
 
 
 ## Chat themes
@@ -1376,8 +1380,10 @@ The default is none.
 
 gmlx checks the whole file when it reads it. An unknown key fails the load
 with the name of the key, so a typo such as `pinned:` for `pin:` is caught
-before the server starts. The one exception is the contents of `sampling`,
-`load` and `cache`, where an unknown key causes only a warning.
+before the server starts. In `sampling`, `load` and `cache`, an unknown
+key causes only a warning. The load does not check the keys inside
+`chat_template_kwargs` or `themes`, and `gmlx chat` warns about a bad
+theme when it starts.
 
 A running server reads its file again on `POST /v1/reload` or on `SIGHUP`.
 Models that are already loaded stay loaded when their load settings did
@@ -1394,9 +1400,14 @@ formatting:
 | `gmlx rm` | It deletes the files of a model and its entry. |
 
 Each of them, and `gmlx init`, tells a running server to reload. Pass
-`--no-reload` to prevent that. A server started with a GGUF path instead
-of a config file has no file to read again, so it ignores the signal and
-answers `/v1/reload` as unsupported.
+`--no-reload` to `init`, `sync-models` or `rm` to prevent that.
+`gmlx pull --no-register` leaves the config file and the running server
+unchanged.
+
+A server started without a config file, from a GGUF path, `--models-dir`
+or a scan of the current folder, has no file to read again. These
+commands do not signal it. It ignores a `SIGHUP` with a log line and
+answers `/v1/reload` with status 501.
 
 
 ## Flags and environment variables

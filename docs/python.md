@@ -2,7 +2,8 @@
 
 The `gmlx` package loads and runs GGUF models from your own Python code.
 Its stable surface is the set of names that the package root exports in
-`gmlx.__all__`.
+`gmlx.__all__`, plus `preflight` and `HadamardFoldError` from
+`gmlx.load.preflight`.
 
 Exports resolve lazily, so `import gmlx` returns immediately and never
 imports MLX, which makes it safe in tooling that only inspects metadata. The
@@ -141,7 +142,7 @@ GGUF header, so a file of many GB is checked in well under a second.
 `load_model` runs it internally, and you can call it yourself to check a
 file first. Its CLI equivalent is `gmlx validate`.
 
-`preflight` and `load_model` raise the same exceptions:
+The same exceptions come from `preflight` and `load_model`:
 
 - `UnsupportedCodecError` means a tensor codec with no kernel here. It
   carries `.arch` and `.unsupported`, a `{codec: count}` dict.
@@ -198,9 +199,10 @@ key = vocab_map_hash(tokenizer)                # 16 hex digits over the id-to-to
 below `width`, which defaults to the vocabulary size. Specials and unfilled
 ids are `None`. ByteLevel vocabularies go through the GPT-2 byte decoder,
 and SentencePiece vocabularies map the U+2581 marker to a space and
-`<0xNN>` pieces to that byte. `whitespace_start_mask(tokenizer, width,
-token_bytes_list=None)` marks the ids whose bytes start with ASCII
-whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
+`<0xNN>` pieces to that byte.
+
+`whitespace_start_mask(tokenizer, width, token_bytes_list=None)` marks the
+ids whose bytes start with ASCII whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
 hashes the id-to-token map with specials left out. Equal hashes mean
 equal maps, not identical tokenization, since merges, the pre-tokenizer
 and the normalizer are not covered.
