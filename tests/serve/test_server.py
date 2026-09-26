@@ -1191,6 +1191,20 @@ def test_serve_loopback_without_key_ok(monkeypatch, capsys):
     assert "WARNING" not in capsys.readouterr().out
 
 
+def test_serve_sets_the_until_eos_marker_unless_capped(monkeypatch):
+    # With no --max-tokens, serve hands mlx-vlm the until-EOS marker, so a
+    # request with no output cap runs until EOS or the context fills.
+    import os
+    sampling = pytest.importorskip("gmlx.serve.patches.sampling")
+    monkeypatch.delenv("MLX_VLM_MAX_TOKENS", raising=False)
+    _stub_serving_stack(monkeypatch)
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert os.environ["MLX_VLM_MAX_TOKENS"] == str(sampling.UNTIL_EOS)
+    _stub_serving_stack(monkeypatch)
+    assert srv._serve(_one_model_cfg(), _ns(max_tokens=300), None) == 0
+    assert os.environ["MLX_VLM_MAX_TOKENS"] == "300"
+
+
 def test_serve_api_key_config_only(monkeypatch, capsys):
     # `server.api_key` in the config is the sole server-side key source. A config key
     # satisfies the non-loopback policy ...

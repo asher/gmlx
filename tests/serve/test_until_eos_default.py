@@ -56,15 +56,3 @@ def test_hook_swaps_the_marker_for_the_room_left(monkeypatch):
     FakeGen()._make_thinking_budget_criteria(pinned, [1, 2, 3])
     assert pinned.max_tokens == 512
 
-
-def test_serve_sets_the_marker_unless_capped(monkeypatch):
-    import os
-    import gmlx.serve.server as srv
-    from tests.serve.test_server import _ns, _one_model_cfg, _stub_serving_stack
-
-    _stub_serving_stack(monkeypatch)
-    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
-    assert os.environ["MLX_VLM_MAX_TOKENS"] == str(sampling.UNTIL_EOS)
-    _stub_serving_stack(monkeypatch)
-    assert srv._serve(_one_model_cfg(), _ns(max_tokens=300), None) == 0
-    assert os.environ["MLX_VLM_MAX_TOKENS"] == "300"
