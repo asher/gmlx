@@ -42,6 +42,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   long context, by 19% on E2B and 5% on 31B with a 30k-token prompt.
 - Gemma-4 E2B and 12B decode faster at long context, by 2% on E2B with a
   30k-token prompt.
+- `gmlx init` writes only the settings you chose and the model entries,
+  under a header that links the configuration reference, instead of every
+  option as a commented example.
 
 ### Fixed
 

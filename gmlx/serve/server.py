@@ -600,8 +600,9 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 models[mc.id] = entry          # update keeps its position
             else:
                 # Insert at the top of the block: appending would land the
-                # entry after the scaffold's trailing commented hints (talk:,
-                # assistant:), which ride the last entry's comment token.
+                # entry after trailing comments, such as the commented hints
+                # that older `gmlx init` files carry, which ride the last
+                # entry's comment token.
                 models.insert(pos, mc.id, entry)
                 pos += 1
             note = discovery.family_comment(mc)

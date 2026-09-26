@@ -364,8 +364,7 @@ def test_wizard_no_eligible_family_no_prompt(monkeypatch, tmp_path):
 
 # Non-interactive flag path
 def test_flag_path_unchanged_without_new_flags(monkeypatch, tmp_path):
-    """Bare flag-driven init (no new flags) still writes today's shape: ttl 900,
-    services left as commented hints."""
+    """Bare flag-driven init (no new flags) writes ttl 900 and no service keys."""
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
     out = tmp_path / "cfg.yaml"
     rc = server._cmd_init(["--models-dir", str(tmp_path), "--out", str(out)])
@@ -374,7 +373,7 @@ def test_flag_path_unchanged_without_new_flags(monkeypatch, tmp_path):
     cfg = config.load_config(out)
     assert cfg.defaults.ttl_s == 900
     assert cfg.stt is None and cfg.tts is None and cfg.embeddings is None
-    assert "# stt: whisper-turbo" in text       # hint, commented
+    assert "stt:" not in text
 
 
 def test_flag_path_mirrors_wizard_knobs(monkeypatch, tmp_path):
@@ -551,7 +550,7 @@ def test_wizard_talk_offers_install_when_extra_missing(monkeypatch, tmp_path):
 
 def test_wizard_talk_skipped_without_both_services(monkeypatch, tmp_path):
     """STT alone (no TTS) never shows the talk step - the historic answer
-    script still fits and the scaffold keeps the commented hint."""
+    script still fits and the scaffold writes no talk block."""
     monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
     monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
     monkeypatch.setattr(extras, "extra_installed", lambda e: True)
@@ -569,6 +568,6 @@ def test_wizard_talk_skipped_without_both_services(monkeypatch, tmp_path):
     ])
     outcome = wizard.run_wizard(default_out=str(out), io=io)
 
-    assert "# talk:" in outcome.text
+    assert "talk:" not in outcome.text
     cfg = config.build_config(yaml.safe_load(outcome.text))
-    assert cfg.talk.voice is None                # defaults, block commented out
+    assert cfg.talk.voice is None

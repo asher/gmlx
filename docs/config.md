@@ -18,32 +18,40 @@ gmlx init --models-dir ~/models
 
 The file goes to `~/.config/gmlx/gmlx.yaml`. With no flags on a terminal,
 `init` asks its questions as a wizard instead. The scan reads only the GGUF
-headers, so it takes seconds even for a large folder. This is the part of
-the result that does the work, with the comments removed:
+headers, so it takes seconds even for a large folder. The result holds the
+server settings you chose and the models it found:
 
 ```yaml
+# gmlx configuration, written by `gmlx init`.
+# Every key, with its default: https://asher.github.io/gmlx/config.html
+# The settings a server runs with: gmlx serve --print-config
+# The sampling each model starts from: gmlx profiles
+
 server:
   host: 127.0.0.1
   port: 8080
   model_dirs:
     - ~/models
-  hf_cache: false
   defaults:
     ttl_s: 900
   cache:
     enabled: true
-    disk: false
 
 models:
+  # sampling (gemma): t=1 top_p=0.95 top_k=64
   gemma-4-12b-it-q4:
     path: gemma-4-12b-it-Q4_K_M.gguf
+  # sampling (qwen3.6): t=1 top_p=0.95 top_k=20
   qwen3.6-27b-q4:
     path: Qwen3.6-27B-Q4_K_S.gguf
+    speculative: true
 ```
 
-The file that `init` writes also carries every other option as a commented
-example with its default, so you can turn a setting on by removing the `#`.
-Start the server with `gmlx serve`, which finds the file on its own.
+The comment above each model shows the sampling values it starts from,
+which come from its [family defaults](family-defaults.md) and from the
+GGUF itself. Every other key
+has a default and is documented on this page, so add a key only to change
+it. Start the server with `gmlx serve`, which finds the file on its own.
 
 
 ## Where gmlx looks

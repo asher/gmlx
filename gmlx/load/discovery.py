@@ -31,7 +31,6 @@ import sys
 from dataclasses import dataclass
 
 from gmlx.textfmt import plural_s
-from gmlx.commands.extras import install_hint
 import gmlx.gen.profiles as _family_profiles
 from gmlx.config import DiscoverSpec, ModelCfg
 from .config_synth import supported_arches
@@ -1139,324 +1138,53 @@ def family_comment(mc: ModelCfg) -> str:
         f"{fam} + gguf" if fam and fam != "default" else "gguf")
     if not src:
         return ""
-    # `sampling (<src>):` and not `<src>: ...` -- a comment starting with a
-    # bare `word:` reads as a commented-out option key (see
-    # tests/load/test_discovery.py `_uncomment_hints`).
+    # `sampling (<src>):` and not `<src>: ...`: a comment that starts with a
+    # bare `word:` reads as a commented-out key.
     return f"sampling ({src}): {' '.join(parts)}" if parts else f"sampling ({src})"
 
 
-def _rows(rows: list, indent: str = "  ") -> list[str]:
-    """``rows``: ``(keyval_text, comment_text_or_None)``, mixed live and
-    commented-example lines. A LIVE row's comment renders on its own line above
-    the key (no wrapping on narrow terminals, no busy right-hand column);
-    commented example rows keep a trailing aligned comment via :func:`_aligned`
-    (they are reference prose either way)."""
-    out = []
-    commented = [r for r in rows if r[0].startswith("#")]
-    aligned = iter(_aligned(commented, indent=indent))
-    for kv, c in rows:
-        if kv.startswith("#"):
-            out.append(next(aligned))
-        elif c is None:
-            out.append(f"{indent}{kv}")
-        else:
-            out.append(f"{indent}# {c}")
-            out.append(f"{indent}{kv}")
-    return out
+CONFIG_DOCS_URL = "https://asher.github.io/gmlx/config.html"
 
 
-def _aligned(rows: list, indent: str = "  ", gap: int = 3, cap: int = 40) -> list[str]:
-    """``rows``: ``(keyval_text, comment_text_or_None)``. The comment column is
-    computed from this group's own longest ``keyval_text`` up to ``cap`` chars, so
-    it stays aligned regardless of live vs hint values or a user's own strings --
-    not hardcoded spacing. A row past ``cap`` (a long HF id, an absolute path a
-    user passed for e.g. ``embeddings:``) is a one-off outlier: it gets a plain
-    single-gap comment instead of stretching the whole group's column out to
-    match it."""
-    width = max((len(kv) for kv, c in rows if c is not None and len(kv) <= cap),
-               default=0)
-    out = []
-    for kv, c in rows:
-        if c is None:
-            out.append(f"{indent}{kv}")
-        elif len(kv) <= width:
-            out.append(f"{indent}{kv.ljust(width)}{' ' * gap}# {c}")
-        else:
-            out.append(f"{indent}{kv}{' ' * gap}# {c}")
-    return out
-
-
-def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s) -> list[str]:
-    """Header comment + server: core, model_dirs, and discovery/capacity rows."""
-    lines: list[str] = []
-    lines.append("# gmlx server config -- created by `gmlx init`.")
-    lines.append("# Every option below is live or a commented example with its "
-                 "default. Inspect the")
-    lines.append("# effective config: `gmlx serve --print-config` | sampling "
-                 "table: `gmlx profiles`")
-    lines.append("# | full reference: docs/server-config.md")
-    lines.append("server:")
-    lines.extend(_aligned([
-        ("host: 127.0.0.1", None),
-        (f"port: {int(port or 8080)}", None),
-        ("# api_key: change-me",
-         "optional for the default localhost bind, required otherwise"),
-        ("# no_auth: true",
-         "explicit opt-out of that requirement (e.g. auth handled by a "
-         "front proxy/mTLS)"),
-        ("# menubar: false",
-         "disable the menu-bar monitor raised when `serve` backgrounds "
-         "(macOS only, default on)"),
-    ]))
-    lines.append("")
-    lines.append("  # Model discovery + capacity")
-    lines.append("  model_dirs:")
+def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
+                           stt, tts, embeddings, rerank, ttl_s,
+                           default_model, disk_cache, disk_cache_gb) -> list[str]:
+    """The server block: the bind, the model folders and the chosen values."""
+    lines = ["server:", "  host: 127.0.0.1", f"  port: {int(port or 8080)}"]
     if dirs:
-        for d in dirs:
-            lines.append(f"    - {d}")
+        lines.append("  model_dirs:")
+        lines.extend(f"    - {d}" for d in dirs)
     else:
-        lines.append("    []      # no local dirs; models below resolve from the "
-                     "hf cache")
-    hf_val = "true" if hf_cache else "false"
-    discovery_rows: list = [
-        (f"hf_cache: {hf_val}",
-         "hf model paths resolve from the local cache, no downloads"),
-        ("# budget_gb: 96",
-         "GB cap on resident model weights (default: auto-sized to RAM)"),
-        ("# max_models: 2",
-         "max resident models at once (checked after budget_gb)"),
-        ("# family_defaults: true",
-         "built-in model architecture sampling defaults (false to disable)"),
-    ]
+        lines.append("  model_dirs: []")
+    if hf_cache:
+        lines.append("  hf_cache: true")
     if token_queue_timeout_s is not None:
-        discovery_rows.append(
-            (f"token_queue_timeout_s: {_fmt_num(token_queue_timeout_s)}",
-             "abort if no new token received in this time (0 = never, "
-             "includes prefill time for first token)"))
-    else:
-        discovery_rows.append(
-            ("# token_queue_timeout_s: 600",
-             "abort if no new token received in this time (0 = never, "
-             "includes prefill time for first token)"))
-    lines.extend(_rows(discovery_rows))
-    lines.append("")
-    return lines
-
-
-def _scaffold_services_block(stt, tts, embeddings, rerank) -> list[str]:
-    """Optional service endpoints; a chosen value uncomments its line."""
-    lines: list[str] = []
-    # Optional service models. A chosen value uncomments one line; otherwise a short
-    # hint keeps the knob discoverable. Endpoints are OpenAI-compatible.
-    lines.append("  # Optional service endpoints (all OpenAI-compatible)")
-    svc_rows = []
-    if stt:
-        svc_rows.append((f"stt: {stt}",
-                         "speech-to-text (POST /v1/audio/transcriptions)"))
-    else:
-        svc_rows.append(("# stt: whisper-turbo",
-                         f"speech-to-text: {install_hint('stt')} + ffmpeg"))
-    if tts:
-        svc_rows.append((f"tts: {tts}", "text-to-speech (POST /v1/audio/speech)"))
-    else:
-        svc_rows.append(("# tts: kokoro",
-                         f"text-to-speech: {install_hint('tts')} + ffmpeg"))
-    if embeddings:
-        svc_rows.append((f"embeddings: {embeddings}",
-                         "text embeddings (POST /v1/embeddings)"))
-    else:
-        svc_rows.append(("# embeddings: qwen3-embed-0.6b",
-                         "text embeddings: GGUF embedders work out of the box, "
-                         f"{install_hint('embeddings')} for safetensors"))
-    if rerank:
-        svc_rows.append((f"rerank: {rerank}", "reranking (POST /v1/rerank)"))
-    else:
-        svc_rows.append(("# rerank: qwen3-rerank-0.6b",
-                         "reranking: Qwen3-Reranker GGUF works out of the box"))
-    lines.extend(_rows(svc_rows))
-    lines.append("")
-    return lines
-
-
-def _scaffold_defaults_block(ttl_s, default_model) -> list[str]:
-    """server.defaults: ttl + fallback model + profile hint."""
-    lines: list[str] = []
+        lines.append(f"  token_queue_timeout_s: {_fmt_num(token_queue_timeout_s)}")
+    for key, value in (("stt", stt), ("tts", tts), ("embeddings", embeddings),
+                       ("rerank", rerank)):
+        if value:
+            lines.append(f"  {key}: {value}")
     lines.append("  defaults:")
-    ttl_val = 900 if ttl_s is None else ttl_s
-    defaults_rows = [
-        (f"ttl_s: {_fmt_num(ttl_val)}",
-         "idle-unload timeout, seconds; 0/null = never unload"),
-    ]
+    lines.append(f"    ttl_s: {_fmt_num(900 if ttl_s is None else ttl_s)}")
     if default_model:
-        defaults_rows.append((f"model: {default_model}",
-                              "fallback model when a request omits `model`"))
-    else:
-        defaults_rows.append(("# model: <id>",
-                              "fallback model when a request omits `model`"))
-    lines.extend(_rows(defaults_rows, indent="    "))
-    lines.append("    # profile: <name>    # global fallback profile (rules + "
-                 "per-model settings win over this); rarely")
-    lines.append("    #                    # needed -- each model already "
-                 "starts from its family defaults")
-    lines.append("")
-    return lines
-
-
-def _scaffold_cache_block(disk_cache, disk_cache_gb) -> list[str]:
-    """APC prompt-cache block, with the SSD tier when requested."""
-    lines: list[str] = []
-    lines.append("  # APC prompt cache: reuse a shared prompt prefix across "
-                 "requests. An exact-prefix")
-    lines.append("  # hit skips the prefill recompute (~90% faster TTFT; "
-                 "storing it costs ~1% of")
-    lines.append("  # prefill). See docs/server-config.md \"Cache keys\". "
-                 "Overridable per profile/model.")
+        lines.append(f"    model: {default_model}")
     lines.append("  cache:")
-    cache_rows = [
-        ("enabled: true", None),
-        ("# exact_entries: 4",
-         "exact-prefix snapshots kept in memory for hybrid/recurrent "
-         "models (default 4)"),
-    ]
+    lines.append("    enabled: true")
     if disk_cache:
-        # `init --disk-cache` adds the SSD tier, so prefix reuse survives an
-        # idle-unload / restart out of the box.
         gb = 50 if disk_cache_gb is None else disk_cache_gb
-        cache_rows.append(
-            ("disk:", "SSD tier: persists cache across an idle-unload or restart"))
-        lines.extend(_rows(cache_rows, indent="    "))
-        lines.extend(_rows([
-            ("path: ~/.cache/gmlx/apc", None),
-            (f"max_gb: {_fmt_num(gb)}",
-             "disk cap per model (worst case: max_gb * resident models)"),
-        ], indent="      "))
-    else:
-        cache_rows.append(
-            ("disk: false",
-             "true persists the cache to ~/.cache/gmlx/apc so reuse "
-             "survives an idle-unload or restart; a mapping sets "
-             "{path, max_gb, ...}"))
-        lines.extend(_rows(cache_rows, indent="    "))
-    lines.append("")
-    return lines
-
-
-def _scaffold_profiles_block() -> list[str]:
-    """Sampling/profiles reference comments + profiles/rules hints."""
-    lines: list[str] = []
-    lines.append("# Sampling. Every model automatically starts from its family's "
-                 "model-card")
-    lines.append("# recommended sampling, refined by any sampling the GGUF "
-                 "itself embeds (the")
-    lines.append("# comment above each model below; `gmlx profiles` prints the "
-                 "full table).")
-    lines.append("# Built-in intents work on any model with zero config,")
-    lines.append("# as the request `model` (`<id>@coding`), a request `profile` "
-                 "field, or")
-    lines.append("# `run/chat --profile`: @coding @instruct @creative "
-                 "@reasoning-low|-medium|-high")
-    lines.append("# Profiles you define here layer on top of the family base. "
-                 "Three override levels:")
-    lines.append("#   1. reuse a built-in name (e.g. `coding:`) -> replaces that "
-                 "intent everywhere")
-    lines.append("#   2. `extends: <name>`                      -> compose a "
-                 "variant of one")
-    lines.append("#   3. a model's `profiles:` block            -> reshape an "
-                 "intent for one model")
-    lines.append("profiles:")
-    lines.append("  # brief:     {sampling: {max_tokens: 512}}")
-    lines.append("  # my-coding: {extends: coding, sampling: {min_p: 0.05}, "
-                 "load: {kv_bits: 8}}")
-    lines.append("  # agents:    {chat_template_kwargs: {preserve_thinking: "
-                 "true}}   # keep prior-turn <think> (Qwen3.6, Gemma-4)")
-    lines.append("  # narrator:  {system: \"Answer in second person.\", "
-                 "chat_template: ~/.config/gmlx/templates/narrator.jinja}")
-    lines.append("")
-    lines.append("# Assign a profile to every id a glob matches "
-                 "(a model's own `profile:` wins):")
-    lines.append("# rules:")
-    lines.append("#   - {match: \"*-coder-*\", profile: my-coding}")
-    lines.append("")
-    return lines
-
-
-def _scaffold_aliases_block(aliases) -> list[str]:
-    """aliases: block (real entries, or a commented hint)."""
-    lines: list[str] = []
-    if aliases:
-        lines.append("# Friendly request names, listed in /v1/models")
-        lines.append("aliases:")
-        for name, target in aliases.items():
-            lines.append(f"  {name}: {target}")
-    else:
-        lines.append("# Friendly request names, listed in /v1/models:")
-        lines.append("# aliases: {fast: <id>, coder: <id>@coding}")
-    lines.append("")
-    return lines
-
-
-def _scaffold_discover_block() -> list[str]:
-    """Commented discover: scan-on-start example."""
-    lines: list[str] = []
-    lines.append("# Auto-register models by scanning a directory on every server "
-                 "start, instead")
-    lines.append("# of listing them by hand (skip this if you're happy curating "
-                 "`models:` below")
-    lines.append("# -- `gmlx init` already scanned once to produce that list).")
-    lines.append("# discover:")
-    lines.extend(_aligned([
-        ("- dir: ~/llm/gguf", "default: server.model_dirs"),
-        ("  recursive: true", "default: false"),
-        ("  pair_mmproj: true",
-         "auto-pair a sibling mmproj into a VLM entry (default: true)"),
-        ("  speculative: auto",
-         "auto | true | false -- wire in native-head MTP drafters "
-         "(default: auto)"),
-    ], indent="#   "))
+        lines.append("    disk:")
+        lines.append("      path: ~/.cache/gmlx/apc")
+        lines.append(f"      max_gb: {_fmt_num(gb)}")
     lines.append("")
     return lines
 
 
 def _scaffold_models_block(models, dirs) -> list[str]:
-    """models: per-model key reference + one entry per discovered model."""
-    lines: list[str] = []
-    lines.append("models:")
-    # Per-model knobs, documented once instead of repeated under every entry.
-    lines.append("  # Optional per-model keys:")
-    lines.append("  #   profile: <name> (default profile for this model) | "
-                 "family: <key> (override")
-    lines.append("  #   auto-detection) | profiles: {coding: {sampling: {...}}} "
-                 "(reshape one intent")
-    lines.append("  #   for this model) | overrides: {sampling: {...}, "
-                 "load: {...}, ...} (also:")
-    lines.append("  #   cache, system, chat_template(_kwargs); always wins "
-                 "over any profile) |")
-    # Every wrapped line below must carry a `<placeholder>` (or `{...}`) so
-    # _uncomment_hints's per-line heuristic (tests/load/test_discovery.py) leaves this
-    # prose-only reference block commented instead of splicing a bare
-    # `key: value | key: value` fragment into the parsed YAML.
-    lines.append("  #   adapter: <lora.gguf> | pin: true (never auto-unload) | "
-                 "ttl_s: 600")
-    lines.append("  #   (overrides defaults.ttl_s) | speculative: true "
-                 "(native-head MTP) |")
-    lines.append("  #   draft_gguf: <assistant.gguf> (assistant-drafter MTP) |")
-    lines.append("  #   mmproj: <file> (VLM) | stream: experts (over-RAM MoE: "
-                 "experts stream from")
-    lines.append("  #   disk, rest of the model + KV on GPU) | stream: cpu "
-                 "(whole model on CPU) |")
-    lines.append("  #   moe_expert_mass: <P> (adaptive lossy fan-out on "
-                 "streamed experts; size P")
-    lines.append("  #   with `gmlx run --moe-expert-probe`) | "
-                 "moe_experts: <K> (fixed cap) |")
-    lines.append("  #   moe_miss_shed: <P> (drop arena-miss experts, keep "
-                 "mass P) |")
-    lines.append("  #   moe_prestage: <ranked|keepers> (keepers = prestage "
-                 "only miss-shed keepers) |")
-    lines.append("  #   moe_layer_shed: <P> (skip routed path with "
-                 "probability P)")
+    """One entry per discovered model, each under its sampling comment."""
+    lines = ["models:"]
     if not models:
-        lines.append("  # (none discovered) -- point model_dirs at a folder of "
-                     ".gguf files")
+        lines.append("  # No models found. Add GGUF files to a folder in "
+                     "model_dirs, then run `gmlx sync-models`.")
     for mc in sorted(models, key=lambda m: m.id):
         note = family_comment(mc)
         if note:
@@ -1464,120 +1192,16 @@ def _scaffold_models_block(models, dirs) -> list[str]:
         lines.append(f"  {mc.id}:")
         lines.append(f"    path: {_rel(mc.path, dirs)}")
         if mc.profile:
-            lines.append("    # pinned default (requests can still "
-                         "switch @intent)")
             lines.append(f"    profile: {mc.profile}")
         if mc.mmproj:
             lines.append(f"    mmproj: {_rel(mc.mmproj, dirs)}")
         if mc.draft_gguf:
-            lines.append("    # a companion drafter sits next to the model; "
-                         "this key turns speculative decoding on")
+            # The drafter key turns speculative decoding on at load.
             lines.append(f"    draft_gguf: {_rel(mc.draft_gguf, dirs)}")
         elif mc.speculative:
-            lines.append("    # native-head MTP (drafter inside the "
-                         "target GGUF)")
             lines.append("    speculative: true")
         if mc.stream:
-            lines.append("    # experts stream from disk (over-RAM MoE); "
-                         "rest of the model + KV on GPU")
             lines.append(f"    stream: {mc.stream}")
-    lines.append("")
-    return lines
-
-
-def _scaffold_talk_block(talk) -> list[str]:
-    """talk: voice-chat block (real values, or the commented field reference)."""
-    from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
-    modifiers = " | ".join(PUSH_TO_TALK_MODIFIERS)
-    alternates = " | ".join(m for m in PUSH_TO_TALK_MODIFIERS if m != "globe")
-    lines: list[str] = []
-    if talk:
-        lines.append("# Voice chat client: `gmlx talk` "
-                     "(wake word -> STT -> chat -> TTS)")
-        lines.append("talk:")
-        lines.extend(_rows([
-            (f"voice: {talk['voice']}",
-             "kokoro preset or a qwen3-tts speaker name"),
-            (f"wake_word: \"{talk['wake_word']}\"", None),
-            (f"mode: {talk['mode']}",
-             "wake=say the phrase | vad=just start talking | "
-             "ptt=space in the terminal | text=typed"),
-            (f"push_to_talk_modifier: {talk.get('push_to_talk_modifier', 'globe')}",
-             f"menu bar hotkey is <key>+Space: {modifiers}"),
-        ]))
-    else:
-        lines.append("# Voice chat client (`gmlx talk`): needs stt + tts above "
-                     f"+ `{install_hint('talk')}`")
-        lines.append("# talk:")
-        talk_field_rows = [
-            ("model: <id>@profile",
-             "which model to talk to (default: server's default model)"),
-            ("voice: af_heart", "kokoro preset or a qwen3-tts speaker name"),
-            ("speed: 1.0", "TTS playback speed multiplier"),
-            ("wake_word: \"hey assistant\"", "any phrase works, no training needed"),
-            ("wake_threshold: 0.3",
-             "detection confidence needed to trigger (0-1)"),
-            ("mode: wake",
-             "wake=say the phrase | vad=just start talking | "
-             "ptt=space in the terminal | text=typed"),
-            ("push_to_talk_modifier: globe",
-             "menu bar hotkey is <key>+Space; keyboards without a Globe key: "
-             f"{alternates}"),
-            ("system: <prompt>", "spoken persona (default: a speakable-output prompt; \"\" disables)"),
-            ("language: en", "whisper STT language hint (default: auto-detect)"),
-            ("max_tokens: 512", "cap on spoken reply length"),
-            ("chime: true", "audio chime on wake / turn end"),
-            ("input_device: <name>",
-             "sounddevice name/index (default: system default mic)"),
-            ("output_device: <name>",
-             "sounddevice name/index (default: system default output)"),
-        ]
-        lines.extend(_aligned(talk_field_rows, indent="#   "))
-        lines.append("#")
-        lines.append("#   vad:                           # endpointing tuning, "
-                     "only used in `mode: vad`")
-        vad_rows = [
-            ("threshold: 0.6", "speech-probability threshold (0-1)"),
-            ("silence_ms: 550", "trailing silence that ends an utterance"),
-            ("min_speech_ms: 300", "shorter utterances are discarded as noise"),
-            ("pre_roll_ms: 400", "audio kept from before speech onset"),
-        ]
-        lines.extend(_aligned(vad_rows, indent="#     "))
-        lines.append("#")
-        lines.append("#   brain: chat    # chat=plain turn-based | "
-                     "assistant=adds MCP tools + long-term memory")
-    lines.append("")
-    return lines
-
-
-def _scaffold_assistant_block() -> list[str]:
-    """Commented assistant: tool-loop reference block."""
-    lines: list[str] = []
-    lines.append("# The built-in tool-loop assistant, shared by `talk.brain: "
-                 "assistant`,")
-    lines.append("# `chat --assistant`, and served `server.assistants` aliases "
-                 "(NOT the external")
-    lines.append("# coding agents `gmlx launch` points at the server):")
-    lines.append("# assistant:")
-    assistant_rows = [
-        ("max_tool_rounds: 8", "tool-call round-trips per turn"),
-        ("tool_timeout_s: 60", "per-tool execution timeout"),
-    ]
-    lines.extend(_aligned(assistant_rows, indent="#   "))
-    lines.append("#   mcp:                         # MCP servers "
-                 "providing tools")
-    lines.append("#     - name: my-tools")
-    lines.append("#       command: [npx, -y, some-mcp-server]   # stdio "
-                 "transport (or use url: for HTTP)")
-    lines.append("#   memory:")
-    memory_rows = [
-        ("enabled: true", "long-term memory (sqlite + embeddings)"),
-        ("top_k: 4", "memories recalled per turn"),
-        ("ttl_days: <n>", "expire memories older than this (default: never)"),
-        ("max_items: 20000",
-         "store size cap, evicts least-recalled oldest first"),
-    ]
-    lines.extend(_aligned(memory_rows, indent="#     "))
     lines.append("")
     return lines
 
@@ -1588,22 +1212,23 @@ def scaffold_yaml(models: list[ModelCfg], *, model_dirs,
                   stt=None, tts=None, embeddings=None, rerank=None,
                   default_model=None, aliases=None, ttl_s=None,
                   token_queue_timeout_s=None, talk=None, port=None) -> str:
-    """Emit a starter YAML config from discovered models. Local paths render relative
-    to ``model_dirs`` when possible; ``hf:`` cache refs pass through portably. The
-    output parses cleanly via :func:`config.load_config`; commented hints show the
-    optional knobs. ``hf_cache`` writes ``server.hf_cache: true`` (set by
-    ``init --from-hf-cache`` so the cache-resident entries resolve).
+    """Emit a starter YAML config from discovered models. The file holds only a
+    header, the chosen server values and the model entries; every other key is
+    documented at :data:`CONFIG_DOCS_URL`. Local paths render relative to
+    ``model_dirs`` when possible; ``hf:`` cache refs pass through portably. The
+    output parses cleanly via :func:`config.load_config`. ``hf_cache`` writes
+    ``server.hf_cache: true`` (set by ``init --from-hf-cache`` so the
+    cache-resident entries resolve).
 
-    The wizard / ``init --with-*`` knobs uncomment what would otherwise be a hint:
-    ``stt`` / ``tts`` / ``embeddings`` / ``rerank`` write ``server.<svc>``; ``ttl_s`` and
-    ``token_queue_timeout_s`` write their server knobs (``0`` => never / wait
-    forever); ``default_model`` writes ``server.defaults.model``; ``aliases``
-    (``{name: id}``) writes a real ``aliases:`` block. ``disk_cache`` turns the APC
-    SSD tier on, with ``disk_cache_gb`` as the per-namespace ``max_gb`` cap (default
-    50 when unset). All must reference ids that exist in ``models`` - the caller
-    curates that. ``talk`` (``{voice, wake_word, mode}``) writes a top-level
-    ``talk:`` block for the voice-chat client; ``None`` leaves a commented hint.
-    ``port`` overrides the default 8080 (``init --port``)."""
+    ``stt`` / ``tts`` / ``embeddings`` / ``rerank`` write ``server.<svc>``;
+    ``ttl_s`` and ``token_queue_timeout_s`` write their server keys (``0`` =>
+    never / wait forever); ``default_model`` writes ``server.defaults.model``;
+    ``aliases`` (``{name: id}``) writes an ``aliases:`` block. ``disk_cache`` turns
+    the APC SSD tier on, with ``disk_cache_gb`` as the per-namespace ``max_gb`` cap
+    (default 50 when unset). All must reference ids that exist in ``models`` - the
+    caller curates that. ``talk`` (``{voice, wake_word, mode}``) writes a top-level
+    ``talk:`` block for the voice-chat client. ``port`` overrides the default 8080
+    (``init --port``)."""
     # Anchor cwd-relative roots: the server resolves `model_dirs` against its
     # own cwd (launchd runs at `/`), so a root written as typed ("models")
     # silently yields a zero-model server from any other directory. `~` and
@@ -1611,17 +1236,30 @@ def scaffold_yaml(models: list[ModelCfg], *, model_dirs,
     dirs = [d if d.startswith(("~", "$")) or os.path.isabs(os.path.expandvars(d))
             else os.path.abspath(d)
             for d in model_dirs]
-    lines: list[str] = []
+    lines = [
+        "# gmlx configuration, written by `gmlx init`.",
+        f"# Every key, with its default: {CONFIG_DOCS_URL}",
+        "# The settings a server runs with: gmlx serve --print-config",
+        "# The sampling each model starts from: gmlx profiles",
+        "",
+    ]
     lines += _scaffold_server_block(
         dirs, hf_cache=hf_cache, port=port,
-        token_queue_timeout_s=token_queue_timeout_s)
-    lines += _scaffold_services_block(stt, tts, embeddings, rerank)
-    lines += _scaffold_defaults_block(ttl_s, default_model)
-    lines += _scaffold_cache_block(disk_cache, disk_cache_gb)
-    lines += _scaffold_profiles_block()
-    lines += _scaffold_aliases_block(aliases)
-    lines += _scaffold_discover_block()
+        token_queue_timeout_s=token_queue_timeout_s,
+        stt=stt, tts=tts, embeddings=embeddings, rerank=rerank, ttl_s=ttl_s,
+        default_model=default_model, disk_cache=disk_cache,
+        disk_cache_gb=disk_cache_gb)
+    if aliases:
+        lines.append("aliases:")
+        lines.extend(f"  {name}: {target}" for name, target in aliases.items())
+        lines.append("")
     lines += _scaffold_models_block(models, dirs)
-    lines += _scaffold_talk_block(talk)
-    lines += _scaffold_assistant_block()
+    if talk:
+        lines.append("talk:")
+        lines.append(f"  voice: {talk['voice']}")
+        lines.append(f"  wake_word: \"{talk['wake_word']}\"")
+        lines.append(f"  mode: {talk['mode']}")
+        lines.append("  push_to_talk_modifier: "
+                     f"{talk.get('push_to_talk_modifier', 'globe')}")
+        lines.append("")
     return "\n".join(lines)
