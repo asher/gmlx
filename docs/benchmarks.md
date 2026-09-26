@@ -453,13 +453,14 @@ This Mamba2 hybrid has a head dimension of 128.
 
 ### Reading the tables
 
-The kvarn cache beats the affine cache of the same width on both legs at every
-width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the
-two converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8 on
-the 9B model and matches affine 8 on the 27B model, in three quarters of
-the memory of affine 8. At 32K, its decode median can trail affine
-8 by a few percent while its p99 and top-1 stay ahead. The split width
-k6 v5 keeps the median of kvarn 6 with the p99 and top-1 of kvarn 5.
+The kvarn cache beats the affine cache of the same width on both legs at
+every width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and
+the two converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8
+on the 9B model and matches affine 8 on the 27B model, in three quarters
+of the memory of affine 8. At 32K, its decode median can trail affine 8
+by a few percent while its p99 and top-1 stay ahead. The split width
+k6 v5 keeps the decode median of kvarn 6, and its p99 and top-1 are at
+least as good as those of kvarn 5.
 
 When two caches differ by a few percent on one measure, prefer the one
 with the lower p99 and the higher top-1. Top-1 is closest to what a greedy

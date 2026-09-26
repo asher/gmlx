@@ -777,7 +777,7 @@ confidence. A question skipped by `ask_if` prints `skipped`.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `REQUEST.json`, positional | None | Send the request body in this file. |
+| `REQUEST.json`, positional | Required | Send the request body in this file. |
 | `--url URL` | The managed server | Query the server at this base URL. |
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The `GMLX_API_KEY` variable | Send this key to a keyed server. |

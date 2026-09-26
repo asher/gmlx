@@ -75,7 +75,7 @@ The rendering of the prompt follows these keyword arguments:
 | `system_prompt` | `None` | It is prepended as a system message on the templated path. |
 | `template_kwargs` | `None` | These extra kwargs go to `apply_chat_template`, such as `{"enable_thinking": False}`. |
 
-The KV cache is set by these keyword arguments:
+Six keyword arguments set the KV cache:
 
 | Kwarg | Default | Meaning |
 |---|---|---|

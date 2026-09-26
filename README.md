@@ -9,8 +9,8 @@ The fastest way to run GGUF models on Apple Silicon.
 
 gmlx is a local inference platform. You can chat with an open model in the
 terminal or your browser, serve it over OpenAI and Anthropic compatible APIs,
-connect a coding agent to it, talk to it by voice, build a local RAG stack on
-it and fine-tune it with LoRA.
+and connect a coding agent to it. You can also talk to it by voice, build a
+local RAG stack on it and fine-tune it with LoRA.
 
 It runs the community's K-quant and IQ-quant GGUF builds exactly as
 published. Those formats are the most accurate open quants at a given file
@@ -359,9 +359,9 @@ and the runtime's design in
 gmlx builds on [llama.cpp and ggml](https://github.com/ggml-org/llama.cpp)
 for the GGUF format and the K-quant reference implementations,
 [MLX and mlx-lm](https://github.com/ml-explore/mlx-lm) for the runtime and
-model implementations, [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) for the
-server app, generation step loop and vision towers,
-[mlx-whisper](https://pypi.org/project/mlx-whisper/) for speech-to-text, and
+model implementations, and [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) for
+the server app, generation step loop and vision towers. Speech uses
+[mlx-whisper](https://pypi.org/project/mlx-whisper/) for speech-to-text and
 [mlx-audio](https://pypi.org/project/mlx-audio/) for text-to-speech.
 
 ## License

@@ -104,8 +104,9 @@ itself. Qwen3.8-27B keeps its native head until you pass `--draft-gguf`.
 The block defaults to the size that the checkpoint was trained with, 8 on
 Qwen3.8 and 16 on Muse Glimmer, so a round drafts 7 or 15 tokens.
 `--draft-block-size` makes the block smaller. The drafter handles one
-sequence at a time, so its server width cap is 1. Acceptance is exact by
-default, and `--stochastic-mtp` applies to DFlash 2 as well.
+sequence at a time, which sets its
+[server width cap](config.md#modelsspeculative_width_cap). Acceptance is
+exact by default, and `--stochastic-mtp` applies to DFlash 2 as well.
 
 ## Bonsai drafters
 

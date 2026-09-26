@@ -57,9 +57,9 @@ describes.
 
 Head dimensions of 128, 256 and 512 are the only ones that kvarn accepts,
 so layers with a head dimension of 64, as in gpt-oss, use affine
-quantization only. The scheme also declines [MLA](glossary.md#mla) models such as
-DeepSeek-V4, GLM-5.3 and Kimi K2 and K3, whose compressed cache affine
-quantization still packs. Turns with images or audio keep an fp16 cache.
+quantization only. The scheme also declines [MLA](glossary.md#mla)
+models such as DeepSeek-V4, GLM-5.3 and Kimi K2 and K3, whose compressed
+cache affine quantization still packs. Turns with images or audio keep an fp16 cache.
 
 ## Choosing a scheme by model
 

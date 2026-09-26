@@ -38,7 +38,7 @@ the measured width the batch is faster without drafting.
 
 New requests join between verify rounds, when the loop drains an injection
 queue, extends the target KV cache and the drafter with the new rows and
-re-checks the cap. A batch that comes back under the cap re-arms itself with
+re-checks the cap. A batch that comes back within the cap re-arms itself with
 a capture round, a single plain-cost forward that collects the hidden state
 the drafter needs, described under [Re-arming a drained
 batch](#re-arming-a-drained-batch).
@@ -82,7 +82,7 @@ up.
 ## Re-arming a drained batch
 
 A batch gated to plain decode re-arms when finishing rows bring it back
-under the cap. Because re-arming needs fresh hidden state and shared KV for
+within the cap. Because re-arming needs fresh hidden state and shared KV for
 each surviving row, the resume path re-runs the generator's cold-start
 sequence on fresh captures instead of reusing per-row state:
 

@@ -33,8 +33,8 @@ shows a page's source, so download one to watch the animation.
 Both pages ran as generated, and the larger quant also added scroll and
 drag controls for the cruising pace that the prompt never asked for. The
 samples show scale. A model five to seven times the machine's RAM
-sustained a coherent 30k-token single-file program at 1.15 to 1.34
-tok/s.
+sustained coherent single-file programs of 24k to 31k tokens at 1.15 to
+1.34 tok/s.
 
 ## Hy3
 
@@ -209,7 +209,7 @@ Crediting both tables as off-disk gives this fit plan.
 ```
 
 Without the credit the planner prices the tables as every-token weights and
-the arena falls to 11 GB, a sixth of the experts.
+the arena falls to 11 GB, about 6% of the experts.
 
 How the tables reach Metal decides whether that arena exists. mlx-kquant
 wraps a tensor's window of the mapped file in a Metal buffer. A window
@@ -218,7 +218,7 @@ dims are int32, and its dtype can widen only to a width that the row byte
 count divides. For 84-byte rows that width is 4 bytes and the 1-D ceiling
 is 8.6 GB, so a reader limited to 1-D windows copies each 30 GiB engram
 table into dirty, partly swapped Metal memory instead. `vmmap -summary`
-shows the two copies as 60.1 GB of `IOAccelerator`. The reclaimable-RAM
+shows the two copies as 60.1 GiB of `IOAccelerator`. The reclaimable-RAM
 snapshot at install then reads about 45 GB and clamps the arena to 13 GB,
 and the governor sheds it toward 3 GB.
 
@@ -231,9 +231,9 @@ table and then with a 2-D window, gives these figures.
 | | Copied | 2-D window |
 |---|---|---|
 | Q2_K table, zero-copy views | 61 of 62 | 62 of 62 |
-| Q2_K table, `IOAccelerator` | 30.0 GB | 64 KB |
-| Q2_K table, resident mapped file | 30.0 GB | 528 KB |
-| q8_0 geometry, `IOAccelerator` | 17.7 GB | 64 KB |
+| Q2_K table, `IOAccelerator` | 30.0 GiB | 64 KiB |
+| Q2_K table, resident mapped file | 30.0 GiB | 528 KiB |
+| q8_0 geometry, `IOAccelerator` | 17.7 GiB | 64 KiB |
 
 Gathered rows match `pread` at the first, the last and two interior rows in
 every case. The q8_0 row is a 19.0 GB tensor of 272-byte rows, the shape a
@@ -331,7 +331,7 @@ Quality degrades in a consistent order as the settings become more
 aggressive. On Hy3, multi-step arithmetic broke first, well before
 coherence, formatting or code. `moe_layer_shed: 0.20` alone dropped
 arithmetic tasks, and so did `moe_layer_shed: 0.10` with
-`moe_miss_shed: 0.75`, although each of those two is clean alone. On the same
+`moe_miss_shed: 0.75`, although each half of that pair is clean alone. On the same
 battery, miss-shed alone stayed clean down to 0.75 and expert-mass down to
 0.70. Past the quality threshold, long generations show a second symptom,
 stray token substitutions such as wrong-script digits or a bullet character

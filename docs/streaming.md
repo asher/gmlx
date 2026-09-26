@@ -1,9 +1,9 @@
 # Models larger than memory
 
-gmlx can run a mixture-of-experts model whose file is larger than the memory
-of your Mac, by reading its experts from disk as they are needed. Starting
-takes one flag, a header check tells whether a model fits, and further
-settings make streaming faster, some with a cost in quality.
+gmlx can run a mixture-of-experts model whose file is larger than the
+memory of your Mac, by reading its experts from disk as they are needed.
+Starting takes one flag, a header check tells whether a model fits, and
+further settings make streaming faster, some with a cost in quality.
 
 - [What to expect](#what-to-expect)
 - [Quick start](#quick-start)

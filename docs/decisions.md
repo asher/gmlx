@@ -27,9 +27,9 @@ numbers on the same model file and server settings.
 
 ## Why DiffusionGemma
 
-The route answers only with DiffusionGemma models. A diffusion model writes
-into a block of positions, called a [canvas](glossary.md#canvas), and predicts
-every position at once. The server fills the canvas with an answer template
+The route answers only with DiffusionGemma models. A diffusion model
+writes into a block of positions, called a [canvas](glossary.md#canvas),
+and predicts every position at once. The server fills the canvas with an answer template
 and leaves the answer positions open, so one pass of the model gives the
 probability of every answer.
 
@@ -71,9 +71,8 @@ that the server knows. A Jev client that sends a name such as `jev-latest`
 reaches the model this way. A file with one model, or with
 [`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
 key out. A `profile` field in the request selects the
-[profile](config.md#profiles) that `model` resolves with. The other
-`server.systemone` keys set the request limits and the
-thought defaults, and
+[profile](config.md#profiles) that `model` resolves with. The other `server.systemone` keys set the request
+limits and the thought defaults, and
 [Structured decisions](config.md#structured-decisions) in the
 configuration reference lists them.
 

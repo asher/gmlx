@@ -285,8 +285,8 @@ answer you wrote under `check.answer`. This judge asks whatever model
 `gmlx serve` has on port 8080. Any instruct model larger than the
 student serves as the judge, the teacher included.
 
-Save the script as `judge.py`, run `chmod +x judge.py`, and give it to `filter` as
-`--verify ./judge.py`. `filter` runs after `gen` has stopped its own
+Save the script as `judge.py`, run `chmod +x judge.py`, and give it to
+`filter` as `--verify ./judge.py`. `filter` runs after `gen` has stopped its own
 server, so the judge model has the memory to itself. Start that model
 with `gmlx serve <judge>.gguf` before `filter` and stop it with
 `gmlx stop` after:
@@ -822,8 +822,8 @@ are matched by their text, so two caches of one corpus cut at other
 sizes still pair up. Within one view, a one-document cache keeps the
 split `align` made.
 
-`best` is the lowest of the earlier validations, so
-a `val` below it is a new best, and the first validation line has no
+`best` is the lowest of the earlier validations, so a `val` below it is
+a new best, and the first validation line has no
 `best` yet. A validation loss that rises while the training loss keeps
 falling means the adapter is memorizing the rows, and fewer steps or a
 lower rank fix it.
@@ -993,8 +993,8 @@ in the reply text. Pick a student whose template renders the same turns,
 or leave those rows out of the corpus.
 
 `eval` refuses `--reply-positions` when the census map names none of
-the reply rows. The census keys its map by the ids of the corpus given to its
-`--corpus`, so run it with the same corpus file the reply slice was
+the reply rows. The census keys its map by the ids of the corpus given to
+its `--corpus`, so run it with the same corpus file the reply slice was
 drawn from. A reply table showing `None` scored no row at all, because
 every row was too long for `--chat-max-len` or had no target bytes.
 
@@ -1006,15 +1006,15 @@ The cache, the view and the training loss each have settings beyond the
 worked task. Every flag changes one thing, and
 [gmlx distill](cli.md#gmlx-distill) has the full tables.
 
-For each position, the cache stores the teacher's `--top-k` most likely next
-tokens with their log-probabilities and the log-probability of the token
+For each position, the cache stores the teacher's `--top-k` most likely
+next tokens with their log-probabilities and the log-probability of the token
 that followed. It also stores the probability mass outside the top-k,
 the probability summed over every other token, and the mass on word
 boundaries. `--validate DIR` checks an existing cache without loading
 a model.
 
-Two cache flags serve MoE teachers. `--routes` stores the experts the teacher
-chose, so `eval --kld-cache` on the teacher's own quantization measures
+Two cache flags serve MoE teachers. `--routes` stores the experts the
+teacher chose, so `eval --kld-cache` on the teacher's own quantization measures
 the error the quantization adds and nothing else. `--hidden` stores a
 sketch of the teacher's final hidden state, a fixed-width compressed
 copy of it, for the `train --hs` term, which is off by default.
@@ -1071,8 +1071,8 @@ renorm` rescales both distributions to sum to one over the top-k.
 
 `--lora-alpha` scales the adapter as alpha over rank. The learning rate
 rises to `--lr` over the first `--warmup` fraction of the steps and then
-falls along a cosine curve to zero. The defaults are rank 16, a batch of 8 and
-a learning rate of 1e-4. The worked task used rank 128, alpha 64, a
+falls along a cosine curve to zero. The defaults are rank 16, a batch of
+8 and a learning rate of 1e-4. The worked task used rank 128, alpha 64, a
 batch of 3 and 5e-5 on the 9B student. On a student of another size,
 start from those values and change one at a time, judged by the
 validation loss. `--seed` fixes the batch order and the adapter's
