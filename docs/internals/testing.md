@@ -5,9 +5,9 @@ interpreter that has gmlx and mlx-kquant installed for all of them.
 
 | Tier | Needs | Command |
 |------|-------|---------|
-| CPU logic | Nothing beyond Python. | `pytest` |
-| GGUF-gated integration | Real GGUFs on disk. | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
-| Server end-to-end | GGUFs and the GPU. | The harnesses under `tests/e2e/`. |
+| CPU logic | It needs nothing beyond Python. | `pytest` |
+| GGUF-gated integration | It needs real GGUFs on disk. | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
+| Server end-to-end | It needs GGUFs and the GPU. | Run the harnesses under `tests/e2e/`. |
 
 ## CPU logic tests
 
@@ -48,7 +48,7 @@ enough to exercise a path.
 | `tests/gen/test_long_context.py` | None. | Long decodes of 16k tokens or more keep ids in range, logprobs finite and output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
 | `tests/spec/test_mtp.py`, one case | None. | A native-head MTP GGUF's drafter has full remap coverage. |
-| `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows. | One model per cache-shape family is served end to end, and that family's own tier counters must move. |
+| `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` enables the multi-GB rows. | One model per cache-shape family is served end to end, and that family's own tier counters must move. |
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ~/models/qwen3-0.6b

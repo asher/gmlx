@@ -7,8 +7,8 @@ tokens its decoding is faster too, and the gap grows as the context
 deepens.
 
 Speculative decoding is measured where the model has a
-[native head](glossary.md#native-head) or a companion drafter. The measurements behind the guidance of the
-performance pages are under [Serving measurements](#serving-measurements)
+[native head](glossary.md#native-head) or a companion drafter. The
+measurements behind the guidance of the performance pages are under [Serving measurements](#serving-measurements)
 and [KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
 in [a JSON file](benchmarks.json), and the
 [benchmark harness](../bench/) reproduces any cell.
@@ -31,7 +31,7 @@ reference engine, for every model, against the context depth.
   <img src="assets/perf/fleet-ratio.svg" alt="Throughput speedup of gmlx over the reference engine by KV depth">
 </picture>
 
-The second chart shows how much faster speculative decoding is than plain
+A second chart shows how much faster speculative decoding is than plain
 decoding on the same server, for each model, against the context depth.
 
 <picture>
@@ -456,7 +456,7 @@ The kvarn cache beats the affine cache of the same width on both legs at every
 width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the
 two converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8 on
 the 9B model and matches affine 8 on the 27B model, in three quarters of
-the bytes of the 8-bit record. At 32K, its decode median can trail affine
+the memory of affine 8. At 32K, its decode median can trail affine
 8 by a few percent while its p99 and top-1 stay ahead. The split width
 k6 v5 keeps the median of kvarn 6 with the p99 and top-1 of kvarn 5.
 

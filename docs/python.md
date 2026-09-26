@@ -52,7 +52,7 @@ A string prompt goes through the tokenizer's chat template when one is
 present, while a pre-tokenized `list[int]` prompt is used as-is. The return
 value is the generated text.
 
-These keyword arguments control sampling:
+Sampling takes these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -62,12 +62,12 @@ These keyword arguments control sampling:
 | `top_k` | `0` | Sampling keeps only the k most likely tokens, and `0` disables the cutoff. |
 | `min_p` | `0.05` | Sampling drops tokens less likely than this fraction of the top token. |
 | `xtc_probability` / `xtc_threshold` | `0.0` | They set XTC sampling, which is active when the probability is nonzero. |
-| `repetition_penalty` | `0.0` | It applies a classic repetition penalty over the last `repetition_context_size` tokens, default `20`. |
+| `repetition_penalty` | `0.0` | It applies a classic repetition penalty over the last `repetition_context_size` tokens, `20` by default. `0.0` turns it off. |
 | `presence_penalty` / `frequency_penalty` | `0.0` | They apply OpenAI-style penalties. |
 | `logit_bias` | `None` | Each `{token_id: bias}` entry is added to the logits. |
 | `stop` | `None` | Generation ends when one of these strings appears, and the match is trimmed. |
 
-These keyword arguments control how the prompt is rendered:
+The rendering of the prompt follows these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -75,7 +75,7 @@ These keyword arguments control how the prompt is rendered:
 | `system_prompt` | `None` | It is prepended as a system message on the templated path. |
 | `template_kwargs` | `None` | These extra kwargs go to `apply_chat_template`, such as `{"enable_thinking": False}`. |
 
-These keyword arguments control the KV cache:
+The KV cache is set by these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -86,7 +86,7 @@ These keyword arguments control the KV cache:
 | `kv_quant_scheme` | `None` | It selects `uniform` for the standard affine scheme or `kvarn` for variance-normalized quantization. |
 | `kv_tail_tokens` | `1024` | Under `kvarn`, this many recent tokens also stay fp16. It is a multiple of 128, and `0` disables the tail. |
 
-These keyword arguments control long prompts, thinking models and output:
+The remaining keyword arguments control long prompts, thinking models and output:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -108,8 +108,8 @@ bench(model, tokenizer, lengths=(512, 4096, 16384))
 
 `bench` measures prefill and decode throughput at each prompt length through
 the real generation path, with chunked prefill and the async one-step-ahead
-decode pipeline. The numbers therefore match deployed throughput, not a naive forward
-loop. Its CLI equivalent is `gmlx run --bench`.
+decode pipeline. The numbers therefore match deployed throughput, not a
+naive forward loop. Its CLI equivalent is `gmlx run --bench`.
 
 | Kwarg | Default | Meaning |
 |---|---|---|
@@ -242,5 +242,5 @@ architecture, a custom loader can use it on any model.
 Other modules are importable but internal, among them the VLM loader,
 embeddings and rerank, the CPU-offload paths and the server. Their
 signatures change without notice. `generate` also accepts experimental
-parameters that are not part of the stable surface. To have an internal piece made
-public, open an issue.
+parameters that are not part of the stable surface. To have an internal
+piece made public, open an issue.

@@ -69,7 +69,7 @@ mixed recipe, which keeps some tensors at higher precision. Without
 `--to`, `pull` also registers the file in your gmlx config unless
 `--no-register` is given.
 
-The pipeline never loads the teacher and the student together. `gen` and
+No step loads the teacher and the student together. `gen` and
 `cache` need the memory of the teacher, and `train` needs the student's
 weights plus its training state. On the worked pair, `train` peaked near
 51 GB and `cache` near 40 GB, so a Mac with 64 GB runs it with nothing
@@ -89,13 +89,13 @@ training on. Every flag of every action is listed under
 
 | Action | What it does |
 |---|---|
-| `gen` | Serves the teacher and writes its replies to your prompts as a corpus, the file of rows the student trains on. |
-| `filter` | Drops replies the student should not learn from, including any your own checker rejects. |
-| `cache` | Runs the teacher over the corpus once and stores, per position, which next tokens it favored and by how much. |
-| `align` | Reads the cache through the student's tokenizer and writes a view, the positions and values the student is trained to match. |
-| `train` | Fits a LoRA adapter on the student against one or more views and writes it as a GGUF. |
-| `eval` | Scores the student with and without the adapter on held-out text and tasks. |
-| `census` | Checks how much a document moves the teacher, from two caches of the same replies. |
+| `gen` | It serves the teacher and writes its replies to your prompts as a corpus, the file of rows the student trains on. |
+| `filter` | It drops replies the student should not learn from, including any your own checker rejects. |
+| `cache` | It runs the teacher over the corpus once and stores, per position, which next tokens it favored and by how much. |
+| `align` | It reads the cache through the student's tokenizer and writes a view, the positions and values the student is trained to match. |
+| `train` | It fits a LoRA adapter on the student against one or more views and writes it as a GGUF. |
+| `eval` | It scores the student with and without the adapter on held-out text and tasks. |
+| `census` | It checks how much a document moves the teacher, from two caches of the same replies. |
 
 ## A ten-minute smoke run
 
@@ -439,15 +439,15 @@ fails, with one reason word per dropped row:
 - `budget` means that the reasoning trace hit `--thinking-budget`.
 - `empty` means that the answer has fewer than `--min-words` units, a
   unit being a word or one ideograph or kana character.
-- `marker` means that a marker of the chat template leaked into the reply or its
-  reasoning trace.
+- `marker` means that a marker of the chat template leaked into the reply
+  or its reasoning trace.
 - `repeat` means that lines or phrases repeat in the reply or its
   reasoning trace, the trace under its own `--max-trace-repeat`.
 - `ascii` means that the reply has too many non-ASCII characters, and
   applies only with `--max-non-ascii`.
 - `tokens` means that the reply is over `--max-reply-tokens`.
-- `verify` means that your checker said no, with its word under `detail` in the
-  rejects file.
+- `verify` means that your checker said no, with its word under `detail`
+  in the rejects file.
 
 A reply whose reasoning trace hit the budget is unfinished and is
 dropped as `budget`. Expect to lose about a third of the replies at a
@@ -533,9 +533,8 @@ so a second run either resumes them or names another directory. These
 values come from the worked task, and
 [Advanced settings](#advanced-settings) says what each one changes.
 
-Training prints the loss every ten steps.
-If the loss has not fallen by step 40, stop the run and check that the
-filter kept the rows you expected and that `align` reported `a=1.000`
+Training prints the loss every ten steps. If the loss has not fallen by
+step 40, stop the run and check that the filter kept the rows you expected and that `align` reported `a=1.000`
 or a warning you accepted.
 
 ## Use and measure the adapter
@@ -1108,9 +1107,9 @@ and the measurements behind these defaults.
   `--tokenizer`. It cannot be cached, since `cache` runs the teacher
   itself and needs a local GGUF.
 - Recorded routes are replayed by `eval --kld-cache` when the student
-  carries the teacher's MoE layers and no adapter is loaded, so a
-  requantized teacher is scored on the teacher's own routes and an
-  adapter's routing changes count against it. `cache --routes` refuses a
+  carries the teacher's MoE layers and no adapter is loaded. A requantized
+  teacher is then scored on the teacher's own routes, and an adapter's
+  routing changes count against it. `cache --routes` refuses a
   teacher whose MoE gates gmlx cannot replay, such as DeepSeek-V2's
   softmax gate, DeepSeek-V4 and HY4. `train` does not replay them, so a
   MoE student trained from a MoE teacher of the same family learns from

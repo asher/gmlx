@@ -29,20 +29,20 @@ A request passes through five layers in order, and all of them are on by
 default. The prefix layer and the drafter sidecar exist only for
 speculative models, and checkpoints only for checkpoint-tier models.
 
-- Prefix layer. An in-memory LRU holds post-prefill KV and hidden state. A
+- Prefix layer: An in-memory LRU holds post-prefill KV and hidden state. A
   request sharing a prefix with an earlier one skips that prefill even with
   `cache:` off.
-- Shared pools. With `cache.enabled`, the lookup order of exact, block and
+- Shared pools: With `cache.enabled`, the lookup order of exact, block and
   disk fills the prompt cache before prefill, including warm restarts from the
   SSD tier.
-- Retirement. At request finish the whole sequence, prompt plus reply, is
+- Retirement: At request finish the whole sequence, prompt plus reply, is
   stored back, so the next turn of a conversation warm-starts past the whole
   of this one.
-- Drafter sidecar. A native MTP head keeps a separate KV, and a warm target
+- Drafter sidecar: A native MTP head keeps a separate KV, and a warm target
   paired with an empty drafter KV decodes at degraded acceptance until that
   KV is rebuilt. A small sidecar entry therefore saves the drafter's KV
   beside the target's, so a warm hit restores both.
-- Checkpoints. Hybrid models save restore points piecewise along a prefill
+- Checkpoints: Hybrid models save restore points piecewise along a prefill
   and while generating, plus targeted ones at the end of the system prompt,
   one token before the prompt end and at the predicted next-turn boundary.
   The system-prompt one is what lets parallel agents sharing a prompt
@@ -75,10 +75,11 @@ one for each of its blocks.
 | `sidecar_writes` | Each draft-model cache entry saved next to its target entry adds one. Only speculative decoding writes them. |
 | `retire_fallback_suppressed` | A retirement store is skipped and counted here when the predicted next-turn render has diverged, so the entry could never match. The turn checkpoint covers it. |
 
-The server watches for two failures and warns once per model. The first
-is `GMLX_APC_CKPT_TRIPWIRE` completed requests with zero stores, and the
-second is that many unusable matches with zero hits. Either warning means
-prefix reuse is not working for that model, so file an issue with the
+The server watches for two failures and warns once per model about each. One
+warning fires when more than `GMLX_APC_CKPT_TRIPWIRE` requests have
+completed with zero stores. The other fires when that many lookups have
+matched a saved prefix but adopted nothing, with zero hits. Either warning
+means prefix reuse is not working for that model, so file an issue with the
 `/v1/cache/stats` snapshot.
 
 ## Under kvarn KV
@@ -120,7 +121,7 @@ older batch layout refuses instead of misreading it.
 | `GMLX_APC_CKPT_SYS_MIN` | An anchor needs at least this many tokens of shared system prefix. The default is `256`, raised to the replay minimum on recurrent models. |
 | `GMLX_APC_ANCHOR_ENTRIES` | Exact-mode models keep system-prompt anchors as whole-prefix clones in an LRU of this many entries. The default is `4`. |
 | `GMLX_APC_ANCHOR_BUDGET_MB` | The exact-tier anchor LRU stays within this many MB, default `4096`, and never evicts its newest entry. A long shared prefix on a pooling stack clones to GBs. |
-| `GMLX_APC_CKPT_TRIPWIRE` | The not-storing and not-hitting checks warn after this many completed requests. The default is `5`, and `0` silences both. |
+| `GMLX_APC_CKPT_TRIPWIRE` | The not-storing check warns after this many requests, and the not-hitting check after this many unusable matches. The default is `5`, and `0` silences both. |
 | `GMLX_APC_CKPT_RECORDS` | The checkpoint-record LRU keeps this many entries. The default is `32`. |
 | `GMLX_APC_CKPT_BUDGET_MB` | Checkpoint payload stays within this many MB. The default is `4096`, and resident memory grows toward it on hybrid models under multi-turn traffic. |
 | `GMLX_APC_DECODE_CKPT` | Hybrid models snapshot at this interval in generated tokens, anchored to the prompt end. The default is `512`, widening with context. `0` turns it off. |

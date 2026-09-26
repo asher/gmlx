@@ -52,12 +52,12 @@ same position for all of a question's labels. `TemplateResolver` checks
 this with the model's tokenizer and refuses the schema otherwise. That is
 why labels are `yes` and `no`, letters for choices and digits for scores.
 
-With `constrained` on, the unembedding multiplies the slot rows by the
-label rows of the embedding table only, and the log-probabilities are
-normalized over the union of the read's label ids. With it off, the product
-runs over the full vocabulary. Both run the matrix product in the activation dtype and
-apply the model's own softcap in fp32, as vLLM does. On the unit fixture
-the two modes agree after renormalization to within 1e-6.
+With `constrained` on, the unembedding multiplies the slot rows by the label
+rows of the embedding table only, and the log-probabilities are normalized
+over the union of the read's label ids. With it off, the product runs over
+the full vocabulary. Both run the matrix product in the activation dtype and
+apply the model's own softcap in fp32, as vLLM does. On the unit fixture the
+two modes agree after renormalization to within 1e-6.
 
 At one step, then, a read gives each question the same label probabilities
 in both modes. The mode does change the entropy over the returned ids,

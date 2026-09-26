@@ -55,9 +55,9 @@ state and sliding windows stay fp16, apart from the rolling
 [Settings that limit memory](memory.md#settings-that-limit-memory)
 describes.
 
-The kvarn scheme accepts head dimensions of 128, 256 and 512 only, so
-layers with a head dimension of 64, as in gpt-oss, use affine quantization
-only. The scheme also declines [MLA](glossary.md#mla) models such as
+Head dimensions of 128, 256 and 512 are the only ones that kvarn accepts,
+so layers with a head dimension of 64, as in gpt-oss, use affine
+quantization only. The scheme also declines [MLA](glossary.md#mla) models such as
 DeepSeek-V4, GLM-5.3 and Kimi K2 and K3, whose compressed cache affine
 quantization still packs. Turns with images or audio keep an fp16 cache.
 
@@ -69,11 +69,11 @@ touches. The shape of the cache decides both, as the table shows.
 
 | Cache shape | Families | Cache at 32K in fp16 | What to use |
 |---|---|---|---|
-| Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | `--kv-bits 8`, or kvarn at 6 for the same quality in less memory. Use kvarn at 4 when memory is the limit. |
+| Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | Use `--kv-bits 8`, or kvarn at 6 for the same quality in less memory, and kvarn at 4 when memory is the limit. |
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Quantize only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
-| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme, for a small saving, since only the global layers quantize. |
-| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | Already compressed by the architecture. | Affine only. |
-| Head dimension 64 | gpt-oss | Small for each token. | Affine only. |
+| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme gives a small saving, since only the global layers quantize. |
+| MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | The architecture already compresses it. | Use affine, since kvarn declines MLA models. |
+| Head dimension 64 | gpt-oss | Each token adds little cache. | Use affine, since kvarn needs a head dimension of 128 or more. |
 
 ## Quality
 

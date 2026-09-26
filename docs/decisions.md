@@ -149,9 +149,8 @@ over the answers of that question, in one of three shapes:
   medium, with a little weight on low.
 
 `usage.input_tokens` is the token count of the longest prompt that a read
-ran on.
-`usage.output_tokens` counts the tokens of the answer template and of any
-thought.
+ran on. `usage.output_tokens` counts the tokens of the answer template and
+of any thought.
 
 `diagnostics` describes how the decision ran. It holds the `stages` and
 `chunks` that ran, the `skipped` questions, the `thought`, the entropies of
@@ -286,11 +285,11 @@ what the model knows about them:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `type` | Required | `noul` for yes or no, `choice` for one of several options, or `score` for one of several ordered levels. |
-| `instructions` | Empty | The question as the model reads it. |
-| `criteria` | Required, except for `noul` | For `noul`, an object with `true` and `false` descriptions. For `choice`, a map of option names to descriptions. For `score`, a list of level names in order. |
-| `depends_on` | None | Question ids from an earlier stage, whose answers this question's read sees. |
-| `ask_if` | None | A map of question ids to lists of their answers. The question is asked only when that answer is in the list. |
+| `type` | Required | The type is `noul` for yes or no, `choice` for one of several options, or `score` for one of several ordered levels. |
+| `instructions` | Empty | The model reads this text as the question. |
+| `criteria` | Required, except for `noul` | A `noul` takes `true` and `false` descriptions. A `choice` maps option names to descriptions. A `score` lists level names in order. |
+| `depends_on` | None | The read of this question sees the answers of these question ids from an earlier stage. |
+| `ask_if` | None | It maps question ids to lists of their answers. The question is asked only when that answer is in the list. |
 | `alone` | `false` | With `true`, the question is read on its own. |
 
 A choice or a score takes 2 to 26 alternatives. Describe each option so
@@ -336,16 +335,16 @@ does.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `instructions` | None | Text added to the system prompt ahead of the questions. |
-| `samples` | `"auto"` | The number of reads, with different random label tokens, whose results are averaged. `"auto"` reads once and adds more reads when an answer is uncertain. |
-| `auto_max` | `4` | The sample count that `"auto"` extends to. |
-| `auto_threshold` | `0.1` | The entropy, in nats, at a label position above which `"auto"` adds reads. |
-| `steps` | `1` | The denoise steps for each read. Values outside 1 to 8 are clamped. |
-| `think` | [`server.systemone.think`](config.md#serversystemonethink) | A thought budget in tokens, from 0 to 4096, or `"auto"`. The model writes a thought first, and the reads see it. |
-| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | The confidence below which `"auto"` runs the decision again with a thought. It must be above 0 and at most 1. |
-| `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | The thought budget, from 1 to 4096 tokens, that `"auto"` uses. |
-| `ask` | Every question | The ids to answer, which must include every question they depend on. Only these appear in `answers`. |
-| `chunk_rows` | The canvas | The most canvas tokens that the answer template of one read may take, at least 8. A larger stage is split into chunks. |
+| `instructions` | None | This text goes into the system prompt ahead of the questions. |
+| `samples` | `"auto"` | The server averages this many reads, each with different random label tokens. `"auto"` reads once and adds more reads when an answer is uncertain. |
+| `auto_max` | `4` | `"auto"` extends the sample count up to this number. |
+| `auto_threshold` | `0.1` | `"auto"` adds reads when the entropy at a label position is above this value, in nats. |
+| `steps` | `1` | Each read runs this many denoise steps. Values outside 1 to 8 are clamped. |
+| `think` | [`server.systemone.think`](config.md#serversystemonethink) | It sets a thought budget of 0 to 4096 tokens, or `"auto"`. The model writes a thought first, and the reads see it. |
+| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | `"auto"` runs the decision again with a thought when a confidence is below this value, which must be above 0 and at most 1. |
+| `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | `"auto"` thinks with this budget, from 1 to 4096 tokens. |
+| `ask` | Every question | Only these ids appear in `answers`, and the list must include every question they depend on. |
+| `chunk_rows` | The canvas | The answer template of one read may take at most this many canvas tokens, a value of at least 8. A larger stage is split into chunks. |
 | `chunk_prompt` | `"own"` | With `"own"`, each chunk gets a system prompt with only its own questions. With `"shared"`, every chunk gets all of them. |
 | `sequential` | `false` | With `true`, the chunks are read in order on one prompt, and each sees the answers before it. |
 

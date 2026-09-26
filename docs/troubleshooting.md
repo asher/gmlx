@@ -1,8 +1,7 @@
 # Troubleshooting
 
 Most failures in a new setup have a known cause and a fix, grouped by the
-step where they appear. [Logs and files](#logs-and-files)
-says where gmlx writes its logs, runfiles, caches and sessions.
+step where they appear. [Logs and files](#logs-and-files) says where gmlx writes its logs, runfiles, caches and sessions.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
 kernels, the config and its model files, the background server, the login
@@ -257,7 +256,7 @@ quant, or [streaming](streaming.md) for a MoE model larger than memory. On a
 server with several models, lower
 [`server.budget_gb`](config.md#serverbudget_gb) or
 [`server.max_models`](config.md#servermax_models). To try anyway, set
-[`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#runtime), which skips the refusal on
+[`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands), which skips the refusal on
 `run` and `chat`.
 
 ## Voice
@@ -306,18 +305,18 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 
 | Path | Contents |
 |------|----------|
-| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | The config, searched in that order. `gmlx init` writes the second one. |
-| `~/.config/gmlx/` | Client configs that `gmlx launch` writes. |
-| `~/.cache/gmlx/` | Server runfiles and logs, chat input history and the GGUF header cache. |
-| `~/.cache/gmlx/apc/` | The prompt cache on disk, when it is on. |
-| `~/.cache/gmlx/talk/` | The wake-word and voice-activity models, fetched on the first `talk`. |
-| `~/.cache/huggingface/` | Files that `hf:` references resolve from when `server.hf_cache` is on. |
-| `~/.local/share/gmlx/chats/` | Saved chat sessions. |
-| `~/.local/share/gmlx/assistant-memory.db` | The assistant's memory, with `assistant-<id>.db` beside it for each served assistant. |
-| `~/Library/Application Support/gmlx/` | The menu bar app. |
-| `~/Library/LaunchAgents/com.gmlx.*.plist` | The login items that `gmlx service install` writes. |
-| `~/.open-webui/` | Open WebUI's chat history. |
-| Your model folders | The GGUFs that `pull` downloads. |
+| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, searched in that order. `gmlx init` writes the second one. |
+| `~/.config/gmlx/` | `gmlx launch` writes client configs here. |
+| `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
+| `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on. |
+| `~/.cache/gmlx/talk/` | The first `talk` fetches the wake-word and voice-activity models here. |
+| `~/.cache/huggingface/` | `hf:` references resolve from these files when `server.hf_cache` is on. |
+| `~/.local/share/gmlx/chats/` | Saved chat sessions are kept here. |
+| `~/.local/share/gmlx/assistant-memory.db` | It holds the assistant's memory, with `assistant-<id>.db` beside it for each served assistant. |
+| `~/Library/Application Support/gmlx/` | The menu bar runs from an app bundle that gmlx writes here. |
+| `~/Library/LaunchAgents/com.gmlx.*.plist` | `gmlx service install` writes its login items here. |
+| `~/.open-webui/` | Open WebUI keeps its chat history here. |
+| Your model folders | `pull` downloads GGUFs into them. |
 
 [Removing gmlx](installation.md#removing-gmlx) gives the steps that remove
 gmlx and these files.

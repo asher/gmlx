@@ -39,8 +39,8 @@ chat sends only the settings that you change. `/image`, `/audio`,
 process.
 
 The optional `chat` extra adds a completion menu, a toolbar and styled
-markdown. [Optional features](installation.md#optional-features) shows how
-to install it.
+markdown. To install it, follow
+[Optional features](installation.md#optional-features).
 
 ## Commands
 
@@ -113,9 +113,10 @@ from another [profile](config.md#profiles) instead.
 
 Models with an MTP head use
 [speculative decoding](speculative-decoding.md) automatically, and
-`--draft-gguf` pairs a separate drafter. While a drafter is active, only temperature, top-p, top-k and min-p apply. Chat warns at
-startup and drops the penalties, logit bias and XTC settings, as well as
-`--max-kv-size` and `--quantized-kv-start`.
+`--draft-gguf` pairs a separate drafter. While a drafter is active, only
+temperature, top-p, top-k and min-p apply. Chat warns at startup and drops
+the penalties, logit bias and XTC settings, as well as `--max-kv-size` and
+`--quantized-kv-start`.
 
 ## Undo, retry and sessions
 
@@ -161,8 +162,8 @@ waiting, and Ctrl-C stops the command instead of the chat.
 With `--mmproj`, `/image` and `/audio` attach media the same way, and so
 does dragging a file from Finder into the terminal. Each attachment stays
 with the turn that sent it, so a later question can refer to an earlier
-image. [Vision and audio](vlm.md) covers the supported models and file
-types.
+image. The supported models and file types are listed in
+[Vision and audio](vlm.md).
 
 ## Reasoning and rendering
 
@@ -216,14 +217,16 @@ A theme with the name of a built-in theme replaces it. A theme is a set of
 slots, one for each kind of text, named `thinking`, `heading`, `bold`,
 `italic`, `inline_code`, `code_block`, `code_border`, `bullet`,
 `blockquote`, `link`, `hr`, `stat`, `info` and `error`. Beside its slots, a
-theme takes the keys `extends`, `code_theme`, `code_theme_cb` and
-`ptk_toolbar`.
+theme takes `extends`, `code_theme`, `code_theme_cb` for the pygments style
+under the colorblind modifier, and `ptk_toolbar` for the prompt_toolkit
+style of the toolbar.
 
 Each slot holds a style, which takes the booleans `bold`, `dim`, `italic`
 and `underline`, and the colors `fg16` and `rgb`. `rgb` takes `"#rrggbb"`
-or `[r, g, b]`. A terminal with 256 colors or more uses it, reduced to the nearest of 256 colors when the terminal has no
-true color. `fg16` is an ANSI color code from 30 to 37 or 90 to 97, which a
-16-color terminal uses instead. `code_theme_cb` is the pygments style under
-the colorblind modifier, and `ptk_toolbar` is the prompt_toolkit style of
-the toolbar. Chat prints a warning at startup for a theme that it cannot
-read, skips that theme and loads the others.
+or `[r, g, b]`. A terminal with 256 colors or more uses it, reduced to the
+nearest of 256 colors when the terminal has no true color. `fg16` is an
+ANSI color code from 30 to 37 or 90 to 97, which a 16-color terminal uses
+instead.
+
+Chat prints a warning at startup for a theme that it cannot read, skips
+that theme and loads the others.

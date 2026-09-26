@@ -74,16 +74,16 @@ names the projector and architecture that it found.
 
 | Family | Projector and architecture | Examples | Notes |
 |--------|----------------------------|----------|-------|
-| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | Needs `--hf-source llava-hf/llava-1.5-7b-hf`, because the GGUF has no image processor. |
+| LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | It needs `--hf-source llava-hf/llava-1.5-7b-hf`, because the GGUF has no image processor. |
 | Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | Vision quality is poor, because the published companion files were converted with a defect. |
 | Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
 | Qwen3.8-Flash-Next | `qwen3vl_merger` with `qwen4exp` | Qwen3.8-Flash-Next | |
-| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | Reads images and audio. |
-| gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | Reads images and audio. |
-| gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | Reads images, and audio when the companion has an audio encoder. |
+| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | It reads images and audio. |
+| gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | It reads images and audio. |
+| gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
 | GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
-| Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | Larger than RAM on most Macs, so it needs `--stream-experts`. |
+| Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
 | DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | The antirez encoder GGUF | |
 
@@ -108,9 +108,9 @@ have limits:
 |-------------|--------|
 | [Speculative decoding](speculative-decoding.md) | Text turns use speculation, and turns with media decode without it. It needs a drafter, which is a native head or a `--draft-gguf` companion. |
 | [`--stream-experts`](streaming.md) | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it, and a served model cannot combine it with speculation. |
-| `--stream-cpu` | Refused, because it would move the vision encoder to the CPU too. |
+| `--stream-cpu` | The command refuses it, because it would move the vision encoder to the CPU too. |
 | The lossy MoE settings, such as `--moe-experts` | Chat refuses them with `--mmproj`. |
-| `--adapter` | Refused, because a LoRA adapter applies only to text models. |
+| `--adapter` | The command refuses it, because a LoRA adapter applies only to text models. |
 | `--stop`, `--xtc-probability`, `--xtc-threshold` | `run` ignores them with a warning. |
 
 Chat and the server place media differently in a conversation. Chat keeps

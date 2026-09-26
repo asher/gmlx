@@ -176,8 +176,8 @@ tools and agents work with the server. Running tools also needs aichat's
 
 Each served model becomes an OpenAI-compatible model in elia, and `launch`
 starts elia on the selected model. elia 1.x or newer is required. An older
-elia starts but lists no local models, and `pipx upgrade elia-chat` fixes
-that.
+elia starts but lists no local models, so upgrade it with
+`pipx upgrade elia-chat`.
 
 ### open-webui
 
@@ -224,9 +224,9 @@ different default model or an edit to the gmlx providers. Run `launch`
 again with `--model` to change the default.
 
 Two entries in the file point at the server. Under `gmlx (local)`, the
-server and its profiles decide whether a model thinks. Under `gmlx (thinking off)`, the
-same models answer without thinking, and dsh writes its session titles
-there with the default model.
+server and its profiles decide whether a model thinks. Under
+`gmlx (thinking off)`, the same models answer without thinking, and dsh
+writes its session titles there with the default model.
 
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
 the launch opens a browser. The app starts in
@@ -239,7 +239,7 @@ is not. Otherwise a conversation still compacts when the server reports
 that a request no longer fits, as
 [Limits and back-pressure](api.md#limits-and-back-pressure) describes.
 
-dsh's `headless` profile works with the same file. This command answers
+The `headless` profile of dsh works with the same file. This command answers
 one task about the current folder and exits:
 
 ```sh

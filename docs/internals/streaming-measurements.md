@@ -84,10 +84,10 @@ percent of mass.
 MiniMax-M3 is the low-hit-rate end of the range. It is a 4-of-128-expert
 MoE, streamed as a 264 GB Q4_K_M file on the same 128 GB machine with the
 decode arena at about an 87% hit rate. The runs used the same alternated A/B
-rounds as Hy3, with decode-only medians over 512-token generations. A layer stalls when
-any one of its four routed experts misses, so at 87% per-expert residency
-roughly half of all token-layer calls stall, and the miss-targeted setting
-gains more.
+rounds as Hy3, with decode-only medians over 512-token generations. A layer
+stalls when any one of its four routed experts misses, so at 87% per-expert
+residency roughly half of all token-layer calls stall, and the miss-targeted
+setting gains more.
 
 | Setting | Decode | Disk stall time |
 |---|---|---|
@@ -301,8 +301,9 @@ Sinkhorn, the lagged collapse and the sublayer norm. At prefill width the
 front is one GEMM, and the lag collapse and the expand are one kernel
 each. `GMLX_DS41_HC_FUSED=0` restores the ops route.
 
-On the ds4 conversion, `GMLX_DECODE_LAYER_PROFILE=2` measured the two routes over
-48 greedy tokens after a 16K prompt, with the profile's own syncs included.
+On the ds4 conversion, `GMLX_DECODE_LAYER_PROFILE=2` measured the two routes
+over 48 greedy tokens after a 16K prompt, with the profile's own syncs
+included.
 
 | Route | Hyper-connections, ms per token | Total ms per token | Decode |
 |---|---|---|---|
@@ -339,9 +340,10 @@ inside code.
 The procedure works on any model.
 
 1. Generate with the lossless path and with the candidate setting on the
-   same prompt at the same seed, at the temperature and top-p you deploy with. A check at a
-   lower temperature does not cover a higher one, and untruncated sampling
-   exposes the whole perturbed tail that nucleus truncation hides.
+   same prompt at the same seed, at the temperature and top-p you deploy
+   with. A check at a lower temperature does not cover a higher one, and
+   untruncated sampling exposes the whole perturbed tail that nucleus
+   truncation hides.
 2. Score a short goal battery of JSON extraction, constrained format, code
    with asserts, multi-step arithmetic, length control and a repetition check.
    Put chained arithmetic in first if the workload depends on it.
@@ -417,32 +419,31 @@ slightly.
 
 Kimi-K3 repeats the comparison at the most over-budget end of the range.
 Each of the four settings in the [Kimi-K3](#kimi-k3) table ran the same
-prompt once to completion at temperature 1.0. Screenshots link to the generated pages as
-before.
+prompt once to completion at temperature 1.0. Screenshots link to the
+generated pages as before.
 
 | | |
 |---|---|
 | <a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="lossless: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>Lossless, ranked prestage. 23.7k tokens at 1.15 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.80.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.80.png" alt="miss-shed 0.80 with keeper prestage: bright daylight scene with green fields, mountains and sun, red car with slightly misdrawn body panels"></a><br>`moe_miss_shed 0.80` + keeper prestage. 24.2k tokens at 1.19 tok/s. |
 | <a href="../assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>`moe_miss_shed 0.70` + keeper prestage. 29.6k tokens at 1.33 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence and birds, red car with oversized featureless black wheels and a light streak across the body"></a><br>`moe_miss_shed 0.65` + keeper prestage. 28.3k tokens at 1.39 tok/s. |
 
-All four pages ran as generated, with valid markup, a working animation
-loop and no stray tokens. What varies is the scene, and it does not worsen
-steadily as P falls.
-The lossless page drew the cohesive film-grain dusk. At 0.80 the scene is
-clean and bright, but the car body has small geometry glitches and the
-lighting is the flattest of the set. The 0.70 composition is complete but
-the tone mapping overshot, so that page renders far darker than its palette
-intends and the foreground trees reduce to blurred dark masses. At 0.65 the
-sky and landscape are the richest of the four while the car is the most
-damaged subject, with oversized featureless wheels and a stray light streak
-across the body.
+All four pages ran as generated, with valid markup, a working animation loop
+and no stray tokens. What varies is the scene, and it does not worsen
+steadily as P falls. The lossless page drew the cohesive film-grain dusk. At
+0.80 the scene is clean and bright, but the car body has small geometry
+glitches and the lighting is the flattest of the set. The 0.70 composition
+is complete but the tone mapping overshot, so that page renders far darker
+than its palette intends and the foreground trees reduce to blurred dark
+masses. At 0.65 the sky and landscape are the richest of the four while the
+car is the most damaged subject, with oversized featureless wheels and a
+stray light streak across the body.
 
-Between 0.65 and 0.80 the flaws differ in kind rather
-than degree, so a single sample for each setting cannot rank adjacent
-levels. It can show that all three sit above the threshold that 0.60 fell
-through. As on GLM-5.2, dropped mass degraded what the pages drew long before it
-corrupted what they wrote. Certifying a level means rendering the artifact,
-and ranking neighboring levels takes more samples than one.
+Between 0.65 and 0.80 the flaws differ in kind rather than degree, so a
+single sample for each setting cannot rank adjacent levels. It can show that
+all three sit above the threshold that 0.60 fell through. As on GLM-5.2,
+dropped mass degraded what the pages drew long before it corrupted what they
+wrote. Certifying a level means rendering the artifact, and ranking
+neighboring levels takes more samples than one.
 
 ## Lossless setting measurements
 
@@ -456,10 +457,10 @@ medians unless noted.
 | Decode feeder | Same model and machine, 512-token generation | 2.4 tok/s page cache, 3.0 tok/s `--stream-cpu` | 4.0 tok/s average, 4.7 steady at 90% arena hits |
 | Arena token split, second-turn prefill | Kimi-K3 UD-IQ2_XXS, M5 Max 128 GB, 48-token turn | 0.25 tok/s | 2.13 tok/s |
 | Weight pin | Kimi-K3 UD-IQ2_XXS 662 GB, 62 GB every-token set, M5 Max 128 GB | 0.10 tok/s decode, 0.62 prefill | 0.38 decode, 0.97 prefill |
-| Pin excludes converted tensors | HY4-preview, F32 output head held as bf16 | 22.6 GB pinned | 19.7 GB pinned, 3.5% fewer expert bytes per token |
+| Pin excludes converted tensors | Hy4 preview release, F32 output head held as bf16 | 22.6 GB pinned | 19.7 GB pinned, 3.5% fewer expert bytes per token |
 | GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
 | GPU keep-warm | Hy3 IQ4_XS, layer shed 0.10 with miss shed 0.90 | 4.01 tok/s | 5.29 tok/s |
-| Streamable lookup table | Qwen4-Exp Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
+| Streamable lookup table | `qwen4exp` Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
 
 Lookahead prestage recall of the next layer's actual top-k is about 78% on
 GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the

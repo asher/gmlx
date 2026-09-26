@@ -45,8 +45,10 @@ When a speech service is off, `gmlx talk` prints the lines to add to the
 configuration file. The first session downloads a 15 MB wake phrase model
 and a 0.6 MB speech detection model into the cache folder that
 [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
-lists. macOS then asks once for permission to use the microphone, in the
-name of your terminal. [Permissions](menubar.md#permissions) explains why,
+lists.
+
+macOS asks once for permission to use the microphone, in the name of your
+terminal. [Permissions](menubar.md#permissions) explains why,
 and [The mic never works in talk](troubleshooting.md#the-mic-never-works-in-talk)
 shows how to allow it later.
 
@@ -170,13 +172,15 @@ assistant:
     enabled: true
 ```
 
-The filesystem server needs Node, and the fetch server needs uv. The
-status line names each tool as the assistant uses it, and only the answer
-is spoken. After the turn, the assistant stores what it learned in the
-background, so memory does not delay the spoken reply. When you interrupt a
-tool call, the conversation keeps what you heard and drops the unfinished
-call. [Assistant](assistant.md) covers choosing a model, the tools and the
+The filesystem server needs Node, and the fetch server needs uv.
+[Assistant](assistant.md) covers choosing a model, the tools and the
 memory store.
+
+During a turn, the status line names each tool as the assistant uses it,
+and only the answer is spoken. After the turn, the assistant stores what it
+learned in the background, so memory does not delay the spoken reply. When
+you interrupt a tool call, the conversation keeps what you heard and drops
+the unfinished call.
 
 ## Settings
 

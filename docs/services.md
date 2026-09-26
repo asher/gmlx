@@ -193,9 +193,8 @@ and write its full reference.
 A request is a JSON body with `input`, which is a string or a list of
 strings. The optional fields are `model` and `encoding_format`, which is
 `float` by default or `base64`. Every model returns vectors normalized to
-length 1.
-The server refuses input given as token ids, and it ignores the OpenAI
-`dimensions` field:
+length 1. The server refuses input given as token ids, and it ignores the
+OpenAI `dimensions` field:
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
@@ -224,11 +223,11 @@ A request is a JSON body with these fields:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `query` | Required | The text to rank the documents against. |
-| `documents` | Required | The documents, as strings or `{"text": ...}` objects. |
-| `top_n` | Every document | How many results to return, a positive integer. `top_k` is another name for it. |
+| `query` | Required | The documents are ranked against this text. |
+| `documents` | Required | These documents are ranked, given as strings or `{"text": ...}` objects. |
+| `top_n` | Every document | The response holds this many results, a positive integer. `top_k` is another name for it. |
 | `return_documents` | `true` | With `false`, each result has only its index and score. |
-| `instruction` | "Given a web search query, retrieve relevant passages that answer the query" | The instruction that the reranker reads with the query. |
+| `instruction` | "Given a web search query, retrieve relevant passages that answer the query" | The reranker reads this instruction with the query. |
 
 ```sh
 curl localhost:8080/v1/rerank -H 'content-type: application/json' \

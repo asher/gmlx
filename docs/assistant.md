@@ -15,9 +15,7 @@ Short tasks suit the assistant, such as looking something up, chaining a
 few tool calls, writing a note or remembering a fact. A turn ends when the
 model answers, and no work continues afterwards. The coding agents that
 `gmlx launch` connects have loops of their own and use the server only for
-the model. Tools need the `assistant` extra, which
-[Optional features](installation.md#optional-features) shows how to
-install.
+the model.
 
 - [The tool loop](#the-tool-loop)
 - [Tools](#tools)
@@ -54,9 +52,11 @@ in their tool calls.
 
 Tools come from [MCP](glossary.md#mcp) servers, which are separate programs
 that offer tools to a model through the Model Context Protocol. The
-[`assistant.mcp`](config.md#assistantmcp) list names them. This block
-connects one server that runs as a local command and one that answers over
-HTTP:
+[`assistant.mcp`](config.md#assistantmcp) list names them, and tools need
+the `assistant` extra, which
+[Optional features](installation.md#optional-features) shows how to
+install. This block connects one server that runs as a local command and
+one that answers over HTTP:
 
 ```yaml
 assistant:
@@ -69,12 +69,13 @@ assistant:
 
 A server that fails to start gives a warning, and the assistant runs
 without its tools. A server that has not connected after 20 seconds also
-gives a warning, which names its log file. A command server gets only a
-few variables from your environment, so pass a token that it needs with
-[`env`](config.md#assistantmcpenv). `~` is not expanded in the command or
-in `env` values, so write full paths. An HTTP server gets no custom
-headers. `gmlx doctor` checks that the programs of the command servers
-exist.
+gives a warning, which names its log file. `gmlx doctor` checks that the
+programs of the command servers exist.
+
+Command servers get only a few variables from your environment, so pass
+a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not
+expanded in the command or in `env` values, so write full paths. An HTTP
+server gets no custom headers.
 
 ## Tool examples
 
@@ -147,9 +148,10 @@ The assistant remembers facts across conversations. After each turn, a
 background request asks the chat model to reduce the exchange to at most
 three lasting facts, such as "sister Ana, birthday March 12". Small talk
 gives none, and nothing is stored. A new fact that repeats a stored one
-closely replaces it. With
-[`assistant.memory.extract: false`](config.md#assistantmemoryextract), the
-assistant stores a short form of each exchange instead. When extraction
+closely replaces it.
+
+With [`assistant.memory.extract: false`](config.md#assistantmemoryextract),
+the assistant stores a short form of each exchange instead. When extraction
 fails, it stores the exchange and prints one warning. Cancelled turns and
 very short messages are not stored.
 
@@ -162,9 +164,10 @@ not grow because of them.
 
 Memory therefore needs [`server.embeddings`](config.md#serverembeddings).
 Without it, the assistant prints a `memory disabled` warning the first
-time that it uses memory, and continues without memory. Facts older than
-[`ttl_days`](config.md#assistantmemoryttl_days) are removed at startup.
-When the store holds more than
+time that it uses memory, and continues without memory.
+
+Facts older than [`ttl_days`](config.md#assistantmemoryttl_days) are
+removed at startup. When the store holds more than
 [`max_items`](config.md#assistantmemorymax_items) facts, those recalled
 the fewest times go first, and the oldest go first among equals.
 
@@ -239,9 +242,11 @@ At startup, the server connects the tools and prints a line such as
 `[server] assistant 'helper' -> qwen3.8-27b-ud-q6  tools: ...` for each
 id. `/v1/models` lists each id with `"assistant": true` and `alias_of`,
 which names the model. An id may not contain `@` or match a model id or
-alias. The server routes a request to `/v1/chat/completions` by its
-`model` and by whether it carries tools of its own, where an empty `tools`
-list counts as none:
+alias.
+
+Routing a request to `/v1/chat/completions` depends on its `model` and on
+whether it carries tools of its own, where an empty `tools` list counts as
+none:
 
 | Request | Result |
 |---------|--------|

@@ -135,7 +135,7 @@ config, where the same settings apply to a config-mode server:
 | `--no-family-defaults` | Off | Do not seed each family's model-card sampling under profiles and requests. In config mode a reload restores `server.family_defaults`. |
 | `--prefill-step-size N` | `2048` | Prefill in chunks of this many tokens. A lower value caps peak memory. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
-| `--decode-prefill-ratio R` | `auto` | Give prefill this share of GPU time while streams decode. `0` restores stock scheduling. |
+| `--decode-prefill-ratio R` | `auto` | Make each prefill chunk wait until decoding streams have had this multiple of its GPU time. `0` restores stock scheduling. |
 | `--prefill-tick-ms MS` | `500` | Give each prefill chunk this wall-clock budget while streams decode. `0` never halves a chunk. |
 | `--ignore-eos` | Off | Decode each request to `max_tokens`, for throughput benchmarks. |
 
@@ -154,7 +154,7 @@ things are per-model keys under [models](config.md#models):
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. An unknown name is refused at start. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
 | `--chat-template-config JSON` | None | Pass this JSON object of extra chat-template variables through verbatim. |
-| `--kv-bits N` | Off | Quantize the KV cache to N bits, which is 2, 3, 4, 6 or 8 affine, or 2, 3, 4, 5, 6 or 8 under kvarn. |
+| `--kv-bits N` | Off | Quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn. |
 | `--kv-group-size N` | `64` | Set the affine quantization group size. |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or [kvarn](glossary.md#kvarn) quantization. Under kvarn `--kv-bits` defaults to 6. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, keep this many newest tokens fp16, a multiple of 128. |
@@ -443,7 +443,7 @@ These flags control speculative decoding, which
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--speculative`, `--mtp` | Auto for models with an MTP head | Force speculation on. |
-| `--no-speculative`, `--no-mtp` | Off | Force it off. |
+| `--no-speculative`, `--no-mtp` | Off | Force speculation off. |
 | `--draft-gguf PATH` | Detected sibling | Draft with this separate drafter GGUF, which implies `--speculative`. |
 | `--native-mtp` | Off | Prefer the model's own head when a drafter is also present. |
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
@@ -833,10 +833,10 @@ is set.
 | `--mode {wake,vad,ptt,text}` | `wake` | Set how a turn starts. |
 | `--once` | Off | Hold one exchange without the wake gate, then exit. |
 | `--wake-word PHRASE` | `hey assistant` | Wake on this phrase, which can be any phrase and needs no training. |
-| `--wake-threshold X` | `0.3` | Higher means fewer false wakes. |
+| `--wake-threshold X` | `0.3` | Set the wake sensitivity from 0 to 1. A higher value means fewer false wakes. |
 | `--vad-threshold X` | `0.6` | A frame counts as speech above this probability. |
 | `--vad-silence-ms MS` | `550` | This much trailing silence ends an utterance. |
-| `--min-speech-ms MS` | `300` | Shorter utterances are discarded. |
+| `--min-speech-ms MS` | `300` | Discard utterances shorter than this. |
 | `--voice NAME` | The server's default | Speak with this TTS voice. |
 | `--list-voices` | Off | List the server's voices and exit. |
 | `--speed X` | `1.0` | Set the speech speed, from 0.25 to 4. |
@@ -884,7 +884,7 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 | `--steps-per-eval N` | `200` | Validate every N steps. |
 | `--seed N` | `0` | Seed the random number generator. |
 | `--hf-source ID` | None | Fall back to this repo for the tokenizer and config, which is rarely needed. |
-| `--grad-checkpoint` | Off | Recompute each layer's activations in the backward pass, trading time for memory. Refused with `--dropout` above 0 and on Kimi K3 and DeepSeek-V4.1. |
+| `--grad-checkpoint` | Off | Recompute each layer's activations in the backward pass, trading time for memory. It is refused with `--dropout` above 0 and on Kimi K3 and DeepSeek-V4.1. |
 
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
@@ -1025,7 +1025,7 @@ student wrote without it. It refuses a row that already carries
 | `--out PATH` | Required | Write the filtered corpus here, with `<out>.gen.json` beside it. |
 | `--report JSON` | None | Write the kept and dropped counts here. |
 | `--rejects PATH` | None | Write one `{id, reason}` line per dropped row here, with the checker's word under `detail`. |
-| `--min-words N` | `16` | Drop replies whose answer, without the trace, has fewer units. A unit is a word or one ideograph or kana character. `--min-tokens` is the same flag. |
+| `--min-words N` | `16` | Drop replies whose answer, trace excluded, has fewer than this many units. A unit is a word or one ideograph or kana character. `--min-tokens` is the same flag. |
 | `--ngram N` | `8` | The repetition check uses n-grams of this size, in the units of `--min-words`. |
 | `--max-repeat F` | `0.2` | Drop replies whose repeated n-grams exceed this fraction. |
 | `--max-trace-repeat F` | `0.5` | Drop replies whose reasoning trace's repeated n-grams exceed this fraction. |
@@ -1073,8 +1073,8 @@ started, and a resume and the student's render in `align` keep that day.
 | `--max-rows N` | None | Stop after this many rows. |
 | `--max-tokens N` | None | Stop after this many teacher tokens. |
 | `--limit-docs N` | None | Read at most this many documents. |
-| `--text-key KEY` | `text` | Text column of a jsonl or dataset row. |
-| `--hf-split NAME` | `train` | Dataset split for a Hugging Face id. |
+| `--text-key KEY` | `text` | Read text from this column of a jsonl or dataset row. |
+| `--hf-split NAME` | `train` | Read this split of a Hugging Face dataset id. |
 | `--source TAG` | `human`, or `synthetic` with a generator sidecar | Write this source tag on every row. |
 | `--frame KIND` | `none` | Place the targets in the chat template by frame, `none`, `continue`, `chat`, `reply` or `reply-think`. `reply-think` starts at the final turn's reasoning trace. |
 | `--per-turn` | Off | With the chat or reply frame, write one reply row per assistant turn. |
@@ -1134,7 +1134,7 @@ checkpoints as it goes.
 | `--lora-scale F` | `2.0` | Apply this nonzero LoRA multiplier directly. |
 | `--lora-alpha F` | None | Set the nonzero LoRA multiplier as alpha over rank, instead of `--lora-scale`. |
 | `--lora-dropout F` | `0.0` | Set the LoRA dropout, below 1, with one mask per step that `--grad-checkpoint` replays. |
-| `--grad-checkpoint` | Off | Recompute each layer's activations in the backward pass. Refused on Kimi K3 and DeepSeek-V4.1. |
+| `--grad-checkpoint` | Off | Recompute each layer's activations in the backward pass. It is refused on Kimi K3 and DeepSeek-V4.1. |
 | `--lr F` | `1e-4` | Set the peak learning rate. |
 | `--batch-size N` | `8` | Train on this many rows per step. |
 | `--warmup F` | `0.05` | Warm up for this fraction of the steps, at least one step and never the last, then decay by cosine. `0` starts at the peak rate. |

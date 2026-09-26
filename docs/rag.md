@@ -80,9 +80,9 @@ print(answer.choices[0].message.content)
 ```
 
 A real index keeps the document vectors in a vector database instead of a
-list, and embeds each document once. On a server with an [API key](config.md#serverapi_key),
-pass the key to the OpenAI client and as an `Authorization: Bearer` header
-to httpx.
+list, and embeds each document once. On a server with an
+[API key](config.md#serverapi_key), pass the key to the OpenAI client and
+as an `Authorization: Bearer` header to httpx.
 
 ## Open WebUI
 

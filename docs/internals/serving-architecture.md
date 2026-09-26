@@ -5,10 +5,10 @@ as a layer of patches and policy over mlx-vlm's server. The config surface
 is documented in [Configuration](../config.md) and the endpoints in
 [HTTP API](../api.md).
 
-Stock mlx-vlm supplies the mechanism and gmlx supplies the policy. Upstream owns the
-FastAPI app object, the protocol handlers and SSE formatters, the engine's
-step loop, and the fp16 `BatchKVCache` layout. gmlx owns the scheduling
-policy around that loop, which covers admission in `admit_gate`,
+Stock mlx-vlm supplies the mechanism and gmlx supplies the policy. Upstream
+owns the FastAPI app object, the protocol handlers and SSE formatters, the
+engine's step loop, and the fp16 `BatchKVCache` layout. gmlx owns the
+scheduling policy around that loop, which covers admission in `admit_gate`,
 prioritization in `batch_sched` with `auto_ratio`, and resource arbitration
 in `governor`, `capacity` and `queue_cap`. All of it installs through the
 patch layer, whose seam inventory of well over a hundred entries is in
@@ -163,11 +163,11 @@ hides the pending list for the tick while the projection does not fit. Two
 rules keep it from deadlocking. An idle server is never declined, and past
 the defer ceiling the gate admits one row per tick with a warning.
 
-Each tick, the governor computes ticks-to-collision from one shared accounting and
-walks a band ladder from green to red. Bands follow rates, not levels, so a
-deep batch at flat headroom is green and a shallow one growing fast is not.
-Rate and one-shot costs are accounted separately, and dwell minimums plus a
-cap on sheds per minute prevent thrash.
+Each tick, the governor computes ticks-to-collision from one shared
+accounting and walks a band ladder from green to red. Bands follow rates,
+not levels, so a deep batch at flat headroom is green and a shallow one
+growing fast is not. Rate and one-shot costs are accounted separately, and
+dwell minimums plus a cap on sheds per minute prevent thrash.
 
 The queue cap rejects a request before enqueue instead of holding its
 socket until the queue timeout. The HTTP 503 body names the cap and depth,

@@ -60,26 +60,26 @@ of loading cleanly into wrong weights.
 
 An architecture is done when all of the following pass.
 
-- Strict load. `load_model` builds and swaps, and `load_weights` leaves no
+- Strict load: `load_model` builds and swaps, and `load_weights` leaves no
   parameter unfilled. The loader's unfilled-params warning must be empty.
-- Coherent short generation. A chat model answers "capital of France?" with
+- Coherent short generation: A chat model answers "capital of France?" with
   Paris in 20 greedy tokens.
-- No looping. About 300 greedy tokens contain no 8-token n-gram repeated
+- No looping: About 300 greedy tokens contain no 8-token n-gram repeated
   four or more times.
-- Long-context parity against llama.cpp at 16k, from
-  `tests/gen/test_long_context.py::test_long_prefill_parity`. A prompt of
+- Long-context parity: In
+  `tests/gen/test_long_context.py::test_long_prefill_parity`, a prompt of
   16k tokens or more, greedy-decoded, agrees as text with llama.cpp on the
   same file. Short-prompt parity is not enough, because rope, KV-cache,
   grouped-query (GQA) head-layout and permute bugs surface only at depth.
-- Degeneration check, from `test_long_decode_integrity`. A long
+- Degeneration check: In `test_long_decode_integrity`, a long
   EOS-suppressed greedy decode keeps each token id in range and each step's
   logprob finite, with no single-token repetition. Semantic looping on a tiny
   model is expected. NaNs and out-of-range ids are not.
-- Bench sanity. Prefill and decode throughput on one real model are
-  compared against llama.cpp on the same file. A large unexplained deficit is usually
+- Bench sanity: Prefill and decode throughput on one real model are compared
+  against llama.cpp on the same file. A large unexplained deficit is usually
   a contiguity or layout bug, not MLX itself.
-- Route check at depth. Run a decode at 16k context or more, plus an MTP
-  round if the family has a draft head, with `GMLX_SDPA_DEBUG=1`, and
+- Route check at depth: Run a decode at 16k context or more, plus an MTP
+  round if the family has an MTP head, with `GMLX_SDPA_DEBUG=1`, and
   confirm attention uses one of the fused routes, `gqa_decode`, `fa_decode`,
   `fa_verify`, `verify_gemm` or `sdpa_vector`, rather than `stock`. A new
   family's head geometry can miss the eligibility gates without any error
@@ -88,7 +88,7 @@ An architecture is done when all of the following pass.
   warning fires if a verify-shaped causal call at depth falls back to stock.
   For MTP families, `GMLX_MTP_DEBUG=1` logs a line starting
   `[mtp] verify branch:` per round.
-- Repo gates green. The CPU tier of `pytest` passes with a new fixture
+- Repo gates green: The CPU tier of `pytest` passes with a new fixture
   case for the family in `tests/load/test_config_synth.py`, and
   `scripts/check-coverage.py --check --strict` passes with
   `docs/arch-coverage.md` regenerated from the new table row.

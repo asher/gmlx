@@ -110,11 +110,11 @@ short caches.
 
 | Step | Memory | Time | Disk |
 |---|---|---|---|
-| `gen` | The teacher, served, 36 GB. | 52 teacher tokens per second at `--concurrency` 8, about 4 hours for the training prompts. | The replies, a few MB. |
-| `cache` | The teacher plus a few GB, about 40 GB. | About 500 teacher tokens per second. | 1.6 KB per position at top-k 256. |
-| `align` | The tokenizers only. | About 25 ms per conversation row on the CPU, under 1 ms per plain-text row. | A few MB, unless `--materialize` writes the batch tensors too. |
-| `train` | 50.7 GB peak on the 9B student. | 9.3 s per step of 3 rows, so 678 steps in 1.75 hours. | Two checkpoints under `--ckpt-dir`. |
-| `eval` | The student. | Minutes per slice, longer with the adapter attached. | Two report files. |
+| `gen` | The served teacher takes 36 GB. | The teacher writes 52 tokens per second at `--concurrency` 8, so the training prompts take about 4 hours. | The replies take a few MB. |
+| `cache` | The teacher takes about 40 GB, a few GB over its served size. | The teacher scores about 500 tokens per second. | Each position takes 1.6 KB at top-k 256. |
+| `align` | Only the tokenizers load. | A conversation row takes about 25 ms on the CPU, and a plain-text row under 1 ms. | The output takes a few MB, unless `--materialize` writes the batch tensors too. |
+| `train` | The 9B student peaks at 50.7 GB. | A step of 3 rows takes 9.3 s, so 678 steps take 1.75 hours. | Two checkpoints go under `--ckpt-dir`. |
+| `eval` | Only the student loads. | Each slice takes minutes, longer with the adapter attached. | Two report files are written. |
 
 These pass rates came out of the run, with the teacher and student on one
 tokenizer:

@@ -95,8 +95,8 @@ print(reply.choices[0].message.content)
 ```
 
 Tool calls, structured output, log probabilities and images in messages
-also work. The [HTTP API](api.md) lists the endpoints and the request
-fields that each one accepts.
+also work. For the endpoints and the request fields that each one accepts,
+see the [HTTP API](api.md).
 
 ## Choosing a model
 
@@ -149,9 +149,9 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 `launch` starts the server if it is not running, and adds a provider for
 the server to the settings of pi without changing the providers that are
 already there. It asks the server to load the model and keep it loaded
-through the idle timeout, and then it starts pi.
-[Agents and chat apps](launch.md) covers the other coding agents and chat
-apps, including Open WebUI, a chat app for the browser.
+through the idle timeout, and then it starts pi. The same command connects
+the other coding agents and chat apps, including Open WebUI in the
+browser, as [Agents and chat apps](launch.md) describes.
 
 ## Next steps
 

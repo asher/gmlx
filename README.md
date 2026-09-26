@@ -74,8 +74,8 @@ To choose the optional features yourself, install with
 `uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
 [Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md) covers both routes.
 
-The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about its file size
-plus the KV cache of the conversation, and the Quickstart
+The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about
+its file size plus the KV cache of the conversation, and the Quickstart
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
 for each memory size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
 gmlx` for a uv install. To remove gmlx, follow
@@ -136,18 +136,18 @@ shows how to write the questions and act on the answers.
 
 `gmlx launch pi --model qwen3.8-27b-ud-q6@coding` writes the tool's
 configuration so that it uses the server, starts the server first if it is
-not running, and then runs the tool. It works for the common coding agents, two terminal chat clients
-and two browser apps, Open WebUI and DeepSeek Harness, each listed with its
-quirks in [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md).
+not running, and then runs the tool. It works for the common coding
+agents, two terminal chat clients and two browser apps, Open WebUI and
+DeepSeek Harness, each listed with its quirks in [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md).
 A menu bar app shows what is resident, and `gmlx service install` keeps the
 server running from login.
 
 ### Voice chat and the assistant
 
 With `gmlx talk` a wake phrase opens the mic, Whisper transcribes, and the
-reply is spoken as it streams, as [Voice chat](https://github.com/asher/gmlx/blob/main/docs/talk.md)
-describes. The
-built-in [assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md)
+reply is spoken as it streams, as
+[Voice chat](https://github.com/asher/gmlx/blob/main/docs/talk.md)
+describes. The built-in [assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md)
 adds MCP tools and long-term memory to a voice session, to
 `chat --assistant`, and to assistant ids that the server exposes as models.
 

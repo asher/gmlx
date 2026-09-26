@@ -30,13 +30,13 @@ weights. Each feature of gmlx targets one of these limits.
 
 | Feature | What it gains | What it costs | Page |
 |---------|---------------|---------------|------|
-| A uniform K-quant file | Faster decoding than a mixed file of the same model. | Nothing. | [Choosing a quant for speed](#choosing-a-quant-for-speed) |
-| Speculative decoding | Faster decoding with the same output. | Memory for the drafter, and less gain with many streams. | [Speculative decoding](speculative-decoding.md) |
-| The prompt cache | Skips prefill for the start of a prompt that the server has seen before. | Memory or SSD space for the entries. | [Prompt cache](prompt-cache.md) |
-| Batched serving and admission pacing | More total throughput for several clients, and steady streams while a long prompt arrives. | A new request starts a little later. | [Concurrent requests](concurrency.md) |
-| A quantized KV cache | A half to a quarter of the KV cache memory. | A small quality cost at 4 bits, and fewer accepted drafts. | [KV cache quantization](kv-quantization.md) |
-| Sparse attention | Attention cost that stops growing past 8K tokens. | It changes the output, is opt-in, and applies to the llama family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
-| Streaming | Runs a MoE model larger than RAM. | Decoding runs at a few tokens per second. | [Models larger than memory](streaming.md) |
+| A uniform K-quant file | It decodes faster than a mixed file of the same model. | It costs nothing. | [Choosing a quant for speed](#choosing-a-quant-for-speed) |
+| Speculative decoding | The model decodes faster with the same output. | The drafter takes memory, and the gain shrinks with many streams. | [Speculative decoding](speculative-decoding.md) |
+| The prompt cache | The server skips prefill for the start of a prompt that it has seen before. | The entries take memory or SSD space. | [Prompt cache](prompt-cache.md) |
+| Batched serving and admission pacing | Several clients get more total throughput, and streams stay steady while a long prompt arrives. | A new request starts a little later. | [Concurrent requests](concurrency.md) |
+| A quantized KV cache | The KV cache takes a half to a quarter of the memory. | Quality drops a little at 4 bits, and the model accepts fewer drafts. | [KV cache quantization](kv-quantization.md) |
+| Sparse attention | The cost of attention stops growing past 8K tokens. | It changes the output, is opt-in, and applies to the llama family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
+| Streaming | A MoE model larger than RAM can run. | Decoding runs at a few tokens per second. | [Models larger than memory](streaming.md) |
 
 [Memory and the KV cache](memory.md) explains how much memory a model and
 its context take, and the settings that limit it.

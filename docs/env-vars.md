@@ -14,6 +14,12 @@ Variables that appear neither here nor under
 [Debug switches](internals/debug-switches.md) are internal and may change
 meaning or disappear between releases.
 
+- [Load and cache keys](#load-and-cache-keys)
+- [Residency](#residency)
+- [Server](#server)
+- [Runtime](#runtime)
+- [Commands](#commands)
+
 ## Load and cache keys
 
 gmlx sets these upstream mlx-vlm variables for each model from the `load`
@@ -62,8 +68,8 @@ describes.
 ## Server
 
 The server variables change how `gmlx serve` schedules and admits
-requests. A variable read per tick or per chunk takes effect on a running
-server.
+requests and how it drafts and stops replies. A variable read per tick or
+per chunk takes effect on a running server.
 
 | Variable | Meaning |
 |----------|---------|
@@ -81,6 +87,9 @@ server.
 | `GMLX_DECODE_FAST_DISK` | It sets the `stream_fast_disk` policy to `auto`, `on` or `off`, as `--stream-fast-disk` does. |
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it from the prefill ring with the prompt's most routed experts. |
 | `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
+| `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, which drafts one token fewer, as `--draft-block-size` does. |
+| `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, and `0` removes the cap. It overrides `speculative_width_cap` and is read each round. |
+| `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does, for forced-length benchmarking. |
 
 ## Runtime
 
@@ -136,11 +145,17 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. It is lossy and off by default. |
 | `GMLX_SPARSE_K` | Sparse attention keeps this many tokens. The default is `2048`. |
 | `GMLX_SPARSE_MIN_S` | Sparse attention begins at this depth in tokens. The default is `8192`. |
+
+## Commands
+
+The command variables change the defaults of `run`, `chat`, `ps`,
+`systemone`, `pull` and `validate`, and the directories where gmlx keeps
+its files.
+
+| Variable | Meaning |
+|----------|---------|
 | `GMLX_TOOL_PREFLIGHT=0` | Skip the fit check that `run` and `chat` make from the header before a load, and that `cannot fit:` refusals name. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` and `chat`, as `--no-family-defaults` does. |
-| `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, which drafts one token fewer, as `--draft-block-size` does. |
-| `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, and `0` removes the cap. It overrides `speculative_width_cap` and is read each round. |
-| `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does, for forced-length benchmarking. |
 | `GMLX_API_KEY` | `ps` and `systemone` send this key when `--api-key` is not passed. The server reads its own key only from `server.api_key`. |
 | `GMLX_PULL_RETRIES` | `pull` accepts this many consecutive failed attempts on one file, `10` by default. An attempt that moves bytes resets the count, and `0` fails at once. |
 | `GMLX_PULL_TIMEOUT` | `pull` uses this socket timeout in seconds, which also bounds one stalled read. The default is `60`. |

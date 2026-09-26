@@ -73,26 +73,27 @@ Edit config opens the configuration file of the server in a panel:
 ## Voice sessions
 
 When the server runs both speech services of
-[Speech, embeddings and rerank](services.md), the menu gains a
-Talk to item, named after [`talk.model`](config.md#talkmodel) or the
-default model of the server. It starts a voice session inside the app,
-with no terminal window. The menu bar icon shows a microphone while the
-session listens, a thought bubble while the model thinks, and a speaker
-while it talks.
+[Speech, embeddings and rerank](services.md), the menu gains a Talk to
+item, named after [`talk.model`](config.md#talkmodel) or the default model
+of the server. It starts a voice session inside the app, with no terminal
+window. The Talk in a terminal item beside it opens [`gmlx talk`](talk.md)
+in iTerm2 when iTerm2 is running, and otherwise in the default terminal
+app.
 
-During a session, the menu offers Stop speaking, Mute mic, a volume
-slider, Show transcript, which opens the conversation in a panel, and End
-voice chat. With the [assistant](assistant.md) brain and memory turned on,
-it also offers Show memory and Clear memory. The volume persists between
-sessions. The app has no microphone gain control, because a software gain
-would change when speech counts as speech, so set the input level in the
-Sound settings of macOS instead.
+During a session, the menu bar icon shows a microphone while the session
+listens, a thought bubble while the model thinks, and a speaker while it
+talks. The menu offers Stop speaking, Mute mic, a volume slider, Show
+transcript, which opens the conversation in a panel, and End voice chat.
+With the [assistant](assistant.md) brain and memory turned on, it also
+offers Show memory and Clear memory.
 
-The session reads its settings from the [`talk`](config.md#voice) block of
-the configuration file. The `ptt` and `text` modes need a keyboard, so the
-app uses `wake` mode for them. Talk in a terminal opens
-[`gmlx talk`](talk.md) in iTerm2 when it is running, and otherwise in the
-default terminal app.
+The volume persists between sessions. The app has no microphone gain
+control, because a software gain would change when speech counts as
+speech, so set the input level in the Sound settings of macOS instead.
+
+Session settings come from the [`talk`](config.md#voice) block of the
+configuration file. The `ptt` and `text` modes need a keyboard, so the app
+uses `wake` mode for them.
 
 A session asks the server to keep its model loaded. The load runs in the
 background, so the microphone opens without waiting for it.
@@ -126,11 +127,12 @@ in macOS still works for a plain press of Globe.
 With the `talk` extra installed, the menu shows the hotkey item. To keep
 Space from reaching the app in front, the hotkey needs Accessibility
 permission. The app asks for the permission each time you turn on the
-hotkey without it, and never at startup. The hotkey stays on across
-restarts, and the app turns it back on at startup only when the permission
-is present. Until then, the item says that it needs permission. After you
-grant the permission in System Settings, the app notices within a few
-seconds. If the item then says to
+hotkey without it, and never at startup.
+
+The hotkey stays on across restarts, and the app turns it back on at
+startup only when the permission is present. Until then, the item says
+that it needs permission. After you grant the permission in System
+Settings, the app notices within a few seconds. If the item then says to
 quit and reopen the menu bar, do that, because some macOS versions apply a
 permission only to a newly started app.
 

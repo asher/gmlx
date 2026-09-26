@@ -23,9 +23,8 @@ alone.
 
 Some GGUF files carry a [native head](glossary.md#native-head), a small
 extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8
-models do. Other
-families use a separate drafter GGUF, a companion file such as the gemma-4
-assistant drafter or a DFlash 2 drafter.
+models do. Other families use a separate drafter GGUF, a companion file
+such as the gemma-4 assistant drafter or a DFlash 2 drafter.
 
 On `run` and `chat`, speculation turns on by itself for a model with a
 native head, and for DeepSeek-V4 when its companion drafter is in the same

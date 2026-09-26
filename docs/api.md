@@ -42,25 +42,25 @@ services. Every route except `/health` needs the API key when one is set.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /v1/chat/completions` | OpenAI chat completions, the primary route. |
-| `POST /v1/responses` | OpenAI Responses. |
-| `POST /v1/messages` | Anthropic Messages. `/v1/messages/count_tokens` counts a body's input tokens. |
-| `POST /v1/completions` | Classic text completions, with a single string prompt, a single choice and no chat template. |
-| `GET /v1/models` | Configured ids and aliases with their markers, also at `/models`. |
-| `GET /health` | Liveness. `?ready=1` adds a readiness verdict. |
-| `GET /v1/metrics` | The runtime snapshot, also at `/metrics` and as Prometheus text with `?format=prometheus`. |
-| `POST /v1/estimate` | Dry-run admission for a chat body. |
-| `GET /v1/capacity/plan` | Whether `width` streams fit at `depth` tokens each, and whether they may start now. |
-| `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}`. |
+| `POST /v1/chat/completions` | It serves OpenAI chat completions and is the primary route. |
+| `POST /v1/responses` | It serves OpenAI Responses. |
+| `POST /v1/messages` | It serves Anthropic Messages, and `/v1/messages/count_tokens` counts a body's input tokens. |
+| `POST /v1/completions` | It serves classic text completions, with a single string prompt, a single choice and no chat template. |
+| `GET /v1/models` | It lists configured ids and aliases with their markers, also at `/models`. |
+| `GET /health` | It reports liveness, and `?ready=1` adds a readiness verdict. |
+| `GET /v1/metrics` | It returns the runtime snapshot, also at `/metrics`, or Prometheus text with `?format=prometheus`. |
+| `POST /v1/estimate` | It runs a dry-run admission check for a chat body. |
+| `GET /v1/capacity/plan` | It says whether `width` streams fit at `depth` tokens each, and whether they may start now. |
+| `GET /v1/cache/stats` | It returns prompt cache statistics, or `{"enabled": false}`. |
 | `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
-| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, or all with an empty body. 409 while streams are in flight. |
+| `POST /unload` | Evict a resident model with `{"model": "<id>"}`, or all with an empty body. It answers 409 while streams are in flight. |
 | `POST /v1/keep` | Keep a model resident through the idle timeout with `{"model": "<id>", "warm": true}`. `"keep": false` releases it. |
-| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. Same as SIGHUP. |
-| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech-to-text, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
-| `POST /v1/audio/speech` | Text-to-speech, with `tts` configured. |
-| `POST /v1/embeddings` | Text embeddings, with `embeddings` configured. |
-| `POST /v1/rerank` | Reranking, with `rerank` configured, also at `/rerank`. |
-| `POST /v1/systemone` | Answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [Structured decisions](decisions.md). |
+| `POST /v1/reload` | Re-read the config and re-register models, keeping entries whose load parameters are unchanged. SIGHUP does the same. |
+| `POST /v1/audio/transcriptions`, `/v1/audio/translations` | It transcribes or translates speech, with `stt` configured as in [Speech, embeddings and rerank](services.md). |
+| `POST /v1/audio/speech` | It turns text into speech, with `tts` configured. |
+| `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured. |
+| `POST /v1/rerank` | It reranks documents, with `rerank` configured, also at `/rerank`. |
+| `POST /v1/systemone` | It answers a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [Structured decisions](decisions.md). |
 
 `GET /v1/models` lists configured and discovered ids plus alias presets,
 and never the Hugging Face cache. Each entry carries `resident`, `pinned`,
@@ -81,8 +81,9 @@ when the model runs fp16 KV while batched, as it does under `uniform`.
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
 or 503 with a one-word `reason` and a `Retry-After` header. The reason is
-`pressure` when the [governor](glossary.md#governor) is orange or red, `queue` when
-requests are waiting and `busy` when all engines are at their decode width.
+`pressure` when the [governor](glossary.md#governor) is orange or red,
+`queue` when requests are waiting and `busy` when all engines are at their
+decode width.
 
 `POST /v1/completions` supports `max_tokens`, `temperature`, `top_p`, `seed`,
 `stop`, `stream` and `profile`. List or token-array prompts, `n > 1`, `echo`,
@@ -107,22 +108,22 @@ instead of failing the snapshot.
 
 | Section | Fields | Meaning |
 |---|---|---|
-| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The decode width, the queue cap, streams generating now and requests waiting for a slot. |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
+| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | They give the decode width, the queue cap, the streams generating now and the requests waiting for a slot. |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | They give the waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
 | `requests[]` | One row for each request | Queued rows come first. `state` is `queued`, `prefill` or `decode`. |
-| `resident_models[]` | For each model, `in_flight`, `pinned`, `kept` and bytes | The number for each model to compare against `decode_batch`, since each model decodes on a separate engine. |
-| `governor` | `band`, counters | The memory governor's band and shed history. |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the [arena's](glossary.md#arena) bytes, capacity and hit rate. |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table, absent for a Hugging Face fall-through load. |
-| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean. |
+| `resident_models[]` | For each model, `in_flight`, `pinned`, `kept` and bytes | Each model decodes on a separate engine, so compare each model's `in_flight` with `decode_batch`. |
+| `governor` | `band`, counters | They give the memory governor's band and shed history. |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | They hold MLX's active and cached bytes, the gate's free memory, and a streamed model's [arena](glossary.md#arena) bytes, capacity and hit rate. |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | It holds the boot capacity table, which is absent for a Hugging Face fall-through load. |
+| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | They give the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean. |
 
 A request row carries `id`, `model`, `state`, `position`, `prompt_tokens`,
 `generated`, `max_tokens`, `elapsed_s`, `ttft_s` and `decode_tok_s`, and
 two structured fields. `cache` holds the tier its prefix hit, one of
 `exact`, `block`, `ckpt`, `anchor` and `miss`, or `hit` when only the reused
 token count is known, plus the `warm_tokens` it reused. `speculative` holds
-the [drafter's](glossary.md#drafter) rounds, drafted and accepted counts and accept
-rate, exact at batch width 1 and shared across a wider batch, or `null`
+the [drafter's](glossary.md#drafter) rounds, drafted and accepted counts
+and accept rate, exact at batch width 1 and shared across a wider batch, or `null`
 without a drafter. Rows refresh at most four times a second on each engine.
 
 Two routes use the same numbers to tell a dispatcher whether to proceed before
@@ -176,13 +177,13 @@ configure. Streaming works too, and a parsed call ends the stream with
 
 | Value | Behavior |
 |-------|----------|
-| `none` | Enforced. The tools are stripped before the template runs, so the model cannot emit a call. |
+| `none` | The server enforces it by stripping the tools before the template runs, so the model cannot emit a call. |
 | `auto` | This is the default, and the model decides whether to call a tool. |
-| `required` and named-function forms | Forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call. |
+| `required` and named-function forms | They reach the template as a variable and work only if the template implements them. A forced call that produces no call logs a warning. |
 
 In this loop the server parses the calls, and the client runs them and
-sends the results back. To run the loop server-side
-with config-allowlisted MCP tools, serve an
+sends the results back. To run the loop server-side with
+config-allowlisted MCP tools, serve an
 [assistant id](assistant.md#served-assistants).
 
 ```sh
@@ -296,12 +297,12 @@ curl localhost:8080/v1/chat/completions -d '{
 
 | Condition | Response | Switch |
 |-----------|----------|--------|
-| The prompt plus `max_tokens` exceeds the context budget. | 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
-| The prompt alone cannot fit in memory. | 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
-| More requests are waiting than the queue cap. | 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time, 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
-| A model cannot load beside the resident models that are busy. | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | None |
+| The prompt plus `max_tokens` exceeds the context budget. | The server answers 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
+| The prompt alone cannot fit in memory. | The server answers 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
+| More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
+| A model cannot load beside the resident models that are busy. | The server answers 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | None |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
-| A streaming request is silent, as during a long prefill. | An SSE comment line every 15 seconds, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
+| A streaming request is silent, as during a long prefill. | The server sends an SSE comment line every 15 seconds, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight estimates the prompt's KV cache from the model's per-token KV
 size, plus the prefill transient, against the working set with the batch

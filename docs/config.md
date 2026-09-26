@@ -76,17 +76,17 @@ YAML and exits without loading a model.
 The top level of the file is a YAML mapping of these blocks. Every block
 is optional, and a server needs only `models`.
 
-| Block | What it sets |
+| Block | What it does |
 |-------|--------------|
-| [`models`](#models) | The models gmlx can run, one entry each, with its GGUF file and its own settings. |
-| [`aliases`](#aliases) | Extra names for models, such as `coder` for `qwen3.8-27b-ud-q6@coding`. |
-| [`profiles`](#profiles) | Named sets of sampling, loading and prompt settings that any model can use. |
-| [`rules`](#rules) | A profile for every model whose id matches a pattern, such as all ids that contain `coder`. |
-| [`discover`](#model-discovery) | Folders the server scans at each start, adding every GGUF it finds without an entry of its own. |
-| [`server`](#server) | Where the server listens, its API key, the folders that hold models, how much memory models may use, and optional services. |
-| [`talk`](#voice) | The voice client's model, voice, wake phrase and listening thresholds. |
-| [`assistant`](#assistant) | Tool servers and long-term memory for the built-in assistant. |
-| [`theme`, `themes`](#chat-themes) | Colors of the terminal chat. |
+| [`models`](#models) | It lists the models gmlx can run, one entry each, with its GGUF file and its own settings. |
+| [`aliases`](#aliases) | It gives models extra names, such as `coder` for `qwen3.8-27b-ud-q6@coding`. |
+| [`profiles`](#profiles) | It defines named sets of sampling, loading and prompt settings that any model can use. |
+| [`rules`](#rules) | It gives a profile to every model whose id matches a pattern, such as all ids that contain `coder`. |
+| [`discover`](#model-discovery) | It names folders that the server scans at each start, adding every GGUF it finds without an entry. |
+| [`server`](#server) | It sets where the server listens, its API key, the model folders, how much memory models may use, and optional services. |
+| [`talk`](#voice) | It sets the voice client's model, voice, wake phrase and listening thresholds. |
+| [`assistant`](#assistant) | It gives the built-in assistant its tool servers and long-term memory. |
+| [`theme`, `themes`](#chat-themes) | They set the colors of the terminal chat. |
 
 A key is named by its full path, such as `server.port`. A path such as
 `models.*.pin` means the `pin` key of any entry under `models`. After you
@@ -349,15 +349,15 @@ A model gets a profile from its own entry, from a matching rule, from the
 server default, or from the request. When a setting comes from more than
 one place, a later layer wins over an earlier one:
 
-| Layer | Set where |
-|-------|-----------|
-| Family defaults | Built in, per detected family |
-| Server default profile | [`server.defaults.profile`](#serverdefaultsprofile) |
-| Rule profile | The first matching entry in [`rules`](#rules) |
-| Model profile | [`models.*.profile`](#modelsprofile), or `@name` on the request |
-| Per-model profile change | [`models.*.profiles`](#modelsprofiles) |
-| Model overrides | [`models.*.overrides`](#modelsoverrides) |
-| Request fields | The request body |
+| Layer | Where it is set |
+|-------|-----------------|
+| Family defaults | They are built in for each detected family. |
+| Server default profile | [`server.defaults.profile`](#serverdefaultsprofile) sets it. |
+| Rule profile | The first matching entry in [`rules`](#rules) sets it. |
+| Model profile | [`models.*.profile`](#modelsprofile) sets it, or `@name` on the request. |
+| Per-model profile change | [`models.*.profiles`](#modelsprofiles) sets it. |
+| Model overrides | [`models.*.overrides`](#modelsoverrides) sets them. |
+| Request fields | The request body sets them. |
 
 A request's `@name` replaces the model's own profile rather than adding to
 it, and an unknown name gets a 400. A profile's `system` prompt applies
@@ -421,11 +421,11 @@ works across families.
 
 | Family | Template variable | Values |
 |--------|-------------------|--------|
-| Qwen3.x, GLM | `enable_thinking` | `true`, `false` |
-| MiniMax-M3 | `thinking_mode` | Three states, so `adaptive` is accepted. |
-| Kimi K2.x | `thinking` | `true`, `false` |
-| Hy3 | `reasoning_effort` | Levels that include `no_think`. |
-| gpt-oss | `reasoning_effort` | `low`, `medium`, `high`. Reasoning cannot be turned off. |
+| Qwen3.x, GLM | `enable_thinking` | `true` or `false`. |
+| MiniMax-M3 | `thinking_mode` | It has three states, so `adaptive` is accepted. |
+| Kimi K2.x | `thinking` | `true` or `false`. |
+| Hy3 | `reasoning_effort` | Its levels include `no_think`. |
+| gpt-oss | `reasoning_effort` | `low`, `medium` or `high`. Reasoning cannot be turned off. |
 
 A request's `enable_thinking` wins, then its `thinking` or
 `reasoning_effort` field, then the profile, then the template's default.
@@ -889,12 +889,12 @@ The server keeps several models in memory at once, up to the budget in
 `server.budget_gb`. A model takes about the size of its GGUF file in
 memory, because the weights map from the file without a copy.
 
-| State | Set by | Unloads when |
-|-------|--------|--------------|
-| Pinned | `pin: true`, `--pin` | Never |
-| Kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | The budget is full and it is the least recently used. |
-| Idle | Any request | No request arrives for `ttl_s` seconds, or the budget needs the room. |
-| Preloaded | `server.defaults.preload` | The same as an idle model. |
+| State | Set by | When it unloads |
+|-------|--------|-----------------|
+| Pinned | `pin: true`, `--pin` | It never unloads. |
+| Kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | It unloads when the budget is full and it is the least recently used. |
+| Idle | Any request | It unloads after `ttl_s` seconds without a request, or when the budget needs the room. |
+| Preloaded | `server.defaults.preload` | It unloads like an idle model. |
 
 A model is never unloaded during a generation. Keeping is what
 `gmlx launch --model` asks for, so the model of a coding session survives
@@ -1380,9 +1380,9 @@ formatting:
 
 | Command | Change |
 |---------|--------|
-| `gmlx sync-models` | Adds new GGUFs from `model_dirs` and removes the entries whose file is gone. |
-| `gmlx pull` | Downloads a GGUF into the first folder of `model_dirs` and adds its entry. |
-| `gmlx rm` | Deletes the files of a model and its entry. |
+| `gmlx sync-models` | It adds new GGUFs from `model_dirs` and removes the entries whose file is gone. |
+| `gmlx pull` | It downloads a GGUF into the first folder of `model_dirs` and adds its entry. |
+| `gmlx rm` | It deletes the files of a model and its entry. |
 
 Each of them, and `gmlx init`, tells a running server to reload. Pass
 `--no-reload` to prevent that. A server started with a GGUF path instead

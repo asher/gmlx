@@ -20,8 +20,8 @@ settings make streaming faster, some with a cost in quality.
 A [MoE](glossary.md#expert-and-moe) model uses only a few of its experts
 for each token, so one token reads a small part of the file. gmlx keeps
 the parts that every token reads in memory and reads the routed experts
-from disk. This
-lets a model of about 200 billion parameters run on a Mac with 64 GB.
+from disk. This lets a model of about 200 billion parameters run on a Mac
+with 64 GB.
 
 The speed of decoding then depends on the SSD and the CPU rather than the
 GPU, and a few tokens per second is normal. A model that fits in memory
@@ -70,8 +70,8 @@ model prints that the flag has no effect.
 
 | Placement | What stays on the GPU | What streams | Use it when |
 |-----------|-----------------------|--------------|-------------|
-| `--stream-experts`, or `stream: experts` | Attention, routers, shared experts and the KV cache. | The routed experts, from the arena and the disk. | Most cases, including long contexts, chat and a server with other models. |
-| `--stream-cpu`, or `stream: cpu` | Nothing. The whole model runs on the CPU from the page cache. | Everything that does not fit in the wired budget. | A model on its own, where one device for everything is simpler. |
+| `--stream-experts`, or `stream: experts` | Attention, routers, shared experts and the KV cache stay on the GPU. | The routed experts stream from the arena and the disk. | Use it in most cases, including long contexts, chat and a server with other models. |
+| `--stream-cpu`, or `stream: cpu` | Nothing stays on the GPU, and the whole model runs on the CPU from the page cache. | Everything that does not fit in the wired budget streams. | Use it for a model on its own, where one device for everything is simpler. |
 
 `--stream-cpu` streams the experts whatever the size of the model. The
 decode feeder is off under it, so the settings that need the feeder do not
@@ -83,9 +83,9 @@ a `stream: cpu` model on a server of its own.
 | Combination | Result |
 |-------------|--------|
 | `--stream-experts` with `--mmproj` | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it. |
-| `--stream-cpu` with `--mmproj` | Refused, because the CPU placement would move the vision encoder too. |
-| `--stream-experts` with speculative decoding | Works on the command line with an explicit `--speculative`. Automatic speculation stays off under streaming. |
-| `stream` on a server entry with `speculative` | Refused at load, because the server loads the drafter after the placement. |
+| `--stream-cpu` with `--mmproj` | The command refuses it, because the CPU placement would move the vision encoder too. |
+| `--stream-experts` with speculative decoding | It works on the command line with an explicit `--speculative`. Automatic speculation stays off under streaming. |
+| `stream` on a server entry with `speculative` | The server refuses it at load, because it loads the drafter after the placement. |
 | A lossy setting with speculative decoding | Automatic speculation turns off, and the setting applies. Chat refuses the combination with an explicit `--speculative`. |
 
 ## How big a model can this machine stream
@@ -222,17 +222,19 @@ These settings do not change the output, and all of them are on by
 default for `stream: experts`, with one exception. Lookahead prestage is
 off by default on the GLM-5 and DeepSeek-V3.2 families, and
 `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
+[Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements)
+records the gain of each setting on real models.
 
 | Setting | What it does | How to turn it off |
 |---------|--------------|--------------------|
-| Prefill feeder | Reads the experts of each layer from the GGUF into GPU memory while the previous layer computes, so each byte is read once. | `--no-prefill-feeder` |
-| Decode feeder | Keeps the most used experts of each layer in the arena, and reads only the others from disk. | `--no-decode-feeder` |
-| Lookahead prestage | Predicts the experts of the next layer while the current layer computes, and reads the missing ones early. It changes which bytes are read, never the routing. | `GMLX_DECODE_LOOKAHEAD=0` |
-| Weight pin | Locks the every-token weights in memory, so that macOS cannot evict them between tokens. | `GMLX_PIN_WEIGHTS=0` |
-| GPU keep-warm | Runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `GMLX_GPU_KEEPWARM=0` |
-| Streamed lookup tables | Streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
-| Stack unmap | Releases the GPU mapping of the expert stacks once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
-| Tail merge | Widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
+| Prefill feeder | It reads the experts of each layer from the GGUF into GPU memory while the previous layer computes, so each byte is read once. | `--no-prefill-feeder` |
+| Decode feeder | It keeps the most used experts of each layer in the arena, and reads only the others from disk. | `--no-decode-feeder` |
+| Lookahead prestage | It predicts the experts of the next layer while the current layer computes, and reads missing ones early. It changes which bytes are read, never the routing. | `GMLX_DECODE_LOOKAHEAD=0` |
+| Weight pin | It locks the every-token weights in memory, so that macOS cannot evict them between tokens. | `GMLX_PIN_WEIGHTS=0` |
+| GPU keep-warm | It runs a tiny kernel between layers, so that the GPU clock stays high through the disk reads. | `GMLX_GPU_KEEPWARM=0` |
+| Streamed lookup tables | It streams large lookup tables before the experts, on the architectures that have them. | `GMLX_STREAM_PLE=0` |
+| Stack unmap | It releases the GPU mapping of the expert stacks once the feeders read them from the file. | `GMLX_STREAM_UNMAP_STACKS=0` |
+| Tail merge | It widens the prefill chunk by up to an eighth, so that a short last chunk joins the ones before it. | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` |
 
 On a short prompt, the prefill feeder reads only the experts that the
 router chose, which shortens the time to the first token. Its reads bypass
@@ -264,9 +266,6 @@ weights are larger than 60% of RAM. The settings apply to MXFP4 and NVFP4
 experts too, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL quants, and
 [`GMLX_NATIVE_FP`](env-vars.md#runtime) controls how gmlx lays them out.
 
-The gain of each setting on real models is recorded in
-[Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements).
-
 ## The lossy settings
 
 Five settings trade some output quality for decoding speed. None is on by
@@ -283,11 +282,11 @@ when fewer experts are used. Each setting reduces a different cost:
 
 | Setting | Flag | Config key | Reduces | Acts on |
 |---------|------|------------|---------|---------|
-| Expert cap | `--moe-experts K` | [`moe_experts`](config.md#modelsmoe_experts) | Reads and compute. Each token uses K experts. | Prefill and decoding. |
-| Expert mass | `--moe-expert-mass P` | [`moe_expert_mass`](config.md#modelsmoe_expert_mass) | Reads and compute. Each token keeps the fewest experts that cover share P of the gate weight. | Prefill and decoding. |
-| Miss shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | Disk waits. Drops only experts that are not in the arena, lowest scores first, while the kept experts cover share P. | Decoding, with the decode feeder. |
-| Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | The remaining disk waits. Lookahead reads only the experts that miss shed would keep. | Decoding, with miss shed and lookahead. |
-| Layer shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | The fixed cost of each layer. Skips the routed experts of a layer with probability P, and the shared expert still runs. | Decoding. |
+| Expert cap | `--moe-experts K` | [`moe_experts`](config.md#modelsmoe_experts) | It cuts reads and compute, because each token uses K experts. | It acts on prefill and decoding. |
+| Expert mass | `--moe-expert-mass P` | [`moe_expert_mass`](config.md#modelsmoe_expert_mass) | It cuts reads and compute, because each token keeps the fewest experts that cover share P of the gate weight. | It acts on prefill and decoding. |
+| Miss shed | `--moe-miss-shed P` | [`moe_miss_shed`](config.md#modelsmoe_miss_shed) | It cuts disk waits by dropping only experts that are not in the arena, lowest scores first, while the kept experts cover share P. | It acts on decoding, with the decode feeder. |
+| Keeper prestage | `--moe-prestage keepers` | [`moe_prestage`](config.md#modelsmoe_prestage) | It cuts the remaining disk waits, because lookahead reads only the experts that miss shed would keep. | It acts on decoding, with miss shed and lookahead. |
+| Layer shed | `--moe-layer-shed P` | [`moe_layer_shed`](config.md#modelsmoe_layer_shed) | It cuts the fixed cost of each layer by skipping its routed experts with probability P. The shared expert still runs. | It acts on decoding. |
 
 The expert cap and expert mass combine, so
 `--moe-experts 6 --moe-expert-mass 0.9` uses at most 6 experts and then

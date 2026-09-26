@@ -167,8 +167,8 @@ Adapters work with the prompt cache and speculative decoding:
 
 - The key of a [prompt cache](config.md#prompt-cache) entry includes the
   adapter, so each id caches its own copy of a shared prefix.
-- `speculative: true` works with adapters. Set it on every id of the group,
-  because a difference splits the group. Adapters give the same output
+- Set `speculative: true` on every id of the group, because a difference
+  splits the group. Adapters give the same output
   whether the batch uses speculation or not.
 
 The adapters of a group are part of what identifies its loaded model. When
