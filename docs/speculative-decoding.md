@@ -66,8 +66,8 @@ each model. This command measures your own model at two context depths:
 gmlx run model.gguf --bench-depths "0,4096" --speculative
 ```
 
-A quantized KV cache makes the model accept fewer drafts, and 4 bits
-costs the most. When
+A [quantized KV cache](kv-quantization.md#speed-and-speculative-decoding)
+makes the model accept fewer drafts, and 4 bits costs the most. When
 speculation is on, keep the KV cache at full precision if you can, and use
 8 bits if memory requires quantization.
 

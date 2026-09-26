@@ -1,7 +1,7 @@
 # Troubleshooting
 
-Most failures in a new setup have a known cause and a fix, and each one
-appears under the command that shows it. [Logs and files](#logs-and-files)
+Most failures in a new setup have a known cause and a fix, grouped by the
+step where they appear. [Logs and files](#logs-and-files)
 says where gmlx writes its logs, runfiles, caches and sessions.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
@@ -256,8 +256,9 @@ and which settings reduce them. The usual fixes are a
 quant, or [streaming](streaming.md) for a MoE model larger than memory. On a
 server with several models, lower
 [`server.budget_gb`](config.md#serverbudget_gb) or
-[`server.max_models`](config.md#servermax_models). `GMLX_TOOL_PREFLIGHT=0`
-skips the refusal on `run` and `chat` when you want to try anyway.
+[`server.max_models`](config.md#servermax_models). To try anyway, set
+[`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#runtime), which skips the refusal on
+`run` and `chat`.
 
 ## Voice
 

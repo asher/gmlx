@@ -170,10 +170,10 @@ base can serve several adapters at once, which
 end to end.
 
 `distill` teaches a small GGUF what a larger one knows, a document or a
-behavior, by training an adapter on the larger model's outputs without
-running the two at once.
+behavior. It trains an adapter on the larger model's outputs without
+running the two at once, and
 [Distillation](https://github.com/asher/gmlx/blob/main/docs/distill.md)
-shows how to run it.
+gives the commands for each case.
 
 ## Performance
 

@@ -96,12 +96,12 @@ harness](../../tests/e2e/README.md).
 | `run_residency_switch_e2e.py` | The server switches between two models that cannot both be resident. |
 | `run_stream_e2e.py` | A streamed model goes through load cycles, memory pressure and coresidency, with `memguard.py` run beside it. |
 | `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | Prompt-cache reuse is checked across restarts and at depth, for each tier. |
-| `run_lora_e2e.py` | The harness preps, trains, and serves base and adapter, then checks that the adapter changed the output style. |
+| `run_lora_e2e.py` | The harness preps, trains and serves base and adapter, then checks that the adapter changed the output style. |
 | `run_distill_e2e.py` | The harness caches a small teacher, aligns, trains an adapter and evals before and after, then checks that the loss fell. |
 | `run_chat_pty_e2e.py` | The chat client runs in a real pseudo-terminal. |
 | `run_serve_harmony_e2e.py` | A served gpt-oss model keeps its response contract, with no harmony channel markup in content and truncation inside analysis. |
 | `run_serve_stress_e2e.py` | Seeded concurrent chaos hits one server, with mid-stream aborts, tiny budgets, warm resends and growing sessions. |
-| `run_systemone_e2e.py` | `/v1/systemone` runs on a DiffusionGemma GGUF, covering answer shapes, obvious answers, seed replay, refusals, a concurrent chat and the verb. |
+| `run_systemone_e2e.py` | `/v1/systemone` runs on a DiffusionGemma GGUF, covering answer shapes, obvious answers, seed replay, refusals, a concurrent chat and `gmlx systemone`. |
 
 ```sh
 python tests/e2e/run_server_e2e.py --print-pull   # pull commands for the harness models

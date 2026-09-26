@@ -34,8 +34,8 @@ scripts/upstream_canary.sh
 The script builds a disposable venv with this checkout, lifts only the mlx-vlm
 pin to whatever PyPI serves and runs the seam check. mlx-lm is exercised
 only if that upgrade happens to pull a newer one in. A pass means the
-release is likely a safe bump, still to be qualified by the procedure
-below, while a failure lists each changed symbol and the gmlx site that
+release is likely a safe bump, still to be qualified by the
+[bump procedure](#bump-procedure), while a failure lists each changed symbol and the gmlx site that
 uses it.
 
 ## Bump procedure

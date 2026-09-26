@@ -84,7 +84,7 @@ The mode sets how a turn starts:
 | `wake` | You say the wake phrase, and then speak. This is the default. |
 | `vad` | Any speech starts a turn. |
 | `ptt` | Space opens the microphone. The turn ends after a pause, or when you press Space again. |
-| `text` | You type every message, and the replies are spoken. |
+| `text` | You type every message, and the replies are spoken. This mode needs only the text-to-speech service. |
 
 Any English text works as the wake phrase, with no training needed. The
 default is "hey assistant", and `/wake` changes it during a session. Choose a
@@ -92,9 +92,9 @@ phrase that the model is unlikely to say, because the client also hears
 the speakers. When the wake phrase model cannot load, the client prints
 why and uses `vad` mode instead.
 
-An utterance ends after 550 milliseconds of silence by default. In `ptt`
-mode, pressing Space before you speak closes the microphone again. The
-`text` mode needs only the text-to-speech service.
+An utterance ends after 550 milliseconds of silence by default, which
+[`talk.vad.silence_ms`](config.md#talkvadsilence_ms) changes. In `ptt`
+mode, pressing Space before you speak closes the microphone again.
 
 ## Keys and commands
 

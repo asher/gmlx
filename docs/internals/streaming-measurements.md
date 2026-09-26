@@ -5,15 +5,15 @@ memory](../streaming.md) show what the lossless over-budget path produces,
 what each lossy setting did on four models, and how a setting is certified.
 
 - [What the over-budget case produces](#what-the-over-budget-case-produces)
-- [Hy3: flat router, high hit rate](#hy3-flat-router-high-hit-rate)
-- [MiniMax-M3: low hit rate](#minimax-m3-low-hit-rate)
-- [GLM-5.2: wider routing](#glm-52-wider-routing)
-- [Kimi-K3: far over budget](#kimi-k3-far-over-budget)
-- [DeepSeek-V4.1-Flash: two engram tables](#deepseek-v41-flash-two-engram-tables)
+- [Hy3](#hy3)
+- [MiniMax-M3](#minimax-m3)
+- [GLM-5.2](#glm-52)
+- [Kimi-K3](#kimi-k3)
+- [DeepSeek-V4.1-Flash engram tables](#deepseek-v41-flash-engram-tables)
 - [Settings that passed](#settings-that-passed)
 - [Certifying a setting](#certifying-a-setting)
-- [One prompt, four settings](#one-prompt-four-settings)
-- [One prompt, four shed levels: Kimi-K3](#one-prompt-four-shed-levels-kimi-k3)
+- [Four settings on Hy3](#four-settings-on-hy3)
+- [Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3)
 - [Lossless setting measurements](#lossless-setting-measurements)
 - [Decode feeder defaults](#decode-feeder-defaults)
 
@@ -33,10 +33,10 @@ shows a page's source, so download one to watch the animation.
 Both pages ran as generated, and the larger quant also added scroll and
 drag controls for the cruising pace that the prompt never asked for. The
 samples show scale. A model five to seven times the machine's RAM
-sustained a coherent 30k-token single-file program at the single-digit
-rates listed above.
+sustained a coherent 30k-token single-file program at 1.15 to 1.34
+tok/s.
 
-## Hy3: flat router, high hit rate
+## Hy3
 
 Hy3 is the flat-router end of the range. It is a 299B-A21B MoE, streamed as
 a 159 GB IQ4_XS file on a 128 GB machine with the decode arena at about a
@@ -79,12 +79,12 @@ concentrated-router model with a high hit rate, the probe shows the reverse
 before any lossy run is needed. There it removes most reads for a few
 percent of mass.
 
-## MiniMax-M3: low hit rate
+## MiniMax-M3
 
 MiniMax-M3 is the low-hit-rate end of the range. It is a 4-of-128-expert
 MoE, streamed as a 264 GB Q4_K_M file on the same 128 GB machine with the
-decode arena at about an 87% hit rate. The runs used the alternated A/B
-above, with decode-only medians over 512-token generations. A layer stalls when
+decode arena at about an 87% hit rate. The runs used the same alternated A/B
+rounds as Hy3, with decode-only medians over 512-token generations. A layer stalls when
 any one of its four routed experts misses, so at 87% per-expert residency
 roughly half of all token-layer calls stall, and the miss-targeted setting
 gains more.
@@ -110,7 +110,7 @@ producing complete working artifacts with no stray tokens. The probe sizes
 expert-mass but does not account for residency, so when the exit stats show
 a low hit rate, try miss-shed first.
 
-## GLM-5.2: wider routing
+## GLM-5.2
 
 GLM-5.2 changes the routing width. It is a 282 GB UD-IQ3_XXS file with 256
 experts routed top-8 under sigmoid gating. On the same machine it streams at
@@ -137,7 +137,7 @@ before the form, and a different routing width moved the threshold. That is
 why [Certifying a setting](#certifying-a-setting) renders the artifact and
 re-gates after a routing change.
 
-## Kimi-K3: far over budget
+## Kimi-K3
 
 The most over-budget point reruns the Kimi-K3 scale sample with the
 settings on. Kimi-K3 UD-Q2_K_XL is 861 GB on the same 128 GB
@@ -147,7 +147,7 @@ expert set and the lossless hit rate is about 50%. Demand stalls take about
 two thirds of decode wall time, so the miss-targeted setting gains by far
 the most. Each shed arm pairs it with keeper prestage through
 `--moe-prestage keepers`. Every setting ran one long generation on the same
-one-shot prompt as the samples above, at temperature 1.0, for 23-30k tokens
+one-shot prompt as the scale samples, at temperature 1.0, for 23-30k tokens
 with thinking included. The figures are whole-run averages rather than
 alternated A/Bs.
 
@@ -170,17 +170,17 @@ step is also non-linear, as on the other models. Going from lossless to
 
 All three shed levels produced complete working pages on this long-form
 prompt, and what separates them is content drift, compared side by side
-under [One prompt, four shed levels](#one-prompt-four-shed-levels-kimi-k3).
+under [Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3).
 One step further down broke the form of the output as well as its content.
 At 0.60, a code generation on this model produced a program that did not
 work in one try. The usable range on this model at this quant is therefore
 0.65 to 0.80, and where to sit within it depends on how much content
 fidelity the workload can lose.
 
-## DeepSeek-V4.1-Flash: two engram tables
+## DeepSeek-V4.1-Flash engram tables
 
 The engram tier is the first case of more than one streamable table, and of
-a table read 24 rows deep per token. The figures below come from the Q2_K
+a table read 24 rows deep per token. The figures come from the Q2_K
 file (7 shards, 246 GiB) on an M3 Max with 128 GB, gathering from the
 layer-1 table of 384,006,168 rows at 84 bytes, 30.04 GiB in all. A row of
 84 bytes does not divide a 16 KiB page, so a row can span two pages.
@@ -355,7 +355,7 @@ The procedure works on any model.
    a single quality threshold. Re-gate whenever routing width or gating
    changes.
 
-## One prompt, four settings
+## Four settings on Hy3
 
 The quality loss is easier to see than to score. A one-shot prompt asks for
 a single-file HTML canvas animation of a car driving through parallax
@@ -413,11 +413,11 @@ This is a single sample like the others, but on this model it suggests
 keeping the full pair and its whole +13% and lowering the temperature
 slightly.
 
-## One prompt, four shed levels: Kimi-K3
+## Four shed levels on Kimi-K3
 
 Kimi-K3 repeats the comparison at the most over-budget end of the range.
-Each of the four Kimi-K3 settings measured above ran the same prompt once to
-completion at temperature 1.0. Screenshots link to the generated pages as
+Each of the four settings in the [Kimi-K3](#kimi-k3) table ran the same
+prompt once to completion at temperature 1.0. Screenshots link to the generated pages as
 before.
 
 | | |
@@ -458,7 +458,7 @@ medians unless noted.
 | Weight pin | Kimi-K3 UD-IQ2_XXS 662 GB, 62 GB every-token set, M5 Max 128 GB | 0.10 tok/s decode, 0.62 prefill | 0.38 decode, 0.97 prefill |
 | Pin excludes converted tensors | HY4-preview, F32 output head held as bf16 | 22.6 GB pinned | 19.7 GB pinned, 3.5% fewer expert bytes per token |
 | GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
-| GPU keep-warm | Hunyuan3 IQ4_XS, layer shed 0.10 with miss shed 0.90 | 4.01 tok/s | 5.29 tok/s |
+| GPU keep-warm | Hy3 IQ4_XS, layer shed 0.10 with miss shed 0.90 | 4.01 tok/s | 5.29 tok/s |
 | Streamable lookup table | Qwen4-Exp Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
 
 Lookahead prestage recall of the next layer's actual top-k is about 78% on

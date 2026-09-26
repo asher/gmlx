@@ -197,7 +197,7 @@ These flags control speculative decoding:
 | `--draft-gguf PATH` | None | A separate [drafter](glossary.md#drafter) GGUF, which implies `--speculative`. |
 | `--native-mtp` | Off | Prefer the model's own head when `--draft-gguf` is also set. |
 | `--draft-block-size N` | Drafter default | Block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
-| `--speculative-width-cap N` | Drafter default | Speculate only while at most N requests decode together. `0` uncapped. |
+| `--speculative-width-cap N` | Drafter default | Speculate only while at most N requests decode together. `0` removes the cap. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling. More accepted, not token-identical. |
 
 These flags stream a model bigger than memory, as
@@ -308,7 +308,7 @@ gmlx service uninstall
 
 | Subcommand | Flags | Meaning |
 |------------|-------|---------|
-| `install` | The `serve` flags plus the table below | Register the login item and start now. |
+| `install` | The `serve` flags, `--no-autostart`, `--headless` and `--keepalive` | Register the login item and start now. |
 | `status` | `--host H`, `--port P` | Print the launchd state. |
 | `uninstall` | `--host H`, `--port P` | Unload and remove the item. |
 
@@ -935,8 +935,8 @@ output path it cannot write. Some actions add codes of their own:
 
 ### distill gen
 
-The prompt file holds one `{"id", "messages", "context"}` object per line
-whose messages end on a user turn. A row's context, or the file given by
+`gen` reads a prompt file with one `{"id", "messages", "context"}` object
+per line, whose messages end on a user turn. A row's context, or the file given by
 `--context`, goes in front of the last user turn for the teacher, and
 either one must hold text. A row that took a context is written with the
 teacher's list under `messages` and the prompt as given under
@@ -1007,7 +1007,8 @@ request to the budget.
 
 ### distill filter
 
-Checks run in a fixed order and the first failure names the reason, one of
+`filter` runs its checks in a fixed order, and the first failure names the
+reason, one of
 `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`, `tokens` and
 `verify`, each defined in [Round
 one](distill.md#round-one-trains-on-the-teachers-replies) of the guide. The

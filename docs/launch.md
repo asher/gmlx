@@ -142,7 +142,7 @@ a Mac with fast prefill.
 
 ### opencode, pi and omp
 
-These three coding agents differ only in where the default model goes.
+These three coding agents take the default model in different places.
 opencode takes it in the `model` key of the injected file, pi as
 `defaultProvider` and `defaultModel` in its merged files, and omp as
 `modelRoles.default`. For pi, `launch` also sets the context window and
@@ -227,13 +227,14 @@ same models answer without thinking, and dsh writes its session titles
 there with the default model.
 
 Port 3080 serves the web app, or 3081 when the gmlx server uses 3080, and
-the launch opens a browser. It starts in
+the launch opens a browser. The app starts in
 `~/Documents/deepseek-harness/default-workspace`, not in the folder you
-launch from, and Add workspace in the app opens a project folder. The app
-compacts a conversation by itself only when the model's context is large
-enough for dsh's default headroom, and `launch` prints a note when it is
-not. Otherwise a conversation still compacts when the server reports that a
-request no longer fits, as
+launch from, and Add workspace in the app opens a project folder.
+
+dsh compacts a conversation by itself only when the model's context is
+large enough for its default headroom, and `launch` prints a note when it
+is not. Otherwise a conversation still compacts when the server reports
+that a request no longer fits, as
 [Limits and back-pressure](api.md#limits-and-back-pressure) describes.
 
 dsh's `headless` profile works with the same file. This command answers

@@ -17,8 +17,8 @@ settings make streaming faster, some with a cost in quality.
 
 ## What to expect
 
-A [MoE](glossary.md#expert-and-moe) model uses only a few of its experts for each token,
-so one token reads a small part of the file. gmlx keeps the parts that
+A [MoE](glossary.md#expert-and-moe) model uses only a few of its experts
+for each token, so one token reads a small part of the file. gmlx keeps the parts that
 every token reads in memory and reads the routed experts from disk. This
 lets a model of about 200 billion parameters run on a Mac with 64 GB.
 
@@ -61,8 +61,8 @@ experts were found in the arena. `run` and `chat` print this line with
 `-v`, and the server always logs it. For long contexts, a quantized KV
 cache with `--kv-bits 8` is the usual addition.
 
-`--stream-experts` streams only a model larger than 0.9 of the GPU working
-set. A smaller model loads into memory as usual, and a dense model prints
+`--stream-experts` streams only a model larger than 90% of the GPU
+working set. A smaller model loads into memory as usual, and a dense model prints
 that the flag has no effect.
 
 ## Choosing a placement
@@ -105,7 +105,7 @@ physical RAM. Four things share the ceiling, in this order:
 1. The every-token weights.
 2. The KV room. It holds the KV cache for 32768 tokens, or the trained
    context when that is shorter. It adds room for prefill and an admission
-   reserve of 2 GB or 5% of the working set each.
+   reserve, each the larger of 2 GB and 5% of the working set.
 3. The prefill ring, which is two copies of the expert stacks of the
    largest layer. When the ring does not fit, prefill reads through the
    page cache instead, and the load says so. Decoding is not affected.
@@ -329,8 +329,8 @@ experts are found in the arena. Prefill is not affected.
 
 The feeder settings are the [`prefill_feeder`](config.md#modelsprefill_feeder)
 and [`decode_feeder`](config.md#modelsdecode_feeder) keys beside `stream`.
-Each lossy setting has the model key that
-[The lossy settings](#the-lossy-settings) names.
+Each lossy setting has a model key, listed in the table of
+[lossy settings](#the-lossy-settings).
 
 ## Residency of a streamed model
 

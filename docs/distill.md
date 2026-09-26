@@ -47,21 +47,21 @@ closed. Measure such a pair on your own document before you rely on it.
 
 Check a pair in minutes before hours of caching. Run `cache --max-rows 8`
 on any corpus, then `align` with the student, and read `a` on the
-`align` summary line, where 1.000 is the ideal. The smoke run below
-shows both commands.
+`align` summary line, where 1.000 is the ideal.
+[A ten-minute smoke run](#a-ten-minute-smoke-run) shows both commands.
 
 Both models are GGUF files on disk. `gmlx pull` downloads one from a
 Hugging Face repository into your model directory, as
 [gmlx pull](cli.md#gmlx-pull) describes, and `--to .` saves it in the
-current directory instead, which is where the commands below expect it.
-The worked task pulls its two files this way:
+current directory instead, so that a command can name it by its file name
+alone. The worked task pulls its two files this way:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-UD-Q8_K_XL.gguf --to .
 gmlx pull hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf --to .
 ```
 
-Every `--teacher` and `--student` below is a file path, so a file kept
+The `--teacher` and `--student` flags take file paths, so a file kept
 elsewhere is named by its full path. A file name carries the model's
 size in parameters, 27B or 9B, and its quantization, Q8 or Q6_K, the
 precision its weights were shrunk to. A `UD-` prefix marks Unsloth's
@@ -159,7 +159,7 @@ one-sentence replies that the default of 16 words would drop.
 ## Write the inputs
 
 You bring a document, questions about it, and a way to check an
-answer. The worked files below are not shipped, so read their
+answer. gmlx does not ship the files of the worked task, so read their
 names as placeholders for your own.
 
 The worked task is a database schema. The teacher reads the schema and
@@ -169,16 +169,17 @@ against the database and returns the reference rows. Any document with a
 checkable task fits the same steps, such as an API reference with tests, a
 style guide with a linter, or a rulebook with a judge.
 
-Only the teacher reads the document, one text file, `schema.md` below.
-The worked one is about 3400 bytes. The database, `freight.sqlite` below,
-is what the checker runs queries against and is not part of the pipeline.
+Only the teacher reads the document, which is one text file. In the
+worked task it is `schema.md`, of about 3400 bytes. The database,
+`freight.sqlite`, is what the checker runs queries against and is not
+part of the pipeline.
 
 The prompts are jsonl files with one question per line. Each row has an
 `id`, a `messages` list that ends on a user turn, and any extra fields you
-want to travel with the row, such as `family` below. Ids must be unique,
-since a rerun of `gen` skips the ids already in its output. The row
-below carries its expected answer under `check`, which `gen` copies onto
-the reply row unchanged, so the checker finds it there:
+want to travel with the row. Ids must be unique, since a rerun of `gen`
+skips the ids already in its output. This row carries a `family` field and
+its expected answer under `check`, which `gen` copies onto the reply row
+unchanged, so the checker finds it there:
 
 ```json
 {"id": "train-00000", "family": "in_transit_hull",
@@ -221,7 +222,7 @@ id prefix changed to `heldout-`, and write the combined shapes to their
 own file. For `prompts-untrained.jsonl`, write shapes for kinds the
 training file leaves out entirely.
 
-The skeleton below has one shape with three phrasings. Save it as
+This skeleton has one shape with three phrasings. Save it as
 `make-prompts.py` next to `freight.sqlite` and run it with `python3`,
 redirecting its output to `prompts-train.jsonl`:
 
@@ -250,7 +251,7 @@ for family, (phrasings, sql) in shapes.items():
 Given to `filter` as `--verify`, the checker is any command that reads
 the surviving rows as jsonl on stdin and prints one line per row, `ok` or
 a reason word. The filter runs it through the shell, so a script with
-arguments works. Save the skeleton below as `check-sql.py` and run
+arguments works. Save this skeleton as `check-sql.py` and run
 `chmod +x check-sql.py`. It opens the database read-only, so a reply
 that deletes rows cannot damage the reference data:
 
@@ -280,7 +281,7 @@ counts dropped rows per reason, with every checker rejection under
 
 A task with no mechanical check can use a judge in the same place, a
 script that asks a served model whether the reply matches a reference
-answer you wrote under `check.answer`. The one below asks whatever
+answer you wrote under `check.answer`. This judge asks whatever model
 `gmlx serve` has on port 8080. Any instruct model larger than the
 student serves as the judge, the teacher included. Save it as
 `judge.py`, run `chmod +x judge.py`, and give it to `filter` as
@@ -374,7 +375,7 @@ python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["kept"]/(r[
 The teacher answers the training prompts with the document in view and
 the checker keeps the replies that were right. The teacher is then cached
 over the kept replies, the cache is aligned to the student, and the
-adapter is trained. Two values below depend on your data,
+adapter is trained. Two values in these commands depend on your data,
 `--max-reply-tokens` on `filter` and `--iters` on `train`, and the
 one-liners after the commands size them. Run the commands one at a
 time and size each value before the command that uses it:
@@ -420,8 +421,8 @@ wording and how much of its vocabulary it draws from, and 0.6 with 0.95
 gives varied replies that stay on task.
 
 A teacher without a thinking mode runs without `--thinking` and
-`--thinking-budget`, since `gen` refuses a budget on its own. The caches
-below then take `--frame reply` instead of `reply-think`, and `eval`
+`--thinking-budget`, since `gen` refuses a budget on its own. The `cache`
+commands then take `--frame reply` instead of `reply-think`, and `eval`
 under [Use and measure the adapter](#use-and-measure-the-adapter) drops
 `--reply-think`. The same goes for a teacher whose chat template does not
 render the reasoning trace of a finished turn, since
@@ -468,8 +469,8 @@ value depends on your answers. Set it to `--thinking-budget` plus the
 longest answer a finished reply needs. A reply over that limit reasoned
 for nearly the whole budget or wrote an unusually long answer, and both
 are suspect. The worked answers ran under 180 tokens, so the command
-sets 1180. Each reply row records its counts under `gen`, and the
-one-liner below prints the median and the longest answer among replies
+sets 1180. Each reply row records its counts under `gen`, and this
+one-liner prints the median and the longest answer among replies
 that stayed under the budget. Run it after `gen` and before `filter`:
 
 ```sh
@@ -512,8 +513,8 @@ value means a weaker result.
 
 `train` reads the view, fits the adapter on the quantized student, and
 writes the adapter GGUF. `--iters` counts steps of `--batch-size` rows
-each, and two passes over the rows is enough for a generated corpus. The
-one-liner below counts the training rows once `align` has written the
+each, and two passes over the rows is enough for a generated corpus.
+This one-liner counts the training rows once `align` has written the
 view. Run it after `align` and before `train`. The 3 in it is
 `--batch-size`, so change it with the batch size:
 
@@ -572,7 +573,7 @@ reasoning trace under `reasoning_content` beside it. The question
 carries the same closing sentence as every training prompt, since the
 student learned to answer in that form. Any OpenAI client library talks
 to the same server with `http://127.0.0.1:8080/v1` as its base URL, any
-string as the key and the model id above.
+string as the key and `qwen3.5-9b` as the model.
 
 Stop the server with `gmlx stop` before the next step, because it
 detaches and stays in memory, and `gen`, `cache` and `train` each need
@@ -641,9 +642,10 @@ The first gives the adapter's pass rate on kinds it never trained on,
 and the second its pass rate on the combined questions, each after the
 same `filter` line with its own `--out` and `--report`.
 
-`eval` scores what a pass rate cannot see. With the census JSON from the
-check above it scores the adapter at the positions the document moved,
-and it checks that the student's general behavior survived:
+`eval` scores what a pass rate cannot see. With the census JSON from
+[Check that the document matters](#check-that-the-document-matters), it
+scores the adapter at the positions the document moved, and it checks
+that the student's general behavior survived:
 
 ```sh
 gmlx distill eval --student Qwen3.5-9B-Q6_K.gguf --adapter r1.gguf --before \
@@ -664,9 +666,9 @@ it has no cache to read one from.
 
 `--chat-sanity chat-sanity.jsonl` on that command adds a check that the
 student still behaves as a chat model. The file is a jsonl of a few
-dozen ordinary prompts in the `messages` form above, each with a `kind`
-of `task` or `refuse`, where `refuse` marks a prompt the untouched
-student declines. A row reads:
+dozen ordinary prompts in the `messages` form of the prompt files, each
+with a `kind` of `task` or `refuse`, where `refuse` marks a prompt the
+untouched student declines. A row reads:
 
 ```json
 {"id": "cs-001", "kind": "task", "messages": [{"role": "user", "content": "Summarize this paragraph in one sentence: ..."}]}
@@ -742,14 +744,14 @@ When the teacher does not fit, first try a smaller quantization of it.
 `cache` refuses a dense teacher larger than the wired budget. A
 mixture-of-experts teacher is different, and `gmlx validate` says whether
 a file is one. `cache` streams the experts of such a teacher from disk
-when its parameters are larger than 0.9 of the GPU working set. `gen` can
+when its parameters are larger than 90% of the GPU working set. `gen` can
 also use a teacher that another server serves, through `--base-url`, but
 `cache` needs a local GGUF, as [Limitations](#limitations) says.
 
 The document sits in the teacher's prompt on every row, so its length is
 limited by the context window of the teacher during `gen` and by
 `--max-len` during `cache`. A few thousand tokens, at about four bytes of
-English text per token, fit the settings above. A longer document needs
+English text per token, fit the worked settings. A longer document needs
 a larger `--max-len`, and the memory of every teacher step grows with it.
 Beyond that, split the document into sections, and give each prompt row
 the section that it needs in its own `context` field, as
@@ -1083,7 +1085,7 @@ different template variables.
 
 `--iters` follows from the training row count. One pass over the rows,
 an epoch, is the train rows of every view divided by `--batch-size`,
-rounded up, and the settings above make two passes. The one-liner under
+rounded up, and the worked task trains for two passes. The one-liner under
 [Round one](#round-one-trains-on-the-teachers-replies) computes it.
 
 [Distillation internals](internals/distill.md) has the memory figures
@@ -1091,8 +1093,8 @@ and the measurements behind these defaults.
 
 ## Limitations
 
-- The student is a GGUF in a K-quant format, such as Q4_K_M or Q6_K,
-  and training writes a LoRA adapter for it.
+- The student is a quantized GGUF, such as Q4_K_M or Q6_K, and
+  training writes a LoRA adapter for it.
   [Training on the quantized model](lora.md#training-on-the-quantized-model)
   says why. Full-parameter training and MLX checkpoints are library
   features without an action.
@@ -1107,8 +1109,9 @@ and the measurements behind these defaults.
   requantized teacher is scored on the teacher's own routes and an
   adapter's routing changes count against it. `cache --routes` refuses a
   teacher whose MoE gates gmlx cannot replay, such as DeepSeek-V2's
-  softmax gate, DeepSeek-V4 and HY4. `train` does not replay them, so a MoE student trained from a MoE teacher of the same family
-  learns from the teacher's outputs alone.
+  softmax gate, DeepSeek-V4 and HY4. `train` does not replay them, so a
+  MoE student trained from a MoE teacher of the same family learns from
+  the teacher's outputs alone.
 - The hidden-state term reads the teacher's final hidden state only. No
   intermediate layer is stored, and the sketch is fixed at cache time.
 - Task files for `eval` are read from disk, in the formats listed under

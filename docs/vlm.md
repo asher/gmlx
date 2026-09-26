@@ -27,7 +27,8 @@ pairs the files that a folder scan finds.
 
 `--mmproj` pairs the two files for one command. `gmlx validate` recognizes
 a companion and says to pair it with its language model. The language
-model alone still runs as a text model, and media support needs no extra.
+model alone still runs as a text model, and media support needs no
+optional package.
 
 gmlx builds the image processor and the chat template from the metadata
 of the two files. For a family whose files leave something out,
@@ -83,7 +84,7 @@ names the projector and architecture that it found.
 | GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | Larger than RAM on most Macs, so it needs `--stream-experts`. |
-| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | See the notes below the table. |
+| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
 | DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` with `deepseek41` | The antirez encoder GGUF | |
 
 Qwen2-VL and Qwen2.5-VL companions, with the projector `qwen2vl_merger`,

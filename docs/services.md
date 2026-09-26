@@ -1,7 +1,7 @@
 # Speech, embeddings and rerank
 
-Beside its chat models, the server can run four services on the same port:
-speech-to-text, text-to-speech, embeddings and reranking. Each one adds
+Beside its chat models, the server can run services for speech-to-text,
+text-to-speech, embeddings and reranking on the same port. Each one adds
 OpenAI-compatible endpoints, so the voice client
 [`gmlx talk`](talk.md), [RAG pipelines](rag.md) and apps such as
 [Open WebUI](launch.md#open-webui) can use them. A service starts when its
@@ -60,9 +60,9 @@ The aliases are these:
 | `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | The default, with large-v3 quality at about six times its speed. |
 | `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | A 4-bit version, about 600 MB. |
 | `whisper-large` | `mlx-community/whisper-large-v3-mlx` | The full large-v3 model. |
-| `whisper-medium` | `mlx-community/whisper-medium-mlx` | Smaller and faster. |
-| `whisper-small` | `mlx-community/whisper-small-mlx` | Smaller and faster. |
-| `whisper-base` | `mlx-community/whisper-base-mlx` | Smaller and faster. |
+| `whisper-medium` | `mlx-community/whisper-medium-mlx` | A smaller model that is faster than large-v3. |
+| `whisper-small` | `mlx-community/whisper-small-mlx` | A smaller model that is faster than medium. |
+| `whisper-base` | `mlx-community/whisper-base-mlx` | A smaller model that is faster than small. |
 | `whisper-tiny` | `mlx-community/whisper-tiny` | The smallest and fastest. |
 
 The server downloads the configured model from Hugging Face on first use
@@ -158,7 +158,7 @@ input that the model reads:
 | Alias | Repository and default quant | Dimension | Context | Notes |
 |-------|------------------------------|-----------|---------|-------|
 | `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | The default, small, fast and multilingual, about 0.6 GB. |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | Better retrieval, about 4.3 GB. |
+| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | A larger model that retrieves better, about 4.3 GB. |
 | `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | The best of the family, about 8 GB, with the largest index. |
 | `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | A small multilingual encoder from Google, about 0.3 GB. |
 

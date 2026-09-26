@@ -107,8 +107,8 @@ bench(model, tokenizer, lengths=(512, 4096, 16384))
 ```
 
 `bench` measures prefill and decode throughput at each prompt length through
-the real generation path, chunked prefill and the async one-step-ahead decode
-pipeline. The numbers therefore match deployed throughput, not a naive forward
+the real generation path, with chunked prefill and the async one-step-ahead
+decode pipeline. The numbers therefore match deployed throughput, not a naive forward
 loop. Its CLI equivalent is `gmlx run --bench`.
 
 | Kwarg | Default | Meaning |

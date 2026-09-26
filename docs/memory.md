@@ -48,8 +48,8 @@ These settings reduce memory, the cheapest first:
   server, they are the [load keys](config.md#model-loading).
 - A context limit. On `run` and `chat`, `--max-kv-size` keeps a rolling
   window of the most recent tokens and drops the oldest ones. Under kvarn,
-  the window is quantized when it is at least the kvarn minimum, and a
-  smaller window exits with an error. Plain `--kv-bits` cannot quantize a
+  the window stays quantized if it reaches the kvarn window floor, 1280
+  tokens with the default tail, and a smaller window exits with an error. Plain `--kv-bits` cannot quantize a
   rolling window, so the command refuses that combination. On the server,
   [`max_kv_size`](config.md#loadmax_kv_size) limits the context of a
   request and keeps no rolling window.

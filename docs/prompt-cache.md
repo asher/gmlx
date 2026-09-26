@@ -52,9 +52,9 @@ identical resend, because it prefills quickly anyway.
 A sliding-window model under speculative decoding keeps no record of the
 tokens it generated, so the next turn reuses only up to the end of the
 previous prompt, and the reply is read again. Under a
-[KVarN KV cache](kv-quantization.md), dense models reuse whole prompts
+[kvarn KV cache](kv-quantization.md), dense models reuse whole prompts
 only, as the pure recurrent models do, because the cache blocks cannot
-split the records of KVarN.
+split kvarn records.
 
 Some thinking models remove the reasoning of earlier turns when the chat
 template renders the conversation again. The rendered text then changes

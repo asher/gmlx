@@ -50,7 +50,7 @@ services. Every route except `/health` needs the API key when one is set.
 | `GET /health` | Liveness. `?ready=1` adds a readiness verdict. |
 | `GET /v1/metrics` | The runtime snapshot, also at `/metrics` and as Prometheus text with `?format=prometheus`. |
 | `POST /v1/estimate` | Dry-run admission for a chat body. |
-| `GET /v1/capacity/plan` | Can `width` streams run at `depth` tokens each, and may they start now. |
+| `GET /v1/capacity/plan` | Whether `width` streams fit at `depth` tokens each, and whether they may start now. |
 | `GET /v1/cache/stats` | Prompt cache statistics, or `{"enabled": false}`. |
 | `POST /v1/cache/reset` | Clear the prompt cache for all resident models, or one with `{"model": "<id>"}`. |
 | `POST /unload` | Evict a resident model with `{"model": "<id>"}`, or all with an empty body. 409 while streams are in flight. |
@@ -109,7 +109,7 @@ instead of failing the snapshot.
 |---|---|---|
 | `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The decode width, the queue cap, streams generating now and requests waiting for a slot. |
 | `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now. |
-| `requests[]` | One row for each request | Queued rows first. `state` is `queued`, `prefill` or `decode`, and the other fields are listed below the table. |
+| `requests[]` | One row for each request | Queued rows come first. `state` is `queued`, `prefill` or `decode`. |
 | `resident_models[]` | For each model, `in_flight`, `pinned`, `kept` and bytes | The number for each model to compare against `decode_batch`, since each model decodes on a separate engine. |
 | `governor` | `band`, counters | The memory governor's band and shed history. |
 | `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the [arena's](glossary.md#arena) bytes, capacity and hit rate. |
@@ -280,7 +280,7 @@ TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ### Vision messages
 
 OpenAI `image_url` content parts work against a model configured with
-`mmproj:`. The url can be an `http(s)://` URL or a base64 `data:` URI.
+`mmproj:`. The image can be an `http(s)://` URL or a base64 `data:` URI.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{

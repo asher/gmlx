@@ -41,7 +41,8 @@ decoding on the same server, for each model, against the context depth.
 
 ## Methodology
 
-Every number is server throughput for one request at a time. Both
+Every number in the per-model tables is server throughput for one
+request at a time. Both
 engines ran the same GGUF weights, sampler settings and chat prompts on
 the setup in this table.
 
@@ -56,7 +57,7 @@ the setup in this table.
 | Dates | 2026-07-05 to 2026-09-18. |
 | Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
 | Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
-| Speculative draft | Three draft tokens a round, from the native MTP head or from gemma-4's companion drafter. |
+| Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
 | Aggregation | Four requests for each cell in two rounds that alternate the engines, with the median reported. |
 | Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
 | Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
@@ -317,10 +318,9 @@ one by one.
 ## DeepSeek-V4 against ds4-server
 
 llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path, so these models
-are compared with the dwarfstar ds4-server by antirez, a DeepSeek-V4
-server, with the ignore-eos patch. Each ratio is gmlx divided by
-ds4-server, and each model's ds4-server commit is in its
-[Model provenance](#model-provenance) row.
+are compared with ds4-server, a DeepSeek-V4 server. Each ratio is gmlx
+divided by ds4-server, and [Methodology](#methodology) lists the
+ds4-server build of each model.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
@@ -453,9 +453,9 @@ A Mamba2 hybrid with head dimension 128.
 
 ### Reading the tables
 
-KVarN beats the affine cache of the same width on both legs at every
+The kvarn cache beats the affine cache of the same width on both legs at every
 width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the
-two converge at 8. At 6 bits, KVarN sits between affine 6 and affine 8 on
+two converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8 on
 the 9B model and matches affine 8 on the 27B model, in three quarters of
 the bytes of the 8-bit record. At 32K, its decode median can trail affine
 8 by a few percent while its p99 and top-1 stay ahead. The split width
@@ -473,7 +473,7 @@ tables rank caches against each other and do not predict a task score.
 TurboQuant, the scheme of mlx-vlm
 ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), measured on the
 same models and legs, fell between the other two. It was ahead of affine
-at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind KVarN at
+at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind kvarn at
 each width on all measures, so gmlx does not offer it.
 
 Speed was measured on Qwen3-0.6B Q8 with 27 of 28 layers quantized, a

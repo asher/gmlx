@@ -26,8 +26,8 @@ kinds, the mlx-lm class of that name.
 ## The cache layers
 
 A request passes through five layers in order, and all of them are on by
-default. The first three serve every model, and the last two exist for
-speculative and checkpoint-tier models.
+default. The prefix layer and the drafter sidecar exist only for
+speculative models, and checkpoints only for checkpoint-tier models.
 
 - Prefix layer. An in-memory LRU holds post-prefill KV and hidden state. A
   request sharing a prefix with an earlier one skips that prefill even with
@@ -75,10 +75,10 @@ one for each of its blocks.
 | `sidecar_writes` | Each draft-model cache entry saved next to its target entry adds one. Only speculative decoding writes them. |
 | `retire_fallback_suppressed` | A retirement store is skipped and counted here when the predicted next-turn render has diverged, so the entry could never match. The turn checkpoint covers it. |
 
-The server watches for two failures and warns once per model. One is
-`GMLX_APC_CKPT_TRIPWIRE` completed requests with zero stores, and the other
-is that many unusable matches with zero hits, with a default of 5. Either warning
-means prefix reuse is not working for that model, so file an issue with the
+The server watches for two failures and warns once per model. The first
+is `GMLX_APC_CKPT_TRIPWIRE` completed requests with zero stores, and the
+second is that many unusable matches with zero hits. Either warning means
+prefix reuse is not working for that model, so file an issue with the
 `/v1/cache/stats` snapshot.
 
 ## Under kvarn KV

@@ -199,9 +199,9 @@ shrinks.
 `null` takes the drafter's default. A native head on a dense Qwen model
 has no cap, and the Gemma assistant drafter and families without a
 measurement get `2`. Every mixture-of-experts model gets `1`, as do the
-drafters that handle one sequence at a time. Those are Hy3, DeepSeek-V4,
-Muse Glimmer, Qwen3.8-Flash-Next, GLM-5.3-Flash and the DFlash 2
-drafters. `0` removes the cap, except on a single-sequence drafter, which
+drafters that handle one sequence at a time. Those are the MTP heads of
+Hy3, DeepSeek-V4, Muse Glimmer, Qwen3.8-Flash-Next and GLM-5.3-Flash, and
+every DFlash drafter. `0` removes the cap, except on a single-sequence drafter, which
 stays at `1` whatever the value. The default is `null`.
 
 [Speculative batching](internals/speculative-batching.md) describes how a
@@ -497,7 +497,8 @@ default comes from the family defaults.
 The model samples only from the most likely tokens whose probabilities
 add up to this value, and `0` turns off the filter. When `top_p` is the
 only filter, it considers at most the 1024 most likely tokens, so a very
-flat distribution loses its tail past that rank. The default comes from the family defaults.
+flat distribution loses its tail past that rank. The default comes from
+the family defaults.
 
 ### `sampling.top_k`
 
@@ -1192,9 +1193,9 @@ counts. A higher value gives fewer false wakes. The default is `0.3`.
 
 ### `talk.push_to_talk_modifier`
 
-The menu bar hotkey is Space, pressed while this key is held. The value
-is `globe`, `right-command`, `right-option` or `control`. There is no flag for this
-key. The default is `globe`.
+The menu bar hotkey is Space, pressed while holding this modifier. The
+value is `globe`, `right-command`, `right-option` or `control`. There is
+no flag for this key. The default is `globe`.
 
 ### `talk.input_device`
 

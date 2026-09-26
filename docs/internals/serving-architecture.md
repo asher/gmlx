@@ -114,7 +114,7 @@ gmlx's own copy of the class mlx-vlm removed in 0.6.15, vendored in
 language-model interface the engine expects steady across upstream
 releases.
 
-The prompt cache picks its tier for each architecture, and
+Each architecture gets its own prompt cache tier, and
 [Prompt cache internals](prompt-cache.md) lists the choices. gmlx owns the
 verify round of speculative decoding, which keeps the prompt cache usable
 under a drafter, and [Speculative batching](speculative-batching.md)

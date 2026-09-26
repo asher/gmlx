@@ -111,10 +111,9 @@ Chat starts from the [family defaults](family-defaults.md) of the model.
 An `@profile` suffix on the model, such as `model.gguf@creative`, starts
 from another [profile](config.md#profiles) instead.
 
-Models with a native prediction head use
+Models with an MTP head use
 [speculative decoding](speculative-decoding.md) automatically, and
-`--draft-gguf` pairs a separate drafter. While a drafter
-is active, only temperature, top-p, top-k and min-p apply. Chat warns at
+`--draft-gguf` pairs a separate drafter. While a drafter is active, only temperature, top-p, top-k and min-p apply. Chat warns at
 startup and drops the penalties, logit bias and XTC settings, as well as
 `--max-kv-size` and `--quantized-kv-start`.
 
@@ -156,8 +155,8 @@ attach several blocks, and the prompt shows `(+n) >> ` while any are
 waiting. Enter on an empty prompt sends the blocks alone.
 
 Output longer than about 16,000 characters is cut in the middle. The
-command gets no input, so an interactive program cannot stop the chat, and
-Ctrl-C stops the command instead of the chat.
+command gets no input, so an interactive program cannot leave the chat
+waiting, and Ctrl-C stops the command instead of the chat.
 
 With `--mmproj`, `/image` and `/audio` attach media the same way, and so
 does dragging a file from Finder into the terminal. Each attachment stays
@@ -214,16 +213,15 @@ themes:
 ```
 
 A theme with the name of a built-in theme replaces it. A theme is a set of
-slots, one for each kind of text, and each slot holds a style:
+slots, one for each kind of text, named `thinking`, `heading`, `bold`,
+`italic`, `inline_code`, `code_block`, `code_border`, `bullet`,
+`blockquote`, `link`, `hr`, `stat`, `info` and `error`. Beside its slots, a
+theme takes the keys `extends`, `code_theme`, `code_theme_cb` and
+`ptk_toolbar`.
 
-| Part | Values |
-|------|--------|
-| Slots | `thinking`, `heading`, `bold`, `italic`, `inline_code`, `code_block`, `code_border`, `bullet`, `blockquote`, `link`, `hr`, `stat`, `info`, `error`. |
-| Style keys | The booleans `bold`, `dim`, `italic` and `underline`, and the colors `fg16` and `rgb`. |
-| Theme keys | `extends`, `code_theme`, `code_theme_cb`, `ptk_toolbar`. |
-
-`rgb` takes `"#rrggbb"` or `[r, g, b]`. A terminal with 256 colors or more
-uses it, reduced to the nearest of 256 colors when the terminal has no
+Each slot holds a style, which takes the booleans `bold`, `dim`, `italic`
+and `underline`, and the colors `fg16` and `rgb`. `rgb` takes `"#rrggbb"`
+or `[r, g, b]`. A terminal with 256 colors or more uses it, reduced to the nearest of 256 colors when the terminal has no
 true color. `fg16` is an ANSI color code from 30 to 37 or 90 to 97, which a
 16-color terminal uses instead. `code_theme_cb` is the pygments style under
 the colorblind modifier, and `ptk_toolbar` is the prompt_toolkit style of

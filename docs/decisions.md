@@ -137,7 +137,7 @@ value that is not a string reaches the model as its JSON text.
 over the answers of that question, in one of three shapes:
 
 - A `noul` entry answers a yes or no question, under the Jev API's name for
-  it. The `noul` field is the probability of yes. The ticket above is not
+  it. The `noul` field is the probability of yes. The billing ticket is not
   urgent, since 0.022 is a 97.8 percent no, and it asks for a refund.
 - A `choice` entry answers with one of several named options. `choice` is
   the most probable option, `probabilities` holds the probability of every
@@ -330,8 +330,9 @@ for questions whose answer changes with the earlier one.
 
 ## Samples, steps and thoughts
 
-A request can also carry the following fields. Most of them set how many
-times each answer is read and how much work each read does.
+Other request fields add instructions, choose the questions to answer,
+and set how many times each answer is read and how much work each read
+does.
 
 | Field | Default | Meaning |
 |-------|---------|---------|

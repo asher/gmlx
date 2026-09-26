@@ -1,9 +1,9 @@
 # Structured read measurements
 
 The timings behind [Structured reads](structured-reads.md) show where the
-time of a `/v1/systemone` decision goes on one machine, how the request
-options and the wording of a question change the answers, and the
-commands that measure both again.
+time of a `/v1/systemone` decision goes on one machine, and how the request
+options and the wording of a question change the answers. The commands in
+[Setup](#setup) measure both again.
 
 - [Setup](#setup)
 - [Prefill](#prefill)
@@ -111,7 +111,7 @@ A 64-token thought on the bench's 472-token prompt took 2068 ms at the
 median, with a range of 1341 to 2556 ms. A thought's time follows the
 number of denoise steps its canvas takes to converge, at about 150 ms a
 step. The `thoughts` mode wrote a 64-token thought three times for each
-request below, and every thought used the whole budget.
+request in the table, and every thought used the whole budget.
 
 | Request | Denoise steps | Median ms |
 |---------|---------------|-----------|

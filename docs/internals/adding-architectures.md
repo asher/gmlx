@@ -1,7 +1,7 @@
 # Adding a GGUF architecture
 
 A new model family becomes a supported architecture once gmlx can map its
-tensors and config, and it clears an acceptance gate before its row
+tensors and config, and it must clear an acceptance gate before its row
 appears in [Supported architectures](../arch-coverage.md).
 
 Each GGUF architecture needs a model class for its `model_type`. The class

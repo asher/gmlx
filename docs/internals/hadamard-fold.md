@@ -14,8 +14,8 @@ normalized natural-order Walsh-Hadamard matrix applied to each contiguous
 block of the input dimension. The rotation spreads outliers across the
 row before quantization, which is what lets a ternary codec hold the
 model. At run time the activation takes the same rotation before the
-matmul, so `W_stored (H D x) = W x`. The rotation is its own inverse. The
-file's `token_embd.weight` carries the inverse fold, so the gathered row is
+matmul, so `W_stored (H D x) = W x`. The normalized transform `H` is its own
+inverse. The file's `token_embd.weight` carries the inverse fold, so the gathered row is
 transformed and then signed.
 
 The header keys live under `prism.hadamard.`, and `gmlx.load.hadamard`
@@ -59,7 +59,7 @@ decode site uses it. The fused GDN decode and verify bodies share
 `in_proj_qkv` and `in_proj_z`, and the owned tree's `verify_linears` shares
 whatever group it is handed. `gmlx.upstream.hadamard_share` swaps the stock
 mlx-lm attention and MLP onto forwards that share q/k/v and gate/up. On the
-27B this is 258 rotations per decoded token instead of 402. The stock GDN
+Ternary Bonsai 2 27B file this is 258 rotations per decoded token instead of 402. The stock GDN
 prefill body still rotates `in_proj_qkv` and `in_proj_z` separately.
 
 The down and output projections read a gated activation, the swiglu and
@@ -85,16 +85,17 @@ A folded file runs at the activation dtype every other file gets, bf16
 on GPUs with native bf16. The rotation spreads each row's outliers
 evenly, so the rotated row has a small dynamic range and the mantissa is
 what limits precision on it. The float16 type keeps three more mantissa
-bits than bf16, and `GMLX_ACTIVATION_DTYPE=float16` tightens the teacher-forced
-logprob delta against the reference on the 27B from about 0.3 nats to
-about 0.04. The bf16 delta already sits inside gmlx's own
-prefill-versus-decode noise, and float16 costs speed on a GPU with native
-bf16. On the PQ2_0 file, an M3 Max decodes about 2 percent slower on
-float16, and the prefill tile runs about 20 percent slower. The 16K decode
-integrity test passes the PQ2_0 file on float16, so the narrower exponent
-range holds at depth, and float16 stays the option for parity work rather
-than the default. Passing f32 activations changes nothing, because the
-kquant matmul's internal precision follows its output dtype.
+bits than bf16, and `GMLX_ACTIVATION_DTYPE=float16` tightens the
+teacher-forced logprob delta against the reference on the 27B from about
+0.3 nats to about 0.04. Passing f32 activations changes nothing, because
+the kquant matmul's internal precision follows its output dtype.
+
+The bf16 delta already sits inside gmlx's own prefill-versus-decode noise,
+and float16 costs speed on a GPU with native bf16. On the PQ2_0 file, an
+M3 Max decodes about 2 percent slower on float16, and the prefill tile runs
+about 20 percent slower. The 16K decode integrity test passes the PQ2_0
+file on float16, so the narrower exponent range holds at depth. That makes
+float16 the option for parity work rather than the default.
 
 ## Refusal
 

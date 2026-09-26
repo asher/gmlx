@@ -6,7 +6,7 @@ which is the usual way to set them, because an exported variable applies
 to every model the process loads and to every server started from that
 shell.
 
-When a setting is set more than one way, the flag wins, then the config
+When more than one source sets a value, the flag wins, then the config
 key, then the variable. Two variables reverse that order and override the
 config. `GMLX_CACHE_LIMIT_GB` wins over `server.cache_limit_gb`, and
 `GMLX_MTP_WIDTH_CAP` wins over each model's `speculative_width_cap`.
@@ -53,10 +53,10 @@ describes.
 | Variable | Meaning |
 |----------|---------|
 | `MLX_VLM_RESIDENT_BUDGET_GB` | Resident weight-byte budget in GB. Consulted only when neither `--budget-gb` nor `server.budget_gb` sets one. |
-| `MLX_VLM_MAX_RESIDENT_MODELS` | Secondary cap on resident model count. A fallback below `--max-models` and `server.max_models`. |
+| `MLX_VLM_MAX_RESIDENT_MODELS` | Cap on the resident model count, used only when neither `--max-models` nor `server.max_models` sets one. |
 | `MLX_VLM_PINNED_MODELS` | Comma-separated model paths to pin. Combined with `--pin` and `pin: true` entries, so it only adds pins. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper entirely. LRU eviction under pressure still applies. |
-| `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds, default `30`. |
+| `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds. The default is `30`. |
 | `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a request may wait for its next token before it fails. `server.token_queue_timeout_s` sets the same limit, and `1800` applies when neither is set. |
 
 ## Server
@@ -68,12 +68,12 @@ server.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_DECODE_PREFILL_RATIO` | The `server.decode_prefill_ratio` value, read per scheduler tick. |
-| `GMLX_DECODE_PREFILL_FLOOR` | The decode-rate floor `auto` pacing protects, as a share of a stream's batched rate, default `0.5`. |
+| `GMLX_DECODE_PREFILL_FLOOR` | The decode-rate floor `auto` pacing protects, as a share of a stream's batched rate. The default is `0.5`. |
 | `GMLX_PREFILL_TICK_MS` | The `server.prefill_tick_ms` value, read per chunk. |
-| `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. Default `256`. |
-| `GMLX_DECODE_BATCH` | Requests that decode together in a step. Default `8`, or the capacity table's widest fit when that is smaller. `0` restores the upstream 32. |
-| `GMLX_QUEUE_DEPTH_CAP` | Waiting requests admitted before the server answers 503. Default 2x the decode batch. `0` disables the cap. |
-| `GMLX_SSE_KEEPALIVE_S` | Seconds between SSE keepalive comments while a stream is silent. Default `15`. `0` disables them. |
+| `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. The default is `256`. |
+| `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when that is smaller. `0` restores the upstream 32. |
+| `GMLX_QUEUE_DEPTH_CAP` | Waiting requests admitted before the server answers 503. The default is twice the decode batch. `0` disables the cap. |
+| `GMLX_SSE_KEEPALIVE_S` | Seconds between SSE keepalive comments while a stream is silent. The default is `15`, and `0` disables them. |
 | `GMLX_PREFLIGHT_MEM=0` | Disable the memory preflight that answers 400 when a prompt cannot fit. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
 | `GMLX_MTP_PREEMPT=0` | Keep a speculating stream from converting to plain decode when a batch grows past the width cap. |
@@ -95,22 +95,22 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_STREAM_CACHE_GB` | MLX buffer cache a streamed model keeps, in GB. The default is the priced KV room, or `4` when no KV room is priced. |
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default memory and cache limits on a streamed model. Every cache miss then purges the whole buffer cache. |
 | `GMLX_DECODE_ARENA_GB` | Decode arena size override in GB. The default is what the memory limit leaves after the every-token weights, KV room and prefill ring. |
-| `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. No default. |
+| `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. Unset by default. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 routed rows and training are not covered. |
-| `GMLX_BATCH_INVARIANT_MAX_OUT` | Widest float projection the batch-invariant kernel takes, in outputs. Default `512`. |
+| `GMLX_BATCH_INVARIANT_MAX_OUT` | Widest float projection the batch-invariant kernel takes, in outputs. The default is `512`. |
 | `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the host floor. |
-| `GMLX_STREAM_KV_CTX` | Tokens of KV cache the arena leaves room for. Default `32768`, capped at the trained context. Raise it for deep prompts. |
-| `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for, default `1`. Each uses arena slots. |
+| `GMLX_STREAM_KV_CTX` | Tokens of KV cache the arena leaves room for. The default is `32768`, capped at the trained context. Raise it for deep prompts. |
+| `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for. The default is `1`, and each stream uses arena slots. |
 | `GMLX_KVARN_BITS` | Split key and value widths for kvarn KV in `k6v5` form. Overrides the width `kv_bits` gives both. A value not of that form is ignored with a warning. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the estimated KV room with a flat reserve in GB. The fallback is `8` when the KV size cannot be computed from the header. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache again. Default off, since a ring pass reads each expert once. |
 | `GMLX_PREFILL_RING_SLOTS` | Prefill ring depth in layer slots, default `2`. Each extra slot stages one more layer ahead and takes one layer's expert bytes from the decode arena. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware instead of by whole-layer staging, default `64`. |
-| `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the arena serves by token-splitting when its routed set exceeds the arena. Default `256`. `0` disables it. |
+| `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the arena serves by token-splitting when its routed set exceeds the arena. The default is `256`, and `0` disables it. |
 | `GMLX_DECODE_PRESSURE=0` | Keep the arena at its sized capacity under memory pressure. By default it shrinks, keeping its most routed experts, then regrows when pressure clears. |
-| `GMLX_DECODE_RAM_FLOOR_GB` | Host floor kept free for the rest of the machine when the arena is sized. Default 5% of RAM, at least `4`. |
+| `GMLX_DECODE_RAM_FLOOR_GB` | Host floor kept free for the rest of the machine when the arena is sized. The default is 5% of RAM, at least `4`. |
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve added to the host floor, default `2.5`. Buffered read throughput drops sharply when the page cache has too little memory. |
-| `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Default on, skipped with a printed reason above 60% of RAM. |
+| `GMLX_PIN_WEIGHTS=0` | Do not lock the every-token weights of a streamed model in memory. Pinning is on by default and is skipped, with a printed reason, above 60% of RAM. |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token weights into the Metal residency set on streamed models. |
 | `GMLX_STREAM_UNMAP_STACKS=0` | Keep the expert stacks' Metal buffers after both feeders take a layer. By default they are dropped once the feeders serve the layer from the file. |
 | `GMLX_STREAM_PREFILL_TAIL_MERGE=0` | Keep the streamed prefill chunk exact. By default a tail under an eighth of the chunk folds into the chunks before it. |
@@ -118,7 +118,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit. A table past it is read from the GGUF row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads per file-backed lookup table, default `32`. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm, which is on by default for streamed models. |
-| `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. Default `1`. `0` runs continuously. |
+| `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed decode before the keep-warm heartbeat pauses. The default is `1`, and `0` runs continuously. |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. |
 | `GMLX_DECODE_LOOKAHEAD_K` | Ranked predictions considered on each call, default `6`. |
 | `GMLX_DECODE_LOOKAHEAD_WORKERS` | Size of the dedicated prestage read pool, default `6`. |
@@ -127,23 +127,23 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_DECODE_LOOKAHEAD_CANCEL=0` | Let unrouted predictions read to completion instead of cancelling the unstarted ones. |
 | `GMLX_DECODE_LOOKAHEAD_IOPOL=0` | Run the prestage read pool at default disk priority. The utility tier is the default only on a disk the fast-disk policy did not classify as fast. |
 | `GMLX_GOVERNOR=0` | Disable the runtime memory governor. Its band, shed counters and floor show at `/v1/metrics`. |
-| `GMLX_GOV_KERNEL_FLOOR_GB` | Reclaimable-pages floor in GB below which the governor goes red and reclaims caches. Default the lower of `4` and 10% of RAM. `0` disables it. |
-| `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server's memory limit is computed. Default the larger of `8` and 10% of RAM. |
+| `GMLX_GOV_KERNEL_FLOOR_GB` | Reclaimable-pages floor in GB below which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
+| `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server's memory limit is computed. The default is the larger of `8` and 10% of RAM. |
 | `GMLX_CACHE_LIMIT_GB` | MLX buffer-cache limit for `serve` in GiB. Overrides `server.cache_limit_gb`. Negative, `off`, `none` or `unlimited` unbounds it. `0` disables caching. |
 | `GMLX_NATIVE_FP` | Layout for MXFP4 and NVFP4 expert tensors. `wire` is zero-copy file bytes and `packed` repacks at load. `auto` picks wire when streaming or near the budget. |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | Smallest shared-prefix length in tokens the cascade route handles, default `1024`. |
-| `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. Lossy. Off by default. |
+| `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. It is lossy and off by default. |
 | `GMLX_SPARSE_K` | Sparse-attention kept-token budget, default `2048`. |
 | `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention begins, default `8192`. |
+| `GMLX_TOOL_PREFLIGHT=0` | Skip the fit check that `run` and `chat` make from the header before a load, and that `cannot fit:` refusals name. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` and `chat`. Same as `--no-family-defaults`. |
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, which drafts one token fewer. Same as `--draft-block-size`. |
-| `GMLX_DRAFT_HEAD` | MTP and DFlash 2 drafter head on a float-head target. `q8` (default) or `q4` loads a q8_0 or q4_0 copy, `f16` uses the target's. Output is unchanged. |
-| `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, with `0` uncapped. Overrides each model's `speculative_width_cap` and is read on each round. |
+| `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, and `0` removes the cap. Overrides `speculative_width_cap`, read each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`. Same as `--ignore-eos`, for forced-length benchmarking. |
 | `GMLX_API_KEY` | The key that `ps` and `systemone` send when `--api-key` is not passed. The server reads its own key only from `server.api_key`. |
 | `GMLX_PULL_RETRIES` | Consecutive failed attempts `pull` accepts on one file, default `10`. An attempt that moves bytes resets the count. `0` fails on the first error. |
 | `GMLX_PULL_TIMEOUT` | Socket timeout in seconds for a `pull` transfer, default `60`. It is also the budget for one stalled read. |
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | The Hugging Face token that `validate` and `pull` send, checked in that order. Without either, they use the token that `hf auth login` stored. |
-| `XDG_CACHE_HOME` | Root of the `gmlx/` cache directory, with the chat input history, server runfiles and logs, and the `talk` models. Default `~/.cache`. |
-| `XDG_DATA_HOME` | The root of the `gmlx/` data directory, which holds saved chat sessions and the assistant's memory. Default `~/.local/share`. |
+| `XDG_CACHE_HOME` | Root of the `gmlx/` cache directory, with the chat input history, server runfiles and logs, and the `talk` models. The default is `~/.cache`. |
+| `XDG_DATA_HOME` | The root of the `gmlx/` data directory, which holds saved chat sessions and the assistant's memory. The default is `~/.local/share`. |
