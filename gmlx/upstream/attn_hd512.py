@@ -11,37 +11,34 @@ vector path {64,96,128,256} (qL==1 decode only) and a tiled path {64,80,128}
     tiled path excludes 256, so a qL>1 verify forward materializes a [Hq, qL, kL]
     score per full-attn layer at depth.
 
-This routes head_dim 512 through mlx_kquant.sdpa_vector, a compiled two-pass
-online-softmax kernel (256/512 instantiations of MLX's own sdpa_vector_2pass), from
-qL==1. Measured vs the stock materialized fallback at 16k-32k context: ~1.0-1.15x at
-decode (qL=1) and ~1.3-1.9x at verify (qL 2..5), tapering to a wash by qL~7, so the
-route is gated to qL <= GMLX_HD512_MAXQL (default 6). Output matches stock SDPA
-to bf16 rounding.
+Head_dim 512 decode and verify at B == 1 take one of three mlx-kquant routes,
+picked by the GQA fold's rows (qL x G), the KV heads and the depth
+(_hd512_route): mlx_kquant.sdpa_vector, a compiled two-pass online-softmax kernel
+(256/512 instantiations of MLX's own sdpa_vector_2pass) that walks the KV once
+per folded row; the kq.sdpa_fa_verify d-split kernel, one flash-attention KV
+sweep per 32-row tile; and a GQA-folded GEMM with a precise softmax, one
+matrix-unit KV sweep for the whole fold. Output matches stock SDPA to bf16
+rounding. GMLX_VERIFY_FA=0 and GMLX_VERIFY_GEMM=0 send the calls those two
+routes would take to stock.
 
 The head_dim-256 verify route (qL>=2; its qL==1 decode is already fused by the
-vector path) is opt-in, off by default. Enable with GMLX_HD256_VERIFY=1.
-
-head_dim-512 verify widths (qL 3..5, kv >= 2) preferentially take the
-kq.sdpa_fa_verify d-split kernel over the same GQA fold (one flash-attention
-KV sweep on the matrix units, no materialized score), then fall back to a
-gqa-folded GEMM route, then sdpa_vector: the GQA group folds into the query
-rows so one matrix-unit KV sweep serves the whole verify block, where the
-vector kernel walks the KV once per query row. GEMM route measured at the
-gemma-4-31b global-layer shape: qL=4 1.6-2.2x per call from 2k to 131k
-(qL=2 loses, stays on vector); this is the MTP verify depth-slope fix.
-A/B fa-verify vs GEMM with GMLX_VERIFY_FA=0; disable the GEMM fold
-with GMLX_VERIFY_GEMM=0.
+vector path) is on by default. Disable it with GMLX_HD256_VERIFY=0. A verify
+whose GQA fold (qL x G rows) holds 18 rows or more goes to kq.sdpa_fa_verify
+once the KV passes a depth set by the fold and the KV heads, from 512 keys for
+most folds. Stock's vector kernel declines folds over 32 rows (e.g. Qwen3.x
+24/4 at qL 6..8, 32/2 from qL 3) and materializes their scores at every depth.
 
 Separately, GQA decode (qL==1, gqa 2..8) routes to mlx_kquant.sdpa_decode_gqa
 once the KV is deep enough. head_dim 64 (e.g. gpt-oss full-attn layers) engages
 at GMLX_GQA_SDPA_MINKV (default 4096): stock MLX's fused vector path
 plateaus near 37% of read-once bandwidth at long KV; the kq kernel's coarse
 contiguous splits + GQA-shared K/V tile staging reach ~55-60% (1.3-1.6x per
-call from 16k up). head_dim 512 (gemma-4 global layers, >= 2 kv heads) engages
-at GMLX_GQA_SDPA_MINKV512 (default 32768), where it overtakes the
-kq.sdpa_vector route below (1.12x @32k -> 1.28x @131k per call; token-exact
-+1.7% whole-step at 49k on gemma-4-31b). Attention sinks ride through the
-kernel's merge pass. Disable with GMLX_GQA_SDPA=0.
+call from 16k up). head_dim 512 (gemma-4 global layers with 4 or more KV
+heads, or a group of 4 or less) engages at GMLX_GQA_SDPA_MINKV512 (default
+32768), where it overtakes the kq.sdpa_vector route below (1.02x-1.28x per
+call on gemma-4-31b from 32k to 131k, token-exact +1.7% whole-step at 49k).
+Attention sinks ride through the kernel's merge pass. Disable with
+GMLX_GQA_SDPA=0.
 
 Also tiles a pathological single-shot full-width prefill (qL > GMLX_HD512_TILE)
 so its score materialization stays bounded; the runtime's normal chunked prefill
@@ -84,8 +81,9 @@ except Exception:  # pragma: no cover - mlx_kquant always present in practice
 # the stock materialized fallback is as fast or faster (the two-pass partials
 # buffer scales with qL). 6 is the measured crossover at 32k context.
 _MAX_QL = env_int("GMLX_HD512_MAXQL", 6)
-# Engage only once context is deep enough to matter; short context is cheap on the
-# stock path.
+# Depth from which kq.sdpa_vector takes head_dim-256 verify and the gemma-4
+# batched row route claims head_dim-512 calls; B == 1 head_dim-512 calls take
+# their depths from _hd512_route.
 _MIN_KV = env_int("GMLX_HD512_MINKV", 4096)
 # Tile width for the chunked-prefill guard. Defaults to the runtime's prefill step
 # (2048), so a normally-chunked prefill passes straight through (qL <= tile) and
@@ -118,34 +116,40 @@ _GQA_DECODE = env_bool("GMLX_GQA_SDPA", True)
 _GQA_MIN_KV = env_int("GMLX_GQA_SDPA_MINKV", 4096)
 _GQA_HD256 = env_bool("GMLX_GQA_SDPA_HD256", False)
 _GQA_MIN_KV_256 = env_int("GMLX_GQA_SDPA_MINKV256", 49152)
-# hd512 GQA decode (gemma-4 global layers): chained per-call probe at the 31b
-# shape (Hq/Hkv 32/4) reads 1.12x @32k -> 1.28x @131k over kq.sdpa_vector,
-# crossing over between 16k and 32k. Requires >= 2 kv heads: at Hkv=1 (12b)
-# the split grid is too starved and the kernel loses at every depth.
+# hd512 GQA decode (gemma-4 global layers) from 32768 keys, where it beats
+# kq.sdpa_vector at 4 or more KV heads (31b 32/4: 1.02-1.07x at 32k-48k,
+# 1.28x @131k) and at groups of 4 or less (e4b 8/2: 1.11-1.22x at 32k-64k).
+# A group of 8 over 2 KV heads (26b-a4b 16/2) underfills the split grid and
+# loses 1.06-1.16x at 32k-48k, and one KV head (e2b, 12b) loses at every
+# depth. Those decode by _hd512_route.
 _GQA_MIN_KV_512 = env_int("GMLX_GQA_SDPA_MINKV512", 32768)
-# hd512 speculative-verify width (qL 3..6): fold the GQA group into the query
-# rows ([B,Hq,qL,D] -> [B,Hkv,G*qL,D]; exact -- query heads are grouped
+# hd512 speculative verify: fold the GQA group into the query rows
+# ([B,Hq,qL,D] -> [B,Hkv,G*qL,D], exact since query heads are grouped
 # kv-major) and run plain batched-GEMM attention with a bottom-right causal
 # mask and precise softmax. One matrix-unit KV sweep serves all G*qL rows
-# where the kq.sdpa_vector route pays a strided sweep per query row; measured
-# at the gemma-4-31b global shape (32/4, hd512, bf16): qL=4 1.6-2.2x per call
-# from 2k to 131k, qL=3 1.1-1.5x, qL=2 LOSES mid-depth (stays on vector).
-# Disable with GMLX_VERIFY_GEMM=0 (falls back to kq.sdpa_vector above).
+# where the kq.sdpa_vector route pays a strided sweep per query row.
+# _hd512_route picks it at 4 or more KV heads and on wide folds. Disable
+# with GMLX_VERIFY_GEMM=0 (those calls go to stock).
 _VERIFY_GEMM = env_bool("GMLX_VERIFY_GEMM", True)
-# Speculative-verify on the matrix units: kq.sdpa_fa_verify, a
-# simdgroup-matrix flash-attention pass over the same GQA fold. One KV sweep
-# on matrix units vs the vector route's per-row strided walk; measured at
-# 24/4 hd256 bf16 (qwen3.x full-attn): qL=4 1.14x @4k -> 1.53x @131k, qL=3
-# wins from ~16k, qL=2 loses (stays on vector). The kernel takes one row
-# tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up to 4x that
-# (e.g. 32/2 gqa16 at qL 4) run as per-chunk calls over a kv-major split of
-# the GQA group -- each chunk re-sweeps the KV, still far ahead of the
-# per-row vector walk at those shapes. hd512 (gemma-4 26b-moe/31b global
-# layers, kv>=2) claims ahead of the verify_gemm fold below; A/B the two
-# with GMLX_VERIFY_FA=0. Disable with GMLX_VERIFY_FA=0.
+# Speculative verify on the matrix units: kq.sdpa_fa_verify, a
+# simdgroup-matrix flash-attention pass over the GQA fold. One KV sweep
+# serves all G x qL folded rows, so its cost barely moves with the rows,
+# while stock and kq.sdpa_vector walk the keys once per row, and stock
+# materializes any fold over 32 rows at every depth. At hd256 the gate keys
+# on the folded rows and the KV heads (_fa_min_kv_256). Chained over 16
+# layers, bf16, on mlx-kquant's GPU-filling split count: folds over 32 rows
+# gain 1.35-1.8x at 512 keys and 1.7-4x at 16k (24/4 at qL 6..8, 16/2 at
+# 5..8, 32/2 at 3..4); 24-32 rows 1.2-1.75x from 512 keys at 4 KV heads
+# and 1.05-1.75x from 1024 at 2; 18-23 rows 1.03-1.15x from 1024 keys at 4
+# KV heads and 1.0-1.1x from 8192 at 2, to 131k; under 18 rows (16/4 and
+# 8/2 at qL 3..4, qL 2 below G 9) fa loses at every depth. Below 256 keys stock wins
+# every shape, since fa's per-split partials cost about 23 us. The kernel
+# takes one row tile (hd256: probed 32 or 64; hd512 d-split: 32); folds up
+# to 4x that (e.g. 32/2 gqa16 at qL 5..8) run as per-chunk calls over a
+# kv-major split of the GQA group, each sweeping the KV again, which pays
+# from 1024 keys (1.4-2.2x to 16k). hd512 takes fa where _hd512_route
+# says (2 KV heads, 21 to 32 rows). Disable with GMLX_VERIFY_FA=0.
 _VERIFY_FA = env_bool("GMLX_VERIFY_FA", True)
-_FA_MIN_KV = env_int("GMLX_VERIFY_FA_MINKV", 4096)
-_FA_MIN_KV_QL3 = 16384
 _HAS_FA_VERIFY = mlx_kquant is not None and hasattr(mlx_kquant, "sdpa_fa_verify")
 # hd256 wide-group decode (gqa > 8, i.e. qwen3.5-122b 32/2): the per-key dot
 # fan-out (16 dots/staged element) is compute-bound on the FMA-path kernels
@@ -181,6 +185,56 @@ def _causal_str(mask):
     return mask is None or (isinstance(mask, str) and mask == "causal")
 
 
+# head_dim 512 route table, from per-call sweeps over the five gemma-4
+# global-layer shapes (12b 16/1, e2b 8/1, e4b 8/2, 26b-a4b 16/2, 31b 32/4),
+# chained over 16 layers, bf16, qL 1..8, depths from 128 to 65536 keys.
+# Stock has no fused kernel at head_dim 512, so it materializes the scores
+# at every width. Every route starts at 384 keys, where the table's pick
+# beats stock by 1.03-1.75x (8/2 at 8 queries runs 2% behind); below that
+# the gains are a few microseconds. At one KV head stock's broadcast matmul
+# is itself a folded GEMM, so kq.sdpa_vector (one KV walk per folded row)
+# wins only while the depth is short for the fold, decode included: to
+# 16384 keys at 8 rows, 8192 at 16, 4096 at 24 and 1024 at 32. Past that
+# it loses up to 3.5x. At 2 or more KV heads decode takes kq.sdpa_vector
+# from 1024 keys (1.05-1.96x) until _gqa_decode_eligible claims it. At 4 or
+# more KV heads the GEMM fold wins every verify width (1.01-1.19x over fa
+# at qL 3, 1.16-1.45x at qL 4, 1.6-3.3x over stock at qL 5..8). At qL 2
+# there, kq.sdpa_vector is up to 6% ahead from 8192 to 16384 keys. At 2 KV
+# heads kq.sdpa_vector takes up to 16 rows, and 20 rows below 65536 keys,
+# where fa pulls 1.10x ahead. fa takes 21 to 31 rows from 1024 keys, 32
+# rows go to the GEMM below 4096 keys and fa from there, and wider folds go
+# to the GEMM, where fa would sweep the KV once per 32-row chunk (1.4-1.9x
+# slower). At one KV head and 24 rows fa is up to 1.16x ahead from 4096 to
+# 8192 keys. The table leaves that fold to kq.sdpa_vector and stock, since
+# only e2b verifying 3 tokens produces it.
+def _hd512_route(q, k):
+    """The route for a B == 1 head_dim-512 call: "vector", "fa", "gemm",
+    or None for stock."""
+    kv = k.shape[1]
+    if kv == 0 or q.shape[1] % kv != 0:
+        return None
+    qL, kL = q.shape[2], k.shape[2]
+    if qL > 8 or qL > kL or kL < 384:
+        return None
+    rows = (q.shape[1] // kv) * qL
+    vector = "vector" if qL <= _MAX_QL else None
+    if kv == 1:
+        top = (16384 if rows <= 8 else 8192 if rows <= 16 else 4096 if rows <= 24
+               else 1024 if rows <= 32 else 0)
+        return vector if kL <= top else None
+    if qL == 1:
+        return vector if kL >= 1024 else None
+    if kv >= 4 or rows > 32:
+        return "gemm"
+    if rows <= 16 or (rows <= 20 and kL < 65536):
+        return vector
+    if rows <= 20:
+        return "fa"
+    if rows < 32:
+        return "fa" if kL >= 1024 else None
+    return "fa" if kL >= 4096 else "gemm"
+
+
 def _eligible(q, k, v, mask):
     # B==1, a kq.sdpa_vector head_dim (q and v), verify/decode width, deep enough,
     # causal/full mask.
@@ -189,17 +243,15 @@ def _eligible(q, k, v, mask):
     hd = q.shape[-1]
     if hd not in _KQ_HD or v.shape[-1] != hd:
         return False
-    if hd == 512:
-        min_ql = 1  # stock materializes hd512 even at decode
-    elif hd == 256 and _HD256_VERIFY:
-        min_ql = 2  # hd256 qL==1 decode is already fused on stock; verify is not
-    else:
-        return False
     qL = q.shape[2]
     kL = k.shape[2]
-    if qL < min_ql or qL > _MAX_QL or qL > kL or kL < _MIN_KV:
+    if qL > _MAX_QL or qL > kL or q.shape[1] % k.shape[1] != 0:
         return False
-    if q.shape[1] % k.shape[1] != 0:
+    if hd == 512:
+        if _hd512_route(q, k) != "vector":
+            return False
+    elif not (_HD256_VERIFY and qL >= 2 and kL >= _MIN_KV):
+        # hd256 qL==1 decode is already fused on stock; verify is not
         return False
     # Only a causal/full mask is handled (global/full-attn layers pass "causal"/None).
     return _causal_str(mask)
@@ -279,7 +331,8 @@ def _gqa_decode_eligible(q, k, v, mask):
         min_kv = _GQA_MIN_KV
     elif hd == 256 and _GQA_HD256:
         min_kv = _GQA_MIN_KV_256
-    elif hd == 512 and k.shape[1] >= 2:
+    elif hd == 512 and k.shape[1] >= 2 and (
+            k.shape[1] >= 4 or q.shape[1] // k.shape[1] <= 4):
         min_kv = _GQA_MIN_KV_512
     else:
         return False
@@ -296,25 +349,15 @@ def _gqa_decode_eligible(q, k, v, mask):
 
 
 def _verify_gemm_eligible(q, k, v, mask):
-    # B==1 hd512 verify width at deep KV, causal/full mask. qL==2 stays on the
-    # vector route (two sweeps amortize fine; GEMM measured 0.83-0.97x there);
-    # from qL==3 the fold wins at every depth.
+    # B==1 hd512 verify where _hd512_route picks the GQA-folded GEMM,
+    # causal/full mask. Never at one KV head: stock's broadcast matmul is the
+    # same GEMM there.
     if q.ndim != 4 or q.shape[0] != 1:
         return False
     hd = q.shape[-1]
     if hd != 512 or v.shape[-1] != hd or k.shape[-1] != hd:
         return False
-    qL = q.shape[2]
-    if not 3 <= qL <= _MAX_QL or qL > k.shape[2]:
-        return False
-    if k.shape[2] < _MIN_KV:
-        return False
-    # >= 2 kv heads: at Hkv=1 (gemma-4-12b globals) there is no GQA
-    # amplification for the fold to remove -- stock's fallback is within
-    # +-8% at every depth and slightly ahead past 32k.
-    if k.shape[1] < 2 or q.shape[1] % k.shape[1] != 0:
-        return False
-    return _causal_str(mask)
+    return _hd512_route(q, k) == "gemm" and _causal_str(mask)
 
 
 def _verify_gemm(q, k, v, scale, causal):
@@ -369,10 +412,24 @@ def _fa_row_cap(hd):
     return 32 if hd == 512 else _FA_MAX_ROWS
 
 
+def _fa_min_kv_256(rows, chunks, kv):
+    # First key count from which the hd256 fold beats stock and
+    # kq.sdpa_vector, or None where it never does (see _VERIFY_FA).
+    if chunks > 1:
+        return 1024
+    if rows > 32:
+        return 512
+    if rows >= 24:
+        return 512 if kv >= 4 else 1024
+    if rows >= 18:
+        return 1024 if kv >= 4 else 8192
+    return None
+
+
 def _fa_verify_eligible(q, k, v, mask):
     # B==1 verify width, causal only, fold must split into <=4 row tiles
     # along the GQA group. hd256 = qwen3.x full-attn; hd512 = gemma-4
-    # global layers (26b-moe/31b folds G8 x qL4 = one 32-row tile).
+    # global layers, one 32-row tile where _hd512_route picks fa.
     if q.ndim != 4 or q.shape[0] != 1:
         return False
     hd = q.shape[-1]
@@ -382,13 +439,17 @@ def _fa_verify_eligible(q, k, v, mask):
     kv = k.shape[1]
     if kv == 0 or q.shape[1] % kv != 0:
         return False
-    # Hkv==1 (gemma-4-12b globals): no GQA amplification for the fold to
-    # remove; stock is par at depth (same finding as the verify_gemm gate).
-    if hd == 512 and kv < 2:
+    if hd == 512:
+        return (_hd512_route(q, k) == "fa" and isinstance(mask, str)
+                and mask == "causal")
+    g = q.shape[1] // kv
+    n = _fa_chunks(g, qL, _fa_row_cap(hd))
+    if n is None:
         return False
-    if not 3 <= qL <= 5 or _fa_chunks(q.shape[1] // kv, qL, _fa_row_cap(hd)) is None:
+    min_kv = _fa_min_kv_256(g * qL, n, kv) if 2 <= qL <= 8 else None
+    if min_kv is None:
         return False
-    if qL > k.shape[2] or k.shape[2] < (_FA_MIN_KV_QL3 if qL == 3 else _FA_MIN_KV):
+    if qL > k.shape[2] or k.shape[2] < min_kv:
         return False
     return isinstance(mask, str) and mask == "causal"
 
@@ -400,6 +461,8 @@ _SDPA_DEBUG = [24] if env_bool("GMLX_SDPA_DEBUG", False) else None
 # summary under GMLX_ROUTE_LOG=1, and a one-shot loud warning when a
 # verify-shaped causal call at depth lands on the stock materialized path --
 # the regression signature that previously needed ad-hoc taps to surface.
+# Head_dim-512 shapes that _hd512_route or a kill switch sends to stock
+# do not warn.
 # Counts are taken at claim time; a kernel exception that falls through to a
 # later branch double-counts, which is itself a signal worth seeing.
 _ROUTE_COUNTS: dict = {}
@@ -427,6 +490,11 @@ def _stock_depth_warning(q, k, mask, sinks):
     B, hq, qL, hd = q.shape
     if B != 1 or not 2 <= qL <= 8 or hd < 256 or k.shape[2] < 16384:
         return
+    if hd == 512:
+        r = _hd512_route(q, k)
+        if (r is None or (r == "fa" and not (_VERIFY_FA and _HAS_FA_VERIFY))
+                or (r == "gemm" and not _VERIFY_GEMM)):
+            return  # stock by the table or by a kill switch
     key = (hd, qL, hq, k.shape[1])
     if key in _STOCK_WARNED:
         return
@@ -498,8 +566,6 @@ def _wrapped_sdpa(q, k, v, *, scale=1.0, mask=None, **kw):
             else:
                 # Oversized fold (e.g. gqa16 x qL4 = 64 rows): kv-major chunks
                 # of the GQA group, one kernel call (= one KV sweep) each.
-                # Chunks must be materialized: the kernel mis-reads strided
-                # q views (returns wrong rows for kv-head > 0).
                 qc = q.reshape(B, kv, n, (g // n) * qL, hd)
                 out = mx.concatenate(
                     [mlx_kquant.sdpa_fa_verify(mx.contiguous(qc[:, :, i]),

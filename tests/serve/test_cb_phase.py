@@ -130,17 +130,41 @@ def test_phased_steps_flips_at_first_token(fake_kq):
     assert fake_kq == [cb_phase.FINE, cb_phase.COARSE] * 2
 
 
+def test_phased_steps_close_closes_wrapped_generator(fake_kq):
+    # A consumer that stops mid-stream closes the wrapper, and the wrapped
+    # generator's cleanup (a speculative loop's cache rollback) runs then.
+    import gmlx.serve.cb_phase as cb_phase
+
+    events = []
+
+    def steps():
+        try:
+            yield "t0"
+            yield "t1"
+        finally:
+            events.append("inner closed")
+
+    gen = cb_phase.phased_steps(steps())
+    assert next(gen) == "t0"
+    gen.close()
+    assert events == ["inner closed"]
+
+
 def test_install_steps_wraps_generate_step_once(monkeypatch, fake_kq):
     lmgen = importlib.import_module("mlx_lm.generate")
+    spec = importlib.import_module("gmlx.spec.speculative")
 
     import gmlx.serve.cb_phase as cb_phase
 
     monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
     saved = (lmgen.generate_step, lmgen.speculative_generate_step)
+    monkeypatch.setattr(spec, "stream_speculative", spec.stream_speculative)
     try:
         assert cb_phase.install_cb_phase_steps() is True
         assert lmgen.generate_step._gmlx_cb_phase
         assert lmgen.speculative_generate_step._gmlx_cb_phase
+        # gmlx run's own speculative loop decodes on coarse caps too
+        assert spec.stream_speculative._gmlx_cb_phase
         first = lmgen.generate_step
         assert cb_phase.install_cb_phase_steps() is True
         assert lmgen.generate_step is first

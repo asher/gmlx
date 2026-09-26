@@ -23,6 +23,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx distill train` refuses a view aligned before this release when the
   student is a gemma-4 or gemma-1.1 GGUF, since its stop ids changed. Run
   `gmlx distill align` again.
+- Requires mlx-kquant 0.4.14. On GPUs with NAX (M5), its kernels speed up
+  speculative decoding on `Q4_0`, `Q8_0`, `Q2_K` to `Q6_K`, `PQ2_0` and
+  `PTQ1_0` targets, and batched decode on every codec.
+- DFlash 2 decoding runs faster on targets with a float output head, such as
+  Q8_K_XL Qwen3.8-27B. `GMLX_DRAFT_HEAD=f16` restores the previous head.
+- `gmlx run`, `chat` and `bench` with MTP or a DFlash 2 drafter decode
+  faster, on the command-buffer settings `gmlx serve` already decoded with.
+- A single `gmlx serve` request with MTP or a DFlash 2 drafter spends less
+  time between speculative rounds.
+- Speculative decoding on Qwen3.x targets verifies faster, most of all with
+  DFlash 2 drafters and on models with 2 KV heads such as Qwen3.6-35B-A3B.
+- MTP on Qwen3.5-9B, and other models with 16 query heads and 4 KV heads,
+  runs faster at long context when it verifies 3 or 4 tokens.
+- Speculative decoding on Gemma-4 with its assistant drafter runs faster at
+  long context, by 19% on E2B and 5% on 31B with a 30k-token prompt.
+- Gemma-4 E2B and 12B decode faster at long context, by 2% on E2B with a
+  30k-token prompt.
 
 ### Fixed
 

@@ -61,7 +61,7 @@ def install_cb_phase_flips() -> bool:
             flip(phase)
             return orig(self, *args, **kwargs)
 
-        wrapped._gmlx_cb_phase = True
+        setattr(wrapped, "_gmlx_cb_phase", True)
         wrapped.__name__ = orig.__name__
         setattr(cls, name, wrapped)
 
@@ -77,21 +77,30 @@ def install_cb_phase_flips() -> bool:
 def phased_steps(gen):
     """Iterate a token-step generator with fine caps through its prefill
     and coarse caps from the first token on. The generator body runs on
-    the first next(), so the prefill flip happens here, not at call."""
+    the first next(), so the prefill flip happens here, not at call.
+    Closing this generator closes the wrapped one at once, so its own
+    cleanup, such as a speculative loop's mid-round cache rollback, runs
+    before the caller goes on."""
     flip("prefill")
     first = True
-    for item in gen:
-        if first:
-            flip("decode")
-            first = False
-        yield item
+    try:
+        for item in gen:
+            if first:
+                flip("decode")
+                first = False
+            yield item
+    finally:
+        close = getattr(gen, "close", None)
+        if close is not None:
+            close()
 
 
 def install_cb_phase_steps(streaming: bool = False) -> bool:
     """Wrap the generate_step functions the CLI generate path drives
-    (mlx-lm's plain and speculative loops, mlx-vlm's ar loop) in
-    phased_steps. A streaming placement keeps its lifetime coarse caps
-    (the argv lift, or a pinned MLX_MAX_OPS_PER_BUFFER) and is skipped."""
+    (mlx-lm's plain and speculative loops, mlx-vlm's ar loop, and gmlx's
+    own speculative loop, stream_speculative) in phased_steps. A streaming
+    placement keeps its lifetime coarse caps (the argv lift, or a pinned
+    MLX_MAX_OPS_PER_BUFFER) and is skipped."""
     if os.environ.get("GMLX_CB_PHASE", "1") == "0":
         return False
     if streaming or os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
@@ -102,7 +111,8 @@ def install_cb_phase_steps(streaming: bool = False) -> bool:
 
     targets = [("mlx_lm.generate", "generate_step"),
                ("mlx_lm.generate", "speculative_generate_step"),
-               ("mlx_vlm.generate.ar", "generate_step")]
+               ("mlx_vlm.generate.ar", "generate_step"),
+               ("gmlx.spec.speculative", "stream_speculative")]
     for modname, name in targets:
         try:
             mod = importlib.import_module(modname)
@@ -115,9 +125,9 @@ def install_cb_phase_steps(streaming: bool = False) -> bool:
         def wrapped(*args, _orig=orig, **kwargs):
             return phased_steps(_orig(*args, **kwargs))
 
-        wrapped._gmlx_cb_phase = True
+        setattr(wrapped, "_gmlx_cb_phase", True)
         wrapped.__name__ = orig.__name__
         wrapped.__doc__ = orig.__doc__
-        wrapped.__wrapped__ = orig
+        setattr(wrapped, "__wrapped__", orig)
         setattr(mod, name, wrapped)
     return True
