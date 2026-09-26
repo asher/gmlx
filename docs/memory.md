@@ -80,14 +80,10 @@ instead of failing with an error, because MLX counts the pool as free
 while macOS counts it as wired.
 
 The server therefore limits the pool by default, and logs the limit on a
-`[serve] MLX cache limit:` line. When the largest configured model takes
-more than 60% of the GPU working set, the limit is a quarter of the memory
-that is left. Otherwise, it is 5% of the working set. Either way, the
-limit is between 4 and 12 GiB. The memory governor also checks the free
+`[serve] MLX cache limit:` line. The memory governor also checks the free
 memory of macOS on every tick.
 
 [`server.cache_limit_gb`](config.md#servercache_limit_gb) sets the limit
-in GiB. Set it for benchmarks, so that runs compare. `0` turns the buffer
-cache off, and a negative value removes the limit.
-[`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime) sets the limit through the
-environment.
+and gives its default, and [`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime)
+sets it through the environment. Set it for benchmarks, so that runs
+compare.

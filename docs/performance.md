@@ -27,6 +27,9 @@ weights. Each feature of gmlx targets one of these limits.
 
 ## The features
 
+Each feature gains on one of these limits at a cost in memory, speed or
+exact output.
+
 | Feature | What it gains | What it costs | Page |
 |---------|---------------|---------------|------|
 | A uniform K-quant file | It decodes faster than a mixed file of the same model. | It can take more memory than a mixed low-bit build. | [Choosing a quant for speed](#choosing-a-quant-for-speed) |
@@ -70,9 +73,9 @@ switches that log the routes are in
 Absolute speeds scale with the memory bandwidth of the chip. A Pro chip
 has about half the bandwidth of a Max, and a base chip a quarter to a
 fifth, while the ratios between models and quants stay the same. The
-kernels target the matrix hardware of M3 and later GPUs. M1 and M2 run
-the standard kernels, but they have not been tuned or compared with
-llama.cpp. [Benchmarks](benchmarks.md) compares gmlx with llama.cpp on
+kernels were tuned on M3 and M5 GPUs, and M5 and later chips also get a
+path through the neural accelerators of the GPU. M1 and M2 run the same
+kernels, but they have not been tuned or compared with llama.cpp. [Benchmarks](benchmarks.md) compares gmlx with llama.cpp on
 the same files, across many models and up to 200K tokens of context.
 
 ## Choosing a quant for speed

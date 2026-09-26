@@ -41,12 +41,12 @@ recurrent layer of the Qwen3.5, Qwen3.6 and Qwen3.8 hybrids.
 | Family | Identical prompt | Next turn | Edited or regenerated turn |
 |--------|------------------|-----------|----------------------------|
 | Dense models and MoE models with plain attention | The whole prompt is reused. | The whole earlier conversation is reused. | Reuse stops at the edit, in blocks of 16 to 256 tokens. |
-| GDN hybrids, such as Qwen3.5 and Qwen3.6 | All but the last token is reused. | Reuse reaches the turn boundary, rounded down to the nearest restore point. | Reuse stops at the nearest restore point before the edit. |
+| GDN hybrids, such as Qwen3.5 and Qwen3.6 | All but the last token is reused. | Reuse reaches the turn boundary, rounded down to the nearest checkpoint. | Reuse stops at the nearest checkpoint before the edit. |
 | Sliding-window models, such as gemma-4 and gpt-oss | Reuse matches the GDN hybrids. | Reuse stops a few tokens before the change, once the prompt is longer than the window. | Reuse matches the GDN hybrids. |
 | Pure recurrent and multi-cache models, such as Falcon-H1 and DeepSeek-V4 | The whole prompt is reused. | The whole conversation is reused, because each turn extends it unchanged. | Nothing is reused, and an edited conversation prefills from the start. |
 
-Hybrid models save restore points along the prompt and at the end of each
-turn. A prompt shorter than 1024 tokens saves no restore point for an
+Hybrid models save checkpoints along the prompt and at the end of each
+turn. A prompt shorter than 1024 tokens saves no checkpoint for an
 identical resend, because it prefills quickly anyway.
 
 A sliding-window model under speculative decoding keeps no record of the

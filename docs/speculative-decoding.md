@@ -56,8 +56,8 @@ turns and decodes turns with images or audio without speculation.
 ## How much it gains
 
 The gain depends on how many drafts the model accepts, and on the depth of
-the context. Speculation often doubles the decoding speed of a dense model
-at short contexts, and keeps a smaller gain deep into long ones. MoE models
+the context. Speculation makes a dense model decode 1.6 to 1.9 times as
+fast at short contexts, and keeps a smaller gain deep into long ones. MoE models
 gain less, and on some of them it becomes a loss at depth, so measure
 before you rely on it. Predictable text, such as code, accepts more drafts
 than free prose. [Benchmarks](benchmarks.md) has the speedup curves of

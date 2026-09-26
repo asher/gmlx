@@ -6,6 +6,20 @@ use it to route a ticket, and an agent can use it to pick its next tool.
 The answers come straight from the model's predictions, so there is no
 reply text to parse. The route is also served at `/systemone`.
 
+- [What the endpoint does](#what-the-endpoint-does)
+- [Why DiffusionGemma](#why-diffusiongemma)
+- [Serving the model](#serving-the-model)
+- [A first decision](#a-first-decision)
+- [Reading the answers](#reading-the-answers)
+- [Examples](#examples)
+- [Questions](#questions)
+- [Stages and skipped questions](#stages-and-skipped-questions)
+- [Samples, steps and thoughts](#samples-steps-and-thoughts)
+- [When answers go wrong](#when-answers-go-wrong)
+- [Errors and queueing](#errors-and-queueing)
+- [The command line](#the-command-line)
+- [How a decision is read](#how-a-decision-is-read)
+
 ## What the endpoint does
 
 A request carries a state, which is the text that the questions are
@@ -406,9 +420,12 @@ when its state is unlike the ones you tested.
 
 ## Errors and queueing
 
+A request that fails gets one of these status codes.
+
 | Status | Cause |
 |--------|-------|
-| 400 | The body is not a JSON object or carries `images`. The model is not DiffusionGemma. The prompt does not fit the context or memory budget. |
+| 400 | The body is not a JSON object, or it carries `images`, which the text-only model cannot read. |
+| 400 | The model is not DiffusionGemma, or the prompt does not fit the context or memory budget. |
 | 400 | `profile` names no profile, with the error type `unknown_profile`. `model` is absent and there is no fallback, with the error type `no_model_specified`. |
 | 401 | The server has an API key, and the request does not present it. |
 | 404 | `model` names nothing and there is no fallback, with the error type `model_not_found`, or the model file is missing, with the error type `model_file_missing`. |
@@ -416,9 +433,6 @@ when its state is unlike the ones you tested.
 | 503 | The queue is full or the model load is deferred, as [Limits and back-pressure](api.md#limits-and-back-pressure) describes. |
 | 504 | The decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s), counted from when it left the queue. The type is `timeout`. |
 | 500 | The engine failed, with the error type `server_error`. |
-
-The model is text only, so the server refuses a request with `images`,
-and it refuses a multipart body.
 
 A decision holds the model from its first read to its last, so a chat
 request to the same model waits behind it. Before the server queues a
