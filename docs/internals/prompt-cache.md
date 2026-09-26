@@ -6,8 +6,9 @@ disable each layer. Operators read [Prompt cache](../prompt-cache.md).
 
 ## Which tier serves which architecture
 
-The cache routes each model by its cache shape once, at load, and logs the
-routing as `APC tier:` so that a silent mis-route is visible. The tiers
+The cache routes each model by its cache shape once and logs the routing
+as `APC tier:`, or as `APC OFF for this model` when no tier serves it, so
+that a silent mis-route is visible. The tiers
 differ in storage layout, not in whether hits happen, so every shape in the
 table gets reuse except one. A MiniMax-M3 file with its sparse-attention
 indexer armed, the MSA row, gets none. In the table, a hybrid mixes
@@ -43,7 +44,7 @@ speculative models, and checkpoints only for checkpoint-tier models.
   paired with an empty drafter KV decodes at degraded acceptance until that
   KV is rebuilt. A small sidecar entry therefore saves the drafter's KV
   beside the target's, so a warm hit restores both.
-- Checkpoints: Hybrid models save restore points piecewise along a prefill
+- Checkpoints: Hybrid models save checkpoints piecewise along a prefill
   and while generating, plus targeted ones at the end of the system prompt,
   one token before the prompt end and at the predicted next-turn boundary.
   The system-prompt one is what lets parallel agents sharing a prompt
@@ -77,8 +78,8 @@ one for each of its blocks.
 | `retire_fallback_suppressed` | A retirement store is skipped and counted here when the predicted next-turn render has diverged, so the entry could never match. The turn checkpoint covers it. |
 
 The server watches for two failures and warns once per model about each. One
-warning fires when more than `GMLX_APC_CKPT_TRIPWIRE` requests have
-completed with zero stores. The other fires when that many lookups have
+warning fires when more than `GMLX_APC_CKPT_TRIPWIRE` requests have been
+armed for checkpoints while the model has zero stores. The other fires when that many lookups have
 matched a saved prefix but adopted nothing, with zero hits. Either warning
 means prefix reuse is not working for that model, so file an issue with the
 `/v1/cache/stats` snapshot.

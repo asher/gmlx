@@ -202,7 +202,7 @@ sequenceDiagram
   participant S as serving (resolver + bridge)
   participant L as loader + kquant swap
   participant E as gmlx tick stack + stock step loop
-  C->>A: POST /v1/chat (model "id@profile")
+  C->>A: POST /v1/chat/completions (model "id@profile")
   A->>A: queue depth cap, over-cap gets 503 + Retry-After   [patched]
   A->>R: get_cached_model(id)   [patched]
   R->>S: resolve_request_model(id@profile)

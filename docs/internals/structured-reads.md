@@ -42,7 +42,8 @@ once, and every read of the group reuses that cache.
 
 The canvas holds the answer template, such as `urgent: yes`, then the turn
 close token and padding to the read's width. The width is the template
-length rounded up to a multiple of 16, capped at `server.systemone.canvas`.
+length plus the turn close, rounded up to a multiple of 16 and capped at
+`server.systemone.canvas`.
 At each label position, called a slot, the template's label is replaced by
 a random token id. The decoder runs over the canvas once, and the logits at
 each slot, restricted to the question's label ids, give the answer.

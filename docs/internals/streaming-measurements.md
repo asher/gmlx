@@ -86,7 +86,7 @@ MoE, streamed as a 264 GB Q4_K_M file on the same 128 GB machine with the
 decode arena at about an 87% hit rate. The runs used the same alternated A/B
 rounds as Hy3, with decode-only medians over 512-token generations. A layer
 stalls when any one of its four routed experts misses, so at 87% per-expert
-residency roughly half of all token-layer calls stall, and the miss-targeted
+residency about 43% of all token-layer calls stall, and the miss-targeted
 setting gains more.
 
 | Setting | Decode | Disk stall time |

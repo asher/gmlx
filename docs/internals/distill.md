@@ -47,9 +47,10 @@ message, and both constants land in `progress.json` and the manifest. Bytes
 per V-element is a ratio of the head's own live set, so shrinking the cap
 alone could never change what the probe measures.
 
-The trunk chunk is bounded by attention activations and by the headroom
-`gmlx.gen.prefill_decay` reports after the buffer cache is cleared, with a
-sticky shrink and no widening. A streaming MoE teacher re-reads its expert
+The trunk chunk is bounded by the attention score transient that
+`gmlx.gen.prefill_decay` allows at depth zero, and it never widens past
+its target. The headroom sampled after the buffer cache is cleared goes
+into the plan as a report and bounds nothing. A streaming MoE teacher re-reads its expert
 stacks on every forward, so its trunk chunk defaults to 8192 tokens, which
 divides that traffic by sixteen against a 512-token chunk. The manifest's
 `throughput` block records forwards, the bytes read and the stream

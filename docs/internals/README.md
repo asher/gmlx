@@ -24,7 +24,7 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
 
 - [Adding a GGUF architecture](adding-architectures.md): What supporting a
   model family involves, and its acceptance gate.
-- [Testing](testing.md): The test tiers, GPU-gated runs and the end-to-end
+- [Testing](testing.md): The test tiers, GGUF-gated runs and the end-to-end
   harnesses.
 - [Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md): Moving the pinned
   upstream versions.

@@ -46,7 +46,7 @@ batch](#re-arming-a-drained-batch).
 ```mermaid
 stateDiagram-v2
     [*] --> Scalar: first request
-    Scalar --> Batched: waiters arrive (preempt at a verify boundary)
+    Scalar --> Batched: waiters arrive (preempt)
     Batched --> Gated: width exceeds the cap
     Gated --> Batched: rows finish, width at or below the cap (capture round)
     Batched --> [*]: last row finishes
@@ -63,9 +63,10 @@ drops too, because a single speculating stream is slower than the same
 hardware decoding several streams plain. When waiters queue behind a live
 scalar generation the server therefore preempts it:
 
-1. The scalar generator closes at its verify-round boundary. Its cleanup
-   rolls the target KV cache back to exactly the delivered tokens, so the
-   round's bonus token has no KV entry yet.
+1. The scalar generator closes, usually in the middle of a round, since it
+   yields one token per step. The round's verified tokens that were not yet
+   delivered go out first, and their KV stays in the cache. The round's
+   bonus token has no KV entry yet.
 2. The generation is rebuilt as a batch-loop generator restarting from that
    bonus token with its real emitted count, but unarmed. It has no drafter
    state and no captured hidden state. Single-sequence caches are converted
@@ -99,16 +100,17 @@ sequence on fresh captures instead of reusing per-row state:
    get their view re-set through the round tail that armed rounds use.
 4. Subsequent rounds speculate normally at the drained width.
 
-Rows with fewer remaining tokens than a small threshold skip the capture
-and finish plain. A new admission in the same round takes precedence over a
+When any row has fewer than 32 tokens left, the batch does not re-arm,
+and every row keeps decoding plain. A new admission in the same round takes precedence over a
 pending resume, because the injection drain runs first and re-triggers the
 gate, which keeps a batch from arming over the cap.
 
 ## What the transitions guarantee
 
 - Token streams are continuous across both transitions. Preempt restarts
-  from the exact rollback boundary and resume consumes the plain lookahead
-  before capturing. Nothing is skipped, re-emitted or re-sampled.
+  from the round's bonus token after the verified tail goes out, and resume
+  consumes the plain lookahead before capturing. Nothing is skipped,
+  re-emitted or re-sampled.
 - A preempted request decodes under batch-loop semantics for the rest of its
   generation, including after the batch drains to a single row. It drafts
   greedily instead of with coupled sampling, which lowers acceptance by a few

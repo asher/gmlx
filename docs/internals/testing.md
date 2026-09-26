@@ -72,7 +72,7 @@ no GGUFs, which makes this the one check that proves a real served model
 engages its cache tier.
 
 ```sh
-KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
+KQUANT_TEST_GGUF_DIR=~/models GMLX_TEST_BIG_GGUFS=1 \
   pytest tests/serve/test_serve_apc_engagement.py -v
 ```
 
