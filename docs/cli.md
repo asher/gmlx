@@ -4,6 +4,8 @@ The `gmlx` command has one verb per task, such as `serve`, `run` or
 `pull`, each with its own flags, defaults and exit codes. The guides linked
 from each verb explain when to use a flag.
 
+`gmlx` has these verbs:
+
 | Verb | Does |
 |------|------|
 | [`gmlx init`](#gmlx-init) | Write a starter server config from the GGUFs on disk. |
@@ -39,7 +41,9 @@ How they combine is in
 [Flags and environment variables](config.md#flags-and-environment-variables),
 and the variables are in [Environment variables](env-vars.md).
 Sampling flags you leave unset take the model's
-[family defaults](family-defaults.md).
+[family defaults](family-defaults.md). A `--config` default of the first
+default location means the first file that exists in the order that
+[Where gmlx looks](config.md#where-gmlx-looks) gives.
 
 ## gmlx init
 
@@ -82,8 +86,8 @@ Auto-named ids carry the quant in compact form, such as `qwen3-0.6b-q4`, and
 fall back to the full codec when two quants would collide. An empty directory
 is accepted and produces a valid config with no models. When a server is
 already running the config you rewrote, `init` signals it to reload. The
-walkthrough is in the [Quickstart](quickstart.md#serving-models)
-and the file it writes is described in [Configuration](config.md).
+walkthrough is in the [Quickstart](quickstart.md#serving-models), and
+[Configuration](config.md) describes the file that `init` writes.
 
 ## gmlx serve
 
@@ -134,7 +138,7 @@ config, where the same settings apply to a config-mode server:
 | `--budget-gb F` | 0.8x the GPU working set | Keep the weights of all [resident](glossary.md#resident) models within this many GB. |
 | `--max-models N` | None | Keep at most this many models resident. |
 | `--pin ID_OR_PATH` | None | Load this model at start and never evict it. Repeat the flag for more models. |
-| `--max-tokens N` | Until the model stops | Cap a completion at this many tokens when the request sets no cap. Without it, the cap is the room left in the context. |
+| `--max-tokens N` | Until the model stops | Cap a completion at this many tokens when the request sets no cap. Without the flag, the cap is the room left in the context. |
 | `--no-family-defaults` | Off | Do not seed each family's model-card sampling under profiles and requests. In config mode a reload restores `server.family_defaults`. |
 | `--prefill-step-size N` | `2048` | Prefill in chunks of this many tokens. A lower value caps peak memory. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
@@ -212,7 +216,7 @@ These flags stream a model bigger than memory, as
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the streamed-decode prefetch policy under `--stream-experts`. `auto` probes the drive. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
-| `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired, popularity-managed expert [arena](glossary.md#arena). |
+| `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired expert [arena](glossary.md#arena) that keeps the experts the router picks most often. |
 | `--gpu-keepwarm`, `--no-gpu-keepwarm` | On with the decode feeder | Keep GPU clocks high while a streamed model decodes, or turn that off. |
 | `--moe-experts K` | Trained | Cap the router at K experts for each token, which is lossy. |
 | `--moe-expert-mass P` | Off | Keep the smallest expert set covering share P of gate mass, which is lossy. |
@@ -355,7 +359,7 @@ gmlx run model.gguf --report-only
 gmlx run coder --prompt "Refactor this loop."    # a config id, with its settings
 ```
 
-The positional is a path, or a model id or alias from your server config
+The positional argument is a path, or a model id or alias from your server config
 when it is not a file. A config id supplies its path, sampling, system
 prompt, template, adapter, drafter and streaming placement, although flags
 you pass still win. An id with an unknown profile fails and lists the valid
@@ -394,7 +398,7 @@ These flags pick profiles and family defaults:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--profile NAME` | None | Apply a built-in intent or, with a config, a user profile, as `@NAME` on the positional does. |
+| `--profile NAME` | None | Apply a built-in intent or, with a config, a user profile, as `@NAME` on the positional argument does. |
 | `--no-family-defaults` | Off | Do not apply the family's sampling defaults on a bare path. |
 | `--config FILE` | The first default location | Resolve an id against this config. |
 
@@ -402,7 +406,7 @@ These flags control memory:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--max-kv-size N` | None | Cap the KV cache with a rotating window. Combines with [kvarn](glossary.md#kvarn) but not with affine `--kv-bits`. |
+| `--max-kv-size N` | None | Cap the KV cache with a rotating window. The flag combines with [kvarn](glossary.md#kvarn) but not with affine `--kv-bits`. |
 | `--kv-bits N` | Off | Quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, where it defaults to 6. |
 | `--kv-group-size N` | `64` | Set the affine quantization group size. |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or `kvarn`, the variance-normalized quantization that [KV cache quantization](kv-quantization.md) describes. |
@@ -411,10 +415,12 @@ These flags control memory:
 | `--prefill-step-size N` | `2048`, `8192` when streaming, `4096` for HY4 when streaming | Prefill in chunks of this many tokens. |
 | `--dtype {auto,bfloat16,float16}` | `auto` | Set the activation width. `auto` picks float16 on M1 and M2. |
 
-A width outside the scheme's list exits 2, and so does a `--max-kv-size`
-window too small for kvarn's block layout, which
-[KV cache quantization](kv-quantization.md) describes along with
-the models kvarn declines. A declined model prints the reason and runs fp16
+A `--kv-bits` value outside the scheme's list exits 2, and so does a
+`--max-kv-size` window too small for kvarn's block layout.
+[Settings that limit memory](memory.md#settings-that-limit-memory) gives
+the smallest window that kvarn accepts, and
+[KV cache quantization](kv-quantization.md) describes the models kvarn
+declines. A declined model prints the reason and runs fp16
 KV, and the VLM media path always keeps fp16.
 
 These flags control loading:
@@ -454,7 +460,7 @@ These flags control speculative decoding, which
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
 
-Speculation drops a flag it cannot honor with a warning, and `--no-mtp`
+Speculation drops, with a warning, each flag it cannot honor, and `--no-mtp`
 decodes on the plain path, which honors every flag.
 [Settings that speculation drops](speculative-decoding.md#settings-that-speculation-drops)
 lists those flags. KV
@@ -472,7 +478,7 @@ These flags stream a model bigger than memory, which
 | `--stream-cpu` | Off | Run the whole model on the CPU device from the page cache. |
 | `--stream-fast-disk {auto,on,off}` | `auto` | Set the prefetch policy. `auto` measures the drive at load. |
 | `--prefill-feeder`, `--no-prefill-feeder` | On | Stage expert prefill directly from the GGUF. |
-| `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired, popularity-managed expert arena. |
+| `--decode-feeder`, `--no-decode-feeder` | On under `--stream-experts` | Decode from a wired expert arena that keeps the experts the router picks most often. |
 | `--gpu-keepwarm`, `--no-gpu-keepwarm` | On with the decode feeder | Keep GPU clocks high while a streamed model decodes, or turn that off. |
 | `--moe-experts K` | Trained | Cap the router at K experts for each token, which is lossy. |
 | `--moe-expert-mass P` | Off | Keep the smallest expert set covering share P of gate mass, which is lossy. |
@@ -526,7 +532,9 @@ These flags say where the model runs:
 | `--profile NAME` | None | Apply a built-in intent or user profile. |
 | `--no-family-defaults` | Off | Do not apply the family's sampling defaults on a bare path. |
 
-These flags control generation. Slash commands in the chat change the system prompt, the sampling and penalty settings, `--reasoning`, `--thinking` and `--thinking-budget`, and the other flags last for the whole chat:
+Slash commands in the chat change the system prompt, the sampling and
+penalty settings, `--reasoning`, `--thinking` and `--thinking-budget`. The
+other flags last for the whole chat. These flags control generation:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -581,10 +589,10 @@ send turns verbatim with `--no-chat-template`.
 
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
-installs the tool. opencode, hermes, aichat, elia and dsh get a
-configuration of their own under `~/.config/gmlx`. pi, omp and goose get a
-provider merged into their own files, and claude-code and open-webui get
-environment variables only. [Agents and chat apps](launch.md) describes each client.
+installs the tool. `opencode`, `hermes`, `aichat`, `elia` and `dsh` get a
+configuration of their own under `~/.config/gmlx`. `pi`, `omp` and `goose`
+get a provider merged into their own files, and `claude-code` and
+`open-webui` get environment variables only. [Agents and chat apps](launch.md) describes each client.
 
 ```sh
 gmlx launch opencode
@@ -614,7 +622,8 @@ These flags control `gmlx launch`:
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
 own. Before that, the command exits 0 after `--config-only` and 1 when the
-server is unreachable, died or timed out, or the tool is not installed. It
+server is unreachable, has died or has timed out, or when the tool is not
+installed. It
 exits 2 when the config is missing or malformed, and 130 when interrupted
 during the start wait.
 
@@ -636,9 +645,9 @@ background `serve` starts it automatically. What it shows is in
 ## gmlx pull
 
 `gmlx pull` checks a remote GGUF's header and, when it will load, downloads
-all its shards into your model library as plain files. A file saved under a
-`model_dirs` root is registered in the config immediately, and any running
-server is signalled to reload it.
+all its shards into your model directory as plain files. A file saved under
+a `model_dirs` root is registered in the config immediately, and any running
+server is signalled to reload the config.
 
 ```sh
 gmlx pull hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q6_K.gguf
@@ -660,9 +669,11 @@ These flags control `gmlx pull`:
 | `--json` | Off | Emit each verdict as JSON before downloading. |
 
 Inside a `model_dirs` root, downloads nest under `<org>__<repo>/` so that a
-model's siblings stay together. Before the first byte, `pull` checks that
-the volume has space for every shard, and it notes, without refusing, a
-model that will not fit this Mac's RAM. A stalled or dropped read retries
+model's siblings stay together. Before it downloads the first byte, `pull`
+checks that the volume has space for every shard. It also notes, without
+refusing, a model that will not fit this Mac's RAM.
+
+A stalled or dropped read retries
 with backoff from the `.part` file, and `GMLX_PULL_RETRIES` and
 `GMLX_PULL_TIMEOUT` tune the retries. An interrupted `pull` resumes from
 the `.part` file on the next run. A gated or private repo needs a token in
@@ -686,7 +697,7 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-
 | Ref form | Example |
 |----------|---------|
 | Local path | `~/models/model.gguf` |
-| `hf:` file | `hf:org/repo/path/file.gguf`, optionally with `@<revision>`. |
+| `hf:` file | `hf:org/repo/path/file.gguf`. An `@<revision>` suffix is optional. |
 | `hf:` folder | `hf:org/repo/UD-Q5_K_M`. A single model inside resolves, and several are listed. |
 | `hf:` repo | `hf:org/repo`. Each quant is listed as a complete ref. |
 | Hugging Face page | A `blob`, `tree` or `resolve` link is rewritten to the file or folder. |
@@ -742,7 +753,8 @@ config. It also exits 2 without `--yes` when there is no terminal or
 block to match disk. Existing entries keep their comments and edits, entries
 whose file is gone are dropped, and new files are added, with a sibling
 drafter pairing into the model it serves. Run it after adding files by hand
-or pulling with `--no-register`.
+or pulling with `--no-register`. The scan descends into subdirectories by
+default because `pull` nests its downloads.
 
 ```sh
 gmlx sync-models
@@ -755,7 +767,7 @@ gmlx sync-models --dry-run
 | `--config FILE` | The first default location | Read this config. |
 | `--models-dir DIR` | The config's `model_dirs` | Scan this directory. Repeat the flag for more directories. |
 | `--from-hf-cache`, `--hf-cache` | The config's `hf_cache` | Also reconcile the Hugging Face cache. |
-| `-r`, `--recursive`, `--no-recursive` | Deep | Descend into subdirectories, which is the default because `pull` nests its downloads. |
+| `-r`, `--recursive`, `--no-recursive` | Deep | Descend into subdirectories. |
 | `--dry-run` | Off | Print the plan without writing. |
 | `--no-reload` | Off | Do not signal a running server to re-read the file. |
 
@@ -844,9 +856,9 @@ gmlx talk --mode vad
 gmlx talk --once
 ```
 
-Most flags override the key of the same name in the
-[`talk` block](config.md#voice), and a flag's default applies when neither
-is set.
+These flags control `gmlx talk`. Most of them override the key of the same
+name in the [`talk` block](config.md#voice), and a flag's default applies
+when neither is set.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -973,8 +985,8 @@ queued requests and stops the server, and the run ends when the requests
 in flight have failed or returned.
 
 Beside the output, `<out>.gen.json` holds the settings a resume must
-match and is written before the first request. When a run ends it
-gains a `run` block with the reply and token totals read from the output
+match and is written before the first request. When a run ends, the
+sidecar gains a `run` block with the reply and token totals read from the output
 rows, the wall time summed over the runs that ended, and this run's
 failed requests and aggregate token rate. An interrupted run leaves the
 block as it found it, and a rerun that finds every prompt answered
@@ -991,7 +1003,7 @@ These flags control `gmlx distill gen`:
 | `--prompts PATH` | None | Read prompt rows that end on a user turn from this jsonl. |
 | `--corpus PATH_OR_ID` | None | Build continuation prompts from this text corpus instead of `--prompts`. |
 | `--teacher GGUF` | None | Serve this GGUF for the run, the teacher or, for a measurement, the student. `--model` is the same flag. |
-| `--base-url URL` | None | Use this running server's `/v1` base instead of serving `--teacher`. With `--thinking-budget` the close is sized for a drafted server. |
+| `--base-url URL` | None | Use this running server's `/v1` base instead of serving `--teacher`. With `--thinking-budget` the close is sized for a server that runs a drafter. |
 | `--host HOST` | `127.0.0.1` | Bind the served teacher to this host. |
 | `--port N` | `8093` | Serve the teacher on this port. |
 | `--text-key KEY` | `text` | With `--corpus`, read text from this column of a jsonl or dataset row. |
@@ -1021,26 +1033,30 @@ These flags control `gmlx distill gen`:
 `--serve-arg` refuses `--thinking`, `--thinking-budget`, `--chat-template`,
 `--chat-template-config`, `--reasoning-effort`, `--system-prompt` and
 `--profile`, in any spelling serve accepts. Each changes what the teacher
-is prompted with, and the rows would not record it. Set the thinking
-switch and budget with gen's own flags, template variables with
-`--chat-template-kwargs`, sampling with gen's sampling flags, and a
-system prompt as a system turn in the prompt rows. A template override
-has no gen form, since `cache` renders the rows with the teacher's own
-template. `--native-mtp`, `--speculative` and `--draft-gguf` are refused
-beside `--thinking-budget` too, because a drafted server does not hold each
-request to the budget.
+is prompted with, and the rows would not record it. `--native-mtp`,
+`--speculative` and `--draft-gguf` are refused beside `--thinking-budget`
+too, because a server that runs a drafter does not hold each request to the
+budget.
+
+Set the thinking switch and budget with gen's own flags, template variables
+with `--chat-template-kwargs`, sampling with gen's sampling flags, and a
+system prompt as a system turn in the prompt rows. A template override has
+no gen form, since `cache` renders the rows with the teacher's own
+template.
 
 ### distill filter
 
 `filter` runs its checks in a fixed order, and the first failure names the
-reason, one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
-`tokens` and `verify`, each defined in
-[Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
-guide. `--context` rebuilds every kept row with the context on the teacher's
-side and the prompt as given under `student_messages`, which prepares a
-second round from replies a student wrote without it. It refuses a row that
-already carries `student_messages`, since that row was generated with a
-context.
+reason. The reason is one of `length`, `budget`, `empty`, `marker`,
+`repeat`, `ascii`, `tokens` and `verify`, each defined in
+[Round one trains on the teacher's replies](distill.md#round-one-trains-on-the-teachers-replies)
+in the distillation guide.
+
+`--context` rebuilds every kept row with the context on the teacher's side
+and the prompt as given under `student_messages`. The rebuilt rows prepare
+a second round from replies a student wrote without the context. The flag
+refuses a row that already carries `student_messages`, since that row was
+generated with a context.
 
 These flags control `gmlx distill filter`:
 
@@ -1058,7 +1074,7 @@ These flags control `gmlx distill filter`:
 | `--max-non-ascii F` | Off | Drop replies whose non-ASCII character fraction exceeds this. |
 | `--max-reply-tokens N` | Off | Drop replies longer than this many tokens, reasoning trace included. |
 | `--keep-budget-hit` | Off | Keep replies whose thinking budget cut the reasoning trace. |
-| `--verify CMD` | None | Run this shell command as your checker, which reads the survivors as jsonl on stdin and prints `ok` or a reason word per row. |
+| `--verify CMD` | None | Run this shell command as your checker, which reads the rows that passed the earlier checks as jsonl on stdin and prints `ok` or a reason word per row. |
 | `--context FILE` | None | Put this text on the teacher's side of every kept row. A blank file is refused. |
 | `--context-format FMT` | `{context}\n\n{prompt}` | Combine the context and the last user turn with this format, which must place both fields. |
 
@@ -1141,7 +1157,7 @@ These flags control `gmlx distill align`:
 | `--val-fraction F` | `0.02` | Hold this fraction of rows for validation, whole documents at a time. A cache of two or more rows holds at least one. |
 | `--seed N` | `1` | Seed the validation split. |
 | `--w-mid F` | `0.5` | Weight an intra-word shared boundary by this much. |
-| `--gamma F` | `0.001` | Drop chunks of the chunk term (ALM) whose teacher boundary mass is under this positive value. |
+| `--gamma F` | `0.001` | In the chunk term (ALM), drop chunks whose teacher boundary mass is under this positive value. |
 | `--tau-alm F` | `1.0` | Set the positive temperature of the chunk term (ALM). |
 | `--T-dk F` | `1.0` | Set the positive temperature of the KL term's group softmaxes, under every `--loss` form. |
 | `--max-chunk-len N` | `8` | Cap ALM chunks at this many tokens on either side, at least 1. |
@@ -1245,11 +1261,11 @@ same rows in one or more caches made with one, and runs on the CPU. It
 reports how much more likely the context makes each token the teacher
 wrote, and the distance between the two stored top-k distributions with
 everything outside the top-k pooled. With several contexts it also reports
-the part no single adapter can learn.
+the part no single adapter can learn. Every `--with` cache then decides
+which rows pair and which positions count, while the effect, the histogram
+and the positions map come from the first.
 
-With several `--with` caches, every cache decides which rows pair and
-which positions count, while the effect, the histogram and the positions
-map come from the first. The action exits 2 when a cache has no manifest
+The action exits 2 when a cache has no manifest
 or one it cannot read, or when no rows pair. It also exits 2 when a
 `--with` cache was made with another teacher, tokenizer, top-k or head
 width than `--without`, and when a reply-think cache records no
@@ -1300,7 +1316,7 @@ usage error or a `--config` file that does not exist.
 script is a shim that asks the installed `gmlx` for candidates on each
 tab. It completes verbs, each verb's flags, model ids from your config and
 client names for `launch`, plus the host, port and URL of servers you have
-backgrounded.
+backgrounded. The script needs no regeneration after an upgrade.
 
 ```sh
 eval "$(gmlx completion zsh)"      # ~/.zshrc
@@ -1311,5 +1327,3 @@ gmlx completion fish | source      # ~/.config/fish/config.fish
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `shell`, positional | None | Print the script for `zsh`, `bash` or `fish`. Without a shell, it prints the help with the install lines. |
-
-No regeneration is needed after an upgrade.
