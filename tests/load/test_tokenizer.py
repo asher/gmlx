@@ -12,6 +12,7 @@ merges) so it round-trips any ASCII text with no model download - CI-able.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from tokenizers import pre_tokenizers  # noqa: E402
 
@@ -671,6 +672,71 @@ def test_solar_open_stop_set_drops_message_end():
 
     toks = ["<|end|>", "<|calls|>", "<|flush|>", "<|endoftext|>"] + _ALPHABET
     assert _drop_message_end_eog([3, 0, 1, 2], toks) == [3, 1, 2]
+
+
+# Gemma-4 files type <|tool_response> USER_DEFINED and some type <eos> NORMAL,
+# while HF and llama.cpp stop on both. Gemma, Qwen2 and Qwen3 vocabularies
+# hold </s> as ordinary text (the HTML strikethrough close).
+_GEMMA4_SPECIALS = ["<pad>", "<eos>", "<bos>", "<turn|>", "<|tool_response>",
+                    "</s>"]
+# Every vocab below puts <eos> at 1, its turn end at 3 and </s> at 5.
+_G_EOS, _G_TURN, _G_TOOL, _G_S = 1, 3, 4, 5
+_PLAIN_TEMPLATE = "{%- for m in messages -%}{{- m['content'] -}}{%- endfor -%}"
+
+
+def _gemma_meta(specials, eos_id, arch, type_overrides) -> dict:
+    meta = _control_meta(specials, eos_id, _PLAIN_TEMPLATE, arch)
+    for tid, ty in type_overrides.items():
+        meta["tokenizer.ggml.token_type"][tid] = ty
+    meta["tokenizer.ggml.bos_token_id"] = 2
+    meta["tokenizer.ggml.padding_token_id"] = 0
+    return meta
+
+
+def test_stop_names_fold_whatever_the_token_type():
+    meta = _gemma_meta(_GEMMA4_SPECIALS, _G_TURN, "gemma4",
+                       {_G_EOS: 1, _G_TOOL: 4, _G_S: 1})
+    ids = load_tokenizer_from_gguf(meta, "gemma4")._gguf_eos_token_ids
+    assert ids[0] == _G_TURN
+    assert set(ids) == {_G_TURN, _G_EOS, _G_TOOL}
+
+
+def test_control_text_close_leaves_beside_tool_response():
+    meta = _gemma_meta(_GEMMA4_SPECIALS, _G_TURN, "gemma4", {})
+    ids = load_tokenizer_from_gguf(meta, "gemma4")._gguf_eos_token_ids
+    assert set(ids) == {_G_TURN, _G_EOS, _G_TOOL}
+
+
+@pytest.mark.parametrize("s_type, stops", [(4, False), (1, False), (3, True)])
+def test_text_close_folds_only_when_control(s_type, stops):
+    specials = ["<pad>", "<eos>", "<bos>", "<end_of_turn>", "<unused>", "</s>"]
+    meta = _gemma_meta(specials, _G_EOS, "gemma3", {_G_S: s_type})
+    ids = load_tokenizer_from_gguf(meta, "gemma3")._gguf_eos_token_ids
+    assert (_G_S in ids) is stops
+    assert {_G_EOS, _G_TURN} <= set(ids)
+
+
+@pytest.mark.parametrize("types", [None, 2])
+def test_names_fold_without_a_token_type(types):
+    specials = ["<pad>", "<|im_end|>", "<bos>", "<|endoftext|>", "<unused>",
+                "</s>"]
+    meta = _control_meta(specials, 1, _PLAIN_TEMPLATE, "qwen3")
+    if types is None:
+        del meta["tokenizer.ggml.token_type"]
+    else:
+        meta["tokenizer.ggml.token_type"] = meta["tokenizer.ggml.token_type"][:types]
+    ids = load_tokenizer_from_gguf(meta, "qwen3")._gguf_eos_token_ids
+    assert set(ids) == {1, 3}
+
+
+def test_text_close_drop_needs_both_names():
+    from gmlx.load.tokenizer import _drop_text_close_eog
+
+    toks = _GEMMA4_SPECIALS + _ALPHABET
+    assert _drop_text_close_eog([_G_TURN, _G_TOOL, _G_S], toks) == [_G_TURN,
+                                                                   _G_TOOL]
+    assert _drop_text_close_eog([_G_TURN, _G_S], toks) == [_G_TURN, _G_S]
+    assert _drop_text_close_eog([_G_TURN, _G_TOOL], toks) == [_G_TURN, _G_TOOL]
 
 
 # ds4-converted headers type a token CONTROL only when the source added_tokens

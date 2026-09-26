@@ -442,10 +442,10 @@ def load_tokenizer_from_gguf(
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
     meta_eos = _metadata_stop_ids(meta, len(tokens))
-    name_eos = _named_eog_ids(tokens, token_types, pre_id)
-    all_eos = _drop_message_end_eog(_dedup_ids(
+    name_eos = _named_eog_ids(tokens, token_types)
+    all_eos = _drop_text_close_eog(_drop_message_end_eog(_dedup_ids(
         ([eos_id] if eos_id is not None else [])
-        + template_eos + meta_eos + name_eos), tokens)
+        + template_eos + meta_eos + name_eos), tokens), tokens)
     fast._gguf_eos_token_ids = all_eos
 
     extra_eos = [tid for tid in all_eos if tid != eos_id]
@@ -737,25 +737,29 @@ _EOG_NAMES = (
 )
 
 
-def _named_eog_ids(tokens: list[str], token_types: list[int] | None,
-                   pre_id: str) -> list[int]:
-    """GGUF eos metadata is often incomplete: qwen4exp marks only <|im_end|>
-    while <|endoftext|> is a real stop, Kimi declares no eot/eom id at all.
-    Match llama.cpp and fold these spellings in by name, but only when the
-    token is control-typed: a plain-text token sharing a spelling must stay
-    live. Kimi ships no token_type array, so its two bracket names keep the
-    old pretokenizer-gated path."""
+def _named_eog_ids(tokens: list[str], token_types: list[int] | None) -> list[int]:
+    """Stop ids found by spelling, since GGUF eos metadata is often
+    incomplete. qwen4exp marks only <|im_end|> while <|endoftext|> is a real
+    stop, Kimi declares no eot/eom id at all, and Gemma-4 files type
+    <|tool_response> as text and some type <eos> the same way. Every name
+    folds in whatever its token type, as in llama.cpp, except </s>. Qwen2,
+    Qwen3 and Gemma 1 to 4 vocabularies hold </s> as ordinary text, so it
+    folds in only when control-typed."""
     out = []
     for name in _EOG_NAMES:
         try:
             tid = tokens.index(name)
         except ValueError:
             continue
-        if token_types is not None:
-            if token_types[tid] == 3:  # control
-                out.append(tid)
-        elif pre_id == "kimi-k2" and name in ("[EOT]", "[EOS]"):
-            out.append(tid)
+        control = (token_types is not None and tid < len(token_types)
+                   and token_types[tid] == 3)
+        if not control:
+            if name == "</s>":
+                continue
+            loadlog.verbose_print(
+                f"[tokenizer] stop token {tid} {name!r} has no control type; "
+                "added to the stop set by name, as llama.cpp does")
+        out.append(tid)
     return out
 
 
@@ -779,6 +783,20 @@ def _drop_message_end_eog(ids: list[int], tokens: list[str]) -> list[int]:
         "the stop set (harmony/solar-open)")
     return [t for t in ids
             if not (0 <= t < len(tokens)) or tokens[t] != "<|end|>"]
+
+
+# llama.cpp (llama-vocab.cpp) drops </s> from a stop set that also holds
+# <|tool_response>, which only Gemma-4 spells. _named_eog_ids adds </s> only
+# when control-typed, so this fires only when a Gemma-4 file marks </s>
+# control or declares it as a stop id.
+def _drop_text_close_eog(ids: list[int], tokens: list[str]) -> list[int]:
+    names = {tokens[t] for t in ids if 0 <= t < len(tokens)}
+    if "</s>" not in names or "<|tool_response>" not in names:
+        return ids
+    loadlog.verbose_print(
+        "[tokenizer] </s> dropped from the stop set beside <|tool_response> "
+        "(gemma4), as llama.cpp does")
+    return [t for t in ids if not (0 <= t < len(tokens) and tokens[t] == "</s>")]
 
 
 def _dedup_ids(ids: list[int]) -> list[int]:
