@@ -9,8 +9,8 @@ first matters.
 A LoRA adapter is a small file of low-rank weight changes that adjusts a
 base model for a task without replacing its weights. gmlx trains adapters
 on the quantized GGUF and serves them with `--adapter` or the `adapter`
-key, and one base in memory can serve several adapters. Training and
-serving are in [LoRA adapters](lora.md).
+key, and one base in memory can serve several adapters.
+[LoRA adapters](lora.md) covers training an adapter and serving it.
 
 ## APC
 
@@ -56,8 +56,9 @@ plot speed against depth, because the cost of attention grows with it.
 
 DFlash is a drafter that proposes a whole block of tokens in one pass, by
 block diffusion, instead of one token at a time. DFlash 2 drafters exist
-for Qwen3.8-27B and Muse-Glimmer-30B, as [DFlash 2
-drafters](speculative-decoding.md#dflash-2-drafters) describes.
+for Qwen3.8-27B and Muse-Glimmer-30B, and
+[DFlash 2 drafters](speculative-decoding.md#dflash-2-drafters) shows how to
+pair one with its model.
 
 ## Discovery
 
@@ -186,8 +187,9 @@ cache is therefore already small, and only affine KV quantization applies.
 ## mmproj
 
 An mmproj is a companion GGUF that holds a vision or audio encoder. Paired
-with its language model, it makes a model that accepts images or audio, as
-[Vision and audio](vlm.md) describes.
+with its language model, it makes a model that accepts images or audio.
+[Vision and audio](vlm.md#supported-families) lists the model families
+that gmlx supports.
 
 ## Native head
 
@@ -220,8 +222,9 @@ only and never changes which experts run.
 
 The prompt cache is the server's store of prefilled prompts. A request
 that shares its start with an earlier one, such as a system prompt or the
-conversation so far, skips prefilling the shared part. Its settings and
-counters are in [Prompt cache](prompt-cache.md).
+conversation so far, skips prefilling the shared part.
+[Prompt cache](prompt-cache.md) lists its settings and the counters that
+show whether reuse works.
 
 ## Quant
 
