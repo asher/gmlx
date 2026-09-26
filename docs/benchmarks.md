@@ -29,7 +29,7 @@ reference engine, for every model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
-  <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
+  <img src="assets/perf/fleet-ratio.svg" alt="Throughput speedup of gmlx over the reference engine by KV depth">
 </picture>
 
 The second chart shows how much faster speculative decoding is than plain
@@ -37,7 +37,7 @@ decoding on the same server, for each model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
-  <img src="assets/perf/mtp-lift.svg" alt="MTP decode lift vs KV depth">
+  <img src="assets/perf/mtp-lift.svg" alt="Speculative decoding speedup by KV depth">
 </picture>
 
 ## Methodology

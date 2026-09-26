@@ -29,7 +29,7 @@ If you are coming from llama.cpp, Ollama or LM Studio,
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
-  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio.svg" alt="gmlx vs llama.cpp: fleet throughput speedup vs KV depth">
+  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio.svg" alt="gmlx against llama.cpp: throughput speedup by KV depth">
 </picture>
 
 Higher is faster, and depth is the number of tokens already in the context.
@@ -314,7 +314,7 @@ below for the latest release, with navigation and search.
 ### Reference
 
 - [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md): every command and flag
-- [Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md#server): every key of `gmlx.yaml`
+- [Configuration](https://github.com/asher/gmlx/blob/main/docs/config.md): every key of `gmlx.yaml`
 - [Family defaults](https://github.com/asher/gmlx/blob/main/docs/family-defaults.md): the sampling defaults and
   intents of each model family
 - [HTTP API](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints and request features

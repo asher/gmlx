@@ -86,7 +86,7 @@ Where to start depends on what you want:
 ## Reference
 
 - [CLI reference](cli.md): every command and flag
-- [Configuration](config.md#server): every key of `gmlx.yaml`
+- [Configuration](config.md): every key of `gmlx.yaml`
 - [Family defaults](family-defaults.md): the sampling defaults and intents
   of each model family
 - [HTTP API](api.md): the endpoints and request features
