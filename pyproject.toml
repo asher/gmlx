@@ -137,9 +137,20 @@ embeddings = []
 
 [project.urls]
 Homepage = "https://github.com/asher/gmlx"
+Documentation = "https://asher.github.io/gmlx/"
 Repository = "https://github.com/asher/gmlx"
 Changelog = "https://github.com/asher/gmlx/blob/main/CHANGELOG.md"
 Issues = "https://github.com/asher/gmlx/issues"
+
+[dependency-groups]
+# The docs site: `pip install --group docs`, then `mkdocs serve` or
+# `mkdocs build --strict`. Pinned so a new release cannot fail the CI build;
+# MkDocs 2.0 drops the plugin and theme system Material needs.
+docs = [
+    "mkdocs==1.6.1",
+    "mkdocs-material==9.7.7",
+    "pymdown-extensions==12.1",
+]
 
 [project.scripts]
 # `gmlx <verb>` (run / chat / serve / init / sync-models / ...) is the umbrella command.

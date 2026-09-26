@@ -867,8 +867,8 @@ _OPEN_WEBUI_PORT = 3000
 _OPEN_WEBUI_DATA_HOME = "~/.open-webui"
 # Open WebUI's openai TTS engine always sends a voice; its default ("alloy") is an
 # OpenAI voice that the default TTS model (Kokoro) rejects. Pin a valid Kokoro voice
-# so read-aloud works out of the box; a non-Kokoro `--tts` model needs AUDIO_TTS_VOICE
-# overridden to one of its own voices.
+# so read-aloud works out of the box. An exported AUDIO_TTS_VOICE wins, for a
+# non-Kokoro `--tts` model that needs one of its own voices.
 _OPEN_WEBUI_TTS_VOICE = "af_heart"
 
 
@@ -960,6 +960,9 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     pairs = build_open_webui_env(base_url, default_model=default_model,
                                  api_key=a.api_key, port=webui_port, data_dir=data_dir,
                                  stt=stt, tts=tts, rerank=rerank)
+    if tts and os.environ.get("AUDIO_TTS_VOICE"):
+        # A voice the user exported wins over the Kokoro default.
+        pairs["AUDIO_TTS_VOICE"] = os.environ["AUDIO_TTS_VOICE"]
 
     audio = [name for name, on in (("STT", stt), ("TTS", tts)) if on]
     audio_note = (f" Audio {'+'.join(audio)} routed at this server."

@@ -192,6 +192,14 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_server_max_tokens(monkeypatch):
+    # `_serve` sets MLX_VLM_MAX_TOKENS in the process environment; restore it
+    # after each test so one server test cannot change another's default.
+    monkeypatch.setenv("MLX_VLM_MAX_TOKENS", "0")
+    monkeypatch.delenv("MLX_VLM_MAX_TOKENS")
+
+
+@pytest.fixture(autouse=True)
 def _no_live_server(monkeypatch):
     # chat's automatic --server gate probes the box's managed server; a
     # live server on the dev machine must not flip test behavior. Tests

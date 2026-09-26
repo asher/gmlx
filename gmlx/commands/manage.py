@@ -1160,15 +1160,8 @@ def _rm_resolve_target(cfg, requested):
         target = real
 
     entry = cfg.models.get(target)
-    disc: list = []
-    if cfg.discover:
-        import gmlx.load.discovery as discovery
-        try:
-            disc = discovery.scan_dirs(
-                cfg.discover, cfg.model_dirs, known_ids=set(cfg.models),
-                known_paths={m.path for m in cfg.models.values()})
-        except Exception:                    # noqa: BLE001 - a flaky scan dir
-            disc = []
+    import gmlx.load.discovery as discovery
+    disc = discovery.discovered_models(cfg)
     m = entry or next((d for d in disc if d.id == target), None)
     return target, m, entry is not None, disc, notes
 
@@ -1506,14 +1499,7 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      "flags": _model_flags(m)})
     if cfg.discover:
         import gmlx.load.discovery as discovery
-        try:
-            disc = discovery.scan_dirs(
-                cfg.discover, cfg.model_dirs, known_ids=set(cfg.models),
-                known_paths={m.path for m in cfg.models.values()})
-        except Exception as e:                       # noqa: BLE001 - a flaky scan dir
-            disc = []
-            print(f"[list] discovery scan failed: {e}", file=sys.stderr)
-        for m in disc:
+        for m in discovery.discovered_models(cfg):
             rows.append({"id": m.id, "path": m.path, "profile": m.profile,
                          "source": "discovered", "default": m.id == default_model,
                          "flags": _model_flags(m)})

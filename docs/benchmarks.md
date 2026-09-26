@@ -1,53 +1,67 @@
-# gmlx fleet serve-bench
+# Benchmarks
 
-Single-stream server throughput of gmlx against llama.cpp on the
-same GGUF across the fleet, at concurrency 1 and at KV depths from
-512 to 200k+ tokens. Prefill is faster on all models at all measured
-depths. Above 4k depth decode is faster too, and the gap grows as
-context deepens. Speculative decode, MTP, is measured where a native
-or preserved MTP head exists.
+gmlx serves the same GGUF files faster than llama.cpp, one request at a
+time, at context depths from 512 to more than 200K tokens. Its prefill is
+faster on every model at every measured depth. Above a depth of about 4K
+tokens its decoding is faster too, and the gap grows as the context
+deepens.
 
-The machine-readable data is in [benchmarks.json](benchmarks.json).
-Any cell is reproducible with the bundled harness in [bench/](../bench/).
+Speculative decoding is measured where the model has a
+[native head](glossary.md#native-head) or a companion drafter. The
+measurements behind the performance pages' guidance are under
+[Serving measurements](#serving-measurements) and
+[KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
+in [a JSON file](benchmarks.json), and the
+[benchmark harness](../bench/) reproduces any cell.
 
-## Fleet summary
+- [Summary](#summary)
+- [Methodology](#methodology)
+- [Model provenance](#model-provenance)
+- [Per-model detail](#per-model-detail)
+- [DeepSeek-V4 against ds4-server](#deepseek-v4-against-ds4-server)
+- [Serving measurements](#serving-measurements)
+- [KV cache fidelity](#kv-cache-fidelity)
 
-Throughput speedup vs KV depth, gmlx over the reference engine, for all models:
+## Summary
+
+The first chart shows gmlx's throughput divided by the reference
+engine's, for every model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
-  <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
+  <img src="assets/perf/fleet-ratio.svg" alt="Throughput speedup of gmlx over the reference engine by KV depth">
 </picture>
 
-Speculative decode lift vs KV depth, each model against its own baseline:
+A second chart shows how much faster speculative decoding is than plain
+decoding on the same server, for each model, against the context depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
-  <img src="assets/perf/mtp-lift.svg" alt="MTP decode lift vs KV depth">
+  <img src="assets/perf/mtp-lift.svg" alt="Speculative decoding speedup by KV depth">
 </picture>
 
 ## Methodology
 
-All numbers are single-stream server throughput at concurrency 1,
-gmlx against the reference engine, measured with the same GGUF weights,
-the same sampler and the same chat prompts on both engines.
+Every number in the per-model tables is server throughput for one
+request at a time. Both engines ran the same GGUF weights, sampler
+settings and chat prompts on the setup in this table.
 
-| | |
+| Item | Setting |
 |---|---|
-| Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
-| gmlx | `0.1.0` (fleet default) |
-| mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
+| Hardware | Apple M5 Max with 128 GB of unified memory, in a MacBook Pro. |
+| gmlx | `0.1.0` for most models. |
+| mlx-kquant | `0.3.5` for most models, with the K-quant and performance kernels. |
 | llama.cpp | `b9967` |
-| Build overrides | models rebenched on newer releases list their own builds under Model provenance |
-| DeepSeek-V4 reference | the dwarfstar ds4-server by antirez, ignore-eos patched: `b030961` for DeepSeek-V4-Flash IQ2_XXS, `8db1d1d` for DeepSeek-V4.1-Flash Q2 |
-| Dates | 2026-07-05 .. 2026-09-18 |
-| Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
-| Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
-| Speculative draft | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
-| Aggregation | 4 requests/cell x 2 thermal-alternated rounds, median reported |
-| Thermal protocol | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
-| Decode metric | median decode tok/s over full-length samples (>=150 output tokens) |
-| Prefill metric | median prefill tok/s over all successful samples |
+| Build overrides | Models measured again on newer releases list their own builds under Model provenance. |
+| DeepSeek-V4 reference | The dwarfstar ds4-server by antirez with the ignore-eos patch, at `b030961` for DeepSeek-V4-Flash IQ2_XXS and `8db1d1d` for DeepSeek-V4.1-Flash Q2. |
+| Dates | 2026-07-05 to 2026-09-18. |
+| Prompt corpus | `HuggingFaceH4/ultrachat_200k:train_sft`, with the chat template applied. |
+| Sampling | Temperature 0.6, top-p 0.95, top-k 20 and seed 1234, with the same random sequence on both engines. |
+| Speculative draft | Three draft tokens a round, two on Qwen3.8-Flash-Next, from the native MTP head or gemma-4's companion drafter. |
+| Aggregation | Four requests for each cell in two rounds that alternate the engines. A cell gives the median, then the lowest and highest sample in parentheses. |
+| Thermal protocol | A cooldown to 50 C or below between engines, 20 seconds of baseline cooldown and one warmup request. |
+| Decode metric | Median decode tokens per second over samples of at least 150 output tokens. |
+| Prefill metric | Median prefill tokens per second over all successful samples. |
 
 MTP@N in the tables means speculative decoding with N draft tokens in
 each round on both engines. The baseline column is the same server with
@@ -55,24 +69,24 @@ it off.
 
 ## Model provenance
 
-Chart labels are sanitized, so abliterated community builds render as
-the base model. This table is the weight mapping for reproduction.
-The Builds column names the gmlx and mlx-kquant builds each model's
-rows were measured on. Models are rebenched independently, so a newer
-build on one row does not apply to the others. The Measured column
+Chart labels give the base model, even for an abliterated community
+build, so each row names the GGUF file behind a label for reproduction.
+The Builds column names the gmlx and mlx-kquant builds that each model's
+rows were measured on. Models are measured again independently, so a
+newer build on one row does not apply to the others. The Measured column
 gives the date of the newest run still contributing cells to the row,
-because a partial rerun replaces the cells of an older depth series
-one by one.
+because a partial rerun replaces an older depth series
+one cell at a time.
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|
-| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gemma-4-E4B-it Q6_K | `gemma-4-E4B-it-Q6_K.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gemma-4-E2B-it UD-Q6_K_XL | `gemma-4-E2B-it-UD-Q6_K_XL.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gpt-oss-120b MXFP4 | `gpt-oss-120b-heretic-v2-MXFP4.gguf` | [HF](https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
@@ -81,7 +95,7 @@ one by one.
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
 | DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
-| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
+| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | Native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
 
@@ -89,7 +103,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen3.5-122b-a10b-ud-q5km-panels-dark.svg">
-  <img src="assets/perf/per-model/qwen3.5-122b-a10b-ud-q5km-panels.svg" alt="Qwen3.5-122B-A10B UD-Q5_K_M">
+  <img src="assets/perf/per-model/qwen3.5-122b-a10b-ud-q5km-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Qwen3.5-122B-A10B UD-Q5_K_M">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -105,7 +119,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen3.6-35b-a3b-heretic-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/qwen3.6-35b-a3b-heretic-q6k-panels.svg" alt="Qwen3.6-35B-A3B Q6_K">
+  <img src="assets/perf/per-model/qwen3.6-35b-a3b-heretic-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Qwen3.6-35B-A3B Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -121,7 +135,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen3.6-27b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/qwen3.6-27b-q6k-panels.svg" alt="Qwen3.6-27B Q6_K">
+  <img src="assets/perf/per-model/qwen3.6-27b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Qwen3.6-27B Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -137,7 +151,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen3.5-9b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/qwen3.5-9b-q6k-panels.svg" alt="Qwen3.5-9B Q6_K">
+  <img src="assets/perf/per-model/qwen3.5-9b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Qwen3.5-9B Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -151,7 +165,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gemma-4-31b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/gemma-4-31b-q6k-panels.svg" alt="gemma-4-31B-it Q6_K">
+  <img src="assets/perf/per-model/gemma-4-31b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gemma-4-31B-it Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -167,7 +181,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gemma-4-26b-a4b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/gemma-4-26b-a4b-q6k-panels.svg" alt="gemma-4-26B-A4B-it Q6_K">
+  <img src="assets/perf/per-model/gemma-4-26b-a4b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gemma-4-26B-A4B-it Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -182,7 +196,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gemma-4-12b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/gemma-4-12b-q6k-panels.svg" alt="gemma-4-12B-it Q6_K">
+  <img src="assets/perf/per-model/gemma-4-12b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gemma-4-12B-it Q6_K">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -197,7 +211,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gemma-4-e4b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/gemma-4-e4b-q6k-panels.svg" alt="gemma-4-E4B-it Q6_K">
+  <img src="assets/perf/per-model/gemma-4-e4b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gemma-4-E4B-it Q6_K">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -212,7 +226,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gemma-4-e2b-q6kxl-panels-dark.svg">
-  <img src="assets/perf/per-model/gemma-4-e2b-q6kxl-panels.svg" alt="gemma-4-E2B-it UD-Q6_K_XL">
+  <img src="assets/perf/per-model/gemma-4-e2b-q6kxl-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gemma-4-E2B-it UD-Q6_K_XL">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -227,7 +241,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gpt-oss-120b-heretic-mxfp4-panels-dark.svg">
-  <img src="assets/perf/per-model/gpt-oss-120b-heretic-mxfp4-panels.svg" alt="gpt-oss-120b MXFP4">
+  <img src="assets/perf/per-model/gpt-oss-120b-heretic-mxfp4-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gpt-oss-120b MXFP4">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -242,7 +256,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/gpt-oss-20b-mxfp4-panels-dark.svg">
-  <img src="assets/perf/per-model/gpt-oss-20b-mxfp4-panels.svg" alt="gpt-oss-20b MXFP4">
+  <img src="assets/perf/per-model/gpt-oss-20b-mxfp4-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for gpt-oss-20b MXFP4">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -257,7 +271,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/dolphin3-llama3.1-8b-q6k-panels-dark.svg">
-  <img src="assets/perf/per-model/dolphin3-llama3.1-8b-q6k-panels.svg" alt="Dolphin3.0-Llama3.1-8B Q6_K">
+  <img src="assets/perf/per-model/dolphin3-llama3.1-8b-q6k-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Dolphin3.0-Llama3.1-8B Q6_K">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -272,7 +286,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/deepseek-v4-flash-unsloth-udiq3xxs-panels-dark.svg">
-  <img src="assets/perf/per-model/deepseek-v4-flash-unsloth-udiq3xxs-panels.svg" alt="DeepSeek-V4-Flash UD-IQ3_XXS">
+  <img src="assets/perf/per-model/deepseek-v4-flash-unsloth-udiq3xxs-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for DeepSeek-V4-Flash UD-IQ3_XXS">
 </picture>
 
 | KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
@@ -289,7 +303,7 @@ one by one.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels-dark.svg">
-  <img src="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels.svg" alt="Qwen3.8-Flash-Next UD-Q3_K_XL">
+  <img src="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels.svg" alt="gmlx and llama.cpp prefill and decode throughput against KV depth for Qwen3.8-Flash-Next UD-Q3_K_XL">
 </picture>
 
 | KV depth | gmlx decode (baseline) | gmlx decode (MTP@2) | MTP lift | llama.cpp decode (MTP@2) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
@@ -301,19 +315,17 @@ one by one.
 | 110k | 31.7 (31-32.4) | 49.8 (46-55.4) | 1.57x | - | - | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) |
 | 200k | 25.3 (25.3-25.6) | 46.8 (44.9-49.7) | 1.85x | - | - | 1250 (1234.9-1275.6) | 210.8 (207-217.1) |
 
-## DeepSeek-V4 family (reference engine: ds4-server)
+## DeepSeek-V4 against ds4-server
 
-The comparison engine for these models is the dwarfstar ds4-server
-by antirez, a DeepSeek-V4 server, with the ignore-eos patch, because
-llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path. Ratios below
-are gmlx / ds4-server. Each model's tested ds4-server commit is in
-its Model provenance row.
+The two antirez files are compared with ds4-server, a DeepSeek-V4 server,
+instead of llama.cpp. Each ratio is gmlx divided by ds4-server, and [Methodology](#methodology) lists
+each model's ds4-server build.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/deepseek-v4-flash-antirez-iq2xxs-panels-dark.svg">
-  <img src="assets/perf/per-model/deepseek-v4-flash-antirez-iq2xxs-panels.svg" alt="DeepSeek-V4-Flash IQ2_XXS">
+  <img src="assets/perf/per-model/deepseek-v4-flash-antirez-iq2xxs-panels.svg" alt="gmlx and ds4-server prefill and decode throughput against KV depth for DeepSeek-V4-Flash IQ2_XXS">
 </picture>
 
 | KV depth | gmlx decode | ds4-server decode | gmlx/ds4-server decode | gmlx prefill | ds4-server prefill | gmlx/ds4-server prefill |
@@ -333,7 +345,7 @@ its Model provenance row.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/deepseek-v4.1-flash-antirez-q2-panels-dark.svg">
-  <img src="assets/perf/per-model/deepseek-v4.1-flash-antirez-q2-panels.svg" alt="DeepSeek-V4.1-Flash Q2">
+  <img src="assets/perf/per-model/deepseek-v4.1-flash-antirez-q2-panels.svg" alt="gmlx and ds4-server prefill and decode throughput against KV depth for DeepSeek-V4.1-Flash Q2">
 </picture>
 
 | KV depth | gmlx decode | ds4-server decode | gmlx/ds4-server decode | gmlx prefill | ds4-server prefill | gmlx/ds4-server prefill |
@@ -346,3 +358,126 @@ its Model provenance row.
 | 110k | 19.6 (18.9-20.5) | 14.8 (13.4-15.1) | 1.32x | 798.5 (759.8-835.1) | 626.8 (585.8-632) | 1.27x |
 | 200k | 18.7 (18.1-18.9) | 13.1 (12.9-13.4) | 1.43x | 807.9 (782.1-831.4) | 556.5 (536.1-564.9) | 1.45x |
 | 384k | 17.4 (12.9-18.2) | 12.2 (10.6-12.7) | 1.43x | 796.9 (790.7-807.7) | 612.5 (592.9-633.5) | 1.30x |
+
+## Serving measurements
+
+These measurements back the performance pages' guidance. Unless a
+row names another machine, they come from the M5 Max listed under
+[Methodology](#methodology).
+
+| Measurement | Result |
+|---|---|
+| Uniform against mixed quant | A uniform Q6_K decoded 64% faster than the mixed UD build on the dense Qwen3.6-27B, and 15% faster on the MoE Qwen3.6-35B-A3B, with equal or better output. |
+| Batched decoding | Three streams on Qwen3.6-35B-A3B Q6_K gave 1.3x to 1.7x the total throughput of one, falling as the context grew. |
+| Admission pacing | A client arriving at 14K tokens left the running stream 4% of its decode speed under strict alternation, and 80% with pacing. |
+| Shared-prompt cascade | Four streams on a 12K-token system prompt decoded about 1.4x faster in total. |
+| Sparse attention | On Llama-3.1-8B Q6_K at 32K, decoding ran 1.4x faster for one stream and 1.8x in total for three, with Q6-level divergence. |
+| Stochastic acceptance | Acceptance rose by a few points on a Q6 dense model and by about 14 points on a low-bit MoE quant. |
+| DFlash 2 drafter | On Qwen3.8-27B at Q6, the drafter about tripled decoding speed over plain decoding, and was about 1.5x the native head. |
+| Thermal behavior | A 14-inch M5 Max ran about twenty minutes of streamed MoE decoding before settling about 20% lower. The 16-inch model holds its boost clocks longer. |
+
+## KV cache fidelity
+
+The fidelity measure is the teacher-forced logit KL divergence against an
+fp16 cache on wikitext, from `scripts/kld_harness.py`. One leg scores the
+chunked prefill logits, and the other scores decoding token by token from
+the full prefill depth. KL divergence is in nats, and lower is better. The
+median is the typical position. The decode p99 is the worst hundredth,
+where a quantizer's outliers show, and top-1 is the share of
+generated positions whose most likely token matches the fp16 cache.
+
+<!-- kld-tables -->
+### Qwen3.5-9B Q4_K_M at 16K
+
+The model has a head dimension of 256, and 7 of its 32 layers quantize.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
+| kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
+| affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
+| kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
+| affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
+| kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
+| kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
+| kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
+| affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
+| kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
+| affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
+| kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
+
+### Qwen3.8-27B Q6_K_XL at 16K
+
+The model has a head dimension of 256, and 15 of its 65 layers quantize.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
+| kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
+| affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
+| kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
+| affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
+| kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
+| kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
+| kvarn k6 v5 | 0.00034 | 0.00019 | 0.0039 | 98.5% |
+| affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
+| kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
+| affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
+| kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
+
+### Qwen3.8-27B Q6_K_XL at 32K
+
+This run uses the same model and layers at twice the context.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
+|---|---|---|---|---|
+| affine 4 | 0.00162 | 0.00205 | 0.0176 | 97.6% |
+| kvarn 4 | 0.00104 | 0.00070 | 0.0068 | 98.1% |
+| affine 6 | 0.00039 | 0.00049 | 0.0037 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 0.0027 | 99.4% |
+| affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
+| kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
+
+### Nemotron-3.5-Lightning-30B-A3B at 16K
+
+This Mamba2 hybrid has a head dimension of 128.
+
+| Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
+|---|---|---|---|---|
+| kvarn 4 | 0.00270 | 0.00163 | 0.0508 | 98.1% |
+| kvarn 6 | 0.00125 | 0.00103 | 0.0266 | 98.8% |
+| affine 8 | 0.00123 | 0.00094 | 0.0335 | 98.2% |
+| kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
+<!-- /kld-tables -->
+
+### Reading the tables
+
+The kvarn cache beats the affine cache of the same width on both legs at
+every width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and
+the two converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8
+on the 9B model and matches affine 8 on the 27B model, in three quarters
+of the memory of affine 8. At 32K, its decode median can trail affine 8
+by a few percent while its p99 and top-1 stay ahead. The split width
+k6 v5 keeps kvarn 6's decode median, and its p99 and top-1 are at
+least as good as kvarn 5's.
+
+When two caches differ by a few percent on one measure, prefer the one
+with the lower p99 and the higher top-1. Top-1 is closest to what a greedy
+or low-temperature user sees. The median measures how far the whole
+next-token distribution moved, which is what sampling draws from. The p99
+bounds the outliers, which matter because one badly wrong position can
+change a reasoning chain or a tool call, and a long generation feeds its
+errors back in. The corpus is wikitext under teacher forcing, so these
+tables rank caches against each other and do not predict a task score.
+
+TurboQuant, mlx-vlm's scheme
+([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), was measured on
+the same models and legs. It was ahead of affine at 2 and 3 bits, level
+at 4 and behind at 6 and 8. It trailed kvarn at each width on all
+measures.
+
+Speed was measured on Qwen3-0.6B Q8 with 27 of 28 layers quantized, a
+dense model whose decoding is limited by the KV read. At 16K, kvarn 6
+decoded at 0.81x fp16 and 0.69x affine 8, and at 32K at 0.98x and 0.75x.
+Prefill stayed within 10% of both. On [GDN](glossary.md#gdn) hybrids and
+gemma-4, all three caches ran within the spread between runs.

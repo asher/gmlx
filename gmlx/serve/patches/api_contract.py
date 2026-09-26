@@ -322,9 +322,13 @@ def install_api_contract() -> None:
 # OpenAI's "exceeds the context window". mlx-vlm's text matches neither, so
 # the client stops at the error.
 def _check_context_budget(prompt_tokens: int, max_tokens: int):
+    from .sampling import UNTIL_EOS
+
     gen = importlib.import_module("mlx_vlm.server.generation")
     limit = gen.get_configured_context_limit()
-    max_gen = max(0, int(max_tokens or 0))
+    # The until-EOS default takes whatever room is left, so only the prompt
+    # must fit.
+    max_gen = 0 if max_tokens == UNTIL_EOS else max(0, int(max_tokens or 0))
     needed = prompt_tokens + max_gen
     if limit is not None and needed > limit:
         raise gen.PromptTooLongError(

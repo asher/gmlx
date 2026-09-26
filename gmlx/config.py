@@ -6,7 +6,7 @@ pure-Python core - dataclasses, the YAML loader, the ``extends`` / ``rules`` /
 precedence merge, and path/env resolution. It imports nothing heavy (no mlx-vlm,
 no mlx), so it loads and tests on any machine.
 
-Shape (see ``docs/server-config.md`` for the full reference)::
+Shape (see ``docs/config.md`` for the full reference)::
 
     server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
@@ -83,7 +83,7 @@ SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 # caches no gmlx path can read.
 
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
-# sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.
+# sub-block maps to APC_DISK_*; without a namespace, each model's path is its namespace.
 CACHE_ENV = {
     "enabled": "APC_ENABLED",
     "block_size": "APC_BLOCK_SIZE",
@@ -98,8 +98,13 @@ CACHE_ENV = {
 # the first. We raise the default when APC is on; each entry is a full prompt-cache
 # clone, so it's memory for reuse. Override per config with cache.exact_entries.
 DEFAULT_EXACT_CACHE_ENTRIES = 4
-# Where `disk: true` (the boolean shorthand for the SSD tier) puts the cache.
-DEFAULT_APC_DISK_PATH = "~/.cache/gmlx/apc"
+def default_apc_disk_path() -> str:
+    """Where `disk: true` (the boolean shorthand for the SSD tier) puts the
+    cache: under ``$XDG_CACHE_HOME``, like the other gmlx caches."""
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or "~/.cache",
+                        "gmlx", "apc")
+
+
 CACHE_DISK_ENV = {
     "path": "APC_DISK_PATH",
     "max_gb": "APC_DISK_MAX_GB",
@@ -273,7 +278,7 @@ class ModelCfg:
     speculative_width_cap: int | None = None
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
-    ttl_s: float | None = None
+    ttl_s: float | None = None      # None => server default; 0 => never
 
 
 @dataclass
@@ -496,7 +501,7 @@ class ServerCfg:
     # Hold GPU clocks up while a streamed model is decoding (loader gate;
     # only acts on models with a decode feeder). The heartbeat parks when
     # no request is decoding, so an idle server pays nothing.
-    gpu_keepwarm: bool = False
+    gpu_keepwarm: bool | None = None   # None => on with the decode feeder
     defaults: ServerDefaults = field(default_factory=ServerDefaults)
     profiles: dict[str, Profile] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
@@ -1349,14 +1354,14 @@ def _normalize_cache(where: str, raw) -> dict:
     """Validate a ``cache:`` block (typo'd keys warn) and normalize its ``disk``
     tier. ``where`` names the block itself (e.g. ``server.cache``). ``disk``
     accepts a boolean shorthand: ``true`` enables the SSD tier at
-    :data:`DEFAULT_APC_DISK_PATH`; ``false`` disables it, overriding any
+    :func:`default_apc_disk_path`; ``false`` disables it, overriding any
     inherited ``disk.path`` (the tier is keyed on a present path)."""
     cache = dict(_section_mapping(where, raw))
     _warn_unknown_keys(where, cache, _CACHE_KEYS)
     if "disk" in cache:
         disk = cache["disk"]
         if disk is True:
-            disk = {"path": DEFAULT_APC_DISK_PATH}
+            disk = {"path": default_apc_disk_path()}
         elif disk is False:
             disk = {"path": None}
         else:
@@ -1567,8 +1572,11 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
         overrides=dict(ov),
         pin=bool(raw.get("pin", False)),
-        ttl_s=_coerce_num("ttl_s", raw.get("ttl_s"), float,
-                          where=f"model {model_id!r}"),
+        # An explicit `ttl_s: null` means never unload, as it does in
+        # server.defaults. Only an absent key inherits the server value.
+        ttl_s=(0.0 if "ttl_s" in raw and raw["ttl_s"] is None
+               else _coerce_num("ttl_s", raw.get("ttl_s"), float,
+                                where=f"model {model_id!r}")),
     )
 
 
@@ -1836,7 +1844,8 @@ def build_config(doc: dict) -> ServerCfg:
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),
         stochastic_mtp=bool(srv.get("stochastic_mtp", False)),
-        gpu_keepwarm=bool(srv.get("gpu_keepwarm", False)),
+        gpu_keepwarm=(None if srv.get("gpu_keepwarm") is None
+                      else bool(srv.get("gpu_keepwarm"))),
         defaults=ServerDefaults(
             profile=dft.get("profile"),
             ttl_s=_coerce_num("defaults.ttl_s", dft.get("ttl_s", 900.0), float),

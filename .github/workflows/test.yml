@@ -118,3 +118,10 @@ jobs:
       - run: pip install ruff==0.15.20
       - run: ruff check .
       - run: python scripts/check-docs.py
+      - name: Docs site build
+        # The release workflow publishes this site. --strict fails on a link,
+        # anchor or nav entry the site cannot resolve.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --group docs
+          mkdocs build --strict

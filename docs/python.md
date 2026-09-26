@@ -1,8 +1,9 @@
 # Python API
 
-The CLI is the primary interface, and this page is for embedding gmlx in
-your own Python. The stable surface is exactly what the package root
-exports as `gmlx.__all__`, all of which is documented here.
+The `gmlx` package loads and runs GGUF models from your own Python code.
+Its stable surface is the set of names that the package root exports in
+`gmlx.__all__`, plus `preflight` and `HadamardFoldError` from
+`gmlx.load.preflight`.
 
 Exports resolve lazily, so `import gmlx` returns immediately and never
 imports MLX, which makes it safe in tooling that only inspects metadata. The
@@ -24,19 +25,23 @@ other code written for ordinary mlx-lm checkpoints run it unchanged. The
 config and tokenizer are both synthesized from the GGUF metadata. Sharded
 files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
+`load_model` takes these keyword arguments:
+
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `arch` | detected | Override `general.architecture` detection. |
-| `hf_source` | `None` | Load the config from this local dir or HF repo id instead of synthesizing it, for arches without a synthesizer or variants whose constants differ. |
-| `chat_template` | from GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
-| `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap. For inspection, not inference. |
+| `arch` | Detected | Override `general.architecture` detection. |
+| `hf_source` | `None` | Load the config from this local directory or Hugging Face repo instead of synthesizing it from the GGUF metadata. |
+| `chat_template` | From the GGUF | An inline Jinja string, or a path to a `.jinja`/`.txt` file, replaces the GGUF's chat template. |
+| `target_prefix` | `""` | This prefix is added to every remapped tensor name. |
+| `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap, which suits inspection but not inference. |
+| `fail_on_unknown` | `False` | Raise `RuntimeError` on a tensor that has no remap entry, instead of skipping it with a warning. |
 | `zero_copy` | `True` | Load tensors as no-copy mmap views. `False` copies into fresh buffers. |
 | `verbose` | `False` | Print load diagnostics such as `[arch]`, `[gguf]` and `[patch]`. |
 
-There are no vision or draft-model kwargs here. Pairing a model with an mmproj
-file and speculative decoding are CLI and server features, covered in
-[vlm.md](vlm.md) and
-[performance.md](performance.md#mtp-speculative-decoding).
+`load_model` takes no vision or drafter arguments. Pairing a model with an
+mmproj file and speculative decoding are CLI and server features, as
+[Vision and audio](vlm.md) and
+[Speculative decoding](speculative-decoding.md) describe.
 
 ## Generate
 
@@ -50,50 +55,50 @@ A string prompt goes through the tokenizer's chat template when one is
 present, while a pre-tokenized `list[int]` prompt is used as-is. The return
 value is the generated text.
 
-Sampling:
+Sampling takes these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `max_tokens` | `64` | Generation cap. |
-| `temp` | `0.0` | Temperature. `0.0` is greedy. |
-| `top_p` | `0.95` | Nucleus sampling. |
-| `top_k` | `0` | Top-k cutoff. `0` disables it. |
-| `min_p` | `0.05` | Minimum-probability cutoff. |
-| `xtc_probability` / `xtc_threshold` | `0.0` | XTC sampling, active when the probability is nonzero. |
-| `repetition_penalty` | `0.0` | Classic repetition penalty over the last `repetition_context_size` tokens, default `20`. |
-| `presence_penalty` / `frequency_penalty` | `0.0` | OpenAI-style penalties. |
-| `logit_bias` | `None` | `{token_id: bias}` added to the logits. |
-| `stop` | `None` | Stop strings. Generation ends when one appears. The match is trimmed. |
+| `max_tokens` | `64` | Generation stops after this many tokens. |
+| `temp` | `0.0` | It sets the sampling temperature, and `0.0` is greedy. |
+| `top_p` | `0.95` | It sets the nucleus sampling threshold. |
+| `top_k` | `0` | Sampling keeps only the k most likely tokens, and `0` disables the cutoff. |
+| `min_p` | `0.05` | Sampling drops tokens less likely than this fraction of the top token. |
+| `xtc_probability` / `xtc_threshold` | `0.0` | They set XTC sampling, which is active when the probability is nonzero. |
+| `repetition_penalty` | `0.0` | It applies a classic repetition penalty over the last `repetition_context_size` tokens, `20` by default. `0.0` turns it off. |
+| `presence_penalty` / `frequency_penalty` | `0.0` | They apply OpenAI-style penalties. |
+| `logit_bias` | `None` | Each `{token_id: bias}` entry is added to the logits. |
+| `stop` | `None` | Generation ends when one of these strings appears, and the match is trimmed. |
 
-Prompt handling:
+Prompt rendering follows these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `apply_chat_template` | `True` | Set `False` for base models or pre-templated text. |
-| `system_prompt` | `None` | Prepended as a system message on the templated path. |
-| `template_kwargs` | `None` | Extra `apply_chat_template` kwargs, such as `{"enable_thinking": False}`. |
+| `apply_chat_template` | `True` | `False` skips the chat template, which suits base models and pre-templated text. |
+| `system_prompt` | `None` | It is prepended as a system message on the templated path. |
+| `template_kwargs` | `None` | These extra kwargs go to `apply_chat_template`, such as `{"enable_thinking": False}`. |
 
-KV cache:
+Six keyword arguments set the KV cache:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
 | `max_kv_size` | `None` | Cap the KV cache with a rotating window. |
 | `kv_bits` | `None` | Quantize the KV cache to this many bits. |
-| `kv_group_size` | `64` | KV quantization group size. |
-| `quantized_kv_start` | `0` | Position where KV quantization begins. |
-| `kv_quant_scheme` | `None` | `uniform` for the standard affine scheme, or `kvarn` for variance-normalized quantization. |
-| `kv_tail_tokens` | `1024` | Under `kvarn`, the most recent tokens that also stay fp16. A multiple of 128, and `0` disables the tail. |
+| `kv_group_size` | `64` | It sets the KV quantization group size. |
+| `quantized_kv_start` | `0` | Quantize the KV cache once it holds this many tokens. |
+| `kv_quant_scheme` | `None` | It selects `uniform` for the standard affine scheme or `kvarn` for variance-normalized quantization. |
+| `kv_tail_tokens` | `1024` | Under `kvarn`, this many recent tokens also stay fp16. It is a multiple of 128, and `0` disables the tail. |
 
-Long prompts and thinking models:
+The remaining keyword arguments control long prompts, thinking models and output:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `prefill_step_size` | model-aware | Prefill chunk width. The default follows the deployed choice for the model. |
+| `prefill_step_size` | Model-aware | It sets the prefill chunk width, and the default is the width that gmlx picks for the model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill, on a TTY only, cleared before the first token. |
-| `thinking_budget` | `None` | Cap reasoning tokens. After roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
-| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
+| `thinking_budget` | `None` | Cap reasoning tokens. After about this many thinking tokens a `</think>` is forced so the model answers. A model that never opens `<think>` is unaffected. |
+| `thinking_start_token` / `thinking_end_token` | `None` | They set the reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
-| `reasoning` | `None` | How a verbose stream shows thinking: `show` styles it, `hide` collapses it to the timing line, `raw` streams it verbatim. The return value is always raw. |
+| `reasoning` | `None` | It sets how a verbose stream shows thinking. `show` styles it, `hide` folds it into the timing line and `raw` streams it. The return value is always raw. |
 
 ## Benchmark
 
@@ -105,22 +110,24 @@ bench(model, tokenizer, lengths=(512, 4096, 16384))
 ```
 
 `bench` measures prefill and decode throughput at each prompt length through
-the real generation path, chunked prefill and the async one-step-ahead decode
-pipeline. The numbers therefore match deployed throughput, not a naive forward
-loop. Its CLI equivalent is `gmlx run --bench`.
+the real generation path, with chunked prefill and the async one-step-ahead
+decode pipeline. The numbers therefore match deployed throughput instead of a
+naive forward loop's speed. Its CLI equivalent is `gmlx run --bench`.
+
+`bench` takes these keyword arguments:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `lengths` | `(512, 4096, 16384)` | Prompt lengths to sweep. |
-| `decode_tokens` | `32` | Decode window measured in each run. |
-| `runs` | `2` | Runs at each length. The best is reported. |
-| `warmup` | `True` | One untimed warmup generation first. |
-| `prefill_step_size` | model-aware | As in `generate`. |
-| `kv_bits` | `None` | As in `generate`, with `kv_group_size` and `quantized_kv_start`. |
-| `kv_group_size` | `64` | |
-| `quantized_kv_start` | `0` | |
-| `kv_quant_scheme` | `None` | As in `generate`, with `kv_tail_tokens`. |
-| `kv_tail_tokens` | `1024` | |
+| `lengths` | `(512, 4096, 16384)` | `bench` sweeps these prompt lengths. |
+| `decode_tokens` | `32` | Each run measures this many decode tokens. |
+| `runs` | `2` | `bench` runs each length this many times and reports the best. |
+| `warmup` | `True` | An untimed warmup generation runs first. |
+| `prefill_step_size` | Model-aware | It works as in `generate`. |
+| `kv_bits` | `None` | It works as in `generate`. |
+| `kv_group_size` | `64` | It works as in `generate`. |
+| `quantized_kv_start` | `0` | It works as in `generate`. |
+| `kv_quant_scheme` | `None` | It works as in `generate`. |
+| `kv_tail_tokens` | `1024` | It works as in `generate`. |
 
 ## Preflight and errors
 
@@ -132,26 +139,30 @@ pf = preflight("model.gguf")
 pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 ```
 
-`preflight(gguf_path, *, arch=None, hf_source=None)` validates a GGUF
-before committing to a load: it discovers shards, histograms the tensor
-codecs, refuses unsupported ones by name and gates on the architecture. It
-reads only the GGUF header, so a multi-GB file is checked in well under a
-second. `load_model` runs it internally, and you can call it yourself to
-check a file first. Its CLI equivalent is `gmlx validate`.
+`preflight(gguf_path, *, arch=None, hf_source=None)` checks a GGUF before
+a load. It finds the shards, counts the tensors of each codec, refuses
+unsupported codecs by name and checks the architecture. It reads only the
+GGUF header, so a file of many GB is checked in well under a second.
+`load_model` runs it internally, and you can call it yourself to check a
+file first. Its CLI equivalent is `gmlx validate`.
 
-Failures raise one of two exceptions, from `preflight` or `load_model`
-alike:
+The same exceptions come from `preflight` and `load_model`:
 
-- `UnsupportedCodecError` means a tensor codec with no kernel here. It
+- `UnsupportedCodecError` means a tensor codec that the `mlx_kquant`
+  kernels do not cover. It
   carries `.arch` and `.unsupported`, a `{codec: count}` dict.
 - `UnsupportedArchError` means a GGUF architecture the loader cannot build
   a model for.
+- `HadamardFoldError`, from `gmlx.load.preflight`, means a Hadamard-folded
+  file whose fold version or architecture the loader does not support.
+- `FileNotFoundError` means missing shards of a split file, and
+  `ValueError` means a truncated file or a header without an architecture.
 
 `ARCH_TABLE` maps each supported GGUF architecture id to its runtime entry,
 with the fields `gguf_arch`, `model_type`, `family`, `remap_alias`,
-`notes`, `backend` and `caveat`. [arch-coverage.md](arch-coverage.md) is
-the generated human-readable view of the same data, with validation
-status.
+`notes`, `backend` and `caveat`. [Supported architectures](arch-coverage.md)
+is the generated view of the same data for people to read, with each
+entry's validation status.
 
 ## Tokenizer without the model
 
@@ -168,17 +179,18 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 builds an HF fast tokenizer from the GGUF's embedded vocab, merges and
 scores metadata. It is the same synthesis `load_model` runs, taken on its
 own. `detect_arch(reader)` reads `general.architecture` from the header.
-Neither touches tensor bytes.
+Neither touches tensor bytes. These suit a tool that needs the tokenizer
+before it decides whether to load weights, such as an eval harness that
+checks tokenizer parity, pre-tokenizes a corpus or inspects a template.
 
-Use these when a tool needs the tokenizer before deciding whether to load
-weights at all, such as an eval harness doing tokenizer parity checks,
-corpus pre-tokenization, or template inspection. `chat_template_override`,
+`chat_template_override`,
 an inline Jinja string, replaces the GGUF's chat template. The loader
 infers the model's turn-ending tokens from the template it ends up with, so
 an override changes which tokens stop generation as well.
 
 Three helpers read a tokenizer's vocabulary as bytes, for tools that line
-up two tokenizers over the same text, such as `gmlx distill align`. They take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
+up two tokenizers over the same text, such as `gmlx distill align`. They
+take an HF fast tokenizer or an mlx-lm tokenizer wrapper.
 
 ```python
 from gmlx import token_bytes, whitespace_start_mask, vocab_map_hash
@@ -192,9 +204,11 @@ key = vocab_map_hash(tokenizer)                # 16 hex digits over the id-to-to
 below `width`, which defaults to the vocabulary size. Specials and unfilled
 ids are `None`. ByteLevel vocabularies go through the GPT-2 byte decoder,
 and SentencePiece vocabularies map the U+2581 marker to a space and
-`<0xNN>` pieces to that byte. `whitespace_start_mask(tokenizer, width,
-token_bytes_list=None)` marks the ids whose bytes start with ASCII
-whitespace plus the end-of-sequence ids. `vocab_map_hash(tokenizer)`
+`<0xNN>` pieces to that byte.
+`whitespace_start_mask(tokenizer, width, token_bytes_list=None)` marks the
+ids whose bytes start with ASCII whitespace plus the end-of-sequence ids.
+
+`vocab_map_hash(tokenizer)`
 hashes the id-to-token map with specials left out. Equal hashes mean
 equal maps, not identical tokenization, since merges, the pre-tokenizer
 and the normalizer are not covered.
@@ -207,32 +221,34 @@ from gmlx import install_gguf_bridge
 install_gguf_bridge()
 ```
 
-Idempotently patches `mlx_lm.server.ModelProvider` so that any `*.gguf`
-model path loads through `load_model`. Non-GGUF paths pass through
-unchanged, which lets a single `mlx_lm.server` process mix GGUF and
-ordinary MLX checkpoints. GGUF requests are pinned to mlx-lm's validated
-sequential path, with no batching. A `--draft-model` is ignored for GGUF
-models with a warning, and `--adapter` on one raises, since adapters are
-wired only in `gmlx serve`. Use the bridge to add GGUF support to an
-existing `mlx_lm.server` deployment, and `gmlx serve` for everything else.
+`install_gguf_bridge` patches `mlx_lm.server.ModelProvider` so that any
+`*.gguf` model path loads through `load_model`, and a second call changes
+nothing. Other paths pass through unchanged, so one `mlx_lm.server` process
+can mix GGUF files and ordinary MLX checkpoints. GGUF requests are pinned
+to mlx-lm's sequential path, with no batching. A `--draft-model` is
+ignored for GGUF models with a warning, and `--adapter` on one raises,
+since adapters are wired only in `gmlx serve`. Use the bridge to add GGUF
+support to an existing `mlx_lm.server` deployment, and `gmlx serve` for
+everything else.
 
 ## Quantized modules
 
 The swapped leaves are `KQuantLinear`, `KQuantEmbedding`,
 `KQuantSwitchLinear` and `KQuantMultiLinear`, the canonical classes in
-`mlx_kquant.nn`, re-exported here. Each stores the GGUF file bytes directly
+`mlx_kquant.nn`, re-exported from the `gmlx` package root. Each stores the GGUF file bytes directly
 as a `uint8` `weight` and dispatches through the `mlx_kquant` Metal kernels
 on a stock `mlx` wheel, so dequantization happens inside the kernel, never
-as a separate materialized pass. `install_kquant_modules(model, hf_kquant_meta)`
-is the swap step itself: it iterates over a constructed model's leaf
-modules and replaces each one whose weight carries a codec. It keys on
-codec strings, not on the architecture, so a custom loader can use it on
-any model.
+as a separate materialized pass.
+
+`install_kquant_modules(model, hf_kquant_meta)` is the swap step. It visits
+the leaf modules of a constructed model and replaces each one whose weight
+carries a codec. Because it keys on codec strings instead of the
+architecture, a custom loader can use it on any model.
 
 ## Beyond the stable surface
 
 Other modules are importable but internal, among them the VLM loader,
-embeddings and rerank, the CPU-offload paths and the server, and their
-signatures change without notice. `generate` additionally accepts
-experimental parameters that are intentionally undocumented here. If you
-need an internal piece as a public API, open an issue.
+embeddings and rerank, the CPU-offload paths and the server. Their
+signatures change without notice. `generate` also accepts experimental
+parameters that are not part of the stable surface. To have an internal
+piece made public, open an issue.

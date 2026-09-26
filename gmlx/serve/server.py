@@ -171,11 +171,12 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
                     default=None, metavar="GB",
                     help="Persist the prompt cache to disk in the generated config "
                          "(the in-memory cache is on in every generated config): "
-                         "cached prefixes land under ~/.cache/gmlx/apc and survive "
+                         "cached prefixes land under $XDG_CACHE_HOME/gmlx/apc "
+                         "(default ~/.cache) and survive "
                          "an idle-unload / restart. A bare --disk-cache caps it at "
                          "50 GB per model, or pass a size (e.g. --disk-cache 100).")
     ap.add_argument("-r", "--recursive", action=argparse.BooleanOptionalAction,
-                    default=False,
+                    default=None,
                     help="Recurse into subdirectories when scanning --models-dir "
                          "(default: shallow).")
     ap.add_argument("--force", action="store_true",
@@ -187,7 +188,8 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
     # non-terminal use the flag-driven path. -i forces the wizard either way.
     ap.add_argument("-i", "--interactive", action="store_true",
                     help="Run the guided wizard (the default when init is given no "
-                         "scaffolding flags on a terminal).")
+                         "scaffolding flags on a terminal). Other flags pre-fill "
+                         "its answers.")
     ap.add_argument("--no-interactive", action="store_true",
                     help="Never run the wizard; scaffold from the flags as given.")
     # Optional services. A bare --with-stt uses the default alias; a value overrides
@@ -221,7 +223,7 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
     a = ap.parse_args(argv)
 
     if _want_interactive(a):
-        return _init_interactive(a)
+        return _init_interactive(a, ap)
     # No scaffolding intent and not interactive -> the help affordance (preserves
     # bare `init` on a non-terminal / under --no-interactive).
     if not _has_scaffold_intent(a):
@@ -253,13 +255,33 @@ def _want_interactive(a) -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _init_interactive(a) -> int:
+def _init_seeds(a, ap):
+    """The wizard answers that the init flags pre-fill."""
+    import gmlx.commands.wizard as wizard
+
+    services = {}
+    for key, value in (("stt", a.with_stt), ("tts", a.with_tts),
+                       ("embeddings", a.with_embeddings),
+                       ("rerank", a.with_rerank)):
+        if value is not None:
+            services[key] = None if value is _SVC_DEFAULT else value
+    return wizard.Seeds(
+        dirs=a.models_dir, recursive=a.recursive, hf_cache=a.from_hf_cache,
+        disk_cache_gb=a.disk_cache, services=services,
+        default_model=a.default_model,
+        ttl_s=_resolve_duration("--idle-ttl", a.idle_ttl, ap),
+        timeout_s=_resolve_duration("--request-timeout", a.request_timeout, ap),
+        overwrite=a.force, install=a.install, port=a.port)
+
+
+def _init_interactive(a, ap) -> int:
     import gmlx.commands.wizard as wizard
     default_out = a.out or DEFAULT_CONFIG_WRITE
+    seeds = _init_seeds(a, ap)
     try:
         outcome = wizard.run_wizard(
-            default_out=default_out, seed_dirs=a.models_dir,
-            allow_install=not a.no_install, port=a.port)
+            default_out=default_out, seeds=seeds,
+            allow_install=not a.no_install)
     except KeyboardInterrupt:
         print("\naborted.", file=sys.stderr)
         return 1
@@ -324,7 +346,7 @@ def _init_scaffold(a, ap) -> int:
     models = []
     scan_stats: dict = {}
     if dirs:
-        specs = [DiscoverSpec(dir=d, recursive=a.recursive) for d in dirs]
+        specs = [DiscoverSpec(dir=d, recursive=bool(a.recursive)) for d in dirs]
         models += discovery.scan_dirs(specs, dirs, progress=True,
                                       stats=scan_stats)
     if a.from_hf_cache:
@@ -600,8 +622,9 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=(),
                 models[mc.id] = entry          # update keeps its position
             else:
                 # Insert at the top of the block: appending would land the
-                # entry after the scaffold's trailing commented hints (talk:,
-                # assistant:), which ride the last entry's comment token.
+                # entry after trailing comments, such as the commented hints
+                # that older `gmlx init` files carry, which ride the last
+                # entry's comment token.
                 models.insert(pos, mc.id, entry)
                 pos += 1
             note = discovery.family_comment(mc)
@@ -767,13 +790,14 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "non-speculative sampling, not token-identical; higher "
                          "acceptance at temp > 0. Same as config "
                          "server.stochastic_mtp; greedy requests unaffected.")
-    ap.add_argument("--gpu-keepwarm", action="store_true",
+    ap.add_argument("--gpu-keepwarm", action=argparse.BooleanOptionalAction,
+                    default=None,
                     help="Hold GPU clocks up while a streamed model is decoding "
                          "(tiny heartbeat kernel; parks when no request is "
                          "decoding, so an idle server pays nothing). Only acts "
-                         "on models streaming with a decode feeder. Same as "
-                         "config server.gpu_keepwarm. Default on for "
-                         "streamed installs; GMLX_GPU_KEEPWARM=0 disables.")
+                         "on models streaming with a decode feeder, where it is "
+                         "on by default; --no-gpu-keepwarm turns it off. Same "
+                         "as config server.gpu_keepwarm.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="Speculative block size. Each round drafts N-1 tokens "
                          "and checks them in one N-token target pass, so "
@@ -810,7 +834,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "`chat_template_kwargs:` key).")
     kv = ap.add_argument_group(
         "KV cache of a single positional model",
-        "Each flag is a `load:` key in config mode; see docs/server-config.md.")
+        "Each flag is a `load:` key in config mode; see docs/config.md.")
     kv.add_argument("--kv-bits", type=int, default=None, metavar="N",
                     help="Quantize the KV cache to N bits: 2, 3, 4, 6 or 8 affine, "
                          "or 2, 3, 4, 5, 6 or 8 under kvarn (`load.kv_bits`).")
@@ -829,8 +853,9 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Cap the request context budget at N tokens "
                          "(`load.max_kv_size`).")
     kv.add_argument("--quantized-kv-start", type=int, default=None, metavar="N",
-                    help="Tokens kept unquantized at the start of the cache, not "
-                         "applied under kvarn (`load.quantized_kv_start`).")
+                    help="Keep the KV cache fp16 until it holds N tokens, "
+                         "default 0; not applied under kvarn or to batches "
+                         "(`load.quantized_kv_start`).")
     sg = ap.add_argument_group(
         "Sampling defaults of a single positional model",
         "Used when a request omits the field; a request that sends it wins. "
@@ -961,7 +986,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--pin", action="append", default=[], metavar="ID_OR_PATH",
                     help="Pin a model (id or path) so it is never evicted (repeatable).")
     ap.add_argument("--max-tokens", type=int, default=None,
-                    help="Server default max completion tokens.")
+                    help="Cap a request that sets no output cap of its own "
+                         "(default: until EOS or the context fills).")
     ap.add_argument("--no-family-defaults", action="store_true",
                     help="Do not seed each model family's model-card sampling "
                          "under profiles and requests (config mode: "
@@ -1541,7 +1567,7 @@ def _resolve_cfg(a) -> tuple:
 def _resolve_mode_cfg(a) -> tuple:
     if a.config:
         path = a.config
-        return load_config(path), _make_reload_fn(path)
+        return _load_with_discover(path), _make_reload_fn(path)
     if a.models_dir:
         return _discovery_cfg(a.models_dir, a), None
     if a.model:
@@ -1554,17 +1580,27 @@ def _resolve_mode_cfg(a) -> tuple:
     for p in default_config_paths():
         if p.exists():
             print(f"[server] loading config {p}", file=sys.stderr)
-            return load_config(p), _make_reload_fn(str(p))
+            return _load_with_discover(p), _make_reload_fn(str(p))
     print("[server] no config found; discovering the current directory "
           "(pass --models-dir DIR, or `gmlx init` to save a config)",
           file=sys.stderr)
     return _discovery_cfg([_DEFAULT_DISCOVER_DIR], a), None
 
 
+def _load_with_discover(path) -> ServerCfg:
+    """Load the config and add the models its ``discover`` scans find."""
+    cfg = load_config(path)
+    found = discovery.merge_discovered(cfg)
+    if found:
+        print(f"[server] discover: {', '.join(m.id for m in found)}",
+              file=sys.stderr)
+    return cfg
+
+
 def _make_reload_fn(path):
     def _reload():
         from .bridge_vlm import register_resolved_models
-        cfg = load_config(path)
+        cfg = _load_with_discover(path)
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         return {"models": len(cfg.models)}
     return _reload
@@ -1796,6 +1832,9 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                           hf_source=a.hf_source)
     if a.max_tokens is not None:
         os.environ["MLX_VLM_MAX_TOKENS"] = str(a.max_tokens)
+    else:
+        from .patches.sampling import UNTIL_EOS
+        os.environ.setdefault("MLX_VLM_MAX_TOKENS", str(UNTIL_EOS))
     if getattr(a, "draft_block_size", None):
         # Read lazily at drafter-load time (server_bridge_vlm.load_drafter).
         os.environ["GMLX_DRAFT_BLOCK_SIZE"] = str(a.draft_block_size)
@@ -1815,11 +1854,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if dtype is not None:
         os.environ["GMLX_ACTIVATION_DTYPE"] = str(dtype)
         print(f"[server] activation dtype: {dtype}")
-    if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
+    keepwarm = getattr(a, "gpu_keepwarm", None)
+    if keepwarm is None:
+        keepwarm = cfg.gpu_keepwarm
+    if keepwarm is not None:
         # Startup-only. The loader's gate starts the heartbeat when a
         # streamed model with a decode feeder loads; the heartbeat itself
         # parks whenever no request is decoding (keepwarm.touch()).
-        os.environ["GMLX_GPU_KEEPWARM"] = "1"
+        os.environ["GMLX_GPU_KEEPWARM"] = "1" if keepwarm else "0"
     # The config's token-queue timeout is authoritative for this server: it drives
     # mlx-vlm's per-request "wait for the next token" guard (default 600s; <=0 waits
     # forever). Read per request from the env, so setting it here is enough.
@@ -1906,15 +1948,20 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
                       "per-model speculative_width_cap config key")
 
     resolved = serving.resolved_models()
-    preload = _preload_id(cfg)
-    if preload:
-        os.environ["MLX_VLM_PRELOAD_MODEL"] = preload
-
     pinned_paths = {rm.path for rm in resolved.values() if rm.pin}
     for p in a.pin:
         rp = resolved.get(p)
         pinned_paths.add(rp.path if rp is not None
                          else os.path.abspath(os.path.expanduser(p)))
+
+    # Only an explicit pin (`pin: true`, --pin, or the single-GGUF positional)
+    # holds the preload for the process lifetime. A default or sole model
+    # preloads too, but stays TTL- and budget-evictable.
+    preload = _preload_id(cfg)
+    preload_rm = resolved.get(preload) if preload else None
+    preload_pinned = preload_rm is not None and preload_rm.path in pinned_paths
+    if preload and preload_pinned:
+        os.environ["MLX_VLM_PRELOAD_MODEL"] = preload
 
     install_gguf_server_bridge()
     budget_gb = a.budget_gb if a.budget_gb is not None else cfg.budget_gb
@@ -2017,9 +2064,16 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         install_ignore_eos()
         print("[server] ignore-eos: decode runs to max_tokens (EOS suppressed)")
 
-    if reload_fn is not None:
-        import signal
+    import signal
 
+    if reload_fn is None and hasattr(signal, "SIGHUP"):
+        # No file to read again. Without a handler, SIGHUP would stop the server.
+        def _ignore_sighup(_sig, _frame):
+            print("[server] SIGHUP ignored: started without a config file, "
+                  "so there is nothing to reload")
+
+        signal.signal(signal.SIGHUP, _ignore_sighup)
+    if reload_fn is not None:
         def _on_sighup(_sig, _frame):
             try:
                 print(f"[server] SIGHUP config reload: {reload_fn() or {}}")
@@ -2060,17 +2114,27 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # synchronously *before* the port accepts connections, so a big model makes the
     # whole server unreachable (menu bar / health probes see "down") until it
     # finishes. The env was already consumed by the residency-pool install above
-    # (it pins the preload); pop it now so the lifespan skips the blocking load, and
-    # warm the model in a background thread instead - the port binds and /health
-    # answers immediately while the load runs (the retained hold keeps it resident,
-    # exactly as the lifespan hold would have). defaults.preload extras warm after
-    # the primary, LRU-evictable.
+    # (it pins a pinned preload); pop it now so the lifespan skips the blocking load,
+    # and warm the model in a background thread instead - the port binds and /health
+    # answers immediately while the load runs. A pinned primary keeps a retained
+    # hold, exactly as the lifespan hold would have; an unpinned one is released
+    # after the warm. The other pinned models warm next, in file order, and the
+    # pool's pinned set keeps them resident; defaults.preload extras follow,
+    # LRU-evictable.
     pre = cfg.defaults.preload
-    extras = [m for m in (list(cfg.models) if pre == "all" else list(pre or ()))
-              if m != preload]
+    warm_paths = {preload_rm.path} if preload_rm is not None else set()
+    pinned_ids = []
+    for mid, rm in resolved.items():
+        if rm.path in pinned_paths and rm.path not in warm_paths:
+            warm_paths.add(rm.path)
+            pinned_ids.append(mid)
+    extras = []
+    for m in pinned_ids + (list(cfg.models) if pre == "all" else list(pre or ())):
+        if m != preload and m not in extras:
+            extras.append(m)
     if preload or extras:
         os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
-        patches.spawn_preload_warm(preload, extras)
+        patches.spawn_preload_warm(preload, extras, retain=preload_pinned)
         if extras:
             print(f"[server] preload: warming {', '.join(extras)} in background")
 

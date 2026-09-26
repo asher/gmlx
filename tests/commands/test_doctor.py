@@ -20,6 +20,7 @@ _real_check_server = doctor.check_server
 _real_check_launcher = doctor.check_launcher
 _real_running_configs = doctor._running_configs
 _real_check_agents = doctor.check_agents
+_real_check_macos = doctor.check_macos
 
 
 def _mint(path):
@@ -53,6 +54,8 @@ models:
 @pytest.fixture(autouse=True)
 def _quiet_env(monkeypatch):
     """Pin the environment-dependent checks so tests are hermetic."""
+    monkeypatch.setattr(doctor, "check_macos",
+                        lambda: doctor._check("macos", "PASS", "pinned"))
     monkeypatch.setattr(doctor, "check_runtime",
                         lambda: doctor._check("runtime", "PASS", "pinned"))
     monkeypatch.setattr(doctor, "check_kernels",
@@ -65,6 +68,27 @@ def _quiet_env(monkeypatch):
     monkeypatch.setattr(doctor, "check_agents", lambda: None)
     # Keep tests hermetic from whatever server the host machine is running.
     monkeypatch.setattr(doctor, "_running_configs", lambda path: [])
+
+
+@pytest.mark.parametrize("version,status,detail", [
+    ("26.6.2", "PASS", "macOS 26.6.2"),
+    ("26.2", "PASS", "macOS 26.2"),
+    ("26.1", "WARN", "macOS 26.1 is older than 26.2"),
+    ("26", "WARN", "macOS 26 is older than 26.2"),
+    ("15.7.3", "WARN", "macOS 15.7.3 is older than 26.2"),
+    ("", "WARN", "version unknown, gmlx needs macOS 26.2 or newer"),
+])
+def test_macos_version(monkeypatch, version, status, detail):
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    monkeypatch.setattr(doctor, "_macos_version", lambda: version)
+    c = _real_check_macos()
+    assert c["name"] == "macos" and c["status"] == status
+    assert c["detail"].startswith(detail)
+
+
+def test_macos_skips_off_darwin(monkeypatch):
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    assert _real_check_macos()["status"] == "SKIP"
 
 
 def test_all_pass_exit_zero(tmp_path, capsys):
@@ -233,6 +257,29 @@ models:
     assert "fs: definitely-not-a-real-binary" in out
 
 
+def test_mcp_row_checks_the_shared_list_for_chat(tmp_path, monkeypatch, capsys):
+    # `gmlx chat --assistant` reads assistant.mcp even when talk and every
+    # alias do not, so doctor checks it.
+    import gmlx.commands.extras as extras
+    monkeypatch.setattr(extras, "extra_installed", lambda x: True)
+    body = """
+server:
+  model_dirs:
+    - <LIB>
+assistant:
+  mcp:
+    - name: shared
+      command: [definitely-not-a-real-binary]
+models:
+  m:
+    path: m.gguf
+"""
+    cfg, lib = _cfg(tmp_path, body)
+    _mint(lib / "m.gguf")
+    doctor.cmd_doctor(["--config", str(cfg)])
+    assert "shared: definitely-not-a-real-binary" in capsys.readouterr().out
+
+
 def test_deep_reads_headers(tmp_path, capsys):
     cfg, lib = _cfg(tmp_path, _BASE)
     _mint(lib / "m.gguf")
@@ -250,7 +297,8 @@ def test_json_shape(tmp_path, capsys):
     assert rc == 0
     assert v["ok"] is True and v["version"]
     names = [c["name"] for c in v["checks"]]
-    assert names[:5] == ["runtime", "kernels", "config", "models", "server"]
+    assert names[:6] == ["macos", "runtime", "kernels", "config", "models",
+                         "server"]
     assert all({"name", "status", "detail"} <= set(c) for c in v["checks"])
 
 

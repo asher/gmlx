@@ -566,7 +566,7 @@ def test_scaffold_writes_a_paired_drafter():
     mc = cfg.models["muse-glimmer-30b-q4"]
     assert mc.draft_gguf == "muse/dflash-m-Q4_K_M.gguf"
     assert mc.speculative is False        # the drafter key turns it on at load
-    # no live `speculative` key: the reference block keeps the only mention
+    # no live `speculative` key: the drafter key alone turns it on
     assert not [ln for ln in text.splitlines() if ln.strip() == "speculative: true"]
 
 
@@ -611,44 +611,15 @@ def test_scaffold_family_comments_above_entry():
     assert "  mystery:\n" in text                # no family -> bare key
 
 
-def _uncomment_hints(text: str) -> str:
-    """Strip the leading `# ` from every commented option-example line (a line
-    whose content looks like `key: ...` or a `- ` sequence item), leaving prose
-    and placeholder examples (`<id>`, `{...}`) commented - the transformation a
-    user applies when enabling a documented knob."""
+def test_scaffold_is_values_only():
+    """The file holds the header, the chosen values and the model entries. It
+    carries no commented-out keys, and its header links the key reference."""
     import re
-    key_rx = re.compile(r"^ *(- |[A-Za-z0-9_.-]+: ?)")
-    out = []
-    for line in text.splitlines():
-        stripped = line.lstrip(" ")
-        indent = line[: len(line) - len(stripped)]
-        if stripped.startswith("# "):
-            content = stripped[2:]
-            if "<" not in content and "{...}" not in content \
-                    and key_rx.match(content):
-                out.append(indent + content)
-                continue
-        out.append(line)
-    return "\n".join(out)
-
-
-def test_scaffold_hints_uncomment_and_parse():
-    """Every commented option example in the scaffold is real: uncommenting
-    them all still parses + validates through build_config."""
-    import yaml
     models = [ModelCfg(id="qw", path="/m/qw.gguf", family="qwen3.6")]
-    text = _uncomment_hints(disc.scaffold_yaml(models, model_dirs=["/m"]))
-    cfg = build_config(yaml.safe_load(text))     # must not raise
-    # The uncommented hints landed as live keys.
-    assert cfg.api_key == "change-me"
-    assert cfg.budget_gb == 96
-    assert cfg.max_models == 2
-    assert cfg.family_defaults is True
-    assert cfg.token_queue_timeout_s == 600
-    assert cfg.cache["enabled"] is True
-    assert set(cfg.profiles) == {"brief", "my-coding", "narrator"}
-    assert cfg.profiles["my-coding"].extends == "coding"
-    assert cfg.rules[0].match == "*-coder-*"
+    text = disc.scaffold_yaml(models, model_dirs=["/m"])
+    assert disc.CONFIG_DOCS_URL in text.splitlines()[1]
+    key_rx = re.compile(r"^ *# *(- |[A-Za-z0-9_.-]+: )")
+    assert not [ln for ln in text.splitlines() if key_rx.match(ln)]
 
 
 def test_scaffold_emits_rerank_when_set():
@@ -714,13 +685,11 @@ def test_scaffold_disk_cache_writes_active_block():
 
 
 def test_scaffold_default_enables_cache_disk_off():
-    """The default scaffold ships the prompt cache on, with the disk tier an
-    explicit `disk: false` (no commented-out cache block)."""
+    """The default scaffold ships the prompt cache on and the disk tier off."""
     import yaml
     text = disc.scaffold_yaml([], model_dirs=["~/llm/gguf"])
     cfg = build_config(yaml.safe_load(text))
-    assert cfg.cache["enabled"] is True
-    assert cfg.cache["disk"] == {"path": None}   # normalized `disk: false`
+    assert cfg.cache == {"enabled": True}
 
 
 # model_to_entry - the per-model dict `sync-models` splices into a config

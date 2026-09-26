@@ -152,6 +152,14 @@ def test_ttl_defaults_to_server_then_model_override():
     assert resolve_model("m-named", cfg).ttl_s == 900     # falls to server default
 
 
+def test_model_ttl_null_means_never_not_inherit():
+    doc = _doc()
+    doc["models"]["m-bare"]["ttl_s"] = None      # explicit null
+    cfg = build_config(doc)
+    assert resolve_model("m-bare", cfg).ttl_s == 0        # never unload
+    assert resolve_model("m-named", cfg).ttl_s == 900     # absent key inherits
+
+
 def test_pin_flag_and_mmproj_passthrough():
     doc = _doc()
     doc["models"]["m-vlm"] = {"path": "/abs/llm.gguf",
@@ -840,7 +848,7 @@ def test_cache_disk_boolean_shorthand():
     doc["server"]["cache"] = {"enabled": True, "disk": True}
     env = cfgmod.env_for(resolve_model("m-bare", build_config(doc)))
     assert env["APC_DISK_PATH"] == os.path.expanduser(
-        cfgmod.DEFAULT_APC_DISK_PATH)
+        cfgmod.default_apc_disk_path())
 
     doc = _doc()
     doc["server"]["cache"] = {"enabled": True, "disk": {"path": "/ssd/apc"}}
@@ -1552,9 +1560,11 @@ def test_stochastic_mtp_key():
 
 def test_gpu_keepwarm_key():
     doc = _doc()
-    assert build_config(doc).gpu_keepwarm is False
+    assert build_config(doc).gpu_keepwarm is None      # unset: the feeder default
     doc["server"]["gpu_keepwarm"] = True
     assert build_config(doc).gpu_keepwarm is True
+    doc["server"]["gpu_keepwarm"] = False
+    assert build_config(doc).gpu_keepwarm is False     # an off switch, not unset
 
 
 def test_kill_switch_rejects_intent_refs():
@@ -2071,3 +2081,10 @@ def test_kv_quant_scheme_turbo_refused():
     cfg = build_config(doc)
     with pytest.raises(ConfigError, match="kv_quant_scheme"):
         resolve_model("m-bare", cfg)
+
+
+def test_default_disk_path_follows_xdg_cache_home(monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
+    assert cfgmod.default_apc_disk_path() == "/xdg/gmlx/apc"
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    assert cfgmod.default_apc_disk_path() == "~/.cache/gmlx/apc"

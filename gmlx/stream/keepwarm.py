@@ -14,9 +14,10 @@ power) once no touch has arrived for ``GMLX_KEEPWARM_IDLE_S`` seconds
 only pays for it while a request is actually decoding; the first token
 after an idle gap eats one clock ramp, every later token is held.
 
-Lossless but not free: it burns a few watts while decode is active,
-so it is opt-in (``--gpu-keepwarm`` / ``GMLX_GPU_KEEPWARM=1``). The
-real fix is the GPU-autonomous token (gpu-dispatch tier 2); this is
+Lossless but not free: it burns a few watts while decode is active.
+It is on by default for streamed loads with a decode feeder;
+``--no-gpu-keepwarm``, ``gpu_keepwarm: false`` or ``GMLX_GPU_KEEPWARM=0``
+turns it off. The real fix is the GPU-autonomous token (gpu-dispatch tier 2); this is
 the shippable stopgap.
 """
 

@@ -491,8 +491,8 @@ def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         metavar="N",
-        help="Token position from which the KV cache is "
-        "quantized (default 0 = from the start).",
+        help="Keep the KV cache fp16 until it holds N tokens, then "
+        "quantize all of it (default 0 = from the start).",
     )
     ap.add_argument(
         "--prefill-step-size",
@@ -604,14 +604,15 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
     )
     grp.add_argument(
         "--gpu-keepwarm",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="Hold GPU clocks up during streamed decode with a tiny "
         "background heartbeat kernel. Streamed decode idles the GPU "
         "between per-layer bursts and each burst pays the clock ramp; "
         "the heartbeat removes that (lossless, costs a few watts while "
         "decoding; parks after GMLX_KEEPWARM_IDLE_S seconds idle, "
-        "default 1). Default on for streamed installs; "
-        "GMLX_GPU_KEEPWARM=0 disables.",
+        "default 1). On by default with the decode feeder; "
+        "--no-gpu-keepwarm turns it off.",
     )
 
 
@@ -1461,8 +1462,9 @@ def _apply_placement(args, model) -> None:
         return
 
     gguf_path = getattr(args, "gguf", None)
-    if getattr(args, "gpu_keepwarm", False):
-        os.environ["GMLX_GPU_KEEPWARM"] = "1"
+    keepwarm = getattr(args, "gpu_keepwarm", None)
+    if keepwarm is not None:
+        os.environ["GMLX_GPU_KEEPWARM"] = "1" if keepwarm else "0"
     fast_disk = getattr(args, "stream_fast_disk", None)
     if fast_disk:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
@@ -1787,13 +1789,7 @@ def _run_vlm(args) -> int:
         extra["thinking_start_token"] = args.thinking_start_token
     if args.thinking_end_token:
         extra["thinking_end_token"] = args.thinking_end_token
-    if getattr(args, "kv_quant_scheme", None) == "kvarn":
-        print(
-            "warning: --kv-quant-scheme kvarn is not applied on the VLM "
-            "path yet; KV stays fp16",
-            file=sys.stderr,
-        )
-    if args.kv_bits is not None:
+    if args.kv_bits is not None and not vlm_declines_kvarn(args):
         extra.update(
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
@@ -2162,6 +2158,17 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     return None
 
 
+def vlm_declines_kvarn(args) -> bool:
+    """Whether the VLM path must keep an fp16 cache because kvarn was asked for.
+    Prints the warning. The VLM path has no kvarn cache, and passing the width
+    on would build an affine cache the user did not ask for."""
+    if getattr(args, "kv_quant_scheme", None) != "kvarn":
+        return False
+    print("warning: --kv-quant-scheme kvarn is not applied on the VLM path "
+          "yet; KV stays fp16", file=sys.stderr)
+    return True
+
+
 def maybe_load_from_config(args, parser, argv) -> int | None:
     """If the positional model isn't an on-disk file (nor a remote ref), resolve it as a
     server-config model id/alias and overlay that model's settings onto ``args`` (and
@@ -2188,7 +2195,9 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
             return None
         # Family detection before resolution, so the family base layer (and
         # family-resolved @intents) shape the overlay exactly like the server.
-        from gmlx.load.discovery import fill_families
+        from gmlx.load.discovery import fill_families, merge_discovered
+        if raw.split("@", 1)[0] not in cfg.models and raw not in cfg.aliases:
+            merge_discovered(cfg)
         fill_families(cfg)
         rm = cfgmod.resolve_cli_model(
             raw, cfg, request_profile=getattr(args, "profile", None))

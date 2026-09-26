@@ -222,7 +222,7 @@ _PQ_LOG = env_bool("GMLX_MTP_PQ_LOG", False)
 # decoding. Opt in per process with run/chat --stochastic-mtp or the server
 # config `stochastic_mtp: true` (set_stoch_accept); GMLX_MTP_STOCH_ACCEPT
 # presets the default for A/B runs. Acceptance gains are measured in
-# docs/performance.md.
+# docs/benchmarks.md.
 _STOCH_ACCEPT = env_bool("GMLX_MTP_STOCH_ACCEPT", False)
 # Round gate (B=1 owned rounds): a drafter that publishes round_estimate
 # after its draft, the tokens the round is expected to emit, has a round

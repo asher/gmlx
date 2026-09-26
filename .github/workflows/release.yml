@@ -10,11 +10,17 @@ name: release
 # macOS and reverts the push if that fails. To retry only these two jobs, run
 # the workflow on the release tag with homebrew_only set.
 #
+# The docs job builds the site from docs/ at the tag and deploys it to GitHub
+# Pages, so the site always describes the latest release. It is skipped on a
+# homebrew_only retry.
+#
 # Prerequisites (one-time, before the first real release):
 #   * a PyPI project + a Trusted Publisher entry for this repo/workflow;
 #   * a GitHub Environment named "pypi" (optionally with required reviewers);
 #   * a write-enabled deploy key on asher/homebrew-gmlx, with its private half
-#     stored in this repo as the HOMEBREW_TAP_DEPLOY_KEY secret.
+#     stored in this repo as the HOMEBREW_TAP_DEPLOY_KEY secret;
+#   * Settings > Pages > Source set to "GitHub Actions", and a "v*" tag rule
+#     under the github-pages environment's deployment branches and tags.
 
 on:
   push:
@@ -67,6 +73,35 @@ jobs:
           name: dist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  docs:
+    name: publish the docs site
+    needs: [publish]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build the site
+        # scripts/mkdocs_hooks.py points links to files outside docs/ at this
+        # tag on GitHub.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --group docs
+          mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v5
 
   homebrew:
     name: update the Homebrew tap

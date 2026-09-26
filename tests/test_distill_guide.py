@@ -31,7 +31,7 @@ USER_WRITTEN = {"schema.md", "freight.sqlite", "check-sql.py", "judge.py", "make
 PRODUCING = ("out", "adapter_out", "md", "json", "report", "rejects")
 CONSUMING = ("teacher", "student", "adapter", "corpus", "prompts", "context", "cache", "tables",
              "reply_positions", "kld_cache", "without", "chat_sanity")
-CONSUMING_LISTS = ("inputs", "views", "with_", "slices", "reply_slices")
+CONSUMING_LISTS = ("inputs", "view", "with_", "slice", "reply_slice")
 
 
 def _commands():

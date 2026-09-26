@@ -114,6 +114,17 @@ def test_affine_start_reads_the_load_window(monkeypatch):
         skv.resolve_for_load(_rg(), "m")
 
 
+def test_affine_start_defaults_to_zero_not_upstream(monkeypatch):
+    # upstream's 5000 rides on rg; unset means 0, as on run and chat.
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.delenv("QUANTIZED_KV_START", raising=False)
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    rg = _rg(quantized_kv_start=5000)
+    pol = skv.resolve_for_load(rg, "m")
+    assert rg.quantized_kv_start == 0
+    assert pol.single.quantized_kv_start == 0
+
+
 def test_kvarn_split_widths_follow_the_key_value_config(kvarn_ops_ok, monkeypatch):
 
     monkeypatch.delenv("GMLX_KVARN", raising=False)

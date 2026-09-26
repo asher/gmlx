@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tripwire for `docs/server-config.md`: every embedded YAML example must parse,
+"""Tripwire for `docs/config.md`: every embedded YAML example must parse,
 and the complete examples (first line `# doctest: build`) must build + validate
 through the real loader - so a renamed key or changed default can't silently drift
 the reference from the code. CPU-only; no model, no server."""
@@ -16,7 +16,8 @@ import yaml  # noqa: E402
 
 from gmlx import config  # noqa: E402
 
-_DOC = Path(__file__).resolve().parent.parent / "docs" / "server-config.md"
+_DOC = Path(__file__).resolve().parent.parent / "docs" / "config.md"
+_FAMILY_DOC = _DOC.parent / "family-defaults.md"
 _FENCE = re.compile(r"```yaml\n(.*?)```", re.DOTALL)
 
 
@@ -74,7 +75,7 @@ def test_family_table_in_sync_with_profiles_py():
     and must appear verbatim - a changed base value, arch list, or intent delta
     in code fails here until the doc row is updated."""
     import gmlx.gen.profiles as fp
-    doc = _DOC.read_text()
+    doc = _FAMILY_DOC.read_text()
     for row in fp.describe():
         fam = row["family"]
         arches = ", ".join(f"`{a}`" for a in row["arches"]) or "(anything else)"
@@ -87,10 +88,13 @@ def test_family_table_in_sync_with_profiles_py():
 
 
 def _param_reference_ticks() -> set:
-    """All `backticked` tokens inside the Param key reference section."""
+    """All `backticked` tokens in the sampling, load and cache sections."""
     doc = _DOC.read_text()
-    body = doc.split("## Param key reference", 1)[1].split("## Residency", 1)[0]
-    return set(re.findall(r"`([A-Za-z_0-9.]+)`", body))
+    body = doc.split("\n## Sampling\n", 1)[1].split("\n## Voice\n", 1)[0]
+    ticks = set(re.findall(r"`([A-Za-z_0-9.]+)`", body))
+    # Key headings carry their block path (`sampling.temperature`), so the
+    # last segment is the key itself.
+    return ticks | {t.rsplit(".", 1)[-1] for t in ticks}
 
 
 def test_sampling_keys_documented():
@@ -114,13 +118,13 @@ def _env_names() -> set:
 
 def test_env_names_owned_by_env_vars_doc():
     """The env names behind the load and cache keys live in docs/env-vars.md
-    and nowhere in docs/server-config.md: one owner per fact."""
+    and nowhere in docs/config.md: one owner per fact."""
     env_ticks = set(re.findall(r"`([A-Z_0-9]+)`", _ENV_DOC.read_text()))
     missing = _env_names() - env_ticks
     assert not missing, f"env vars missing from env-vars.md: {sorted(missing)}"
     doc = _DOC.read_text()
     leaked = {n for n in _env_names() if re.search(rf"\b{n}\b", doc)}
-    assert not leaked, f"env names must not appear in server-config.md: {sorted(leaked)}"
+    assert not leaked, f"env names must not appear in config.md: {sorted(leaked)}"
 
 
 def test_cache_keys_documented():

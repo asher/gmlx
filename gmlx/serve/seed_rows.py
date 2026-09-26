@@ -8,7 +8,7 @@ uid-to-seed registry, and every keyed draw derives that row's key from
 its own seed. Rows without a seed keep the stock derivation byte for
 byte, so seeded and unseeded rows coexist in one batch.
 
-Honest semantics (also in docs/server-config.md): seed guarantees a
+Honest semantics (also in docs/config.md): seed guarantees a
 deterministic sampling stream for that request. It does not guarantee
 bitwise-identical output across runs with different batch composition,
 because batched matmul reduction order shifts logits at float

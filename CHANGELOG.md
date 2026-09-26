@@ -14,9 +14,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsure.
 - `gmlx systemone` sends a decision request to a server or answers it
   offline, and `server.systemone` holds the route's settings.
+- The docs are published at https://asher.github.io/gmlx/ with navigation
+  and search, rebuilt from each release.
+- `--no-gpu-keepwarm` and `server.gpu_keepwarm: false` turn GPU keep-warm
+  off. The flag could only turn it on, which it already was by default.
+- The server logs the block and exact prompt-cache tiers at load, as it
+  already did for the checkpoint tier.
+- `gmlx doctor` prints the macOS version and warns when it is older than
+  26.2, the version that mlx-kquant's kernels need.
 
 ### Changed
 
+- A server request that sets no output cap runs until the model stops or its
+  context fills, as `gmlx run` does, instead of stopping at 2048 tokens.
+  `gmlx serve --max-tokens` and a profile's `max_tokens` still set a cap.
 - The package and Homebrew license metadata declare Apache-2.0 beside
   BUSL-1.1 and MIT, since gmlx ships Apache-2.0 files from omlx, misaki and
   vLLM.
@@ -40,9 +51,52 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   long context, by 19% on E2B and 5% on 31B with a 30k-token prompt.
 - Gemma-4 E2B and 12B decode faster at long context, by 2% on E2B with a
   30k-token prompt.
+- `gmlx init` writes only the settings you chose and the model entries,
+  under a header that links the configuration reference, instead of every
+  option as a commented example.
+- Only a pinned model is held for the life of the server. The default or
+  sole model of a config still loads at start, but it now unloads after its
+  idle timeout or under memory pressure like any other model.
+- Every pinned model loads at start, in file order, instead of only the
+  first one.
+- The server quantizes the KV cache from the first token by default, as
+  `gmlx run` and `gmlx chat` do. A single request kept an fp16 cache up to
+  5000 tokens unless `quantized_kv_start` was set.
+- `gmlx chat` with `--base-url`, `--host`, `--port`, `--api-key` or
+  `--no-start` runs as a server client, as `--server` does, instead of
+  refusing the flag.
 
 ### Fixed
 
+- With `--mmproj` and `--kv-quant-scheme kvarn`, `run` and `chat` keep the
+  KV cache in fp16, as their warning says. An explicit `--kv-bits` built an
+  affine cache instead.
+- `gmlx init -i` pre-fills the wizard from every flag it is given, such as
+  `--with-stt`, `--disk-cache` and `--idle-ttl`. It used only the output
+  file, the port and the first models folder.
+- A server started without a config file ignores `SIGHUP` with a log line.
+  The signal stopped it.
+- `gmlx doctor` checks the MCP servers in `assistant.mcp`, which
+  `gmlx chat --assistant` always uses. It skipped them unless talk or an
+  alias used them.
+- `gmlx launch open-webui` keeps an `AUDIO_TTS_VOICE` that you export
+  instead of replacing it with the Kokoro default.
+- The default prompt-cache disk folder follows `XDG_CACHE_HOME`, like the
+  other gmlx caches.
+- `cache.disk.namespace` now names the disk-tier namespace. The model path
+  always took its place, so the key had no effect.
+- The server applies `stream_fast_disk` and `gmlx serve --stream-fast-disk`
+  to the decode feeder. Only `run` and `chat` applied them.
+- A chat theme with a new name under `themes` no longer crashes the markdown
+  renderer, and a theme that shadows a built-in renders with its own colors.
+- The `ptk_toolbar` theme key now colors the chat toolbar. It was never
+  applied.
+- `gmlx serve`, `gmlx run` and `gmlx chat` serve the models that a config's
+  `discover` block finds. Only `gmlx list` and `gmlx rm` saw them, so a
+  request for a discovered id failed.
+- The install docs state macOS 26.2 as the minimum for every install route.
+  They described a build from source for older macOS, which the Metal
+  kernels do not support.
 - The `--draft-block-size` help and docs called N the drafted tokens. A round
   drafts N-1, so llama-server's `--spec-draft-n-max M` matches N = M+1.
 - DiffusionGemma prompts on `gmlx run` and on the server started with two BOS
@@ -56,6 +110,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tokens, where the same request sent alone decoded right.
 - With a drafter, a repeated gemma-4 prompt shorter than the sliding window
   prefilled in full unless its length fell on a block boundary.
+- `gmlx distill gen` with `--serve-arg=--adapter` exited because the server
+  lists the adapted model and `<id>-base`. It now sends its requests to the
+  adapted model.
+- A model entry with `ttl_s: null` took the server's idle timeout. It now
+  never unloads, as `null` already meant under `server.defaults`.
 
 ## [0.4.17] - 2026-09-25
 

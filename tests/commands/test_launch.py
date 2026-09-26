@@ -1232,6 +1232,7 @@ def test_build_open_webui_env_audio_independent_toggles():
 def test_launch_open_webui_detects_audio_from_models(monkeypatch, tmp_path):
     # Server advertises STT + TTS capability via /v1/models markers; the harness must
     # pick them up and route Open WebUI's audio engines at the server.
+    monkeypatch.delenv("AUDIO_TTS_VOICE", raising=False)
     audio_models = _models() + [
         {"id": "whisper-1", "stt": True},
         {"id": "tts-1", "tts": True},
@@ -1248,6 +1249,19 @@ def test_launch_open_webui_detects_audio_from_models(monkeypatch, tmp_path):
     assert env["AUDIO_STT_ENGINE"] == "openai"
     assert env["AUDIO_TTS_ENGINE"] == "openai"
     assert env["AUDIO_TTS_VOICE"] == "af_heart"
+
+
+def test_launch_open_webui_keeps_an_exported_voice(monkeypatch, tmp_path):
+    audio_models = _models() + [{"id": "tts-1", "tts": True}]
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(launch, "probe_models",
+                        lambda base, api_key=None: audio_models)
+    monkeypatch.setenv("AUDIO_TTS_VOICE", "Vivian")
+    calls = {}
+    launch._launch_open_webui(
+        _args(harness="open-webui", config_path=str(tmp_path)),
+        exec_fn=lambda b, a, e: calls.update(env=e) or 0)
+    assert calls["env"]["AUDIO_TTS_VOICE"] == "Vivian"
 
 
 def test_launch_open_webui_no_audio_when_chat_only(monkeypatch, tmp_path):

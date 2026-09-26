@@ -457,7 +457,7 @@ class Theme:
         from rich.style import Style as RStyle
         from rich.theme import Theme as RTheme
 
-        spec = THEMES[self.name]
+        spec = _USER_THEMES.get(self.name) or THEMES[self.name]
         slots = _cb_slots(spec) if self.colorblind else spec.slots
 
         def conv(slot: str) -> RStyle:

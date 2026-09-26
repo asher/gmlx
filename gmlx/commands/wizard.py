@@ -57,6 +57,34 @@ _SERVICES = (
 
 
 @dataclass
+class Seeds:
+    """Answers that `gmlx init -i` flags pre-fill. Each becomes the default of
+    its question, so Enter accepts it. ``services`` maps stt, tts, embeddings
+    and rerank to a model value, or to None for the service's default."""
+
+    dirs: list | None = None
+    recursive: bool | None = None
+    hf_cache: bool = False
+    disk_cache_gb: float | None = None
+    services: dict = field(default_factory=dict)
+    default_model: str | None = None
+    ttl_s: float | None = None
+    timeout_s: float | None = None
+    overwrite: bool = False
+    install: bool = False
+    port: int | None = None
+
+
+def _choice_default(options: list, value) -> tuple[list, int]:
+    """``options`` with ``value`` selected, adding a row when no option has it."""
+    for i, (_label, v) in enumerate(options):
+        if v == value:
+            return options, i
+    return options + [(f"{value:g} seconds (from the command line)", value)], \
+        len(options)
+
+
+@dataclass
 class Outcome:
     """What the wizard hands back for the shared writer to commit."""
     out: Path
@@ -323,7 +351,9 @@ def _profiles_step(io: WizardIO, models: list) -> None:
 
 
 def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
-                       needs_ffmpeg, blurb, *, allow_install: bool):
+                       needs_ffmpeg, blurb, *, allow_install: bool,
+                       seeded: bool = False, seed_model=None,
+                       install: bool = False):
     """Describe one service (what it does, what it installs, its default model),
     ask whether to configure it; on yes, pick a model and (optionally) install its
     extra. Returns the chosen model value, or ``None`` if skipped. Used for STT /
@@ -333,16 +363,16 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
     io.note(f"  {blurb}; default model `{default_alias}`.")
     ffmpeg = " + ffmpeg on PATH" if needs_ffmpeg else ""
     io.note(f"  installs the [{key}] extra ({pkgs}){ffmpeg} if not already present.")
-    if not io.yesno("Configure it?", default=False):
+    if not io.yesno("Configure it?", default=seeded):
         return None
     io.note(f"  presets: {', '.join(alias_table)}  "
             "(or an HF repo id / local path)")
-    model = io.text(f"  {key} model", default=default_alias)
+    model = io.text(f"  {key} model", default=seed_model or default_alias)
     if not extras.extra_installed(key):
         pkgs = " ".join(extras.extra_packages(key))
         if allow_install and io.yesno(
                 f"  the {key} extra ({pkgs}) isn't installed - install it now?",
-                default=False):
+                default=install):
             ok = extras.install_extra(key)
             io.note("  installed." if ok else
                     f"  install failed - configure anyway; retry later "
@@ -392,7 +422,7 @@ def _offer_found(io: WizardIO, found, label: str):
     return None
 
 
-def _pick_embedding(io: WizardIO):
+def _pick_embedding(io: WizardIO, default: str = "1"):
     """Print the tiered guidance table and read a choice. Returns a preset dict, or
     a raw string (a custom HF repo id / local path the user typed)."""
     io.note("\nPick an embedding model "
@@ -412,7 +442,7 @@ def _pick_embedding(io: WizardIO):
     n = len(rows)
     while True:
         raw = io.text(f"  embedding model [1-{n} or repo/path]",
-                      default="1").strip()
+                      default=default).strip()
         if raw.isdigit():
             if 1 <= int(raw) <= n:
                 return rows[int(raw) - 1]
@@ -437,7 +467,8 @@ def _pick_quant(io: WizardIO, preset: dict, *, prefer=None) -> str:
         opts, default=rungs.index(default))
 
 
-def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install):
+def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install,
+                                    install: bool = False):
     """Offer to install the [embeddings] extra unless ``value`` is a GGUF ref (the
     decoder-LM backend needs no extra). ``value`` is the already-resolved concrete
     ref/repo, so the GGUF test is correct - the old bug tested a raw alias."""
@@ -448,7 +479,7 @@ def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install):
     pkgs = " ".join(extras.extra_packages("embeddings"))
     if allow_install and io.yesno(
             f"  the embeddings extra ({pkgs}) isn't installed - install it now?",
-            default=False):
+            default=install):
         ok = extras.install_extra("embeddings")
         io.note("  installed." if ok else
                 "  install failed - configure anyway; retry later with: "
@@ -458,7 +489,9 @@ def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install):
                 f"{extras.install_hint('embeddings')}")
 
 
-def _configure_embeddings(io: WizardIO, *, allow_install: bool, found):
+def _configure_embeddings(io: WizardIO, *, allow_install: bool, found,
+                          seeded: bool = False, seed_model=None,
+                          install: bool = False):
     """Configure text embeddings: adopt an embedder GGUF already on disk, else pick
     a tiered preset + quant (or a custom repo/path), installing the [embeddings]
     extra when a safetensors encoder needs it. Returns ``(value, quant_rung)`` -
@@ -471,20 +504,23 @@ def _configure_embeddings(io: WizardIO, *, allow_install: bool, found):
     adopt = _offer_found(io, found, "embedder")
     if adopt is not None:
         return adopt, None
-    if not io.yesno("Configure text embeddings?", default=False):
+    if not io.yesno("Configure text embeddings?", default=seeded):
         return None, None
-    pick = _pick_embedding(io)
+    pick = _pick_embedding(io, default=seed_model or "1")
     if isinstance(pick, str):                   # custom HF repo id / local path
-        _maybe_install_embeddings_extra(io, pick, allow_install=allow_install)
+        _maybe_install_embeddings_extra(io, pick, allow_install=allow_install,
+                                        install=install)
         return pick, None
     rung = _pick_quant(io, pick)
     value = pick["quants"][rung]
     if pick["tier"] == "mlx":
-        _maybe_install_embeddings_extra(io, value, allow_install=allow_install)
+        _maybe_install_embeddings_extra(io, value, allow_install=allow_install,
+                                        install=install)
     return value, rung
 
 
-def _configure_rerank(io: WizardIO, *, found, embed_quant):
+def _configure_rerank(io: WizardIO, *, found, embed_quant, seeded: bool = False,
+                      seed_model=None):
     """Configure reranking (POST /v1/rerank): adopt a reranker GGUF already on
     disk, else pick a Qwen3-Reranker size + quant. The quant defaults to
     ``embed_quant`` (the embedder's chosen rung) when that rung exists, else the
@@ -495,8 +531,10 @@ def _configure_rerank(io: WizardIO, *, found, embed_quant):
     adopt = _offer_found(io, found, "reranker")
     if adopt is not None:
         return adopt
-    if not io.yesno("Configure reranking?", default=False):
+    if not io.yesno("Configure reranking?", default=seeded):
         return None
+    if seed_model:
+        return seed_model
     opts = [(f"{p['label']} - {p['blurb']}", p) for p in rerank.RERANK_PRESETS]
     preset = io.choice("\nPick a reranker size:", opts, default=0)
     rung = _pick_quant(io, preset, prefer=embed_quant)
@@ -567,24 +605,27 @@ def _configure_talk(io: WizardIO, *, stt_model, tts_model,
 
 # The wizard
 def run_wizard(*, default_out, io: WizardIO | None = None,
-               seed_dirs=None, allow_install: bool = True,
-               port=None) -> Outcome | None:
+               seeds: Seeds | None = None,
+               allow_install: bool = True) -> Outcome | None:
     """Walk the guided init flow and return an :class:`Outcome` to write, or
     ``None`` if the user cancels at the final confirm. ``default_out`` is the path
-    a bare ``gmlx serve`` would find; ``seed_dirs`` pre-seeds the dir prompt (from
-    ``-i --models-dir``). ``allow_install`` gates the pip-install offers; ``port``
-    (from ``-i --port``) overrides the scaffold's server.port."""
+    a bare ``gmlx serve`` would find; ``seeds`` pre-fill the answers from the
+    ``init -i`` flags. ``allow_install`` gates the pip-install offers."""
     io = io or make_io()
+    seeds = seeds or Seeds()
+    svc = seeds.services
     io.note("gmlx init - let's build a server config.\n")
 
     # 1. Model directories + scan.
-    default_dir = (seed_dirs or [None])[0] or _suggested_dir()
+    default_dir = (shlex.join(seeds.dirs) if seeds.dirs else _suggested_dir())
     answer = io.text("Directory of GGUFs to scan (space-separated for several, "
                      "quote paths with spaces)", default=default_dir)
     # shlex keeps the space-separated multi-dir affordance while letting a
     # quoted "~/My Models" through in one piece.
     dirs = shlex.split(answer) if answer else []
-    recursive = io.yesno("Recurse into subdirectories?", default=True)
+    recursive = io.yesno("Recurse into subdirectories?",
+                         default=True if seeds.recursive is None
+                         else seeds.recursive)
 
     models: list[ModelCfg] = []
     if dirs:
@@ -594,7 +635,8 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     # 2. Hugging Face cache (only when it actually holds GGUFs).
     hf_cache = False
     if _hf_cache_has_gguf() and io.yesno(
-            "\nAlso include GGUFs from your Hugging Face cache?", default=False):
+            "\nAlso include GGUFs from your Hugging Face cache?",
+            default=seeds.hf_cache):
         models += discovery.scan_hf_cache(
             known_ids={m.id for m in models}, progress=True)
         hf_cache = True
@@ -603,6 +645,8 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     default_model, aliases = None, {}
     if models:
         models, default_model, aliases = _curate(io, models)
+        if default_model is None and seeds.default_model in {m.id for m in models}:
+            default_model = seeds.default_model
     else:
         io.note("\nNo GGUFs found yet - writing a valid zero-model config; "
                 "`gmlx pull` some in, then `gmlx sync-models`.")
@@ -612,12 +656,14 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
 
     # 4. Prompt-cache SSD tier. The in-memory prompt cache is on in every
     # generated config; this decides only whether it also persists to disk.
+    from gmlx.config import default_apc_disk_path
     disk_cache = io.yesno(
         "\nThe prompt cache reuses prompt prefixes across requests (on by "
-        "default).\nAlso persist it to disk at ~/.cache/gmlx/apc, so reuse "
-        "survives an\nidle-unload or restart?",
-        default=False)
-    disk_cache_gb = _ask_cache_gb(io) if disk_cache else None
+        f"default).\nAlso persist it to disk at {default_apc_disk_path()}, "
+        "so reuse survives an\nidle-unload or restart?",
+        default=seeds.disk_cache_gb is not None)
+    disk_cache_gb = (_ask_cache_gb(io, seeds.disk_cache_gb or 50.0)
+                     if disk_cache else None)
 
     # 5. Optional services (+ install). STT / TTS use the generic flow; embeddings
     # and rerank have richer flows with auto-pickup of a retrieval GGUF already on
@@ -626,14 +672,18 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     for key, label, table, default_alias, needs_ffmpeg, blurb in _SERVICES:
         svc_values[key] = _configure_service(
             io, key, label, table, default_alias, needs_ffmpeg, blurb,
-            allow_install=allow_install)
+            allow_install=allow_install, seeded=key in svc,
+            seed_model=svc.get(key), install=seeds.install)
     found_emb, found_rerank = (
         discovery.find_retrieval_models(dirs, recursive=recursive)
         if dirs else ([], []))
     emb_value, emb_quant = _configure_embeddings(
-        io, allow_install=allow_install, found=found_emb)
+        io, allow_install=allow_install, found=found_emb,
+        seeded="embeddings" in svc, seed_model=svc.get("embeddings"),
+        install=seeds.install)
     rerank_value = _configure_rerank(
-        io, found=found_rerank, embed_quant=emb_quant)
+        io, found=found_rerank, embed_quant=emb_quant,
+        seeded="rerank" in svc, seed_model=svc.get("rerank"))
     talk_value = _configure_talk(
         io, stt_model=svc_values["stt"], tts_model=svc_values["tts"],
         allow_install=allow_install)
@@ -642,22 +692,28 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     io.note("\nUnloading frees the model and its in-memory KV cache. If the "
             "on-disk prompt\ncache is enabled, cached prefixes survive there and "
             "reload quickly.")
-    ttl_s = io.choice(
-        "Auto-unload an idle model after:",
+    ttl_opts, ttl_default = (
         [("10 minutes", 600), ("15 minutes", 900), ("30 minutes", 1800),
          ("1 hour", 3600),
          ("never (keep resident; evict manually or under memory pressure)", 0)],
-        default=1)
+        1)
+    if seeds.ttl_s is not None:
+        ttl_opts, ttl_default = _choice_default(ttl_opts, seeds.ttl_s)
+    ttl_s = io.choice("Auto-unload an idle model after:", ttl_opts,
+                      default=ttl_default)
     io.note("\nA single request (prefill + generation) can be slow for some "
             "model + context\ncombinations. Some cases may need significant time "
             "to generate the first token.\nThis caps the wait for the NEXT token "
             "before the server gives up (each token\nresets it, so a healthy long "
             "reply is never cut off).")
-    timeout_s = io.choice(
-        "Give up on a request if no new token arrives for:",
+    # The default matches the config-less server default (1800s).
+    to_opts, to_default = (
         [("10 minutes", 600), ("30 minutes", 1800), ("1 hour", 3600),
-         ("4 hours", 14400), ("never (wait forever)", 0)],
-        default=1)   # matches the config-less server default (1800s)
+         ("4 hours", 14400), ("never (wait forever)", 0)], 1)
+    if seeds.timeout_s is not None:
+        to_opts, to_default = _choice_default(to_opts, seeds.timeout_s)
+    timeout_s = io.choice("Give up on a request if no new token arrives for:",
+                          to_opts, default=to_default)
 
     # 7. Output path (+ overwrite).
     user_out = Path(os.path.expanduser(str(default_out)))
@@ -667,7 +723,8 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
          ("project-local (./gmlx.yaml)", "project")],
         default=0)
     out = user_out if where == "user" else Path("gmlx.yaml").resolve()
-    if out.exists() and not io.yesno(f"\n{out} exists - overwrite?", default=False):
+    if out.exists() and not io.yesno(f"\n{out} exists - overwrite?",
+                                     default=seeds.overwrite):
         io.note("aborted (existing config left in place).")
         return None
 
@@ -678,7 +735,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         stt=svc_values["stt"], tts=svc_values["tts"],
         embeddings=emb_value, rerank=rerank_value, default_model=default_model,
         aliases=aliases, ttl_s=ttl_s, token_queue_timeout_s=timeout_s,
-        talk=talk_value, port=port)
+        talk=talk_value, port=seeds.port)
     io.note("\n----- config preview -----")
     io.note(text)
     io.note("----- end preview -----")

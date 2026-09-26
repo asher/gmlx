@@ -531,6 +531,7 @@ def _install_stream_placement(
     moe_miss_shed: float | None = None,
     moe_prestage: str | None = None,
     moe_layer_shed: float | None = None,
+    fast_disk: str | None = None,
 ) -> None:
     """Put the execution placement and the lossy MoE levers on a text tower.
 
@@ -547,12 +548,14 @@ def _install_stream_placement(
         from gmlx.stream.expert_streaming import configure_stream_cpu
         configure_stream_cpu(
             text_model, gguf_path=gguf_path,
-            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
+            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
+            fast_disk=fast_disk)
     elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
         from gmlx.stream.expert_streaming import install_expert_streaming
         install_expert_streaming(
             text_model, gguf_path=gguf_path,
-            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
+            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
+            fast_disk=fast_disk)
     if moe_experts is not None:
         from gmlx.stream.expert_streaming import install_moe_experts_override
         install_moe_experts_override(text_model, moe_experts)
@@ -591,6 +594,7 @@ def load_serveable_model(
     moe_prestage: str | None = None,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
+    fast_disk: str | None = None,
 ) -> tuple[object, object, object]:
     """Load a GGUF model into the form mlx-vlm's server expects.
 
@@ -668,7 +672,7 @@ def load_serveable_model(
     _levers: dict[str, Any] = dict(
         moe_experts=moe_experts, moe_expert_mass=moe_expert_mass,
         moe_miss_shed=moe_miss_shed, moe_prestage=moe_prestage,
-        moe_layer_shed=moe_layer_shed)
+        moe_layer_shed=moe_layer_shed, fast_disk=fast_disk)
 
     if mmproj_path is not None and speculative:
         # VLM x MTP: text-only requests speculate; image/audio requests prefill media
@@ -994,6 +998,7 @@ def install_gguf_server_bridge() -> None:
                 moe_prestage=getattr(spec, "moe_prestage", None),
                 feeder_prefill=getattr(spec, "prefill_feeder", None),
                 feeder_decode=getattr(spec, "decode_feeder", None),
+                fast_disk=getattr(spec, "stream_fast_disk", None),
             )
             # Path registry + the per-build MLX_VLM_GGUF_SPECULATIVE env window
             # (set by residency) decide MTP vs plain - both process-global, so they

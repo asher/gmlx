@@ -107,17 +107,17 @@ _FAMILY_NOTES = {
 # implementation record and is not rendered.
 _CAVEATS = {
     "deepseek2": "DeepSeek-V2, with softmax gating, is not supported.",
-    "deepseek4": "Not a llama.cpp conversion. The parity reference is the ds4 engine.",
-    "deepseek41": "MTP is not yet implemented. The ds4 conversion's engram tables are read from the GGUF row by row.",
-    "gemma2": "Pass hf_source for 27B. Output matches the reference only within the 4096 window.",
+    "deepseek4": "The GGUF is not a llama.cpp conversion.",
+    "deepseek41": "MTP is not yet implemented. An engram lookup table larger than one GPU buffer is read from the file row by row.",
+    "gemma2": "Pass hf_source for 27B. Output matches llama.cpp only up to 4096 tokens, the size of the model's sliding attention window.",
     "gemma3": "Pass hf_source for 27B.",
     "phi3": "Pass hf_source for the 128K long-context variants.",
     "hy_v3": "Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them.",
-    "hyv4": "No MTP head in the GGUF, so no speculative decoding. --kv-bits is refused.",
+    "hyv4": "The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` is refused.",
     "qwen4exp": "The MTP head needs the companion GGUF next to the target or --draft-gguf.",
-    "kimi-k3": "The hybrid cache cannot trim, so chat re-prefills on trim.",
-    "glm5next": "The hybrid cache cannot trim, so chat re-prefills on trim.",
-    "minimax-m3": "Indexless GGUFs run dense, exact to 2048 tokens and degrading beyond.",
+    "kimi-k3": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
+    "glm5next": "The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message.",
+    "minimax-m3": "Without indexer tensors or an indexer sidecar file, a GGUF runs dense. Its output is exact to 2048 tokens and degrades beyond that.",
 }
 
 

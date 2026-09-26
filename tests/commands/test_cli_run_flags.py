@@ -251,3 +251,16 @@ def test_run_reasoning_default_and_explicit(gguf, gen):
     assert gen["reasoning"] == "show"          # default matches chat
     assert cli.main([gguf, "--reasoning", "raw"]) == 0
     assert gen["reasoning"] == "raw"
+
+
+def test_vlm_path_keeps_fp16_under_kvarn(capsys):
+    # The VLM path has no kvarn cache, so kvarn keeps KV fp16 there rather
+    # than passing the width on to an affine cache.
+    import types
+    import gmlx.commands.cli as cli
+
+    assert cli.vlm_declines_kvarn(types.SimpleNamespace(kv_quant_scheme="kvarn"))
+    assert "KV stays fp16" in capsys.readouterr().err
+    assert not cli.vlm_declines_kvarn(
+        types.SimpleNamespace(kv_quant_scheme="uniform"))
+    assert not cli.vlm_declines_kvarn(types.SimpleNamespace())

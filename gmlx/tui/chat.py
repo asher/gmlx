@@ -124,8 +124,9 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         action="store_true",
         help="Plain server client: chat on a running (auto-started) server "
         "with no assistant extras (no tools, no memory). The positional is "
-        "a served model id. Engages automatically when the config's server "
-        "is already up and serves the requested model.",
+        "a served model id. Engages automatically with --base-url, --host, "
+        "--port, --api-key or --no-start, or when the config's server is "
+        "already up and serves the requested model.",
     )
     ap.add_argument(
         "--local",
@@ -1795,7 +1796,10 @@ def _wire_ptk(state: ChatState) -> bool:
                 parts.pop(next(i for i, (_, d) in enumerate(parts) if d))
         return " · ".join(p for p, _ in parts)
 
+    from prompt_toolkit.styles import DynamicStyle
+
     state.ptk_session = PromptSession(
+        style=DynamicStyle(lambda: _ptk_style(state.theme)),
         history=_ToggleableFileHistory(hist_file),
         auto_suggest=AutoSuggestFromHistory(),
         completer=_SlashCompleter(),
@@ -1805,6 +1809,18 @@ def _wire_ptk(state: ChatState) -> bool:
     )
     state.history_loaded = True
     return True
+
+
+def _ptk_style(theme):
+    """The toolbar style of ``theme``, read on each redraw so /theme applies at
+    once. prompt_toolkit draws the toolbar in reverse video by default, so a
+    theme's colors turn that off. No style when color is off."""
+    from prompt_toolkit.styles import Style
+
+    toolbar = getattr(theme, "ptk_toolbar", None)
+    if not toolbar or not any(getattr(theme, "sgr", {}).values()):
+        return Style([])
+    return Style.from_dict({"bottom-toolbar": f"noreverse {toolbar}"})
 
 
 def _wire_input(no_history: bool) -> ChatState:
@@ -2286,6 +2302,13 @@ def _assistant_flag_gate(args, parser) -> int | None:
     return None
 
 
+# Flags that only mean something against a server; any one of them selects
+# --server when neither --assistant nor --server is given.
+_SERVER_TARGET_FLAGS = (("base_url", "--base-url"), ("host", "--host"),
+                        ("port", "--port"), ("api_key", "--api-key"),
+                        ("no_start", "--no-start"))
+
+
 def _auto_server(args, parser) -> bool:
     """Whether a bare ``gmlx chat`` should become a --server client: the
     managed/config server already answers and serves the requested id, and no
@@ -2297,7 +2320,7 @@ def _auto_server(args, parser) -> bool:
     if args.local or args.assistant or args.server:
         return False
     if args.base_url or args.host or args.port or args.no_start:
-        return False              # explicit targeting keeps today's contract
+        return False              # explicit targeting already chose --server
     for attr, _flag in _ASSISTANT_REJECT + _ASSISTANT_NOOP:
         if getattr(args, attr, None) not in (None, False):
             return False          # a local-load flag pins the local path
@@ -3149,6 +3172,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     if args.server and args.assistant:
         parser.error("--assistant and --server are mutually exclusive "
                      "(--server is the assistant path minus its extras)")
+    target_flag = next((flag for attr, flag in _SERVER_TARGET_FLAGS
+                        if getattr(args, attr, None) not in (None, False)),
+                       None)
+    if target_flag and not (args.assistant or args.server):
+        if args.local:
+            parser.error(f"{target_flag} targets a server and cannot combine "
+                         f"with --local")
+        args.server = True        # a server-targeting flag implies --server
     if _auto_server(args, parser):
         args.server = True
         args.no_start = True      # the probe saw it up; never start one
@@ -3188,17 +3219,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         speculative = False
         vlm_mtp = False
     else:
-        # The server-targeting flags only apply under --assistant/--server;
-        # without one chat loads the model in-process. Accepting them silently
-        # would leave the user believing they are on the server while a second
-        # copy loads.
-        for attr, flag in (("base_url", "--base-url"), ("host", "--host"),
-                           ("port", "--port"), ("api_key", "--api-key"),
-                           ("no_start", "--no-start")):
-            if getattr(args, attr, None) not in (None, False):
-                parser.error(f"{flag} targets a server and needs --assistant "
-                             f"or --server (without one, chat loads the model "
-                             f"in-process)")
         if not args.gguf:
             # Not parser.error: that leads with the full usage dump, which is
             # exactly the wall of text a first-run user shouldn't wade through.
@@ -3410,6 +3430,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     }
     if args.prefill_step_size is not None:
         kv_kwargs["prefill_step_size"] = args.prefill_step_size
+    if args.mmproj:
+        from gmlx.commands.cli import vlm_declines_kvarn
+        if vlm_declines_kvarn(args):
+            kv_kwargs["kv_bits"] = None
 
     if brain is not None:
         state.assistant_brain = brain

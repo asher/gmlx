@@ -121,6 +121,29 @@ def test_user_theme_extends_named_theme_and_shadows_builtins(user_themes):
     assert kid.error == "\x1b[1;91m"
 
 
+def test_user_theme_builds_rich_theme(user_themes):
+    # A new name and a shadowed built-in both render from the user spec.
+    th.register_user_themes({
+        "my-black": {"heading": {"bold": True, "rgb": "#112233"}},
+        "nord": {"extends": "nord", "heading": {"rgb": "#445566"}},
+    })
+    rt = th.resolve_theme("my-black", depth=1 << 24).rich_theme()
+    assert rt.styles["markdown.h1"].color.name == "#112233"
+    rt = th.resolve_theme("nord", depth=1 << 24).rich_theme()
+    assert rt.styles["markdown.h1"].color.name == "#445566"
+
+
+def test_ptk_toolbar_styles_the_prompt_toolbar(user_themes):
+    import gmlx.tui.chat as chat
+
+    th.register_user_themes({"bar": {"ptk_toolbar": "bg:#010203 #aabbcc"}})
+    style = chat._ptk_style(th.resolve_theme("bar", depth=1 << 24))
+    assert ("bottom-toolbar", "noreverse bg:#010203 #aabbcc") in \
+        style.style_rules
+    assert chat._ptk_style(th.resolve_theme("dark", depth=1 << 24)) \
+        .style_rules == []
+
+
 def test_user_theme_colorblind_remap_applies(user_themes):
     th.register_user_themes({"my-black": {"thinking": {"fg16": 94}}})
     cb = th.resolve_theme("my-black", colorblind=True, depth=1 << 24)

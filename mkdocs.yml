@@ -1,0 +1,141 @@
+site_name: gmlx
+site_description: Run GGUF models on Apple Silicon.
+site_url: https://asher.github.io/gmlx/
+repo_url: https://github.com/asher/gmlx
+repo_name: asher/gmlx
+
+# Raw <img> tags in benchmarks.md use paths relative to docs/, which only
+# resolve when each page is served from the same directory as its source.
+use_directory_urls: false
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/logo.svg
+  favicon: assets/favicon.png
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Follow the system theme
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - search.highlight
+    - toc.follow
+
+hooks:
+  - scripts/mkdocs_hooks.py
+
+exclude_docs: |
+  assets/record-demo.sh
+
+# The pages that have moved stay in docs/ as pointers for old links.
+not_in_nav: |
+  adapter-serving.md
+  adding-architectures.md
+  getting-started.md
+  serving-architecture.md
+  server-config.md
+  testing.md
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: README.md
+  - User guide:
+      - Getting started:
+          - installation.md
+          - quickstart.md
+          - migrating.md
+      - Serving:
+          - config.md
+          - launch.md
+          - menubar.md
+          - services.md
+          - rag.md
+          - decisions.md
+      - Clients:
+          - chat.md
+          - talk.md
+          - assistant.md
+      - Models:
+          - arch-coverage.md
+          - vlm.md
+          - streaming.md
+          - lora.md
+          - distill.md
+      - Performance:
+          - performance.md
+          - speculative-decoding.md
+          - prompt-cache.md
+          - concurrency.md
+          - memory.md
+          - kv-quantization.md
+      - Help:
+          - troubleshooting.md
+          - glossary.md
+  - Reference:
+      - cli.md
+      - family-defaults.md
+      - api.md
+      - env-vars.md
+      - python.md
+  - Benchmarks: benchmarks.md
+  - Developer guide:
+      - internals/README.md
+      - internals/serving-architecture.md
+      - internals/speculative-batching.md
+      - internals/prompt-cache.md
+      - internals/adding-architectures.md
+      - internals/testing.md
+      - internals/upstream-upgrades.md
+      - internals/streaming-measurements.md
+      - internals/structured-reads.md
+      - internals/structured-read-measurements.md
+      - internals/hadamard-fold.md
+      - internals/debug-switches.md
+      - internals/distill.md
+      - Contributing: https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md

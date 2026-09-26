@@ -323,7 +323,7 @@ def test_resident_ttl_disable_env(monkeypatch, capsys):
 
 
 def test_default_budget_fraction(monkeypatch):
-    # docs/server-config.md: default budget = 0.8x the GPU recommended working set.
+    # docs/config.md: default budget = 0.8x the GPU recommended working set.
     import mlx.core as mx
 
     monkeypatch.setattr(

@@ -127,6 +127,7 @@ from .routes import (
     spawn_preload_warm,
 )
 from .sampling import (
+    install_until_eos_default,
     install_fast_sampler,
     install_gen_args_profile_injection,
     install_max_completion_tokens,
@@ -153,6 +154,7 @@ __all__ = [
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
+    "install_until_eos_default",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
     "install_health_readiness",
@@ -343,6 +345,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # the defer wrap must be the outer one for both installs to stay
     # idempotent).
     install_mtp_thinking_budget()
+    # After every other thinking-criteria patch: its wrapper carries their
+    # flags forward, and none of them may replace it.
+    install_until_eos_default()
     # Late so the trace brackets the full tick including pacing and
     # admission work.
     from gmlx.serve.memtrace import install_serve_memtrace

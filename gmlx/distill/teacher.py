@@ -841,7 +841,7 @@ def run_cache(opts: CacheOptions) -> int:
                         f"{plan['bytes_per_v']}, step {step} -> {new_step}")
                     if new_step != step:
                         step = new_step
-                        # second probe on the next sub-chunk confirms; a second failure refuses
+                        # a second probe from the same start confirms; a second failure refuses
                         mx.reset_peak_memory()
                         e2 = min(s + step, n)
                         logits = head_logits(head, flat_h[s:e2])

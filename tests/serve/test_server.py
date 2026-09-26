@@ -302,6 +302,29 @@ def test_discovery_cfg_wraps_scan(monkeypatch):
     assert cfg.port == 9000
 
 
+def test_config_mode_serves_discover_scan(monkeypatch, tmp_path):
+    # A config's discover block adds its models at start and again on each
+    # reload; a configured entry keeps its id.
+    conf = tmp_path / "gmlx.yaml"
+    conf.write_text("models:\n  mine: {path: /m/mine.gguf}\n"
+                    "discover:\n  - {dir: /m}\n")
+    scans = []
+
+    def fake_scan(specs, dirs, *, known_ids=(), known_paths=(), **kw):
+        scans.append(set(known_ids))
+        return [ModelCfg(id="loose", path="/m/loose.gguf")]
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    registered = []
+    monkeypatch.setattr("gmlx.serve.bridge_vlm.register_resolved_models",
+                        lambda cfg: registered.append(set(cfg.models)))
+    cfg, reload_fn = srv._resolve_mode_cfg(_ns(config=str(conf)))
+    assert set(cfg.models) == {"mine", "loose"}
+    assert scans == [{"mine"}]
+    assert reload_fn() == {"models": 2}
+    assert registered == [{"mine", "loose"}]
+
+
 # preload pick: pinned > defaults.model > sole > none
 def test_preload_prefers_pinned():
     cfg = ServerCfg(models={
@@ -1124,9 +1147,10 @@ def _stub_serving_stack(monkeypatch):
                         lambda cfg, reload_fn=None:
                         calls.__setitem__("patches_cfg", cfg))
     monkeypatch.setattr(sp_mod, "spawn_preload_warm",
-                        lambda mid, extras=():
+                        lambda mid, extras=(), retain=True:
                         (calls.__setitem__("preload_warm", mid),
-                         calls.__setitem__("preload_extras", list(extras))))
+                         calls.__setitem__("preload_extras", list(extras)),
+                         calls.__setitem__("preload_retain", retain)))
     monkeypatch.setattr(uvicorn, "run",
                         lambda *a, **kw: calls.__setitem__("uvicorn", kw))
     monkeypatch.setattr(signal, "signal",
@@ -1165,6 +1189,20 @@ def test_serve_loopback_without_key_ok(monkeypatch, capsys):
     assert rc == 0
     assert "uvicorn" in calls
     assert "WARNING" not in capsys.readouterr().out
+
+
+def test_serve_sets_the_until_eos_marker_unless_capped(monkeypatch):
+    # With no --max-tokens, serve hands mlx-vlm the until-EOS marker, so a
+    # request with no output cap runs until EOS or the context fills.
+    import os
+    sampling = pytest.importorskip("gmlx.serve.patches.sampling")
+    monkeypatch.delenv("MLX_VLM_MAX_TOKENS", raising=False)
+    _stub_serving_stack(monkeypatch)
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert os.environ["MLX_VLM_MAX_TOKENS"] == str(sampling.UNTIL_EOS)
+    _stub_serving_stack(monkeypatch)
+    assert srv._serve(_one_model_cfg(), _ns(max_tokens=300), None) == 0
+    assert os.environ["MLX_VLM_MAX_TOKENS"] == "300"
 
 
 def test_serve_api_key_config_only(monkeypatch, capsys):
@@ -1228,6 +1266,71 @@ def test_serve_preload_extras_from_config(monkeypatch):
     assert calls.get("preload_extras") == ["e1", "e2"]
 
 
+def test_serve_unpinned_preload_is_not_retained(monkeypatch):
+    # A sole or default model preloads, but only an explicit pin holds it for
+    # the process lifetime; otherwise it stays TTL- and budget-evictable.
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "m": types.SimpleNamespace(path="/m.gguf", pin=False)})
+    assert srv._serve(_one_model_cfg(), _ns(), None) == 0
+    assert calls.get("preload_warm") == "m"
+    assert calls.get("preload_retain") is False
+    assert "/m.gguf" not in (calls["pool"].get("pinned") or ())
+
+
+def test_serve_pinned_preload_is_retained(monkeypatch):
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "m": types.SimpleNamespace(path="/m.gguf", pin=True)})
+    cfg = ServerCfg(models={"m": ModelCfg(id="m", path="/m.gguf", pin=True)})
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert calls.get("preload_warm") == "m"
+    assert calls.get("preload_retain") is True
+    assert "/m.gguf" in calls["pool"]["pinned"]
+
+
+def test_serve_warms_every_pinned_model_in_file_order(monkeypatch):
+    # The first pinned model is the retained primary; the other pinned ids
+    # warm next in file order, then defaults.preload, without repeats.
+    import types
+    import gmlx.serve.bridge_vlm as serving_mod
+    calls = _stub_serving_stack(monkeypatch)
+    ns = types.SimpleNamespace
+    monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
+        "a": ns(path="/a.gguf", pin=False), "p1": ns(path="/p1.gguf", pin=True),
+        "b": ns(path="/b.gguf", pin=False), "p2": ns(path="/p2.gguf", pin=True),
+        "p2-alias": ns(path="/p2.gguf", pin=True)})
+    cfg = ServerCfg(
+        models={"a": ModelCfg(id="a", path="/a.gguf"),
+                "p1": ModelCfg(id="p1", path="/p1.gguf", pin=True),
+                "b": ModelCfg(id="b", path="/b.gguf"),
+                "p2": ModelCfg(id="p2", path="/p2.gguf", pin=True),
+                "p2-alias": ModelCfg(id="p2-alias", path="/p2.gguf", pin=True)},
+        defaults=ServerDefaults(preload=["b", "p2"]))
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert calls.get("preload_warm") == "p1"
+    assert calls.get("preload_retain") is True
+    assert calls.get("preload_extras") == ["p2", "b"]
+
+
+def test_serve_gpu_keepwarm_is_an_on_off_switch(monkeypatch):
+    # Unset leaves the feeder default alone; the config key and the flag
+    # both turn it on or off, and the flag wins.
+    import os
+    for cfg_v, flag_v, want in ((None, None, None), (False, None, "0"),
+                                (True, None, "1"), (True, False, "0"),
+                                (None, True, "1")):
+        _stub_serving_stack(monkeypatch)
+        monkeypatch.delenv("GMLX_GPU_KEEPWARM", raising=False)
+        assert srv._serve(_one_model_cfg(gpu_keepwarm=cfg_v),
+                          _ns(gpu_keepwarm=flag_v), None) == 0
+        assert os.environ.get("GMLX_GPU_KEEPWARM") == want
+
+
 def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     import signal as signal_mod
 
@@ -1244,10 +1347,17 @@ def test_serve_sighup_triggers_reload_fn(monkeypatch, capsys):
     assert "SIGHUP config reload" in out and "kill -HUP" in out
 
 
-def test_serve_no_sighup_without_reload_fn(monkeypatch):
+def test_serve_ignores_sighup_without_reload_fn(monkeypatch, capsys):
+    # A server with no config file has nothing to reload, and SIGHUP must not
+    # stop it.
+    import signal as signal_mod
+
     calls = _stub_serving_stack(monkeypatch)
     assert srv._serve(_one_model_cfg(), _ns(), None) == 0
-    assert "signal" not in calls
+    num, handler = calls["signal"]
+    assert num == signal_mod.SIGHUP
+    handler(num, None)
+    assert "SIGHUP ignored" in capsys.readouterr().out
 
 
 # token-queue timeout: config value drives mlx-vlm's per-request env knob

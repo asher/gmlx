@@ -24,6 +24,44 @@ def _check(name: str, status: str, detail: str) -> dict:
     return {"name": name, "status": status, "detail": detail}
 
 
+# The mlx-kquant Metal library targets this release, which the wheel tag
+# cannot say (scripts/brew_formula.py MACOS_KERNELS).
+_MACOS_MIN = (26, 2)
+
+
+def _macos_version() -> str:
+    # sw_vers first: a Python built against an older SDK can see a
+    # compatibility version instead of the real one.
+    try:
+        v = subprocess.run(["sw_vers", "-productVersion"], capture_output=True,
+                           text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        v = ""
+    if not v:
+        import platform
+        v = platform.mac_ver()[0]
+    return v
+
+
+def check_macos() -> dict:
+    if sys.platform != "darwin":
+        return _check("macos", "SKIP", "not macOS")
+    want = ".".join(map(str, _MACOS_MIN))
+    v = _macos_version()
+    try:
+        have = tuple(int(p) for p in v.split(".")[:2])
+    except ValueError:
+        have = ()
+    if not have:
+        return _check("macos", "WARN",
+                      f"version unknown, gmlx needs macOS {want} or newer")
+    if (have + (0,))[:2] < _MACOS_MIN:
+        return _check("macos", "WARN",
+                      f"macOS {v} is older than {want}, which the mlx-kquant "
+                      "kernels need. Update macOS")
+    return _check("macos", "PASS", f"macOS {v}")
+
+
 def check_runtime() -> dict:
     try:
         import mlx.core as mx
@@ -349,13 +387,9 @@ def check_ffmpeg(cfg, running=()):
 
 def _assistant_mcp_servers(cfg) -> list:
     """Every MCP server the assistant can reach: the shared assistant.mcp
-    list (when the talk brain or an unscoped alias uses it) plus each
-    alias's own scoped list. Deduped by name."""
-    servers: list = []
-    shared_used = (cfg.talk.brain == "assistant"
-                   or any(a.mcp is None for a in cfg.assistants.values()))
-    if shared_used:
-        servers.extend(cfg.assistant.mcp)
+    list, which `gmlx chat --assistant` always uses, plus each alias's own
+    scoped list. Deduped by name."""
+    servers: list = list(cfg.assistant.mcp)
     for alias in cfg.assistants.values():
         if alias.mcp:
             servers.extend(alias.mcp)
@@ -492,7 +526,7 @@ def check_disk(cfg) -> dict:
 def _run_checks(config_path, *, deep: bool) -> list[dict]:
     cfg_check, cfg, path = check_config(config_path)
     running = _running_configs(path)
-    checks = [check_runtime(), check_kernels(), cfg_check,
+    checks = [check_macos(), check_runtime(), check_kernels(), cfg_check,
               check_models(cfg, deep=deep), check_server()]
     for c in (check_agents(), check_launcher(), check_services(cfg),
               check_extras(cfg, running), check_ffmpeg(cfg, running),

@@ -1,56 +1,60 @@
-# LoRA on a quantized GGUF
+# LoRA adapters
 
-This guide is for fine-tuning a GGUF model without converting it and for
-serving a base model under several adapters. The first half trains an adapter
-with `gmlx train`, and the second serves a base with many adapters as separate
-model ids.
+A LoRA adapter is a small file that changes how a model answers without
+changing the model file. `gmlx train` trains one on a GGUF model.
+`run`, `chat` and `serve` apply it at load, and one server can offer a model
+under several adapters at once.
 
-- [Why train on the quant](#why-train-on-the-quant)
+- [Training on the quantized model](#training-on-the-quantized-model)
 - [Train an adapter](#train-an-adapter)
 - [Use the adapter](#use-the-adapter)
 - [Serving one base with many adapters](#serving-one-base-with-many-adapters)
 - [Adapter format and interop](#adapter-format-and-interop)
 - [Limitations](#limitations)
 
-## Why train on the quant
+## Training on the quantized model
 
-`gmlx train` fine-tunes a K-quant GGUF base as it is and writes the adapter as
-a small GGUF file. `run`, `chat` and `serve` attach it live at load with
-`--adapter`. A base serves any number of adapted variants, each an exact delta
-on the unmodified quantized weights.
+`gmlx train` fine-tunes a quantized GGUF model as it is, and writes the
+adapter as a small GGUF file. The model is never converted, and
+`--adapter` applies the result at load.
 
-Two properties make this worth using over the usual convert, fine-tune and
-requantize cycle. During training the frozen base stays in its K-quant
-codec and the adapter's gradient flows through the quantized matmul. There
-is no float copy of the base and no optimizer state for it, so you can
-fine-tune a model you could not hold in fp16. At inference the base bytes
-are never modified: the output is the base, with its existing quantization
-error, plus the exact adapter delta in full precision, whereas merging would
-force a requantization of the adapted weights.
+The usual way to fine-tune is to convert the model to full precision,
+train, and quantize again. Training on the quantized model skips the
+conversion and the second quantization. The model weights stay in their
+quantized form and only the adapter trains, so gmlx keeps no
+full-precision copy of the model and no optimizer state for it. You can
+therefore fine-tune a model that would not fit in memory at full
+precision. At inference, the model file is not changed, and the output is
+the quantized model plus the adapter at full precision.
 
-If you have the full-precision model and enough memory, fine-tune that and
-quantize afterward, because training on the quant is for when the quant is
-all you can fit.
+If you have the full-precision model and enough memory, fine-tune that
+and quantize afterwards. Training on the quantized model is for when the
+quantized model is all that fits.
 
 ## Train an adapter
 
-The walkthrough teaches Qwen3-0.6B to talk like a pirate. Any pure K-quant or
-legacy-codec GGUF works as a base. The walkthrough uses a dense one, and on
-a MoE base the default adaptation keys are untested:
+Teaching Qwen3-0.6B to talk like a pirate shows the whole flow. The
+example uses a dense Q8_0 model, which is the tested case. The trainer
+accepts the other GGUF codecs and plain MLX models too. `gmlx pull`
+downloads the model into the first `server.model_dirs` folder in your
+[configuration file](config.md) and registers it as `qwen3-0.6b-q8`:
 
 ```sh
-gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --to .
+gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
 ```
 
-`--data` takes a directory of `train.jsonl` and `valid.jsonl`, or a
-Hugging Face dataset id, in any format mlx-lm's LoRA trainer accepts. The
-formats are chat records of the `{"messages": [...]}` shape, prompt and
-completion pairs, or plain text. Chat records suit an instruct base, since
-the trainer applies the base's chat template. The example dataset,
+`--data` takes a folder with `train.jsonl`, and optionally `valid.jsonl`,
+in any format that the mlx-lm LoRA trainer accepts. The formats are chat
+records of the form `{"messages": [...]}`, prompt and completion pairs, and
+plain text. Chat records suit an instruct model, because the trainer
+applies the model's chat template. The loss covers the prompt as
+well as the reply. `--data` also takes a Hugging Face dataset id, which
+needs the `datasets` package in the gmlx environment.
+
+The example dataset,
 [GPT007/pirate_speak](https://huggingface.co/datasets/GPT007/pirate_speak),
-contains 100 turns as Llama-3-formatted text. A short script re-emits them
-as chat records. It needs the `datasets` package, which gmlx does not
-install:
+has 100 conversations as Llama-3-formatted text. This script writes them as
+chat records, and it needs the `datasets` package:
 
 ```python
 # prep_pirate.py
@@ -70,142 +74,134 @@ split = max(1, len(records) // 10)
 (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records[split:]))
 ```
 
-Then train. The adapter targets the attention and MLP projections of the top
-`--num-layers` layers:
+Then train. The adapter covers every linear layer in the model's
+top `--num-layers` layers:
 
 ```sh
 pip install datasets && python prep_pirate.py
-gmlx train Qwen3-0.6B-Q8_0.gguf --data ./pirate-data \
-    --iters 150 --batch-size 4 --num-layers 8 --adapter-out pirate-lora.gguf
+gmlx train qwen3-0.6b-q8 --data ./pirate-data \
+    --iters 150 --batch-size 4 --num-layers 8 --adapter-out ~/models/pirate-lora.gguf
 ```
 
-Train loss should fall steadily. With only 90 examples, stop around 150
-iterations, because training longer overfits, validation loss rises and
-greedy decoding can repeat. `--num-layers` and `--rank` trade capacity for
-memory, and the defaults of 8 layers at rank 8 are a reasonable starting
-point. When a longer `--max-seq-length` runs out of memory,
-`--grad-checkpoint` recomputes each layer's activations in the backward
-pass instead of keeping them, at some cost in time. The flag table is under
-[gmlx train](cli.md#gmlx-train).
+Before it loads the model, `train` checks the data folder and that it can
+write the adapter file. At the end it prints
+`[gmlx] wrote N-module LoRA adapter -> PATH`. The training loss should
+fall steadily. With only 90 examples, stop at about 150 iterations,
+because longer training overfits the data, and the model then starts to
+repeat itself.
+
+`--num-layers` and `--rank` trade what the adapter can learn against
+memory, and the defaults of 8 layers at rank 8 are a good start. When a
+longer `--max-seq-length` runs out of memory, `--grad-checkpoint`
+computes each layer again in the backward pass instead of keeping it,
+which costs time. `--grad-checkpoint` needs `--dropout 0`, and Kimi K3 and DeepSeek-V4.1
+refuse it. The flags are listed under [gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
 
 ```sh
-gmlx run Qwen3-0.6B-Q8_0.gguf --adapter pirate-lora.gguf --prompt "What's the weather like today?"
-gmlx run Qwen3-0.6B-Q8_0.gguf --prompt "What's the weather like today?"    # the untouched base
-gmlx serve Qwen3-0.6B-Q8_0.gguf --adapter pirate-lora.gguf
+gmlx run qwen3-0.6b-q8 --adapter ~/models/pirate-lora.gguf --prompt "What's the weather like today?"
+gmlx run qwen3-0.6b-q8 --prompt "What's the weather like today?"    # The model without the adapter.
 ```
 
-Qwen3 is a thinking model, which is why `run` emits a `<think>` block first.
-Because the pirate data has no thinking, the adapted model thinks briefly and
-then answers in pirate speech.
+At load, gmlx prints `[adapter] applied N-module GGUF LoRA from ...`.
+Qwen3 is a thinking model, so `run` prints its reasoning first. The pirate
+data has no reasoning, so the adapted model thinks briefly and then
+answers like a pirate.
 
-The single-model `serve` form registers the adapted model under the
-file-derived id and the bare base as `<id>-base` on the same loaded model,
-so both are addressable without a config.
+In chat, `/adapter off` and `/adapter on` turn the adapter off and on for
+the next turns, and `/adapter 0.5` scales it. `gmlx serve model.gguf
+--adapter pirate-lora.gguf` serves the adapted model under an id derived
+from the model file name, and the model without the adapter as
+`<id>-base`, with no configuration file.
 
 ## Serving one base with many adapters
 
-A quantized base can serve any number of adapted variants at once. The
-base weights load a single time and each adapter loads into a slot of its
-own on that resident model, so a request applies only the adapter of the
-model id it addressed. Requests to the base and to any adapted id batch
-together into a single decode step. An adapter adds about 1% to 2% to
-decode and prefill cost, and switching between ids costs nothing, because
-nothing is swapped.
+A server can offer one model under several adapters at once. The model
+loads a single time, and each adapter loads into a slot of its own on that
+model. A request applies only the adapter that belongs to the id it names.
+Requests to the base and to adapted ids batch together in one decode step,
+and switching between ids swaps nothing.
 
-Model ids whose entries name the same `path` and differ only in `adapter:`
-share a resident model:
+Ids whose entries have the same `path` and differ only in `adapter`
+share one loaded model:
 
 ```yaml
-server:
-  port: 8080
-
 models:
-  qwen3-0.6b:
-    path: Qwen3-0.6B-Q8_0.gguf
+  qwen3-0.6b-q8:
+    path: unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
   qwen3-0.6b-pirate:
-    path: Qwen3-0.6B-Q8_0.gguf
+    path: unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
     adapter: pirate-lora.gguf
   qwen3-0.6b-formal:
-    path: Qwen3-0.6B-Q8_0.gguf
+    path: unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
     adapter: formal-lora.gguf
 ```
 
-| Id | Weights | Adapter slot |
-|----|---------|--------------|
-| `qwen3-0.6b` | the loaded base | none |
-| `qwen3-0.6b-pirate` | the same base | `pirate-lora.gguf` at scale 1.0 for its rows |
-| `qwen3-0.6b-formal` | the same base | `formal-lora.gguf` at scale 1.0 for its rows |
+The server finds a relative adapter path in
+[`server.model_dirs`](config.md#servermodel_dirs), like a model path. All
+settings that change how the model loads must match across the group,
+because an id that differs in more than `adapter` gets a separate copy of
+the model. [Memory and residency](config.md#memory-and-residency) lists
+these settings, and a shared [profile](config.md#profiles) keeps them the
+same. `GET /v1/metrics` shows the group as one entry under
+`resident_models`, and `GET /v1/models` lists all three ids.
 
-Everything that changes how the model is loaded must agree across the
-group, including `path`, `context_length` and `speculative`, because an id
-that differs in more than `adapter:` becomes a separate entry with a
-separate copy of the weights. Keep the group's other keys identical or
-inherit them from a profile. The memory use shows as a single entry under
-`resident_models` on `GET /v1/metrics`, while `curl localhost:8080/v1/models`
-lists all three ids.
-
-Nothing in the API is adapter-specific: a request names an id, and the
-server turns that id's adapter on and all other slots off for the rows of
-that request:
+A request names an id, and nothing else in the API concerns adapters:
 
 ```sh
-curl -s http://127.0.0.1:8080/v1/chat/completions -d '{
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
   "model": "qwen3-0.6b-pirate",
   "messages": [{"role": "user", "content": "Summarize RAID levels."}]
 }'
 ```
 
-Concurrent requests to different ids of the group do not queue behind each
-other, and an adapted request's output equals what it would produce running
-alone, whatever else is in the batch.
+Requests to different ids of a group do not wait for each other. An
+adapted request gives the same output as it would alone, whatever else is
+in the batch. To compare adapters in one conversation, run
+`gmlx chat --server qwen3-0.6b-pirate` and switch with
+[`/model <id>`](chat.md#undo-retry-and-sessions), which keeps the
+conversation.
 
-The chat client compares them in one conversation: `gmlx chat --server
-qwen3-0.6b-pirate` connects to a served id and
-[`/model <id>`](chat.md#undo-retry-and-sessions) switches to another with
-the transcript kept, instantly, since the ids share a resident model. On a
-local load, `/adapter off` and `/adapter SCALE` toggle or scale the
-`--adapter` file live.
+Adapters work with the prompt cache and speculative decoding:
 
-Adapters interact with two other features:
+- The key of a [prompt cache](config.md#prompt-cache) entry includes the
+  adapter, so each id caches its own copy of a shared prefix.
+- Set `speculative: true` on every id of the group, because a difference
+  splits the group. Adapters give the same output whether the batch uses
+  speculation or not.
 
-- Prompt cache. Adapted and bare rows never share a cache entry, since the
-  key includes the adapter set. The cost is a cached copy for each id that
-  shares a prefix.
-- Speculative decoding. `speculative: true` combines with adapters. Set it
-  on each id of the group, since a mismatch would split the entry. Adapters
-  behave identically whether the batch is speculating or has fallen back to
-  plain decode past the
-  [width cap](performance.md#mtp-speculative-decoding).
-
-The sorted adapter set is part of what identifies the loaded model, so
-adding an id with a new adapter and reloading the config builds a new
-entry, and the old one is evicted after its idle time. Plan for both copies
-being briefly resident, or restart instead of reloading when the base is
-large.
+A group's adapters are part of what identifies its loaded model. When
+you add an id with a new adapter and reload the configuration, the server
+builds a new copy, and the old copy unloads after its idle timeout. Plan
+for both copies in memory for a short time, or restart the server instead
+when the model is large.
 
 ## Adapter format and interop
 
-The adapter file is the llama.cpp GGUF LoRA format, which
-`convert_lora_to_gguf.py` emits from a PEFT directory. It has `general.type`
-of `adapter`, `adapter.lora.alpha` in the metadata and `lora_a` and `lora_b`
-tensor pairs for each target, keyed to base tensor names, with PEFT scaling.
-Adapters trained with `gmlx train` or `gmlx distill train` therefore load
-in llama.cpp with `--lora`.
-Any PEFT LoRA converted with that script loads here, as do existing community
-GGUF adapters built for llama.cpp.
+The adapter file uses the llama.cpp GGUF LoRA format, which
+`convert_lora_to_gguf.py` writes from a PEFT folder. The file has
+`general.type` set to `adapter`, `adapter.type` set to `lora`, and
+`adapter.lora.alpha`. Each adapted weight has a `lora_a` and `lora_b`
+tensor pair named after the base model's tensor.
+
+gmlx therefore loads PEFT adapters converted with that script, and the
+GGUF adapters that people publish for llama.cpp. Adapters from
+`gmlx train` and `gmlx distill train` load in llama.cpp with `--lora`, for
+the architectures that llama.cpp supports. `gmlx validate` recognizes an
+adapter file.
 
 ## Limitations
 
-- LoRA only. DoRA on a K-quant base is not supported.
-- Targets are the dense linears q, k, v, o, gate, up and down, plus MoE
-  expert down-projection stacks. Three target kinds are refused at load
-  rather than skipped: expert gate and up stacks, embeddings, and any
-  expert target on a base the runtime runs under a fused MoE block, such as
-  gemma and gpt-oss.
-- Text path only. `--adapter` does not combine with `--mmproj`.
-- Each model id's adapter is fixed at load. Switching adapters means
-  addressing a different id, not a request parameter.
-- The adapter must match the base architecture, which is checked at load.
-  Matching the exact base fine-tune is your responsibility.
+- Only LoRA adapters work. DoRA on a quantized model is not supported.
+- An adapter can change the dense linear layers and the down projections
+  of MoE experts. Loading refuses an adapter that changes the gate or up
+  projections of experts, the embeddings, or any expert weight on a model
+  that runs a fused MoE block, such as Gemma and gpt-oss.
+- An adapter works on text models only, so `--adapter` does not combine
+  with `--mmproj`.
+- Each id's adapter is fixed at load. To use another adapter, a
+  request names another id.
+- The adapter must be for the model's architecture. The loader checks
+  this, and its error names both architectures. It does not check that the
+  model is the fine-tune the adapter was trained on.
