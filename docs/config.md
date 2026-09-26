@@ -1094,8 +1094,9 @@ uncertain. The default is `0`.
 
 #### `server.systemone.think_threshold`
 
-When `think` is `"auto"`, the model thinks when its confidence is below
-this value. A request can set its own. The default is `0.8`.
+When `think` is `"auto"`, the model thinks when the probability of an
+answer's chosen label is below this value. That probability is not the
+answer's `confidence`. A request can set its own. The default is `0.8`.
 
 #### `server.systemone.think_budget`
 

@@ -160,7 +160,7 @@ def test_a_single_group_reads_once_on_the_chat_prompt():
     assert req.width == res.canvas_width(req.template) == 16
     assert (req.steps, req.pinned, req.constrained) == (1, False, True)
     assert out["answers"]["q1"]["label"] == "yes"
-    assert out["answers"]["q1"]["confidence"] == pytest.approx(50 / 51)
+    assert out["answers"]["q1"]["chosen_probability"] == pytest.approx(50 / 51)
     assert out["answers"]["q1"]["noul"] == pytest.approx(50 / 51)
     assert r["rows"] == len(req.template) + 1
     d = out["diagnostics"]
@@ -180,7 +180,7 @@ def test_diagnostics_key_sets_match_the_proxy():
                                            "first_read_entropy"}
     assert set(d["timing"]) == {"total_ms", "reads"}
     assert set(d["questions"]["q1"]) == QUESTION_KEYS
-    assert set(out["answers"]["q1"]) == {"type", "label", "confidence",
+    assert set(out["answers"]["q1"]) == {"type", "label", "chosen_probability",
                                          "probabilities", "noul"}
 
 
@@ -193,7 +193,7 @@ def test_multi_part_diagnostics_list_each_group():
     assert all(set(p) == {"mode", "n", "extended", "first_read_entropy"}
                for p in d["samples"]["policy"])
     assert all(set(t) == THOUGHT_KEYS for t in d["thought"])
-    assert set(r["out"]["answers"]["q1"]) == {"type", "label", "confidence",
+    assert set(r["out"]["answers"]["q1"]) == {"type", "label", "chosen_probability",
                                               "probabilities", "noul", "stderr",
                                               "agreement"}
 
@@ -248,7 +248,7 @@ def test_fixed_samples_give_mean_stderr_and_agreement():
     assert req.seeds == tuple(42 + k * SAMPLE_SEED_STRIDE for k in range(4))
     a = r["out"]["answers"]["q1"]
     assert a["label"] == "yes"
-    assert a["noul"] == pytest.approx(0.7) and a["confidence"] == pytest.approx(0.7)
+    assert a["noul"] == pytest.approx(0.7) and a["chosen_probability"] == pytest.approx(0.7)
     assert a["probabilities"] == pytest.approx({"yes": 0.7, "no": 0.3})
     assert a["stderr"] == pytest.approx(0.2)
     assert a["agreement"] == pytest.approx(0.75)
@@ -272,7 +272,7 @@ def test_entropy_covers_the_label_union_of_the_read():
     q = r["out"]["diagnostics"]["questions"]["q1"]
     assert q["entropy"] == [pytest.approx(_entropy(ps))]
     assert q["label_mass"] == pytest.approx(51 / 53)
-    assert r["out"]["answers"]["q1"]["confidence"] == pytest.approx(50 / 51)
+    assert r["out"]["answers"]["q1"]["chosen_probability"] == pytest.approx(50 / 51)
 
 
 def test_scores_and_choices_aggregate_and_map_to_jev_shapes():
@@ -288,9 +288,12 @@ def test_scores_and_choices_aggregate_and_map_to_jev_shapes():
     assert team["choice"] == "tech" and team["label"] == "B"
     jev = jev_answers(r["schema"], r["out"])
     assert jev["sev"]["score"] == pytest.approx(0 * 0.1 + 1 * 0.2 + 2 * 0.7)
+    # Official Jev confidence: 1 - E|i - mode| / uniform MAD = 1 - 0.4 / (2/3).
+    assert jev["sev"]["confidence"] == pytest.approx(0.4)
+    # (max p - 1/N) / (1 - 1/N) = (0.75 - 0.5) / 0.5.
     assert jev["team"] == {"type": "choice", "choice": "tech",
                            "probabilities": pytest.approx({"billing": 0.25, "tech": 0.75}),
-                           "confidence": pytest.approx(0.75)}
+                           "confidence": pytest.approx(0.5)}
 
 
 # stages and conditioning

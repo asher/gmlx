@@ -3,7 +3,7 @@ server's request defaults.
 
 ``think: "auto"`` runs a decision without a thought, and runs it again with
 one when an answer is unsure. ``think_threshold`` and ``think_budget`` set
-the confidence floor and the thought budget. ``server.systemone`` supplies
+the floor on the chosen answer's probability and the thought budget. ``server.systemone`` supplies
 ``think`` and both settings for a request that omits them."""
 
 from __future__ import annotations
@@ -75,11 +75,11 @@ def decide(
     body (answers and diagnostics) and the completion-token count.
 
     Without ``think: "auto"`` this is ``decide_once``. With it, the
-    decision runs without a thought first. When an answer's confidence is
-    below the threshold, it runs again with a thought of the auto budget,
-    and that run gives the answers, the samples, the question diagnostics
-    and the completion-token count. ``timing`` covers both runs, and
-    ``think_auto`` holds the first run's confidences, reads and time."""
+    decision runs without a thought first. When the probability of an
+    answer's chosen label is below the threshold, it runs again with a
+    thought of the auto budget, and that run gives the answers, the samples,
+    the question diagnostics and the completion-token count. ``timing`` covers both runs, and
+    ``think_auto`` holds those first-run probabilities, reads and time."""
     auto = schema.get("think_auto")
     run = functools.partial(
         decide_once, engine=engine, resolver=resolver, chat_ids=chat_ids,
@@ -88,13 +88,14 @@ def decide(
     if not auto:
         return run(schema)
     first, first_rows = run(schema)
-    confidence = {qid: a["confidence"] for qid, a in first["answers"].items()
-                  if a is not None}
+    chosen = {qid: a["chosen_probability"]
+              for qid, a in first["answers"].items() if a is not None}
     unsure = [q["id"] for q in schema["questions"]
-              if confidence.get(q["id"], 1.0) < auto["threshold"]]
+              if chosen.get(q["id"], 1.0) < auto["threshold"]]
     first_timing = first["diagnostics"]["timing"]
     info = {"threshold": auto["threshold"], "budget": auto["budget"],
-            "thought": bool(unsure), "unsure": unsure, "confidence": confidence,
+            "thought": bool(unsure), "unsure": unsure,
+            "chosen_probability": chosen,
             "reads": first_timing["reads"], "total_ms": first_timing["total_ms"]}
     if not unsure:
         first["diagnostics"]["think_auto"] = info

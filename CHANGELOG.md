@@ -18,6 +18,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `/v1/systemone` reports the official Jev confidence for choice and score
+  answers in place of the chosen probability. `think_threshold` still
+  compares the chosen probability, which `diagnostics.think_auto` now names
+  `chosen_probability`.
 - The README links each page to the docs site instead of the Markdown file
   on GitHub, and the Homebrew formula names the site as its homepage.
 - `gmlx run` and `gmlx chat` turn speculation on by themselves when they

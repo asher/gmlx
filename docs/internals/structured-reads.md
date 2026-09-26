@@ -137,8 +137,10 @@ and the engine rely on upstream internals, each fingerprinted in
 
 `tests/systemone/test_systemone_proxy_parity.py` runs the vendored example
 and the gmlx decision logic on the same scripted reads and compares whole
-response bodies. The intended differences are few. Invalid numbers and
-seeds get a 422 instead of a 500, the template cache is bounded, chunks
+response bodies. The intended differences are few. `confidence` is the
+official Jev value where the example reports the chosen probability, so
+the test applies the official formulas to the example's answers before it
+compares. Invalid numbers and seeds get a 422 instead of a 500, the template cache is bounded, chunks
 run one after another, and `ask` returns the asked answers where the
 example raises a `KeyError`. The route refuses image states and multipart
 bodies, and it does not serve decisions through chat completions.

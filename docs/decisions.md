@@ -139,11 +139,11 @@ rounded. The exact numbers depend on the model file.
     "urgent": {"type": "noul", "noul": 0.022},
     "team": {"type": "choice", "choice": "billing",
              "probabilities": {"billing": 0.9994, "infra": 0.0006, "product": 0.0000},
-             "confidence": 0.9994},
+             "confidence": 0.9991},
     "severity": {"type": "score", "score": 0.96,
                  "legend": {"0": "low", "1": "medium", "2": "high"},
                  "probabilities": {"0": 0.044, "1": 0.952, "2": 0.004},
-                 "confidence": 0.952},
+                 "confidence": 0.928},
     "refund": {"type": "noul", "noul": 0.9997}
   },
   "usage": {"input_tokens": 211, "output_tokens": 22}
@@ -159,13 +159,19 @@ over that question's answers, in one of three shapes:
   it. The `noul` field is the probability of yes. The billing ticket is not
   urgent, since 0.022 is a 97.8 percent no, and it asks for a refund.
 - A `choice` entry answers with one of several named options. `choice` is
-  the most probable option, `probabilities` holds the probability of every
-  option, and `confidence` is the probability of the chosen one.
+  the most probable option, and `probabilities` holds the probability of
+  every option. `confidence` is 0 when the probabilities are even and 1
+  when the chosen option has all of it.
 - A `score` entry answers with one of several ordered levels.
   `probabilities` is keyed by the index of each level, counted from 0, and
-  `legend` names each index. `confidence` is the probability of the most
-  likely level, and `score` is the expected index. A score of 0.96 is
-  medium, with a little weight on low.
+  `legend` names each index. `score` is the expected index, so a score of
+  0.96 is medium, with a little weight on low. `confidence` is 1 when all
+  the weight is on one level, and it falls to 0 as the weight spreads as
+  widely as an even answer.
+
+Both confidence values use the formulas of TypeSafe's
+[system-one adapter](https://github.com/typesafe-ai/system-one-adapter-python),
+which gives answers from other model providers the Jev shape.
 
 `usage.input_tokens` is the token count of the longest prompt that a read
 ran on. `usage.output_tokens` counts the tokens of the answer template and
@@ -361,7 +367,7 @@ does.
 | `auto_threshold` | `0.1` | `"auto"` adds reads when the entropy at a label position is above this value, in nats. |
 | `steps` | `1` | Each read runs this many denoise steps. Values outside 1 to 8 are clamped. |
 | `think` | [`server.systemone.think`](config.md#serversystemonethink) | It sets a thought budget of 0 to 4096 tokens, or `"auto"`. The model writes a thought first, and the reads see it. |
-| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | `"auto"` runs the decision again with a thought when a confidence is below this value, which must be above 0 and at most 1. |
+| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | `"auto"` runs the decision again with a thought when a chosen answer's probability is below this value, above 0 and at most 1. |
 | `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | `"auto"` thinks with this budget, from 1 to 4096 tokens. |
 | `ask` | Every question | Only these ids appear in `answers`, and the list must include every question they depend on. |
 | `chunk_rows` | The canvas | The answer template of one read may take at most this many canvas tokens, a value of at least 8. A larger stage is split into chunks. |
@@ -377,17 +383,18 @@ A thought is the costliest of these settings. The model writes it with its
 full denoise loop, which takes seconds, while a read without one takes a
 single pass. `think: "auto"` spends that cost only on unsure decisions.
 
-Under `"auto"`, the decision first runs without a thought, and when any
-answer's confidence is below `think_threshold`, it runs again with a thought of
-`think_budget` tokens. The answers then come from the second run, and
+Under `"auto"`, the decision first runs without a thought. When the
+probability of any answer's chosen label is below `think_threshold`, it runs
+again with a thought of `think_budget` tokens. The answers then come from the second run, and
 `diagnostics.think_auto` says whether the thought ran and which questions
 were unsure. With
 [`server.systemone.think`](config.md#serversystemonethink) set to `"auto"`,
 a Jev client gets this behavior without sending any of the fields.
 
 The two thresholds point in opposite directions. `think_threshold` is a
-floor on an answer's confidence, so a higher value runs a thought more
-often. `auto_threshold` is a ceiling on the entropy at a label position,
+floor on the probability of each chosen answer, so a higher value runs a
+thought more often. It reads that probability, not the `confidence` field,
+which rescales it by the number of options. `auto_threshold` is a ceiling on the entropy at a label position,
 so a higher value adds reads less often. Without `"auto"`, the server ignores
 `think_threshold` and `think_budget` and logs them in an
 `ignoring unsupported parameter(s)` warning.

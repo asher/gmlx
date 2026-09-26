@@ -19,7 +19,7 @@ _ANSWER = {
         "urgent": {"type": "noul", "noul": 0.91},
         "team": {"type": "choice", "choice": "infra",
                  "probabilities": {"infra": 0.8, "billing": 0.2},
-                 "confidence": 0.8},
+                 "confidence": 0.6},
         "severity": {"type": "score", "score": 1.5, "legend": {},
                      "probabilities": {}, "confidence": 0.6},
         "why": None,
@@ -62,7 +62,7 @@ def posted(monkeypatch):
 def test_rows_are_printed_per_question(request_file, posted, capsys):
     assert so.cmd_systemone([request_file, "--url", "http://h:1/v1"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out == ["urgent:   0.910", "team:     infra (0.80)",
+    assert out == ["urgent:   0.910", "team:     infra (0.60)",
                    "severity: 1.50 (0.60)", "why:      skipped"]
     assert posted["url"] == "http://h:1/v1/systemone"
     assert posted["body"] == _BODY

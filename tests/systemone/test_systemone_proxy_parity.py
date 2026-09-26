@@ -6,7 +6,9 @@ proxy's threaded reads and gmlx's batched reads get the same values. The
 proxy runs through its /v1/systemone handler with its upstream calls
 patched; gmlx runs through decide() and the contract helpers the route
 uses. Bodies are compared as JSON with timing values and the engine name
-removed."""
+removed. The proxy reports the chosen probability as ``confidence`` where
+gmlx reports the official Jev confidence, so the comparison applies the
+official formulas to the proxy's probabilities first."""
 
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ from gmlx.systemone import (
     label_id_union,
     parse_seed,
 )
+from gmlx.systemone.confidence import choice_confidence, score_confidence
 from gmlx.systemone.reads import SEED_VOCAB, pinned_positions
 
 CANVAS = 64
@@ -258,6 +261,25 @@ def _gmlx_body(body, tok, engine, constrained):
     return jev_response(schema, result, completion_tokens, MODEL)
 
 
+def _official(body):
+    """The proxy's response body with the official Jev confidence."""
+    for a in body["answers"].values():
+        if a is None or a["type"] == "noul":
+            continue
+        rule = choice_confidence if a["type"] == "choice" else score_confidence
+        a["confidence"] = rule(list(a["probabilities"].values()))
+    return body
+
+
+def _chosen(decision):
+    """The proxy's decision with each answer's chosen probability under the
+    name gmlx gives it."""
+    for a in decision["answers"].values():
+        if a is not None:
+            a["chosen_probability"] = a.pop("confidence")
+    return decision
+
+
 def _normalize(obj, engine):
     """The body as it goes on the wire, without timing values and with the
     engine name checked and dropped."""
@@ -389,7 +411,7 @@ def test_bodies_match_the_proxy(monkeypatch, capsys, tok, name, body, bias, nois
     _patch_upstream(monkeypatch, tok, table)
     body = dict(body, model="jev-latest")
 
-    want = _normalize(_proxy_body(body), "vllm")
+    want = _normalize(_official(_proxy_body(body)), "vllm")
     engine = FakeEngine(table)
     got = _normalize(_gmlx_body(body, tok, engine, constrained), "gmlx")
     assert got == want
@@ -451,7 +473,7 @@ def test_ask_matches_the_proxy_decision(monkeypatch, tok, constrained):
         proxy.jev_schema(req), proxy.jev_state(req, []), 42)
     assert code == 200
     schema, got, got_rows = _gmlx_decision(body, tok, FakeEngine(table), constrained)
-    assert _normalize(got, "gmlx") == _normalize(want, "vllm")
+    assert _normalize(got, "gmlx") == _normalize(_chosen(want), "vllm")
     assert got_rows == want_rows
     answers = jev_response(schema, got, got_rows, MODEL)["answers"]
     assert list(answers) == ["urgent", "bucket"]

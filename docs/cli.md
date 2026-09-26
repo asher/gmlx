@@ -805,8 +805,9 @@ gmlx systemone ticket.json --model diffusiongemma-Q4_K_M.gguf
 ```
 
 A yes or no answer prints as its probability, a choice as the chosen
-option with its confidence, and a score as the expected level with its
-confidence. A question skipped by `ask_if` prints `skipped`.
+option with its
+[confidence](decisions.md#reading-the-answers), and a score as the
+expected level with its confidence. A question skipped by `ask_if` prints `skipped`.
 
 These flags control `gmlx systemone`:
 
