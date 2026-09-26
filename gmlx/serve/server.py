@@ -171,7 +171,8 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
                     default=None, metavar="GB",
                     help="Persist the prompt cache to disk in the generated config "
                          "(the in-memory cache is on in every generated config): "
-                         "cached prefixes land under ~/.cache/gmlx/apc and survive "
+                         "cached prefixes land under $XDG_CACHE_HOME/gmlx/apc "
+                         "(default ~/.cache) and survive "
                          "an idle-unload / restart. A bare --disk-cache caps it at "
                          "50 GB per model, or pass a size (e.g. --disk-cache 100).")
     ap.add_argument("-r", "--recursive", action=argparse.BooleanOptionalAction,

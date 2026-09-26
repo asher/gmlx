@@ -848,7 +848,7 @@ def test_cache_disk_boolean_shorthand():
     doc["server"]["cache"] = {"enabled": True, "disk": True}
     env = cfgmod.env_for(resolve_model("m-bare", build_config(doc)))
     assert env["APC_DISK_PATH"] == os.path.expanduser(
-        cfgmod.DEFAULT_APC_DISK_PATH)
+        cfgmod.default_apc_disk_path())
 
     doc = _doc()
     doc["server"]["cache"] = {"enabled": True, "disk": {"path": "/ssd/apc"}}
@@ -2081,3 +2081,10 @@ def test_kv_quant_scheme_turbo_refused():
     cfg = build_config(doc)
     with pytest.raises(ConfigError, match="kv_quant_scheme"):
         resolve_model("m-bare", cfg)
+
+
+def test_default_disk_path_follows_xdg_cache_home(monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
+    assert cfgmod.default_apc_disk_path() == "/xdg/gmlx/apc"
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    assert cfgmod.default_apc_disk_path() == "~/.cache/gmlx/apc"

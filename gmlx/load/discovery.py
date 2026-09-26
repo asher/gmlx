@@ -1209,7 +1209,8 @@ def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
     if disk_cache:
         gb = 50 if disk_cache_gb is None else disk_cache_gb
         lines.append("    disk:")
-        lines.append("      path: ~/.cache/gmlx/apc")
+        from gmlx.config import default_apc_disk_path
+        lines.append(f"      path: {default_apc_disk_path()}")
         lines.append(f"      max_gb: {_fmt_num(gb)}")
     lines.append("")
     return lines

@@ -63,6 +63,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The default prompt-cache disk folder follows `XDG_CACHE_HOME`, like the
+  other gmlx caches.
 - `cache.disk.namespace` now names the disk-tier namespace. The model path
   always took its place, so the key had no effect.
 - The server applies `stream_fast_disk` and `gmlx serve --stream-fast-disk`

@@ -612,10 +612,11 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
 
     # 4. Prompt-cache SSD tier. The in-memory prompt cache is on in every
     # generated config; this decides only whether it also persists to disk.
+    from gmlx.config import default_apc_disk_path
     disk_cache = io.yesno(
         "\nThe prompt cache reuses prompt prefixes across requests (on by "
-        "default).\nAlso persist it to disk at ~/.cache/gmlx/apc, so reuse "
-        "survives an\nidle-unload or restart?",
+        f"default).\nAlso persist it to disk at {default_apc_disk_path()}, "
+        "so reuse survives an\nidle-unload or restart?",
         default=False)
     disk_cache_gb = _ask_cache_gb(io) if disk_cache else None
 
