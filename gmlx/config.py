@@ -1770,11 +1770,16 @@ def _parse_talk(raw) -> TalkCfg:
         raise ConfigError(
             f"talk.push_to_talk_modifier: {ptt!r} is not one of "
             f"{'/'.join(PUSH_TO_TALK_MODIFIERS)}")
+    from gmlx.serve.tts import SPEED_MAX, SPEED_MIN
+    speed = num("speed", raw.get("speed"), float, 1.0)
+    if not SPEED_MIN <= speed <= SPEED_MAX:
+        raise ConfigError(
+            f"talk.speed: {speed:g} is not between {SPEED_MIN:g} and {SPEED_MAX:g}")
     dev = lambda v: None if v is None else str(v)  # noqa: E731
     return TalkCfg(
         model=str(raw["model"]) if raw.get("model") else None,
         voice=str(raw["voice"]) if raw.get("voice") else None,
-        speed=num("speed", raw.get("speed"), float, 1.0),
+        speed=speed,
         # Absent -> speakable-output default; an explicit empty string is
         # the opt-out for "no system prompt at all".
         system=(str(raw["system"]) if raw.get("system")

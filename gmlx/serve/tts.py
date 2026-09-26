@@ -59,8 +59,8 @@ _MEDIA_TYPES = {
     "pcm":  "audio/pcm",
 }
 
-# OpenAI clamps speed to [0.25, 4.0].
-_SPEED_MIN, _SPEED_MAX = 0.25, 4.0
+# OpenAI clamps speed to [0.25, 4.0]. gmlx talk checks against the same range.
+SPEED_MIN, SPEED_MAX = 0.25, 4.0
 
 # Qwen3-TTS has no voices/ directory; it takes named speakers. Best-effort
 # known set (standard + dialect voices) for the aliases we curate.
@@ -409,9 +409,9 @@ def run_synthesis(text: str, *, configured_model: str, model: str = "",
         spd = float(speed) if str(speed).strip() else 1.0
     except ValueError:
         raise TTSRequestError(400, f"speed {speed!r} is not a number")
-    if not _SPEED_MIN <= spd <= _SPEED_MAX:
+    if not SPEED_MIN <= spd <= SPEED_MAX:
         raise TTSRequestError(
-            400, f"speed must be between {_SPEED_MIN} and {_SPEED_MAX}")
+            400, f"speed must be between {SPEED_MIN} and {SPEED_MAX}")
 
     import_mlx_audio()
 

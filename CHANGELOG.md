@@ -31,6 +31,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first token, and `run` and `chat` did the same on Kimi K2 and K3.
 - GLM-5.3 runs with `--kv-bits`. A quantized cache failed at the first
   token in its attention layers.
+- `gmlx launch` sends the config's `server.api_key` to a keyed server that
+  is already running. Before, only a server that `launch` started got the
+  key, and a running one refused the launch.
+- `gmlx validate` reports a Hadamard-folded file as not loadable when the
+  loader cannot run its fold version or architecture.
+- `gmlx talk` refuses a speech speed outside 0.25 to 4 from `--speed`,
+  `/speed` or `talk.speed`. The server refused to speak at such a speed.
+- `/thinking-budget` in `gmlx chat` no longer warns that MTP replies ignore
+  it, since they honor it.
+- `gmlx init` no longer offers to install the `[embeddings]` extra, which
+  installs nothing.
+- Help text: `/help` in `gmlx chat` lists `/thinking adaptive`, `serve
+  --tts` lists the `qwen3-tts-small` alias, and `gmlx talk` names the
+  command to run when the server has no default model.
 
 ## [0.4.18] - 2026-09-26
 

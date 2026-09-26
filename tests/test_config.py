@@ -1702,6 +1702,9 @@ def test_talk_numeric_coercion_and_errors():
     doc["talk"] = {"speed": "fast"}
     with pytest.raises(ConfigError, match="talk.speed"):
         build_config(doc)
+    doc["talk"] = {"speed": 0.1}
+    with pytest.raises(ConfigError, match="talk.speed"):
+        build_config(doc)
 
 
 def test_talk_non_mapping_raises():

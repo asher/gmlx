@@ -116,9 +116,10 @@ skips the request, and so does `--config-only`.
 
 A server with an [API key](config.md#serverapi_key) refuses a launch
 without the key before the tool starts, and `launch` says to pass
-`--api-key`. When `launch` starts the server itself from a configuration
-file, it takes the key from that file. Each tool gets the key in its own
-setting:
+`--api-key`. Without that flag, `launch` takes the key from the
+configuration file, whether it starts the server or finds it running. A
+server named with `--base-url` gets no key from the file. Each tool gets
+the key in its own setting:
 
 | Client | Where the key goes |
 |--------|--------------------|

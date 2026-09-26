@@ -467,34 +467,10 @@ def _pick_quant(io: WizardIO, preset: dict, *, prefer=None) -> str:
         opts, default=rungs.index(default))
 
 
-def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install,
-                                    install: bool = False):
-    """Offer to install the [embeddings] extra unless ``value`` is a GGUF ref (the
-    decoder-LM backend needs no extra). ``value`` is the already-resolved concrete
-    ref/repo, so the GGUF test is correct - the old bug tested a raw alias."""
-    if embeddings._is_gguf_ref(value):
-        return                                  # GGUF decoder-LM backend - no extra
-    if extras.extra_installed("embeddings"):
-        return
-    pkgs = " ".join(extras.extra_packages("embeddings"))
-    if allow_install and io.yesno(
-            f"  the embeddings extra ({pkgs}) isn't installed - install it now?",
-            default=install):
-        ok = extras.install_extra("embeddings")
-        io.note("  installed." if ok else
-                "  install failed - configure anyway; retry later with: "
-                f"{extras.install_hint('embeddings')}")
-    else:
-        io.note("  not installed - the endpoint errors until you run: "
-                f"{extras.install_hint('embeddings')}")
-
-
-def _configure_embeddings(io: WizardIO, *, allow_install: bool, found,
-                          seeded: bool = False, seed_model=None,
-                          install: bool = False):
+def _configure_embeddings(io: WizardIO, *, found, seeded: bool = False,
+                          seed_model=None):
     """Configure text embeddings: adopt an embedder GGUF already on disk, else pick
-    a tiered preset + quant (or a custom repo/path), installing the [embeddings]
-    extra when a safetensors encoder needs it. Returns ``(value, quant_rung)`` -
+    a tiered preset + quant (or a custom repo/path). Returns ``(value, quant_rung)`` -
     ``value`` is the config string (hf: ref / repo id / path) or ``None`` if
     skipped; ``quant_rung`` is the chosen rung (so the reranker can match it) or
     ``None`` for a custom / adopted pick."""
@@ -508,15 +484,9 @@ def _configure_embeddings(io: WizardIO, *, allow_install: bool, found,
         return None, None
     pick = _pick_embedding(io, default=seed_model or "1")
     if isinstance(pick, str):                   # custom HF repo id / local path
-        _maybe_install_embeddings_extra(io, pick, allow_install=allow_install,
-                                        install=install)
         return pick, None
     rung = _pick_quant(io, pick)
-    value = pick["quants"][rung]
-    if pick["tier"] == "mlx":
-        _maybe_install_embeddings_extra(io, value, allow_install=allow_install,
-                                        install=install)
-    return value, rung
+    return pick["quants"][rung], rung
 
 
 def _configure_rerank(io: WizardIO, *, found, embed_quant, seeded: bool = False,
@@ -678,9 +648,8 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         discovery.find_retrieval_models(dirs, recursive=recursive)
         if dirs else ([], []))
     emb_value, emb_quant = _configure_embeddings(
-        io, allow_install=allow_install, found=found_emb,
-        seeded="embeddings" in svc, seed_model=svc.get("embeddings"),
-        install=seeds.install)
+        io, found=found_emb, seeded="embeddings" in svc,
+        seed_model=svc.get("embeddings"))
     rerank_value = _configure_rerank(
         io, found=found_rerank, embed_quant=emb_quant,
         seeded="rerank" in svc, seed_model=svc.get("rerank"))

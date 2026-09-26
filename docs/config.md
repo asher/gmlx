@@ -1171,8 +1171,8 @@ name. The default is the server's default voice.
 
 ### `talk.speed`
 
-Replies are spoken at this multiple of normal speed. The default is
-`1.0`.
+Replies are spoken at this multiple of normal speed, from 0.25 to 4. The
+default is `1.0`.
 
 ### `talk.system`
 

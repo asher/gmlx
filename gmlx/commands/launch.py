@@ -209,7 +209,7 @@ def probe_models(base_url: str, api_key: str | None = None) -> list:
     except urllib.error.HTTPError as e:
         if e.code == 401:
             raise LaunchError(
-                "server requires an API key (it runs with --api-key) - pass the "
+                "server requires an API key (server.api_key). Pass the "
                 "same key:  launch <harness> --api-key <key>")
         raise LaunchError(f"server is up but /v1/models failed: {e}")
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -1310,6 +1310,17 @@ def _server_ready(base_url: str, api_key: str | None = None) -> bool:
     return bool(isinstance(payload, dict) and payload.get("data"))
 
 
+def _auth_required(base_url: str) -> bool:
+    """True iff ``/v1/models`` answers 401 without a key."""
+    try:
+        _http_get_json(base_url.rstrip("/") + "/models", timeout=1.5)
+    except urllib.error.HTTPError as e:
+        return e.code == 401
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return False
+
+
 def _warn_if_stale_server(host: str, port) -> None:
     """A reused managed server that predates a source change on disk will
     fail lazy imports mid-request with an opaque 500; say so at connect
@@ -1505,6 +1516,11 @@ def _ensure_server(a) -> int | None:
     base0 = a.base_url or f"http://{host0}:{port0}/v1"
     if _server_ready(base0, a.api_key):              # up: fast path, no engine import
         _warn_if_stale_server(host0, port0)
+        if a.api_key is None and not a.base_url and _auth_required(base0):
+            # Without a key the launch fails, so the config's key is the only
+            # one to try. The auto-start path below uses it too.
+            cfg, _path = _discover_config()
+            a.api_key = getattr(cfg, "api_key", None)
         a.base_url, a.host, a.port = base0, host0, port0
         return None
 
@@ -1587,9 +1603,10 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help="Server port (default: the single managed server if "
                          f"there's one, else the config's, else {_DEFAULT_PORT}).")
     ap.add_argument("--api-key", default=None, metavar="KEY",
-                    help="API key the harness sends - pass the same key the "
-                         "server runs with (--api-key / server.api_key). "
-                         "Default: a placeholder (fine for a no-auth server).")
+                    help="API key the harness sends, which must match the "
+                         "server's server.api_key. Default: the config's "
+                         "server.api_key. With --base-url, or when the config "
+                         "sets no key, tools get a placeholder.")
     ap.add_argument("--provider-id", default=_PROVIDER_ID,
                     help=f"Provider id written into the harness config "
                          f"(default {_PROVIDER_ID}).")

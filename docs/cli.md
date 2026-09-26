@@ -613,7 +613,7 @@ These flags control `gmlx launch`:
 | `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
-| `--api-key KEY` | A placeholder | Write this key to the tool's native config field. Without one, tools that require a key get the provider id. |
+| `--api-key KEY` | The config's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
 | `--provider-id NAME` | `gmlx` | Write this provider id into the tool's config. |
 | `--config-path PATH` | The client's location | Write the tool config to this file or directory, depending on the client. [How a launch works](launch.md#how-a-launch-works) lists each one. |
 | `--config-only` | Off | Write the config and print the run command without running it. |
