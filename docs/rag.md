@@ -27,8 +27,8 @@ gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
 gmlx restart
 ```
 
-The restart matters because a service whose model is missing at start
-stays off until the next restart, as
+`gmlx restart` is needed because a service whose model is missing at start
+stays off until the next start, as
 [How the services run](services.md#how-the-services-run) describes.
 
 To create a new configuration file with both services, run

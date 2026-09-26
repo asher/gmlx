@@ -197,7 +197,7 @@ adapter file.
 - An adapter can change the dense linear layers and the down projections
   of MoE experts. Loading refuses an adapter that changes the gate or up
   projections of experts, the embeddings, or any expert weight on a model
-  that runs a fused MoE block, such as gemma and gpt-oss.
+  that runs a fused MoE block, such as Gemma and gpt-oss.
 - An adapter works on text models only, so `--adapter` does not combine
   with `--mmproj`.
 - The adapter of each id is fixed at load. To use another adapter, a

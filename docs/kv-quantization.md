@@ -81,8 +81,8 @@ The kvarn scheme keeps the output closer to that of an fp16 cache than
 affine quantization does at every width below 8, by a factor of 3 to 5 at
 2 to 4 bits. The two converge at 8 bits. At 6 bits, kvarn matches or nearly
 matches affine at 8 in three quarters of the memory. Widths 2 and 3 are
-for experiments. [KV cache fidelity](benchmarks.md#kv-cache-fidelity) has
-the measurements.
+for experiments. The measurements are in
+[KV cache fidelity](benchmarks.md#kv-cache-fidelity).
 
 ## Speed and speculative decoding
 

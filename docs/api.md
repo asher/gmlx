@@ -312,7 +312,8 @@ model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
 still returning from a recent unload. The switch variables, and the decode
 batch width that sets the queue cap, are listed under
-[Server](env-vars.md#server).
+[Server](env-vars.md#server), except `GMLX_GOVERNOR`, which is under
+[Runtime](env-vars.md#runtime).
 
 Both 400s for a request that does not fit start their message with `prompt
 is too long`, and the budget error also says the request `exceeds the context

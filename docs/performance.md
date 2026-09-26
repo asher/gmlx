@@ -37,8 +37,8 @@ weights. Each feature of gmlx targets one of these limits.
 | Sparse attention | The cost of attention stops growing past 8K tokens. | It changes the output, is opt-in, and applies to the llama family only. | [Sparse attention at depth](#sparse-attention-at-depth) |
 | Streaming | A MoE model larger than RAM can run. | Decoding runs at a few tokens per second. | [Models larger than memory](streaming.md) |
 
-[Memory and the KV cache](memory.md) explains how much memory a model and
-its context take, and the settings that limit it.
+To see how much memory a model and its context take, and which settings
+limit it, read [Memory and the KV cache](memory.md).
 
 ## Measuring
 

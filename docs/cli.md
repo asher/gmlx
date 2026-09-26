@@ -587,7 +587,7 @@ gmlx launch omp --config-only
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `client`, positional | Required | Launch one of `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh` or `menubar`. |
+| `client`, positional | None | Launch `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`, `dsh` or `menubar`. Without one, it prints the help. |
 | `--model ID[@profile]` | The server's default | Point the tool at this served model, which the server keeps loaded through its idle timeout. |
 | `--base-url URL` | None | Connect to this server, which is never auto-started. |
 | `--host H`, `--port P` | The managed server | Select the server. |
@@ -804,7 +804,7 @@ gmlx profiles qwen3.8-27b-ud-q6
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `id`, positional | None | Resolve this model id or alias. |
+| `model`, positional | None | Resolve this model id or alias. |
 | `--config FILE` | The first default location | Read this config. |
 | `--json` | Off | Emit JSON. |
 

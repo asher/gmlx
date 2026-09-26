@@ -1059,7 +1059,7 @@ summary line is diagnostics.
 [When something goes wrong](#when-something-goes-wrong) gives the values
 of `a` and `s` at which `align` warns and refuses.
 
-The training loss is a sparse KL over the top-k plus a tail bucket for
+Training uses a sparse KL loss over the top-k plus a tail bucket for
 the mass outside it, so the student is never asked to put all of its
 probability on the top-k. `--dk` weights that term, printed as `dk` in
 the train line. `--alm` weights the chunk term of a cross-tokenizer
@@ -1090,8 +1090,8 @@ an epoch, is the train rows of every view divided by `--batch-size`,
 rounded up, and the worked task trains for two passes. The one-liner under
 [Round one](#round-one-trains-on-the-teachers-replies) computes it.
 
-[Distillation internals](internals/distill.md) has the memory figures
-and the measurements behind these defaults.
+The memory figures and the measurements behind these defaults are in
+[Distillation internals](internals/distill.md).
 
 ## Limitations
 

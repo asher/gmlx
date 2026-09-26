@@ -24,7 +24,7 @@ model with 64 layers uses 256 KB for each token, or 8 GB at 32K. For
 long-context agent work, the KV cache can be as large as the weights.
 
 Many families use much less than the formula gives. Sliding-window
-layers, as in gemma, stop growing at the size of the window. Hybrid
+layers, as in Gemma, stop growing at the size of the window. Hybrid
 models, such as Qwen3.5, Qwen3.6, Qwen3.8, Granite 4 and Nemotron-H, keep
 a small fixed state on most layers and a full KV cache only on their few
 attention layers. Qwen3.6-27B, with 16 attention layers of 64, therefore

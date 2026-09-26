@@ -65,8 +65,8 @@ the projected groups and the gather of every student token's slot, then
 the cotangent in the backward. That is 24 bytes per position and
 vocabulary element on a cross-tokenizer pair and 16 on a same-tokenizer
 pair. A chunk with no boundaries holds 12. At the default 512 positions
-and a 262144-token student vocabulary that is 3.2 GB, which `--chunk`
-scales linearly.
+and a 262144-token student vocabulary, a cross-tokenizer boundary chunk
+holds 3.2 GB, which `--chunk` scales linearly.
 
 This closed form takes the cotangent of the logits back to the hidden
 states through the dequantized head weight. A Hadamard-folded head

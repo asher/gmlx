@@ -317,9 +317,8 @@ one by one.
 
 ## DeepSeek-V4 against ds4-server
 
-llama.cpp has no DeepSeek-V4-Flash or V4.1-Flash path, so these models
-are compared with ds4-server, a DeepSeek-V4 server. Each ratio is gmlx
-divided by ds4-server, and [Methodology](#methodology) lists the
+The two antirez files are compared with ds4-server, a DeepSeek-V4 server,
+instead of llama.cpp. Each ratio is gmlx divided by ds4-server, and [Methodology](#methodology) lists the
 ds4-server build of each model.
 
 ### DeepSeek-V4-Flash IQ2_XXS

@@ -116,12 +116,12 @@ GLM-5.2 changes the routing width. It is a 282 GB UD-IQ3_XXS file with 256
 experts routed top-8 under sigmoid gating. On the same machine it streams at
 a per-expert hit rate near 88%, higher than MiniMax-M3's, yet it stalls more. A
 layer stalls when any of eight routed experts misses rather than four. At
-hit rate h the stall odds are `1 - h^k`, and k = 8 roughly doubles them at
-the same h.
+hit rate h the stall odds are `1 - h^k`, so at h = 0.88 they rise from 40%
+with four experts to 64% with eight.
 
 That amplification works in both directions. Each point of hit rate that
-miss-shed recovers is worth about twice as much, so the same setting
-measured stronger here. It gained 16.5% decode at P=0.80 with stalls halved,
+miss-shed recovers removes more stalls than it would with four experts, so
+the same setting measured stronger here. It gained 16.5% decode at P=0.80 with stalls halved,
 and 10.7% at P=0.85, both as even-round alternated 512-token medians. Arena
 size, flat on MiniMax-M3, mattered too, with each arena GB adding about 0.2 points
 of hit rate.

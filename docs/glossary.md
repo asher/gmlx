@@ -63,8 +63,8 @@ drafters](speculative-decoding.md#dflash-2-drafters) describes.
 
 Discovery scans a folder for GGUF files, gives each model an id, pairs it
 with its mmproj and drafter files, and chooses load settings. `gmlx init`,
-`gmlx sync-models` and a `gmlx serve` with no config use it, as [Model
-discovery](config.md#model-discovery) describes.
+`gmlx sync-models` and a `gmlx serve` with no config use it. Its naming
+and pairing rules are in [Model discovery](config.md#model-discovery).
 
 ## Drafter
 

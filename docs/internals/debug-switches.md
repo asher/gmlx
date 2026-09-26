@@ -20,7 +20,7 @@ are read at load or on each call. The user-facing variables are in
 | `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new arch. The default is the llama family only. |
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
 | `GMLX_GDN_REPLAY=0` | Qwen3.5 and 3.6 verify rounds store the recurrent state after each position instead of records the next step replays. Output is bit-identical either way. |
-| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
+| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes, with no performance patches and two stock defects back. Multimodal targets ignore it. |
 | `GMLX_TRAIN_BLOCKED_ATTN=0` | Run training attention on MLX's unfused path instead of the query-block recompute in `gmlx.tune.attention`. Numerics match to rounding. |
 | `GMLX_TRAIN_GDN_CHUNK=0` | Run the gated delta scan of a training forward on mlx-lm's per-token loop instead of the chunked rule in `gmlx.tune.gdn`. |
 | `MLX_ENABLE_TF32=1` | Keep TF32 float32 matmul in `gmlx train` and `gmlx distill`, which otherwise set it to `0`. The chunked gated delta rule then takes the loop and says so. |
@@ -62,7 +62,7 @@ are read at load or on each call. The user-facing variables are in
 | `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too, so a serve claim can be certified there. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print a streamed decode's per-token split between disk stalls and the eval and sync bucket at exit. A clock frequency drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses, so a cold layer or a cold start shows where it is. |
-| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 decode, eval after each layer part and print the wall time per token of attention, experts, hyper-connections and engram. Slows the run. |
+| `GMLX_DECODE_LAYER_PROFILE=1` | On DeepSeek-V4.1 decode, eval after each layer part and print the wall time per token of attention, experts, hyper-connections and engram. This slows the run. |
 | `GMLX_DECODE_LAYER_PROFILE=2` | Also eval inside attention and the MoE, so each sub-step (projections, indexer, core, router, experts, shared expert) is one command buffer in a GPU trace. |
 | `GMLX_DECODE_LAYER_PROFILE_LOG` | With the layer profile, write every mark as `key layer wall_t0 wall_t1` to this path at exit, for aligning a Metal System Trace to the marks. |
 | `GMLX_LAYER_PROFILE_PREFILL=1` | With the layer profile, also mark the steps wider than one token, which are the prefill chunks. The per-token figures then average over forward calls. |
