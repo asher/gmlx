@@ -111,7 +111,7 @@ An `@profile` suffix on the model, such as `model.gguf@creative`, starts
 from another [profile](config.md#profiles) instead.
 
 Models with a native prediction head use
-[speculative decoding](performance.md#mtp-speculative-decoding)
+[speculative decoding](speculative-decoding.md)
 automatically, and `--draft-gguf` pairs a separate drafter. While a drafter
 is active, only temperature, top-p, top-k and min-p apply. Chat warns at
 startup and drops the penalties, logit bias and XTC settings, as well as

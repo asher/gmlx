@@ -174,7 +174,7 @@ Mark a model for loading at startup with a pin, `server.defaults.model` or
 The port answers while that load runs, so an early request waits only for
 what is left of it. A slow first turn on a very long prompt is a
 different case: that is prefill rather than loading, and the
-[prompt cache](performance.md#the-prompt-cache) covers it.
+[prompt cache](prompt-cache.md) covers it.
 
 ## Requests fail with 403 hf_access_disabled
 
@@ -198,7 +198,7 @@ rerun.
 The whole machine becomes slow while a model runs, or loads abort.
 
 The weights plus KV cache exceed available RAM. Check the arithmetic in
-[performance.md](performance.md#memory-and-the-kv-cache), then either
+[Memory and the KV cache](memory.md), then either
 quantize the KV cache or pick a smaller quant. On `run` and `chat` the KV
 flags are `--kv-bits 8` and `--max-kv-size`. On the server the same
 settings are the `kv_bits` and `max_kv_size`

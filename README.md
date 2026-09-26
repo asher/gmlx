@@ -145,7 +145,7 @@ server running from login.
 ### Voice chat and the assistant
 
 With `gmlx talk` a wake phrase opens the mic, Whisper transcribes, and the
-reply is spoken as it streams, as [Voice](https://github.com/asher/gmlx/blob/main/docs/talk.md)
+reply is spoken as it streams, as [Voice chat](https://github.com/asher/gmlx/blob/main/docs/talk.md)
 describes. The
 built-in [assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md)
 adds MCP tools and long-term memory to a voice session, to
@@ -271,7 +271,7 @@ below for the latest release, with navigation and search.
 
 - [Chat](https://github.com/asher/gmlx/blob/main/docs/chat.md): the terminal chat client, its commands, sessions
   and themes
-- [Voice](https://github.com/asher/gmlx/blob/main/docs/talk.md): talking to a model with `gmlx talk`
+- [Voice chat](https://github.com/asher/gmlx/blob/main/docs/talk.md): talking to a model with `gmlx talk`
 - [Assistant](https://github.com/asher/gmlx/blob/main/docs/assistant.md): tools and long-term memory for chat,
   voice and served models
 
@@ -288,14 +288,27 @@ below for the latest release, with navigation and search.
 - [Distillation](https://github.com/asher/gmlx/blob/main/docs/distill.md): teaching a small model a document or
   a larger model's behavior
 
-### Performance and help
+### Performance
 
-- [Performance tuning](https://github.com/asher/gmlx/blob/main/docs/performance.md): the speed features and what
-  each setting costs
-- [Benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md): gmlx against llama.cpp on the same
-  files, with the method
-- [Troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md): `gmlx doctor`, common
-  failures, and where gmlx keeps its files
+- [Performance tuning](https://github.com/asher/gmlx/blob/main/docs/performance.md): what makes a model fast, measuring,
+  and choosing a quant
+- [Speculative decoding](https://github.com/asher/gmlx/blob/main/docs/speculative-decoding.md): faster decoding with a drafter,
+  with the same output
+- [Prompt cache](https://github.com/asher/gmlx/blob/main/docs/prompt-cache.md): skipping prefill for prompts the server
+  has seen
+- [Concurrent requests](https://github.com/asher/gmlx/blob/main/docs/concurrency.md): batching, admission pacing and shared
+  prompts
+- [Memory and the KV cache](https://github.com/asher/gmlx/blob/main/docs/memory.md): how much memory a model and its
+  context take
+- [KV cache quantization](https://github.com/asher/gmlx/blob/main/docs/kv-quantization.md): storing the context in fewer
+  bits
+- [Benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md): gmlx against llama.cpp on the same files,
+  with the method
+
+### Help
+
+- [Troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md): `gmlx doctor`, common failures,
+  and where gmlx keeps its files
 - [Glossary](https://github.com/asher/gmlx/blob/main/docs/glossary.md): the terms these pages use
 
 ### Reference

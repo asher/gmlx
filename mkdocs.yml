@@ -104,8 +104,14 @@ nav:
           - streaming.md
           - lora.md
           - distill.md
-      - Performance and help:
+      - Performance:
           - performance.md
+          - speculative-decoding.md
+          - prompt-cache.md
+          - concurrency.md
+          - memory.md
+          - kv-quantization.md
+      - Help:
           - troubleshooting.md
           - glossary.md
   - Reference:

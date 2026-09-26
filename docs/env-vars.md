@@ -88,8 +88,8 @@ marked as read per tick or per chunk take effect on a running server.
 ## Runtime
 
 Streaming, memory-governor and kernel-route switches. The mechanisms are
-explained in [streaming.md](streaming.md) and
-[performance.md](performance.md).
+explained in [Models larger than memory](streaming.md) and
+[Performance tuning](performance.md).
 
 | Variable | Meaning |
 |----------|---------|

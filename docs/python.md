@@ -35,8 +35,8 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 
 There are no vision or draft-model kwargs here. Pairing a model with an mmproj
 file and speculative decoding are CLI and server features, covered in
-[vlm.md](vlm.md) and
-[performance.md](performance.md#mtp-speculative-decoding).
+[Vision and audio](vlm.md) and
+[Speculative decoding](speculative-decoding.md).
 
 ## Generate
 

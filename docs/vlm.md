@@ -105,7 +105,7 @@ have limits:
 
 | Combination | Result |
 |-------------|--------|
-| [Speculative decoding](performance.md#mtp-speculative-decoding) | Text turns use speculation, and turns with media decode without it. It needs a drafter, which is a native head or a `--draft-gguf` companion. |
+| [Speculative decoding](speculative-decoding.md) | Text turns use speculation, and turns with media decode without it. It needs a drafter, which is a native head or a `--draft-gguf` companion. |
 | [`--stream-experts`](streaming.md) | `run` and `serve` stream the language model and keep the vision encoder on the GPU. Chat refuses it, and a served model cannot combine it with speculation. |
 | `--stream-cpu` | Refused, because it would move the vision encoder to the CPU too. |
 | The lossy MoE settings, such as `--moe-experts` | Chat refuses them with `--mmproj`. |

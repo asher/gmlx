@@ -398,7 +398,7 @@ These flags control memory:
 | `--max-kv-size N` | none | cap the KV cache with a rotating window. Combines with [kvarn](glossary.md) but not with affine `--kv-bits` |
 | `--kv-bits N` | off | quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, default 6 |
 | `--kv-group-size N` | `64` | affine quantization group size |
-| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | `kvarn` is variance-normalized quantization, [performance.md](performance.md#kv-cache-quantization) |
+| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | `kvarn` is variance-normalized quantization, [KV cache quantization](kv-quantization.md) |
 | `--kv-tail-tokens N` | `1024` | under kvarn, the newest N tokens stay fp16. A multiple of 128. `0` disables |
 | `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache. Not applied under kvarn |
 | `--prefill-step-size N` | `2048`, `8192` when streaming | prefill chunk size |
@@ -406,7 +406,7 @@ These flags control memory:
 
 A width outside the scheme's list exits 2, and so does a `--max-kv-size`
 window too small for kvarn's block layout, which
-[performance.md](performance.md#kv-cache-quantization) describes along with
+[KV cache quantization](kv-quantization.md) describes along with
 the models kvarn declines. A declined model prints the reason and runs fp16
 KV, and the VLM media path always keeps fp16.
 
@@ -435,7 +435,7 @@ These flags are multimodal. [vlm.md](vlm.md) describes them:
 while the bench, report and streaming flags error with it.
 
 These flags control speculative decoding, which
-[performance.md](performance.md#mtp-speculative-decoding) describes:
+[Speculative decoding](speculative-decoding.md) describes:
 
 | Flag | Default | Meaning |
 |------|---------|---------|

@@ -107,7 +107,7 @@ kvarn. The KV cache quantization scheme that keeps the most accuracy per
 bit. It rotates and normalizes the cache in 128-token records before
 rounding, so no single token or channel dominates, and it leaves the first
 tokens and the newest ones at full precision. `--kv-quant-scheme kvarn`
-selects it, and [performance.md](performance.md#kv-cache-quantization)
+selects it, and [KV cache quantization](kv-quantization.md)
 compares it with plain affine quantization.
 
 MCP. The Model Context Protocol, a standard way for a model to call tools

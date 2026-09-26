@@ -3,7 +3,7 @@
 How the prompt cache tiers are chosen per architecture, the counters that
 show whether reuse is working and the environment switches that tune or
 disable each layer. This page is for contributors, while operators read
-[performance.md](../performance.md#the-prompt-cache). Upstream calls the
+[Prompt cache](../prompt-cache.md). Upstream calls the
 cache APC, and the switches use that name.
 
 ## Which tier serves which architecture

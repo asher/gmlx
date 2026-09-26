@@ -19,7 +19,7 @@ the `datasets` package (not a gmlx dependency) and a Hugging Face cache
 that holds Salesforce/wikitext, or network access to fetch it. The kvarn
 arms need an mlx-kquant build with the kvarn ops. Protocol: idle machine,
 one model, arms interleaved per chunk so drift hits all arms equally.
-The kvarn figures in docs/performance.md come from this harness.
+The kvarn figures in docs/benchmarks.md come from this harness.
 
 Example:
   python scripts/kld_harness.py path/to/model.gguf --ctx 16384 \\

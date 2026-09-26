@@ -113,7 +113,7 @@ conversation:
 A loaded model needs memory for its weights, about its file size, and for
 its KV cache, which grows with the conversation. In a long session the KV
 cache can grow as large as the weights.
-[Performance tuning](performance.md#memory-and-the-kv-cache) explains how
+[Memory and the KV cache](memory.md) explains how
 to estimate it and how to make it smaller. A mixture-of-experts model that
 is larger than memory can still run, as
 [Models larger than memory](streaming.md) describes.
@@ -157,7 +157,7 @@ apps, including Open WebUI, a chat app for the browser.
 
 - [Configuration](config.md) explains profiles, aliases, the prompt cache
   and the memory limits of the server.
-- [Voice](talk.md) sets up `gmlx talk`, which answers spoken questions
+- [Voice chat](talk.md) sets up `gmlx talk`, which answers spoken questions
   aloud.
 - [Menu bar app](menubar.md) describes the login item, which keeps the
   server and the menu bar app running.

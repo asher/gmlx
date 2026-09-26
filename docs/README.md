@@ -44,7 +44,7 @@ Where to start depends on what you want:
 
 - [Chat](chat.md): the terminal chat client, its commands, sessions and
   themes
-- [Voice](talk.md): talking to a model with `gmlx talk`
+- [Voice chat](talk.md): talking to a model with `gmlx talk`
 - [Assistant](assistant.md): tools and long-term memory for chat, voice
   and served models
 
@@ -60,12 +60,25 @@ Where to start depends on what you want:
 - [Distillation](distill.md): teaching a small model a document or a
   larger model's behavior
 
-## Performance and help
+## Performance
 
-- [Performance tuning](performance.md): the speed features and what each
-  setting costs
+- [Performance tuning](performance.md): what makes a model fast, measuring,
+  and choosing a quant
+- [Speculative decoding](speculative-decoding.md): faster decoding with a drafter,
+  with the same output
+- [Prompt cache](prompt-cache.md): skipping prefill for prompts the server
+  has seen
+- [Concurrent requests](concurrency.md): batching, admission pacing and shared
+  prompts
+- [Memory and the KV cache](memory.md): how much memory a model and its
+  context take
+- [KV cache quantization](kv-quantization.md): storing the context in fewer
+  bits
 - [Benchmarks](benchmarks.md): gmlx against llama.cpp on the same files,
   with the method
+
+## Help
+
 - [Troubleshooting](troubleshooting.md): `gmlx doctor`, common failures,
   and where gmlx keeps its files
 - [Glossary](glossary.md): the terms these pages use

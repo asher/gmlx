@@ -7,7 +7,10 @@ depths. Above 4k depth decode is faster too, and the gap grows as
 context deepens. Speculative decode, MTP, is measured where a native
 or preserved MTP head exists.
 
-The machine-readable data is in [benchmarks.json](benchmarks.json).
+The page also holds the measurements behind the performance pages, under
+[Serving measurements](#serving-measurements) and
+[KV cache fidelity](#kv-cache-fidelity). The machine-readable data is in
+[benchmarks.json](benchmarks.json).
 Any cell is reproducible with the bundled harness in [bench/](../bench/).
 
 ## Fleet summary
@@ -346,3 +349,115 @@ its Model provenance row.
 | 110k | 19.6 (18.9-20.5) | 14.8 (13.4-15.1) | 1.32x | 798.5 (759.8-835.1) | 626.8 (585.8-632) | 1.27x |
 | 200k | 18.7 (18.1-18.9) | 13.1 (12.9-13.4) | 1.43x | 807.9 (782.1-831.4) | 556.5 (536.1-564.9) | 1.45x |
 | 384k | 17.4 (12.9-18.2) | 12.2 (10.6-12.7) | 1.43x | 796.9 (790.7-807.7) | 612.5 (592.9-633.5) | 1.30x |
+
+## Serving measurements
+
+These measurements back the guidance of the performance pages. Unless a
+line names another machine, they come from the M5 Max of the methodology
+table.
+
+| Measurement | Result |
+|---|---|
+| Uniform against mixed quant | A uniform Q6_K decoded 64% faster than the mixed UD build on the dense Qwen3.6-27B, and 15% faster on the MoE Qwen3.6-35B-A3B, with equal or better output. |
+| Batched decoding | Three streams on Qwen3.6-35B-A3B Q6_K gave 1.3x to 1.7x the total throughput of one, falling as the context grew. |
+| Admission pacing | A client arriving at 14K tokens left the running stream 4% of its decode speed under strict alternation, and 80% with pacing. |
+| Shared-prompt cascade | Four streams on a 12K-token system prompt decoded about 1.4x faster in total. |
+| Sparse attention | On Llama-3.1-8B Q6_K at 32K, decoding ran 1.4x faster for one stream and 1.8x in total for three, with Q6-level divergence. |
+| Stochastic acceptance | Acceptance rose by a few points on a Q6 dense model and by about 14 points on a low-bit MoE quant. |
+| DFlash 2 drafter | On Qwen3.8-27B at Q6, the drafter about tripled decoding speed over plain decoding, and was about 1.5x the native head. |
+| Thermal behavior | A 14-inch M5 Max ran about twenty minutes of streamed MoE decoding before settling about 20% lower. The 16-inch model holds its boost clocks longer. |
+
+## KV cache fidelity
+
+The fidelity measure is the teacher-forced logit KL divergence against an
+fp16 cache on wikitext, from `scripts/kld_harness.py`. One leg scores the
+chunked prefill logits, and the other scores decoding token by token from
+the full prefill depth. KL divergence is in nats, and lower is better. The
+median is the typical position, the decode p99 is the worst hundredth,
+where a quantizer's outliers show, and top-1 is the share of generated
+positions whose most likely token matches the fp16 cache.
+
+<!-- kld-tables -->
+Qwen3.5-9B Q4_K_M, 16k context, head_dim 256, 7 of 32 layers quantized:
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
+| kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
+| affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
+| kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
+| affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
+| kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
+| kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
+| kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
+| affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
+| kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
+| affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
+| kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
+
+Qwen3.8-27B Q6_K_XL, 16k context, head_dim 256, 15 of 65 layers quantized:
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
+| kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
+| affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
+| kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
+| affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
+| kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
+| kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
+| kvarn k6 v5 | 0.00034 | 0.00019 | 0.0039 | 98.5% |
+| affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
+| kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
+| affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
+| kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
+
+Qwen3.8-27B Q6_K_XL, 32k context:
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 4 | 0.00162 | 0.00205 | 0.0176 | 97.6% |
+| kvarn 4 | 0.00104 | 0.00070 | 0.0068 | 98.1% |
+| affine 6 | 0.00039 | 0.00049 | 0.0037 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 0.0027 | 99.4% |
+| affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
+| kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
+
+Nemotron-3.5-Lightning-30B-A3B, 16k context, Mamba2 hybrid, head_dim 128:
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| kvarn 4 | 0.00270 | 0.00163 | 0.0508 | 98.1% |
+| kvarn 6 | 0.00125 | 0.00103 | 0.0266 | 98.8% |
+| affine 8 | 0.00123 | 0.00094 | 0.0335 | 98.2% |
+| kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
+<!-- /kld-tables -->
+
+At the same width, kvarn beats the affine cache on both legs at every width
+below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the two
+converge at 8. kvarn 6 sits between affine 6 and affine 8 on the 9B model
+and matches affine 8 on the 27B model, in three quarters of the bytes of
+the 8-bit record. At 32K, its decode median can trail affine 8 by a few
+percent while its p99 and top-1 stay ahead. The split width k6 v5 keeps
+the median of kvarn 6 with the p99 and top-1 of kvarn 5.
+
+When two caches differ by a few percent on one measure, prefer the one
+with the lower p99 and the higher top-1. Top-1 is closest to what a greedy
+or low-temperature user sees. The median measures how far the whole
+next-token distribution moved, which is what sampling draws from. The p99
+bounds the outliers, which matter because one badly wrong position can
+change a reasoning chain or a tool call, and a long generation feeds its
+errors back in. The corpus is wikitext under teacher forcing, so these
+tables rank caches against each other and do not predict a task score.
+
+TurboQuant, the scheme of mlx-vlm
+([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), measured on the
+same models and legs, fell between the other two. It was ahead of affine
+at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind kvarn at
+each width on all measures, so gmlx does not offer it.
+
+On a dense model whose decoding is limited by the KV read, Qwen3-0.6B Q8
+with 27 of 28 layers quantized, kvarn 6 decoded at 0.81x fp16 and 0.69x
+affine 8 at 16K, and at 0.98x and 0.75x at 32K, with prefill within 10% of
+both. On GDN hybrids and gemma-4, all three caches ran within the spread
+between runs.

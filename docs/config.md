@@ -209,7 +209,7 @@ value. The default is `null`.
 The switch is described in
 [Speculative batching](internals/speculative-batching.md), and the
 measurements behind the defaults in
-[Performance tuning](performance.md#mtp-speculative-decoding).
+[Benchmarks](benchmarks.md).
 
 ### `models.*.adapter`
 
@@ -628,8 +628,7 @@ quantization. `kvarn` normalizes the variance first and keeps the newest
 tokens in fp16. A model where no layer converts under `kvarn` runs fp16
 and logs why, and it never falls back to affine. Under `uniform`,
 speculative models quantize only while they serve one request. Under
-`kvarn` they stay quantized at any batch size with mlx-kquant 0.4.9 or
-later. [Performance tuning](performance.md#kv-cache-quantization) lists which
+`kvarn` they stay quantized at any batch size. [KV cache quantization](kv-quantization.md) lists which
 architectures convert. The default is `uniform`.
 
 ### `load.kv_group_size`
@@ -661,7 +660,7 @@ for agents and long chats, which resend the same history on every turn.
 [`server.cache`](#servercache) sets the cache for every model, and a
 `cache` block in a profile or a model's `overrides` changes it. What the
 cache restores for each architecture is in
-[Performance tuning](performance.md#the-prompt-cache).
+[Prompt cache](prompt-cache.md).
 
 ```yaml
 server:
@@ -934,7 +933,7 @@ key is unset, the server sets a limit from 4 to 12 GiB. It is a quarter of
 the memory that the weights leave free when they take more than 60 percent
 of the GPU working set, and 5 percent of the working set otherwise. `0`
 turns the buffer cache off, and a negative value removes the limit.
-[Performance tuning](performance.md#the-mlx-buffer-cache-at-deep-context)
+[The MLX buffer cache](memory.md#the-mlx-buffer-cache)
 explains when to change it. The server chooses the default at start.
 
 #### `server.defaults.model`
@@ -985,8 +984,8 @@ generating request would drop below half its speed. A number such as
 `1.0` makes each prefill chunk wait until the generating requests have
 had that multiple of the chunk's GPU time. With `0`, one prefill chunk
 runs per generation step.
-[Performance tuning](performance.md#serving-concurrent-requests)
-measures the effect. The default is `auto`.
+[Concurrent requests](concurrency.md)
+describes the effect. The default is `auto`.
 
 #### `server.prefill_tick_ms`
 
@@ -1017,7 +1016,7 @@ With `true`, the server accepts speculative tokens by rejection sampling,
 which accepts more of them. The sampling distribution stays exact, but the
 output is no longer token-identical to plain decoding. Greedy requests do
 not change, and a reload does not change this key.
-[Performance tuning](performance.md#stochastic-acceptance) measures the gain. The
+[Stochastic acceptance](speculative-decoding.md#stochastic-acceptance) describes it. The
 default is `false`.
 
 #### `server.gpu_keepwarm`
