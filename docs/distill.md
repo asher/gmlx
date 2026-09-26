@@ -2,8 +2,8 @@
 
 Distillation teaches a small model something that a larger one knows, so
 the small model can answer without the larger one. The `gmlx distill`
-actions run it as a pipeline, and one worked task below goes through every
-step, with what each step needs and what its report means.
+actions run it as a pipeline of steps, and each step writes a report that
+says whether it worked.
 
 You give it a document and a list of questions about it. A large GGUF
 model, the teacher, reads the document. A small GGUF model, the student,
@@ -79,7 +79,7 @@ fits any Apple Silicon Mac.
 
 Conversation rows and the chat measurements need a student with a chat
 template, the fixed text a model wraps around each turn of a
-conversation. Chat models carry one. Gemma adds `-it` to their names,
+conversation. Chat models carry one. Gemma models add `-it` to their names,
 many families add `Instruct`, and Qwen3.5 and Qwen3.6 chat models, like
 the worked student, carry no suffix.
 
@@ -112,8 +112,8 @@ at least one row of a cache with two or more, and never trains on them.
 A cache made from one document splits that document. Here 24 rows leave
 23 for a batch of 4.
 
-`eval --slice` reads plain text, so the second line writes the same rows
-to `smoke.txt`:
+`eval --slice` reads plain text, so the second `python3` line writes the
+same rows to `smoke.txt`:
 
 ```sh
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --to .
@@ -210,17 +210,20 @@ than using it do not help and stay out.
 
 Hundreds of prompts are easiest to write as templates, one question
 shape per kind, filled from the database's own values by a script that
-also writes the reference query under `check`. The skeleton below has
-one shape with three phrasings. Save it as `make-prompts.py` next to
-`freight.sqlite` and run it with `python3`, redirecting its output to
-`prompts-train.jsonl`. Add a shape per kind of question, and shapes that
-combine two kinds. For the held-out file, run it again with fresh
-phrasings and the id prefix changed to `heldout-`, and write the combined
-shapes to their own file. A combined shape joins two kinds in one
-question and one reference query, such as "How many {hull}-class
-manifests left port in {year} and have not arrived?" with a query that
-applies both conditions. For `prompts-untrained.jsonl`, write shapes for
-kinds the training file leaves out entirely:
+also writes the reference query under `check`. Add a shape per kind of
+question, and shapes that combine two kinds. A combined shape joins two
+kinds in one question and one reference query, such as "How many
+{hull}-class manifests left port in {year} and have not arrived?" with a
+query that applies both conditions.
+
+For the held-out file, run the script again with fresh phrasings and the
+id prefix changed to `heldout-`, and write the combined shapes to their
+own file. For `prompts-untrained.jsonl`, write shapes for kinds the
+training file leaves out entirely.
+
+The skeleton below has one shape with three phrasings. Save it as
+`make-prompts.py` next to `freight.sqlite` and run it with `python3`,
+redirecting its output to `prompts-train.jsonl`:
 
 ```python
 #!/usr/bin/env python3
@@ -280,11 +283,11 @@ script that asks a served model whether the reply matches a reference
 answer you wrote under `check.answer`. The one below asks whatever
 `gmlx serve` has on port 8080. Any instruct model larger than the
 student serves as the judge, the teacher included. Save it as
-`judge.py`, run
-`chmod +x judge.py`, and give it to `filter` as `--verify ./judge.py`.
-`filter` runs after `gen` has stopped its own server, so the judge has
-the memory to itself. Start it with `gmlx serve <judge>.gguf` before
-`filter` and stop it with `gmlx stop` after:
+`judge.py`, run `chmod +x judge.py`, and give it to `filter` as
+`--verify ./judge.py`. `filter` runs after `gen` has stopped its own
+server, so the judge model has the memory to itself. Start that model
+with `gmlx serve <judge>.gguf` before `filter` and stop it with
+`gmlx stop` after:
 
 ```python
 #!/usr/bin/env python3
@@ -308,8 +311,8 @@ held-out prompts with the document in view, then caches those exact
 replies twice, once as written and once with the document removed from
 the prompt.
 
-`--context`, the flags' word for the document, puts it into the last user
-turn on the teacher's side only. Each reply row then carries two message
+`--context` names the document and puts it into the last user turn, on
+the teacher's side only. Each reply row then carries two message
 lists, `messages` with the document and `student_messages` without it.
 The first `cache` reads `messages`, the second reads the bare list
 through `--messages-key student_messages`, and `census` compares what the
@@ -319,7 +322,7 @@ teacher thought of the same replies with and without the document.
 caps the reasoning trace, the text a thinking model writes before its
 answer. [Round one](#round-one-trains-on-the-teachers-replies) explains
 the other flags. The replies are cached as written, including the ones
-whose trace hit the budget, since the census wants every position the
+whose trace hit the budget, since the census needs every position the
 document moved:
 
 ```sh
@@ -334,7 +337,7 @@ gmlx distill census --without cache-heldout-bare/ --with cache-heldout-ctx/ \
     --corpus heldout-ctx.jsonl --out census.json --md census.md
 ```
 
-Two rows of the census report decide. The row that starts
+Two rows of the census report decide whether to go on. The row that starts
 `distillable effect` is how far the document moves the teacher's
 next-token choices, averaged over every position of the replies, in nats,
 which [Read the numbers](#read-the-numbers) defines. The
@@ -343,20 +346,22 @@ makes the token the teacher wrote more likely by more than one nat.
 
 An effect under about 0.05 nats, or a high-delta share under 0.01,
 means the document changes little that a student could learn, and the
-run is not worth its hours. The other rows are diagnostics. The
-`paired reply rows` row also counts two kinds of skipped row. A reply
-mismatch is a row whose reply bytes differed between the two caches,
-and a history mismatch is one whose context render dropped turns the
-bare row kept. With several `--with` caches, every cache decides which
-rows pair and which positions count. The effect, the histogram and the
-positions map come from the first cache, and only
-`residual across contexts` reads them all. Keep the census JSON, which the
-evaluation reads to score the adapter at those positions.
+run is not worth its hours. When the run goes on, keep the census JSON,
+which the evaluation reads to score the adapter at those positions.
 
-The same replies give the teacher's own pass rate, computed as under
-[Use and measure the adapter](#use-and-measure-the-adapter). A teacher
-that fails most questions with the document in view cannot teach them.
-These two commands compute it:
+Other rows of the report are diagnostics. The `paired reply rows` row
+also counts two kinds of skipped row. A reply mismatch is a row
+whose reply bytes differed between the two caches, and a history
+mismatch is one whose context render dropped turns the bare row kept.
+With several `--with` caches, every cache decides which rows pair and
+which positions count. The effect, the histogram and the positions map
+come from the first cache, and only `residual across contexts` reads
+them all.
+
+The same replies give the teacher's own pass rate, and a teacher that
+fails most questions with the document in view cannot teach them. These
+two commands compute it, as
+[Use and measure the adapter](#use-and-measure-the-adapter) explains:
 
 ```sh
 gmlx distill filter --in heldout-ctx.jsonl --out heldout-ctx-ok.jsonl \
@@ -428,17 +433,18 @@ of its own, or run the teacher without `--thinking` and
 `filter` runs its checks in a fixed order and names the first one a row
 fails, with one reason word per dropped row:
 
-- `length`, the reply did not reach its end of turn.
-- `budget`, the reasoning trace hit `--thinking-budget`.
-- `empty`, the answer has fewer than `--min-words` units, a unit being a
-  word or one ideograph or kana character.
-- `marker`, a marker of the chat template leaked into the reply or its
+- `length` means that the reply did not reach its end of turn.
+- `budget` means that the reasoning trace hit `--thinking-budget`.
+- `empty` means that the answer has fewer than `--min-words` units, a
+  unit being a word or one ideograph or kana character.
+- `marker` means that a marker of the chat template leaked into the reply or its
   reasoning trace.
-- `repeat`, lines or phrases repeat in the reply or its reasoning trace,
-  the trace under its own `--max-trace-repeat`.
-- `ascii`, too many non-ASCII characters, only with `--max-non-ascii`.
-- `tokens`, the reply is over `--max-reply-tokens`.
-- `verify`, your checker said no, with its word under `detail` in the
+- `repeat` means that lines or phrases repeat in the reply or its
+  reasoning trace, the trace under its own `--max-trace-repeat`.
+- `ascii` means that the reply has too many non-ASCII characters, and
+  applies only with `--max-non-ascii`.
+- `tokens` means that the reply is over `--max-reply-tokens`.
+- `verify` means that your checker said no, with its word under `detail` in the
   rejects file.
 
 A reply whose reasoning trace hit the budget is unfinished and is
@@ -496,10 +502,8 @@ alone does not fit. 2560 holds a 1180-token reply behind a prompt.
 256 by default, and is unrelated to the sampler's `--top-k` on `gen`.
 
 `align` runs on the CPU with the two tokenizers only and writes the view
-into `view-r1/`. It holds back about one row in fifty for validation,
-whole documents at a time and at least one row of a cache with two or
-more, and the rest are training rows. A cache made from one document
-splits that document instead. Its summary line reports `a` and `s`, the
+into `view-r1/`. It holds back validation rows as in the smoke run, and
+the rest are training rows. Its summary line reports `a` and `s`, the
 own-group and singleton fractions explained under
 [Advanced settings](#advanced-settings), and the other fields on that
 line are diagnostics. On the worked pair every teacher token has a
@@ -527,7 +531,7 @@ so a second run either resumes them or names another directory. These
 values come from the worked task, and
 [Advanced settings](#advanced-settings) says what each one changes.
 
-Training prints the loss, the figure it drives down, every ten steps.
+Training prints the loss every ten steps.
 If the loss has not fallen by step 40, stop the run and check that the
 filter kept the rows you expected and that `align` reported `a=1.000`
 or a warning you accepted.
@@ -547,7 +551,7 @@ answering, so serve it with thinking on. The Qwen template turns it on by
 default, and `--thinking on` makes sure. The switch holds for every
 request, and a request turns it off with
 `"chat_template_kwargs": {"enable_thinking": false}` in its body, listed
-under [parameter support](api.md#parameter-support). Adding
+under [Parameter support](api.md#parameter-support). Adding
 `--thinking-budget 1000` to `serve` caps the trace at the length the
 student trained with.
 
@@ -575,8 +579,9 @@ detaches and stays in memory, and `gen`, `cache` and `train` each need
 the memory to themselves.
 
 [Use the adapter](lora.md#use-the-adapter) in the LoRA guide covers `run`
-and `serve`, and its [interop section](lora.md#adapter-format-and-interop)
-says how the same file loads in llama.cpp.
+and `serve`, and
+[Adapter format and interop](lora.md#adapter-format-and-interop) says how
+the same file loads in llama.cpp.
 
 The pass rate uses the same checker that filtered the corpus. Generate
 the student's replies to the held-out prompts, without the document, and
@@ -859,7 +864,7 @@ The other tables follow the same after and before pattern.
   refused. `ref_nll_nats` is the student's surprise at the replies of an
   earlier report given by `--chat-refs`, or under `--before` at the
   adapter-off replies, which then win. `refs_source` in the JSON names
-  which, the report path or `before`.
+  the source that applied, the report path or `before`.
 - The KL table gives the KL divergence, a distance between the student's
   next-token probabilities and the teacher's stored ones, in nats.
   `clustered se` is its standard error over rows, and `top-1` the share
@@ -897,8 +902,8 @@ places each window in an assistant turn behind a fixed
 `--iters 2000` at the default batch of 8 is two passes over 8000 rows of
 512 tokens, about four million teacher tokens, which is a starting size
 for general text. Size the corpus by the validation line from there. A
-`val` that stops falling while `loss` keeps falling wants more text, and
-a `val` still falling at the last step wants more steps.
+`val` that stops falling while `loss` keeps falling needs more text, and
+a `val` still falling at the last step needs more steps.
 
 The two slices are text files you set aside and did not put in
 `corpus.jsonl`. `eval --cache` checks each slice against the corpus so a
@@ -955,7 +960,7 @@ The round-one pass rate is low but not zero. Check the census effect
 first, since a small one caps what any adapter can learn. Then add
 prompts and phrasings for the kinds that fail, including rows that
 combine two kinds, and rerun with more steps. A pass rate that stays
-low after that wants a larger student.
+low after that needs a larger student.
 
 `gen` against a `--base-url` server with several models refuses unless
 `--teacher` names the served model that it should use.
@@ -985,12 +990,12 @@ in the reply text. Pick a student whose template renders the same turns,
 or leave those rows out of the corpus.
 
 `eval` refuses `--reply-positions` when the census map names none of
-the reply rows. The census keys its map by the corpus ids it was given
+the reply rows. The census keys its map by the ids of the corpus given to its
 `--corpus`, so run it with the same corpus file the reply slice was
 drawn from. A reply table showing `None` scored no row at all, because
 every row was too long for `--chat-max-len` or had no target bytes.
 
-Other failures are in [troubleshooting](troubleshooting.md).
+[Troubleshooting](troubleshooting.md) covers failures outside this pipeline.
 
 ## Advanced settings
 
@@ -1081,16 +1086,16 @@ an epoch, is the train rows of every view divided by `--batch-size`,
 rounded up, and the settings above make two passes. The one-liner under
 [Round one](#round-one-trains-on-the-teachers-replies) computes it.
 
-Memory and the measurements behind these defaults are on the
-[distillation internals](internals/distill.md) page.
+[Distillation internals](internals/distill.md) has the memory figures
+and the measurements behind these defaults.
 
 ## Limitations
 
-- The student is a K-quant GGUF, a file in one of the K-quant formats
-  such as Q4_K_M or Q6_K, with a LoRA adapter.
+- The student is a GGUF in a K-quant format, such as Q4_K_M or Q6_K,
+  and training writes a LoRA adapter for it.
   [Training on the quantized model](lora.md#training-on-the-quantized-model)
-  says why. Full-parameter
-  training and MLX checkpoints are library features without an action.
+  says why. Full-parameter training and MLX checkpoints are library
+  features without an action.
 - An adapter is trained from the base weights each time. A changed
   document means a new round one, not a top-up of the old adapter.
 - A remote teacher can write the corpus through `gen --base-url`, and
@@ -1102,8 +1107,7 @@ Memory and the measurements behind these defaults are on the
   requantized teacher is scored on the teacher's own routes and an
   adapter's routing changes count against it. `cache --routes` refuses a
   teacher whose MoE gates gmlx cannot replay, such as DeepSeek-V2's
-  softmax gate, DeepSeek-V4 and HY4. `train` does not replay
-  them, so a MoE student trained from a MoE teacher of the same family
+  softmax gate, DeepSeek-V4 and HY4. `train` does not replay them, so a MoE student trained from a MoE teacher of the same family
   learns from the teacher's outputs alone.
 - The hidden-state term reads the teacher's final hidden state only. No
   intermediate layer is stored, and the sketch is fixed at cache time.

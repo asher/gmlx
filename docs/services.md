@@ -92,8 +92,8 @@ curl localhost:8080/v1/audio/translations -F file=@japanese.ogg -F model=whisper
 `server.tts` adds `POST /v1/audio/speech`, which turns text into speech with
 [mlx-audio](https://pypi.org/project/mlx-audio/). Speech models also load in
 MLX format. The value is an alias, a Hugging Face repository in MLX-Audio
-format, or a local folder with a converted model, and `true` selects
-`kokoro`. The aliases are these:
+format, or a local folder with a converted model. `true` selects `kokoro`,
+the first of these aliases:
 
 | Alias | Repository | Notes |
 |-------|------------|-------|
@@ -190,9 +190,10 @@ Like the speech models, a safetensors encoder downloads once when it is
 not in the cache. `gmlx init` can also choose a quant other than the default
 and write its full reference.
 
-A request is a JSON body with `input`, a string or a list of strings, and
-the optional fields `model` and `encoding_format`, which is `float`, the
-default, or `base64`. Every model returns vectors normalized to length 1.
+A request is a JSON body with `input`, which is a string or a list of
+strings. The optional fields are `model` and `encoding_format`, which is
+`float` by default or `base64`. Every model returns vectors normalized to
+length 1.
 The server refuses input given as token ids, and it ignores the OpenAI
 `dimensions` field:
 
@@ -234,7 +235,7 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
   -d '{"query": "how do I cancel?", "documents": ["Billing FAQ ...", "Setup guide ..."]}'
 ```
 
-The response holds `results`, best first, each with `index` and
-`relevance_score`, and `model` and `usage`. The model reads each document
+The response holds `model`, `usage` and `results`, best first, each with
+its `index` and `relevance_score`. The model reads each document
 separately, up to 8192 tokens with the query, so send the short list from a
 vector search, tens of documents rather than thousands.

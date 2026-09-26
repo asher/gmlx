@@ -301,7 +301,7 @@ Sinkhorn, the lagged collapse and the sublayer norm. At prefill width the
 front is one GEMM, and the lag collapse and the expand are one kernel
 each. `GMLX_DS41_HC_FUSED=0` restores the ops route.
 
-On the ds4 file, `GMLX_DECODE_LAYER_PROFILE=2` measured the two routes over
+On the ds4 conversion, `GMLX_DECODE_LAYER_PROFILE=2` measured the two routes over
 48 greedy tokens after a 16K prompt, with the profile's own syncs included.
 
 | Route | Hyper-connections, ms per token | Total ms per token | Decode |
@@ -319,10 +319,10 @@ procedure](#certifying-a-setting) on the models they were measured on.
 
 | Model | Setting | Quality verdict |
 |-------|---------|-----------------|
-| Hy3 IQ4_XS | `moe_layer_shed: 0.10` with `moe_miss_shed: 0.90` | No defects at temperature 0.6. Lower to 0.07 and 0.93 at the card's temperature of 0.9. |
-| MiniMax-M3 Q4_K_M | `moe_miss_shed: 0.80` | No defects over two 10k-token generations. |
-| GLM-5.2 UD-IQ3_XXS | `moe_miss_shed: 0.85` | No defects. 0.80 dropped scene content while keeping valid form. |
-| Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | Working pages throughout, with content drift growing as P falls. 0.60 broke code. |
+| Hy3 IQ4_XS | `moe_layer_shed: 0.10` with `moe_miss_shed: 0.90` | The pair showed no defects at temperature 0.6. Lower it to 0.07 and 0.93 at the card's temperature of 0.9. |
+| MiniMax-M3 Q4_K_M | `moe_miss_shed: 0.80` | Two 10k-token generations showed no defects. |
+| GLM-5.2 UD-IQ3_XXS | `moe_miss_shed: 0.85` | The setting showed no defects. At 0.80 the model dropped scene content but kept valid form. |
+| Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | Every level produced working pages, with content drift growing as P falls. At 0.60 the code broke. |
 
 ## Certifying a setting
 
@@ -426,7 +426,8 @@ before.
 | <a href="../assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>`moe_miss_shed 0.70` + keeper prestage. 29.6k tokens at 1.33 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence and birds, red car with oversized featureless black wheels and a light streak across the body"></a><br>`moe_miss_shed 0.65` + keeper prestage. 28.3k tokens at 1.39 tok/s. |
 
 All four pages ran as generated, with valid markup, a working animation
-loop and no stray tokens, and what varies is the scene, not monotonically.
+loop and no stray tokens. What varies is the scene, and it does not worsen
+steadily as P falls.
 The lossless page drew the cohesive film-grain dusk. At 0.80 the scene is
 clean and bright, but the car body has small geometry glitches and the
 lighting is the flattest of the set. The 0.70 composition is complete but
@@ -489,7 +490,7 @@ the setting alone.
 
 | Default | Measurement |
 |---|---|
-| Gathers submitted off the main thread | 8 ms less GPU wait per token than submitting from the graph-building thread. |
+| Gathers submitted off the main thread | Submitting off the main thread saved 8 ms of GPU wait per token over the graph-building thread. |
 | Fast-disk recipe on `auto` | With the arena seeded from the prefill ring, a 5.7 GB/s drive gained 7% decode throughput on the fast recipe. An M5 Max drive reads 14 GB/s. |
 | No background arena seeder | A seeder filling empty slots from a fast drive seeded 1295 slots over 1000 tokens and cost 0.1 tok/s. |
 | Demand reads land in a bounce buffer | A `pread` straight into the Metal-shared slot saved 7 ms per token of read wait and cost 18 ms per token of GPU time on the gathers. |

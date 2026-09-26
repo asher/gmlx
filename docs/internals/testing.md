@@ -89,19 +89,19 @@ imports and argument tree in CI. Each harness is described, with its tiers,
 grading and model bootstrap, in [Server end-to-end test
 harness](../../tests/e2e/README.md).
 
-| Harness | Exercises |
+| Harness | What it exercises |
 |---------|-----------|
-| `run_server_e2e.py` | The start-mode and config matrix with a graded prompt suite. |
-| `run_capacity_e2e.py`, `run_capacity_soak_e2e.py`, `run_capacity_multi_e2e.py` | Metrics, queue and governor invariants under load, with one model and with several. |
-| `run_residency_switch_e2e.py` | Two models that cannot both be resident. |
-| `run_stream_e2e.py` | A streamed model through load cycles, memory pressure and coresidency, with `memguard.py` run beside it. |
-| `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | Prompt-cache reuse across restarts and at depth, for each tier. |
-| `run_lora_e2e.py` | Prep, train, and serve base and adapter, then check that the adapter changed the output style. |
-| `run_distill_e2e.py` | Cache a small teacher, align, train an adapter and eval before and after, then check that the loss fell. |
-| `run_chat_pty_e2e.py` | The chat client in a real pseudo-terminal. |
-| `run_serve_harmony_e2e.py` | The response contract of a served gpt-oss model, with no harmony channel markup in content and truncation inside analysis. |
-| `run_serve_stress_e2e.py` | Seeded concurrent chaos against one server, with mid-stream aborts, tiny budgets, warm resends and growing sessions. |
-| `run_systemone_e2e.py` | `/v1/systemone` on a DiffusionGemma GGUF, covering answer shapes, obvious answers, seed replay, refusals, a concurrent chat and the verb. |
+| `run_server_e2e.py` | Every start mode and config in the matrix runs a graded prompt suite. |
+| `run_capacity_e2e.py`, `run_capacity_soak_e2e.py`, `run_capacity_multi_e2e.py` | Metrics, queue and governor invariants are checked under load, with one model and with several. |
+| `run_residency_switch_e2e.py` | The server switches between two models that cannot both be resident. |
+| `run_stream_e2e.py` | A streamed model goes through load cycles, memory pressure and coresidency, with `memguard.py` run beside it. |
+| `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | Prompt-cache reuse is checked across restarts and at depth, for each tier. |
+| `run_lora_e2e.py` | The harness preps, trains, and serves base and adapter, then checks that the adapter changed the output style. |
+| `run_distill_e2e.py` | The harness caches a small teacher, aligns, trains an adapter and evals before and after, then checks that the loss fell. |
+| `run_chat_pty_e2e.py` | The chat client runs in a real pseudo-terminal. |
+| `run_serve_harmony_e2e.py` | A served gpt-oss model keeps its response contract, with no harmony channel markup in content and truncation inside analysis. |
+| `run_serve_stress_e2e.py` | Seeded concurrent chaos hits one server, with mid-stream aborts, tiny budgets, warm resends and growing sessions. |
+| `run_systemone_e2e.py` | `/v1/systemone` runs on a DiffusionGemma GGUF, covering answer shapes, obvious answers, seed replay, refusals, a concurrent chat and the verb. |
 
 ```sh
 python tests/e2e/run_server_e2e.py --print-pull   # pull commands for the harness models

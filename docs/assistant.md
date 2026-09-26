@@ -258,7 +258,8 @@ the model and a comment line such as `: assistant using NAME` for each
 tool, which also keeps the connection alive.
 
 Every round uses the sampling fields and `stop` of the request, but not
-`response_format`, because it would stop the model from calling tools. `max_tokens` limits each round and defaults to 4096, and
+`response_format`, because it would stop the model from calling tools.
+`max_tokens` limits each round and defaults to 4096, and
 `max_completion_tokens` wins over it. The reported usage adds up the
 completion tokens of all rounds and gives the prompt tokens of the last
 round.

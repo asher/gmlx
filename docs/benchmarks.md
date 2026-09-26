@@ -41,9 +41,9 @@ decoding on the same server, for each model, against the context depth.
 
 ## Methodology
 
-Every number is server throughput for one request at a time, measured
-with the same GGUF weights, sampler settings and chat prompts on both
-engines, on this setup:
+Every number is server throughput for one request at a time. Both
+engines ran the same GGUF weights, sampler settings and chat prompts on
+the setup in this table.
 
 | Item | Setting |
 |---|---|
@@ -383,9 +383,9 @@ The fidelity measure is the teacher-forced logit KL divergence against an
 fp16 cache on wikitext, from `scripts/kld_harness.py`. One leg scores the
 chunked prefill logits, and the other scores decoding token by token from
 the full prefill depth. KL divergence is in nats, and lower is better. The
-median is the typical position, the decode p99 is the worst hundredth,
-where a quantizer's outliers show, and top-1 is the share of generated
-positions whose most likely token matches the fp16 cache.
+median is the typical position. The decode p99 is the worst hundredth,
+where the outliers of a quantizer show, and top-1 is the share of
+generated positions whose most likely token matches the fp16 cache.
 
 <!-- kld-tables -->
 ### Qwen3.5-9B Q4_K_M at 16K
@@ -453,13 +453,13 @@ A Mamba2 hybrid with head dimension 128.
 
 ### Reading the tables
 
-At the same width, kvarn beats the affine cache on both legs at every width
-below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the two
-converge at 8. At 6 bits, kvarn sits between affine 6 and affine 8 on the
-9B model and matches affine 8 on the 27B model, in three quarters of the
-bytes of the 8-bit record. At 32K, its decode median can trail affine 8 by a few
-percent while its p99 and top-1 stay ahead. The split width k6 v5 keeps
-the median of kvarn 6 with the p99 and top-1 of kvarn 5.
+KVarN beats the affine cache of the same width on both legs at every
+width below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the
+two converge at 8. At 6 bits, KVarN sits between affine 6 and affine 8 on
+the 9B model and matches affine 8 on the 27B model, in three quarters of
+the bytes of the 8-bit record. At 32K, its decode median can trail affine
+8 by a few percent while its p99 and top-1 stay ahead. The split width
+k6 v5 keeps the median of kvarn 6 with the p99 and top-1 of kvarn 5.
 
 When two caches differ by a few percent on one measure, prefer the one
 with the lower p99 and the higher top-1. Top-1 is closest to what a greedy
@@ -473,11 +473,11 @@ tables rank caches against each other and do not predict a task score.
 TurboQuant, the scheme of mlx-vlm
 ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), measured on the
 same models and legs, fell between the other two. It was ahead of affine
-at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind kvarn at
+at 2 and 3 bits, level at 4 and behind at 6 and 8, and behind KVarN at
 each width on all measures, so gmlx does not offer it.
 
 Speed was measured on Qwen3-0.6B Q8 with 27 of 28 layers quantized, a
 dense model whose decoding is limited by the KV read. At 16K, kvarn 6
 decoded at 0.81x fp16 and 0.69x affine 8, and at 32K at 0.98x and 0.75x.
-Prefill stayed within 10% of both. On GDN hybrids and gemma-4, all three caches ran within the spread
-between runs.
+Prefill stayed within 10% of both. On [GDN](glossary.md#gdn) hybrids and
+gemma-4, all three caches ran within the spread between runs.

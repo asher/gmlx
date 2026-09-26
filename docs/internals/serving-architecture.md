@@ -114,11 +114,11 @@ gmlx's own copy of the class mlx-vlm removed in 0.6.15, vendored in
 language-model interface the engine expects steady across upstream
 releases.
 
-For each architecture the prompt cache picks its tier, as
-[Prompt cache internals](prompt-cache.md) describes. The verify round of
-speculative decoding is gmlx's own, which keeps the prompt cache usable
-under a drafter, as [Speculative batching](speculative-batching.md)
-describes.
+The prompt cache picks its tier for each architecture, and
+[Prompt cache internals](prompt-cache.md) lists the choices. gmlx owns the
+verify round of speculative decoding, which keeps the prompt cache usable
+under a drafter, and [Speculative batching](speculative-batching.md)
+explains how.
 
 Two things happen before a request reaches the engine. Its sampling
 parameters resolve through the config precedence chain, from the family's
@@ -169,10 +169,10 @@ deep batch at flat headroom is green and a shallow one growing fast is not.
 Rate and one-shot costs are accounted separately, and dwell minimums plus a
 cap on sheds per minute prevent thrash.
 
-The queue cap rejects before enqueue with an HTTP 503, a body naming the
-cap and depth, and a Retry-After set to the estimated drain time clamped
-between 2 and 60 seconds, instead of holding sockets until the queue
-timeout.
+The queue cap rejects a request before enqueue instead of holding its
+socket until the queue timeout. The HTTP 503 body names the cap and depth,
+and Retry-After is the estimated drain time clamped between 2 and 60
+seconds.
 
 At model build time, the capacity module derives a table from the same
 cost model that prices requests at admission. The table holds the largest

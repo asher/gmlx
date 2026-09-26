@@ -160,10 +160,10 @@ a run, which is why `eval --reply-positions` restricts the reply slice
 to the positions the census found.
 
 There is no per-token weighting in the loss. The tokens that decide a
-tool call, the call's opener and closer, the key names and the tool
-name, are the most certain positions of a reply. They sit at rank 1 in
-the cache with the whole mass, so a student trained on the cache sees
-them at full weight already.
+tool call are the call's opener and closer, the key names and the tool
+name, and they are the most certain positions of a reply. They sit at
+rank 1 in the cache with the whole mass, so a student trained on the
+cache sees them at full weight already.
 
 ## The cross-tokenizer result
 
@@ -179,5 +179,5 @@ column names the schema does not have, so the alignment carried the shape of
 the replies and only part of the document. The alignment statistics for the
 pair read an own-group fraction of 0.83, a singleton fraction of 0.20 and a
 shared-boundary fraction of 0.47, which is where the tokenizations diverge.
-At the positions the document moved the student's nats per token fell from
+At the positions the document moved, the student's nats per token fell from
 8.21 to 0.80.

@@ -134,9 +134,9 @@ shows how to write the questions and act on the answers.
 
 ### Connect coding agents and chat apps
 
-`gmlx launch pi --model qwen3.6-27b@coding` writes the tool's native config
-without touching your dotfiles, starting the server first if it is not
-running. It works for the common coding agents, two terminal chat clients
+`gmlx launch pi --model qwen3.8-27b-ud-q6@coding` writes the tool's
+configuration so that it uses the server, starts the server first if it is
+not running, and then runs the tool. It works for the common coding agents, two terminal chat clients
 and two browser apps, Open WebUI and DeepSeek Harness, each listed with its
 quirks in [Agents and chat apps](https://github.com/asher/gmlx/blob/main/docs/launch.md).
 A menu bar app shows what is resident, and `gmlx service install` keeps the
@@ -173,7 +173,7 @@ end to end.
 behavior, by training an adapter on the larger model's outputs without
 running the two at once.
 [Distillation](https://github.com/asher/gmlx/blob/main/docs/distill.md)
-walks through it.
+shows how to run it.
 
 ## Performance
 
@@ -209,8 +209,8 @@ https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
 - Llama, Mistral, Phi-3, SmolLM3, Seed-OSS and ERNIE-4.5
 - Qwen 2 through 3.8, dense and MoE, with the hybrid attention families
 - Gemma 1 through 4, except the 3n variant, whose GGUFs are broken upstream
-- DeepSeek V3, R1 and V4-Flash
-- GLM 4 through 5.2, Kimi-K3, MiniMax M2 and M3, and gpt-oss
+- DeepSeek V3, R1, V4-Flash and V4.1-Flash
+- GLM 4 through 5.3, Kimi-K3, MiniMax M2 and M3, and gpt-oss
 - Hunyuan, Hy3, HY4 and Muse Glimmer
 - Granite, Nemotron-H and Falcon-H1
 

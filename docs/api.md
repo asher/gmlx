@@ -76,8 +76,7 @@ with `scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16` and a
 `verdict` of `full`, `partial`, `dropped` or `error`. Under
 [kvarn](glossary.md#kvarn) it also carries `value_bits` and `tail_tokens`.
 A speculative model adds `verdict_batched`, which differs from `verdict`
-when the model runs fp16 KV while batched. That happens under `uniform`,
-and under kvarn on an mlx-kquant older than 0.4.9.
+when the model runs fp16 KV while batched, as it does under `uniform`.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}`. Adding
 `?ready=1` gives a coarse readiness verdict, either 200 with `"ready": true`
@@ -136,6 +135,7 @@ the routing signal across machines. `need_bytes` is the prompt's KV plus the
 prefill transient, plus `max_tokens` when the body pins one. `fits_now` and
 `fits_drained` judge that against the current free memory and the drained
 working set, while `context_ok` judges it against `context_limit`.
+
 `est_ttft_s` estimates the time to first token. The dry run never loads a
 model, so a model that is not resident answers `resident: false`. A media
 request is rendered but not estimated. `"dry_run": true` on
@@ -233,7 +233,7 @@ route:
 | `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K`, as [Logprobs](#logprobs) explains. |
 | `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions`. Anthropic uses `stop_sequences`. |
 | `stop_sequences` | Ignored | Ignored | Honored | The Anthropic-native spelling. |
-| `chat_template_kwargs` | Honored | Honored | Honored | Extra template variables, request overrides profile. |
+| `chat_template_kwargs` | Honored | Honored | Honored | Extra template variables. The request's values override the profile's. |
 | `profile` | Honored | Honored | Honored | A sampling and system [profile](config.md#profiles) by name. |
 | `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold`. |
 
@@ -299,7 +299,7 @@ curl localhost:8080/v1/chat/completions -d '{
 | The prompt plus `max_tokens` exceeds the context budget. | 400 with both token counts and the budget. | [`max_kv_size`](config.md#loadmax_kv_size) |
 | The prompt alone cannot fit in memory. | 400 with the estimated need and the available budget. | `GMLX_PREFLIGHT_MEM=0` |
 | More requests are waiting than the queue cap. | 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time, 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
-| A model cannot load beside the resident models that are busy. | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | |
+| A model cannot load beside the resident models that are busy. | 503 of type `model_load_deferred`, with the gate's numbers in the message and `Retry-After`. | None |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
 | A streaming request is silent, as during a long prefill. | An SSE comment line every 15 seconds, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 

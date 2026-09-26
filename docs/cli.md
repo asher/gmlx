@@ -1,8 +1,8 @@
 # CLI reference
 
-The `gmlx` command has one verb per task, and each verb's section gives
-its flags, defaults and exit codes. A section says what a flag does, while
-the guides it links explain when to use it.
+The `gmlx` command has one verb per task, such as `serve`, `run` or
+`pull`, each with its own flags, defaults and exit codes. The guides linked
+from each verb explain when to use a flag.
 
 | Verb | Does |
 |------|------|
@@ -151,7 +151,7 @@ things are per-model keys under [models](config.md#models):
 | `--thinking {on,off,adaptive}` | Template default | The reasoning switch, mapped to the model's template variable. |
 | `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once. |
 | `--reasoning-effort LEVEL` | Template default | The reasoning level for models whose template grades thinking, such as `low`, `medium` or `high`. |
-| `--profile NAME` | None | A built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. `gmlx profiles` lists them. |
+| `--profile NAME` | None | A built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. An unknown name is refused at start. |
 | `--system-prompt STR` | None | A system prompt used when the request has none. |
 | `--chat-template-config JSON` | None | Extra chat-template variables, a JSON object passed through verbatim. |
 | `--kv-bits N` | Off | Quantize the KV cache to N bits. 2, 3, 4, 6 or 8 affine, or 2, 3, 4, 5, 6 or 8 under kvarn. |
@@ -166,12 +166,11 @@ The KV flags are the [`load` keys](config.md#model-loading) of the config.
 `load: {kv_quant_scheme: kvarn}` on a config model, priced and reported the
 same way.
 
-These flags set a positional model's sampling defaults, the
+These flags set a positional model's sampling defaults on top of the
+family defaults that `gmlx profiles` prints. They are the
 [`sampling` keys](config.md#sampling) of the config. A default applies to a
 request that omits the field, and a request that sends the field wins, so
-`--temp 0` does not pin a client that sends its own temperature. They sit on
-top of the family defaults `gmlx profiles` prints, and an unknown `--profile`
-is refused at start:
+`--temp 0` does not pin a client that sends its own temperature.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -528,8 +527,8 @@ These flags control generation. All of them can be changed during the chat:
 |------|---------|---------|
 | `--system-prompt STR` | None | The system message, sent on the first turn and after each reset. |
 | `--max-tokens N` | Until the model stops | Cap on each reply. |
-| `--temp F`, `--top-p F`, `--top-k N`, `--min-p F` | Family default | Sampling |
-| `--repetition-penalty F`, `--presence-penalty F`, `--frequency-penalty F` | `0` | Penalties |
+| `--temp F`, `--top-p F`, `--top-k N`, `--min-p F` | Family default | Sampling temperature and filters. |
+| `--repetition-penalty F`, `--presence-penalty F`, `--frequency-penalty F` | `0` | Repetition, presence and frequency penalties. |
 | `--repetition-context-size N` | `20` | Tokens the repetition penalty looks back over. |
 | `--xtc-probability F`, `--xtc-threshold F` | `0` | XTC sampling. |
 | `--logit-bias JSON` | None | Token id to bias map. |
@@ -558,12 +557,12 @@ the same as they do there:
 
 | Group | Flags shared with `run` |
 |-------|-------------------------|
-| loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter` |
-| memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
-| multimodal | `--mmproj`, `--resize-shape` |
-| speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
-| streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm` |
-| lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
+| Loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter` |
+| Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
+| Multimodal | `--mmproj`, `--resize-shape` |
+| Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
+| Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm` |
+| Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
 
 None of them applies when the chat is a server client. A base model with no
 chat template refuses to start until you pass one with `--chat-template` or
@@ -670,12 +669,12 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-
 
 | Ref form | Example |
 |----------|---------|
-| local path | `~/models/model.gguf` |
-| `hf:` file | `hf:org/repo/path/file.gguf`, optionally `@<revision>` |
-| `hf:` folder | `hf:org/repo/UD-Q5_K_M`. A single model inside resolves. Several are listed |
-| `hf:` repo | `hf:org/repo`. Each quant is listed as a complete ref |
-| Hugging Face page | A `blob`, `tree` or `resolve` link, rewritten to the file or folder |
-| direct URL | `https://host/path/file.gguf` |
+| Local path | `~/models/model.gguf` |
+| `hf:` file | `hf:org/repo/path/file.gguf`, optionally with `@<revision>`. |
+| `hf:` folder | `hf:org/repo/UD-Q5_K_M`. A single model inside resolves, and several are listed. |
+| `hf:` repo | `hf:org/repo`. Each quant is listed as a complete ref. |
+| Hugging Face page | A `blob`, `tree` or `resolve` link, rewritten to the file or folder. |
+| Direct URL | `https://host/path/file.gguf` |
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -905,9 +904,9 @@ use different tokenizers, and the walkthrough is [Distillation](distill.md).
   positions and values the student trains to match.
 - `train` fits a LoRA adapter on a K-quant GGUF student against the view.
 - `eval` scores the student with and without the adapter.
-- `census` checks, from two reply caches of the same replies, how much
-  a context the student never sees, the document in the guide, moves the
-  teacher.
+- `census` compares two reply caches of the same replies, one made with a
+  context the student never sees, and measures how much that context moves
+  the teacher.
 
 ```sh
 gmlx distill gen --teacher teacher-Q6_K.gguf --prompts prompts.jsonl --out replies.jsonl
@@ -919,18 +918,20 @@ gmlx distill eval --student student-Q4_K_M.gguf --adapter student-distill.gguf -
     --slice prose=heldout.txt --md eval.md --json eval.json
 ```
 
-Every size flag is in decimal GB (1e9 bytes). Each action exits 0 on
-success. A refused input or setting exits 2, and so does a missing
-required flag, with argparse's usage message, a missing input file, and
-`filter` when its `--verify` command fails. Every output path is checked
-before any model loads, and one the action cannot write exits 2 as well.
-`cache` exits 2 when a shard cannot be written and keeps the verified
-shards. `gen` exits 1 when some requests failed and their prompts remain
-to be rerun, and 2 when its server fails to start. `align` exits 3 when
-the own-group check refuses the pair, and writes no view. `cache` exits
-3 when its memory probe misses twice or a `--routes` recording does not
-match its rows, and 4 when the validator fails on what it wrote.
-`cache --validate` exits 1 on a problem.
+Every size flag is in decimal GB, 1e9 bytes. Each action checks its
+output paths before any model loads. It exits 0 on success, and 2 on a
+refused input or setting, a missing required flag or input file, or an
+output path it cannot write. Some actions add codes of their own:
+
+- `gen` exits 1 when some requests failed and their prompts remain to be
+  rerun, and 2 when its server fails to start.
+- `filter` exits 2 when its `--verify` command fails.
+- `cache` exits 2 when a shard cannot be written, and keeps the verified
+  shards. It exits 3 when its memory probe misses twice or a `--routes`
+  recording does not match its rows, and 4 when the validator fails on
+  what it wrote. `cache --validate` exits 1 on a problem.
+- `align` exits 3 when the own-group check refuses the pair, and writes no
+  view.
 
 ### distill gen
 
@@ -939,13 +940,14 @@ whose messages end on a user turn. A row's context, or the file given by
 `--context`, goes in front of the last user turn for the teacher, and
 either one must hold text. A row that took a context is written with the
 teacher's list under `messages` and the prompt as given under
-`student_messages`, and a row without one
-carries `messages` alone. Prompt ids already in the output are skipped,
-so a run resumes where it stopped. A resume checks that each skipped id
-still names the prompt it answered and refuses when one differs or is
-gone, since ids taken from line numbers shift when a line is inserted.
-An interrupt cancels the queued requests and stops the server, and the
-run ends when the requests in flight have failed or returned.
+`student_messages`. A row without one carries `messages` alone.
+
+Prompt ids already in the output are skipped, so a run resumes where it
+stopped. A resume checks that each skipped id still names the prompt it
+answered and refuses when one differs or is gone, since ids taken from
+line numbers shift when a line is inserted. An interrupt cancels the
+queued requests and stops the server, and the run ends when the requests
+in flight have failed or returned.
 
 Beside the output, `<out>.gen.json` holds the settings a resume must
 match and is written before the first request. When a run ends it
@@ -953,9 +955,10 @@ gains a `run` block with the reply and token totals read from the output
 rows, the wall time summed over the runs that ended, and this run's
 failed requests and aggregate token rate. An interrupted run leaves the
 block as it found it, and a rerun that finds every prompt answered
-writes the block from the rows when the sidecar has none. A `--base-url`
-server that lists several models serves the run with the one named like
-`--teacher`, and gen refuses when none or several match.
+writes the block from the rows when the sidecar has none.
+
+A `--base-url` server that lists several models serves the run with the
+one named like `--teacher`, and gen refuses when none or several match.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -974,19 +977,19 @@ server that lists several models serves the run with the one named like
 | `--instruction TEXT` | `Continue the following text.` | With `--corpus`, the user turn placed before the prefix. |
 | `--chat-template-kwargs JSON` | None | Chat-template variables for every teacher render, as a JSON object passed to serve as `--chat-template-config`. A thinking key is refused. |
 | `--context FILE` | None | Text the teacher reads for every prompt without its own context field, refused when blank. |
-| `--context-format FMT` | `{context}\n\n{prompt}` | How the context and the last user turn combine, must place both fields. |
-| `--thinking` | Off | Thinking on, reasoning trace kept as `reasoning_content` on the reply, off sends the server's thinking switch off. |
+| `--context-format FMT` | `{context}\n\n{prompt}` | How the context and the last user turn combine. It must place both fields. |
+| `--thinking` | Off | Turn thinking on and keep the reasoning trace as `reasoning_content` on the reply. Without it, gen turns thinking off. |
 | `--thinking-budget N` | None | With `--thinking`, cap the reasoning trace at N tokens per request, and mark the replies it cut for `filter`. |
 | `--tokenizer GGUF_OR_DIR` | `--teacher` | Tokenizer that counts the reasoning trace against the budget when `--base-url` is given. |
 | `--serve-arg ARG` | None | Extra `gmlx serve` argument, repeatable, compared on a resume. A flag that changes the prompt or thinking is refused, as is a drafter with `--thinking-budget`. |
 | `--startup-timeout S` | `900` | Seconds to wait for the served teacher. |
 | `--concurrency N` | `8` | Requests in flight. |
-| `--max-tokens N` | `1024` | Answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close on top, without one the trace shares this budget. |
+| `--max-tokens N` | `1024` | Answer budget per request. With `--thinking-budget` the trace gets its own budget plus the forced close. Without it, the trace shares this budget. |
 | `--temperature F` | `0.7` | Sampling temperature. |
 | `--top-p F` | `0.9` | Keep the most likely tokens whose probabilities add to this. |
 | `--top-k N` | The server's | Sampler top-k cutoff. |
 | `--min-p F` | The server's | Minimum-probability cutoff. |
-| `--seed N` | `1` | Base seed, and each request uses it plus the prompt index. |
+| `--seed N` | `1` | Base seed. Each request adds its prompt index to it. |
 | `--timeout S` | `1800` | Per-request timeout. |
 | `--report-every N` | `50` | Progress line interval in replies. |
 
@@ -1017,11 +1020,11 @@ student wrote without it. It refuses a row that already carries
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--in PATH` | Required | Generated corpus jsonl, repeatable, concatenated in order, refused when the sidecars disagree, the inputs were filtered differently or two rows share an id. |
+| `--in PATH` | Required | Generated corpus jsonl, repeatable and concatenated in order. Refused when the sidecars disagree, the inputs were filtered differently or two rows share an id. |
 | `--out PATH` | Required | Filtered corpus to write, with `<out>.gen.json` beside it. |
 | `--report JSON` | None | Write the kept and dropped counts here. |
 | `--rejects PATH` | None | Write one `{id, reason}` line per dropped row here, with the checker's word under `detail`. |
-| `--min-words N` | `16` | Drop replies whose answer has fewer units, a unit being a word or one ideograph or kana character, trace not counted. `--min-tokens` is the same flag. |
+| `--min-words N` | `16` | Drop replies whose answer, without the trace, has fewer units. A unit is a word or one ideograph or kana character. `--min-tokens` is the same flag. |
 | `--ngram N` | `8` | N-gram size of the repetition check, in the units of `--min-words`. |
 | `--max-repeat F` | `0.2` | Drop replies whose repeated n-grams exceed this fraction. |
 | `--max-trace-repeat F` | `0.5` | Drop replies whose reasoning trace's repeated n-grams exceed this fraction. |
@@ -1031,14 +1034,13 @@ student wrote without it. It refuses a row that already carries
 | `--keep-budget-hit` | Off | Keep replies whose thinking budget cut the reasoning trace. |
 | `--verify CMD` | None | Shell command of your checker, which reads the survivors on stdin and prints `ok` or a reason per row. |
 | `--context FILE` | None | Put this text on the teacher's side of every kept row, refused when blank. |
-| `--context-format FMT` | `{context}\n\n{prompt}` | How the context and the last user turn combine, must place both fields. |
+| `--context-format FMT` | `{context}\n\n{prompt}` | How the context and the last user turn combine. It must place both fields. |
 
 ### distill cache
 
-`cache` takes the flags of the teacher pass, listed in the order `--help`
-prints them. `--messages-key` picks which list of a row the teacher reads, and
-`--student-messages-key` only names the list the student's render reads
-later, in `align` and `eval`. A reply or reply-think row whose final
+`cache` runs the teacher pass. `--messages-key` picks which list of a row
+the teacher reads, and `--student-messages-key` only names the list the
+student's render reads later, in `align` and `eval`. A reply or reply-think row whose final
 turn has no content, such as a tool call, has nothing to target and is
 dropped, counted in the `[cache] frame` line. That line also counts the
 reply-think rows whose reasoning trace the teacher's template does not
@@ -1054,7 +1056,7 @@ started, and a resume and the student's render in `align` keep that day.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--teacher GGUF` | Required unless `--validate` | The teacher GGUF, sharded ok. |
+| `--teacher GGUF` | Required unless `--validate` | The teacher GGUF, which may be sharded. |
 | `--corpus PATH_OR_ID` | Required unless `--validate` | A jsonl file, a directory of text files, or a Hugging Face dataset id, `id[@config]`. |
 | `--out DIR` | Required unless `--validate` | The cache directory to write. |
 | `--validate DIR` | None | Validate an existing cache and exit, no teacher load. |
@@ -1093,7 +1095,8 @@ started, and a resume and the student's render in `align` keep that day.
 
 ### distill align
 
-`align` takes these flags, listed in the order `--help` prints them.
+`align` maps a teacher cache onto the student's tokenizer and writes the
+view that `train` reads.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1117,12 +1120,13 @@ started, and a resume and the student's render in `align` keep that day.
 
 ### distill train
 
-`train` takes these flags, in `--help` order.
+`train` fits the LoRA adapter against one or more views and saves
+checkpoints as it goes.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--view DIR` | Required | A view directory, repeatable to mix views aligned alike over one tokenizer pair. |
-| `--student GGUF` | Required | The student GGUF, sharded ok. |
+| `--student GGUF` | Required | The student GGUF, which may be sharded. |
 | `--adapter-out PATH` | Required | Where to write the GGUF adapter. A path that cannot be written is refused before the load, a module the adapter cannot hold before the first step. |
 | `--iters N` | Required | Training steps. |
 | `--lora-rank N` | `16` | LoRA rank. |
@@ -1134,7 +1138,7 @@ started, and a resume and the student's render in `align` keep that day.
 | `--batch-size N` | `8` | Rows per step. |
 | `--warmup F` | `0.05` | Warmup as a fraction of the steps, at least one step and never the last, then cosine decay. `0` starts at the peak rate. |
 | `--weight-decay F` | `0` | AdamW weight decay. |
-| `--clip F` | `1.0` | Gradient norm clip, `0` turns clipping off. |
+| `--clip F` | `1.0` | Gradient norm clip. `0` turns clipping off. |
 | `--seed N` | `1` | Data order and LoRA init. |
 | `--loss MODE` | `bucketed` | `bucketed`, `paper` or `renorm`: the sparse KL variant. |
 | `--dk F` | `1` | Weight of the bucketed KL term. |
@@ -1160,11 +1164,11 @@ started, and a resume and the student's render in `align` keep that day.
 
 ### distill eval
 
-`eval` takes these flags, in `--help` order. Its task files are jsonl
-files. `arc_easy.jsonl` and `hellaswag.jsonl` hold
-`{id, query, choices, gold}` rows, `gsm8k.jsonl` holds
-`{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the worked
-examples shown before each question.
+`eval` scores the student on held-out text, tasks and chat sets, with or
+without the adapter. Its task files are jsonl. `arc_easy.jsonl` and
+`hellaswag.jsonl` hold `{id, query, choices, gold}` rows, `gsm8k.jsonl`
+holds `{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the
+worked examples shown before each question.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1176,10 +1180,10 @@ examples shown before each question.
 | `--slice NAME=PATH` | None | A held-out text slice, repeatable. |
 | `--teacher-bpb JSON` | None | Teacher bits per byte per slice, a `{slice: bpb}` map or an earlier eval report, shown beside the student's. |
 | `--tasks-dir DIR` | `.` | Directory of the four task files. |
-| `--tasks LIST` | None | Comma list of `arc_easy`, `hellaswag`, `gsm8k`. |
+| `--tasks LIST` | None | A comma-separated list of `arc_easy`, `hellaswag` and `gsm8k`. |
 | `--task-limit N` | All | Items per task. |
 | `--gsm8k-max-tokens N` | `384` | Generation budget per GSM8K item. |
-| `--before` | Off | Also score with the adapter disabled in process, needs `--adapter`. |
+| `--before` | Off | Also score with the adapter disabled in process. Needs `--adapter`. |
 | `--chat-slice NAME=PATH` | None | A jsonl of `{messages}` conversations scored on their assistant turns, `student_messages` first, repeatable. |
 | `--chat-sanity PATH` | None | A jsonl of `{id, messages, kind}` chat prompts, `kind` being `task` or `refuse`, scored for template compliance and drift from an earlier report's replies. |
 | `--chat-max-tokens N` | `256` | Reply budget for the chat sanity set. |
@@ -1215,7 +1219,7 @@ map come from the first. The action exits 2 when a cache has no manifest
 or one it cannot read, or when no rows pair. It also exits 2 when a
 `--with` cache was made with another teacher, tokenizer, top-k or head
 width than `--without`, and when a reply-think cache records no
-`content_start`, as one written before rows carried it does. A `--corpus`
+`content_start`, which older caches lack. A `--corpus`
 that names no file, or holds a line that is not a JSON object, exits 2 as
 well.
 

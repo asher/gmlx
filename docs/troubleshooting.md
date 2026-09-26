@@ -1,8 +1,8 @@
 # Troubleshooting
 
-Most failures in a new setup have a known cause and fix, grouped here by
-the command that shows them. Where gmlx keeps its logs and files comes
-last.
+Most failures in a new setup have a known cause and a fix, and each one
+appears under the command that shows it. [Logs and files](#logs-and-files)
+says where gmlx writes its logs, runfiles, caches and sessions.
 
 Run [gmlx doctor](cli.md#gmlx-doctor) first. It checks the runtime, the
 kernels, the config and its model files, the background server, the login

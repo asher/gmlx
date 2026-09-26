@@ -1,8 +1,8 @@
 # Python API
 
 The `gmlx` package loads and runs GGUF models from your own Python code.
-Its stable surface is exactly what the package root exports as
-`gmlx.__all__`, and every export is documented below.
+Its stable surface is the set of names that the package root exports in
+`gmlx.__all__`.
 
 Exports resolve lazily, so `import gmlx` returns immediately and never
 imports MLX, which makes it safe in tooling that only inspects metadata. The
@@ -27,7 +27,7 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 | Kwarg | Default | Meaning |
 |---|---|---|
 | `arch` | Detected | Override `general.architecture` detection. |
-| `hf_source` | `None` | Load the config from this local dir or HF repo id instead of synthesizing it, for arches without a synthesizer or variants whose constants differ. |
+| `hf_source` | `None` | Load the config from this local directory or Hugging Face repo instead of synthesizing it from the GGUF metadata. |
 | `chat_template` | From the GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
 | `target_prefix` | `""` | A prefix added to every remapped tensor name. |
 | `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap. For inspection, not inference. |
@@ -175,8 +175,8 @@ scores metadata. It is the same synthesis `load_model` runs, taken on its
 own. `detect_arch(reader)` reads `general.architecture` from the header.
 Neither touches tensor bytes.
 
-A tool that needs the tokenizer before it decides whether to load weights
-uses these, such as an eval harness that checks tokenizer parity,
+These suit a tool that needs the tokenizer before it decides whether to
+load weights, such as an eval harness that checks tokenizer parity,
 pre-tokenizes a corpus or inspects a template. `chat_template_override`,
 an inline Jinja string, replaces the GGUF's chat template. The loader
 infers the model's turn-ending tokens from the template it ends up with, so
@@ -216,11 +216,12 @@ install_gguf_bridge()
 `install_gguf_bridge` patches `mlx_lm.server.ModelProvider` so that any
 `*.gguf` model path loads through `load_model`, and a second call changes
 nothing. Other paths pass through unchanged, so one `mlx_lm.server` process
-can mix GGUF files and ordinary MLX checkpoints. GGUF requests are pinned to mlx-lm's validated
-sequential path, with no batching. A `--draft-model` is ignored for GGUF
-models with a warning, and `--adapter` on one raises, since adapters are
-wired only in `gmlx serve`. Use the bridge to add GGUF support to an
-existing `mlx_lm.server` deployment, and `gmlx serve` for everything else.
+can mix GGUF files and ordinary MLX checkpoints. GGUF requests are pinned
+to mlx-lm's sequential path, with no batching. A `--draft-model` is
+ignored for GGUF models with a warning, and `--adapter` on one raises,
+since adapters are wired only in `gmlx serve`. Use the bridge to add GGUF
+support to an existing `mlx_lm.server` deployment, and `gmlx serve` for
+everything else.
 
 ## Quantized modules
 
@@ -241,5 +242,5 @@ architecture, a custom loader can use it on any model.
 Other modules are importable but internal, among them the VLM loader,
 embeddings and rerank, the CPU-offload paths and the server. Their
 signatures change without notice. `generate` also accepts experimental
-parameters, which are left out on purpose. To have an internal piece made
+parameters that are not part of the stable surface. To have an internal piece made
 public, open an issue.

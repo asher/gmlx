@@ -112,8 +112,8 @@ An `@profile` suffix on the model, such as `model.gguf@creative`, starts
 from another [profile](config.md#profiles) instead.
 
 Models with a native prediction head use
-[speculative decoding](speculative-decoding.md)
-automatically, and `--draft-gguf` pairs a separate drafter. While a drafter
+[speculative decoding](speculative-decoding.md) automatically, and
+`--draft-gguf` pairs a separate drafter. While a drafter
 is active, only temperature, top-p, top-k and min-p apply. Chat warns at
 startup and drops the penalties, logit bias and XTC settings, as well as
 `--max-kv-size` and `--quantized-kv-start`.
@@ -143,8 +143,9 @@ message, not at load time.
 In server mode, `/model` lists the served ids, and `/model <id>` sends the
 next turns to another id. The conversation is kept, and the server reads it
 again under the new id. A base model and its adapters share one loaded
-model, so switching between them is fast. [LoRA adapters](lora.md#serving-one-base-with-many-adapters)
-uses this to compare adapters in one conversation.
+model, so switching between them is fast.
+[LoRA adapters](lora.md#serving-one-base-with-many-adapters) uses this to
+compare adapters in one conversation.
 
 ## Shell output and media
 

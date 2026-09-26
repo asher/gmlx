@@ -4,8 +4,8 @@
 runs with, and the settings of the server itself. `gmlx serve` reads it at
 start, and the other commands read it to turn a model name into a GGUF
 file, so a name that works in a request also works with `gmlx run` and
-`gmlx chat`. Every key has a default, so a file needs only the keys that
-change one.
+`gmlx chat`. Every key has a default, so a file needs only the keys whose
+defaults you want to change.
 
 ## Create the file
 
@@ -73,8 +73,8 @@ YAML and exits without loading a model.
 
 ## What the file contains
 
-The file is a YAML mapping of the blocks below, and every block is
-optional. A server needs only `models`, and everything else has a default.
+The top level of the file is a YAML mapping of these blocks. Every block
+is optional, and a server needs only `models`.
 
 | Block | What it sets |
 |-------|--------------|
@@ -408,10 +408,10 @@ template.
 
 ### `profiles.*.chat_template_kwargs`
 
-The chat template receives these variables on each request. The most
-useful is `preserve_thinking` on Qwen3.6 and recent Gemma templates, which
-keeps earlier `<think>` blocks in the prompt so that an agent sees its
-earlier reasoning. Keys that the request sends win. The default is none.
+The chat template receives these variables on each request. For
+example, `preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps
+earlier `<think>` blocks in the prompt, so that an agent sees its earlier
+reasoning. Keys that the request sends win. The default is none.
 
 ### `profiles.*.thinking`
 
@@ -488,16 +488,16 @@ profiles:
 
 ### `sampling.temperature`
 
-This key sets how random the choice of each token is. `0` always takes
-the most likely token, and `temp` is accepted as another name. The
+This key sets how random the choice of each token is, and `0` always
+takes the most likely token. The key also accepts the name `temp`. The
 default comes from the family defaults.
 
 ### `sampling.top_p`
 
 The model samples only from the most likely tokens whose probabilities
 add up to this value, and `0` turns off the filter. When `top_p` is the
-only filter, it considers at most the 1024 most likely tokens, so that
-sorting stays batched. The default comes from the family defaults.
+only filter, it considers at most the 1024 most likely tokens, so a very
+flat distribution loses its tail past that rank. The default comes from the family defaults.
 
 ### `sampling.top_k`
 
@@ -692,8 +692,8 @@ Metal limit on the number of buffers.
 
 Hybrid and recurrent models, which cannot cache in blocks, keep this many
 whole-prompt copies of the cache. Each copy is a full cache, so a higher
-value uses more memory. With the default, a third conversation can start
-without evicting the first. The default is `4`.
+value uses more memory, and a new prompt past the limit evicts an older
+copy. The default is `4`.
 
 ### `cache.hash`
 
@@ -705,8 +705,8 @@ processes and costs more per token. The default is `fast`.
 
 This key adds a second cache tier on the SSD, so that a prompt survives
 the model unloading or the server restarting. `true` puts the tier at
-`~/.cache/gmlx/apc`, and a mapping sets the keys below. The default is
-`false`.
+`~/.cache/gmlx/apc`, and a mapping sets the `cache.disk.*` keys. The
+default is `false`.
 
 ### `cache.disk.path`
 
@@ -885,9 +885,8 @@ none.
 ### Memory and residency
 
 The server keeps several models in memory at once, up to the budget in
-`server.budget_gb`. The default budget is 0.8 times the working set that
-macOS recommends for the GPU. A model takes about the size of its GGUF
-file in memory, because the weights map from the file without a copy.
+`server.budget_gb`. A model takes about the size of its GGUF file in
+memory, because the weights map from the file without a copy.
 
 | State | Set by | Unloads when |
 |-------|--------|--------------|
@@ -1105,7 +1104,7 @@ server:
 
 #### `server.assistants.*.model`
 
-This configured model answers for the assistant. The key is required.
+This configured model answers for the assistant. This key is required.
 
 #### `server.assistants.*.memory`
 
@@ -1193,8 +1192,8 @@ counts. A higher value gives fewer false wakes. The default is `0.3`.
 
 ### `talk.push_to_talk_modifier`
 
-The menu bar hotkey is Space held with this key, which is `globe`,
-`right-command`, `right-option` or `control`. There is no flag for this
+The menu bar hotkey is Space, pressed while this key is held. The value
+is `globe`, `right-command`, `right-option` or `control`. There is no flag for this
 key. The default is `globe`.
 
 ### `talk.input_device`

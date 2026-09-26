@@ -169,10 +169,10 @@ under no ceiling below 192 GB.
 
 ### What changes the limit
 
-Most of the limit comes from the bits of the every-token tensors. A
-quant that keeps attention and the shared experts at Q8 doubles what
-stays in memory, so choose a quant with smaller non-expert tensors
-before a smaller expert quant.
+The size of the every-token weights depends mostly on the bits of their
+tensors. A quant that keeps attention and the shared experts at Q8
+doubles what stays in memory, so choose a quant with smaller non-expert
+tensors before a smaller expert quant.
 
 The KV room trades against the arena. A smaller room gives a larger arena
 and a shorter safe context, and `--kv-bits 8` halves the KV cache part of
@@ -259,8 +259,8 @@ without work. Turn it off on battery. It does nothing for a model that
 fits in RAM.
 
 The weight pin is skipped, with a printed reason, when the every-token
-weights are larger than 60% of RAM. MXFP4 and NVFP4 experts, as in gpt-oss
-and the DeepSeek-V4-Flash Q4_K_XL quants, stream in the same way.
+weights are larger than 60% of RAM. The settings apply to MXFP4 and NVFP4
+experts too, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL quants, and
 [`GMLX_NATIVE_FP`](env-vars.md#runtime) controls how gmlx lays them out.
 
 [Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements)

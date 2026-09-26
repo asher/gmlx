@@ -75,8 +75,8 @@ An architecture is done when all of the following pass.
   EOS-suppressed greedy decode keeps each token id in range and each step's
   logprob finite, with no single-token repetition. Semantic looping on a tiny
   model is expected. NaNs and out-of-range ids are not.
-- Bench sanity. Prefill and decode throughput on one real model, compared
-  against llama.cpp on the same file. A large unexplained deficit is usually
+- Bench sanity. Prefill and decode throughput on one real model are
+  compared against llama.cpp on the same file. A large unexplained deficit is usually
   a contiguity or layout bug, not MLX itself.
 - Route check at depth. Run a decode at 16k context or more, plus an MTP
   round if the family has a draft head, with `GMLX_SDPA_DEBUG=1`, and

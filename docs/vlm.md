@@ -1,9 +1,9 @@
 # Vision and audio
 
 A multimodal GGUF model reads images or audio as well as text. It comes as
-two files that gmlx pairs, it takes media from the command line, chat and
-the server, and most of its features still work when a turn carries
-media.
+two files that gmlx pairs, and it takes media from the command line, from
+chat and from the server. Most features of the language model still work
+when a turn carries media.
 
 ## The two files
 
@@ -51,8 +51,8 @@ gmlx serve model.gguf --mmproj mmproj.gguf
 `run` takes local files and URLs, and chat takes local files. Image files
 can be PNG, JPEG, GIF, WebP, BMP, TIFF or HEIC, and audio files can be WAV,
 MP3, FLAC, M4A, Ogg, Opus or AIFF. A request to the server carries images
-as the [Vision messages](api.md#vision-messages) section of the API
-reference shows. The flags are listed under [gmlx run](cli.md#gmlx-run).
+as [Vision messages](api.md#vision-messages) describes. The flags are
+listed under [gmlx run](cli.md#gmlx-run).
 
 Each family resizes images to its own limits before encoding. The size
 sets how many tokens an image becomes, and those tokens make up most of

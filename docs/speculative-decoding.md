@@ -37,8 +37,9 @@ beside it, and uses it only with `--draft-gguf`.
 
 The server enables speculation for a model through its
 [`speculative`](config.md#modelsspeculative) key, and
-[`draft_gguf`](config.md#modelsdraft_gguf) names the drafter. `gmlx pull` and a [discover](config.md#model-discovery)
-scan pair a drafter that they find with its model.
+[`draft_gguf`](config.md#modelsdraft_gguf) names the drafter. `gmlx pull`
+and a [discover](config.md#model-discovery) scan pair a drafter that they
+find with its model.
 
 ## Settings that speculation drops
 
@@ -47,9 +48,9 @@ only. On `run`, speculation drops `--stop`, `--logit-bias`, the penalties,
 the XTC settings, `--max-kv-size`, `--quantized-kv-start` and
 `--prefill-step-size`, with a warning for each. Chat keeps the system
 prompt and `--stop`, and drops the others. `--no-mtp` keeps these settings
-and decodes without speculation. A multimodal model uses speculation for
-text turns only, as [Vision and audio](vlm.md#media-with-other-features)
-describes.
+and decodes without speculation. A
+[multimodal model](vlm.md#media-with-other-features) speculates on text
+turns and decodes turns with images or audio without speculation.
 
 ## How much it gains
 
@@ -59,14 +60,14 @@ at short contexts, and keeps a smaller gain deep into long ones. MoE models
 gain less, and on some of them it becomes a loss at depth, so measure
 before you rely on it. Predictable text, such as code, accepts more drafts
 than free prose. [Benchmarks](benchmarks.md) has the speedup curves of
-each model. To measure your own model and work:
+each model. This command measures your own model at two context depths:
 
 ```sh
 gmlx run model.gguf --bench-depths "0,4096" --speculative
 ```
 
-A quantized KV cache moves the model's verification away from the drafts
-and lowers the number of accepted drafts, most at 4 bits. When
+A quantized KV cache makes the model accept fewer drafts, and 4 bits
+costs the most. When
 speculation is on, keep the KV cache at full precision if you can, and use
 8 bits if memory requires quantization.
 

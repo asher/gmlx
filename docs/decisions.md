@@ -21,8 +21,8 @@ instead.
 The request and response follow the
 [Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide).
 A Jev client that sends text states works with gmlx unchanged. A decision
-is deterministic. The same request and `seed` give the same numbers on the
-same model file and server settings.
+is deterministic, so the same request and `seed` give the same numbers on
+the same model file and server settings.
 
 ## Why DiffusionGemma
 
@@ -33,7 +33,7 @@ and leaves the answer positions open, so one pass of the model gives the
 probability of every answer.
 
 An autoregressive model predicts one token at a time and has no such pass,
-so the route does not offer one. With a chat model, request
+so the route refuses it with a 400. With a chat model, request
 [logprobs](api.md#logprobs) or [structured output](api.md#structured-output)
 through chat completions to get an answer and its token probability.
 
@@ -70,8 +70,9 @@ that the server knows. A Jev client that sends a name such as `jev-latest`
 reaches the model this way. A file with one model, or with
 [`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
 key out. The other `server.systemone` keys set the request limits and the
-thought defaults, as [Structured decisions](config.md#structured-decisions)
-in the configuration reference lists.
+thought defaults, and
+[Structured decisions](config.md#structured-decisions) in the
+configuration reference lists them.
 
 ## A first decision
 
@@ -147,7 +148,8 @@ over the answers of that question, in one of three shapes:
   likely level, and `score` is the expected index. A score of 0.96 is
   medium, with a little weight on low.
 
-`usage.input_tokens` is the longest prompt that a read ran on.
+`usage.input_tokens` is the token count of the longest prompt that a read
+ran on.
 `usage.output_tokens` counts the tokens of the answer template and of any
 thought.
 
@@ -328,8 +330,8 @@ for questions whose answer changes with the earlier one.
 
 ## Samples, steps and thoughts
 
-A request can also carry these fields, which set how many times each
-answer is read and how much work each read does:
+A request can also carry the following fields. Most of them set how many
+times each answer is read and how much work each read does.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
@@ -351,16 +353,16 @@ stages or `sequential: true`, every read uses the full question list,
 `chunk_prompt` has no effect, and `diagnostics.chunk_prompt` reports
 `"full"`.
 
-A thought costs the most. The model writes it with its full denoise loop,
-which takes seconds, while a read without one takes a single pass.
-`think: "auto"` spends that cost only on unsure decisions. The decision
-runs without a thought first, and when the confidence of any answer is
-below `think_threshold`, it runs again with a thought of `think_budget`
-tokens. The answers then come from the second run, and
+A thought is the costliest of these settings. The model writes it with its
+full denoise loop, which takes seconds, while a read without one takes a
+single pass. `think: "auto"` spends that cost only on unsure decisions. The
+decision runs without a thought first, and when the confidence of any
+answer is below `think_threshold`, it runs again with a thought of
+`think_budget` tokens. The answers then come from the second run, and
 `diagnostics.think_auto` says whether the thought ran and which questions
-were unsure. With [`server.systemone.think`](config.md#serversystemonethink)
-set to `"auto"`, a Jev client gets this behavior without sending any of the
-fields.
+were unsure. With
+[`server.systemone.think`](config.md#serversystemonethink) set to `"auto"`,
+a Jev client gets this behavior without sending any of the fields.
 
 The two thresholds point in opposite directions. `think_threshold` is a
 floor on the confidence of an answer, so raising it thinks more often.
@@ -433,8 +435,8 @@ server:
 gmlx systemone ticket.json
 ```
 
-[`gmlx systemone`](cli.md#gmlx-systemone) in the CLI reference lists its
-flags and output format.
+Its flags and output format are listed under
+[`gmlx systemone`](cli.md#gmlx-systemone) in the CLI reference.
 
 ## How a decision is read
 

@@ -221,8 +221,8 @@ in `~/.config/gmlx/dsh/gmlx.cordis.yml`, which `launch` passes to dsh with
 different default model or an edit to the gmlx providers. Run `launch`
 again with `--model` to change the default.
 
-Two entries in the file point at the server. Under `gmlx (local)`, the server and its
-profiles decide whether a model thinks. Under `gmlx (thinking off)`, the
+Two entries in the file point at the server. Under `gmlx (local)`, the
+server and its profiles decide whether a model thinks. Under `gmlx (thinking off)`, the
 same models answer without thinking, and dsh writes its session titles
 there with the default model.
 

@@ -1,6 +1,5 @@
 # Testing
 
-This page has moved to the contributor internals:
-[Testing](internals/testing.md).
-
-It covers the test tiers, the GGUF-gated invocations and the end-to-end harness. This stub stays so that published links keep resolving.
+This page has moved to [Testing](internals/testing.md) in the contributor
+internals, with the test tiers, the GGUF-gated runs and the end-to-end
+harness.

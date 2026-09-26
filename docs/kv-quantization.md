@@ -2,8 +2,8 @@
 
 Quantizing the KV cache stores the context of a request in fewer bits, so
 a long context uses less memory. gmlx offers two schemes, affine and
-KVarN, which apply to the attention layers whose cache grows with the
-context and cost a little quality and, on some models, speed.
+KVarN, for the attention layers whose cache grows with the context. Both
+cost a little quality, and on some models a little speed.
 
 - [The two schemes](#the-two-schemes)
 - [Which layers quantize](#which-layers-quantize)
@@ -50,28 +50,28 @@ describes.
 
 KVarN accepts head dimensions of 128, 256 and 512 only, so layers with a
 head dimension of 64, as in gpt-oss, use affine quantization only. KVarN
-also declines the [MLA](glossary.md#mla) models, DeepSeek-V4, GLM-5.3 and Kimi
-K2 and K3, whose compressed cache affine quantization still packs. Turns
-with images or audio keep an fp16 cache.
+also declines [MLA](glossary.md#mla) models such as DeepSeek-V4, GLM-5.3
+and Kimi K2 and K3, whose compressed cache affine quantization still
+packs. Turns with images or audio keep an fp16 cache.
 
 ## Choosing a scheme by model
 
 Quantization saves memory in proportion to how much of the cache grows
 with the context, and costs quality in proportion to how many layers it
-touches. The shape of the cache decides both:
+touches. The shape of the cache decides both, as the table shows.
 
 | Cache shape | Families | Cache at 32K in fp16 | What to use |
 |---|---|---|---|
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | `--kv-bits 8`, or KVarN at 6 for the same quality in less memory. KVarN at 4 when memory is the limit. |
-| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
+| Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Quantize only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
 | Sliding-window mix | gemma-4 | The window layers stop growing at the window. | A small saving, since only the global layers quantize. |
 | MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | Already compressed by the architecture. | Affine only. |
 | Head dimension 64 | gpt-oss | Small for each token. | Affine only. |
 
 ## Quality
 
-At the same width, KVarN keeps the output closer to an fp16 cache than
-affine quantization at every width below 8, by a factor of 3 to 5 at 2 to
+KVarN keeps the output closer to that of an fp16 cache than affine
+quantization does at every width below 8, by a factor of 3 to 5 at 2 to
 4 bits. The two converge at 8 bits. KVarN at 6 bits matches or nearly
 matches affine at 8 in three quarters of the memory. Widths 2 and 3 are
 for experiments. [KV cache fidelity](benchmarks.md#kv-cache-fidelity) has
@@ -99,6 +99,5 @@ KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli,
 [arXiv:2606.03458](https://arxiv.org/abs/2606.03458). The gmlx cache
 follows the record format of
 [beellama.cpp](https://github.com/Anbeeld/beellama.cpp), including the
-fp16 tail and `--kv-tail-tokens`, and
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)
-has the notices.
+fp16 tail and `--kv-tail-tokens`, and the
+[third-party notices](../THIRD_PARTY_NOTICES.md) credit both.

@@ -19,8 +19,8 @@ adapter as a small GGUF file. The model is never converted, and
 `--adapter` applies the result at load.
 
 The usual way to fine-tune is to convert the model to full precision,
-train, and quantize again. Training on the quantized model skips all
-three steps. The model weights stay in their quantized form and only the
+train, and quantize again. Training on the quantized model skips the
+conversion and the second quantization. The model weights stay in their quantized form and only the
 adapter trains, so gmlx keeps no full-precision copy of the model and no
 optimizer state for it. You can therefore fine-tune a model that would
 not fit in memory at full precision. At inference, the model file is not
@@ -203,5 +203,5 @@ adapter file.
 - The adapter of each id is fixed at load. To use another adapter, a
   request names another id.
 - The adapter must be for the architecture of the model. The loader checks
-  this, and its error names both architectures. Using an adapter with the
-  fine-tune that it was trained on is up to you.
+  this, and its error names both architectures. It does not check that the
+  model is the fine-tune the adapter was trained on.

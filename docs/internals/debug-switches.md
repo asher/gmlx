@@ -11,50 +11,50 @@ are read at load or on each call. The user-facing variables are in
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with that reason and the model runs fp16 KV. |
-| `GMLX_DSPARK_CONF=T` | Confidence threshold of a DSpark drafter's block cut, in 0..1. Default `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on the DFlash-backbone drafters. |
+| `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. It defaults to `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on DFlash-backbone drafters. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step. `auto` derives X from round costs. Off by default. Output is unchanged. |
-| `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Differs at fp16 rounding only. Set this first when debugging kvarn. |
-| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Same numerics to fp16 rounding. Widths above 4 materialize. |
+| `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Output differs at fp16 rounding only. Set this first when debugging kvarn. |
+| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Numerics match to fp16 rounding. Widths above 4 materialize. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. Set only to rule it out when debugging long context. |
-| `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse attention route may apply to, comma separated, for a quality gate on a new arch. The default is the llama family only. |
+| `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new arch. The default is the llama family only. |
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
-| `GMLX_GDN_REPLAY=0` | Qwen3.5 and 3.6 verify rounds store the recurrent state after each position instead of records the next step replays. Bit-identical either way. |
+| `GMLX_GDN_REPLAY=0` | Qwen3.5 and 3.6 verify rounds store the recurrent state after each position instead of records the next step replays. Output is bit-identical either way. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
-| `GMLX_TRAIN_BLOCKED_ATTN=0` | Run training attention on MLX's unfused path instead of the query-block recompute in `gmlx.tune.attention`. Same numerics to rounding. |
+| `GMLX_TRAIN_BLOCKED_ATTN=0` | Run training attention on MLX's unfused path instead of the query-block recompute in `gmlx.tune.attention`. Numerics match to rounding. |
 | `GMLX_TRAIN_GDN_CHUNK=0` | Run the gated delta scan of a training forward on mlx-lm's per-token loop instead of the chunked rule in `gmlx.tune.gdn`. |
 | `MLX_ENABLE_TF32=1` | Keep TF32 float32 matmul in `gmlx train` and `gmlx distill`, which otherwise set it to `0`. The chunked gated delta rule then takes the loop and says so. |
-| `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Same numerics to one rounding. Set this first when debugging a folded file. |
-| `GMLX_HADAMARD_FUSE=0` | Rotate a folded down or output projection's input as its own dispatch instead of inside the swiglu or output gate kernel. Same numerics to bf16 rounding. |
+| `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. Set this first when debugging a folded file. |
+| `GMLX_HADAMARD_FUSE=0` | Rotate a folded down or output projection's input as its own dispatch instead of inside the swiglu or output gate kernel. Numerics match to bf16 rounding. |
 | `GMLX_HADAMARD_TRACE=1` | Count rotations per forward on a Hadamard-folded file, read back through `hadamard_modules.rotation_count`. |
 | `GMLX_HADAMARD_ROTATE=0` | Skip the Hadamard-fold rotation entirely. The model produces garbage. A benchmark under it measures the rotation's whole cost. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |
 | `GMLX_MOE_GATEUP_CONCAT=0` | Disable the prefill gate and up expert concat, which runs one gather over the concatenated wire bytes at the cost of a second resident copy of them. |
-| `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap in MB on the concat copies the install builds, default `2048`. Layers are stamped in order until the cap is reached. |
-| `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Room left under the memory ceiling after a concat copy, default `8`. A copy that would not fit is skipped and logged. `0` turns the check off. |
+| `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap the concat copies the install builds at this many MB, default `2048`. Layers are stamped in order until the cap is reached. |
+| `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Leave this many GB under the memory ceiling after a concat copy, default `8`. A copy that would not fit is skipped and logged. `0` turns the check off. |
 | `GMLX_MOE_MIX_PREFILL=0` | Keep the eager unsort and score mix after the sorted-prefill MoE down gather instead of running them as one mlx-kquant `gather_mix` dispatch. |
-| `GMLX_GLM5_ABSORBED_MAX_L` | Widest query count GLM-5.3-Flash MLA layers run in the absorbed MQA form instead of expanding the latent per head, default `16`. `0` restores the expansion. |
+| `GMLX_GLM5_ABSORBED_MAX_L` | GLM-5.3-Flash MLA layers run up to this many queries in the absorbed MQA form, default `16`. `0` restores the per-head latent expansion everywhere. |
 | `GMLX_GLM5_INDEXER_DECODE=0` | Score the GLM-5.3-Flash DSA indexer inline instead of through the mlx-kquant fused scorer and radix top-k. The fused route rounds scores before the select. |
 | `GMLX_GLM5_SPARSE_INDEXED=0` | Disable index-gathered attention for GLM-5.3-Flash sparse decode and verify, restoring the per-query gather and sdpa loop. The route needs `sdpa_fa_indexed`. |
-| `GMLX_GLM5_KDA_FUSED_MAX_T` | Widest step GLM-5.3-Flash KDA layers run as one fused decode dispatch per layer, default `8`. Wider steps take the op chain, and `0` restores it everywhere. |
+| `GMLX_GLM5_KDA_FUSED_MAX_T` | GLM-5.3-Flash KDA layers run steps up to this wide as one fused decode dispatch, default `8`. Wider steps take the op chain, and `0` restores it everywhere. |
 | `GMLX_GLM5_KDA_CHUNK=0` | Keep GLM-5.3-Flash KDA prefill on the token-sequential kernel instead of the mlx-kquant chunked recurrence, which needs tensor-op hardware and head dim 128. |
 | `GMLX_GLM5_KDA_CONV=0` | Keep the eager GLM-5.3-Flash KDA prefill chain instead of the mlx-kquant glue `kda_conv`, `kda_chunk_gated` and `rmsnorm_gate`. |
-| `GMLX_HC_M1_MAX_ROWS` | Widest step in rows that hyper-connected models run the fused per-row hyper-connection kernels on, default `8`. Wider steps take the GEMM route. |
+| `GMLX_HC_M1_MAX_ROWS` | Hyper-connected models run steps up to this many rows on the fused per-row hyper-connection kernels, default `8`. Wider steps take the GEMM route. |
 | `GMLX_HC_M1_FUSED=0` | Disable the fused per-row hyper-connection kernels on DeepSeek-V4 and GLM-5.3-Flash, leaving every step on the GEMM route. |
-| `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Bit-identical either way. |
-| `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 hyper-connection cycles op by op instead of on the fused kernels, at decode and prefill width. Same numerics to bfloat16 rounding. |
-| `GMLX_DS41_QAT_FUSED=0` | Run DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Bit-identical. |
+| `GMLX_HC_FUSED_CYCLE=0` | Restore the two-kernel hyper-connection cycle instead of running the expand, front reduction and collapse as one mlx-kquant dispatch. Output is bit-identical. |
+| `GMLX_DS41_HC_FUSED=0` | Run DeepSeek-V4.1 hyper-connection cycles op by op instead of on the fused kernels, at decode and prefill width. Numerics match to bfloat16 rounding. |
+| `GMLX_DS41_QAT_FUSED=0` | Run DeepSeek-V4.1 window-KV and indexer quantization round-trips as compiled op chains instead of one mlx-kquant kernel each. Output is bit-identical. |
 | `GMLX_DS41_SPARSE_KERNEL=0` | Run DeepSeek-V4.1 decode attention as a gather and compiled op chain instead of the `sdpa_sparse_decode` kernel, which keeps its softmax in fp32. |
-| `GMLX_DS4_PREFILL_BLOCK=N` | DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores, default `512`. `0` scores every query against the whole chunk. |
-| `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant GEMM and radix select. Same picks to fp16 rounding. |
-| `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel on the packed FP4 codes. Bit-identical. |
-| `GMLX_DS41_SPARSE_KERNEL_BLOCK=N` | Queries per `sdpa_sparse_decode` call in a DeepSeek-V4.1 prefill, default `64`. `0` keeps prefill blocks on the op chain. |
-| `GMLX_DS41_SPARSE_PREFILL=0` | Run DeepSeek-V4.1 prefill attention as `sdpa_sparse_decode` query blocks instead of one `sdpa_sparse_prefill` call per layer. Same numerics. |
-| `GMLX_DS41_INDEXER_DECODE=0` | Compute DeepSeek-V4.1 decode-width indexer scores on the inline fp32 op chain instead of the fused mlx-kquant kernel. Same picks to fp16 rounding. |
-| `GMLX_DS41_POOL_FP4=0` | Keep the DeepSeek-V4.1 latent pool as fp16 rows at rest instead of the FP4 codes and scales the sparse kernels read directly. Bit-identical. |
-| `GMLX_DS41_INDEXER_CAND=0` | DeepSeek-V4.1 decode indexer layers past the candidate source score every pooled row under a mask instead of only the listed candidate rows. Same picks. |
+| `GMLX_DS4_PREFILL_BLOCK=N` | Set the DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores, default `512`. `0` scores every query against the whole chunk. |
+| `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant GEMM and radix select. Picks match to fp16 rounding. |
+| `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel on the packed FP4 codes. Output is bit-identical. |
+| `GMLX_DS41_SPARSE_KERNEL_BLOCK=N` | Set the queries per `sdpa_sparse_decode` call in a DeepSeek-V4.1 prefill, default `64`. `0` keeps prefill blocks on the op chain. |
+| `GMLX_DS41_SPARSE_PREFILL=0` | Run DeepSeek-V4.1 prefill attention as `sdpa_sparse_decode` query blocks instead of one `sdpa_sparse_prefill` call per layer. Numerics are the same. |
+| `GMLX_DS41_INDEXER_DECODE=0` | Compute DeepSeek-V4.1 decode-width indexer scores on the inline fp32 op chain instead of the fused mlx-kquant kernel. Picks match to fp16 rounding. |
+| `GMLX_DS41_POOL_FP4=0` | Keep the DeepSeek-V4.1 latent pool as fp16 rows at rest instead of the FP4 codes and scales the sparse kernels read directly. Output is bit-identical. |
+| `GMLX_DS41_INDEXER_CAND=0` | DeepSeek-V4.1 decode indexer layers past the candidate source score every pooled row under a mask instead of only the listed candidate rows. Picks are the same. |
 | `GMLX_DS41_PREFILL_STEP=N` | DeepSeek-V4.1 prefills in N-token chunks instead of 8192 when the experts stream and 4096 when they are resident. `0` restores the 2048-token default. |
-| `GMLX_DS41_PREFILL_TAIL=0` | Run every DeepSeek-V4.1 layer on every prompt row. By default the layers past the last kv-source layer skip rows no later window reaches. Same logits. |
+| `GMLX_DS41_PREFILL_TAIL=0` | Run every DeepSeek-V4.1 layer on every prompt row. By default the layers past the last kv-source layer skip rows no later window reaches. Logits are the same. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |

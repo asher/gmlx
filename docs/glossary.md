@@ -14,8 +14,8 @@ serving are in [LoRA adapters](lora.md).
 
 ## APC
 
-Automatic prefix caching, the name that mlx-vlm and the log lines tagged
-`[apc]` use for the [prompt cache](#prompt-cache).
+APC stands for automatic prefix caching, the name that mlx-vlm and the log
+lines tagged `[apc]` use for the [prompt cache](#prompt-cache).
 
 ## Arena
 
@@ -237,8 +237,9 @@ them.
 
 ## Ring
 
-The GPU-visible slots through which the [feeder](#feeder) stages the
-experts of a streamed model during prefill, one layer at a time.
+The ring is the set of GPU-visible slots through which the
+[feeder](#feeder) stages the experts of a streamed model during prefill,
+one layer at a time.
 
 ## Runfile
 
