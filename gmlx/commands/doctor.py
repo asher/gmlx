@@ -349,13 +349,9 @@ def check_ffmpeg(cfg, running=()):
 
 def _assistant_mcp_servers(cfg) -> list:
     """Every MCP server the assistant can reach: the shared assistant.mcp
-    list (when the talk brain or an unscoped alias uses it) plus each
-    alias's own scoped list. Deduped by name."""
-    servers: list = []
-    shared_used = (cfg.talk.brain == "assistant"
-                   or any(a.mcp is None for a in cfg.assistants.values()))
-    if shared_used:
-        servers.extend(cfg.assistant.mcp)
+    list, which `gmlx chat --assistant` always uses, plus each alias's own
+    scoped list. Deduped by name."""
+    servers: list = list(cfg.assistant.mcp)
     for alias in cfg.assistants.values():
         if alias.mcp:
             servers.extend(alias.mcp)

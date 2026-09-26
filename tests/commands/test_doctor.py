@@ -233,6 +233,29 @@ models:
     assert "fs: definitely-not-a-real-binary" in out
 
 
+def test_mcp_row_checks_the_shared_list_for_chat(tmp_path, monkeypatch, capsys):
+    # `gmlx chat --assistant` reads assistant.mcp even when talk and every
+    # alias do not, so doctor checks it.
+    import gmlx.commands.extras as extras
+    monkeypatch.setattr(extras, "extra_installed", lambda x: True)
+    body = """
+server:
+  model_dirs:
+    - <LIB>
+assistant:
+  mcp:
+    - name: shared
+      command: [definitely-not-a-real-binary]
+models:
+  m:
+    path: m.gguf
+"""
+    cfg, lib = _cfg(tmp_path, body)
+    _mint(lib / "m.gguf")
+    doctor.cmd_doctor(["--config", str(cfg)])
+    assert "shared: definitely-not-a-real-binary" in capsys.readouterr().out
+
+
 def test_deep_reads_headers(tmp_path, capsys):
     cfg, lib = _cfg(tmp_path, _BASE)
     _mint(lib / "m.gguf")

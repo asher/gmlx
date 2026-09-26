@@ -63,6 +63,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx doctor` checks the MCP servers in `assistant.mcp`, which
+  `gmlx chat --assistant` always uses. It skipped them unless talk or an
+  alias used them.
 - `gmlx launch open-webui` keeps an `AUDIO_TTS_VOICE` that you export
   instead of replacing it with the Kokoro default.
 - The default prompt-cache disk folder follows `XDG_CACHE_HOME`, like the
