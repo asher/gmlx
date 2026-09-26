@@ -148,7 +148,8 @@ kinds of model:
   reference, or a `qwen3-embed-*` alias. These are Qwen3-Embedding models,
   loaded like any other GGUF.
 - A GGUF encoder: `embeddinggemma-gguf` runs an EmbeddingGemma GGUF.
-- A safetensors encoder from Hugging Face, through
+- A safetensors encoder: an alias, a Hugging Face repository or a local
+  folder runs through
   [mlx-embeddings](https://pypi.org/project/mlx-embeddings/).
 
 `true` selects `qwen3-embed-0.6b`. These are the GGUF models, where the

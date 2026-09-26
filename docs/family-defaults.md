@@ -15,7 +15,7 @@ gmlx profiles qwen3.8-27b-ud-q6   # the resolved values of one configured model
 Each family covers the GGUF architectures in the second column. An intent
 is shown with the family values it keeps, and an intent that a family does
 not define gives the family defaults. The reasoning level goes by three
-names. It is `reasoning_effort` for gpt-oss, DeepSeek-V4.1, Hy3 and Hy4,
+names. It is `reasoning_effort` for gpt-oss, DeepSeek-V4.1, Hy3 and HY4,
 `thinking_effort` for Kimi, and `reasoning_strength` for Muse. Each value
 comes from the model card cited in `gmlx/gen/profiles.py`.
 

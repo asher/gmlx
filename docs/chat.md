@@ -26,10 +26,11 @@ Chat also uses the server without `--server` when the server of your
 configuration file is running and serves the id that you name, or when you
 name no model. A GGUF path always loads in the chat process, because the
 file on disk can be newer than what the server holds, and chat prints the
-served id when the server already serves that file. A flag that changes how
-the model loads, or any of `--base-url`, `--host`, `--port` and
-`--no-start`, also keeps the model in the chat process. `--local` forces an
-in-process load in every case.
+served id when the server already serves that file.
+
+A flag that changes how the model loads, or any of `--base-url`, `--host`,
+`--port` and `--no-start`, also keeps the model in the chat process.
+`--local` forces an in-process load in every case.
 
 In server mode, the server owns the model and its chat template. Chat
 refuses flags that load the model and ignores a few others with a note. The
@@ -83,9 +84,12 @@ With the `chat` extra, a completion menu opens as you type a command, and
 an earlier prompt that matches your text appears in grey ahead of the
 cursor, where the right arrow accepts it. A toolbar at the bottom shows the
 sampling settings, attached items, how full the context is and the speed of
-the last reply. Pasted text keeps its line breaks, and Alt-Enter inserts a
-newline. Shift-Enter also inserts one when your terminal sends ESC CR for
-it. Without the extra, readline edits the line and completes with Tab.
+the last reply.
+
+The extra also keeps the line breaks of pasted text, and Alt-Enter
+inserts a newline. Shift-Enter also inserts one when your terminal sends
+ESC CR for it. Without the extra, readline edits the line and completes
+with Tab.
 
 Tab completes command names. After a command, it completes the argument:
 
@@ -133,10 +137,11 @@ the earlier conversation is read again with your next message.
 
 Chat saves the session as JSON in `$XDG_DATA_HOME/gmlx/chats` after each
 turn, and `--no-autosave` turns that off. `/reset` starts a new file, so
-the old conversation stays saved. A saved session restores its settings
-and its conversation together. `--resume` at startup restores the latest
-session of the model, or a named one, and `/load-session` does the same
-from inside a chat. Both refuse a session that was recorded with another
+the old conversation stays saved.
+
+A saved session restores its settings and its conversation together.
+`--resume` at startup restores the latest session of the model, or a named
+one, and `/load-session` does the same from inside a chat. Both refuse a session that was recorded with another
 model. The restored conversation is read into the KV cache with your next
 message, not at load time.
 

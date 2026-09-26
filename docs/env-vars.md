@@ -82,11 +82,8 @@ per chunk takes effect on a running server.
 | `GMLX_SSE_KEEPALIVE_S` | The server sends an SSE keepalive comment at this interval in seconds while a stream is silent. The default is `15`, and `0` disables them. |
 | `GMLX_PREFLIGHT_MEM=0` | Disable the memory preflight that answers 400 when a prompt cannot fit. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
-| `GMLX_MTP_PREEMPT=0` | Keep a speculating stream from converting to plain decode when a batch grows past the width cap. |
-| `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it drains. |
-| `GMLX_DECODE_FAST_DISK` | It sets the `stream_fast_disk` policy to `auto`, `on` or `off`, as `--stream-fast-disk` does. |
-| `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it from the prefill ring with the prompt's most routed experts. |
-| `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
+| `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
+| `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it shrinks back within the width cap. |
 | `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, which drafts one token fewer, as `--draft-block-size` does. |
 | `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, and `0` removes the cap. It overrides `speculative_width_cap` and is read each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does, for forced-length benchmarking. |
@@ -103,6 +100,9 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch on streamed models. By default, prefill-sized expert calls advise the kernel two layers ahead. |
 | `GMLX_STREAM_CACHE_GB` | A streamed model keeps this much MLX buffer cache, in GB. The default is the priced KV room, or `4` when no KV room is priced. |
 | `GMLX_STREAM_ALLOC_LIMITS=0` | Keep the MLX allocator's default memory and cache limits on a streamed model. Every cache miss then purges the whole buffer cache. |
+| `GMLX_DECODE_FAST_DISK` | It sets the `stream_fast_disk` policy to `auto`, `on` or `off`, as `--stream-fast-disk` does. |
+| `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it from the prefill ring with the prompt's most routed experts. |
+| `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
 | `GMLX_DECODE_ARENA_GB` | It overrides the decode arena size, in GB. The default is what the memory limit leaves after the every-token weights, KV room and prefill ring. |
 | `GMLX_DECODE_ARENA_RAM_FRAC` | Cap the arena size limit at a fraction of physical RAM. It is unset by default. |
 | `GMLX_BATCH_INVARIANT=1` | Run small float `nn.Linear` layers on a row-count-invariant kernel. Raw-array routers, router calls under 64 routed rows and training are not covered. |

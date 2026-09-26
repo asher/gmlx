@@ -78,16 +78,16 @@ An architecture is done when all of the following pass.
 - Bench sanity: Prefill and decode throughput on one real model are compared
   against llama.cpp on the same file. A large unexplained deficit is usually
   a contiguity or layout bug, not MLX itself.
-- Route check at depth: Run a decode at 16k context or more, plus an MTP
-  round if the family has an MTP head, with `GMLX_SDPA_DEBUG=1`, and
-  confirm attention uses one of the fused routes, `gqa_decode`, `fa_decode`,
+- Route check at depth: Run a decode at 16k context or more with
+  `GMLX_SDPA_DEBUG=1`, plus an MTP round if the family has an MTP head.
+  Attention must take a fused route, which is `gqa_decode`, `fa_decode`,
   `fa_verify`, `verify_gemm` or `sdpa_vector`, rather than `stock`. A new
   family's head geometry can miss the eligibility gates without any error
   and pay a materialized-scores penalty that only shows at depth.
   `GMLX_ROUTE_LOG=1` prints per-route call counts at exit, and a one-shot
   warning fires if a verify-shaped causal call at depth falls back to stock.
   For MTP families, `GMLX_MTP_DEBUG=1` logs a line starting
-  `[mtp] verify branch:` per round.
+  `[mtp] verify branch:` the first time each verify branch runs.
 - Repo gates green: The CPU tier of `pytest` passes with a new fixture
   case for the family in `tests/load/test_config_synth.py`, and
   `scripts/check-coverage.py --check --strict` passes with

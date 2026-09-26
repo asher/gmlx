@@ -178,7 +178,7 @@ gives the commands for each case.
 ## Performance
 
 Because gmlx and llama.cpp run the same file, the comparison is direct. On an
-M5 Max, gmlx prefills faster on every model in the fleet at every depth, and
+M5 Max, gmlx prefills faster on every benchmarked model at every depth, and
 with speculative decoding on both engines it decodes faster at every depth as
 well. Absolute numbers scale with the machine's memory bandwidth, so measure
 your own with `gmlx run model.gguf --bench 128,512,2048`.

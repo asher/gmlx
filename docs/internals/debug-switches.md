@@ -58,7 +58,7 @@ are read at load or on each call. The user-facing variables are in
 | `GMLX_CB_PHASE=0` | Disable the per-phase MLX command-buffer caps, fine through a prefill and coarse from the first generated token. Output is unchanged. Decode runs slower. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
-| `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round. |
+| `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_ROUND_PROFILE=1` | Profile each speculative round, in the server process too, so a serve claim can be certified there. `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
 | `GMLX_DECODE_PHASE_STATS=1` | Print a streamed decode's per-token split between disk stalls and the eval and sync bucket at exit. A clock frequency drop shows as a large sync bucket. |
 | `GMLX_DECODE_PHASE_LAYERS=1` | With the phase stats, also print the split per layer and each token's arena misses, so a cold layer or a cold start shows where it is. |

@@ -782,7 +782,7 @@ confidence. A question skipped by `ask_if` prints `skipped`.
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The `GMLX_API_KEY` variable | Send this key to a keyed server. |
 | `--model GGUF` | None | Answer offline on this GGUF path or configured model id. It cannot be combined with `--url`, `--host` or `--port`. |
-| `--config FILE` | The first default location | An offline run takes its model ids and `server.systemone` settings from this config, which needs `--model`. |
+| `--config FILE` | The first default location | Take an offline run's model ids and `server.systemone` settings from this config. The flag needs `--model`. |
 | `--seed N` | The request's `seed` | Replace the request's seed on both paths. |
 | `--json` | Off | Print the whole response body as JSON. |
 
@@ -1184,7 +1184,7 @@ worked examples shown before each question.
 | `--tasks LIST` | None | Run these comma-separated tasks, from `arc_easy`, `hellaswag` and `gsm8k`. |
 | `--task-limit N` | All | Score this many items per task. |
 | `--gsm8k-max-tokens N` | `384` | Give each GSM8K item this generation budget. |
-| `--before` | Off | Also score with the adapter disabled in process. Needs `--adapter`. |
+| `--before` | Off | Also score with the adapter disabled in process. The flag needs `--adapter`. |
 | `--chat-slice NAME=PATH` | None | Score this jsonl of `{messages}` conversations on their assistant turns, `student_messages` first. The flag repeats. |
 | `--chat-sanity PATH` | None | Score this jsonl of `{id, messages, kind}` prompts, where `kind` is `task` or `refuse`, for template compliance and drift from an earlier report's replies. |
 | `--chat-max-tokens N` | `256` | Give each chat sanity reply this token budget. |

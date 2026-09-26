@@ -179,9 +179,9 @@ default is `false`.
 
 ### `models.*.draft_gguf`
 
-This separate [drafter](glossary.md#drafter) GGUF proposes tokens for the model,
-and setting it turns on `speculative`. `gmlx init` and `discover` pair a
-drafter with the model next to it. The default is none.
+This separate [drafter](glossary.md#drafter) GGUF proposes tokens for the
+model, and setting it turns on `speculative`. `gmlx init` and `discover`
+pair a drafter with the model next to it. The default is none.
 
 ### `models.*.native_mtp`
 
@@ -254,8 +254,8 @@ most 1, and it changes the output. The default is off.
 ### `models.*.moe_miss_shed`
 
 The model drops the experts of a token that are not in the decode
-[arena](glossary.md#arena), as long as the kept experts still cover this share
-of the gate weight. The value is above 0 and at most 1, and it changes
+[arena](glossary.md#arena), as long as the kept experts still cover this
+share of the gate weight. The value is above 0 and at most 1, and it changes
 the output. The default is off.
 
 ### `models.*.moe_layer_shed`
@@ -1271,8 +1271,8 @@ One tool call may take at most this many seconds. The value is at least
 
 ### `assistant.mcp`
 
-These [MCP](glossary.md#mcp) servers provide the tools, as a list. Each entry
-has a `name` and exactly one of `command` and `url`. A server that fails
+These [MCP](glossary.md#mcp) servers provide the tools, as a list. Each
+entry has a `name` and exactly one of `command` and `url`. A server that fails
 to start gives a warning, and the assistant runs without its tools. The
 default is none.
 
@@ -1286,11 +1286,12 @@ name as a prefix. This key is required.
 
 This command starts a server over stdio. It is a list of arguments, or a
 string that is split like a shell command line. The server's log goes to
-`~/.cache/gmlx/mcp-<name>.log`.
+`~/.cache/gmlx/mcp-<name>.log`. The default is none.
 
 ### `assistant.mcp[].url`
 
-The assistant reaches a server over streamable HTTP at this address.
+The assistant reaches a server over streamable HTTP at this address. The
+default is none.
 
 ### `assistant.mcp[].env`
 

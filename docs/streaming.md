@@ -220,7 +220,7 @@ so its arena can be smaller than the one in the plan.
 
 These settings do not change the output, and all of them are on by
 default for `stream: experts`, with one exception. Lookahead prestage is
-off by default on the GLM-5 and DeepSeek-V3.2 families, and
+off by default on GLM-5.2, the `glm-dsa` architecture, and
 `GMLX_DECODE_LOOKAHEAD=1` turns it on there.
 [Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements)
 records the gain of each setting on real models.

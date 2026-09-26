@@ -8,8 +8,9 @@ deepens.
 
 Speculative decoding is measured where the model has a
 [native head](glossary.md#native-head) or a companion drafter. The
-measurements behind the guidance of the performance pages are under [Serving measurements](#serving-measurements)
-and [KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
+measurements behind the guidance of the performance pages are under
+[Serving measurements](#serving-measurements) and
+[KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
 in [a JSON file](benchmarks.json), and the
 [benchmark harness](../bench/) reproduces any cell.
 

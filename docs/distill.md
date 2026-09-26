@@ -534,8 +534,8 @@ values come from the worked task, and
 [Advanced settings](#advanced-settings) says what each one changes.
 
 Training prints the loss every ten steps. If the loss has not fallen by
-step 40, stop the run and check that the filter kept the rows you expected and that `align` reported `a=1.000`
-or a warning you accepted.
+step 40, stop the run and check that the filter kept the rows you
+expected and that `align` reported `a=1.000` or a warning you accepted.
 
 ## Use and measure the adapter
 
