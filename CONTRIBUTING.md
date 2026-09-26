@@ -1,7 +1,8 @@
 # Contributing
 
-Thanks for considering a contribution. This page covers the mechanics. For
-design context, the docs under [docs/](docs/) are authoritative.
+A contribution to gmlx needs a dev setup, passing tests, clean lint and a
+commit in the house style. Thanks for considering one. For design context,
+the [gmlx documentation](docs/README.md) is authoritative.
 
 ## Dev setup
 
@@ -13,9 +14,9 @@ are explained in
 [Upgrading mlx-vlm, mlx-lm and mlx](docs/internals/upstream-upgrades.md).
 
 Dev setup is a venv, a clone and an editable install with the `chat` and
-`assistant` extras. CI adds `vlm` as well, an empty extra kept for older
-install commands. Without `assistant`, the MCP tool-server tests skip
-themselves:
+`assistant` extras. Without `assistant`, the MCP tool-server tests skip
+themselves. CI adds `vlm` as well, an empty extra kept for older install
+commands. These commands create the dev setup:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -26,7 +27,7 @@ pip install -e "./gmlx[chat,assistant]" pytest ruff
 ## Tests
 
 There are three tiers, described in full in
-[docs/internals/testing.md](docs/internals/testing.md):
+[Testing](docs/internals/testing.md):
 
 ```sh
 pytest                                   # CPU logic tests, no models, runs anywhere
@@ -38,7 +39,7 @@ A PR should keep the default `pytest` tier passing, and if your change
 touches loading or numerics, say which integration tests you ran and on
 which model. A new architecture has its own acceptance gate and required
 tests, in
-[docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
+[Adding a GGUF architecture](docs/internals/adding-architectures.md).
 
 ## Lint
 
@@ -52,14 +53,16 @@ pip install "pyright[nodejs]==1.1.414" && pyright   # seam drift check, needs th
 
 pyright is a guard against upstream symbol and signature drift, not a type
 checker for the tree. It covers the files in `[tool.pyright].include`, all
-of them at zero errors; the other files that import mlx_vlm or mlx_lm
+of them at zero errors. The other files that import mlx_vlm or mlx_lm
 statically are listed in `[tool.gmlx.pyright].backlog` and join the gate
 one file at a time as each reaches zero. `tests/test_pyright_scope.py`
 holds both lists to the tree, so a new static import lands in one list or
-the other. A `# pyright: ignore[rule]` is allowed only where the false
-positive comes from upstream typing (a stub that omits the attribute, a
-scalar union, a field added to an upstream dataclass), with a comment
-saying which; keep the count under twenty repo-wide.
+the other.
+
+A `# pyright: ignore[rule]` is allowed only where the false positive comes
+from upstream typing (a stub that omits the attribute, a scalar union, a
+field added to an upstream dataclass), with a comment saying which. Keep
+the count under twenty repo-wide.
 
 ruff's S110 rule flags a `try`/`except Exception: pass`. Either log the
 failure, or say where the error goes on the except line:
@@ -69,7 +72,8 @@ reason is not accepted in review. Tests are exempt.
 The docs site is built from `docs/` by MkDocs and published by the release
 workflow for each release tag, so a docs change reaches the site with the
 next release. A new page goes in the `nav` of `mkdocs.yml` as well as the
-docs index, and the CI build of the site fails on a page missing from it.
+docs index. The site's CI build fails on a page that is missing from the
+`nav`.
 
 ## Things to know before you patch
 
@@ -81,7 +85,7 @@ docs index, and the CI build of the site fails on a page missing from it.
   Every patch is registered as a seam, guarded, and raises rather than
   no-ops when upstream moves. The rules for adding one and for moving the
   pins are in
-  [docs/internals/upstream-upgrades.md](docs/internals/upstream-upgrades.md).
+  [Upgrading mlx-vlm, mlx-lm and mlx](docs/internals/upstream-upgrades.md).
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py` and arch metadata in
   `gmlx/load/arch_table.py`. Those three are where a new architecture lands.
@@ -89,20 +93,20 @@ docs index, and the CI build of the site fails on a page missing from it.
 
   | Package | Concern |
   |---------|---------|
-  | `gmlx/load/` | GGUF discovery, parsing, remap, config synthesis, model construction |
-  | `gmlx/models/` | owned model backbones, one subpackage or module per family |
-  | `gmlx/upstream/` | patches installed over upstream mlx-lm/mlx-vlm seams |
-  | `gmlx/cache/` | automatic prompt cache and KV-cache persistence |
-  | `gmlx/spec/` | speculative decoding, MTP, drafters, acceptance |
-  | `gmlx/stream/` | weight streaming and residency for over-RAM models |
-  | `gmlx/serve/` | server, admission, batched decode, with HTTP patches in `serve/patches/` |
-  | `gmlx/gen/` | generation loop, sampling profiles, benchmarks |
-  | `gmlx/tune/` | training-time helpers: LoRA student setup, blocked attention, per-layer checkpointing, selection ids kept off the gradient |
-  | `gmlx/distill/` | offline distillation: teacher cache, cross-tokenizer alignment, fused head and losses, batch loader, eval |
-  | `gmlx/commands/` | CLI verbs behind the `gmlx` umbrella |
-  | `gmlx/tui/` | interactive chat terminal UI |
-  | `gmlx/talk/` | voice client, audio I/O and hotkey |
-  | `gmlx/assistant/` | tool-loop assistant brain and its MCP surface |
+  | `gmlx/load/` | It covers GGUF discovery, parsing, remap, config synthesis and model construction. |
+  | `gmlx/models/` | It holds the owned model backbones, one subpackage or module per family. |
+  | `gmlx/upstream/` | It holds the patches installed over upstream mlx-lm/mlx-vlm seams. |
+  | `gmlx/cache/` | It holds the automatic prompt cache and KV-cache persistence. |
+  | `gmlx/spec/` | It covers speculative decoding, MTP, drafters and acceptance. |
+  | `gmlx/stream/` | It covers weight streaming and residency for over-RAM models. |
+  | `gmlx/serve/` | It holds the server, admission and batched decode, with HTTP patches in `serve/patches/`. |
+  | `gmlx/gen/` | It holds the generation loop, sampling profiles and benchmarks. |
+  | `gmlx/tune/` | It holds training-time helpers: LoRA student setup, blocked attention, per-layer checkpointing and selection ids kept off the gradient. |
+  | `gmlx/distill/` | It holds offline distillation: teacher cache, cross-tokenizer alignment, fused head and losses, batch loader and eval. |
+  | `gmlx/commands/` | It holds the CLI verbs behind the `gmlx` umbrella. |
+  | `gmlx/tui/` | It holds the interactive chat terminal UI. |
+  | `gmlx/talk/` | It holds the voice client, audio I/O and hotkey. |
+  | `gmlx/assistant/` | It holds the tool-loop assistant brain and its MCP surface. |
 
   Cross-cutting modules such as `config.py`, `envflags.py`,
   `eval_guard.py`, `textfmt.py` and `spinner.py` stay at the `gmlx/` top
@@ -110,9 +114,9 @@ docs index, and the CI build of the site fails on a page missing from it.
 - Error messages follow the existing style: they say what was expected,
   what was found and what the user or upgrader should do next.
 - Install instructions show Homebrew first, then uv, and pip only for a
-  venv the user manages. docs/installation.md owns the install facts, and a page
-  that adds an extra shows the uv and pip forms, because a Homebrew install
-  already has every extra.
+  venv the user manages. The [Installation](docs/installation.md) page owns
+  the install facts, and a page that adds an extra shows the uv and pip
+  forms, because a Homebrew install already has every extra.
 
 ## Commit style
 

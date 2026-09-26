@@ -2,10 +2,11 @@
 
 `gmlx talk` is a voice client for the models that the gmlx server serves. It
 listens for a wake phrase, sends what you say to the model and speaks the
-reply as it streams. You can interrupt it, tune it and script it.
+reply as it streams. You can interrupt a reply, change the client's settings
+and run the client from a script.
 
 The client records your speech, and the server turns it into text, streams
-the reply of the model, and turns each part of the reply into speech while
+the model's reply, and turns each part of the reply into speech while
 the model is still writing. Speech recognition, speech synthesis and the
 model all run in the server, so a remote server does the work while the
 microphone and speakers stay on your Mac.
@@ -26,7 +27,7 @@ microphone and speakers stay on your Mac.
    [Optional features](installation.md#optional-features) shows how to add
    it to a uv or pip install. Without it, `gmlx talk` exits with
    `error: voice chat requires the optional talk extra`.
-2. Turn on the [speech services](services.md) of the server:
+2. Turn on the server's [speech services](services.md):
 
     ```yaml
     server:
@@ -35,7 +36,7 @@ microphone and speakers stay on your Mac.
     ```
 
 3. Run `gmlx init` to choose the voice, the wake phrase, the listening mode
-   and the hotkey of the menu bar app. The wizard asks these questions
+   and the menu bar app's hotkey. The wizard asks these questions
    whenever it sets up both speech services, and it offers to install the
    `talk` extra when it is missing.
 4. Run `gmlx restart` so that the server starts the services, and then run
@@ -47,8 +48,8 @@ and a 0.6 MB speech detection model into the cache folder that
 [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
 lists.
 
-macOS asks once for permission to use the microphone, in the name of your
-terminal. [Permissions](menubar.md#permissions) explains why,
+macOS asks once for permission to use the microphone, in your terminal's
+name. [Permissions](menubar.md#permissions) explains why,
 and [The mic never works in talk](troubleshooting.md#the-mic-never-works-in-talk)
 shows how to allow it later.
 
@@ -56,7 +57,7 @@ shows how to allow it later.
 
 `gmlx talk` starts the server if it is down, and then asks it to keep the
 model loaded until the session ends. With no model named, it uses
-[`talk.model`](config.md#talkmodel), then the default model of the server,
+[`talk.model`](config.md#talkmodel), then the server's default model,
 then the only model that the server serves. The first line names the
 model, the voice and the mode:
 
@@ -114,14 +115,14 @@ them. A line that starts with `/` runs a command:
 
 | Command | Effect |
 |---------|--------|
-| `/voice [name]` | Lists the voices of the server, or switches to one. |
-| `/speed <number>` | Sets the speed of speech. The server accepts 0.25 to 4. |
+| `/voice [name]` | Lists the server's voices, or switches to one. |
+| `/speed <number>` | Sets the speech speed. The server accepts 0.25 to 4. |
 | `/mode wake\|vad\|ptt\|text` | Switches the listening mode. |
 | `/wake [phrase]` | Shows or changes the wake phrase. |
 | `/mute` | Mutes or unmutes the microphone. |
 | `/system [text]` | Sets the system prompt, or clears it with no text. Either way, the conversation starts again. |
 | `/reset` | Starts the conversation again. |
-| `/memory` | Shows and manages the [memory of the assistant](assistant.md#memory). |
+| `/memory` | Shows and manages the [assistant's memory](assistant.md#memory). |
 | `/devices` | Lists the audio devices. |
 | `/help` | Lists the commands. |
 | `/quit`, `/exit`, `/q` | Quits. |
@@ -203,8 +204,8 @@ To shorten the wait for a reply, change these settings:
 
 `--base-url http://host:8080/v1` points the client at another server, and
 `--api-key` gives its key. Speech recognition and synthesis then run on
-that machine. Without `--base-url`, the client uses the server of your
-configuration file and starts it when it is down, unless you pass
+that machine. Without `--base-url`, the client uses your configured
+server and starts it when it is down, unless you pass
 `--no-start`.
 
 `--once` answers one utterance and exits. It skips the wake phrase, which

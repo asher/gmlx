@@ -27,8 +27,8 @@ the model.
 
 ## The tool loop
 
-A turn is the standard OpenAI tool loop, sent to the chat completions
-endpoint of the server. Your message goes out with the tools attached.
+A turn is the standard OpenAI tool loop, sent to the server's chat
+completions endpoint. Your message goes out with the tools attached.
 When the model answers with tool calls instead of text, the assistant runs
 them, sends the results back and asks again. This repeats until the model
 answers in text. A failed call returns to the model as an error message,
@@ -41,8 +41,8 @@ takes longer than
 [`assistant.tool_timeout_s`](config.md#assistanttool_timeout_s) returns a
 timeout error to the model, and the tool keeps running in the background.
 
-Each round is an ordinary chat completion request, so the profiles,
-speculative decoding and prompt cache of the server apply to it. A round
+Each round is an ordinary chat completion request, so the server's
+profiles, speculative decoding and prompt cache apply to it. A round
 costs a model reply plus the tool call, so an answer that needs several
 tools takes longer than a plain reply. Choose a model that handles tool
 calls well, such as Qwen3.8-27B, because smaller models make more mistakes
@@ -70,7 +70,7 @@ assistant:
 A server that fails to start, or that has not connected after 20 seconds,
 gives a warning, and the assistant runs without its tools. For a command
 server, the warning names its log file. `gmlx doctor` checks that the
-programs of the command servers exist.
+command servers' programs exist.
 
 Command servers get only a few variables from your environment, so pass
 a token that one needs with [`env`](config.md#assistantmcpenv). `~` is not
@@ -156,7 +156,7 @@ fails, it stores the exchange and prints one warning. Cancelled turns and
 very short messages are not stored.
 
 Before each turn, the assistant finds the facts closest to your message
-through the `/v1/embeddings` endpoint of the server. It keeps up to
+through the server's `/v1/embeddings` endpoint. It keeps up to
 [`top_k`](config.md#assistantmemorytop_k) of them, and when more facts
 match, the `/v1/rerank` endpoint chooses the best ones if the server runs
 a reranker. The facts go into that request only, so the conversation does
@@ -188,7 +188,7 @@ either client, these commands manage the store:
 
 `gmlx chat --assistant` sends each turn to the assistant through the
 server, and starts the server if it is down. Name a served model id, or no
-model for the default model of the server. A file path is refused, because
+model for the server's default model. A file path is refused, because
 the server owns the model:
 
 ```sh
@@ -258,16 +258,16 @@ none:
 The server builds each turn from the messages that the client sends, so
 tool calls from earlier turns are not kept. The last message must be a
 user message with text only, and earlier system messages are kept. The
-answer joins the text of every round. A stream carries the reasoning of
-the model and a comment line such as `: assistant using NAME` for each
+answer joins every round's text. A stream carries the model's reasoning
+and a comment line such as `: assistant using NAME` for each
 tool, which also keeps the connection alive.
 
-Every round uses the sampling fields and `stop` of the request, but not
+Every round uses the request's sampling fields and `stop`, but not
 `response_format`, because it would stop the model from calling tools.
 `max_tokens` limits each round and defaults to 4096, and
 `max_completion_tokens` wins over it. The reported usage adds up the
-completion tokens of all rounds and gives the prompt tokens of the last
-round.
+completion tokens from all rounds and gives the last round's prompt
+tokens.
 
 A round that fails returns a 502 with the code `assistant_upstream_error`,
 or an error object in a stream. The server runs at most 4 assistant turns
@@ -301,9 +301,8 @@ These rules limit what a served assistant can do:
   is `true`. Such an address also needs an API key, unless
   [`server.no_auth`](config.md#serverno_auth) is set.
 - With `assistant_allow_remote: true` and a non-empty `assistant.mcp`,
-  each assistant must list its own `mcp`, with `[]` for no tools. The
-  tools of each assistant are therefore a choice that you make in the
-  file.
+  each assistant must list its own `mcp`, with `[]` for no tools. Each
+  assistant's tools are therefore a choice that you make in the file.
 - `gmlx doctor` warns when assistants are served beyond loopback. For
   each one, it says whether the assistant inherits `assistant.mcp` or how
   many servers its own `mcp` list names.

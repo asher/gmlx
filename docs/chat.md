@@ -19,11 +19,11 @@ under [gmlx chat](cli.md#gmlx-chat).
 By default, chat loads the GGUF that you name and generates in its own
 process. With `--server`, it sends each turn to a model that the gmlx
 server serves, and it starts the server if the server is down. With
-`--assistant`, it works like `--server` and adds the
-[tool loop and long-term memory](assistant.md#text-chat) of the assistant.
+`--assistant`, it works like `--server` and adds the assistant's
+[tool loop and long-term memory](assistant.md#text-chat).
 
-Chat also uses the server without `--server` when the server of your
-configuration file is running and serves the id that you name, or when you
+Chat also uses the server without `--server` when your configured
+server is running and serves the id that you name, or when you
 name no model. A GGUF path always loads in the chat process, because the
 file on disk can be newer than what the server holds, and chat prints the
 served id when the server already serves that file.
@@ -36,7 +36,7 @@ every case.
 In server mode, the server owns the model and its chat template. Chat
 refuses `--adapter`, `--mmproj` and the chat template flags. It ignores
 the other load flags and prints a note that names them. The
-served [profile](config.md#profiles) of the model sets the sampling, and
+model's served [profile](config.md#profiles) sets the sampling, and
 chat sends only the settings that you change. `/image`, `/audio`,
 `/thinking-budget` and Ctrl-T work only on a model loaded in the chat
 process.
@@ -57,8 +57,8 @@ A line that starts with `/` runs one of these commands:
 | `/system [text\|off]` | Shows or sets the system prompt. Setting it starts the conversation again. |
 | `/retry`, `/undo` | `/retry` generates the last reply again, and `/undo` removes the last exchange. |
 | `/temp`, `/top-p` and the other sampling commands | Changes the sampling of the next replies. `/sampling` shows the current values. |
-| `/thinking [on\|off\|adaptive\|default]` | Turns the reasoning of a thinking model on or off for the next turns. |
-| `/thinking-budget [N\|off]` | Limits the reasoning tokens of each reply. |
+| `/thinking [on\|off\|adaptive\|default]` | Turns a thinking model's reasoning on or off for the next turns. |
+| `/thinking-budget [N\|off]` | Limits each reply's reasoning tokens. |
 | `/reasoning show\|hide\|raw` | Sets how reasoning is shown. |
 | `/render rich\|lite\|plain` | Sets the markdown renderer. |
 | `/theme NAME [cb]` | Sets the color theme. `cb` adds colorblind-safe accents. |
@@ -67,11 +67,11 @@ A line that starts with `/` runs one of these commands:
 | `/history [on\|off\|clear]` | Turns saving of prompt history on or off, or clears it. |
 | `/save [name]`, `/sessions`, `/load-session <name\|N>` | Saves, lists and restores sessions. |
 | `/export [file.md]` | Writes the conversation as markdown, by default to the session name in the current folder. |
-| `/load <file>` | Puts the text of a file in the prompt for you to edit and send. |
+| `/load <file>` | Puts a file's text in the prompt for you to edit and send. |
 | `/! <command>` | Runs a shell command and attaches its output to the next message. `/drop` discards what is attached. |
 | `/image <file>`, `/audio <file>` | Attaches a local file to the next message on a multimodal model. |
 | `/copy` | Copies the last answer, without its reasoning, to the clipboard. |
-| `/memory` | Shows or edits the [memory of the assistant](assistant.md#memory) in `--assistant` mode. |
+| `/memory` | Shows or edits the [assistant's memory](assistant.md#memory) in `--assistant` mode. |
 
 Esc or Ctrl-C during a reply cancels it and returns to the prompt. The
 partial reply stays in the conversation, so `/retry` generates it again and
@@ -88,8 +88,8 @@ with the `chat` extra. `--no-history` keeps a session out of the file, and
 With the `chat` extra, a completion menu opens as you type a command, and
 an earlier prompt that matches your text appears in grey ahead of the
 cursor, where the right arrow accepts it. A toolbar at the bottom shows the
-sampling settings, attached items, how full the context is and the speed of
-the last reply.
+sampling settings, attached items, how full the context is and the last
+reply's speed.
 
 The extra also keeps the line breaks of pasted text, and Alt-Enter
 inserts a newline. Shift-Enter does the same when your terminal sends
@@ -100,7 +100,7 @@ Tab completes command names. After a command, it completes the argument:
 
 | After | Tab offers |
 |-------|------------|
-| `/history`, `/reasoning`, `/render`, `/thinking` | Tab offers the values of that command. |
+| `/history`, `/reasoning`, `/render`, `/thinking` | Tab offers that command's values. |
 | `/thinking-budget` | Tab offers `off`. |
 | `/load-session` | Tab offers the names of saved sessions. |
 | `/theme` | Tab offers theme names, and then `cb`. |
@@ -116,7 +116,7 @@ Each one changes the next replies and has a startup flag with the same
 name, so the sampling that a model card recommends fits on the command
 line. `/max-tokens 0` removes the limit on the length of a reply.
 
-Chat starts from the [family defaults](family-defaults.md) of the model.
+Chat starts from the model's [family defaults](family-defaults.md).
 An intent suffix on a GGUF path, such as `model.gguf@creative`, starts
 from that intent of the family defaults instead. A configured id also
 takes a [profile](config.md#profiles) of the configuration file after the
@@ -147,7 +147,7 @@ turn, and `--no-autosave` turns that off. `/reset` starts a new file, so
 the old conversation stays saved.
 
 A saved session restores its settings and its conversation together.
-`--resume` at startup restores the latest session of the model, or a named
+`--resume` at startup restores the model's latest session, or a named
 one, and `/load-session` does the same from inside a chat. Both refuse a
 session that was recorded with another model. The restored conversation
 is read into the KV cache with your next message, not at load time.
@@ -179,20 +179,20 @@ image. The supported models and file types are listed in
 
 ## Reasoning and rendering
 
-For a thinking model, chat shows the reasoning in a frame in the thinking
-style of the theme. The frame closes with a line that says how long the
+For a thinking model, chat shows the reasoning in a frame in the theme's
+thinking style. The frame closes with a line that says how long the
 model thought and how many tokens it used. Ctrl-O folds or unfolds the
 frame during a reply, and Ctrl-T ends the reasoning so that the answer
 starts.
 
 `--reasoning hide` shows a spinner while the model thinks, and then the
 same closing line. `--reasoning raw` prints the output unchanged, which
-helps when chat does not recognize the reasoning markers of a model. The
+helps when chat does not recognize a model's reasoning markers. The
 conversation keeps the full output in every mode, so the display never
 changes what the model reads in the next turn.
 
 Replies render as markdown while they stream. Finished blocks stay in the
-scrollback of the terminal, and only the block in progress is drawn again.
+terminal's scrollback, and only the block in progress is drawn again.
 Chat chooses the renderer, and `/render` or `--render` overrides it:
 
 | Mode | Chosen when | What it shows |
@@ -205,7 +205,7 @@ Chat chooses the renderer, and `/render` or `--render` overrides it:
 
 `--theme` and `/theme` choose from the built-in themes `dark`, `light`,
 `dark-hc`, `nord`, `dracula`, `solarized-dark` and `gruvbox`. The default
-is `dark`, which uses the colors of your terminal. The `cb` modifier, or
+is `dark`, which uses your terminal's colors. The `cb` modifier, or
 `--colorblind`, changes the accent colors to the colorblind-safe Okabe-Ito
 palette and works with every theme.
 
@@ -230,8 +230,8 @@ slots, one for each kind of text, named `thinking`, `heading`, `bold`,
 `italic`, `inline_code`, `code_block`, `code_border`, `bullet`,
 `blockquote`, `link`, `hr`, `stat`, `info` and `error`. Beside its slots, a
 theme takes `extends`, `code_theme`, `code_theme_cb` for the pygments style
-under the colorblind modifier, and `ptk_toolbar` for the prompt_toolkit
-style of the toolbar.
+under the colorblind modifier, and `ptk_toolbar` for the toolbar's
+prompt_toolkit style.
 
 Each slot holds a style, which takes the booleans `bold`, `dim`, `italic`
 and `underline`, and the colors `fg16` and `rgb`. `rgb` takes `"#rrggbb"`

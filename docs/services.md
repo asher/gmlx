@@ -28,8 +28,8 @@ The server loads each configured service model in the background at
 start, and the first request loads it if that load failed. Service models
 do not count against [`server.budget_gb`](config.md#serverbudget_gb) and
 are never unloaded to make room for chat models, so indexing documents and
-chatting do not push each other out. The requests of one service run one at
-a time, alongside the generation of chat models.
+chatting do not push each other out. One service's requests run one at a
+time, alongside chat model generation.
 
 A request can leave out its `model` field, set it to `default`, or send a
 name that OpenAI clients commonly send. All of these reach the configured
@@ -48,8 +48,10 @@ running service under the first name in its row:
 Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 [Optional features](installation.md#optional-features) describes. When a
 speech service is configured and its extra is missing, the server refuses
-to start. When the model file of an embeddings or rerank service is
-missing, the server starts without that service and prints a warning. For
+to start.
+
+When an embeddings or rerank service's model file is missing, the server
+starts without that service and prints a warning. For
 an alias, an `hf:` reference or a relative path, the service stays off
 until the server restarts, because a reload does not start it. For an
 absolute path, the endpoint returns a 404 until the file is back, and then
@@ -132,7 +134,7 @@ Before speaking, the server removes markdown, emoji and control characters
 from `input`, and it turns dashes into pauses. Input with nothing left to
 speak gets a 400.
 
-`GET /v1/audio/voices` lists the voices of the configured model, which is
+`GET /v1/audio/voices` lists the configured model's voices, which is
 what `gmlx talk` shows for `/voice`. Kokoro lists the voices in its model
 folder, a Qwen3-TTS model lists its named speakers, and another model
 lists none:
@@ -190,15 +192,13 @@ when it is not in the cache.
 A GGUF reference, written out or reached through an alias, is never
 downloaded by the server. The server finds it in your local Hugging Face
 cache, or in a folder of [`server.model_dirs`](config.md#servermodel_dirs)
-where `gmlx pull` saves it. Download the default model before you start the
-server:
+where `gmlx pull` saves it. `gmlx init` can choose a quant other than the
+default and write its full reference. Download the default model before you
+start the server:
 
 ```sh
 gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 ```
-
-`gmlx init` can choose a quant other than the default and write its full
-reference.
 
 A request is a JSON body with `input`, which is a string or a list of
 strings. The optional fields are `model` and `encoding_format`, which is

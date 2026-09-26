@@ -1,17 +1,17 @@
 # Menu bar app
 
-The menu bar app shows the state of a gmlx server in the macOS menu bar. It
+The menu bar app shows a gmlx server's state in the macOS menu bar. It
 lists the loaded models, starts and stops the server, edits the
 configuration file, and runs voice sessions.
 
 ## What the menu shows
 
-The title is `gmlx` followed by a dot that shows the state of the server.
+The title is `gmlx` followed by a dot that shows the server's state.
 The dot is filled while the server is up, ringed while it is generating,
 empty while it is down, and half filled when the server needs an API key
 that the app does not have.
 
-Under the title, rows show the process id and port of the server, and how
+Under the title, rows show the server's process id and port, and how
 many requests are generating and queued. The Loaded models submenu lists each
 loaded model with its size, a marker when it is the default, pinned or
 kept, and the time until an idle model unloads. Selecting a model unloads
@@ -25,8 +25,8 @@ The server items act on the server that the app tracks:
 | Stop server | Stops a server that runs in the background. For a server from `gmlx service install --headless`, it shows how to remove the login item instead. |
 | Restart server | Restarts the server. |
 | Reload config | Tells the server to read its configuration file again. |
-| Copy server URL | Copies the address of the server. |
-| Open logs | Opens a panel with the recent log lines of the server and the app. |
+| Copy server URL | Copies the server's address. |
+| Open logs | Opens a panel with the recent log lines from the server and the app. |
 | Quit | Quits the app. The server keeps running. |
 
 When the server exits unexpectedly or stops responding, the app posts a
@@ -50,13 +50,13 @@ session, so it does not start over SSH.
 
 With no target, the app tracks the main server and follows it as servers
 start and stop. `--url`, `--host` or `--port` makes it track one server.
-The app reads the API key from the configuration file of the server, and
+The app reads the API key from the server's configuration file, and
 `--api-key` supplies it for a server whose file the app cannot read. The
 flags are listed under [`gmlx launch menubar`](cli.md#launch-menubar).
 
 ## Editing the configuration
 
-Edit config opens the configuration file of the server in a panel:
+Edit config opens the server's configuration file in a panel:
 
 - Validate checks the draft the way `gmlx serve` would, and checks that
   each model path exists.
@@ -70,10 +70,10 @@ Edit config opens the configuration file of the server in a panel:
 
 ## Voice sessions
 
-When the server runs both speech services of
-[Speech, embeddings and rerank](services.md), the menu gains a Talk to
-item, named after [`talk.model`](config.md#talkmodel) or the default model
-of the server. It starts a voice session inside the app, with no terminal
+When the server runs both speech services that
+[Speech, embeddings and rerank](services.md) describes, the menu gains a Talk to
+item, named after [`talk.model`](config.md#talkmodel) or the server's default
+model. It starts a voice session inside the app, with no terminal
 window. The Talk in a terminal item beside it opens [`gmlx talk`](talk.md)
 in iTerm2 when iTerm2 is running, and otherwise in the default terminal
 app.
@@ -87,14 +87,13 @@ offers Show memory and Clear memory.
 
 The volume persists between sessions. The app has no microphone gain
 control, because a software gain would change when speech counts as
-speech, so set the input level in the Sound settings of macOS instead.
+speech, so set the input level in the macOS Sound settings instead.
 
 Session settings come from the [`talk`](config.md#voice) block of the
 configuration file. The `ptt` and `text` modes need a keyboard, so the app
-uses `wake` mode for them.
-
-A session asks the server to keep its model loaded. The load runs in the
-background, so the microphone opens without waiting for it.
+uses `wake` mode for them. A session asks the server to keep its model
+loaded, and the load runs in the background, so the microphone opens
+without waiting for it.
 
 ### Tap-to-talk hotkey
 

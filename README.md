@@ -78,7 +78,7 @@ covers both routes. Upgrade with `brew upgrade gmlx`, or
 [Removing gmlx](https://github.com/asher/gmlx/blob/main/docs/installation.md#removing-gmlx).
 
 The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about
-its file size plus the KV cache of the conversation, and the Quickstart
+its file size plus the conversation's KV cache, and the Quickstart
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
 for each memory size.
 
@@ -202,9 +202,8 @@ than MLX's native quantization, as
 
 A one-minute video shows the same server moving from one chat at full
 speculative speed to four concurrent streams and back, with no break in the
-live stream:
-
-https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
+live stream.
+[Watch the concurrency video](https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5).
 
 ## Supported architectures
 
@@ -220,13 +219,15 @@ The generated [coverage
 table](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md) lists
 each mapped architecture with its status and names the caveats where an
 architecture has any. A new family counts as done only after its output
-matches llama.cpp at 16k context. All 19 K-quant,
-legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair and the ternary
-STQ1_0, PTQ1_0 and PQ2_0 types. Vision models load
-as a GGUF paired with its projector, as
-[Vision and audio](https://github.com/asher/gmlx/blob/main/docs/vlm.md) describes, and
+matches llama.cpp at 16k context, and
 [Adding a GGUF architecture](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md)
 explains what adding a family involves.
+
+All 19 K-quant, legacy and IQ codecs load, plus the MXFP4 and NVFP4 pair and
+the ternary STQ1_0, PTQ1_0 and PQ2_0 types. A vision model loads as a GGUF
+paired with its projector, as
+[Vision and audio](https://github.com/asher/gmlx/blob/main/docs/vlm.md)
+describes.
 
 ## Python API
 

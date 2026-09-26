@@ -50,16 +50,16 @@ Each client uses one or two of these styles:
 
 | Client | What it is | Style | Where the configuration goes |
 |--------|------------|-------|------------------------------|
-| `claude-code` | Anthropic's Claude Code | Environment | `ANTHROPIC_*` variables |
-| `opencode` | A coding agent | Injection | `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG` |
-| `pi` | A coding agent | Merge | `~/.pi/agent/models.json` and `settings.json` |
-| `omp` | oh-my-pi, a coding agent | Merge | `~/.omp/agent/models.yml` and `config.yml` |
-| `hermes` | NousResearch hermes-agent | Injection | `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG` |
-| `goose` | Block's agent runtime | Merge and environment | `~/.config/goose/config.yaml` |
-| `aichat` | A terminal chat client with tools | Injection | `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR` |
-| `elia` | A terminal chat app | Injection | `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME` |
-| `open-webui` | A chat app for the browser | Environment | `OPENAI_API_BASE_URL` and related variables |
-| `dsh` | DeepSeek Harness, an agent app for the browser | Injection | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
+| `claude-code` | It is Anthropic's Claude Code. | Environment | `ANTHROPIC_*` variables |
+| `opencode` | It is a coding agent. | Injection | `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG` |
+| `pi` | It is a coding agent. | Merge | `~/.pi/agent/models.json` and `settings.json` |
+| `omp` | It is oh-my-pi, a coding agent. | Merge | `~/.omp/agent/models.yml` and `config.yml` |
+| `hermes` | It is NousResearch hermes-agent. | Injection | `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG` |
+| `goose` | It is Block's agent runtime. | Merge and environment | `~/.config/goose/config.yaml` |
+| `aichat` | It is a terminal chat client with tools. | Injection | `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR` |
+| `elia` | It is a terminal chat app. | Injection | `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME` |
+| `open-webui` | It is a chat app for the browser. | Environment | `OPENAI_API_BASE_URL` and related variables |
+| `dsh` | It is DeepSeek Harness, an agent app for the browser. | Injection | `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch` |
 
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
@@ -72,7 +72,7 @@ and aichat. For goose it names the `config.yaml`, for elia the
 When no server answers, `launch` starts one in the background from the
 first configuration file in the
 [places gmlx looks](config.md#where-gmlx-looks), and it waits until the
-server responds. On a Mac desktop that also opens the
+server responds. On a Mac desktop, starting the server also opens the
 [menu bar app](menubar.md), unless
 [`server.menubar`](config.md#servermenubar) is `false`. With no
 configuration file anywhere, `launch` says to run `gmlx init` and exits
@@ -146,7 +146,7 @@ Claude Code uses the server's Anthropic API. `launch` sets
 that the token takes effect. It does not change `~/.claude`.
 
 Its system prompt is very long, and it often rewrites the start of its
-requests, so processing the prompt takes most of the time of a turn.
+requests, so processing the prompt takes most of a turn's time.
 Turn on the [prompt cache](config.md#prompt-cache), and prefer a model and
 a Mac with fast prefill.
 
@@ -155,8 +155,8 @@ a Mac with fast prefill.
 These three coding agents take the default model in different places.
 opencode takes it in the `model` key of the injected file, pi as
 `defaultProvider` and `defaultModel` in its merged files, and omp as
-`modelRoles.default`. For pi, `launch` also sets the context window and
-output limit of each model from the server's model list.
+`modelRoles.default`. For pi, `launch` also sets each model's context window
+and output limit from the server's model list.
 
 ### hermes
 
@@ -247,9 +247,9 @@ note when it is not. Otherwise a conversation still compacts when the
 server reports that a request no longer fits, as
 [Limits and back-pressure](api.md#limits-and-back-pressure) describes. The
 headless and acp profiles use compaction settings from the file, sized to
-the context of each model.
+each model's context.
 
-The `headless` profile of dsh works with the same file. This command answers
+dsh's `headless` profile works with the same file. This command answers
 one task about the current folder and exits:
 
 ```sh
