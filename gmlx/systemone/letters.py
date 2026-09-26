@@ -168,19 +168,36 @@ def _probs(scores: list[float]) -> list[float]:
     return _softmax([v / T for v in scores])
 
 
+def _orders(n: int, orderings: int) -> list[list[int]]:
+    """Each lettering of ``n`` options as indices: the given order alone, or
+    ``orderings`` shuffles seeded 0, 1 and so on."""
+    if orderings <= 1:
+        return [list(range(n))]
+    out = []
+    for j in range(orderings):
+        order = list(range(n))
+        random.Random(j).shuffle(order)
+        out.append(order)
+    return out
+
+
+def _chunks(options) -> list:
+    """The options in near-equal chunks of at most 52."""
+    if len(options) <= 52:
+        return [options]
+    k = -(-len(options) // 52)
+    size = -(-len(options) // k)
+    return [options[i:i + size] for i in range(0, len(options), size)]
+
+
 def _readout(state: str, instructions: str, options, orderings: int) -> Read:
     """Probabilities aligned with ``options``, averaged over ``orderings``
-    letterings. One ordering keeps the given order."""
-    if orderings <= 1:
-        (scores,) = yield [Pass(prompt_text(state, instructions, options), len(options))]
-        return _probs(scores)
-    orders = []
-    for j in range(orderings):
-        order = list(range(len(options)))
-        random.Random(j).shuffle(order)
-        orders.append(order)
+    letterings."""
+    orders = _orders(len(options), orderings)
     got = yield [Pass(prompt_text(state, instructions, [options[i] for i in order]),
                       len(options)) for order in orders]
+    if len(orders) == 1:
+        return _probs(got[0])
     acc = [0.0] * len(options)
     for order, scores in zip(orders, got):
         p = _probs(scores)
@@ -220,9 +237,7 @@ def distribution(state: str, instructions: str, options, orderings: int) -> Read
     p(i) ~ p_final(chunk of i) * p_chunk(i) / p_chunk(winner of that chunk)."""
     if len(options) <= 52:
         return (yield from _readout(state, instructions, options, orderings))
-    k = -(-len(options) // 52)
-    size = -(-len(options) // k)
-    chunks = [options[i:i + size] for i in range(0, len(options), size)]
+    chunks = _chunks(options)
     parts = yield from gather(
         [_readout(state, instructions, c, orderings) for c in chunks])
     wins = [max(range(len(p)), key=p.__getitem__) for p in parts]
@@ -253,12 +268,36 @@ def answer(state: str, q, orderings: int) -> Read:
     return a
 
 
+def _asked(schema) -> list:
+    return [q for q in schema["questions"]
+            if not schema.get("ask") or q["id"] in schema["ask"]]
+
+
+def pass_texts(schema, state: str) -> list[str]:
+    """The text of every pass the decision can send before any answer is
+    known: each ordering of each chunk of each asked question."""
+    out = []
+    for q in _asked(schema):
+        for c in _chunks(q["options"]):
+            out += [prompt_text(state, q["instructions"], [c[i] for i in order])
+                    for order in _orders(len(c), schema["orderings"])]
+    return out
+
+
+def winner_bounds(schema, state: str) -> list[str]:
+    """For each asked question past 52 options, a text at least as long as
+    its winners pass: the longest option of each chunk."""
+    return [prompt_text(state, q["instructions"],
+                        [max(c, key=lambda o: len(o[0]) + len(o[1]))
+                         for c in _chunks(q["options"])])
+            for q in _asked(schema) if len(q["options"]) > 52]
+
+
 def decision(schema, state: str) -> Read:
     """The whole request: the questions in stages by their ``ask_if``
     dependencies, every question of a stage read side by side. Returns the
     answers, the stages and the skipped questions."""
-    qs = [q for q in schema["questions"]
-          if not schema.get("ask") or q["id"] in schema["ask"]]
+    qs = _asked(schema)
     by_id = {q["id"]: q for q in qs}
     answered: dict[str, Any] = {}
     stages, skipped = [], {}

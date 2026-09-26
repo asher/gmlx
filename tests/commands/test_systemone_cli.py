@@ -1,11 +1,16 @@
 """`gmlx systemone` on the server path: flag checks, the posted body, the
-key header, the printed rows and the error messages. No server runs."""
+key header, the printed rows and the error messages. No server runs. The
+offline path on a text model runs a scripted letter reader."""
 
 from __future__ import annotations
 
+import contextlib
+import importlib
 import io
 import json
+import types
 import urllib.error
+import zlib
 
 import pytest
 
@@ -133,3 +138,88 @@ def test_an_unreachable_server_is_reported(request_file, monkeypatch, capsys):
     monkeypatch.setattr(so.urllib.request, "urlopen", fake_urlopen)
     assert so.cmd_systemone([request_file, "--url", "http://h:1"]) == 1
     assert "gmlx serve" in capsys.readouterr().err
+
+
+# offline on a text model
+
+class _CharTok:
+    bos_token = None
+
+    def encode(self, text, add_special_tokens=True):
+        return [ord(c) for c in text]
+
+    def apply_chat_template(self, msgs, **kwargs):
+        return "".join(f"{m['role']}: {m['content']}\n" for m in msgs) + "assistant: "
+
+
+class _LetterReader:
+    def __init__(self, model, letter_ids):
+        self.forwards = 0
+        self.path = "rows"
+
+    def check(self, rows_scope=None):
+        return self.path
+
+    def bind(self, rows_scope=None):
+        return self
+
+    def prefill(self, ids):
+        self.forwards += 1
+        yield
+        return ids
+
+    def tails(self, prefix, prefix_ids, tails):
+        self.forwards += 1
+        yield
+        return [[zlib.crc32(repr((t, i)).encode()) / 2**32 for i in range(52)]
+                for t in tails]
+
+
+@pytest.fixture
+def offline(monkeypatch, tmp_path):
+    import gmlx.gen.diffusion as diffusion
+    import gmlx.load.loader as loader
+    import gmlx.serve.bridge_vlm as bridge
+    import gmlx.systemone.ar_reader as ar_reader
+    from gmlx.config import SystemoneCfg
+
+    model = types.SimpleNamespace(diffusion=False)
+    monkeypatch.setattr(so, "_offline_settings", lambda path: (None, SystemoneCfg()))
+    monkeypatch.setattr(loader, "load_model", lambda path, verbose: (model, None, None))
+    monkeypatch.setattr(bridge, "_make_text_processor", lambda tok: _CharTok())
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda m: m.diffusion)
+    monkeypatch.setattr(ar_reader, "LetterReader", _LetterReader)
+    monkeypatch.setattr(importlib.import_module("mlx_lm.generate"), "wired_limit",
+                        lambda m: contextlib.nullcontext())
+    gguf = tmp_path / "text.gguf"
+    gguf.write_bytes(b"")
+
+    def run(body, *flags):
+        req = tmp_path / "letters.json"
+        req.write_text(json.dumps(body))
+        return so.cmd_systemone([str(req), "--model", str(gguf), *flags])
+    return run
+
+
+_LETTER_BODY = {"state": "s", "questions": {
+    "urgent": {"type": "noul", "instructions": "Urgent?"},
+    "team": {"type": "choice", "instructions": "Which team?",
+             "criteria": {"billing": None, "infra": None}}}}
+
+
+def test_offline_a_text_model_answers_with_the_letter_readout(offline, capsys):
+    assert offline(_LETTER_BODY, "--json") == 0
+    out = capsys.readouterr()
+    body = json.loads(out.out)
+    assert body["model"] == "text.gguf"
+    assert body["diagnostics"]["readout"] == "letters"
+    assert set(body["answers"]) == {"urgent", "team"}
+    assert body["usage"]["output_tokens"] == 0
+    assert "forwards in" in out.err
+
+
+def test_offline_letter_errors_name_the_request(offline, capsys):
+    assert offline(_BODY) == 1
+    assert "instructions is required" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="text-only"):
+        offline(dict(_LETTER_BODY, state={"image": "data:image/png;base64,AA"}))

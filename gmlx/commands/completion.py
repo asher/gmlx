@@ -39,7 +39,7 @@ _VERB_DESC = {
     "rm": "delete a model's files and config entry",
     "list": "list the models your server config defines",
     "ps": "show the models resident in a running server",
-    "systemone": "answer a structured-decision request with DiffusionGemma",
+    "systemone": "answer a structured-decision request",
     "profiles": "show per-family sampling defaults + @intents",
     "doctor": "check the runtime, config, models, and services",
     "train": "finetune a LoRA adapter on a GGUF base",

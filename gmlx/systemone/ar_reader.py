@@ -15,6 +15,7 @@ is fixed, never taken from load, so a decision repeats bit for bit."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import time
 from typing import Any, Callable, Generator, Optional
 
@@ -206,11 +207,13 @@ def plan_buckets(lengths: list[int], fits: Callable[[int, int], bool],
 
 class LetterTokens:
     """The chat prompt of a letter pass: the pass text as the only user
-    message, thinking off, the generation prompt on."""
+    message, thinking off, the generation prompt on. Ids are kept per text,
+    so a request can tokenize its passes before the reads start."""
 
     def __init__(self, processor, *, lock=None):
         self.wrapper = getattr(processor, "_wrapper", processor)
         self.lock = lock if lock is not None else contextlib.nullcontext()
+        self._ids: dict[str, list[int]] = {}
 
     def render(self, text: str) -> str:
         with self.lock:
@@ -220,9 +223,12 @@ class LetterTokens:
         return str(out)
 
     def ids(self, text: str) -> list[int]:
-        rendered = self.render(text)
-        with self.lock:
-            return list(encode_prompt(self.wrapper, rendered))
+        got = self._ids.get(text)
+        if got is None:
+            rendered = self.render(text)
+            with self.lock:
+                got = self._ids[text] = list(encode_prompt(self.wrapper, rendered))
+        return got
 
     def letter_ids(self) -> list[int]:
         with self.lock:
@@ -248,20 +254,34 @@ def split_point(tokens: LetterTokens, state: str, first_pass: str) -> tuple[list
     return full[:n], n
 
 
+def _no_rows(rows: int):
+    return contextlib.nullcontext()
+
+
 class LetterReader:
-    """Letter reads on one autoregressive model."""
+    """Letter reads on one autoregressive model. One reader serves every
+    decision on the model; ``bind`` gives a decision its own copy for the
+    per-request adapter scales."""
 
     def __init__(self, model, letter_ids: list[int], *,
                  rows_scope: Optional[Callable[[int], Any]] = None):
         self.model = model
         self.letter_ids = list(letter_ids)
-        self.rows_scope = rows_scope or (lambda rows: contextlib.nullcontext())
+        self.rows_scope = rows_scope or _no_rows
         self.trunk: Any
         self.head: Any
         self.trunk, self.head = _trunk_and_head(model)
         self.rows: Optional[tuple[Any, Any]] = None
         self.path = None          # "rows" or "logits", set by the self-check
         self.forwards = 0
+
+    def bind(self, rows_scope: Optional[Callable[[int], Any]] = None) -> "LetterReader":
+        """A copy that shares the checked read path and publishes adapter
+        scales through ``rows_scope`` around each forward."""
+        out = copy.copy(self)
+        out.rows_scope = rows_scope or _no_rows
+        out.forwards = 0
+        return out
 
     # -- model calls ---------------------------------------------------------
 
@@ -295,11 +315,14 @@ class LetterReader:
         logits = self._full(x, cache)[rows, pick]
         return logits[:, mx.array(self.letter_ids)].astype(mx.float32)
 
-    def check(self) -> str:
+    def check(self, rows_scope: Optional[Callable[[int], Any]] = None) -> str:
         """Choose how letter scores are read. The float32 head rows serve
         when the model's logits are exactly the head of its trunk and the
         rows reproduce the head's letter scores; otherwise the full logits
-        do. Runs once, on a short probe."""
+        do. Runs on a short probe, again after an adapter replaces the head."""
+        trunk, head = _trunk_and_head(self.model)
+        if getattr(head, "__self__", head) is not getattr(self.head, "__self__", self.head):
+            self.trunk, self.head, self.path, self.rows = trunk, head, None, None
         if self.path is not None:
             return self.path
         self.path = "logits"
@@ -311,7 +334,7 @@ class LetterReader:
         x = mx.array([self.letter_ids[:8]], dtype=mx.int32)
         letter = mx.array(self.letter_ids)
         try:
-            with self.rows_scope(1):
+            with (rows_scope or self.rows_scope)(1):
                 full = _logits(self.model(x, cache=self.make_cache()))[0, -1]
                 h = self.trunk(x, cache=self.make_cache())
                 split = self.head(h)[0, -1]
@@ -411,14 +434,16 @@ class LetterReader:
 def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: str,
                    *, prefix: Optional[tuple[list[int], Any]] = None,
                    on_prefix: Optional[Callable[[list[int], Any], Any]] = None,
-                   should_stop: Optional[Callable[[], bool]] = None) -> Step:
+                   should_stop: Optional[Callable[[], bool]] = None,
+                   rows_scope: Optional[Callable[[int], Any]] = None) -> Step:
     """One letter decision, as a generator that yields after each forward.
     ``prefix`` is ``(ids, cache)`` from an earlier request with the same
     state, and ``on_prefix(ids, cache)`` sees a freshly computed prefix.
-    Returns the decision body: answers and diagnostics."""
+    ``rows_scope(rows)`` publishes the request's adapter scales around each
+    forward. Returns the decision body: answers and diagnostics."""
     started = time.time()
-    first_forward = reader.forwards
-    reader.check()
+    reader.check(rows_scope)
+    reader = reader.bind(rows_scope)
     read = letters.decision(schema, state)
     out: dict[str, Any] = {}
     try:
@@ -473,7 +498,7 @@ def decide_letters(reader: LetterReader, tokens: LetterTokens, schema, state: st
             "prompt_tokens": prompt_tokens,
             "path": reader.path,
             "timing": {"total_ms": (time.time() - started) * 1e3,
-                       "reads": reader.forwards - first_forward},
+                       "reads": reader.forwards},
         },
     }
 

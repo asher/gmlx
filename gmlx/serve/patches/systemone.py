@@ -1,14 +1,17 @@
-"""``POST /v1/systemone``: structured decisions on a served DiffusionGemma
-model, in the Jev decision API's request and answer shapes.
+"""``POST /v1/systemone``: structured decisions in the Jev decision API's
+request and answer shapes.
 
 The route parses the body, picks the model, checks the request against
-the context and memory budgets, and runs the decision as one job on the
-model's engine thread (``engine_jobs``). The decision logic and the reads
-live in ``gmlx.systemone``."""
+the context and memory budgets, and runs the decision as a job on the
+model's engine thread (``engine_jobs``). A DiffusionGemma model reads its
+answer slots in one job. Any other text model answers with the letter
+readout, as a step job between batch steps. The decision logic and the
+reads live in ``gmlx.systemone``."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import inspect
 import json
@@ -16,33 +19,37 @@ import logging
 import threading
 import time
 import uuid
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx import lora_rows
+from gmlx.systemone import ar_reader, letters
 from gmlx.systemone import (
     Limits,
     SchemaError,
     TemplateResolver,
     decide,
-    ignored_fields,
     jev_response,
-    jev_state,
     log_labels,
-    parse_seed,
-    request_schema,
     system_text,
 )
+from gmlx.systemone.backends import ParsedRequest
 from gmlx.systemone.decide import chunk_groups
 from gmlx.systemone.schema import schedule
 
 from ._common import _error_content, _remove_routes
 from .api_contract import SYSTEMONE_CONSUMED, warn_ignored_fields
 
+if TYPE_CHECKING:
+    from gmlx.systemone.engine import StructuredReader
+
 SYSTEMONE_PATHS = ("/systemone", "/v1/systemone")
 _ENDPOINT = "/v1/systemone"
 _RUNTIME_ATTR = "_kq_systemone_runtime"
+_LETTERS_ATTR = "_kq_systemone_letters"
 _DISCONNECT_POLL_S = 0.5
 _NO_IMAGES = "images are not supported: the served model is text-only"
 
@@ -71,7 +78,7 @@ class _ModelRuntime:
         self.canvas_len = min(int(canvas), int(rg.model.config.canvas_length))
         self.prefill_step_size = int(rg._effective_prefill_step_size())
         self.resolver = TemplateResolver(_tokens(rg).enc, self.canvas_len)
-        self.reader = None
+        self.reader: Optional[StructuredReader] = None
 
 
 def _runtime_for(rg, canvas: int) -> _ModelRuntime:
@@ -85,6 +92,42 @@ def _runtime_for(rg, canvas: int) -> _ModelRuntime:
         if rt is None:
             rt = by_canvas[int(canvas)] = _ModelRuntime(rg, canvas)
     return rt
+
+
+class _LetterRuntime:
+    """Per-model letter state kept on the model's ResponseGenerator: the
+    letter ids and the reader, built on the engine thread by the first job."""
+
+    def __init__(self, rg):
+        self.letter_ids = ar_reader.LetterTokens(
+            rg.processor, lock=rg._tokenizer_lock).letter_ids()
+        self.reader: Optional[ar_reader.LetterReader] = None
+
+
+def _letters_for(rg) -> _LetterRuntime:
+    with _runtime_lock:
+        rt = getattr(rg, _LETTERS_ATTR, None)
+        if rt is None:
+            rt = _LetterRuntime(rg)
+            setattr(rg, _LETTERS_ATTR, rt)
+    return rt
+
+
+def _rows_scope(scales):
+    """Publishes the request's adapter scales around each reader forward
+    while the server runs adapters per row."""
+    @contextlib.contextmanager
+    def scope(rows: int):
+        if lora_rows.mode() != "rows":
+            yield
+            return
+        pad = (0.0,) * max(lora_rows.n_slots() - len(scales), 0)
+        lora_rows.set_rows([tuple(scales) + pad] * rows)
+        try:
+            yield
+        finally:
+            lora_rows.clear_rows()
+    return scope
 
 
 def _settings(installed):
@@ -154,6 +197,24 @@ def _admit(rg, rt, tokens, schema) -> int:
     return len(bound_ids)
 
 
+def _admit_letters(rg, tokens, schema, state: str) -> int:
+    """Tokenize every pass the decision can send and check the longest
+    against the memory and context budgets. Returns its token count. The
+    reader holds at most one forward of tail rows beyond that prompt."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    from gmlx.serve.mem_preflight import preflight_prompt_memory
+
+    tokens.ids(letters.prefix_text(state))
+    texts = letters.pass_texts(schema, state) + letters.winner_bounds(schema, state)
+    longest = max(texts, key=lambda t: len(tokens.ids(t)))
+    n = len(tokens.ids(longest))
+    preflight_prompt_memory(
+        rg, tokens.render(longest),
+        args=gen.GenerationArguments(max_tokens=ar_reader.FORWARD_TOKENS))
+    gen._check_configured_context_budget(n, 1)
+    return n
+
+
 def _record_failure(runtime, model, error: str) -> None:
     try:
         runtime.metrics.record_failure(endpoint=_ENDPOINT, model=model,
@@ -202,25 +263,82 @@ def make_systemone_endpoint(installed):
         if body.get("images"):
             return fail(400, "invalid_request_error", _NO_IMAGES)
         unread = set(body) - SYSTEMONE_CONSUMED
-        try:
-            schema = request_schema(body, limits, cfg.request_defaults())
-            state = jev_state(body)
-            seed = parse_seed(body)
-        except SchemaError as e:
+        parsed = ParsedRequest(body, limits, cfg.request_defaults())
+        if parsed.error is not None:
             warn_ignored_fields(_ENDPOINT, unread)
-            return fail(422, "validation_error", str(e))
-        warn_ignored_fields(_ENDPOINT, unread | ignored_fields(body, schema))
+            return fail(422, "validation_error", str(parsed.error))
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
 
         app_mod = importlib.import_module("mlx_vlm.server.app")
         stop = threading.Event()
         request_id = f"so-{uuid.uuid4().hex[:12]}"
 
+        def _backend(kind: str):
+            try:
+                got = parsed.get(kind)
+            except SchemaError:
+                warn_ignored_fields(_ENDPOINT, unread)
+                raise
+            warn_ignored_fields(_ENDPOINT, unread | parsed.ignored(kind))
+            return got
+
+        def _diffusion_job(rg):
+            from gmlx.systemone.engine import BoundReader, StructuredReader, engine_scope
+
+            schema, state, seed = _backend("diffusion")
+            rt = _runtime_for(rg, cfg.canvas)
+            tokens = _tokens(rg, state)
+            admitted = _admit(rg, rt, tokens, schema)
+
+            def job(engine_rg, should_stop):
+                with engine_scope(engine_rg.model, seed):
+                    tok = engine_rg.tokenizer
+                    criteria = getattr(tok, "stopping_criteria", None)
+                    if criteria is not None:
+                        criteria.reset(engine_rg.config.eos_token_id)
+                    if rt.reader is None:
+                        rt.reader = StructuredReader(
+                            engine_rg.model,
+                            prefill_step_size=rt.prefill_step_size)
+                    engine = BoundReader(
+                        rt.reader, processor=engine_rg.processor,
+                        backend=tok, should_stop=should_stop)
+                    return decide(
+                        schema, state, engine=engine, resolver=rt.resolver,
+                        chat_ids=tokens.chat_ids, seed=seed,
+                        constrained=cfg.constrained,
+                        canvas_len=rt.canvas_len, decode=tokens.decode,
+                        should_stop=should_stop)
+
+            return schema, job, admitted
+
+        def _letters_job(rg, spec, resolved):
+            schema, state = _backend("letters")
+            if letters.has_image(body.get("state")):
+                raise HTTPException(status_code=400, detail=_NO_IMAGES)
+            try:
+                lrt = _letters_for(rg)
+                tokens = ar_reader.LetterTokens(rg.processor, lock=rg._tokenizer_lock)
+                tokens.render(letters.prefix_text(state))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=(
+                    f"model {resolved!r} cannot answer letter reads: {e}")) from e
+            admitted = _admit_letters(rg, tokens, schema, state)
+            scope = _rows_scope(lora_rows.request_scales(spec))
+
+            def job(engine_rg, should_stop):
+                if lrt.reader is None:
+                    lrt.reader = ar_reader.LetterReader(engine_rg.model, lrt.letter_ids)
+                return ar_reader.decide_letters(
+                    lrt.reader, tokens, schema, state,
+                    should_stop=should_stop, rows_scope=scope)
+
+            return schema, job, admitted
+
         def _run():
             from gmlx.gen.diffusion import is_diffusion_model
             from gmlx.serve.engine_jobs import run_on_engine
             from gmlx.serve.residency import _http_from_resolver_error
-            from gmlx.systemone.engine import BoundReader, StructuredReader, engine_scope
 
             gen = importlib.import_module("mlx_vlm.server.generation")
             # The residency seam resolves the model string with the body
@@ -245,45 +363,26 @@ def make_systemone_endpoint(installed):
                         "the model engine is unavailable; restart the server"))
                 resolved = spec.id if spec is not None else (model_str or shown["model"])
                 shown["model"] = resolved
-                if not is_diffusion_model(getattr(rg, "model", None)):
-                    raise HTTPException(status_code=400, detail=(
-                        f"model {resolved!r} is not a diffusion model; "
-                        "/v1/systemone needs a DiffusionGemma model"))
-                rt = _runtime_for(rg, cfg.canvas)
-                tokens = _tokens(rg, state)
-                admitted = _admit(rg, rt, tokens, schema)
-
-                def job(engine_rg, should_stop):
-                    with engine_scope(engine_rg.model, seed):
-                        tok = engine_rg.tokenizer
-                        criteria = getattr(tok, "stopping_criteria", None)
-                        if criteria is not None:
-                            criteria.reset(engine_rg.config.eos_token_id)
-                        if rt.reader is None:
-                            rt.reader = StructuredReader(
-                                engine_rg.model,
-                                prefill_step_size=rt.prefill_step_size)
-                        engine = BoundReader(
-                            rt.reader, processor=engine_rg.processor,
-                            backend=tok, should_stop=should_stop)
-                        return decide(
-                            schema, state, engine=engine, resolver=rt.resolver,
-                            chat_ids=tokens.chat_ids, seed=seed,
-                            constrained=cfg.constrained,
-                            canvas_len=rt.canvas_len, decode=tokens.decode,
-                            should_stop=should_stop)
-
-                result, completion_tokens = run_on_engine(
+                if is_diffusion_model(getattr(rg, "model", None)):
+                    schema, job, admitted = _diffusion_job(rg)
+                    result, completion_tokens = run_on_engine(
+                        rg, job, request_id=request_id, prompt_tokens=admitted,
+                        stop=stop, timeout_s=gen.get_token_queue_timeout())
+                    return "diffusion", schema, resolved, result, completion_tokens
+                schema, job, admitted = _letters_job(rg, spec, resolved)
+                result = run_on_engine(
                     rg, job, request_id=request_id, prompt_tokens=admitted,
-                    stop=stop, timeout_s=gen.get_token_queue_timeout())
-                return resolved, result, completion_tokens
+                    stop=stop, timeout_s=gen.get_token_queue_timeout(),
+                    stepwise=True)
+                return "letters", schema, resolved, result, 0
             finally:
                 if hold is not None:
                     hold.release()
 
         watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
         try:
-            resolved, result, completion_tokens = await asyncio.to_thread(_run)
+            backend, schema, resolved, result, completion_tokens = (
+                await asyncio.to_thread(_run))
         except SchemaError as e:
             return fail(422, "validation_error", str(e))
         except HTTPException as e:
@@ -325,7 +424,7 @@ def make_systemone_endpoint(installed):
         try:
             runtime.metrics.record_success(gen._build_metrics_envelope(
                 endpoint=_ENDPOINT, model=resolved, stream=False,
-                backend="diffusion", prompt_tokens=input_tokens,
+                backend=backend, prompt_tokens=input_tokens,
                 completion_tokens=int(completion_tokens),
                 generated_tokens=int(completion_tokens),
                 request_elapsed_s=time.perf_counter() - request_start,

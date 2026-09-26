@@ -8,6 +8,7 @@ score difference, not a crash."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import mlx.core as mx
@@ -196,6 +197,44 @@ def test_a_decision_reuses_a_given_prefix():
     assert cd["prompt_tokens"] == sum(len(tokens.ids(p)) for p in (
         letters.prompt_text(state, q["instructions"], q["options"])
         for q in schema["questions"]))
+
+
+@_NEEDS_GPU
+def test_every_forward_runs_inside_the_rows_scope(monkeypatch):
+    monkeypatch.setattr(ar_reader, "FORWARD_TOKENS", 512)   # both tails in one forward
+    seen = []
+
+    @contextlib.contextmanager
+    def scope(rows):
+        seen.append(rows)
+        yield
+
+    body = {"state": "a long enough state", "questions": {
+        "a": {"type": "noul", "instructions": "One?"},
+        "b": {"type": "noul", "instructions": "Two?"}}}
+    out = run_to_end(ar_reader.decide_letters(
+        LetterReader(_model(), LETTER_IDS), FakeTokens(), letters.parse(body),
+        letters.state_text(body), rows_scope=scope))
+    assert len(seen) == 1 + out["diagnostics"]["timing"]["reads"]
+    assert seen[0] == 1 and 2 in seen
+
+
+@_NEEDS_GPU
+def test_a_replaced_head_is_checked_again():
+    model = _model()
+    reader = LetterReader(model, LETTER_IDS)
+    assert reader.check() == "rows"
+
+    class Wrapped(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def __call__(self, x):
+            return self.base(x)
+
+    model.language_model.lm_head = Wrapped(model.language_model.lm_head)
+    assert reader.check() == "logits"
 
 
 def test_buckets_group_similar_lengths_within_the_budget():

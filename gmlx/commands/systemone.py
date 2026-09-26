@@ -1,5 +1,6 @@
 """``gmlx systemone``: send a structured-decision request to a server, or
-run it offline on a DiffusionGemma GGUF."""
+run it offline on a GGUF: DiffusionGemma, or any text model through the
+letter readout."""
 
 from __future__ import annotations
 
@@ -96,23 +97,39 @@ def _model_path(name: str, cfg) -> str:
     raise SystemExit(f"error: {name}: no such GGUF file or configured model")
 
 
+def _run_letters(model, processor, parsed, path: str) -> dict:
+    """The letter readout on a text model, to completion on this thread."""
+    from gmlx.systemone import jev_response, letters
+    from gmlx.systemone.ar_reader import LetterReader, LetterTokens, decide_letters, run_to_end
+
+    schema, state = parsed.get("letters")
+    if letters.has_image(parsed.body.get("state")):
+        raise SystemExit("error: images are not supported: the model is text-only")
+    tokens = LetterTokens(processor)
+    try:
+        letter_ids = tokens.letter_ids()
+    except ValueError as e:
+        raise SystemExit(f"error: {path} cannot answer letter reads: {e}") from e
+    wired = importlib.import_module("mlx_lm.generate").wired_limit
+    started = time.perf_counter()
+    with wired(model):
+        result = run_to_end(decide_letters(
+            LetterReader(model, letter_ids), tokens, schema, state))
+    print(f"[systemone] {result['diagnostics']['timing']['reads']} forwards in "
+          f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
+    return jev_response(schema, result, 0, os.path.basename(path))
+
+
 def _run_offline(a, body: dict) -> dict:
-    from gmlx.systemone import (
-        Limits,
-        TemplateResolver,
-        decide,
-        jev_response,
-        jev_state,
-        parse_seed,
-        request_schema,
-    )
+    from gmlx.systemone import Limits, TemplateResolver, decide, jev_response
+    from gmlx.systemone.backends import ParsedRequest
 
     cfg, settings = _offline_settings(a.config)
     limits = Limits(max_questions=settings.max_questions,
                     max_samples=settings.max_samples)
-    schema = request_schema(body, limits, settings.request_defaults())
-    state = jev_state(body)
-    seed = parse_seed(body)
+    parsed = ParsedRequest(body, limits, settings.request_defaults())
+    if parsed.error is not None:
+        raise parsed.error
     path = _model_path(a.model, cfg)
 
     from gmlx.gen.diffusion import is_diffusion_model
@@ -120,9 +137,10 @@ def _run_offline(a, body: dict) -> dict:
     from gmlx.serve.bridge_vlm import _make_text_processor
 
     model, _config, tokenizer = load_model(path, verbose=False)
+    processor = _make_text_processor(tokenizer)
     if not is_diffusion_model(model):
-        raise SystemExit(f"error: {path} is not a diffusion model; "
-                         "systemone needs a DiffusionGemma GGUF")
+        return _run_letters(model, processor, parsed, path)
+    schema, state, seed = parsed.get("diffusion")
     from gmlx.systemone.engine import (
         BoundReader,
         ChatTokens,
@@ -130,7 +148,6 @@ def _run_offline(a, body: dict) -> dict:
         engine_scope,
     )
 
-    processor = _make_text_processor(tokenizer)
     gen = importlib.import_module("mlx_vlm.server.generation")
     canvas_len = min(int(settings.canvas), int(model.config.canvas_length))
     tokens = ChatTokens(processor, state)
@@ -155,8 +172,8 @@ def cmd_systemone(argv: list | None = None, prog: str = "gmlx systemone") -> int
     ap = argparse.ArgumentParser(
         prog=prog,
         description="Answer a structured-decision request (the POST "
-                    "/v1/systemone body) with a DiffusionGemma model: on a "
-                    "running server by default, or offline with --model.")
+                    "/v1/systemone body): on a running server by default, or "
+                    "offline with --model.")
     ap.add_argument("request", metavar="REQUEST.json",
                     help="JSON file holding the request body.")
     ap.add_argument("--url", default=None, metavar="URL",
@@ -171,8 +188,10 @@ def cmd_systemone(argv: list | None = None, prog: str = "gmlx systemone") -> int
                     help="API key for a key-protected server (default: the "
                          "GMLX_API_KEY env var).")
     ap.add_argument("--model", default=None, metavar="GGUF",
-                    help="Run offline on this DiffusionGemma GGUF path or "
-                         "configured model id instead of posting to a server.")
+                    help="Run offline on this GGUF path or configured model id "
+                         "instead of posting to a server. DiffusionGemma reads "
+                         "answer slots, and any other text model answers with "
+                         "the letter readout.")
     ap.add_argument("--config", default=None, metavar="FILE",
                     help="Server config whose server.systemone settings and "
                          "model ids the offline run uses (default: the "
