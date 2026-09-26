@@ -148,8 +148,8 @@ gmlx launch pi --model qwen3.8-27b-ud-q6
 
 `launch` starts the server if it is not running, and adds a provider for
 the server to the settings of pi without changing the providers that are
-already there. It asks the server to load the model and keep it loaded for
-the session, and then it starts pi.
+already there. It asks the server to load the model and keep it loaded
+through the idle timeout, and then it starts pi.
 [Agents and chat apps](launch.md) covers the other coding agents and chat
 apps, including Open WebUI, a chat app for the browser.
 

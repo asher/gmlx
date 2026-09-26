@@ -924,11 +924,14 @@ after the budget. The default is no limit.
 
 #### `server.cache_limit_gb`
 
-This key limits the MLX buffer cache, in GiB. The cache keeps freed GPU
-buffers for reuse, and at deep context it can grow to tens of GB. When the
-key is unset, the server sets a limit of 4 to 12 GiB if the largest model
-leaves little memory spare, and no limit otherwise. A negative value
-removes the limit.
+This key limits the MLX buffer cache, in GiB. MLX keeps freed GPU memory in
+this cache for reuse instead of returning it to macOS, and at deep context
+it can grow to tens of GB. It is not the KV cache or the prompt cache, and
+its limit never removes their contents. When the
+key is unset, the server sets a limit from 4 to 12 GiB. It is a quarter of
+the memory that the weights leave free when they take more than 60 percent
+of the GPU working set, and 5 percent of the working set otherwise. `0`
+turns the buffer cache off, and a negative value removes the limit.
 [Performance tuning](performance.md#the-mlx-buffer-cache-at-deep-context)
 explains when to change it. The server chooses the default at start.
 

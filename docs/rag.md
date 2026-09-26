@@ -1,125 +1,104 @@
 # RAG pipelines
 
-This guide is for building retrieval-augmented generation on the server.
-RAG needs two services beside the chat model: an embedder that indexes
-documents and queries as vectors, and an optional reranker that re-scores
-the vector search's shortlist. The server provides both as OpenAI- and
-Cohere-compatible endpoints, from GGUF models, on the same port as chat.
+Retrieval-augmented generation, or RAG, answers questions from your own
+documents. An embedder turns the documents and each question into vectors,
+a search finds the passages closest to the question, a reranker puts the
+best of them first, and the chat model answers from those passages. The
+server provides the embedder and the reranker on the same port as its chat
+models.
 
-## Enable the endpoints
+## Setting up the services
 
-```sh
-gmlx init --models-dir ~/models --with-embeddings --with-rerank
-gmlx serve
-```
-
-The two `--with-*` flags add the services to a scaffolded config, which
-needs a models directory, or the interactive `gmlx init` offers both as
-steps. Either way the config gains the two keys with the default models:
+Add an embedder and a reranker to the `server` block of the
+[configuration file](config.md):
 
 ```yaml
 server:
-  embeddings: qwen3-embed-0.6b     # POST /v1/embeddings
-  rerank: qwen3-rerank-0.6b        # POST /v1/rerank
+  embeddings: qwen3-embed-0.6b
+  rerank: qwen3-rerank-0.6b
 ```
 
-The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
-cache only, so fetch them first with `gmlx pull`. Both services load in the
-background at startup and sit outside the chat residency pool, which
-[services.md](services.md) describes along with the other behavior the
-four services share.
-
-## Choosing the models
-
-The default embedder, `qwen3-embed-0.6b`, embeds a document in one pass
-over the default model's 32k context, so long documents are not truncated.
-`qwen3-embed-4b` and `-8b` retrieve better at the cost of a bigger index,
-any local or `hf:` GGUF can be named instead, and there are encoder options
-for particular languages or sizes. The reranker is `qwen3-rerank-0.6b` by
-default, with `-4b` and `-8b` above it. The alias tables, dimensions,
-context windows and how each model scores are under
-[Text embeddings](services.md#text-embeddings-embeddings) and
-[Reranking](services.md#reranking-rerank).
-
-## The embeddings endpoint
-
-The endpoint has the OpenAI shape, where `input` is a string or a list of
-strings, and vectors come back L2-normalized:
+The server never downloads these GGUF models, so download them before it
+starts:
 
 ```sh
-curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
-  -d '{"model": "text-embedding-3-small", "input": ["hello", "world"]}'
+gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
+gmlx restart
 ```
 
-```json
-{
-  "object": "list",
-  "data": [
-    {"object": "embedding", "index": 0, "embedding": [0.0123, -0.0456, ...]},
-    {"object": "embedding", "index": 1, "embedding": [0.0789, ...]}
-  ],
-  "model": "text-embedding-3-small",
-  "usage": {"prompt_tokens": 2, "total_tokens": 2}
-}
+A service whose model is missing when the server starts stays off until
+the next restart, and the server prints a warning about it. To create a new
+configuration file with both services, run
+`gmlx init --models-dir ~/models --with-embeddings --with-rerank`, or answer
+the questions of the `gmlx init` wizard. The larger models, the other kinds
+of embedder and the request fields are in
+[Speech, embeddings and rerank](services.md#embeddings).
+
+## A pipeline in Python
+
+This example indexes three passages, finds the best one for a question, and
+answers from it. It uses the OpenAI client for embeddings and chat, and
+httpx, which the OpenAI client installs, for reranking:
+
+```python
+import httpx
+from openai import OpenAI
+
+base = "http://127.0.0.1:8080/v1"
+client = OpenAI(base_url=base, api_key="none")
+
+docs = [
+    "To cancel a subscription, open Billing and choose Plans.",
+    "Invoices are emailed on the first day of each month.",
+    "Install the desktop app from the Downloads page.",
+]
+question = "How do I cancel my plan?"
+
+def embed(texts):
+    reply = client.embeddings.create(model="text-embedding-3-small", input=texts)
+    return [item.embedding for item in reply.data]
+
+doc_vectors = embed(docs)
+query_vector = embed([question])[0]
+
+# The vectors have length 1, so the dot product is the cosine similarity.
+scores = [sum(q * d for q, d in zip(query_vector, v)) for v in doc_vectors]
+best = sorted(range(len(docs)), key=scores.__getitem__, reverse=True)[:2]
+shortlist = [docs[i] for i in best]
+
+ranked = httpx.post(f"{base}/rerank",
+                    json={"query": question, "documents": shortlist, "top_n": 1}).json()
+passage = shortlist[ranked["results"][0]["index"]]
+
+answer = client.chat.completions.create(
+    model="qwen3.8-27b-ud-q6",
+    messages=[{"role": "system", "content": f"Answer from this passage:\n{passage}"},
+              {"role": "user", "content": question}],
+)
+print(answer.choices[0].message.content)
 ```
 
-The response echoes the `model` name you sent, which can be any of the
-conventional OpenAI embedding names or omitted. An optional
-`encoding_format` selects `float`, the default, or `base64`.
+A real index keeps the document vectors in a vector database instead of a
+list, and embeds each document once. The reranker reads each candidate in
+full, so give it the short list from the search, tens of passages rather
+than thousands. On a server with an [API key](config.md#serverapi_key),
+pass the key to the OpenAI client and as an `Authorization: Bearer` header
+to httpx.
 
-## The rerank endpoint
+## Open WebUI
 
-`POST /v1/rerank`, also served at `/rerank`, has the Cohere and Jina shape.
-Send the query and the candidate documents to get back indices sorted
-best-first with relevance scores:
+`gmlx launch open-webui` points Open WebUI's document embedder at the
+server. When the server runs a reranker, it also turns on Open WebUI's
+hybrid search and points its external reranker at the server. Documents
+that you upload in Open WebUI are then indexed and searched on your
+server. [Open WebUI](launch.md#open-webui) lists what the launch sets.
 
-```sh
-curl localhost:8080/v1/rerank -H 'content-type: application/json' \
-  -d '{
-    "query": "how do I cancel my subscription?",
-    "documents": ["Billing FAQ ...", "Setup guide ...", "Refund policy ..."],
-    "top_n": 2
-  }'
-```
+## Other tools
 
-```json
-{
-  "results": [
-    {"index": 0, "relevance_score": 0.93, "document": {"text": "Billing FAQ ..."}},
-    {"index": 2, "relevance_score": 0.71, "document": {"text": "Refund policy ..."}}
-  ],
-  "model": "reranker",
-  "usage": {"total_tokens": 41}
-}
-```
-
-The optional fields:
-
-| Field | Default | Meaning |
-|-------|---------|---------|
-| `documents[]` | | strings, or `{"text": ...}` objects |
-| `top_n` | all | how many results to return |
-| `return_documents` | `true` | echo each result's document. Set it false for indices and scores only |
-| `instruction` | the model's | replaces the query instruction the reranker is prompted with |
-
-Scoring runs a model forward for each document, so keep the candidate list
-to a vector search's shortlist of tens, not thousands.
-
-## Configure Open WebUI
-
-`gmlx launch open-webui` points Open WebUI's document embedder at this
-server, points its external reranker here when the server advertises one
-and enables the hybrid search mode that reranking requires. Upload
-documents in Open WebUI and query them, and indexing and retrieval happen
-against your server. The variables it sets are listed under
-[open-webui](launch.md#open-webui).
-
-## Other consumers
-
-Any OpenAI-compatible RAG framework connects in the same way, with base
-URL `http://127.0.0.1:8080/v1` and any API key unless the server sets one.
-The built-in assistant's [long-term memory](assistant.md#memory) embeds
-remembered facts through this endpoint and reorders recall through
-`/v1/rerank`. To give the assistant retrieval over your documents as a tool
-it can call, add a vector-store MCP server from the
-[tool examples](assistant.md#tool-examples).
+Any RAG framework that supports an OpenAI-compatible embeddings endpoint
+works with the base URL `http://127.0.0.1:8080/v1`, and any API key unless
+the server has one. The built-in [assistant](assistant.md) uses the same
+endpoints for its long-term memory. To give the assistant a search over
+your documents as a tool, add a vector store as an MCP server, as the
+[tool examples](assistant.md#tool-examples) show.

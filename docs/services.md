@@ -1,257 +1,239 @@
 # Speech, embeddings and rerank
 
-The server can host speech-to-text, text-to-speech, embeddings and
-reranking services beside chat models. This page is the reference for each
-service's config value, aliases and endpoint. [rag.md](rag.md) and
-[talk.md](talk.md) show them in use, and `gmlx launch open-webui` wires all
-four into Open WebUI, as [launch.md](launch.md#open-webui) describes.
-
-The four services share their runtime behavior. Each configured model is
-warmed in the background at startup and then cached in-process, and if the
-warm-up fails the first request loads it. None of them counts against
-`budget_gb` or lives in the chat residency pool, so a RAG re-index and chat
-never evict each other. Requests run serialized with each other in a worker
-thread for that service, which interleaves with batched LLM decode.
-
-A request's `model` field may be omitted, may be `default`, or may be one
-of the names OpenAI clients conventionally send, all of which map to the
-configured model. Any other name is refused with a 400, which keeps clients
-from making the server download arbitrary repos. `/v1/models` advertises
-each service that is on under the first name in its row.
-
-| Service | Names accepted in `model` |
-|---------|---------------------------|
-| speech-to-text | `whisper-1` |
-| text-to-speech | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` |
-| embeddings | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` |
-| rerank | advertised as `reranker`. Any name is accepted and echoed back, since one reranker is served |
-
-## Speech-to-text (`stt:`)
-
-`server.stt:`, or `--stt` in any serve mode, adds an OpenAI-compatible
-`POST /v1/audio/transcriptions` endpoint backed by
-[mlx-whisper](https://pypi.org/project/mlx-whisper/). It needs the `stt`
-extra and `ffmpeg` on PATH for audio decoding:
-
-```sh
-uv tool install "gmlx[stt]"      # or: pip install "gmlx[stt]"
-brew install ffmpeg
-```
-
-Whisper checkpoints are not GGUFs, since whisper.cpp uses a separate ggml
-container, so the server loads them in MLX format.
+Beside its chat models, the server can run four services on the same port:
+speech-to-text, text-to-speech, embeddings and reranking. Each one adds
+OpenAI-compatible endpoints, so the voice client
+[`gmlx talk`](talk.md), [RAG pipelines](rag.md) and apps such as
+[Open WebUI](launch.md#open-webui) can use them. A service starts when its
+key in the [configuration file](config.md#services) names a model:
 
 ```yaml
 server:
-  stt: whisper-turbo    # or: whisper-turbo-q4 | an HF repo id | a local model dir | true
+  stt: whisper-turbo
+  tts: kokoro
+  embeddings: qwen3-embed-0.6b
+  rerank: qwen3-rerank-0.6b
 ```
 
-The value is an alias, an HF repo in MLX-whisper format, or a local
-converted model directory, and `true` means the default alias. Any other
-mlx-community Whisper conversion, such as a quantized `large-v3`, is
-reached by naming its repo.
+## How the services run
 
-| Alias | Repo | Notes |
-|-------|------|-------|
-| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | the default. large-v3 quality at about 6x the speed, fp16, about 1.6 GB |
-| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | 4-bit, about 600 MB |
-| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | full large-v3 |
-| `whisper-medium`, `-small`, `-base`, `-tiny` | `mlx-community/whisper-<size>-mlx` | smaller and faster |
+The server loads each configured service model in the background at
+start, and the first request loads it if that load failed. Service models
+do not count against [`server.budget_gb`](config.md#serverbudget_gb) and
+are never unloaded to make room for chat models, so indexing documents and
+chatting do not push each other out. The requests of one service run one at
+a time, alongside the generation of chat models.
 
-The configured model is fetched from Hugging Face on first use when it is
-not already local. Naming it in the config is the opt-in, and the
-no-download policy for chat models is unchanged.
+The `model` field of a request can be left out, can be `default`, or can be
+a name that OpenAI clients commonly send. All of these reach the configured
+model, as does the configured model's own alias, repository id or path.
+Any other name gets a 400, so a client cannot make the server download a
+model. `/v1/models` lists each running service under the first name in its
+row:
 
-Requests follow the OpenAI shape, `multipart/form-data` with `file` plus the
-optional fields `model`, `language`, `prompt`, `temperature` and
-`response_format`. `response_format` takes `json`, `text`, `verbose_json`,
-`srt` or `vtt`:
+| Service | Names accepted in `model` |
+|---------|---------------------------|
+| Speech-to-text | `whisper-1` |
+| Text-to-speech | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` |
+| Embeddings | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` |
+| Reranking | `reranker`. Any name is accepted and returned in the response, since the server runs one reranker. |
+
+Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
+[Optional features](installation.md#optional-features) describes. When a
+speech service is configured and its extra is missing, the server refuses
+to start. When the model file of an embeddings or rerank service is
+missing, the server starts without that service and prints a warning. The
+service stays off until the server restarts, because a reload does not
+start it.
+
+## Speech-to-text
+
+`server.stt` adds `POST /v1/audio/transcriptions`, which turns speech into
+text with [mlx-whisper](https://pypi.org/project/mlx-whisper/). Whisper
+models are not GGUF files, so the server loads them in MLX format. The
+value is an alias from this table, a Hugging Face repository in
+MLX-Whisper format, or a local folder with a converted model, and `true`
+selects `whisper-turbo`:
+
+| Alias | Repository | Notes |
+|-------|------------|-------|
+| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | The default, with large-v3 quality at about six times its speed |
+| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | A 4-bit version, about 600 MB |
+| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | The full large-v3 model |
+| `whisper-medium` | `mlx-community/whisper-medium-mlx` | Smaller and faster |
+| `whisper-small` | `mlx-community/whisper-small-mlx` | Smaller and faster |
+| `whisper-base` | `mlx-community/whisper-base-mlx` | Smaller and faster |
+| `whisper-tiny` | `mlx-community/whisper-tiny` | The smallest and fastest |
+
+The server downloads the configured model from Hugging Face on first use
+when it is not already local. Naming it in the configuration file allows
+that download, and chat models are still never downloaded.
+
+A request is a `multipart/form-data` upload with `file`, and the optional
+fields `model`, `language`, `prompt`, `temperature` and `response_format`.
+`response_format` is `json`, `text`, `verbose_json`, `srt` or `vtt`, and
+`temperature` defaults to 0. Decoding audio needs ffmpeg on your PATH:
 
 ```sh
 curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
 ```
 
-The same `stt:` model also serves `POST /v1/audio/translations`, Whisper's
-built-in translate task, which takes audio in any language and returns
-English text. The request is the same multipart form without `language`,
-which the OpenAI translations endpoint does not take:
+The same model also serves `POST /v1/audio/translations`, which takes
+speech in any language and returns English text. The request is the same
+upload without `language`:
 
 ```sh
 curl localhost:8080/v1/audio/translations -F file=@japanese.ogg -F model=whisper-1
 ```
 
-## Text-to-speech (`tts:`)
+## Text-to-speech
 
-`server.tts:`, or `--tts` in any serve mode, adds an OpenAI-compatible `POST
-/v1/audio/speech` endpoint backed by
-[mlx-audio](https://pypi.org/project/mlx-audio/). It needs the `tts` extra,
-plus `ffmpeg` on PATH for formats other than WAV, which encodes through
-miniaudio:
+`server.tts` adds `POST /v1/audio/speech`, which turns text into speech with
+[mlx-audio](https://pypi.org/project/mlx-audio/). Speech models also load in
+MLX format. The value is an alias from this table, a Hugging Face
+repository in MLX-Audio format, or a local folder with a converted model,
+and `true` selects `kokoro`:
 
-```sh
-uv tool install "gmlx[tts]"      # or: pip install "gmlx[tts]"
-brew install ffmpeg
-```
+| Alias | Repository | Notes |
+|-------|------------|-------|
+| `kokoro` | `mlx-community/Kokoro-82M-bf16` | The default, a small English model with many preset voices |
+| `kokoro-8bit` | `mlx-community/Kokoro-82M-8bit` | A smaller Kokoro |
+| `kokoro-4bit` | `mlx-community/Kokoro-82M-4bit` | The smallest Kokoro |
+| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | A larger multilingual model with named voices |
+| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | A smaller Qwen3-TTS |
 
-Like Whisper, TTS checkpoints are not GGUFs and load in MLX format.
+Kokoro also downloads a small English language model from Hugging Face the
+first time it speaks, so a server without internet access needs that
+download done beforehand.
 
-```yaml
-server:
-  tts: kokoro    # or: kokoro-8bit | qwen3-tts | an HF repo id | a local model dir | true
-```
-
-The value is an alias, an HF repo in MLX-audio format, or a local
-converted model directory, and `true` means the default alias.
-
-| Alias | Repo | Notes |
-|-------|------|-------|
-| `kokoro` | `mlx-community/Kokoro-82M-bf16` | the default. 82M parameters, 24 kHz, Apache license, 54 voices |
-| `kokoro-8bit`, `kokoro-4bit` | `mlx-community/Kokoro-82M-8bit`, `-4bit` | smaller |
-| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | larger, multilingual, named voices |
-| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | smaller Qwen3-TTS |
-
-A request is a JSON body with `input` plus the optional fields `model`,
-`voice`, `speed` from 0.25 to 4.0 and `response_format`, where
-`response_format` takes `mp3`, the default, `wav`, `flac`, `opus` or `pcm`.
-Without `voice`, Kokoro speaks as `af_heart` and any other model uses its
-own default:
+A request is a JSON body with `input`, and the optional fields `model`,
+`voice`, `speed` and `response_format`. `speed` is from 0.25 to 4.0.
+`response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`,
+and every format except `wav` and `pcm` needs ffmpeg on your PATH. Without
+`voice`, Kokoro speaks as `af_heart`, and other models use their own
+default voice:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \
-  -d '{"model":"tts-1","input":"Hello from MLX.","voice":"af_heart"}' -o out.mp3
+  -d '{"model": "tts-1", "input": "Hello from MLX.", "voice": "af_heart"}' -o out.mp3
 ```
 
-The server also answers `GET /v1/audio/voices` with the configured
-model's voice names, which is what `gmlx talk` shows under `/voice`.
-Kokoro-style repos enumerate their `voices/` directory once the model is
-local, qwen3-tts models return their named-speaker set and unknown models
-return an empty list:
+Before speaking, the server removes markdown, emoji and control characters
+from `input`, and it turns dashes into pauses. Input with nothing left to
+speak gets a 400.
+
+`GET /v1/audio/voices` lists the voices of the configured model, which is
+what `gmlx talk` shows for `/voice`. Kokoro lists the voices in its model
+folder, a Qwen3-TTS model lists its named speakers, and another model
+lists none:
 
 ```sh
 curl localhost:8080/v1/audio/voices
 # {"model": "mlx-community/Kokoro-82M-bf16", "voices": ["af_alloy", ...], "default": "af_heart"}
 ```
 
-A client that gets a 404 here, from an older server or one without TTS,
-has to pass voice names through unchecked. Open WebUI always sends a voice,
-and its default is an OpenAI name that Kokoro rejects, so
-`gmlx launch open-webui` sets `AUDIO_TTS_VOICE` to `af_heart`. When the
-server's TTS model is not Kokoro, override that variable in Open WebUI's
-environment with one of the model's own voices.
+Open WebUI always sends a voice, and its default voice is an OpenAI name
+that Kokoro does not have. `gmlx launch open-webui` therefore sets
+`AUDIO_TTS_VOICE` to `af_heart`. With another speech model, set that
+variable in Open WebUI's environment to one of the model's own voices.
 
-## Text embeddings (`embeddings:`)
+## Embeddings
 
-`server.embeddings:`, or `--embeddings` in any serve mode, adds an
-OpenAI-compatible `POST /v1/embeddings` endpoint, so that Open WebUI and
-other OpenAI clients have a local RAG embedder. No extra is needed for any
-backend.
+`server.embeddings` adds `POST /v1/embeddings`, which turns text into
+vectors for search. No extra is needed. The value selects one of three
+kinds of model:
 
-The form of the value picks one of three backends.
+- A GGUF embedder: a `*.gguf` path, an `hf:<org>/<repo>/<file>.gguf`
+  reference, or a `qwen3-embed-*` alias. These are Qwen3-Embedding models,
+  loaded like any other GGUF.
+- A GGUF encoder: `embeddinggemma-gguf` runs an EmbeddingGemma GGUF.
+- A safetensors encoder from Hugging Face, through
+  [mlx-embeddings](https://pypi.org/project/mlx-embeddings/).
 
-- A GGUF decoder embedder. The value is a `*.gguf` path, an
-  `hf:<org>/<repo>/<file>.gguf` ref, or a `qwen3-embed-*` alias for
-  Qwen3-Embedding `0.6b`, `4b` or `8b`. These are the Qwen3 dense decoder
-  trunk with last-token pooling, loaded like any other GGUF. They carry the
-  model's full 32k to 40k context, so long documents embed without
-  truncation.
-- A GGUF encoder. `embeddinggemma-gguf` runs an EmbeddingGemma GGUF as a
-  bidirectional sentence encoder with mean pooling and a dense head, on
-  this runtime's loader.
-- A safetensors encoder through
-  [mlx-embeddings](https://pypi.org/project/mlx-embeddings/), a core
-  dependency. This covers the Gemma3, XLM-RoBERTa and ModernBERT encoders
-  in the second table.
+`true` selects `qwen3-embed-0.6b`. These are the GGUF models, where the
+dimension is the width of each vector and the context is the most tokens of
+input that the model reads:
 
-```yaml
+| Alias | Repository and default quant | Dimension | Context | Notes |
+|-------|------------------------------|-----------|---------|-------|
+| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | The default, small, fast and multilingual, about 0.6 GB |
+| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | Better retrieval, about 4.3 GB |
+| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | The best of the family, about 8 GB, with the largest index |
+| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | A small multilingual encoder from Google, about 0.3 GB |
+
+These are the safetensors encoders, each at its 8-bit default:
+
+| Alias | Repository | Dimension | Context | Notes |
+|-------|------------|-----------|---------|-------|
+| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | A small multilingual model from Google, about 0.3 GB |
+| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | A multilingual model for long inputs |
+| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | A widely used English model for long inputs |
+| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | A multilingual model for long inputs |
+
+Choose a GGUF model unless you want one of the encoders for its size or its
+languages. Input longer than a model's context is cut to fit, without an
+error. `qwen3-embed` without a size is another name for
+`qwen3-embed-0.6b`.
+
+A GGUF reference, written out or reached through an alias, is never
+downloaded by the server. The server finds it in your local Hugging Face
+cache, or in a folder of [`server.model_dirs`](config.md#servermodel_dirs)
+where `gmlx pull` saves it. Download the default model before you start the
 server:
-  embeddings: qwen3-embed-0.6b                  # the default, a GGUF decoder embedder
-  # embeddings: hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q6_K.gguf   # a specific quant
-  # embeddings: ~/models/Qwen3-Embedding-4B.Q6_K.gguf   # a local GGUF
-  # embeddings: embeddinggemma-gguf             # EmbeddingGemma encoder from a GGUF
-  # embeddings: embeddinggemma                  # EmbeddingGemma encoder from safetensors
+
+```sh
+gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
 ```
 
-The value is a GGUF ref, an alias, an HF repo in MLX-embeddings format, or
-a local converted model directory, and `true` means the default alias. A
-bare alias resolves to the default quant shown in the tables, while the
-`gmlx init` wizard offers a follow-up to pick another quant and writes its
-concrete ref. A GGUF ref, whether written out or reached through an alias,
-resolves from the local Hugging Face cache only and never the network, so
-fetch it with `gmlx pull` first. A miss at startup disables the endpoint
-until the file is present. The safetensors encoders download once on a
-cache miss, like the speech models.
+A safetensors encoder downloads once when it is not in the cache, like the
+speech models. `gmlx init` can also choose a quant other than the default
+and write its full reference.
 
-GGUF embedders, where dim is the vector width and ctx the largest input in
-tokens:
-
-| Alias | Repo and default quant | dim / ctx | Notes |
-|-------|------------------------|-----------|-------|
-| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 / 32k | the default. Small, fast and multilingual, about 0.6 GB |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 / 40k | higher retrieval quality, about 4.3 GB |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 / 40k | highest quality of the family, about 8 GB, with the largest index |
-| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 / 2k | encoder, a small multilingual model from Google, about 0.3 GB |
-
-The bare `qwen3-embed` is a back-compat alias for `qwen3-embed-0.6b`.
-
-Safetensors encoders, default quant `8bit`:
-
-| Alias | Repo | dim / ctx | Notes |
-|-------|------|-----------|-------|
-| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 / 2k | a small, high-quality multilingual model from Google, about 0.3 GB |
-| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 / 8k | multilingual long-context XLM-RoBERTa |
-| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 / 8k | widely used long-context English ModernBERT |
-| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 / 8k | multilingual long-context XLM-RoBERTa |
-
-Pick from the GGUF tier unless you want one of the encoders in
-particular, for its size or its language coverage.
-
-A request is a JSON body with `input` as a string or a list of strings,
-plus the optional fields `model` and `encoding_format`, where
-`encoding_format` takes `float`, the default, or `base64`. Every backend
-returns L2-normalized vectors:
+A request is a JSON body with `input`, a string or a list of strings, and
+the optional fields `model` and `encoding_format`, which is `float`, the
+default, or `base64`. Every model returns vectors normalized to length 1.
+The server refuses input given as token ids, and it ignores the OpenAI
+`dimensions` field:
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
-  -d '{"model":"text-embedding-3-small","input":["hello","world"]}'
+  -d '{"model": "text-embedding-3-small", "input": ["hello", "world"]}'
 ```
 
-## Reranking (`rerank:`)
+## Reranking
 
-`server.rerank:`, or `--rerank` in any serve mode, adds a Cohere- and
-Jina-shaped `POST /v1/rerank`, also served at `/rerank`. Reranking is the
-second RAG stage: a vector search returns a coarse top-N, the reranker
-re-scores those documents jointly against the query, and the highest-scored
-few are sent to the model. Open WebUI calls it as an external reranker.
+`server.rerank` adds `POST /v1/rerank`, which is also served at `/rerank`.
+A reranker scores documents against a query more accurately than a vector
+search, so a RAG pipeline uses it on the short list that the search
+returns. The request and response have the shape that Cohere and Jina use.
 
-The model is a Qwen3-Reranker GGUF, a Qwen3 causal LM fine-tuned to answer yes
-or no to whether a document satisfies a query. It loads like any other GGUF,
-with no extra needed. Its relevance score is the probability it assigns to yes
-over no, computed as `sigmoid(yes - no)`. BGE and Jina BERT cross-encoders,
-which llama.cpp reranks through a classifier head, are not mlx-lm
-architectures and are out of scope.
-
-```yaml
+The model is a Qwen3-Reranker GGUF, which judges whether a document answers
+a query. Its score is the probability it gives to yes over no. The value is
+a `qwen3-rerank-0.6b`, `qwen3-rerank-4b` or `qwen3-rerank-8b` alias at the
+Q8_0 quant, a `*.gguf` path, or an `hf:` reference, and `true` selects
+`qwen3-rerank-0.6b`. Like a GGUF embedder, it is never downloaded by the
 server:
-  rerank: qwen3-rerank-0.6b                      # the default, a Qwen3-Reranker GGUF
-  # rerank: hf:mradermacher/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q6_K.gguf   # a specific quant
-  # rerank: ~/models/Qwen3-Reranker-4B.Q6_K.gguf   # a local GGUF
+
+```sh
+gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
 ```
 
-The value is a `qwen3-rerank-*` alias for `0.6b`, `4b` or `8b` at the default
-quant `Q8_0`, a `*.gguf` path, or an `hf:<org>/<repo>/<file>.gguf` ref, and
-it resolves from the local cache only, like a GGUF embedder. Although the
-reranker is independent of the embedder, `gmlx init` defaults its quant to
-the quant chosen for the embedder.
+A request is a JSON body with these fields:
 
-A request takes `query`, `documents` as strings or `{"text": ...}` objects
-and the optional fields `top_n`, which `top_k` also spells, `instruction`
-and `return_documents`. The response holds `results` sorted best-first,
-each with `index` and `relevance_score`, plus `model` and `usage`:
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `query` | Required | The text to rank the documents against. |
+| `documents` | Required | The documents, as strings or `{"text": ...}` objects. |
+| `top_n` | Every document | How many results to return, a positive integer. `top_k` is another name for it. |
+| `return_documents` | `true` | With `false`, each result has only its index and score. |
+| `instruction` | "Given a web search query, retrieve relevant passages that answer the query" | The instruction that the reranker reads with the query. |
 
 ```sh
 curl localhost:8080/v1/rerank -H 'content-type: application/json' \
-  -d '{"query":"how do I cancel?","documents":["Billing FAQ ...","Setup guide ..."]}'
+  -d '{"query": "how do I cancel?", "documents": ["Billing FAQ ...", "Setup guide ..."]}'
 ```
 
-Scoring runs a model forward for each document, so keep the candidate
-list to a vector search's shortlist of tens, not thousands.
+The response holds `results`, best first, each with `index` and
+`relevance_score`, and `model` and `usage`. The model reads each document
+separately, up to 8192 tokens with the query, so send the short list from a
+vector search, tens of documents rather than thousands.

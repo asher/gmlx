@@ -1,75 +1,54 @@
 # Structured decisions
 
-This guide is for asking a model a fixed set of questions about a piece of
-text, such as how to route a support ticket, and getting back a probability
-for every allowed answer. It covers the model to serve, writing a request,
-reading the response, worked examples and what each request option costs.
-
-- [What the endpoint does](#what-the-endpoint-does)
-- [Why DiffusionGemma](#why-diffusiongemma)
-- [Serve the model](#serve-the-model)
-- [A first decision](#a-first-decision)
-- [Reading the answers](#reading-the-answers)
-- [Examples](#examples)
-- [Questions](#questions)
-- [Stages and skipped questions](#stages-and-skipped-questions)
-- [Samples, steps and thoughts](#samples-steps-and-thoughts)
-- [When answers go wrong](#when-answers-go-wrong)
-- [Errors and queueing](#errors-and-queueing)
-- [From the command line](#from-the-command-line)
-- [How a decision is read](#how-a-decision-is-read)
+`POST /v1/systemone` asks a model a fixed set of questions about a piece of
+text and returns a probability for every allowed answer. A support tool can
+use it to route a ticket, and an agent can use it to pick its next tool.
+The answers come straight from the model's predictions, so there is no
+reply text to parse. The route is also served at `/systemone`.
 
 ## What the endpoint does
 
-`POST /v1/systemone` takes a state and a set of questions with fixed
-answers, and returns a probability distribution over each question's
-answers. The answers are read from the model's predictions, so there is no
-reply to parse, and a decision on a short state takes a fraction of a
-second unless it asks for a thought. The route is also at `/systemone`.
-
-Use it when the possible answers are known before the call, the same
-decision repeats often, and your code needs a number to branch on. A
-triage tool can page someone only when an outage is more than 90 percent
-likely and send the uncertain tickets to a person. For a written answer, an
-explanation or an answer that cannot be listed in advance, use chat
+A request carries a state, which is the text that the questions are about,
+and questions whose answers are known in advance: yes or no, one of several
+options, or one of several ordered levels. The response gives a probability
+distribution over each question's answers, so your code can branch on a
+number. A triage tool, for example, can page someone only when an outage is
+more than 90 percent likely and send the uncertain tickets to a person. For
+a written answer, or an answer that cannot be listed in advance, use chat
 completions instead.
 
 The request and response follow the
-[Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide),
-a hosted classifier API whose requests carry a state and typed questions.
-The route ports vLLM's structured-diffusion example server, which answers
-that API with DiffusionGemma. A client of either that posts text states
-works against gmlx unchanged. gmlx refuses images and multipart bodies,
-and it does not serve the example's decisions through chat completions. A
-decision is deterministic for a given request and `seed`, so the same state
-always gets the same numbers.
+[Jev decision API](https://huggingface.co/blog/liliruli/how-to-use-the-jev-api-a-complete-guide).
+A Jev client that sends text states works with gmlx unchanged. A decision
+is deterministic. The same request and `seed` give the same numbers on the
+same model file and server settings.
 
 ## Why DiffusionGemma
 
-The route answers only with DiffusionGemma models. A diffusion model
-writes into a block of positions, called a [canvas](glossary.md), and
-predicts every position at once. The server fills the canvas with an
-answer template and leaves the answer positions open, so one pass of the
-model gives every answer's probability.
+The route answers only with DiffusionGemma models. A diffusion model writes
+into a block of positions, called a [canvas](glossary.md), and predicts
+every position at once. The server fills the canvas with an answer template
+and leaves the answer positions open, so one pass of the model gives the
+probability of every answer.
 
-An autoregressive model predicts one next token at a time and has no such
-pass, so the route does not offer it. With a chat model, request
+An autoregressive model predicts one token at a time and has no such pass,
+so the route does not offer one. With a chat model, request
 [logprobs](api.md#logprobs) or [structured output](api.md#structured-output)
 through chat completions to get an answer and its token probability.
 
-DiffusionGemma is a Gemma 4 model, so the reads draw on general knowledge
-as well as on the state. A question can ask which currency a city uses or
-whether an answer to a science question is correct, as the
-[examples](#examples) show. Knowledge questions are also where a read most
-often goes wrong, and [When answers go wrong](#when-answers-go-wrong) gives
-the fixes.
+DiffusionGemma is a Gemma 4 model, so its answers draw on general knowledge
+as well as on the state. A question can ask which currency a city uses, or
+whether an answer to a science question is correct. Knowledge questions are
+also where an answer most often goes wrong, as
+[When answers go wrong](#when-answers-go-wrong) explains.
 
-## Serve the model
+## Serving the model
 
 The endpoint needs a DiffusionGemma GGUF, such as
-`diffusiongemma-26B-A4B-it-Q4_K_M.gguf` from
-`unsloth/diffusiongemma-26B-A4B-it-GGUF`. Name it in a config, saved here
-as `decisions.yaml`, and start the server with it:
+`diffusiongemma-26B-A4B-it-Q4_K_M.gguf` from the
+`unsloth/diffusiongemma-26B-A4B-it-GGUF` repository. Name it in a
+configuration file, saved here as `decisions.yaml`, and start the server
+with that file:
 
 ```yaml
 models:
@@ -84,20 +63,19 @@ server:
 gmlx serve --config decisions.yaml
 ```
 
-`server.systemone.model` names the model that answers when a request's
-`model` field is absent or names nothing the server knows. Jev clients send
-`"model": "jev-latest"`, which reaches that model this way. A config with
-one model, or with [`defaults.model`](config.md#memory-and-residency)
-set, can leave the key out.
-
-The other `server.systemone` keys set the canvas width, the unembedding,
-the request limits and the thought defaults.
-[config.md](config.md#structured-decisions) lists them.
+[`server.systemone.model`](config.md#serversystemonemodel) names the model
+that answers when the `model` field of a request is absent or names nothing
+that the server knows. A Jev client that sends a name such as `jev-latest`
+reaches the model this way. A file with one model, or with
+[`server.defaults.model`](config.md#serverdefaultsmodel) set, can leave the
+key out. The other `server.systemone` keys set the request limits and the
+thought defaults, as [Structured decisions](config.md#structured-decisions)
+in the configuration reference lists.
 
 ## A first decision
 
-A request carries a `state`, which is what the questions are about, and a
-map of `questions`. This one triages a support ticket with four questions:
+A request carries a `state` and a map of `questions`. This one triages a
+support ticket with four questions:
 
 ```json
 {
@@ -127,8 +105,8 @@ Save it as `ticket.json` and post it:
 curl localhost:8080/v1/systemone -d @ticket.json
 ```
 
-The response from the Q4_K_M file, with `diagnostics` left out and the
-numbers rounded:
+The response looks like this, with `diagnostics` left out and the numbers
+rounded. The exact numbers depend on the model file.
 
 ```json
 {
@@ -148,43 +126,55 @@ numbers rounded:
 }
 ```
 
+The `state` is required. It can be a string or any JSON value, and a value
+that is not a string reaches the model as its JSON text.
+
 ## Reading the answers
 
-`answers` has one entry per question id. Each entry is a distribution over
-that question's answers, in one of three shapes:
+`answers` has one entry for each question id. Each entry is a distribution
+over the answers of that question, in one of three shapes:
 
-- `noul`. A yes or no question, with the Jev API's name for it. The `noul`
-  field is the probability of yes. The ticket above is not urgent, since
-  0.022 is a 97.8 percent no, and it asks for a refund at 99.97 percent yes.
-- `choice`. One of several named options. `choice` is the most probable
-  option, `probabilities` holds every option's probability and
-  `confidence` is the probability of the chosen one.
-- `score`. One of ordered levels. `probabilities` is keyed by level index
-  counted from 0, `legend` names each index, and `confidence` is the
-  probability of the most likely level. `score` is the expected index, so
-  0.96 is medium with a little weight on low.
+- A `noul` entry answers a yes or no question, under the Jev API's name for
+  it. The `noul` field is the probability of yes. The ticket above is not
+  urgent, since 0.022 is a 97.8 percent no, and it asks for a refund.
+- A `choice` entry answers with one of several named options. `choice` is
+  the most probable option, `probabilities` holds the probability of every
+  option, and `confidence` is the probability of the chosen one.
+- A `score` entry answers with one of several ordered levels.
+  `probabilities` is keyed by the index of each level, counted from 0, and
+  `legend` names each index. `confidence` is the probability of the most
+  likely level, and `score` is the expected index. A score of 0.96 is
+  medium, with a little weight on low.
 
-`usage.input_tokens` is the longest prompt a read ran on, and
-`usage.output_tokens` counts the answer template tokens and any thought
-tokens. `diagnostics` holds the `stages` and `chunks` the decision ran, the
-`skipped` questions, the `thought`, the entropies under `questions`, and
-the `timing`. `samples.tops` has one entry per sample, mapping each question
-to its top label as the answer template writes it, such as `yes` or `B`,
-with that label's probability and the entropy of the read. When a decision
-has stages, chunks or a skipped question, `samples.n`, `samples.tops` and
-`samples.policy` are lists with one entry per chunk of each stage.
+`usage.input_tokens` is the longest prompt that a read ran on.
+`usage.output_tokens` counts the tokens of the answer template and of any
+thought.
+
+`diagnostics` describes how the decision ran. It holds the `stages` and
+`chunks` that ran, the `skipped` questions, the `thought`, the entropies of
+each question under `questions`, and the `timing`. It also records the
+`steps`, the `chunk_prompt` and `sequential` settings, the `conditioning`,
+the `prompt_tokens`, and `think_auto` when that setting was used.
+
+`samples.tops` has one entry for each sample. The entry maps each question
+to its top label as the answer template writes it, with the probability of
+that label and the entropy of the read. The label of a score question is
+its level counted from 1, such as `"2"` for medium, unlike the index in
+`probabilities`, which counts from 0. When a decision has stages, chunks or
+a skipped question, `samples.n`, `samples.tops` and `samples.policy` are
+lists with one entry for each chunk of each stage.
 
 ## Examples
 
-Each example below gives the `questions` map and the answers the Q4_K_M
-file returned for a few states, with the default settings. Post it with
-the `state` as in [A first decision](#a-first-decision).
+Each example gives a `questions` map and typical answers for a few states,
+with the default settings. Post it with a `state`, as in
+[A first decision](#a-first-decision).
 
 ### Gate on priority
 
-A yes or no gate with `criteria` that say what yes and no mean. The
-instruction tells the model to read the ticket as data, so text inside it
-does not steer the answer:
+A yes or no gate can have `criteria` that say what yes and no mean. This
+instruction tells the model to read the ticket as data, so that text inside
+the ticket does not steer the answer:
 
 ```json
 {"is_urgent": {"type": "noul",
@@ -201,8 +191,8 @@ does not steer the answer:
 
 ### Route to a tool
 
-An agent asks which tool to call next. Each option describes when it
-applies, so the options do not overlap:
+An agent can ask which tool to call next. Each option says when it applies,
+so that no two options overlap:
 
 ```json
 {"tool": {"type": "choice", "instructions": "Which tool should the agent call next?",
@@ -221,8 +211,7 @@ applies, so the options do not overlap:
 
 ### Verify a claimed result
 
-A check that an agent's report covers the whole task before the agent
-stops:
+An agent can check that its report covers the whole task before it stops:
 
 ```json
 {"done": {"type": "noul", "instructions": "Does the report show that every part of the task is done?",
@@ -237,8 +226,8 @@ stops:
 
 ### Grade an answer
 
-A rubric on a score scale. The grader needs to know the facts itself,
-since the state holds only the question and the answer:
+A rubric fits a score scale. The grader must know the facts itself, since
+the state holds only the question and the answer:
 
 ```json
 {"grade": {"type": "score", "instructions": "How correct is the answer?",
@@ -247,30 +236,34 @@ since the state holds only the question and the answer:
 
 | Question | Answer | `grade` |
 |----------|--------|---------|
-| Why is the sky blue? | Because it reflects the colour of the ocean. | wrong, 0.983 |
-| Why is the sky blue? | Air molecules scatter short blue wavelengths of sunlight much more than long red ones. | correct, 0.993 |
-| At what temperature does water boil? | 100 degrees Celsius, always, anywhere on Earth. | partly right, 0.988 |
+| Why is the sky blue? | Because it reflects the colour of the ocean. | Wrong, 0.983 |
+| Why is the sky blue? | Air molecules scatter short blue wavelengths of sunlight much more than long red ones. | Correct, 0.993 |
+| At what temperature does water boil? | 100 degrees Celsius, always, anywhere on Earth. | Partly right, 0.988 |
 
-### Filter and check
+### Filter passages and check rules
 
-A retrieval pipeline can drop passages that do not help, and an agent can
-check an action against a rule written in plain language:
+A retrieval pipeline can drop the passages that do not help with a query:
 
 ```json
 {"relevant": {"type": "noul", "instructions": "Does the passage help answer the query?"}}
+```
+
+An agent can check an action against a rule written in plain language:
+
+```json
 {"allowed": {"type": "noul", "instructions": "Does the action follow the rule?"}}
 ```
 
 | `state` | Answer |
 |---------|--------|
-| query "How long can cooked rice be kept in the fridge?", passage "Cooked rice should be cooled within an hour and eaten within a day or two of refrigeration." | `relevant` 0.997 |
-| the same query, passage "Rice is grown in flooded paddies across Asia and is a staple for billions of people." | `relevant` 0.017 |
-| rule "Refunds over 500 dollars need a manager's approval.", a refund of 740 with no approver | `allowed` 0.022 |
-| the same rule, a refund of 120 with no approver | `allowed` 0.989 |
+| Query "How long can cooked rice be kept in the fridge?", passage "Cooked rice should be eaten within a day or two of refrigeration." | `relevant`, 0.997 |
+| The same query and the passage "Rice is grown in flooded paddies across Asia and is a staple for billions of people." | `relevant`, 0.017 |
+| The rule "Refunds over 500 dollars need a manager's approval." and a refund of 740 with no approver | `allowed`, 0.022 |
+| The same rule and a refund of 120 with no approver | `allowed`, 0.989 |
 
 ### General knowledge
 
-The state names only the two cities of a trip, so the answers come from
+This state names only the two cities of a trip, so the answers come from
 what the model knows about them:
 
 ```json
@@ -284,187 +277,171 @@ what the model knows about them:
 | `{"trip": {"from": "Vienna", "to": "Budapest"}}` | 0.998 | `forint`, 0.999 |
 | `{"trip": {"from": "Krakow", "to": "Warsaw"}}` | 0.000 | `zloty`, 1.000 |
 
-A code snippet's language and an event's century work the same way. A Rust
-`fn main` snippet gets `rust` at 0.999 among four languages, and the first
-crewed Moon landing gets the 20th century at 0.999.
-
 ## Questions
 
 `questions` maps each question id to an object with these fields:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `type` | required | `noul` for yes or no, `choice` for one of several options, or `score` for one of ordered levels |
-| `instructions` | empty | the question as the model reads it |
-| `criteria` | required, except for `noul` | `noul`: an object with `true` and `false` descriptions. `choice`: option name to description. `score`: a list of level names in order |
-| `depends_on` | none | question ids answered in an earlier stage, whose answers this question's read sees |
-| `ask_if` | none | question id to a list of its answers. The question is asked only when that answer is among them, else it answers `null` |
-| `alone` | `false` | read this question in a read of its own |
+| `type` | Required | `noul` for yes or no, `choice` for one of several options, or `score` for one of several ordered levels. |
+| `instructions` | Empty | The question as the model reads it. |
+| `criteria` | Required, except for `noul` | For `noul`, an object with `true` and `false` descriptions. For `choice`, a map of option names to descriptions. For `score`, a list of level names in order. |
+| `depends_on` | None | Question ids from an earlier stage, whose answers this question's read sees. |
+| `ask_if` | None | A map of question ids to lists of their answers. The question is asked only when that answer is in the list. |
+| `alone` | `false` | With `true`, the question is read on its own. |
 
 A choice or a score takes 2 to 26 alternatives. Describe each option so
-that no two overlap, since probability splits between options that both
-fit. A question id may not contain a colon or a newline. Past ten
-questions the answer template writes each label directly after its id, so
-numbered ids such as `q1` work there, and a word id can be refused with a
-422.
+that no two overlap, since the probability splits between options that both
+fit. A question id may not contain a colon or a newline.
+
+The answers in an `ask_if` list are the answer names of that question.
+They are `"yes"` or `"no"` for a `noul` question, option names for a
+`choice`, and level names for a `score`, and each one must be an answer of
+that question.
+
+Each answer label must be a single token in the answer template, or the
+request gets a 422. With more than ten questions, the template writes each
+label directly after its question id, so a numbered id such as `q1` is the
+safe choice there. A question whose template is longer than the canvas
+also gets a 422.
 
 ## Stages and skipped questions
 
 A question with `depends_on` or `ask_if` is read in a later stage than the
-questions it names, and its prompt carries their answers. `ask_if` adds its
-keys to `depends_on`, so the first decision needs no `depends_on` for
-`refund`. There `refund` is read in a second stage, after `team` answered
+questions that it names, and its prompt carries their answers. `ask_if` adds
+its keys to `depends_on`, so the first decision needs no `depends_on` for
+`refund`. There, `refund` is read in a second stage, after `team` answered
 billing.
 
-When the answer is not among the listed ones, the question is not read. Its
-answer is `null`, and `diagnostics.skipped` says why. With `"ask_if":
-{"team": ["infra"]}` on the same ticket:
+When the answer is not in the `ask_if` list, the question is not read. Its
+answer is `null`, and `diagnostics.skipped` says why. With
+`"ask_if": {"team": ["infra"]}` on the same ticket, the result is:
 
 ```json
 "skipped": {"refund": {"because": "team", "was": "billing", "wanted": ["infra"]}}
 ```
 
-Each stage extends the prompt with the earlier answers and reads again, so
-a decision with stages takes longer than one without. Keep `depends_on` for
-questions whose answer changes with the earlier one.
+Each stage extends the prompt with the earlier answers and reads again, so a
+decision with stages takes longer than one without. Use `depends_on` only
+for questions whose answer changes with the earlier one.
 
 ## Samples, steps and thoughts
 
-A request can also carry these fields. They set how many times each answer
-is read and how much work each read does. The vLLM example defines all of
-them except `think_threshold`, `think_budget` and the `"auto"` value of
-`think`, which gmlx adds:
+A request can also carry these fields, which set how many times each
+answer is read and how much work each read does:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `instructions` | none | text added to the system prompt ahead of the questions |
-| `samples` | `"auto"` | how many reads with different random label tokens are averaged. `"auto"` reads once and adds more when an answer is uncertain |
-| `auto_max` | `4` | the sample count `"auto"` extends to |
-| `auto_threshold` | `0.1` | the entropy in nats at a label position above which `"auto"` extends |
-| `steps` | `1` | denoise steps per read, clamped to 1 through 8 |
-| `think` | `server.systemone.think` | a thought budget in tokens, 0 to 4096, or `"auto"`. The model writes a thought first, and the reads see it |
-| `think_threshold` | `server.systemone.think_threshold` | the confidence below which `"auto"` runs the decision again with a thought |
-| `think_budget` | `server.systemone.think_budget` | the thought budget in tokens that `"auto"` uses |
-| `ask` | every question | the ids to answer, which must include everything they depend on |
-| `chunk_rows` | the canvas | the most canvas tokens one read's answer template may take, at least 8. A larger stage is split into chunks |
-| `chunk_prompt` | `"own"` | `"own"` gives each chunk a system prompt with its questions only, and `"shared"` gives every chunk all of them |
-| `sequential` | `false` | read the chunks in order on one prompt, each seeing the answers before it |
+| `instructions` | None | Text added to the system prompt ahead of the questions. |
+| `samples` | `"auto"` | The number of reads, with different random label tokens, whose results are averaged. `"auto"` reads once and adds more reads when an answer is uncertain. |
+| `auto_max` | `4` | The sample count that `"auto"` extends to. |
+| `auto_threshold` | `0.1` | The entropy, in nats, at a label position above which `"auto"` adds reads. |
+| `steps` | `1` | The denoise steps for each read. Values outside 1 to 8 are clamped. |
+| `think` | [`server.systemone.think`](config.md#serversystemonethink) | A thought budget in tokens, from 0 to 4096, or `"auto"`. The model writes a thought first, and the reads see it. |
+| `think_threshold` | [`server.systemone.think_threshold`](config.md#serversystemonethink_threshold) | The confidence below which `"auto"` runs the decision again with a thought. It must be above 0 and at most 1. |
+| `think_budget` | [`server.systemone.think_budget`](config.md#serversystemonethink_budget) | The thought budget, from 1 to 4096 tokens, that `"auto"` uses. |
+| `ask` | Every question | The ids to answer, which must include every question they depend on. Only these appear in `answers`. |
+| `chunk_rows` | The canvas | The most canvas tokens that the answer template of one read may take, at least 8. A larger stage is split into chunks. |
+| `chunk_prompt` | `"own"` | With `"own"`, each chunk gets a system prompt with only its own questions. With `"shared"`, every chunk gets all of them. |
+| `sequential` | `false` | With `true`, the chunks are read in order on one prompt, and each sees the answers before it. |
 
-Each chunk is read on a prefilled prompt. Under the default
-`chunk_prompt: "own"` every chunk prefills a prompt of its own, while
-`"shared"` chunks read one prompt. A later stage extends the prompt before
-it when the tokens allow, and a `think: "auto"` rerun prefills again.
+`samples` and `auto_max` above the server limit are lowered to it. With
+stages or `sequential: true`, every read uses the full question list,
+`chunk_prompt` has no effect, and `diagnostics.chunk_prompt` reports
+`"full"`.
 
-With the default `samples: "auto"`, each chunk is read once, and
-`auto_max - 1` more samples are read when an answer is uncertain. Samples
-share a decoder pass up to the model's canvas length in canvas tokens, 256
-for diffusiongemma-26B-A4B-it, so 8 samples of width 32 or 4 of width 64
-take one pass. A shared pass costs more than one read and less than
-reading its samples one at a time.
-
-`steps` above 1 costs up to one more decoder pass per step, since a read
-stops once it converges. A thought costs the most, because the model
-writes it with its full denoise loop, which takes seconds.
-[structured-read-measurements.md](internals/structured-read-measurements.md)
-has the timings.
-
-`think: "auto"` spends that cost only on unsure decisions. The decision runs
-without a thought first. When any answer's confidence is below
-`think_threshold`, it runs again with a thought of `think_budget` tokens.
-The answers, `usage` and sample diagnostics then come from the second run,
-and `timing` adds up both. `diagnostics.think_auto` says whether the
-thought ran, lists the unsure questions and keeps the first run's
-confidences. With `server.systemone.think` set to `"auto"`, a Jev client
-gets the behavior without sending any of the fields.
+A thought costs the most. The model writes it with its full denoise loop,
+which takes seconds, while a read without one takes a single pass.
+`think: "auto"` spends that cost only on unsure decisions. The decision
+runs without a thought first, and when the confidence of any answer is
+below `think_threshold`, it runs again with a thought of `think_budget`
+tokens. The answers then come from the second run, and
+`diagnostics.think_auto` says whether the thought ran and which questions
+were unsure. With [`server.systemone.think`](config.md#serversystemonethink)
+set to `"auto"`, a Jev client gets this behavior without sending any of the
+fields.
 
 The two thresholds point in opposite directions. `think_threshold` is a
-floor on an answer's confidence, so raising it thinks more often.
+floor on the confidence of an answer, so raising it thinks more often.
 `auto_threshold` is a ceiling on the entropy at a label position, so
 raising it samples less often. Without `"auto"`, the server ignores
-`think_threshold` and `think_budget` and logs them in an `ignoring
-unsupported parameter(s)` warning.
+`think_threshold` and `think_budget` and logs them in an
+`ignoring unsupported parameter(s)` warning.
 
-A decision with more questions runs the thought more often, since one
-unsure answer is enough. A question without one right answer, such as a
-customer's tone, often stays unsure after the thought, so the time buys
-little there. Use `"auto"` when the questions need recalled facts.
-
-The server caps the question count and the sample count, and
-[config.md](config.md#structured-decisions) gives the limits.
+A question without one right answer, such as the tone of a message, often
+stays unsure after a thought, so `"auto"` suits questions that need
+recalled facts. How the samples share a decoder pass, and what each setting
+costs, is in [Structured reads](internals/structured-reads.md#samples).
 
 ## When answers go wrong
 
-A read answers without working anything out first, so a question that
-needs a step of reasoning or a recalled fact can get a confident wrong
-answer. Asked for the century of the Suez Canal's opening with the options
-16th to 20th, the model picks the 18th at 0.87, although it opened in 1869.
-More samples and more steps do not change that answer.
+A read answers without working anything out first. A question that needs a
+step of reasoning or a recalled fact can therefore get a confident wrong
+answer. Asked for the century in which the Suez Canal opened, with the
+options 16th to 20th, the model can pick the 18th with high confidence,
+although the canal opened in 1869. More samples and more steps do not
+change such an answer.
 
-These changes help, in order of cost:
+These changes help, from the cheapest to the most expensive:
 
-- Name the subject in the question. A question such as "Does the dish
-  usually contain sesame?", whose subject is only in the state, reads worse
-  than "Does pad thai usually contain sesame?", and tends toward yes when
-  the model is unsure. Asked about pad thai that way, it answers yes to
-  both "contains sesame" and "free of sesame".
-- Put the values in the options. Options named `1700s`, `1800s` and
-  `1900s` get `1800s` at 0.994 for the Suez Canal.
-- Let the model think when it is unsure. With `think: 128` the model picks
-  the 19th century at 1.00, but a thought takes several times as long as a
-  plain decision. `think: "auto"` writes one only when an answer's
-  confidence is below `think_threshold`, so at the default 0.8 it leaves
-  the Suez answer at 0.87 as it is.
+1. Name the subject in the question. "Does pad thai usually contain
+   sesame?" reads better than "Does the dish usually contain sesame?" with
+   the dish only in the state. A question whose subject is only in the
+   state tends toward yes when the model is unsure.
+2. Put the values in the options. Options named `1700s`, `1800s` and
+   `1900s` get the Suez Canal right.
+3. Let the model think when it is unsure, with `think: "auto"`. A thought
+   takes several times as long as a plain decision.
 
-More samples, more steps and the full-vocabulary unembedding, set with
-`server.systemone.constrained: false`, do not change accuracy.
-[structured-read-measurements.md](internals/structured-read-measurements.md#accuracy)
-compares the options and the wordings on a set of known facts.
-
-Before acting on the numbers, run states whose answers you know and choose
-each threshold from how the model scores them. A few answers stay wrong
-even with a thought, and a thought can make a wrong answer confident. Send
-an answer that matters to a person when it is unsure or when its state is
-unlike the ones you tested.
+Before your code acts on the numbers, run states whose answers you know,
+and choose each threshold from how the model scores them. Some answers stay
+wrong even with a thought, and a thought can make a wrong answer
+confident. Send an answer that matters to a person when it is unsure, or
+when its state is unlike the ones you tested.
 
 ## Errors and queueing
 
-| Status | When |
-|--------|------|
-| 400 | the body is not a JSON object, it carries `images`, the model is not DiffusionGemma, or the prompt does not fit the context or memory budget |
-| 400 | `profile` names no profile, or `model` is absent and no fallback exists. The error types are `unknown_profile` and `no_model_specified` |
-| 404 | `model` names nothing and no fallback exists, or the model's file is missing. The error types are `model_not_found` and `model_file_missing` |
-| 422 | a request field fails validation, such as a question, `state`, `seed` or the question count. The error type is `validation_error` |
-| 503 | the queue cap or a deferred load, as under [Limits and back-pressure](api.md#limits-and-back-pressure) |
-| 504 | the decision ran past [`token_queue_timeout_s`](config.md#scheduling). The error type is `timeout` |
-| 500 | the engine failed. The error type is `server_error` |
+| Status | Cause |
+|--------|-------|
+| 400 | The body is not a JSON object or carries `images`. The model is not DiffusionGemma. The prompt does not fit the context or memory budget. |
+| 400 | `profile` names no profile, with the error type `unknown_profile`. `model` is absent and there is no fallback, with the error type `no_model_specified`. |
+| 401 | The server has an API key, and the request does not present it. |
+| 404 | `model` names nothing and there is no fallback, with the error type `model_not_found`, or the model file is missing, with the error type `model_file_missing`. |
+| 422 | A field fails validation, such as a missing `state` or a value out of range, with the error type `validation_error`. |
+| 503 | The queue is full or the model load is deferred, as [Limits and back-pressure](api.md#limits-and-back-pressure) describes. |
+| 504 | The decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s), counted from when it left the queue. The type is `timeout`. |
+| 500 | The engine failed, with the error type `server_error`. |
 
-The model is text-only, so a request with `images` is refused. A `profile`
-field selects the [profile](config.md#profiles) that `model`
-resolves with, and `seed`, 42 by default, sets the random tokens each read
+The model is text only, so the server refuses a request with `images`, and
+it refuses a multipart body. A
+`profile` field selects the [profile](config.md#profiles) that `model`
+resolves with. `seed`, 42 by default, sets the random tokens that each read
 starts from.
 
 A decision holds the model from its first read to its last, so a chat
-request to the same model waits behind it, as it waits behind any
-DiffusionGemma generation. Before a decision is queued, the server checks
-the context budget against the largest prompt the decision can build.
+request to the same model waits behind it. Before the server queues a
+decision, it checks the context budget against the largest prompt that the
+decision can build. A client that disconnects cancels its decision.
 
-## From the command line
+## The command line
 
 `gmlx systemone` sends a request file to a running server and prints one
-line per question. It can also load the GGUF and answer with no server:
+line for each question. It can also load the GGUF itself and answer with no
+server:
 
 ```sh
 gmlx systemone ticket.json
 ```
 
-[cli.md](cli.md#gmlx-systemone) lists its flags and output format.
+[`gmlx systemone`](cli.md#gmlx-systemone) in the CLI reference lists its
+flags and output format.
 
 ## How a decision is read
 
 The questions and their allowed answers become the system prompt, and the
 state becomes the user message. The canvas is seeded with an answer
 template that writes each question id with its answer, with a random token
-at each answer position, and one denoise step gives the distribution over
-each question's labels. That is a [structured read](glossary.md), and
-[structured-reads.md](internals/structured-reads.md) describes the
-mechanism for contributors.
+at each answer position. One denoise step then gives the distribution over
+the labels of each question. This is a [structured read](glossary.md), and
+[Structured reads](internals/structured-reads.md) describes the mechanism
+for contributors.
