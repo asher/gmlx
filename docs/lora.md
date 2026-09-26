@@ -47,9 +47,9 @@ gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
 in any format that the mlx-lm LoRA trainer accepts. The formats are chat
 records of the form `{"messages": [...]}`, prompt and completion pairs, and
 plain text. Chat records suit an instruct model, because the trainer
-applies the chat template of the model. The loss covers the prompt as
+applies the model's chat template. The loss covers the prompt as
 well as the reply. `--data` also takes a Hugging Face dataset id, which
-needs the `datasets` package in the environment of gmlx.
+needs the `datasets` package in the gmlx environment.
 
 The example dataset,
 [GPT007/pirate_speak](https://huggingface.co/datasets/GPT007/pirate_speak),
@@ -74,8 +74,8 @@ split = max(1, len(records) // 10)
 (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records[split:]))
 ```
 
-Then train. The adapter covers every linear layer in the top
-`--num-layers` layers of the model:
+Then train. The adapter covers every linear layer in the model's
+top `--num-layers` layers:
 
 ```sh
 pip install datasets && python prep_pirate.py
@@ -94,7 +94,7 @@ repeat itself.
 memory, and the defaults of 8 layers at rank 8 are a good start. When a
 longer `--max-seq-length` runs out of memory, `--grad-checkpoint`
 computes each layer again in the backward pass instead of keeping it,
-which costs time. It needs `--dropout 0`, and Kimi K3 and DeepSeek-V4.1
+which costs time. `--grad-checkpoint` needs `--dropout 0`, and Kimi K3 and DeepSeek-V4.1
 refuse it. The flags are listed under [gmlx train](cli.md#gmlx-train).
 
 ## Use the adapter
@@ -119,7 +119,7 @@ from the model file name, and the model without the adapter as
 
 A server can offer one model under several adapters at once. The model
 loads a single time, and each adapter loads into a slot of its own on that
-model. A request applies only the adapter of the id that it names.
+model. A request applies only the adapter that belongs to the id it names.
 Requests to the base and to adapted ids batch together in one decode step,
 and switching between ids swaps nothing.
 
@@ -171,7 +171,7 @@ Adapters work with the prompt cache and speculative decoding:
   splits the group. Adapters give the same output whether the batch uses
   speculation or not.
 
-The adapters of a group are part of what identifies its loaded model. When
+A group's adapters are part of what identifies its loaded model. When
 you add an id with a new adapter and reload the configuration, the server
 builds a new copy, and the old copy unloads after its idle timeout. Plan
 for both copies in memory for a short time, or restart the server instead
@@ -183,7 +183,7 @@ The adapter file uses the llama.cpp GGUF LoRA format, which
 `convert_lora_to_gguf.py` writes from a PEFT folder. The file has
 `general.type` set to `adapter`, `adapter.type` set to `lora`, and
 `adapter.lora.alpha`. Each adapted weight has a `lora_a` and `lora_b`
-tensor pair named after the tensor of the base model.
+tensor pair named after the base model's tensor.
 
 gmlx therefore loads PEFT adapters converted with that script, and the
 GGUF adapters that people publish for llama.cpp. Adapters from
@@ -200,8 +200,8 @@ adapter file.
   that runs a fused MoE block, such as Gemma and gpt-oss.
 - An adapter works on text models only, so `--adapter` does not combine
   with `--mmproj`.
-- The adapter of each id is fixed at load. To use another adapter, a
+- Each id's adapter is fixed at load. To use another adapter, a
   request names another id.
-- The adapter must be for the architecture of the model. The loader checks
+- The adapter must be for the model's architecture. The loader checks
   this, and its error names both architectures. It does not check that the
   model is the fine-tune the adapter was trained on.

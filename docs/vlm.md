@@ -30,8 +30,8 @@ a companion and says to pair it with its language model. The language
 model alone still runs as a text model, and media support needs no
 optional package.
 
-gmlx builds the image processor and the chat template from the metadata
-of the two files. For a family whose files leave something out,
+gmlx builds the image processor and the chat template from the two
+files' metadata. For a family whose files leave something out,
 `--hf-source` names a Hugging Face repository, and the whole processor,
 including the tokenizer and chat template, then comes from that
 repository.
@@ -67,10 +67,10 @@ attach a clip to the next turn.
 
 ## Supported families
 
-The metadata of the companion names its projector. When several families
-share a projector, the architecture of the language model tells them
-apart. A pairing that gmlx does not support fails at load, and the error
-names the projector and architecture that it found.
+The companion's metadata names its projector. When several families
+share a projector, the language model's architecture tells them apart. A
+pairing that gmlx does not support fails at load, and the error names the
+projector and architecture that it found. gmlx supports these families:
 
 | Family | Projector and architecture | Examples | Notes |
 |--------|----------------------------|----------|-------|
@@ -117,6 +117,6 @@ Chat and the server place media differently in a conversation. Chat keeps
 each image with the turn that sent it, so a later question about an
 earlier image reads the right history. Once a conversation holds media,
 though, chat reads the whole conversation and encodes the media again on
-every turn. The server puts all the images of a conversation on its last
+every turn. The server puts all of a conversation's images on its last
 user message, so a follow-up question after an image misses the prompt
 cache from the point where the images moved.
