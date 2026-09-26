@@ -201,8 +201,8 @@ has no cap, and the Gemma assistant drafter and families without a
 measurement get `2`. Every mixture-of-experts model gets `1`, as do the
 drafters that handle one sequence at a time. Those are the MTP heads of
 Hy3, DeepSeek-V4, Muse Glimmer, Qwen3.8-Flash-Next and GLM-5.3-Flash, and
-every DFlash drafter. `0` removes the cap, except on a single-sequence drafter, which
-stays at `1` whatever the value. The default is `null`.
+every DFlash drafter. `0` removes the cap, except on a single-sequence
+drafter, which stays at `1` whatever the value. The default is `null`.
 
 [Speculative batching](internals/speculative-batching.md) describes how a
 batch switches between the two kinds of decoding.
@@ -422,9 +422,9 @@ works across families.
 | Family | Template variable | Values |
 |--------|-------------------|--------|
 | Qwen3.x, GLM | `enable_thinking` | `true`, `false` |
-| MiniMax-M3 | `thinking_mode` | Three states, so `adaptive` is accepted |
+| MiniMax-M3 | `thinking_mode` | Three states, so `adaptive` is accepted. |
 | Kimi K2.x | `thinking` | `true`, `false` |
-| Hy3 | `reasoning_effort` | Levels that include `no_think` |
+| Hy3 | `reasoning_effort` | Levels that include `no_think`. |
 | gpt-oss | `reasoning_effort` | `low`, `medium`, `high`. Reasoning cannot be turned off. |
 
 A request's `enable_thinking` wins, then its `thinking` or
@@ -892,9 +892,9 @@ memory, because the weights map from the file without a copy.
 | State | Set by | Unloads when |
 |-------|--------|--------------|
 | Pinned | `pin: true`, `--pin` | Never |
-| Kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | The budget is full and it is the least recently used |
-| Idle | Any request | No request arrives for `ttl_s` seconds, or the budget needs the room |
-| Preloaded | `server.defaults.preload` | The same as an idle model |
+| Kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | The budget is full and it is the least recently used. |
+| Idle | Any request | No request arrives for `ttl_s` seconds, or the budget needs the room. |
+| Preloaded | `server.defaults.preload` | The same as an idle model. |
 
 A model is never unloaded during a generation. Keeping is what
 `gmlx launch --model` asks for, so the model of a coding session survives
@@ -982,8 +982,7 @@ requests that are generating. With `auto`, prefill slows only when a
 generating request would drop below half its speed. A number such as
 `1.0` makes each prefill chunk wait until the generating requests have
 had that multiple of the chunk's GPU time. With `0`, one prefill chunk
-runs per generation step.
-[Concurrent requests](concurrency.md)
+runs per generation step. [Concurrent requests](concurrency.md)
 describes the effect. The default is `auto`.
 
 #### `server.prefill_tick_ms`

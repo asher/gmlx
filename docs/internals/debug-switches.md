@@ -14,7 +14,7 @@ are read at load or on each call. The user-facing variables are in
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. It defaults to `0.9` on the DeepSeek-V4 drafter and `0` (no cut) on DFlash-backbone drafters. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step. `auto` derives X from round costs. Off by default. Output is unchanged. |
 | `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Output differs at fp16 rounding only. Set this first when debugging kvarn. |
-| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Numerics match to fp16 rounding. Widths above 4 materialize. |
+| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify on the vector kernel, not the matrix-unit kernel. Numerics match to fp16 rounding. Widths above 4 take the materialize path. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. Set only to rule it out when debugging long context. |
 | `GMLX_SPARSE_ARCHS` | Name extra architecture modules for the sparse attention route, comma separated, to quality-gate a new arch. The default is the llama family only. |

@@ -173,8 +173,7 @@ assistant:
 The filesystem server needs Node, and the fetch server needs uv. The
 status line names each tool as the assistant uses it, and only the answer
 is spoken. After the turn, the assistant stores what it learned in the
-background, so memory does not delay the spoken reply. A turn that needs
-several tool calls takes longer than a plain reply. When you interrupt a
+background, so memory does not delay the spoken reply. When you interrupt a
 tool call, the conversation keeps what you heard and drops the unfinished
 call. [Assistant](assistant.md) covers choosing a model, the tools and the
 memory store.

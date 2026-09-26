@@ -148,10 +148,11 @@ under [`profiles`](config.md#profiles) in the config.
 
 ## Keep, pin and idle
 
-The three states of a resident model. A pinned model is never unloaded. A
-kept model is exempt from the idle timeout but can still be unloaded when
-memory runs short, and `gmlx launch` and voice sessions keep their model.
-An idle model unloads after `ttl_s` seconds without a request.
+A resident model can be pinned, kept or idle. A pinned model is never
+unloaded. A kept model is exempt from the idle timeout but can still be
+unloaded when memory runs short, and `gmlx launch` and voice sessions keep
+their model. An idle model unloads after `ttl_s` seconds without a
+request.
 
 ## KV cache
 
@@ -197,17 +198,17 @@ and `chat` turn it on automatically, and the `[load]` summary line shows
 
 ## Prefill and decode
 
-The two phases of a reply. Prefill reads the whole prompt at once, and
-decoding generates the reply one token at a time. The two run at different
-speeds, so gmlx reports them separately.
+Prefill and decode are the two phases of a reply. Prefill reads the whole
+prompt at once, and decoding generates the reply one token at a time. The
+two run at different speeds, so gmlx reports them separately.
 
 ## Preflight
 
-The checks that run before a model loads. The loader checks the
-architecture, the codec of each tensor, the shard set and the file size
-before it reads any tensor data. `run` and `chat` also refuse a context
-that cannot fit in memory, and the server refuses a request whose prompt
-cannot fit.
+Preflight is the set of checks that run before a model loads. The loader
+checks the architecture, the codec of each tensor, the shard set and the
+file size before it reads any tensor data. `run` and `chat` also refuse a
+context that cannot fit in memory, and the server refuses a request whose
+prompt cannot fit.
 
 ## Prestage
 

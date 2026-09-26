@@ -74,7 +74,7 @@ To choose the optional features yourself, install with
 `uv tool install "gmlx[all]"` and add `brew install ffmpeg` for voice.
 [Installation](https://github.com/asher/gmlx/blob/main/docs/installation.md) covers both routes.
 
-The model above is 20.5 GB. A model needs memory for about its file size
+The Qwen3.8-27B UD-Q6_K file is 20.5 GB. A model needs memory for about its file size
 plus the KV cache of the conversation, and the Quickstart
 [suggests models](https://github.com/asher/gmlx/blob/main/docs/quickstart.md#choosing-a-model)
 for each memory size. Upgrade with `brew upgrade gmlx`, or `uv tool upgrade
@@ -185,7 +185,7 @@ your own with `gmlx run model.gguf --bench 128,512,2048`.
 
 [Performance tuning](https://github.com/asher/gmlx/blob/main/docs/performance.md)
 covers the performance features. Speculative decoding uses a model's own
-draft head, or a companion drafter on models without one, and `run` and
+MTP head, or a companion drafter on models without one, and `run` and
 `chat` turn it on by themselves. The prompt cache skips prefill for the
 repeated prefixes of agent workloads, and KV-cache quantization shrinks long
 contexts. Disk-streamed execution, described in
@@ -240,8 +240,8 @@ is in the [Python API](https://github.com/asher/gmlx/blob/main/docs/python.md) r
 
 ## Documentation
 
-The [documentation site](https://asher.github.io/gmlx/) has every page
-below for the latest release, with navigation and search.
+The [documentation site](https://asher.github.io/gmlx/) publishes the pages
+listed here for the latest release, with navigation and search.
 
 ### Getting started
 

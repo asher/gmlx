@@ -39,6 +39,8 @@ The three styles differ in which files they touch:
   that it cannot parse.
 - Environment passes every setting in environment variables, with no file.
 
+Each client uses one or two of these styles:
+
 | Client | What it is | Style | Where the configuration goes |
 |--------|------------|-------|------------------------------|
 | `claude-code` | Anthropic's Claude Code | Environment | `ANTHROPIC_*` variables |
@@ -96,7 +98,7 @@ when the server has exactly one chat model.
 
 With `--model`, `launch` also asks the server to load the model and keep it
 loaded through the idle timeout, so that the model is not unloaded between
-the turns of a long session. The model stays kept after the tool exits,
+the turns of a long session. The keep lasts after the tool exits,
 until `POST /unload` or a request to `POST /v1/keep` with
 `{"keep": false}` releases it, or the server restarts. A kept model can
 still be unloaded when the memory budget needs the room, as

@@ -107,10 +107,10 @@ conversation:
 
 | Mac memory | Model | Notes |
 |------------|-------|-------|
-| 16 GB | Qwen3-4B, Q4_K_M, 2.5 GB | A fast and capable small model. |
+| 16 GB | Qwen3-4B, Q4_K_M, 2.5 GB | It is fast and capable for its size. |
 | 32 GB | Qwen3.5-9B, Q6_K, 8 GB | Its MTP head turns on speculative decoding by itself. |
-| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | A strong general model for chat, code and tool calls. |
-| 96 GB or more | Qwen3.6-35B-A3B, Q6_K, 29 GB, or gpt-oss-120b, MXFP4, 63 GB | Mixture-of-experts models, with large-model quality at small-model speed. |
+| 64 GB | Qwen3.8-27B, UD-Q6_K, 20.5 GB | It is strong at chat, code and tool calls. |
+| 96 GB or more | Qwen3.6-35B-A3B, Q6_K, 29 GB, or gpt-oss-120b, MXFP4, 63 GB | Both are mixture-of-experts models, with large-model quality at small-model speed. |
 
 A loaded model needs memory for its weights, about its file size, and for
 its KV cache, which grows with the conversation. In a long session the KV

@@ -248,7 +248,7 @@ list counts as none:
 | An assistant id with no `tools` | The server runs the loop and returns the answer under the assistant id. |
 | An assistant id with `tools` | The client runs its own loop, so the server sends the request to the underlying model unchanged. |
 | Any other id | The request is not changed. |
-| An assistant id on `/v1/responses` or `/v1/messages` | A 400, because assistants work only through chat completions. |
+| An assistant id on `/v1/responses` or `/v1/messages` | The server returns a 400, because assistants work only through chat completions. |
 
 The server builds each turn from the messages that the client sends, so
 tool calls from earlier turns are not kept. The last message must be a

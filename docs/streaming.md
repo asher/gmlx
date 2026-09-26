@@ -18,8 +18,9 @@ settings make streaming faster, some with a cost in quality.
 ## What to expect
 
 A [MoE](glossary.md#expert-and-moe) model uses only a few of its experts
-for each token, so one token reads a small part of the file. gmlx keeps the parts that
-every token reads in memory and reads the routed experts from disk. This
+for each token, so one token reads a small part of the file. gmlx keeps
+the parts that every token reads in memory and reads the routed experts
+from disk. This
 lets a model of about 200 billion parameters run on a Mac with 64 GB.
 
 The speed of decoding then depends on the SSD and the CPU rather than the
@@ -62,8 +63,8 @@ experts were found in the arena. `run` and `chat` print this line with
 cache with `--kv-bits 8` is the usual addition.
 
 `--stream-experts` streams only a model larger than 90% of the GPU
-working set. A smaller model loads into memory as usual, and a dense model prints
-that the flag has no effect.
+working set. A smaller model loads into memory as usual, and a dense
+model prints that the flag has no effect.
 
 ## Choosing a placement
 
@@ -174,10 +175,10 @@ tensors. A quant that keeps attention and the shared experts at Q8
 doubles what stays in memory, so choose a quant with smaller non-expert
 tensors before a smaller expert quant.
 
-The KV room trades against the arena. A smaller room gives a larger arena
-and a shorter safe context, and `--kv-bits 8` halves the KV cache part of
-the room. [`GMLX_STREAM_KV_CTX`](env-vars.md#runtime) sets the number of
-tokens in the room.
+A smaller KV room gives a larger arena and a shorter safe context, so
+the two trade against each other. `--kv-bits 8` halves the KV cache part
+of the room, and [`GMLX_STREAM_KV_CTX`](env-vars.md#runtime) sets the
+number of tokens in the room.
 
 Other models and other processes take from the arena too. The arena is
 sized from the RAM that the kernel can reclaim at load. When macOS reports
@@ -263,8 +264,8 @@ weights are larger than 60% of RAM. The settings apply to MXFP4 and NVFP4
 experts too, as in gpt-oss and the DeepSeek-V4-Flash Q4_K_XL quants, and
 [`GMLX_NATIVE_FP`](env-vars.md#runtime) controls how gmlx lays them out.
 
-[Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements)
-has the measurements of each setting.
+The gain of each setting on real models is recorded in
+[Streaming measurements](internals/streaming-measurements.md#lossless-setting-measurements).
 
 ## The lossy settings
 
@@ -322,10 +323,10 @@ models.
 
 ## Serving a streamed model
 
-Send one request at a time to a server that streams a model. The wired
-memory refresh and lookahead turn off when a decode step holds more than
-one token, so a second request at the same time slows both, and fewer
-experts are found in the arena. Prefill is not affected.
+Send one request at a time to a server that streams a model. The decode
+feeder keeps the arena wired and runs lookahead only while each decode
+step holds one token. A second request at the same time therefore slows
+both, and fewer experts are found in the arena. Prefill is not affected.
 
 The feeder settings are the [`prefill_feeder`](config.md#modelsprefill_feeder)
 and [`decode_feeder`](config.md#modelsdecode_feeder) keys beside `stream`.

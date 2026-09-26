@@ -29,8 +29,8 @@ models, such as Qwen3.5, Qwen3.6, Qwen3.8, Granite 4 and Nemotron-H, keep
 a small fixed state on most layers and a full KV cache only on their few
 attention layers. Qwen3.6-27B, with 16 attention layers of 64, therefore
 uses 2.1 GB at 32K, against 8 GB for a dense model of the same depth.
-[MLA](glossary.md#mla) models, such as the DeepSeek family, store a compressed
-cache. The capacity planner of the server counts all of these.
+[MLA](glossary.md#mla) models, such as the DeepSeek family, store a
+compressed cache. The capacity planner of the server counts all of these.
 
 To see the numbers of a running server, read the `memory` and `capacity`
 sections of `GET /v1/metrics`. `POST /v1/estimate` estimates whether a
@@ -39,21 +39,22 @@ metrics](api.md#capacity-and-live-request-metrics) describes both.
 
 ## Settings that limit memory
 
-These settings reduce memory, the cheapest first:
+These steps reduce memory, the cheapest first:
 
-- A quantized KV cache. `--kv-bits 8` about halves the KV cache with
+- Quantize the KV cache. `--kv-bits 8` about halves the KV cache with
   almost no quality cost, and `--kv-quant-scheme kvarn` keeps that quality
   at 6 bits in less memory. [KV cache quantization](kv-quantization.md)
   describes both schemes and the models that gain from them. On the
   server, they are the [load keys](config.md#model-loading).
-- A context limit. On `run` and `chat`, `--max-kv-size` keeps a rolling
+- Limit the context. On `run` and `chat`, `--max-kv-size` keeps a rolling
   window of the most recent tokens and drops the oldest ones. Under kvarn,
   the window stays quantized if it reaches the kvarn window floor, 1280
-  tokens with the default tail, and a smaller window exits with an error. Plain `--kv-bits` cannot quantize a
-  rolling window, so the command refuses that combination. On the server,
+  tokens with the default tail, and a smaller window exits with an error.
+  Plain `--kv-bits` cannot quantize a rolling window, so the command
+  refuses that combination. On the server,
   [`max_kv_size`](config.md#loadmax_kv_size) limits the context of a
   request and keeps no rolling window.
-- A smaller prefill chunk. `--prefill-step-size` makes the 2048-token
+- Shrink the prefill chunk. `--prefill-step-size` makes the 2048-token
   chunk smaller, which lowers the memory peak of a long prompt and slows
   prefill.
 
@@ -86,7 +87,7 @@ limit is between 4 and 12 GiB. The memory governor also checks the free
 memory of macOS on every tick.
 
 [`server.cache_limit_gb`](config.md#servercache_limit_gb) sets the limit
-in GiB, which benchmarks should do so that runs compare. `0` turns the
-buffer cache off, and a negative value removes the limit.
+in GiB. Set it for benchmarks, so that runs compare. `0` turns the buffer
+cache off, and a negative value removes the limit.
 [`GMLX_CACHE_LIMIT_GB`](env-vars.md#runtime) sets the limit through the
 environment.

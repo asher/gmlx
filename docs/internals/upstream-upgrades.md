@@ -11,8 +11,8 @@ symbols, so the surface is safe only under a qualified set of versions.
 The versions are declared in `pyproject.toml` in three different ways.
 mlx-vlm is an exact pin, `mlx-vlm==X.Y.Z`, because it owns the seams.
 mlx-lm and mlx-kquant carry floors, `mlx-lm>=0.31` and
-`mlx-kquant>=X.Y.Z,<0.5`. mlx itself is unconstrained there and arrives
-through mlx-kquant, which pins the exact mlx release its kernels were built
+`mlx-kquant>=X.Y.Z,<0.5`. mlx is listed with no version there. mlx-kquant
+fixes it, because it pins the exact mlx release its kernels were built
 against, and CI installs that same mlx explicitly. Beyond the declared
 versions, three checks keep an environment inside those bounds.
 

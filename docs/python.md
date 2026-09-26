@@ -28,9 +28,9 @@ files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
 |---|---|---|
 | `arch` | Detected | Override `general.architecture` detection. |
 | `hf_source` | `None` | Load the config from this local directory or Hugging Face repo instead of synthesizing it from the GGUF metadata. |
-| `chat_template` | From the GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
-| `target_prefix` | `""` | A prefix added to every remapped tensor name. |
-| `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap. For inspection, not inference. |
+| `chat_template` | From the GGUF | An inline Jinja string, or a path to a `.jinja`/`.txt` file, replaces the GGUF's chat template. |
+| `target_prefix` | `""` | This prefix is added to every remapped tensor name. |
+| `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap, which suits inspection but not inference. |
 | `fail_on_unknown` | `False` | Raise `RuntimeError` on a tensor that has no remap entry, instead of skipping it with a warning. |
 | `zero_copy` | `True` | Load tensors as no-copy mmap views. `False` copies into fresh buffers. |
 | `verbose` | `False` | Print load diagnostics such as `[arch]`, `[gguf]` and `[patch]`. |
@@ -56,24 +56,24 @@ These keyword arguments control sampling:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `max_tokens` | `64` | Generation cap. |
-| `temp` | `0.0` | Temperature. `0.0` is greedy. |
-| `top_p` | `0.95` | Nucleus sampling. |
-| `top_k` | `0` | Top-k cutoff. `0` disables it. |
-| `min_p` | `0.05` | Minimum-probability cutoff. |
-| `xtc_probability` / `xtc_threshold` | `0.0` | XTC sampling, active when the probability is nonzero. |
-| `repetition_penalty` | `0.0` | Classic repetition penalty over the last `repetition_context_size` tokens, default `20`. |
-| `presence_penalty` / `frequency_penalty` | `0.0` | OpenAI-style penalties. |
-| `logit_bias` | `None` | `{token_id: bias}` added to the logits. |
-| `stop` | `None` | Stop strings. Generation ends when one appears. The match is trimmed. |
+| `max_tokens` | `64` | Generation stops after this many tokens. |
+| `temp` | `0.0` | It sets the sampling temperature, and `0.0` is greedy. |
+| `top_p` | `0.95` | It sets the nucleus sampling threshold. |
+| `top_k` | `0` | Sampling keeps only the k most likely tokens, and `0` disables the cutoff. |
+| `min_p` | `0.05` | Sampling drops tokens less likely than this fraction of the top token. |
+| `xtc_probability` / `xtc_threshold` | `0.0` | They set XTC sampling, which is active when the probability is nonzero. |
+| `repetition_penalty` | `0.0` | It applies a classic repetition penalty over the last `repetition_context_size` tokens, default `20`. |
+| `presence_penalty` / `frequency_penalty` | `0.0` | They apply OpenAI-style penalties. |
+| `logit_bias` | `None` | Each `{token_id: bias}` entry is added to the logits. |
+| `stop` | `None` | Generation ends when one of these strings appears, and the match is trimmed. |
 
 These keyword arguments control how the prompt is rendered:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
 | `apply_chat_template` | `True` | Set `False` for base models or pre-templated text. |
-| `system_prompt` | `None` | Prepended as a system message on the templated path. |
-| `template_kwargs` | `None` | Extra `apply_chat_template` kwargs, such as `{"enable_thinking": False}`. |
+| `system_prompt` | `None` | It is prepended as a system message on the templated path. |
+| `template_kwargs` | `None` | These extra kwargs go to `apply_chat_template`, such as `{"enable_thinking": False}`. |
 
 These keyword arguments control the KV cache:
 
@@ -81,21 +81,21 @@ These keyword arguments control the KV cache:
 |---|---|---|
 | `max_kv_size` | `None` | Cap the KV cache with a rotating window. |
 | `kv_bits` | `None` | Quantize the KV cache to this many bits. |
-| `kv_group_size` | `64` | KV quantization group size. |
-| `quantized_kv_start` | `0` | Position where KV quantization begins. |
-| `kv_quant_scheme` | `None` | `uniform` for the standard affine scheme, or `kvarn` for variance-normalized quantization. |
-| `kv_tail_tokens` | `1024` | Under `kvarn`, the most recent tokens that also stay fp16. A multiple of 128, and `0` disables the tail. |
+| `kv_group_size` | `64` | It sets the KV quantization group size. |
+| `quantized_kv_start` | `0` | KV quantization begins at this position. |
+| `kv_quant_scheme` | `None` | It selects `uniform` for the standard affine scheme or `kvarn` for variance-normalized quantization. |
+| `kv_tail_tokens` | `1024` | Under `kvarn`, this many recent tokens also stay fp16. It is a multiple of 128, and `0` disables the tail. |
 
 These keyword arguments control long prompts, thinking models and output:
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `prefill_step_size` | Model-aware | Prefill chunk width. The default follows the deployed choice for the model. |
+| `prefill_step_size` | Model-aware | It sets the prefill chunk width, and the default follows the deployed choice for the model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill, on a TTY only, cleared before the first token. |
-| `thinking_budget` | `None` | Cap reasoning tokens. After roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
-| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
+| `thinking_budget` | `None` | Cap reasoning tokens. After about N thinking tokens a `</think>` is forced so the model answers. A model that never opens `<think>` is unaffected. |
+| `thinking_start_token` / `thinking_end_token` | `None` | They set the reasoning markers for a model whose markers are not detected from its tokenizer or template. The end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
-| `reasoning` | `None` | How a verbose stream shows thinking: `show` styles it, `hide` collapses it to the timing line, `raw` streams it verbatim. The return value is always raw. |
+| `reasoning` | `None` | It sets how a verbose stream shows thinking. `show` styles it, `hide` folds it into the timing line and `raw` streams it. The return value is always raw. |
 
 ## Benchmark
 
@@ -113,16 +113,16 @@ loop. Its CLI equivalent is `gmlx run --bench`.
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `lengths` | `(512, 4096, 16384)` | Prompt lengths to sweep. |
-| `decode_tokens` | `32` | Decode window measured in each run. |
-| `runs` | `2` | Runs at each length. The best is reported. |
-| `warmup` | `True` | One untimed warmup generation first. |
-| `prefill_step_size` | Model-aware | As in `generate`. |
-| `kv_bits` | `None` | As in `generate`. |
-| `kv_group_size` | `64` | As in `generate`. |
-| `quantized_kv_start` | `0` | As in `generate`. |
-| `kv_quant_scheme` | `None` | As in `generate`. |
-| `kv_tail_tokens` | `1024` | As in `generate`. |
+| `lengths` | `(512, 4096, 16384)` | `bench` sweeps these prompt lengths. |
+| `decode_tokens` | `32` | Each run measures this many decode tokens. |
+| `runs` | `2` | `bench` runs each length this many times and reports the best. |
+| `warmup` | `True` | An untimed warmup generation runs first. |
+| `prefill_step_size` | Model-aware | It works as in `generate`. |
+| `kv_bits` | `None` | It works as in `generate`. |
+| `kv_group_size` | `64` | It works as in `generate`. |
+| `quantized_kv_start` | `0` | It works as in `generate`. |
+| `kv_quant_scheme` | `None` | It works as in `generate`. |
+| `kv_tail_tokens` | `1024` | It works as in `generate`. |
 
 ## Preflight and errors
 

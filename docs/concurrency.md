@@ -37,7 +37,7 @@ settings handle the two cases:
 | Symptom | Setting | Default | Effect |
 |---------|---------|---------|--------|
 | The running streams stall while a long prompt arrives. | [`server.decode_prefill_ratio`](config.md#serverdecode_prefill_ratio) | `auto` | Slows admission only when a running stream would drop below half of its batched speed. A number fixes the ratio, and `0` alternates strictly. |
-| A stream pauses during a long prefill chunk. | [`server.prefill_tick_ms`](config.md#serverprefill_tick_ms) | `500` | Halves each chunk until its expected time fits the budget. `0` suits batch jobs where only total throughput matters. |
+| A stream pauses during a long prefill chunk. | [`server.prefill_tick_ms`](config.md#serverprefill_tick_ms) | `500` | Halves each chunk until its expected time fits the budget. `0` turns off the halving, which suits batch jobs. |
 
 With pacing, a new request waits at most about twice as long for its
 first token as it would without pacing. Prefill runs at full speed when

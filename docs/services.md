@@ -57,13 +57,13 @@ The aliases are these:
 
 | Alias | Repository | Notes |
 |-------|------------|-------|
-| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | The default, with large-v3 quality at about six times its speed. |
-| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | A 4-bit version, about 600 MB. |
-| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | The full large-v3 model. |
-| `whisper-medium` | `mlx-community/whisper-medium-mlx` | A smaller model that is faster than large-v3. |
-| `whisper-small` | `mlx-community/whisper-small-mlx` | A smaller model that is faster than medium. |
-| `whisper-base` | `mlx-community/whisper-base-mlx` | A smaller model that is faster than small. |
-| `whisper-tiny` | `mlx-community/whisper-tiny` | The smallest and fastest. |
+| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | It is the default, and it gives large-v3 quality at about six times the speed. |
+| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | It is a 4-bit version of the turbo model, about 600 MB. |
+| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | It is the full large-v3 model. |
+| `whisper-medium` | `mlx-community/whisper-medium-mlx` | It is smaller and faster than large-v3. |
+| `whisper-small` | `mlx-community/whisper-small-mlx` | It is smaller and faster than medium. |
+| `whisper-base` | `mlx-community/whisper-base-mlx` | It is smaller and faster than small. |
+| `whisper-tiny` | `mlx-community/whisper-tiny` | It is the smallest and fastest. |
 
 The server downloads the configured model from Hugging Face on first use
 when it is not already local. Naming it in the configuration file allows
@@ -97,11 +97,11 @@ the first of these aliases:
 
 | Alias | Repository | Notes |
 |-------|------------|-------|
-| `kokoro` | `mlx-community/Kokoro-82M-bf16` | The default, a small English model with many preset voices. |
-| `kokoro-8bit` | `mlx-community/Kokoro-82M-8bit` | A smaller Kokoro. |
-| `kokoro-4bit` | `mlx-community/Kokoro-82M-4bit` | The smallest Kokoro. |
-| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | A larger multilingual model with named voices. |
-| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | A smaller Qwen3-TTS. |
+| `kokoro` | `mlx-community/Kokoro-82M-bf16` | It is the default, a small English model with many preset voices. |
+| `kokoro-8bit` | `mlx-community/Kokoro-82M-8bit` | It is a smaller Kokoro. |
+| `kokoro-4bit` | `mlx-community/Kokoro-82M-4bit` | It is the smallest Kokoro. |
+| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | It is a larger multilingual model with named voices. |
+| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | It is a smaller Qwen3-TTS. |
 
 Kokoro also downloads a small English language model from Hugging Face the
 first time it speaks, so a server without internet access needs that
@@ -157,19 +157,19 @@ input that the model reads:
 
 | Alias | Repository and default quant | Dimension | Context | Notes |
 |-------|------------------------------|-----------|---------|-------|
-| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | The default, small, fast and multilingual, about 0.6 GB. |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | A larger model that retrieves better, about 4.3 GB. |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | The best of the family, about 8 GB, with the largest index. |
-| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | A small multilingual encoder from Google, about 0.3 GB. |
+| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF`, Q8_0 | 1024 | 32K | It is the default, a small, fast multilingual model of about 0.6 GB. |
+| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF`, Q8_0 | 2560 | 32K | It retrieves better and takes about 4.3 GB. |
+| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF`, Q8_0 | 4096 | 32K | It retrieves best of the family, takes about 8 GB and makes the largest index. |
+| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF`, Q8_0 | 768 | 2K | It is a small multilingual encoder from Google, about 0.3 GB. |
 
 These are the safetensors encoders, each at its 8-bit default:
 
 | Alias | Repository | Dimension | Context | Notes |
 |-------|------------|-----------|---------|-------|
-| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | A small multilingual model from Google, about 0.3 GB. |
-| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | A multilingual model for long inputs. |
-| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | A widely used English model for long inputs. |
-| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | A multilingual model for long inputs. |
+| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | It is a small multilingual model from Google, about 0.3 GB. |
+| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | It is a multilingual model for long inputs. |
+| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | It is a widely used English model for long inputs. |
+| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | It is a multilingual model for long inputs. |
 
 Choose a GGUF model unless you want one of the encoders for its size or its
 languages. Input longer than a model's context is cut to fit, without an

@@ -135,6 +135,7 @@ training text on purpose, so `bpb after` in `smoke.md`, the student's
 bits per byte with the adapter, must come out below `bpb before`. The run
 passes when the loss on the `[train] it` lines falls and `eval` writes
 both reports. The loss is the figure that training drives down.
+
 `--top-k` and `--max-len` on `cache` shrink the cache for a quick run,
 `--max-len` on `eval` scores the slice in 128-token windows, and
 `--before` also scores the student with the adapter off.
@@ -1076,7 +1077,9 @@ batch of 3 and 5e-5 on the 9B student. On a student of another size,
 start from those values and change one at a time, judged by the
 validation loss. `--seed` fixes the batch order and the adapter's
 initialization, and `--resume` restarts at the exact step from
-`--ckpt-dir`. `--view` repeats to train on several views over one
+`--ckpt-dir`.
+
+`--view` repeats to train on several views over one
 tokenizer pair, aligned with the same chunk settings (`--gamma`,
 `--max-chunk-len`, `--w-mid`). The first view's `--T-dk` and `--tau-alm`
 apply to all of them unless the train flags override them. `train`
@@ -1093,7 +1096,7 @@ and the measurements behind these defaults.
 
 ## Limitations
 
-- The student is a quantized GGUF, such as Q4_K_M or Q6_K, and
+- The student is a GGUF file, such as a Q4_K_M or Q6_K quant, and
   training writes a LoRA adapter for it.
   [Training on the quantized model](lora.md#training-on-the-quantized-model)
   says why. Full-parameter training and MLX checkpoints are library

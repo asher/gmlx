@@ -177,7 +177,7 @@ configure. Streaming works too, and a parsed call ends the stream with
 | Value | Behavior |
 |-------|----------|
 | `none` | Enforced. The tools are stripped before the template runs, so the model cannot emit a call. |
-| `auto` | The default. The model decides. |
+| `auto` | This is the default, and the model decides whether to call a tool. |
 | `required` and named-function forms | Forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call. |
 
 In this loop the server parses the calls, and the client runs them and
@@ -215,27 +215,27 @@ route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
-| `max_completion_tokens` | Honored | Ignored | Ignored | OpenAI's current name for the chat output cap. It wins over `max_tokens` and a profile value. |
-| `n` | Ignored | Ignored | Ignored | Always a single choice. `n > 1` on `/v1/completions` is a 400. |
-| `user` | Ignored | Ignored | Ignored | No per-user accounting. |
+| `max_completion_tokens` | Honored | Ignored | Ignored | It is OpenAI's current name for the chat output cap, and it wins over `max_tokens` and a profile value. |
+| `n` | Ignored | Ignored | Ignored | The server always returns a single choice, and `n > 1` on `/v1/completions` is a 400. |
+| `user` | Ignored | Ignored | Ignored | The server keeps no per-user accounting. |
 | `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
 | `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
-| `metadata` | Ignored | Ignored | Ignored | Accepted for Anthropic compatibility, never read. |
+| `metadata` | Ignored | Ignored | Ignored | The server accepts it for Anthropic compatibility and never reads it. |
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
-| `logit_bias` | Honored | Honored | Honored | Token-id keyed. |
-| `seed` | Honored | Honored | Honored | Per-request sampling seed. |
-| `presence_penalty` | Honored | Honored | Honored | OpenAI semantics. |
-| `frequency_penalty` | Honored | Honored | Honored | OpenAI semantics. |
+| `logit_bias` | Honored | Honored | Honored | Its keys are token ids. |
+| `seed` | Honored | Honored | Honored | It sets the sampling seed for one request. |
+| `presence_penalty` | Honored | Honored | Honored | It follows the OpenAI semantics. |
+| `frequency_penalty` | Honored | Honored | Honored | It follows the OpenAI semantics. |
 | `stream_options` | Honored | Ignored | Ignored | `include_usage` adds the final usage chunk on chat and `/v1/completions`. |
 | `timings_per_token` | Honored | Ignored | Ignored | Streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count, following llama.cpp. |
-| `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`. Unknown types are rejected, as [Structured output](#structured-output) explains. |
-| `logprobs` | Honored | Ignored | Ignored | Chat only. `/v1/completions` never returns logprobs. |
-| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K`, as [Logprobs](#logprobs) explains. |
-| `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions`. Anthropic uses `stop_sequences`. |
-| `stop_sequences` | Ignored | Ignored | Honored | The Anthropic-native spelling. |
-| `chat_template_kwargs` | Honored | Honored | Honored | Extra template variables. The request's values override the profile's. |
-| `profile` | Honored | Honored | Honored | A sampling and system [profile](config.md#profiles) by name. |
-| `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold`. |
+| `response_format` | Honored | Honored | Honored | It takes `json_schema` or `json_object`. Unknown types are rejected, as [Structured output](#structured-output) explains. |
+| `logprobs` | Honored | Ignored | Ignored | Only chat returns logprobs, and `/v1/completions` never does. |
+| `top_logprobs` | Honored | Ignored | Ignored | `TOP_LOGPROBS_K` caps it, as [Logprobs](#logprobs) explains. |
+| `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions` honor it, and Anthropic uses `stop_sequences`. |
+| `stop_sequences` | Ignored | Ignored | Honored | It is the Anthropic spelling of `stop`. |
+| `chat_template_kwargs` | Honored | Honored | Honored | It passes extra template variables, and the request's values override the profile's. |
+| `profile` | Honored | Honored | Honored | It selects a sampling and system [profile](config.md#profiles) by name. |
+| `xtc_probability` | Honored | Honored | Honored | It turns on XTC sampling, together with `xtc_threshold`. |
 
 ### Structured output
 

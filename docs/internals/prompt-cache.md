@@ -17,10 +17,10 @@ kinds, the mlx-lm class of that name.
 
 | Cache shape | Example archs | Tier |
 |-------------|---------------|------|
-| Plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | `block` |
-| Hybrid GDN, recurrent plus KV layers | qwen3.5/3.6 dense and MoE, qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | `ckpt` |
-| Sliding-window attention | gemma3, gemma-4 including E4B and 3n, gpt-oss, SWA llama | `ckpt` |
-| CacheList or pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | `exact` |
+| Plain KV, dense or MoE | llama, qwen2, qwen3, qwen3moe, glm4, glm4moe, deepseek2, phi3, granite, hunyuan-moe, minimax-m2, gemma2 | `block` |
+| Hybrid GDN, recurrent plus KV layers | qwen35, qwen35moe, qwen3next, kimi-k3, nemotron_h_moe, granitehybrid | `ckpt` |
+| Sliding-window attention | gemma3, gemma4, gpt-oss | `ckpt` |
+| CacheList or pure recurrent | falcon-h1, deepseek4 | `exact` |
 | MSA indexer armed | minimax-m3 indexer GGUFs | None, with a logged warning. The indexless GGUF serves through the block tier. |
 
 ## The cache layers

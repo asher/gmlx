@@ -21,8 +21,9 @@ alone.
 
 ## Turning it on
 
-Some GGUF files carry a native prediction head, a small extra layer that
-drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8 models do. Other
+Some GGUF files carry a [native head](glossary.md#native-head), a small
+extra layer that drafts tokens, as the Qwen3.5, Qwen3.6 and Qwen3.8
+models do. Other
 families use a separate drafter GGUF, a companion file such as the gemma-4
 assistant drafter or a DFlash 2 drafter.
 
@@ -113,8 +114,9 @@ layers and add a bigram head, which adjusts each drafted position by the
 token before it, and a confidence head. They pair through `--draft-gguf`
 in the same way, and the loader reports them as `dflash_dspark`. The first
 position drafts too, so a block-7 drafter proposes seven tokens a round.
-The confidence head is off unless `GMLX_DSPARK_CONF` sets a threshold,
-because the exact acceptance keeps the output the same either way.
+The confidence head, which cuts a block short, is off unless
+[`GMLX_DSPARK_CONF`](internals/debug-switches.md) sets a threshold. The
+output is the same either way, because acceptance is exact.
 
 On Bonsai, the Qwen3.8-27B DFlash 2 drafter is faster for most prompts.
 The Bonsai-trained drafters lead only on long code output, and on chat

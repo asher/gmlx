@@ -78,9 +78,9 @@ names the projector and architecture that it found.
 | Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | Vision quality is poor, because the published companion files were converted with a defect. |
 | Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
 | Qwen3.8-Flash-Next | `qwen3vl_merger` with `qwen4exp` | Qwen3.8-Flash-Next | |
-| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | Vision and audio. |
-| gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | Vision and audio. |
-| gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | Vision, and audio when the companion has it. |
+| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | Reads images and audio. |
+| gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | Reads images and audio. |
+| gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | Reads images, and audio when the companion has an audio encoder. |
 | GLM-5.3-Flash | `glm5next` | GLM-5.3-Flash | |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | Larger than RAM on most Macs, so it needs `--stream-experts`. |

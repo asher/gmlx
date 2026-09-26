@@ -57,9 +57,9 @@ describes.
 
 The kvarn scheme accepts head dimensions of 128, 256 and 512 only, so
 layers with a head dimension of 64, as in gpt-oss, use affine quantization
-only. The scheme also declines [MLA](glossary.md#mla) models such as DeepSeek-V4, GLM-5.3
-and Kimi K2 and K3, whose compressed cache affine quantization still
-packs. Turns with images or audio keep an fp16 cache.
+only. The scheme also declines [MLA](glossary.md#mla) models such as
+DeepSeek-V4, GLM-5.3 and Kimi K2 and K3, whose compressed cache affine
+quantization still packs. Turns with images or audio keep an fp16 cache.
 
 ## Choosing a scheme by model
 
@@ -71,7 +71,7 @@ touches. The shape of the cache decides both, as the table shows.
 |---|---|---|---|
 | Full attention on all layers | Llama, Mistral, dense Qwen3 | 4 to 8 GB for an 8B to 32B model. | `--kv-bits 8`, or kvarn at 6 for the same quality in less memory. Use kvarn at 4 when memory is the limit. |
 | Recurrent hybrid, one attention layer in four | Qwen3.5, Qwen3.6, Qwen3.8 | About 2 GB at 27B, plus a fixed recurrent state. | Quantize only when the context is the limit, at 64K and up. The quality cost is small, since three layers in four never quantize. |
-| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | A small saving, since only the global layers quantize. |
+| Sliding-window mix | gemma-4 | The window layers stop growing at the window. | Either scheme, for a small saving, since only the global layers quantize. |
 | MLA latent | DeepSeek-V4, GLM-5.3, Kimi K2 and K3 | Already compressed by the architecture. | Affine only. |
 | Head dimension 64 | gpt-oss | Small for each token. | Affine only. |
 
@@ -95,8 +95,8 @@ and quality, and affine for the most speed on such a model.
 A quantized cache lowers the share of accepted drafts in
 [speculative decoding](speculative-decoding.md). Under affine
 quantization, a speculative model quantizes only while it serves one
-request. Under kvarn, it stays quantized at any batch size. In a shared
-batch, a drafter with a block wider than four drafts three tokens a round,
-and a request that has shared a batch keeps that limit until it ends.
+request. Under kvarn, it stays quantized at any batch size, and a batch
+verifies at most four tokens a row. A drafter with a wider block then
+drafts three tokens a round, and keeps that limit while the batch lives.
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) lists the
 drafters that stop speculating in any batch.

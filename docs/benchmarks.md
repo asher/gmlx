@@ -6,8 +6,8 @@ faster on every model at every measured depth. Above a depth of about 4K
 tokens its decoding is faster too, and the gap grows as the context
 deepens.
 
-Speculative decoding is measured where the model has a native head or a
-companion drafter. The measurements behind the guidance of the
+Speculative decoding is measured where the model has a
+[native head](glossary.md#native-head) or a companion drafter. The measurements behind the guidance of the
 performance pages are under [Serving measurements](#serving-measurements)
 and [KV cache fidelity](#kv-cache-fidelity). The data behind the charts is
 in [a JSON file](benchmarks.json), and the
@@ -42,9 +42,8 @@ decoding on the same server, for each model, against the context depth.
 ## Methodology
 
 Every number in the per-model tables is server throughput for one
-request at a time. Both
-engines ran the same GGUF weights, sampler settings and chat prompts on
-the setup in this table.
+request at a time. Both engines ran the same GGUF weights, sampler
+settings and chat prompts on the setup in this table.
 
 | Item | Setting |
 |---|---|
@@ -80,13 +79,13 @@ one by one.
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|
-| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
-| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | Native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | Drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gemma-4-E4B-it Q6_K | `gemma-4-E4B-it-Q6_K.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gemma-4-E2B-it UD-Q6_K_XL | `gemma-4-E2B-it-UD-Q6_K_XL.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | gpt-oss-120b MXFP4 | `gpt-oss-120b-heretic-v2-MXFP4.gguf` | [HF](https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
@@ -95,7 +94,7 @@ one by one.
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
 | DeepSeek-V4.1-Flash Q2 | `DeepSeek-V4.1-Flash-Q2.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4.1-flash-gguf) | - | gmlx 0.4.13+ds41 / kq 0.4.11 | 2026-09-18 |
-| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
+| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | Native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
 
@@ -390,7 +389,7 @@ generated positions whose most likely token matches the fp16 cache.
 <!-- kld-tables -->
 ### Qwen3.5-9B Q4_K_M at 16K
 
-Head dimension 256, with 7 of 32 layers quantized.
+The model has a head dimension of 256, and 7 of its 32 layers quantize.
 
 | Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
@@ -409,7 +408,7 @@ Head dimension 256, with 7 of 32 layers quantized.
 
 ### Qwen3.8-27B Q6_K_XL at 16K
 
-Head dimension 256, with 15 of 65 layers quantized.
+The model has a head dimension of 256, and 15 of its 65 layers quantize.
 
 | Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
@@ -428,7 +427,7 @@ Head dimension 256, with 15 of 65 layers quantized.
 
 ### Qwen3.8-27B Q6_K_XL at 32K
 
-The same model and layers at twice the context.
+This run uses the same model and layers at twice the context.
 
 | Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
@@ -441,7 +440,7 @@ The same model and layers at twice the context.
 
 ### Nemotron-3.5-Lightning-30B-A3B at 16K
 
-A Mamba2 hybrid with head dimension 128.
+This Mamba2 hybrid has a head dimension of 128.
 
 | Cache | Prefill median | Decode median | Decode p99 | Decode top-1 |
 |---|---|---|---|---|
