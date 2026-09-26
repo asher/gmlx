@@ -831,8 +831,9 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Cap the request context budget at N tokens "
                          "(`load.max_kv_size`).")
     kv.add_argument("--quantized-kv-start", type=int, default=None, metavar="N",
-                    help="Tokens kept unquantized at the start of the cache, not "
-                         "applied under kvarn (`load.quantized_kv_start`).")
+                    help="Keep the KV cache fp16 until it holds N tokens, "
+                         "default 0; not applied under kvarn or to batches "
+                         "(`load.quantized_kv_start`).")
     sg = ap.add_argument_group(
         "Sampling defaults of a single positional model",
         "Used when a request omits the field; a request that sends it wins. "

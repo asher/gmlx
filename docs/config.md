@@ -649,8 +649,7 @@ a multiple of 128. The default is `1024`.
 
 The cache stays fp16 until it holds this many tokens, and then all of it
 is quantized. Batched requests and `kvarn` quantize from the first token.
-The default is `5000` on the server and `0` for `gmlx run` and
-`gmlx chat`.
+The default is `0`.
 
 ### `load.max_kv_size`
 

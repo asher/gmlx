@@ -161,7 +161,7 @@ things are per-model keys under [models](config.md#models):
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | Pick affine or [kvarn](glossary.md#kvarn) quantization. Under kvarn `--kv-bits` defaults to 6. |
 | `--kv-tail-tokens N` | `1024` | Under kvarn, keep this many newest tokens fp16, a multiple of 128. |
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
-| `--quantized-kv-start N` | `5000`, or `0` under kvarn | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. Batches and kvarn quantize from the first token. |
+| `--quantized-kv-start N` | `0` | Keep the cache in fp16 until it holds this many tokens, then quantize all of it. Batches and kvarn quantize from the first token. |
 
 The KV flags are the [`load` keys](config.md#model-loading) of the config.
 `--kv-quant-scheme kvarn` on a positional model is the same as

@@ -199,21 +199,23 @@ def resolve_for_load(rg, model_id: str):
                                        off_policy("batched")), model_id)
         return None
 
+    # Per-model load key: upstream froze rg.quantized_kv_start from the
+    # process env at server start, with its own 5000 default, so the window
+    # is the truth. Unset means 0, as on run and chat.
     start_env = os.environ.get("QUANTIZED_KV_START")
+    start = 0
     if start_env not in (None, ""):
-        # Per-model load key: upstream froze rg.quantized_kv_start from
-        # the process env at server start, so the window is the truth.
         try:
             start = int(start_env)
         except ValueError:
             raise KvPolicyError(
                 f"[kv] {model_id}: QUANTIZED_KV_START={start_env!r} is not "
                 "an integer")
-        try:
-            rg.quantized_kv_start = start
-        except Exception:
-            _log.warning("[kv] cannot set quantized_kv_start on the "
-                         "generator", exc_info=True)
+    try:
+        rg.quantized_kv_start = start
+    except Exception:
+        _log.warning("[kv] cannot set quantized_kv_start on the "
+                     "generator", exc_info=True)
     mtp = bool(getattr(rg, "draft_model_path", None)
                or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
@@ -241,11 +243,6 @@ def resolve_for_load(rg, model_id: str):
             key_bits=getattr(rg, "kv_key_bits", None),
             value_bits=getattr(rg, "kv_value_bits", None),
             tail_tokens=_serve_tail_tokens(model_id)))
-        # rg carries upstream's 5000 default, which affine honors and
-        # kvarn never can; only an explicit request is worth a "not
-        # honored" note on the line.
-        kw["quantized_kv_start"] = int(
-            os.environ.get("QUANTIZED_KV_START") or 0)
     decline = _mla_decline(rg.model)
     if decline is not None:
         kw.update(can_quantize_kv=False, no_kv_reason=decline)

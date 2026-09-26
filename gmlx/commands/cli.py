@@ -491,8 +491,8 @@ def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         metavar="N",
-        help="Token position from which the KV cache is "
-        "quantized (default 0 = from the start).",
+        help="Keep the KV cache fp16 until it holds N tokens, then "
+        "quantize all of it (default 0 = from the start).",
     )
     ap.add_argument(
         "--prefill-step-size",

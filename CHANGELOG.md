@@ -54,6 +54,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   idle timeout or under memory pressure like any other model.
 - Every pinned model loads at start, in file order, instead of only the
   first one.
+- The server quantizes the KV cache from the first token by default, as
+  `gmlx run` and `gmlx chat` do. A single request kept an fp16 cache up to
+  5000 tokens unless `quantized_kv_start` was set.
 - `gmlx chat` with `--base-url`, `--host`, `--port`, `--api-key` or
   `--no-start` runs as a server client, as `--server` does, instead of
   refusing the flag.
