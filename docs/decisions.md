@@ -390,8 +390,10 @@ raising it samples less often. Without `"auto"`, the server ignores
 
 A question without one right answer, such as the tone of a message, often
 stays unsure after a thought, so `"auto"` suits questions that need
-recalled facts. How the samples share a decoder pass, and what each setting
-costs, is in [Structured reads](internals/structured-reads.md#samples).
+recalled facts. How the samples share a decoder pass is in
+[Structured reads](internals/structured-reads.md#samples), and
+[Structured read measurements](internals/structured-read-measurements.md)
+gives what each setting costs.
 
 ## When answers go wrong
 

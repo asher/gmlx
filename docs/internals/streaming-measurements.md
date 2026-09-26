@@ -1,8 +1,9 @@
 # Streaming measurements
 
-The samples and case studies behind [Models larger than
-memory](../streaming.md) show what the lossless over-budget path produces,
-what each lossy setting did on four models, and how a setting is certified.
+The samples and case studies behind
+[Models larger than memory](../streaming.md) show what the lossless
+over-budget path produces, what each lossy setting did on four models, and
+how a setting is certified.
 
 - [What the over-budget case produces](#what-the-over-budget-case-produces)
 - [Hy3](#hy3)
@@ -21,29 +22,29 @@ what each lossy setting did on four models, and how a setting is certified.
 
 Two single samples came from Kimi-K3, a 2.8T-parameter MoE, generated on an
 M5 Max MacBook Pro with 128 GB. Both used `--stream-experts` at streaming
-defaults, on the lossless path. The prompt is the one-shot canvas-animation
-prompt that the lossy-setting comparisons also use. Each screenshot links to
-the generated page, committed beside it in `docs/assets/perf/`. GitHub
-shows a page's source, so download one to watch the animation.
+defaults, on the lossless path. The prompt is the one-shot
+canvas-animation prompt that the lossy-setting comparisons also use. Each
+screenshot links to the generated page, committed beside it in
+`docs/assets/perf/`. GitHub shows a page's source, so download one to
+watch the animation.
 
 | | |
 |---|---|
 | <a href="../assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="../assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: sunset scene, red coupe with a headlight beam under power lines, the sun low between hills"></a><br>UD-IQ2_XXS, 662 GB file. One generation of 30.8k tokens, thinking included, at 1.34 tok/s and temperature 1.0. | <a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>UD-Q2_K_XL, 861 GB file, of which 799 GB of experts stay file-backed. One generation of 23.7k tokens, thinking included, at 1.15 tok/s and temperature 1.0. |
 
-Both pages ran as generated, and the larger quant also added scroll and
-drag controls for the cruising pace that the prompt never asked for. The
-samples show scale. A model five to seven times the machine's RAM
-sustained coherent single-file programs of 24k to 31k tokens at 1.15 to
-1.34 tok/s.
+Both pages ran as generated. A model five to seven times the machine's
+RAM sustained coherent single-file programs of 24k to 31k tokens at
+1.15 to 1.34 tok/s.
 
 ## Hy3
 
 Hy3 is the flat-router end of the range. It is a 299B-A21B MoE, streamed as
 a 159 GB IQ4_XS file on a 128 GB machine with the decode arena at about a
-92% hit rate. Decode-only tok/s come from alternated A/B rounds of 512-token
-generations. Quality was scored at temperature 0.6 and top-p 0.95 on a
-12-task goal battery of JSON extraction, constrained format, code with
-asserts, multi-step arithmetic and length control, plus a repetition check.
+92% hit rate. Decode-only tok/s come from alternated A/B rounds of
+512-token generations. Quality was scored at temperature 0.6 and top-p
+0.95 on a 12-task goal battery of JSON extraction, constrained format,
+code with asserts, multi-step arithmetic and length control, plus a
+repetition check.
 
 | Setting | Decode | Quality |
 |---|---|---|
@@ -53,41 +54,26 @@ asserts, multi-step arithmetic and length control, plus a repetition check.
 | The pair softened to 0.07 / 0.93 | +2-4% | Clean |
 | `moe_expert_mass: 0.90` | ~0%, alone or stacked | Clean |
 
-Those are sustained-regime medians. A rested 14-inch machine ran the same
-arms faster for its first twenty minutes, with the baseline at 5.0 tok/s
-and the pair at 5.6 or better, until the chassis throttled, as
-[Measuring](../performance.md#measuring) describes.
+Those are sustained-regime medians. A rested machine ran the same arms
+faster until the chassis throttled, as
+[Measuring](../performance.md#measuring) describes. At 0.93, miss-shed
+sheds only a third of the experts it sheds at 0.90, so the softened pair
+gained a few percent where the full pair gained 13%.
 
-Softening the pair keeps its quality margin but loses most of its speed.
-Miss-shed's speedup falls steeply as P rises. At 0.93 it sheds only a third
-of the experts it sheds at 0.90, and the softened pair gained a few percent
-where the full pair gained +13.
-
-Near these values the quality boundary is real. In single long-generation
-checks at the model card's temperature of 0.9, the pair at 0.09/0.91
-emitted a stray token into code even under top-p 0.97, while 0.07/0.93 ran
-clean. At that temperature the safe setting on this model is the softened
-pair and its few percent, and workloads that can run lower-temperature
-sampling, or accept an occasional stray token, get the larger speedups.
-
-That ordering is specific to this model. With a flat router, expert-mass
-had no low-mass experts to drop, and at a 92% hit rate misses were rare
-enough that the per-layer overhead was the constant cost, so layer-shed
-gained more. The two shed settings combined because they cut disjoint
-costs, and +8% and +4% multiply to roughly the observed +13%. On a
-concentrated-router model with a high hit rate, the probe shows the reverse
-before any lossy run is needed. There it removes most reads for a few
-percent of mass.
+At the model card's temperature of 0.9, the pair at 0.09/0.91
+emitted a stray token into code even under top-p 0.97, while 0.07/0.93
+ran clean. With a flat router, expert-mass had no low-mass experts to
+drop, and at a 92% hit rate the per-layer overhead was the constant cost,
+so layer-shed gained more. The two shed settings cut disjoint costs, so
+their gains multiply.
 
 ## MiniMax-M3
 
 MiniMax-M3 is the low-hit-rate end of the range. It is a 4-of-128-expert
 MoE, streamed as a 264 GB Q4_K_M file on the same 128 GB machine with the
-decode arena at about an 87% hit rate. The runs used the same alternated A/B
-rounds as Hy3, with decode-only medians over 512-token generations. A layer
-stalls when any one of its four routed experts misses, so at 87% per-expert
-residency about 43% of all token-layer calls stall, and the miss-targeted
-setting gains more.
+decode arena at about an 87% hit rate, measured the same way as Hy3. A
+layer stalls when any one of its four routed experts misses, so about 43%
+of all token-layer calls stall.
 
 | Setting | Decode | Disk stall time |
 |---|---|---|
@@ -95,61 +81,43 @@ setting gains more.
 | `moe_miss_shed: 0.80` | +6.5% | -31% |
 | `moe_expert_mass: 0.85` | ~-3% | -9% |
 
-The probe put this router in the middle of the concentration range, where
-P=0.85 keeps 3.7 of 4 experts on decode for 4% dropped mass. Expert-mass
-did remove reads, but most of the reads it removed were arena hits that
-cost nothing, so its router-side filtering cost more than the stalls it
-saved. Miss-shed drops mass only where a stall is otherwise certain, so
-its realized cost sits far below the probe's unconditional number. At
-P=0.80 the probe predicts 12% dropped mass, while the residency-aware shed
-dropped 2.9%, shedding 8% of routed experts across a third of token-layer
-calls.
-
-Two 10k-token generations at temperature 0.6 and top-p 0.95 ran clean,
-producing complete working artifacts with no stray tokens. The probe sizes
-expert-mass but does not account for residency, so when the exit stats show
-a low hit rate, try miss-shed first.
+Expert-mass removed reads, but most of them were arena hits that cost
+nothing, so its router-side filtering cost more than the stalls it saved.
+Miss-shed drops mass only where a stall is otherwise certain. At P=0.80
+the probe predicts 12% dropped mass, while the residency-aware shed
+dropped 2.9%. Two 10k-token generations at temperature 0.6 and top-p 0.95
+ran clean.
 
 ## GLM-5.2
 
 GLM-5.2 changes the routing width. It is a 282 GB UD-IQ3_XXS file with 256
-experts routed top-8 under sigmoid gating. On the same machine it streams at
-a per-expert hit rate near 88%, higher than MiniMax-M3's, yet it stalls more. A
-layer stalls when any of eight routed experts misses rather than four. At
-hit rate h the stall odds are `1 - h^k`, so at h = 0.88 they rise from 40%
-with four experts to 64% with eight.
+experts routed top-8 under sigmoid gating. On the same machine it streams
+at a per-expert hit rate near 88%, higher than MiniMax-M3, yet it stalls
+more, because a layer stalls when any of eight routed experts misses. At
+that hit rate the stall odds rise from 40% with four experts to 64% with
+eight.
 
-That amplification works in both directions. Each point of hit rate that
-miss-shed recovers removes more stalls than it would with four experts, so
-the same setting measured stronger here. It gained 16.5% decode at P=0.80 with stalls halved,
-and 10.7% at P=0.85, both as even-round alternated 512-token medians. Arena
-size, flat on MiniMax-M3, mattered too, with each arena GB adding about 0.2 points
-of hit rate.
+Each point of hit rate that miss-shed recovers therefore removes more
+stalls. It gained 16.5% decode at P=0.80 with stalls halved, and 10.7% at
+P=0.85, both as alternated 512-token medians. Each GB of arena added about
+0.2 points of hit rate.
 
-Wider routing also concentrates more meaning in each expert, which moved
-the quality threshold. P=0.80, clean on MiniMax-M3, broke GLM-5.2 in a way
-that character scans cannot detect. A 12k-token one-page-app generation
-completed with no stray tokens, valid markup and working code. The page it
-drew was missing its subject, though, showing a sky with no road and no car
-on a prompt asking for a car on a road. The lossless run at the same seed drew
-the full scene, and so did P=0.85. Dropped gate mass degraded the content
-before the form, and a different routing width moved the threshold. That is
-why [Certifying a setting](#certifying-a-setting) renders the artifact and
-re-gates after a routing change.
+Wider routing also moved the quality threshold. At P=0.80, which was
+clean on MiniMax-M3, a 12k-token one-page-app generation completed with
+valid markup and working code, but the page showed a sky with no road and
+no car on a prompt that asked for a car on a road. The lossless run at the
+same seed drew the full scene, and so did P=0.85.
 
 ## Kimi-K3
 
-The most over-budget point reruns the Kimi-K3 scale sample with the
-settings on. Kimi-K3 UD-Q2_K_XL is 861 GB on the same 128 GB
-machine, with 896 experts routed 16 to a token across 92 streamed expert
-layers. This far over budget, the arena holds a small fraction of the
-expert set and the lossless hit rate is about 50%. Demand stalls take about
-two thirds of decode wall time, so the miss-targeted setting gains by far
-the most. Each shed arm pairs it with keeper prestage through
-`--moe-prestage keepers`. Every setting ran one long generation on the same
-one-shot prompt as the scale samples, at temperature 1.0, for 23-30k tokens
-with thinking included. The figures are whole-run averages rather than
-alternated A/Bs.
+Kimi-K3 UD-Q2_K_XL is 861 GB on the same 128 GB machine, with 896 experts
+routed 16 to a token across 92 streamed expert layers. The arena holds a
+small fraction of the expert set, the lossless hit rate is about 50%, and
+demand stalls take about two thirds of decode wall time. Each shed arm
+pairs miss-shed with `--moe-prestage keepers`. Every setting ran one long
+generation on the same one-shot prompt as the scale samples, at
+temperature 1.0, for 23k to 30k tokens with thinking included. The figures
+are whole-run averages, not alternated A/Bs.
 
 | Setting | Dropped mass | Hit rate | Decode |
 |---|---|---|---|
@@ -158,32 +126,19 @@ alternated A/Bs.
 | `moe_miss_shed: 0.70` | 26.1% | 71.9% | 1.33 tok/s (+16%) |
 | `moe_miss_shed: 0.65` | 30.4% | 74.2% | 1.39 tok/s (+21%) |
 
-The runs span several days, and ambient memory pressure sized the wired
-arena differently across them, from 29 to 33 GB, so read the
-mechanism columns as a trend and not as a controlled sweep. Two results are
-still clear. Shedding raised the hit rate of the remaining experts, because
-the arena stops loading and evicting experts that would be dropped anyway,
-which is the self-reinforcement miss-shed relies on. The speedup for each
-step is also non-linear, as on the other models. Going from lossless to
-0.80 gained little in this sample, while 0.70 and 0.65 returned +16% and
-+21%.
-
-All three shed levels produced complete working pages on this long-form
-prompt, and what separates them is content drift, compared side by side
-under [Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3).
-One step further down broke the form of the output as well as its content.
-At 0.60, a code generation on this model produced a program that did not
-work in one try. The usable range on this model at this quant is therefore
-0.65 to 0.80, and where to sit within it depends on how much content
-fidelity the workload can lose.
+Memory pressure sized the wired arena from 29 to 33 GB across the runs,
+so read the columns as a trend. Shedding raised the hit rate of the
+remaining experts, because the arena stops loading experts that would be
+dropped anyway. All three shed levels produced complete working pages, as
+[Four shed levels on Kimi-K3](#four-shed-levels-on-kimi-k3) shows. At
+0.60, a code generation produced a program that did not work.
 
 ## DeepSeek-V4.1-Flash engram tables
 
-The engram tier is the first case of more than one streamable table, and of
-a table read 24 rows deep per token. The figures come from the Q2_K
-file (7 shards, 246 GiB) on an M3 Max with 128 GB, gathering from the
-layer-1 table of 384,006,168 rows at 84 bytes, 30.04 GiB in all. A row of
-84 bytes does not divide a 16 KiB page, so a row can span two pages.
+The engram tier is the first case of more than one streamable table, and
+of a table read 24 rows deep per token. The figures come from the Q2_K
+file, 246 GiB in 7 shards, on an M3 Max with 128 GB, gathering from the
+layer-1 table of 384,006,168 rows at 84 bytes, 30.04 GiB in all.
 
 | Case | Page cache | Result |
 |---|---|---|
@@ -194,39 +149,14 @@ layer-1 table of 384,006,168 rows at 84 bytes, 30.04 GiB in all. A row of
 | The same as plain, with a concurrent F_NOCACHE reader at 15.8 GiB/s | Cold | 0.02 s, 6.1M rows/s |
 
 The gather is not the bottleneck at either width, so the tier needs no
-prefill prefetch. Touching the pages ahead costs 300 times what it saves,
-because 98,304 rows reach 96,250 distinct pages and the touch pays a fault
-for each one that the gather would have paid anyway. Ring-bandwidth
-contention from another reader costs nothing measurable, so the tables and
-the expert ring need no I/O arbitration between them.
+prefill prefetch, and the tables and the expert ring need no I/O
+arbitration. Crediting both tables as off-disk lets the planner give the
+arena 75.5 GB, 38% of the experts. Without the credit, it prices the
+tables as every-token weights and the arena falls to 11 GB.
 
-Crediting both tables as off-disk gives this fit plan.
-
-```text
-  streaming: every-token weights 3.2 GB, streamed tables 64.5 GB, routed experts 196.8 GB (40 layers, 384 experts, 6 per token), prefill ring 9.8 GB
-    this Mac: 128 GB RAM, ceiling 109.7 GB, KV room 11.6 GB at 32768 tokens, host floor 9.6 GB
-    => decode arena 75.5 GB (38% of the experts); a cold token reads about 3.1 GB of experts
-```
-
-Without the credit the planner prices the tables as every-token weights and
-the arena falls to 11 GB, about 6% of the experts.
-
-How the tables reach Metal decides whether that arena exists. mlx-kquant
-wraps a tensor's window of the mapped file in a Metal buffer. A window
-built as a 1-D array holds at most INT32_MAX elements, since `mx::Shape`
-dims are int32, and its dtype can widen only to a width that the row byte
-count divides. For 84-byte rows that width is 4 bytes and the 1-D ceiling
-is 8.6 GB, so a reader limited to 1-D windows copies each 30 GiB engram
-table into dirty, partly swapped Metal memory instead. `vmmap -summary`
-shows the two copies as 60.1 GiB of `IOAccelerator`. The reclaimable-RAM
-snapshot at install then reads about 45 GB and clamps the arena to 13 GB,
-and the governor sheds it toward 3 GB.
-
-The reader gives the window a second dimension when no width fits, and the
-tensor becomes a whole-row slice of it. The GGUF data section is not
-page-aligned, so the window base also walks back page by page until it
-lands on a row boundary. Loading one tensor per file alone, with a copied
-table and then with a 2-D window, gives these figures.
+A table past the size of a 1-D Metal window was once copied into Metal
+memory instead of mapped. mlx-kquant now gives such a window a second
+dimension. Loading one tensor per file alone gives these figures.
 
 | | Copied | 2-D window |
 |---|---|---|
@@ -235,95 +165,47 @@ table and then with a 2-D window, gives these figures.
 | Q2_K table, resident mapped file | 30.0 GiB | 528 KiB |
 | q8_0 geometry, `IOAccelerator` | 17.7 GiB | 64 KiB |
 
-Gathered rows match `pread` at the first, the last and two interior rows in
-every case. The q8_0 row is a 19.0 GB tensor of 272-byte rows, the shape a
-q8_0 build of the same table carries. 272 divides by 8, so its 1-D ceiling
-is the widest one, 17.2 GB, and the tensor is still past it. A load line
-names the reclaimable-RAM clamp whenever it binds, and on this file with
-2-D windows it does not bind.
-
-The whole model then ran as follows on the same M3 Max with 128 GB and
-`--stream-experts` at streaming defaults.
+The whole model ran as follows on the same machine with `--stream-experts`
+at streaming defaults.
 
 | | 120 tokens, tables copied | 200 tokens, tables copied | 120 tokens, 2-D windows |
 |---|---|---|---|
 | Decode | 2.03 tok/s | 2.07 tok/s | 5.97 tok/s |
 | Prefill | 2.11 tok/s | 2.24 tok/s | 3.28 tok/s |
 | Arena | 13 GB, shed to 3 | 13 GB, shed to 3 | 75.3 GB, no shed |
-| Arena hit rate | 42.5% | 44.4% | n/a |
-| Expert bytes read per token | 2.6 GB | 2.6 GB | n/a |
-| Demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s | n/a |
+| Arena hit rate | 42.5% | 44.4% | Not recorded. |
+| Expert bytes read per token | 2.6 GB | 2.6 GB | Not recorded. |
+| Demand-read stalls | 34.2 s of 77 s | 50.5 s of 113 s | Not recorded. |
 
-`GMLX_DECODE_PHASE_STATS=1` printed this per-token split at 120 tokens,
-with copied tables first and then with 2-D windows.
+The larger arena took the disk stalls from 210 ms per token to 33 ms, in
+the phase split that `GMLX_DECODE_PHASE_STATS=1` prints. The GPU sync time
+also halved, because a decode that does not wait on the SSD keeps the GPU
+off its clock floor.
 
-```text
-[phase] decode per-token ms over 120 tokens: total 495.6 | ev 3.8 la 237.8 stage_wait 210.0 stage_book 41.3 prestage 4.1 build 2.2 | resid -3.6
-[phase] la split: build 0.4 | sync 234.2 | post 3.2
-
-[phase] decode per-token ms over 120 tokens: total 176.2 | ev 5.8 la 117.3 stage_wait 33.1 stage_book 12.2 prestage 0.7 build 1.1 | resid 6.0
-[phase] la split: build 0.3 | sync 115.5 | post 1.5
-```
-
-A 75 GB arena takes the disk stalls from 210 ms per token to 33 ms. The GPU
-sync bucket also halves, because a decode that does not wait on the SSD keeps
-the GPU off its clock floor. The every-token graph is still about two thirds
-of the per-token time.
-
-### The every-token graph of one V4.1 block
-
-An ablation measured these costs on a real-width block at decode width,
-with the GPU at full clocks and the hyper-connections on the ops route. The
-block has hidden size 5120, 64 heads of 512 and hc_mult 4, with 8 float
-experts standing in for the 384 streamed ones.
-
-| Component | ms per block | ms per token over 40 layers |
-|---|---|---|
-| MoE | 2.64 | n/a, the real one streams |
-| Attention | 1.41 | 56 |
-| Hyper-connection mixes, twice | 1.10 | 44 |
-| Hyper-connection collapse, twice | 0.01 | 0.4 |
-
-The mixes figure is a launch cost, not a bandwidth cost. Each `fn` matrix
-is 24 x 20480 in f32, under 2 MB, and the 20 Sinkhorn iterations that
-follow are dozens of dispatches over 4 x 4 arrays. The loader dequantizes
-`fn` to f32, so this measurement carries over to the real model, while the
-attention and MoE figures are float stand-ins for Q2_K weights and
-overstate both.
-
-V4.1 collapses each sublayer with the previous sublayer's pre
-coefficients, so the V4 collapse kernel, which applies the coefficients it
-computes, does not fit as it stands. The fused route keeps the front on
-two dispatches per sublayer. At decode width the first dispatch reduces
-the stream and the mix dots, and from the second sublayer on it also
-applies the previous sublayer's pending expand. The second dispatch runs
-Sinkhorn, the lagged collapse and the sublayer norm. At prefill width the
-front is one GEMM, and the lag collapse and the expand are one kernel
-each. `GMLX_DS41_HC_FUSED=0` restores the ops route.
-
-On the ds4 conversion, `GMLX_DECODE_LAYER_PROFILE=2` measured the two routes
-over 48 greedy tokens after a 16K prompt, with the profile's own syncs
-included.
+`GMLX_DECODE_LAYER_PROFILE=2` measured the two hyper-connection routes on
+the ds4 conversion over 48 greedy tokens after a 16K prompt, with the
+profile's own syncs included.
 
 | Route | Hyper-connections, ms per token | Total ms per token | Decode |
 |---|---|---|---|
 | Ops | 93.6 | 250.1 | 4.58 tok/s |
 | Fused | 19.4 | 162.6 | 6.85 tok/s |
 
-At 64K the fused route's hyper-connections cost 19.0 ms per token, so the
-term does not grow with depth.
+At 64K the fused route spends 19.0 ms per token on hyper-connections, so
+the term does not grow with depth.
 
 ## Settings that passed
 
-Four lossy settings passed the [certification
-procedure](#certifying-a-setting) on the models they were measured on.
+Four lossy settings passed the
+[certification procedure](#certifying-a-setting) on the models they were
+measured on.
 
 | Model | Setting | Quality verdict |
 |-------|---------|-----------------|
 | Hy3 IQ4_XS | `moe_layer_shed: 0.10` with `moe_miss_shed: 0.90` | The pair showed no defects at temperature 0.6. Lower it to 0.07 and 0.93 at the card's temperature of 0.9. |
 | MiniMax-M3 Q4_K_M | `moe_miss_shed: 0.80` | Two 10k-token generations showed no defects. |
 | GLM-5.2 UD-IQ3_XXS | `moe_miss_shed: 0.85` | The setting showed no defects. At 0.80 the model dropped scene content but kept valid form. |
-| Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | Every level produced working pages, with content drift growing as P falls. At 0.60 the code broke. |
+| Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | Every level produced working pages, and one sample per level cannot rank their content drift. At 0.60 the code broke. |
 
 ## Certifying a setting
 
@@ -331,40 +213,36 @@ Quality degrades in a consistent order as the settings become more
 aggressive. On Hy3, multi-step arithmetic broke first, well before
 coherence, formatting or code. `moe_layer_shed: 0.20` alone dropped
 arithmetic tasks, and so did `moe_layer_shed: 0.10` with
-`moe_miss_shed: 0.75`, although each half of that pair is clean alone. On the same
-battery, miss-shed alone stayed clean down to 0.75 and expert-mass down to
-0.70. Past the quality threshold, long generations show a second symptom,
-stray token substitutions such as wrong-script digits or a bullet character
-inside code.
+`moe_miss_shed: 0.75`, although each half of that pair is clean alone.
+Past the quality threshold, long generations also show stray token
+substitutions, such as wrong-script digits or a bullet character inside
+code.
 
 The procedure works on any model.
 
 1. Generate with the lossless path and with the candidate setting on the
    same prompt at the same seed, at the temperature and top-p you deploy
-   with. A check at a lower temperature does not cover a higher one, and
-   untruncated sampling exposes the whole perturbed tail that nucleus
-   truncation hides.
+   with. A check at a lower temperature does not cover a higher one.
 2. Score a short goal battery of JSON extraction, constrained format, code
-   with asserts, multi-step arithmetic, length control and a repetition check.
-   Put chained arithmetic in first if the workload depends on it.
+   with asserts, multi-step arithmetic, length control and a repetition
+   check. Put chained arithmetic first if the workload depends on it.
 3. Generate something long, 10k tokens or more, and scan it for stray
-   tokens. A per-token error rate too small to appear in a short check still
-   accumulates.
+   tokens. A per-token error rate too small to appear in a short check
+   still accumulates.
 4. Render the artifact and compare it with the lossless run. Dropped gate
    mass degrades content before form, so a page can be valid and complete
    with its subject missing.
 5. Leave margin on each stacked setting, since their effects add up against
-   a single quality threshold. Re-gate whenever routing width or gating
-   changes.
+   a single quality threshold. Certify again whenever routing width or
+   gating changes.
 
 ## Four settings on Hy3
 
-The quality loss is easier to see than to score. A one-shot prompt asks for
-a single-file HTML canvas animation of a car driving through parallax
-scenery. It ran once for each setting on the same Hy3 IQ4_XS build, at the
-model card's temperature of 0.9 with low reasoning effort, and each
-generated page was screenshotted. These are single samples at high temperature,
-so read them as an illustration rather than a certification.
+A one-shot prompt asks for a single-file HTML canvas animation of a car
+driving through parallax scenery. It ran once for each setting on the same
+Hy3 IQ4_XS build, at the model card's temperature of 0.9 with low
+reasoning effort. These are single samples at high temperature, so read
+them as an illustration rather than a certification.
 
 <details>
 <summary>The prompt (identical for all four runs)</summary>
@@ -391,66 +269,42 @@ so read them as an illustration rather than a certification.
 | <a href="../assets/perf/lossy-hy3-baseline.html"><img src="../assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"></a><br>Lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <a href="../assets/perf/lossy-hy3-shed-0.07-0.93.html"><img src="../assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"></a><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
 | <a href="../assets/perf/lossy-hy3-shed-0.10-0.90.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <a href="../assets/perf/lossy-hy3-shed-0.20-0.80.html"><img src="../assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"></a><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
 
-The scene simplifies as the settings become more aggressive, well before
-anything breaks, and all of the first three pages ran clean. The black
-frame is the past-the-threshold symptom on a real run. That page failed on
-its first stray token, a bullet character where an operator belonged, with
-CJK characters spliced into two identifiers further down the file.
+The scene simplifies as the settings become more aggressive, and the
+first three pages ran clean. The black page failed on its first stray
+token, a bullet character where an operator belonged. The tok/s figures
+are whole-run averages of single generations at different lengths, so for
+the measured comparison read the [Hy3](#hy3) table.
 
-Sampling interacts with the middle setting as described under [Hy3](#hy3).
-Its page was generated clean at top-p 0.95, while the same setting sampled
-untruncated put one wrong-script token into an 11k-token run. The
-tok/s figures are whole-run averages of these single generations at
-different lengths, not controlled A/B numbers, so for the measured
-comparison read the Hy3 table. Each screenshot links to its generated page.
-
-Lower-temperature sampling can also work to advantage. The full pair was
-rerun once on the same prompt and build at temperature 0.6 and top-p 0.95,
-instead of the model card's 0.9.
+The full pair was also run once on the same prompt and build at
+temperature 0.6 and top-p 0.95.
 
 <a href="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
 
-It ran clean and produced one of the strongest scenes of the whole set,
-from the full pair that needed softening to run clean at temperature 0.9.
-This is a single sample like the others, but on this model it suggests
-keeping the full pair and its whole +13% and lowering the temperature
-slightly.
+It ran clean and drew one of the strongest scenes of the set, which
+suggests keeping the full pair and its 13% at a slightly lower
+temperature on this model.
 
 ## Four shed levels on Kimi-K3
 
-Kimi-K3 repeats the comparison at the most over-budget end of the range.
-Each of the four settings in the [Kimi-K3](#kimi-k3) table ran the same
-prompt once to completion at temperature 1.0. Screenshots link to the
-generated pages as before.
+These are the pages from the four runs in the [Kimi-K3](#kimi-k3) table.
 
 | | |
 |---|---|
 | <a href="../assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="../assets/perf/kimi-k3-ud-q2kxl-car.png" alt="lossless: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>Lossless, ranked prestage. 23.7k tokens at 1.15 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.80.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.80.png" alt="miss-shed 0.80 with keeper prestage: bright daylight scene with green fields, mountains and sun, red car with slightly misdrawn body panels"></a><br>`moe_miss_shed 0.80` + keeper prestage. 24.2k tokens at 1.19 tok/s. |
 | <a href="../assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>`moe_miss_shed 0.70` + keeper prestage. 29.6k tokens at 1.33 tok/s. | <a href="../assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="../assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence and birds, red car with oversized featureless black wheels and a light streak across the body"></a><br>`moe_miss_shed 0.65` + keeper prestage. 28.3k tokens at 1.39 tok/s. |
 
-All four pages ran as generated, with valid markup, a working animation loop
-and no stray tokens. What varies is the scene, and it does not worsen
-steadily as P falls. The lossless page drew the cohesive film-grain dusk. At
-0.80 the scene is clean and bright, but the car body has small geometry
-glitches and the lighting is the flattest of the set. The 0.70 composition
-is complete but the tone mapping overshot, so that page renders far darker
-than its palette intends and the foreground trees reduce to blurred dark
-masses. At 0.65 the sky and landscape are the richest of the four while the
-car is the most damaged subject, with oversized featureless wheels and a
-stray light streak across the body.
-
-Between 0.65 and 0.80 the flaws differ in kind rather than degree, so a
-single sample for each setting cannot rank adjacent levels. It can show that
-all three sit above the threshold that 0.60 fell through. As on GLM-5.2,
-dropped mass degraded what the pages drew long before it corrupted what they
-wrote. Certifying a level means rendering the artifact, and ranking
-neighboring levels takes more samples than one.
+All four pages ran as generated, with valid markup, a working animation
+loop and no stray tokens. What varies is the scene, and it does not worsen
+steadily as P falls. At 0.80 the car body has small geometry glitches, at
+0.70 the page renders far darker than its palette intends, and at 0.65 the
+car is the most damaged subject. The flaws differ in kind rather than
+degree, so a single sample for each setting cannot rank adjacent levels.
 
 ## Lossless setting measurements
 
-These numbers back the table in [The lossless
-settings](../streaming.md#the-lossless-settings). All are alternated A/B
-medians unless noted.
+These numbers back the table in
+[The lossless settings](../streaming.md#the-lossless-settings). All are
+alternated A/B medians unless noted.
 
 | Setting | Model and machine | Without | With |
 |-------|-------------------|---------|------|
@@ -463,32 +317,27 @@ medians unless noted.
 | GPU keep-warm | Hy3 IQ4_XS, layer-shed 0.10 with miss-shed 0.90 | 4.01 tok/s | 5.29 tok/s |
 | Streamable lookup table | `qwen4exp` Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
 
-Lookahead prestage recall of the next layer's actual top-k is about 78% on
-GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the
-previous token's routing, measured with the recall probe in
-[Debug switches](debug-switches.md).
+Lookahead prestage recall of the next layer's actual top-k is about
+78% on GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for
+reusing the previous token's routing.
 
 Keep-warm changes neither stall time nor arena hit rate, since the disk
-does the same work. The gain is clock residency. With the heartbeat alone on
-an idle M5 Max, GPU power rose from 199 mW to 287 mW while active residency
-rose from 58% to 99.8% at the 338 MHz floor. The real cost is holding the
-decode-level clock through the gaps, and it scales with the workload.
-Keep-warm helps a streamed model whose per-token time sits in the eval and
-sync bucket rather than in stalls, in the phase breakdown that
-`GMLX_DECODE_PHASE_STATS` in [Debug switches](debug-switches.md) prints.
+does the same work. The gain is clock residency, so keep-warm helps a
+streamed model whose per-token time sits in the eval and sync bucket
+rather than in stalls.
 
-Weight pinning matters because without it the every-token weights are
-plain file-backed pages, which the kernel evicts between uses on a machine
-at its free-page minimum. Each token then re-faults the whole set, which
-saturates the SSD before the experts read a byte and shows as compute time
-rather than stall time. The symptom is a decode rate close to every-token
-bytes divided by SSD bandwidth, whatever the arena hit rate.
+Without the weight pin, the every-token weights are plain file-backed
+pages, which the kernel evicts between uses on a machine at its free-page
+minimum. Each token then faults the whole set in again, which shows as
+compute time rather than stall time. The symptom is a per-token decode
+time of at least the every-token bytes divided by the SSD bandwidth,
+whatever the arena hit rate.
 
 ## Decode feeder defaults
 
-The decode feeder's defaults rest on these measurements. All are from the
-M3 Max with 128 GB unless the row says otherwise, and each was an A/B on
-the setting alone.
+The decode feeder's defaults rest on these measurements. All are
+from the M3 Max with 128 GB unless the row says otherwise, and each was an
+A/B on the setting alone.
 
 | Default | Measurement |
 |---|---|

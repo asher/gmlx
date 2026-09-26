@@ -7,18 +7,18 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
 
 ## How it works
 
-- [Serving architecture](serving-architecture.md): The path from GGUF bytes to
-  a streamed response, and the scheduling policy gmlx adds to mlx-vlm.
+- [Serving architecture](serving-architecture.md): The path of a request
+  through the server, and the scheduling policy gmlx adds to mlx-vlm.
 - [Speculative batching](speculative-batching.md): How speculative decoding
   and continuous batching run together.
-- [Prompt cache internals](prompt-cache.md): The cache tiers per architecture,
-  reuse counters and switches.
+- [Prompt cache internals](prompt-cache.md): The cache tier of each
+  architecture, the cache layers and the reuse counters.
 - [Structured reads](structured-reads.md): How `/v1/systemone` answers
-  questions with one denoise step, and its parity with the vLLM example.
+  questions from a denoise read, and its parity with the vLLM example.
 - [Hadamard-folded GGUFs](hadamard-fold.md): Weights stored under a Hadamard
-  rotation, the header contract and rotation sharing.
-- [Distillation internals](distill.md): The memory arithmetic of the teacher
-  pass, the training head and the costs of the worked run.
+  rotation, and where gmlx undoes it.
+- [Distillation internals](distill.md): How the teacher pass and the
+  training head bound their memory, and the costs of the worked run.
 
 ## Working on gmlx
 
@@ -29,7 +29,7 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
 - [Upgrading mlx-vlm, mlx-lm and mlx](upstream-upgrades.md): Moving the pinned
   upstream versions.
 - [Debug switches](debug-switches.md): Environment variables for isolating
-  defects.
+  defects, including the prompt cache switches.
 
 ## Measurements
 

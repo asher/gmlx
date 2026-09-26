@@ -1,41 +1,36 @@
 # Upgrading mlx-vlm, mlx-lm and mlx
 
-gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs late-bound
-patches over private upstream symbols, deep-imports model internals, and
-leaves everything between those seams stock. The inventory is the `SEAMS`
-table in `gmlx/upstream/seams.py`, well over a hundred entries, and
+gmlx is a patch layer over stock mlx-vlm and mlx-lm. It installs
+late-bound patches over private upstream symbols, deep-imports model
+internals, and leaves everything between those seams stock. Upstream point
+releases move the symbols, so the patch layer is safe only under a
+qualified set of versions.
+
+## How the versions are held
+
+The `SEAMS` table in `gmlx/upstream/seams.py` lists every seam.
 `python -m gmlx.upstream.seams` prints the seam count when every seam
-matches, and the drift report otherwise. Every seam is fragile by design. Upstream point releases move the
-symbols, so the surface is safe only under a qualified set of versions.
+matches the installed upstream, and the drift report otherwise.
 
-The versions are declared in `pyproject.toml` in three different ways.
-mlx-vlm is an exact pin, `mlx-vlm==X.Y.Z`, because it owns the seams.
-mlx-lm and mlx-kquant carry floors, `mlx-lm>=0.31` and
-`mlx-kquant>=X.Y.Z,<0.5`. mlx is listed with no version there. mlx-kquant
-fixes it, because it pins the exact mlx release its kernels were built
-against, and CI installs that same mlx explicitly. Beyond the declared
-versions, three checks keep an environment inside those bounds.
+`pyproject.toml` pins mlx-vlm exactly, because mlx-vlm owns most seams.
+mlx-lm and mlx-kquant carry floors. mlx has no version there, because
+mlx-kquant pins the exact mlx release that its kernels were built against,
+and CI installs that same mlx. Three checks keep an environment inside
+those bounds:
 
-| Layer | Where | What it does |
+| Check | Where | What it does |
 |-------|-------|--------------|
-| Declared versions | `pyproject.toml` | Holds the exact mlx-vlm pin and the mlx-lm and mlx-kquant floors. |
-| Seam contract | `tests/upstream/test_upstream_seams.py` | Pins every patched symbol to a source fingerprint. Drift fails CI and names the seam. |
-| Runtime gate | `check_upstream_versions`, at CLI entry | Refuses to run with an upgrade message when mlx, mlx-lm or mlx-vlm is below its floor, and warns once above the qualified set. `gmlx doctor` is exempt. |
-| Static-import check | `pyright`, in the macOS CI job | Checks the files in `[tool.pyright].include` against the installed upstream source. A moved symbol or changed signature there fails CI. |
+| Seam contract | `tests/upstream/test_upstream_seams.py` | It pins every patched symbol to a source fingerprint. Drift fails CI and names the seam. |
+| Runtime gate | `check_upstream_versions`, at CLI entry | It refuses to run below a floor and warns once above the qualified set. `gmlx doctor` is exempt. |
+| Static imports | `pyright`, in the macOS CI job | It checks the files in `[tool.pyright].include` against the installed upstream source. |
 
 ## Watching upstream releases
 
-When mlx-vlm publishes a release, run the canary script.
-
-```sh
-scripts/upstream_canary.sh
-```
-
-The script builds a disposable venv with this checkout, lifts only the
-mlx-vlm pin to whatever PyPI serves and runs the seam check. mlx-lm is
-exercised only if that upgrade happens to pull a newer one in. A pass means
-the release is likely a safe bump, still to be qualified by the [bump
-procedure](#bump-procedure), while a failure lists each changed symbol and
+When mlx-vlm publishes a release, run `scripts/upstream_canary.sh`. It
+builds a disposable venv with this checkout, lifts only the mlx-vlm pin to
+the newest release and runs the seam check. A pass means the release is
+likely a safe bump, still to be qualified by the
+[bump procedure](#bump-procedure). A failure lists each changed symbol and
 the gmlx site that uses it.
 
 ## Bump procedure
@@ -48,47 +43,38 @@ the gmlx site that uses it.
    python -m gmlx.upstream.seams   # drift report
    ```
 
-2. Re-audit each drifted seam. Diff the upstream source between the pinned
-   and target versions. `pip download --no-deps` fetches both, then unzip
-   and `diff -r` them. The seam entry's `used_by` names the gmlx site to
-   re-verify. Adjust patches on a branch as needed.
+2. Audit each drifted seam again. Diff the upstream source between the
+   pinned and target versions, which `pip download --no-deps` fetches. The
+   seam's `used_by` field names the gmlx site to verify again.
 
-3. Regenerate fingerprints in a fresh interpreter of the scratch venv, since
-   regen refuses to run once the installers have patched the process.
+3. Regenerate the fingerprints in a fresh interpreter of the scratch venv,
+   since the regeneration refuses to run once the installers have patched
+   the process. It also records the qualified versions for the runtime
+   gate.
 
    ```sh
    python -m gmlx.upstream.seams --regen
    ```
 
-   This also records the qualified versions the runtime gate warns against.
+4. Run the full test suite and the tests marked `integration` in the
+   scratch venv, as [Testing](testing.md) describes.
 
-4. Run the full test suite in the scratch venv.
+5. Run live smoke tests with models on disk. Cover a served MTP model, a
+   warm prompt-cache hit, an MXFP4 model, a DeepSeek-V4 model and one
+   `gmlx talk` turn.
 
-5. Run live smoke tests with models on disk. Serve Qwen3.6-35B-A3B with MTP for
-   prefill and decode, serve gemma-4-12B dense with a warm prompt-cache hit,
-   run gpt-oss-20b MXFP4, serve deepseek-v4 and take one `gmlx talk` turn.
-
-6. Run the gated integration tests. The first needs a native-MTP GGUF on
-   disk, and the second runs whenever the installed mlx-vlm has the qwen3.5
-   language module.
-
-   ```sh
-   KQUANT_TEST_MTP_GGUF=<path> pytest tests/spec/test_full_prompt_prefill.py
-   pytest tests/models/test_qwen35_verify_fold.py
-   ```
-
-7. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
+6. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
    together, as their own commit.
 
 ## Adding a new seam
 
 Any new patch or deep import of upstream internals gets a row in `SEAMS`
-in the same change, then a regen. A seam that correctness or a hard feature
-dependency relies on sets `critical=True`, and its installer must raise
-when the seam is missing, whereas optional accelerations warn once and fall
-back. Either way a patch is idempotent and never silently no-ops when the
+in the same change, then a regeneration. A seam that correctness or a hard
+feature needs sets `critical=True`, and its installer raises when the
+seam is missing. An optional acceleration warns once and falls back.
+Either way, a patch is idempotent and never silently does nothing when the
 upstream surface it expects has changed.
 
-KV-cache classes have two origins since mlx-vlm 0.6.4 vendored its own. The
-rules for isinstance checks and construction are in the docstring of
+KV-cache classes come from both mlx-lm and mlx-vlm. The rules for
+isinstance checks and construction are in the docstring of
 `gmlx/cache/compat.py`.
