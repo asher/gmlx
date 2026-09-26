@@ -83,7 +83,7 @@ per chunk takes effect on a running server.
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it shrinks back within the width cap. |
-| `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, which drafts one token fewer, as `--draft-block-size` does. |
+| `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, as `--draft-block-size` does. A round drafts one token fewer. |
 | `GMLX_MTP_WIDTH_CAP` | Speculate only while at most this many requests decode together, and `0` removes the cap. It overrides `speculative_width_cap` and is read each round. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does, for forced-length benchmarking. |
 

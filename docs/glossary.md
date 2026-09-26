@@ -149,7 +149,7 @@ under [`profiles`](config.md#profiles) in the config.
 ## Keep, pin and idle
 
 A resident model can be pinned, kept or idle. A pinned model is never
-unloaded. A kept model is exempt from the idle timeout but can still be
+unloaded on its own, only by `POST /unload`. A kept model is exempt from the idle timeout but can still be
 unloaded when memory runs short, and `gmlx launch` and voice sessions keep
 their model. An idle model unloads after `ttl_s` seconds without a
 request.
@@ -232,8 +232,8 @@ bits make a smaller file that loses more quality.
 The families are the K-quants, which store weights in blocks with scales,
 the IQ quants, which use codebooks for the smallest files, and the legacy
 `Q4_0` and `Q8_0` types. Newer files also use the 4-bit float types MXFP4
-and NVFP4, and ternary types such as `STQ1_0` and `PQ2_0` that store each
-weight in 2 bits or less.
+and NVFP4, the ternary types `STQ1_0` and `PTQ1_0`, and the 2-bit `PQ2_0`,
+which store each weight in 2 bits or less.
 
 ## Resident
 

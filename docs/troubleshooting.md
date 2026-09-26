@@ -94,8 +94,8 @@ do. `gmlx validate` shows the architecture before you download.
 
 `validate`, `pull` or a load names a tensor type with no kernel, which
 `validate` marks `<- no kernel`. The K-quant, legacy, IQ, MXFP4 and NVFP4
-types all have kernels, as do the ternary `STQ1_0`, `PTQ1_0` and `PQ2_0`
-types. The usual cause is the plain ternary `TQ1_0` or `TQ2_0` type.
+types all have kernels, as do the ternary `STQ1_0` and `PTQ1_0`
+types and the 2-bit `PQ2_0` type. The usual cause is the plain ternary `TQ1_0` or `TQ2_0` type.
 
 Pick another quant from the same repo. `gmlx validate hf:<org>/<repo>`
 lists the files so that you can choose without downloading. A uniform
@@ -307,7 +307,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 
 | Path | Contents |
 |------|----------|
-| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, searched in that order. `gmlx init` writes the second one. |
+| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | `gmlx launch` writes client configs here. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on. |

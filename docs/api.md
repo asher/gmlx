@@ -92,9 +92,8 @@ generation routes are present but cannot serve a GGUF model.
 
 The residency routes act on what
 [Memory and residency](config.md#memory-and-residency) configures.
-`/unload` outranks the hold a preloaded model has for the process lifetime,
-so it unloads too, and until the next reload it is then managed like any
-other model. `/v1/keep` is what `gmlx launch --model` and voice sessions
+`/unload` also unloads a pinned model, which stays pinned when the next
+request loads it again. `/v1/keep` is what `gmlx launch --model` and voice sessions
 call, and a kept model stays LRU-evictable under memory pressure.
 `/v1/reload` returns `{"status": "unsupported"}` outside config mode, as
 [Changing the file](config.md#changing-the-file) explains.
@@ -140,7 +139,7 @@ working set, while `context_ok` judges it against `context_limit`.
 `est_ttft_s` estimates the time to first token. The dry run never loads a
 model, so a model that is not resident answers `resident: false`. A media
 request is rendered but not estimated. `"dry_run": true` on
-`/v1/chat/completions` returns the same estimate through the queue cap.
+`/v1/chat/completions` returns the same estimate instead of generating.
 
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
 table holds `W` streams at `D` tokens each, reading the table conservatively
@@ -217,7 +216,7 @@ route:
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
 | `max_completion_tokens` | Honored | Ignored | Ignored | It is OpenAI's current name for the chat output cap, and it wins over `max_tokens` and a profile value. |
-| `n` | Ignored | Ignored | Ignored | The server always returns a single choice, and `n > 1` on `/v1/completions` is a 400. |
+| `n` | Ignored | Ignored | Ignored | The server always returns a single choice. |
 | `user` | Ignored | Ignored | Ignored | The server keeps no per-user accounting. |
 | `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
 | `tool_choice` | None/auto enforced | Template-dependent | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
@@ -225,8 +224,6 @@ route:
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
 | `logit_bias` | Honored | Honored | Honored | Its keys are token ids. |
 | `seed` | Honored | Honored | Honored | It sets the sampling seed for one request. |
-| `presence_penalty` | Honored | Honored | Honored | It follows the OpenAI semantics. |
-| `frequency_penalty` | Honored | Honored | Honored | It follows the OpenAI semantics. |
 | `stream_options` | Honored | Ignored | Ignored | `include_usage` adds the final usage chunk on chat and `/v1/completions`. |
 | `timings_per_token` | Honored | Ignored | Ignored | Streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count, following llama.cpp. |
 | `response_format` | Honored | Honored | Honored | It takes `json_schema` or `json_object`. Unknown types are rejected, as [Structured output](#structured-output) explains. |
@@ -304,11 +301,9 @@ curl localhost:8080/v1/chat/completions -d '{
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
-The preflight estimates the prompt's KV cache from the model's per-token KV
-size, plus the prefill transient, against the working set with the batch
-drained. `max_tokens` counts only when the request pins it
-explicitly, and media requests are not estimated. The load gate judges a
-model's weights against what is resident and busy and against the
+The preflight uses the same estimate as `POST /v1/estimate`, which
+[Capacity and live-request metrics](#capacity-and-live-request-metrics)
+describes. The load gate judges a model's weights against what is resident and busy and against the
 governor's floor, after waiting up to 3 seconds for memory the kernel is
 still returning from a recent unload. The switch variables, and the decode
 batch width that sets the queue cap, are listed under

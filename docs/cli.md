@@ -55,6 +55,8 @@ gmlx init --models-dir ~/models -r --out ./gmlx.yaml
 gmlx init --from-hf-cache                  # models already in the Hugging Face cache
 ```
 
+These flags control `gmlx init`:
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--models-dir DIR` | Required unless `--from-hf-cache` | Scan this directory. Repeat the flag for more directories. |
@@ -62,14 +64,14 @@ gmlx init --from-hf-cache                  # models already in the Hugging Face 
 | `-r`, `--recursive`, `--no-recursive` | Shallow | Descend into subdirectories. |
 | `--out FILE` | `~/.config/gmlx/gmlx.yaml` | Write the config to this file. |
 | `--force` | Off | Overwrite an existing file. |
-| `-i`, `--interactive` | On a terminal | Run the wizard even with flags, which pre-fill its answers. |
+| `-i`, `--interactive` | On a terminal with no other flags | Run the wizard even with flags, which pre-fill its answers. |
 | `--no-interactive` | Off | Never run the wizard. |
 | `--disk-cache [GB]` | Off | Enable the on-disk prompt cache with this cap for each model, 50 GB when the flag is bare. |
 | `--with-stt [MODEL]` | Off | Configure speech-to-text, with `whisper-turbo` when the flag is bare. |
 | `--with-tts [MODEL]` | Off | Configure text-to-speech, with `kokoro` when the flag is bare. |
 | `--with-embeddings [MODEL]` | Off | Configure embeddings, with `qwen3-embed-0.6b` when the flag is bare. |
 | `--with-rerank [MODEL]` | Off | Configure reranking, with `qwen3-rerank-0.6b` when the flag is bare. |
-| `--install`, `--no-install` | Ask | Install the extras the chosen services need, or never offer to. |
+| `--install`, `--no-install` | Ask in the wizard, else off | Install the extras the chosen services need, or never offer to. |
 | `--default-model ID` | None | A request that omits a model uses this one. |
 | `--port N` | `8080` | Write this port into the config. |
 | `--idle-ttl SECONDS` | `900` | A model unloads after this many idle seconds, and `none` keeps models resident. |
@@ -434,7 +436,7 @@ These flags are multimodal. [Vision and audio](vlm.md) describes them:
 | `--audio PATH_OR_URL` | None | Prepend these comma-separated audio files. The model needs an audio tower. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
-With `--mmproj`, `--stop` and the XTC flags are ignored with a warning,
+Under `--mmproj`, the run ignores `--stop` and the XTC flags with a warning,
 and the bench, report and streaming flags exit with an error.
 
 These flags control speculative decoding, which
@@ -442,9 +444,9 @@ These flags control speculative decoding, which
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--speculative`, `--mtp` | Auto for models with an MTP head | Force speculation on. |
+| `--speculative`, `--mtp` | Auto for an MTP head or a DeepSeek-V4 companion, off under `--stream-experts` | Force speculation on. |
 | `--no-speculative`, `--no-mtp` | Off | Force speculation off. |
-| `--draft-gguf PATH` | Detected sibling | Draft with this separate drafter GGUF, which implies `--speculative`. |
+| `--draft-gguf PATH` | None, or the companion beside a DeepSeek-V4 file | Draft with this separate drafter GGUF, which implies `--speculative`. |
 | `--native-mtp` | Off | Prefer the model's own head when a drafter is also present. |
 | `--draft-block-size N` | Drafter default | Set the block size of each round, which drafts N-1 tokens and checks them in one N-token target pass. |
 | `--stochastic-mtp` | Off | Accept sampled drafts by rejection sampling, which accepts more but is not token-identical. |
@@ -521,7 +523,7 @@ These flags say where the model runs:
 | `--profile NAME` | None | Apply a built-in intent or user profile. |
 | `--no-family-defaults` | Off | Do not apply the family's sampling defaults on a bare path. |
 
-These flags control generation. All of them can be changed during the chat:
+These flags control generation. Slash commands in the chat change the system prompt, the sampling and penalty settings, `--reasoning`, `--thinking` and `--thinking-budget`, and the other flags last for the whole chat:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -561,7 +563,8 @@ the same as they do there:
 | Memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
 | Multimodal | `--mmproj`, `--resize-shape` |
 | Speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
-| Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
+| Streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk` |
+| Streaming feeders | `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm`, `--no-gpu-keepwarm` |
 | Lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
 
 None of them applies when the chat is a server client. A base model with no
@@ -584,6 +587,8 @@ gmlx launch open-webui
 gmlx launch dsh --model qwen3.8-27b-ud-q6
 gmlx launch omp --config-only
 ```
+
+These flags control `gmlx launch`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -632,9 +637,11 @@ gmlx pull hf:org/repo/model.gguf --to ~/models
 gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 ```
 
+These flags control `gmlx pull`:
+
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `refs`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs. Later bare filenames resolve in the first ref's repo. |
+| `REF`, positional | Required | Download these `hf:<org>/<repo>/<file.gguf>[@rev]` references or URLs. Later bare filenames resolve in the first ref's repo. |
 | `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. |
 | `--force` | Off | Download even when the header check or the disk-space check fails. |
@@ -722,8 +729,8 @@ file could not be deleted, and 2 for an unknown id or a missing config.
 `gmlx sync-models` rescans the model directories and updates the `models`
 block to match disk. Existing entries keep their comments and edits, entries
 whose file is gone are dropped, and new files are added, with a sibling
-drafter pairing into the model it serves. Run it after adding files to the
-directory or pulling them.
+drafter pairing into the model it serves. Run it after adding files by hand
+or pulling with `--no-register`.
 
 ```sh
 gmlx sync-models
@@ -774,6 +781,8 @@ gmlx systemone ticket.json --model diffusiongemma-Q4_K_M.gguf
 A yes or no answer prints as its probability, a choice as the chosen
 option with its confidence, and a score as the expected level with its
 confidence. A question skipped by `ask_if` prints `skipped`.
+
+These flags control `gmlx systemone`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -832,7 +841,7 @@ is set.
 | `model`, positional | The server's default model | Talk to this served model, with an optional `@profile`. |
 | `--mode {wake,vad,ptt,text}` | `wake` | Set how a turn starts. |
 | `--once` | Off | Hold one exchange without the wake gate, then exit. |
-| `--wake-word PHRASE` | `hey assistant` | Wake on this phrase, which can be any phrase and needs no training. |
+| `--wake-word PHRASE` | `hey assistant` | Wake on this English phrase, which needs no training. |
 | `--wake-threshold X` | `0.3` | Set the wake sensitivity from 0 to 1. A higher value means fewer false wakes. |
 | `--vad-threshold X` | `0.6` | A frame counts as speech above this probability. |
 | `--vad-silence-ms MS` | `550` | This much trailing silence ends an utterance. |
@@ -864,6 +873,8 @@ does not fit in fp16 can still be fine-tuned. For the walkthrough, read
 gmlx train base-Q8_0.gguf --data ./my-data --adapter-out my-lora.gguf
 gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 ```
+
+These flags control `gmlx train`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -902,7 +913,7 @@ use different tokenizers, and the walkthrough is [Distillation](distill.md).
   likely next tokens and their log-probabilities at every position.
 - `align` maps that cache onto a student tokenizer and writes a view, the
   positions and values the student trains to match.
-- `train` fits a LoRA adapter on a quantized GGUF student against the view.
+- `train` fits a LoRA adapter on a GGUF student against the view.
 - `eval` scores the student with and without the adapter.
 - `census` compares two reply caches of the same replies, one made with a
   context the student never sees, and measures how much that context moves
@@ -960,6 +971,8 @@ writes the block from the rows when the sidecar has none.
 A `--base-url` server that lists several models serves the run with the
 one named like `--teacher`, and gen refuses when none or several match.
 
+These flags control `gmlx distill gen`:
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--out PATH` | Required | Write the corpus jsonl here, with `<out>.gen.json` beside it. |
@@ -1008,16 +1021,16 @@ request to the budget.
 ### distill filter
 
 `filter` runs its checks in a fixed order, and the first failure names the
-reason, one of
-`length`, `budget`, `empty`, `marker`, `repeat`, `ascii`, `tokens` and
-`verify`, each defined in [Round
-one](distill.md#round-one-trains-on-the-teachers-replies) of the guide. The
-checker, the `--verify` command, reads the surviving rows as jsonl on stdin
-and prints one line per row, `ok` or a reason word. `--context` rebuilds
-every kept row with the context on the teacher's side and the prompt as
-given under `student_messages`, which prepares a second round from replies a
-student wrote without it. It refuses a row that already carries
-`student_messages`, since that row was generated with a context.
+reason, one of `length`, `budget`, `empty`, `marker`, `repeat`, `ascii`,
+`tokens` and `verify`, each defined in
+[Round one](distill.md#round-one-trains-on-the-teachers-replies) of the
+guide. `--context` rebuilds every kept row with the context on the teacher's
+side and the prompt as given under `student_messages`, which prepares a
+second round from replies a student wrote without it. It refuses a row that
+already carries `student_messages`, since that row was generated with a
+context.
+
+These flags control `gmlx distill filter`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1033,7 +1046,7 @@ student wrote without it. It refuses a row that already carries
 | `--max-non-ascii F` | Off | Drop replies whose non-ASCII character fraction exceeds this. |
 | `--max-reply-tokens N` | Off | Drop replies longer than this many tokens, reasoning trace included. |
 | `--keep-budget-hit` | Off | Keep replies whose thinking budget cut the reasoning trace. |
-| `--verify CMD` | None | Run this shell command as your checker, which reads the survivors on stdin and prints `ok` or a reason per row. |
+| `--verify CMD` | None | Run this shell command as your checker, which reads the survivors as jsonl on stdin and prints `ok` or a reason word per row. |
 | `--context FILE` | None | Put this text on the teacher's side of every kept row. A blank file is refused. |
 | `--context-format FMT` | `{context}\n\n{prompt}` | Combine the context and the last user turn with this format, which must place both fields. |
 
@@ -1054,6 +1067,8 @@ variables the teacher's template reads. `--frame-kwargs` adds to them,
 and a value that contradicts one is refused. A template that prints the
 date, as Llama 3's and gpt-oss's do, renders the day the cache was first
 started, and a resume and the student's render in `align` keep that day.
+
+These flags control `gmlx distill cache`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1099,6 +1114,8 @@ started, and a resume and the student's render in `align` keep that day.
 `align` maps a teacher cache onto the student's tokenizer and writes the
 view that `train` reads.
 
+These flags control `gmlx distill align`:
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--cache DIR` | Required | Read this cache directory. |
@@ -1109,7 +1126,7 @@ view that `train` reads.
 | `--materialize` | Off | Also write the batch tensors as view shards. |
 | `--max-disk-gb F` | None | Refuse to materialize past this size. |
 | `--force` | Off | Keep a view the own-group check would refuse. |
-| `--val-fraction F` | `0.02` | Hold this fraction of rows, and at least one, for validation, whole documents at a time. A one-document cache holds back its last rows. |
+| `--val-fraction F` | `0.02` | Hold this fraction of rows for validation, whole documents at a time. A cache of two or more rows holds at least one. |
 | `--seed N` | `1` | Seed the validation split. |
 | `--w-mid F` | `0.5` | Weight an intra-word shared boundary by this much. |
 | `--gamma F` | `0.001` | Drop chunks of the chunk term (ALM) whose teacher boundary mass is under this positive value. |
@@ -1123,6 +1140,8 @@ view that `train` reads.
 
 `train` fits the LoRA adapter against one or more views and saves
 checkpoints as it goes.
+
+These flags control `gmlx distill train`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1170,6 +1189,8 @@ without the adapter. Its task files are jsonl. `arc_easy.jsonl` and
 `hellaswag.jsonl` hold `{id, query, choices, gold}` rows, `gsm8k.jsonl`
 holds `{id, question, answer}` rows, and `gsm8k_shots.jsonl` holds the
 worked examples shown before each question.
+
+These flags control `gmlx distill eval`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -1223,6 +1244,8 @@ width than `--without`, and when a reply-think cache records no
 `content_start`, which older caches lack. A `--corpus`
 that names no file, or holds a line that is not a JSON object, exits 2 as
 well.
+
+These flags control `gmlx distill census`:
 
 | Flag | Default | Meaning |
 |------|---------|---------|

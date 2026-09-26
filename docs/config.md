@@ -47,7 +47,7 @@ models:
     speculative: true
 ```
 
-The comment above each model shows the sampling values it starts from,
+Above each model, a comment shows the sampling values it starts from,
 which come from its [family defaults](family-defaults.md) and from the
 GGUF itself. Start the server with `gmlx serve`, which finds the file on
 its own.
@@ -55,11 +55,11 @@ its own.
 
 ## Where gmlx looks
 
-A command that needs the file uses the first of these that exists:
+A command that needs the file uses the first one it finds:
 
-1. `./gmlx.yaml` in the current directory
-2. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes
-3. `~/.gmlx.yaml`
+1. It looks for `./gmlx.yaml` in the current directory first.
+2. It then looks for `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
+3. It looks for `~/.gmlx.yaml` last.
 
 The file in the current directory comes first, so a project can carry its
 own models and settings. Pass `--config FILE` to read a different file.
@@ -74,7 +74,8 @@ YAML and exits without loading a model.
 ## What the file contains
 
 The top level of the file is a YAML mapping of these blocks. Every block
-is optional, and a server needs only `models`.
+is optional, and a server needs models from `models` or from a `discover`
+scan.
 
 | Block | What it does |
 |-------|--------------|
@@ -216,8 +217,9 @@ The default is none.
 
 ### `models.*.pin`
 
-With `true`, the model stays loaded for the life of the server. A pinned
-model loads first at start and never unloads. The default is `false`.
+With `true`, the model loads first at start and stays loaded. Neither the
+idle timeout nor the budget unloads it, only `POST /unload`. The default
+is `false`.
 
 ### `models.*.ttl_s`
 
@@ -359,8 +361,8 @@ one place, a later layer wins over an earlier one:
 | Model overrides | [`models.*.overrides`](#modelsoverrides) sets them. |
 | Request fields | The request body sets them. |
 
-A request's `@name` replaces the model's own profile rather than adding to
-it, and an unknown name gets a 400. A profile's `system` prompt applies
+The `@name` of a request replaces the model's own profile rather than
+adding to it, and an unknown name gets a 400. A profile's `system` prompt applies
 only to a request without a system message. Its `chat_template` applies
 when the model loads, so a request cannot change it. `gmlx profiles <id>`
 prints the sampling values a model resolves to under each of its
@@ -431,8 +433,9 @@ A request's `enable_thinking` wins, then its `thinking` or
 `reasoning_effort` field, then the profile, then the template's default.
 A request's `thinking` also accepts the z.ai form, `{"type": "enabled"}`
 or `{"type": "disabled"}`, whose optional `clear_thinking: false` keeps
-earlier reasoning in the prompt. An entry in `chat_template_kwargs` passes
-through unchanged and wins over this key. `gmlx run` and `gmlx chat` take
+earlier reasoning in the prompt. An entry in the request's
+`chat_template_kwargs` wins over this key, and this key wins over the same
+entry in the profile's own `chat_template_kwargs`. `gmlx run` and `gmlx chat` take
 `--thinking`. The default is the template's own.
 
 ### `profiles.*.reasoning_effort`
@@ -561,7 +564,7 @@ The default is off.
 ### `sampling.xtc_threshold`
 
 XTC removes a candidate whose probability is above this value. The
-default is none.
+default is `0.0`.
 
 ### `sampling.enable_thinking`
 
@@ -874,8 +877,8 @@ default is none.
 
 #### `server.embeddings`
 
-This key names the embeddings model, as a GGUF path, an `hf:` reference
-or an alias. `true` selects the default model. The default is none.
+This key names the embeddings model, as a GGUF path, an `hf:` reference,
+an alias, or the repo id or local folder of an mlx-embeddings model. `true` selects the default model. The default is none.
 
 #### `server.rerank`
 
@@ -891,7 +894,7 @@ memory, because the weights map from the file without a copy.
 
 | State | Set by | When it unloads |
 |-------|--------|-----------------|
-| Pinned | `pin: true`, `--pin` | It never unloads. |
+| Pinned | `pin: true`, `--pin` | It unloads only on `POST /unload`. |
 | Kept | `POST /v1/keep`, `gmlx launch --model`, a talk session | It unloads when the budget is full and it is the least recently used. |
 | Idle | Any request | It unloads after `ttl_s` seconds without a request, or when the budget needs the room. |
 | Preloaded | `server.defaults.preload` | It unloads like an idle model. |
@@ -1383,7 +1386,7 @@ formatting:
 | Command | Change |
 |---------|--------|
 | `gmlx sync-models` | It adds new GGUFs from `model_dirs` and removes the entries whose file is gone. |
-| `gmlx pull` | It downloads a GGUF into the first folder of `model_dirs` and adds its entry. |
+| `gmlx pull` | It adds the entry of each GGUF it downloads. |
 | `gmlx rm` | It deletes the files of a model and its entry. |
 
 Each of them, and `gmlx init`, tells a running server to reload. Pass
@@ -1395,12 +1398,11 @@ answers `/v1/reload` as unsupported.
 ## Flags and environment variables
 
 Some settings can also be set by a `gmlx serve` flag or by an environment
-variable. When a setting has more than one source, the first of these
-wins:
+variable. When a setting has more than one source, this order decides:
 
-1. The `serve` flag
-2. The key in the file
-3. The environment variable
+1. The `serve` flag wins.
+2. The key in the file comes next.
+3. The environment variable comes last.
 
 Two variables are the exception. `GMLX_CACHE_LIMIT_GB` wins over
 `server.cache_limit_gb`, and `GMLX_MTP_WIDTH_CAP` wins over each model's
