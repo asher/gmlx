@@ -273,7 +273,7 @@ class ModelCfg:
     speculative_width_cap: int | None = None
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
-    ttl_s: float | None = None
+    ttl_s: float | None = None      # None => server default; 0 => never
 
 
 @dataclass
@@ -1567,8 +1567,11 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
         overrides=dict(ov),
         pin=bool(raw.get("pin", False)),
-        ttl_s=_coerce_num("ttl_s", raw.get("ttl_s"), float,
-                          where=f"model {model_id!r}"),
+        # An explicit `ttl_s: null` means never unload, as it does in
+        # server.defaults. Only an absent key inherits the server value.
+        ttl_s=(0.0 if "ttl_s" in raw and raw["ttl_s"] is None
+               else _coerce_num("ttl_s", raw.get("ttl_s"), float,
+                                where=f"model {model_id!r}")),
     )
 
 

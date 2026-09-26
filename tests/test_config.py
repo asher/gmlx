@@ -152,6 +152,14 @@ def test_ttl_defaults_to_server_then_model_override():
     assert resolve_model("m-named", cfg).ttl_s == 900     # falls to server default
 
 
+def test_model_ttl_null_means_never_not_inherit():
+    doc = _doc()
+    doc["models"]["m-bare"]["ttl_s"] = None      # explicit null
+    cfg = build_config(doc)
+    assert resolve_model("m-bare", cfg).ttl_s == 0        # never unload
+    assert resolve_model("m-named", cfg).ttl_s == 900     # absent key inherits
+
+
 def test_pin_flag_and_mmproj_passthrough():
     doc = _doc()
     doc["models"]["m-vlm"] = {"path": "/abs/llm.gguf",
