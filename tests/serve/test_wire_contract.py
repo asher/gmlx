@@ -183,6 +183,8 @@ def wire_app():
         "pkg_budget": _PKG._check_configured_context_budget,
         "anthropic_preflight": anthropic_mod._preflight_stream_context_budget,
         "make_sampler": _GEN.ResponseGenerator._make_sampler,
+        "generate_diffusion": _GEN.ResponseGenerator._generate_diffusion,
+        "cpu_preprocess": _GEN.ResponseGenerator._cpu_preprocess,
         "make_tb_criteria": _GEN.ResponseGenerator._make_thinking_budget_criteria,
         "metrics_success": _GEN.ServerMetricsStore.record_success,
         "metrics_failure": _GEN.ServerMetricsStore.record_failure,
@@ -253,6 +255,8 @@ def wire_app():
     anthropic_mod._preflight_stream_context_budget = \
         saved["anthropic_preflight"]
     _GEN.ResponseGenerator._make_sampler = saved["make_sampler"]
+    _GEN.ResponseGenerator._generate_diffusion = saved["generate_diffusion"]
+    _GEN.ResponseGenerator._cpu_preprocess = saved["cpu_preprocess"]
     _GEN.ResponseGenerator._make_thinking_budget_criteria = \
         saved["make_tb_criteria"]
     _GEN.ServerMetricsStore.record_success = saved["metrics_success"]
@@ -849,6 +853,15 @@ def test_profile_sampling_reaches_generation_over_wire(wire):
 #     upstream reshape of the registry names itself here rather than as a
 #     500 deep inside a pooled request (found live: this file's fake loader
 #     called dict-.update() on a registry).
+def test_systemone_over_the_full_patch_set_refuses_a_non_diffusion_model(wire):
+    r = wire.client.post("/v1/systemone", json={
+        "model": MODEL_ID, "state": "the server is down",
+        "questions": {"urgent": {"type": "noul"}}})
+    assert r.status_code == 400, r.text
+    assert "diffusion" in r.json()["error"]["message"]
+    assert wire.gen.calls == []
+
+
 def test_model_cache_registry_supports_residency_reads():
     runtime_mod = importlib.import_module("mlx_vlm.server.runtime")
     registry_cls = getattr(runtime_mod, "ModelCacheRegistry", None)

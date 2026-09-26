@@ -1,7 +1,8 @@
 This license applies only to the files in this repository that carry an
 "SPDX-License-Identifier: MIT" header. All other files are covered by the
-Business Source License 1.1 in LICENSE. MIT files derived from mlx-lm
-retain Apple's copyright on the derived portions.
+Business Source License 1.1 in LICENSE, except the third-party files that
+licenses/ lists. MIT files derived from mlx-lm retain Apple's copyright on
+the derived portions.
 
 MIT License
 

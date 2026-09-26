@@ -39,6 +39,7 @@ _VERB_DESC = {
     "rm": "delete a model's files and config entry",
     "list": "list the models your server config defines",
     "ps": "show the models resident in a running server",
+    "systemone": "answer a structured-decision request with DiffusionGemma",
     "profiles": "show per-family sampling defaults + @intents",
     "doctor": "check the runtime, config, models, and services",
     "train": "finetune a LoRA adapter on a GGUF base",
@@ -49,7 +50,7 @@ _VERB_DESC = {
 # Verbs whose first positional is a model (config id/alias or a path on disk).
 _MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
 # Verbs whose first positional is a path / remote ref (no config lookup).
-_FILE_POSITIONAL_VERBS = frozenset({"validate", "pull"})
+_FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 

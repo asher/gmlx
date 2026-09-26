@@ -130,6 +130,13 @@ endpoints and
 [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md)
 the YAML that configures them.
 
+A served DiffusionGemma model also answers the Jev decision API at
+`/v1/systemone`. A request asks a fixed set of yes or no, choice and score
+questions about a state, and each answer comes back as a probability for
+every option.
+[decisions.md](https://github.com/asher/gmlx/blob/main/docs/decisions.md)
+shows how to write the questions and act on the answers.
+
 ### Connect coding agents and chat apps
 
 `gmlx launch pi --model qwen3.6-27b@coding` writes the tool's native config
@@ -238,23 +245,67 @@ is in [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md).
 
 ## Documentation
 
+Every user guide and reference page is listed below. The
+[documentation index](https://github.com/asher/gmlx/blob/main/docs/README.md)
+groups the same pages by what you want to do.
+
+### Start here
+
 - [getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md):
   install to a served model with a connected client.
-- [cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md): every verb
-  and flag.
-- [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md):
-  every key of the YAML config.
-- [api.md](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints
-  and request features.
-- [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md):
-  `gmlx doctor` first, then the common failures, where files are on disk and
-  how to remove gmlx.
 - [migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md):
   what transfers from llama.cpp, Ollama and LM Studio.
 - [glossary.md](https://github.com/asher/gmlx/blob/main/docs/glossary.md): the
   terms these docs use, from GGUF and quant to arena and governor.
-- [docs/README.md](https://github.com/asher/gmlx/blob/main/docs/README.md):
-  the full index, grouped by what you want to do.
+
+### Guides
+
+- [launch.md](https://github.com/asher/gmlx/blob/main/docs/launch.md): connect
+  a coding agent or chat app to a local model.
+- [chat.md](https://github.com/asher/gmlx/blob/main/docs/chat.md): the terminal
+  chat client's commands, sessions and themes.
+- [menubar.md](https://github.com/asher/gmlx/blob/main/docs/menubar.md): the
+  menu bar app that monitors and controls the server.
+- [talk.md](https://github.com/asher/gmlx/blob/main/docs/talk.md): talk to a
+  model by voice.
+- [assistant.md](https://github.com/asher/gmlx/blob/main/docs/assistant.md):
+  give a model tools and long-term memory.
+- [rag.md](https://github.com/asher/gmlx/blob/main/docs/rag.md): a local RAG
+  pipeline with embeddings and reranking.
+- [decisions.md](https://github.com/asher/gmlx/blob/main/docs/decisions.md):
+  ask fixed questions about a text and get a probability for each answer.
+- [vlm.md](https://github.com/asher/gmlx/blob/main/docs/vlm.md): run a vision
+  or audio model.
+- [lora.md](https://github.com/asher/gmlx/blob/main/docs/lora.md): fine-tune
+  with LoRA and serve several adapters on one base.
+- [distill.md](https://github.com/asher/gmlx/blob/main/docs/distill.md): teach
+  a small model a document, or distill a larger model into it.
+- [streaming.md](https://github.com/asher/gmlx/blob/main/docs/streaming.md):
+  run a MoE model larger than memory by streaming it from disk.
+- [performance.md](https://github.com/asher/gmlx/blob/main/docs/performance.md):
+  the speed features and what each setting costs.
+- [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md):
+  `gmlx doctor` first, then the common failures, where files are on disk and
+  how to remove gmlx.
+
+### Reference
+
+- [cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md): every verb and
+  flag.
+- [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md):
+  every key of the YAML config.
+- [api.md](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints
+  and request features.
+- [services.md](https://github.com/asher/gmlx/blob/main/docs/services.md): the
+  speech-to-text, text-to-speech, embeddings and rerank services.
+- [env-vars.md](https://github.com/asher/gmlx/blob/main/docs/env-vars.md): the
+  environment variables a user can set.
+- [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md): the
+  Python API.
+- [arch-coverage.md](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md):
+  the supported architectures and their caveats.
+- [benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md):
+  the scorecard against llama.cpp, with its method.
 
 ## Contributing
 

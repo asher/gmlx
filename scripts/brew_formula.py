@@ -193,7 +193,7 @@ class Gmlx < Formula
   homepage "https://github.com/asher/gmlx"
   url "{source["url"]}"
   sha256 "{source["sha256"]}"
-  license all_of: ["BUSL-1.1", "MIT"]
+  license all_of: ["BUSL-1.1", "MIT", "Apache-2.0"]
 
   depends_on arch: :arm64
   depends_on "ffmpeg"

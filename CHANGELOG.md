@@ -6,10 +6,28 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /v1/systemone` answers a fixed set of questions about a state with a
+  served DiffusionGemma model, in the Jev decision API shapes.
+- `think: "auto"` on `/v1/systemone` writes a thought only when an answer is
+  unsure.
+- `gmlx systemone` sends a decision request to a server or answers it
+  offline, and `server.systemone` holds the route's settings.
+
+### Changed
+
+- The package and Homebrew license metadata declare Apache-2.0 beside
+  BUSL-1.1 and MIT, since gmlx ships Apache-2.0 files from omlx, misaki and
+  vLLM.
+
 ### Fixed
 
 - The `--draft-block-size` help and docs called N the drafted tokens. A round
   drafts N-1, so llama-server's `--spec-draft-n-max M` matches N = M+1.
+- DiffusionGemma prompts on `gmlx run` and on the server started with two BOS
+  tokens, one from the chat template and one from the tokenizer. They now
+  start with one.
 
 ## [0.4.17] - 2026-09-25
 

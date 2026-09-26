@@ -2425,7 +2425,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train; distill == distill).
+# train == train; distill == distill; systemone == systemone).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -2445,6 +2445,7 @@ _VERBS = (
     "rm",
     "list",
     "ps",
+    "systemone",
     "profiles",
     "doctor",
     "train",
@@ -2480,6 +2481,8 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  rm           delete a model's GGUF files and its config entry\n"
         "  list (ls)    list the models your server config defines (ids/aliases)\n"
         "  ps           show the models resident in a running server\n"
+        "  systemone    answer a structured-decision request with a DiffusionGemma\n"
+        "               model, on a running server or offline\n"
         "  profiles     show the per-family sampling defaults + @intents "
         "(add an id to resolve one model)\n"
         "  doctor       check the runtime, config, models, and services in one pass\n"
@@ -2627,6 +2630,10 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from .doctor import cmd_doctor
 
             return cmd_doctor(rest, prog=f"{prog} doctor")
+        if verb == "systemone":
+            from .systemone import cmd_systemone
+
+            return cmd_systemone(rest, prog=f"{prog} systemone")
         from . import manage
 
         if verb == "validate":

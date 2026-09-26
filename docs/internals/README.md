@@ -12,6 +12,8 @@ How gmlx works internally, for contributors. Users start at
 | [testing.md](testing.md) | test tiers, GPU-gated invocations, the end-to-end harnesses |
 | [upstream-upgrades.md](upstream-upgrades.md) | bumping the pinned mlx-vlm, mlx-lm and mlx versions |
 | [streaming-measurements.md](streaming-measurements.md) | the measurements behind the streaming guide's lossless and lossy settings tables |
+| [structured-reads.md](structured-reads.md) | how `/v1/systemone` answers questions with one denoise step, and its parity with the vLLM example |
+| [structured-read-measurements.md](structured-read-measurements.md) | the timings of prefill, reads, samples, steps and thoughts on DiffusionGemma |
 | [hadamard-fold.md](hadamard-fold.md) | running a GGUF whose weights are stored under a Hadamard rotation: the header contract, module placement and rotation sharing |
 | [debug-switches.md](debug-switches.md) | environment variables for isolating defects |
 | [distill.md](distill.md) | the teacher pass memory arithmetic and the training head's live set |

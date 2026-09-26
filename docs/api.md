@@ -60,6 +60,7 @@ All routes except `/health` require the API key when one is set.
 | `POST /v1/audio/speech` | text-to-speech, with `tts` configured |
 | `POST /v1/embeddings` | text embeddings, with `embeddings` configured |
 | `POST /v1/rerank` | reranking, with `rerank` configured, also at `/rerank` |
+| `POST /v1/systemone` | answers to a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [decisions.md](decisions.md) |
 
 `GET /v1/models` lists configured and discovered ids plus alias presets.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
@@ -200,7 +201,8 @@ curl localhost:8080/v1/chat/completions -d '{
 The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
-in the server log naming them all.
+in the server log naming them all. `/v1/systemone` has its own fields,
+listed in [decisions.md](decisions.md#samples-steps-and-thoughts).
 
 The standard sampling parameters are honored on all three generation dialects.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,

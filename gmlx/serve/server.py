@@ -1614,7 +1614,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "decode_prefill_ratio", "prefill_tick_ms",
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
-               "rerank",
+               "rerank", "systemone",
                "defaults", "cache", "assistants", "assistant_allow_remote")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys).

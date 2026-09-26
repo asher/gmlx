@@ -156,6 +156,17 @@ def test_doc_table_rows_match_allowlists():
     assert rows >= 10, "parameter table went missing or lost its rows"
 
 
+def test_systemone_allowlist_covers_extensions_and_docs():
+    """SYSTEMONE_CONSUMED holds every schema extension, and decisions.md
+    names each consumed field in backticks."""
+    from gmlx.systemone.schema import JEV_EXTENSIONS
+
+    assert set(JEV_EXTENSIONS) <= sp_api.SYSTEMONE_CONSUMED
+    text = (_DOCS.parent / "decisions.md").read_text()
+    missing = sorted(f for f in sp_api.SYSTEMONE_CONSUMED if f"`{f}`" not in text)
+    assert not missing, f"decisions.md does not name {missing}"
+
+
 # -- wrapper behavior --------------------------------------------------------
 
 def _capture_warnings():

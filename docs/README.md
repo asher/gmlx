@@ -29,6 +29,7 @@ terms the rest of the docs use.
 | talk to a model by voice | [talk.md](talk.md) |
 | give a model tools and long-term memory | [assistant.md](assistant.md) |
 | build a local RAG pipeline with embeddings and rerank | [rag.md](rag.md) |
+| ask a model fixed questions about a text and get a probability for each answer | [decisions.md](decisions.md) |
 | run a vision or audio model | [vlm.md](vlm.md) |
 | fine-tune with LoRA and serve several adapters on one base | [lora.md](lora.md) |
 | teach a small model a document without pasting it into every prompt, or distill a larger model into it | [distill.md](distill.md) |

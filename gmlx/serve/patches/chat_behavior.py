@@ -1,6 +1,7 @@
 """Chat-completions behavior patches: chat_template_kwargs
 passthrough, the thinking-budget fix, stream thinking seed, ignore-eos,
-OpenAI stop sequences, and exclude_none streaming chunks."""
+OpenAI stop sequences, exclude_none streaming chunks, and the single BOS
+on DiffusionGemma prompts."""
 
 from __future__ import annotations
 
@@ -881,3 +882,41 @@ def install_stream_timings() -> None:
         return endpoint
 
     _wrap_post_routes(app, _CHAT_PATHS, _STREAM_TIMINGS_FLAG, _make)
+
+
+# Single BOS on DiffusionGemma prompts
+# mlx-vlm tokenizes a diffusion_gemma prompt with the tokenizer's special
+# tokens. The GGUF chat template already opens with BOS and the tokenizer
+# adds one, so the prompt starts with two. A rendered prompt that opens
+# with the BOS string is tokenized without special tokens instead, the
+# rule gmlx.gen.generation.encode_prompt applies on the CLI paths.
+_SINGLE_BOS_FLAG = "_kq_diffusion_single_bos"
+
+
+def install_diffusion_single_bos() -> None:
+    """Tokenize a DiffusionGemma prompt that already opens with BOS without
+    adding a second one. Idempotent."""
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    cls = generation.ResponseGenerator
+    original = cls._cpu_preprocess
+    if getattr(original, _SINGLE_BOS_FLAG, False):
+        return
+
+    def _cpu_preprocess(self, prompt, images=None, audio=None, videos=None):
+        config = getattr(self.model, "config", None)
+        if (getattr(config, "model_type", None) == "diffusion_gemma"
+                and isinstance(prompt, str)):
+            bos = getattr(self.processor, "bos_token", None)
+            if bos and prompt.startswith(bos):
+                return generation.prepare_inputs(
+                    self.processor, images=images, audio=audio, videos=videos,
+                    prompts=prompt,
+                    image_token_index=getattr(config, "image_token_index", None),
+                    add_special_tokens=False)
+        if videos is None:
+            return original(self, prompt, images, audio)
+        return original(self, prompt, images, audio, videos)
+
+    _cpu_preprocess.__dict__[_SINGLE_BOS_FLAG] = True
+    _cpu_preprocess.__wrapped__ = original  # type: ignore[attr-defined]
+    cls._cpu_preprocess = _cpu_preprocess

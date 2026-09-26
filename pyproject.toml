@@ -8,7 +8,9 @@ version = "0.4.17"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
-license = "BUSL-1.1 AND MIT"  # MIT: files with an SPDX MIT header (model and vision modules, dspark tooling, kimi-k3 tests)
+# MIT covers the files with an SPDX MIT header (LICENSE-MIT). MIT and
+# Apache-2.0 also cover the third-party files that licenses/ lists.
+license = "BUSL-1.1 AND MIT AND Apache-2.0"
 license-files = ["LICENSE", "LICENSE-MIT", "licenses/*"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
@@ -181,9 +183,11 @@ include = [
     "gmlx/load/modules.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
+    "gmlx/serve/engine_jobs.py",
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
+    "gmlx/systemone/engine.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
 ]

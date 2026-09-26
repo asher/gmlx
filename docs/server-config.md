@@ -241,7 +241,7 @@ alone otherwise. When to change that is in
 | `dtype` | `null`, meaning `auto` | activation width for all models, `auto`, `bfloat16` or `float16`. `auto` picks float16 on M1 and M2 |
 | `decode_prefill_ratio` | `null`, meaning `auto` | how admission prefills share GPU time with live decode. A number pins a static share, and `0` is stock scheduling |
 | `prefill_tick_ms` | `null`, meaning 500 | wall-clock budget for each prefill chunk while streams decode. Chunks halve to fit, and `0` never halves |
-| `token_queue_timeout_s` | `null`, meaning 1800 | seconds to wait for the next token before failing the request. `0` waits forever |
+| `token_queue_timeout_s` | `null`, meaning 1800 | seconds to wait for the next token before failing the request. `0` waits forever. On `/v1/systemone` it bounds a whole decision |
 
 These are server-wide because the engine reads them on each request, after
 the model's load has finished. They are also available as `serve` flags and,
@@ -301,6 +301,7 @@ the variable that turns it off there are under
 | `tts` | `null` | the text-to-speech model, as an alias such as `kokoro`, a repo id, a directory, or `true` |
 | `embeddings` | `null` | the embeddings model, as a GGUF path, `hf:` ref, alias, or `true` |
 | `rerank` | `null` | the reranker, as a Qwen3-Reranker GGUF path, `hf:` ref, alias, or `true` |
+| `systemone` | `{}` | settings for `/v1/systemone`, with the keys under [Structured decisions](#structured-decisions) |
 | `assistants` | `{}` | served assistant ids, each naming a `model` and optional `memory` and `mcp` |
 | `assistant_allow_remote` | `false` | required to serve assistants on a non-loopback bind |
 
@@ -314,6 +315,27 @@ Because their tools run on the server host, a non-loopback bind with
 assistants configured refuses to start unless `assistant_allow_remote` is
 set, and even then a remote-exposed assistant must declare an `mcp` scope.
 The contract is in [assistant.md](assistant.md#served-assistants).
+
+### Structured decisions
+
+`server.systemone` sets how `POST /v1/systemone` answers. The route is
+always installed, and [decisions.md](decisions.md) describes its requests,
+answers and errors.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `model` | `null` | the model id or alias, optionally `id@profile`, for a request whose `model` is absent or names nothing |
+| `canvas` | `64` | the most tokens one read's canvas holds, a positive multiple of 16, capped at the model's own canvas length |
+| `constrained` | `true` | unembed only the read's label tokens. With `false`, the full vocabulary gives the same one-step label probabilities but other entropies and multi-step reads |
+| `max_questions` | `64` | the most questions one request may ask. A request with more gets a 422 |
+| `max_samples` | `32` | the cap on a request's `samples` and `auto_max`. A larger value is lowered to it |
+| `think` | `0` | the thought budget for a request without `think`, 0 to 4096, or `"auto"` to think only when an answer is unsure |
+| `think_threshold` | `0.8` | the confidence below which `"auto"` thinks, for a request without `think_threshold` |
+| `think_budget` | `64` | the thought budget of `"auto"`, for a request without `think_budget` |
+
+A config with an unknown key here, or a `model` that is not a configured
+id or alias, fails to load. A reload applies the new settings to the next
+request.
 
 ### Cache
 
