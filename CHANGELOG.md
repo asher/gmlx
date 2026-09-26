@@ -20,6 +20,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The package and Homebrew license metadata declare Apache-2.0 beside
   BUSL-1.1 and MIT, since gmlx ships Apache-2.0 files from omlx, misaki and
   vLLM.
+- `gmlx distill train` refuses a view aligned before this release when the
+  student is a gemma-4 or gemma-1.1 GGUF, since its stop ids changed. Run
+  `gmlx distill align` again.
 
 ### Fixed
 
@@ -28,6 +31,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DiffusionGemma prompts on `gmlx run` and on the server started with two BOS
   tokens, one from the chat template and one from the tokenizer. They now
   start with one.
+- gemma-4 GGUFs did not stop on `<|tool_response>` after a tool call, and
+  some did not stop on `<eos>`, so a reply could run past its end.
+- gemma-1.1 GGUFs that type `<end_of_turn>` as text did not stop on it, so a
+  reply could show the tag or run on past the turn.
 
 ## [0.4.17] - 2026-09-25
 
