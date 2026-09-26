@@ -149,8 +149,18 @@ def test_vlm_stream_experts_places_on_the_text_tower(
     # The tower, not the VLM wrapper: the vision tower stays on the GPU.
     assert target is model.language_model
     assert kwargs == {"gguf_path": "/m/llm.gguf",
-                      "feeder_prefill": True, "feeder_decode": False}
+                      "feeder_prefill": True, "feeder_decode": False,
+                      "fast_disk": None}
     assert "configure_stream_cpu" not in spy_placement
+
+
+def test_stream_fast_disk_reaches_the_placement(
+        fake_load_vlm_model, spy_placement):
+    # A model's stream_fast_disk goes to its own feeder, not the process env.
+    serving.load_serveable_model(
+        "/m/llm.gguf", mmproj_path="/m/mmproj.gguf", stream="experts",
+        fast_disk="on")
+    assert spy_placement["install_expert_streaming"][2]["fast_disk"] == "on"
 
 
 def test_vlm_stream_experts_installs_the_moe_levers(
@@ -222,7 +232,8 @@ def installed_bridge(monkeypatch):
             speculative=False, draft_gguf_path=None, chat_template=None,
             adapter_gguf=None, stream=None, moe_experts=None,
             moe_expert_mass=None, moe_miss_shed=None, moe_layer_shed=None,
-            moe_prestage=None, feeder_prefill=None, feeder_decode=None):
+            moe_prestage=None, feeder_prefill=None, feeder_decode=None,
+            fast_disk=None):
         serveable_calls.append((model_path, mmproj_path, hf_source, chat_template))
         return ("SERVEABLE", model_path, mmproj_path)
 

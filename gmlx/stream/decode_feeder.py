@@ -238,6 +238,7 @@ class DecodeFeeder:
         arena_bytes: int,
         stats_verbose: bool | None = None,
         lend_bytes: int = 0,
+        fast_disk: str | None = None,
     ):
         import mlx_kquant as kq
 
@@ -419,7 +420,7 @@ class DecodeFeeder:
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
         self._la_cancel = (
             os.environ.get("GMLX_DECODE_LOOKAHEAD_CANCEL", "1") != "0")
-        self._fast_disk = self._resolve_fast_disk()
+        self._fast_disk = self._resolve_fast_disk(fast_disk)
         self._evict = env_choice(
             "GMLX_DECODE_PRESTAGE_EVICT", _EVICT_DEFAULT, _EVICT_POLICIES)
         if self._evict == "auto":
@@ -965,11 +966,13 @@ class DecodeFeeder:
         except Exception:
             return 0.0
 
-    def _resolve_fast_disk(self) -> bool:
+    def _resolve_fast_disk(self, mode: str | None = None) -> bool:
         """Whether this drive has bandwidth to spare for speculation (see
-        _FAST_DISK_GBPS)."""
-        mode = env_choice(
-            "GMLX_DECODE_FAST_DISK", "auto", ("auto", "on", "off"))
+        _FAST_DISK_GBPS). ``mode`` is the model's own setting, and None
+        reads GMLX_DECODE_FAST_DISK."""
+        if mode is None:
+            mode = env_choice(
+                "GMLX_DECODE_FAST_DISK", "auto", ("auto", "on", "off"))
         self._probe_bps = 0.0
         if mode != "auto":
             return mode == "on"
@@ -1852,7 +1855,7 @@ def _register_exit_close(feeder) -> None:
 
 def maybe_make_decode_feeder(
     offsets, modules, arena_bytes: int, stats_verbose: bool | None = None,
-    lend_bytes: int = 0,
+    lend_bytes: int = 0, fast_disk: str | None = None,
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1873,7 +1876,8 @@ def maybe_make_decode_feeder(
             raise RuntimeError(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
         feeder = DecodeFeeder(
-            offsets, modules, arena_bytes, stats_verbose, lend_bytes=lend_bytes)
+            offsets, modules, arena_bytes, stats_verbose, lend_bytes=lend_bytes,
+            fast_disk=fast_disk)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

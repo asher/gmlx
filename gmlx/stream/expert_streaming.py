@@ -100,6 +100,7 @@ def configure_stream_cpu(
     gguf_path: str | None = None,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
+    fast_disk: str | None = None,
 ):
     """Whole-model CPU streaming (``--stream-cpu``): run the model on the CPU
     device with the streaming-expert machinery always engaged.
@@ -128,6 +129,7 @@ def configure_stream_cpu(
         force_stream=True,
         feeder_prefill=feeder_prefill,
         feeder_decode=feeder_decode,
+        fast_disk=fast_disk,
     )
 
 
@@ -273,6 +275,7 @@ def install_expert_streaming(
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
     stats_verbose: bool | None = None,
+    fast_disk: str | None = None,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -1042,7 +1045,8 @@ def install_expert_streaming(
         # .lend_for_ring) stays as the fallback for a box whose free RAM
         # is gone when a later prefill rebuilds the ring.
         dfeeder = maybe_make_decode_feeder(
-            prefetcher.offsets, moe_modules, arena, stats_verbose)
+            prefetcher.offsets, moe_modules, arena, stats_verbose,
+            fast_disk=fast_disk)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
