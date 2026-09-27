@@ -15,6 +15,7 @@ Shape (see ``docs/config.md`` for the full reference)::
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
+    launch:    {container: {enabled, mount_cwd, mounts, volumes, forward, network, cpus, memory, ssh_agent, env, open_browser, clipboard, clients}}
     assistant: {max_tool_rounds, tool_timeout_s, mcp, memory}   # shared tool-loop assistant
     theme:     <name>                             # chat default theme (--theme overrides)
     themes:    {<name>: {<slot>: {bold, dim, italic, underline, fg16, rgb}, extends, code_theme, ptk_toolbar}}
@@ -35,6 +36,7 @@ from __future__ import annotations
 import fnmatch
 import functools
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -119,7 +121,8 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "discover", "talk", "assistant", "theme", "themes"})
+                       "discover", "talk", "assistant", "theme", "themes",
+                       "launch"})
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
@@ -164,6 +167,27 @@ _MEMORY_KEYS = frozenset({"enabled", "path", "top_k", "extract",
 _ASSISTANT_ALIAS_KEYS = frozenset({"model", "memory", "mcp"})
 TALK_MODES = ("wake", "vad", "ptt", "text")
 TALK_BRAINS = ("chat", "assistant")
+
+# The clients `gmlx launch` runs, in the order its help lists them. The
+# launch.container.clients keys must be one of these.
+LAUNCH_CLIENTS = ("opencode", "pi", "omp", "hermes", "goose", "claude-code",
+                  "aichat", "elia", "open-webui", "dsh")
+LAUNCH_NETWORKS = ("default", "none")
+LAUNCH_CLIPBOARD = ("off", "images")
+_LAUNCH_KEYS = frozenset({"container"})
+# Settings both levels take: the client value wins for a single value, and
+# the two lists add up.
+_LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
+                                 "forward", "network", "cpus", "memory",
+                                 "ssh_agent", "env", "open_browser",
+                                 "clipboard"})
+_LAUNCH_CONTAINER_KEYS = _LAUNCH_SHARED_KEYS | {"clients"}
+_LAUNCH_CLIENT_KEYS = _LAUNCH_SHARED_KEYS | {"image", "build", "command",
+                                             "packages", "seed"}
+# Launch sets these guest variables itself. A second HOME would name a Mac
+# path that is not shared.
+LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
+                                 "PATH", "SSH_AUTH_SOCK"})
 
 # Host names that count as a loopback bind for the serve auth policy and the
 # DNS-rebinding host guard (shared here because server.py must stay importable
@@ -411,6 +435,78 @@ class TalkCfg:
 
 
 @dataclass
+class LaunchClientCfg:
+    """One ``launch.container.clients.<client>`` block. ``None`` and empty
+    lists mean unset, so the global value applies."""
+    enabled: bool | None = None
+    image: str | None = None          # an OCI reference; excludes build
+    build: str | None = None          # a Containerfile or a context folder
+    command: list[str] | str | None = None   # an argv list, or "image"
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)     # PATH[:DST][:ro]
+    volumes: list[str] = field(default_factory=list)    # NAME:/path[:SIZE]
+    forward: list[int] = field(default_factory=list)
+    network: str | None = None
+    cpus: int | None = None
+    memory: str | None = None
+    ssh_agent: bool | None = None
+    env: list[str] = field(default_factory=list)        # NAME or NAME=VALUE
+    open_browser: bool | None = None
+    clipboard: str | None = None
+    packages: list[str] = field(default_factory=list)   # Debian package names
+    seed: list[str] = field(default_factory=list)       # files under $HOME
+
+
+@dataclass
+class LaunchContainerCfg:
+    """The ``launch.container`` block: how ``gmlx launch --container`` runs a
+    client in an Apple container. ``mount_cwd`` stays ``None`` when unset,
+    because each client has its own built-in default."""
+    enabled: bool = False
+    mount_cwd: bool | None = None
+    mounts: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
+    forward: list[int] = field(default_factory=list)
+    network: str = "default"
+    cpus: int = 4
+    memory: str = "4G"
+    ssh_agent: bool = False
+    env: list[str] = field(default_factory=list)
+    open_browser: bool = True
+    clipboard: str = "off"
+    clients: dict[str, LaunchClientCfg] = field(default_factory=dict)
+
+    def for_client(self, client: str) -> LaunchClientCfg:
+        """The effective settings of one client: its own value for each
+        single setting, else the global one, and the global list followed by
+        the client's, with exact duplicates dropped."""
+        own = self.clients.get(client) or LaunchClientCfg()
+
+        def pick(name):
+            value = getattr(own, name)
+            return getattr(self, name) if value is None else value
+
+        def join(name):
+            return list(dict.fromkeys([*getattr(self, name), *getattr(own, name)]))
+
+        return LaunchClientCfg(
+            enabled=pick("enabled"), image=own.image, build=own.build,
+            command=own.command, mount_cwd=pick("mount_cwd"),
+            mounts=join("mounts"), volumes=join("volumes"),
+            forward=join("forward"), network=pick("network"), cpus=pick("cpus"),
+            memory=pick("memory"), ssh_agent=pick("ssh_agent"), env=join("env"),
+            open_browser=pick("open_browser"), clipboard=pick("clipboard"),
+            packages=list(own.packages), seed=list(own.seed))
+
+
+@dataclass
+class LaunchCfg:
+    """The top-level ``launch:`` block. ``gmlx launch`` reads it only from the
+    user-level config (:func:`load_launch_settings`)."""
+    container: LaunchContainerCfg = field(default_factory=LaunchContainerCfg)
+
+
+@dataclass
 class ServerCfg:
     host: str = "127.0.0.1"
     port: int = 8080
@@ -510,6 +606,7 @@ class ServerCfg:
     aliases: dict[str, str] = field(default_factory=dict)   # name -> id | id@profile
     discover: list[DiscoverSpec] = field(default_factory=list)
     talk: TalkCfg = field(default_factory=TalkCfg)
+    launch: LaunchCfg = field(default_factory=LaunchCfg)
     assistant: AssistantCfg = field(default_factory=AssistantCfg)
     # Served assistant aliases: pseudo-model id -> AssistantAlias. Requests to
     # an alias on /v1/chat/completions run the tool loop server-side.
@@ -717,6 +814,40 @@ def _resolve_hf_cache_path(ref: str, model_dirs: list | None = None) -> str:
 def default_config_paths() -> list[Path]:
     """Bare-start config search order (first existing wins)."""
     return [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+
+
+def _launch_block(path: Path):
+    """The raw ``launch`` block of a config file, or None when it has none."""
+    try:
+        with open(path) as f:
+            doc = yaml.safe_load(f)
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"cannot read {path}: {e}")
+    except yaml.YAMLError as e:
+        raise ConfigError(f"malformed YAML in {path}: {e}")
+    return doc.get("launch") if isinstance(doc, dict) else None
+
+
+def load_launch_settings() -> tuple[LaunchCfg, str | None]:
+    """The ``launch`` block of the user-level config: the first of
+    ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. A
+    ``./gmlx.yaml`` never counts, because a cloned repository could otherwise
+    share ``~/.ssh`` or turn the container off. Returns the settings and, when
+    ``./gmlx.yaml`` has a ``launch`` block of its own, a notice saying that it
+    is ignored. Only the ``launch`` block is parsed."""
+    local, *user_paths = default_config_paths()
+    found = next((q for q in user_paths if q.is_file()), None)
+    cfg = _parse_launch(_launch_block(found)) if found else LaunchCfg()
+    notice = None
+    try:
+        is_user = local.resolve() in {q.resolve() for q in user_paths}
+        if local.is_file() and not is_user and _launch_block(local) is not None:
+            notice = (f"ignoring the launch block in {local.resolve()}: launch "
+                      f"settings come only from ~/.config/gmlx/gmlx.yaml or "
+                      f"~/.gmlx.yaml")
+    except (OSError, ConfigError):
+        pass                  # the server reports a broken ./gmlx.yaml itself
+    return cfg, notice
 
 
 def default_config_write_path() -> Path:
@@ -1809,6 +1940,191 @@ def _parse_talk(raw) -> TalkCfg:
     )
 
 
+_LAUNCH_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Apple container's volume name pattern (VolumeConfiguration.swift).
+LAUNCH_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+# Debian package names; they reach a build argument, so nothing else passes.
+_LAUNCH_PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+# A size as Apple container parses it, with the unit required here, so that a
+# bare 4096 cannot mean 4096 bytes.
+_LAUNCH_SIZE = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([kmgtp])(?:i?b)?\s*", re.I)
+_SIZE_SHIFT = {"k": 10, "m": 20, "g": 30, "t": 40, "p": 50}
+LAUNCH_VOLUME_MIN_BYTES = 1 << 20
+
+
+def parse_size_bytes(text: str) -> int | None:
+    """Bytes for a size such as ``8G``, ``512M`` or ``1.5GiB``, or None when
+    the text is not one."""
+    m = _LAUNCH_SIZE.fullmatch(str(text))
+    if m is None:
+        return None
+    return int(float(m.group(1)) * (1 << _SIZE_SHIFT[m.group(2).lower()]))
+
+
+def parse_volume_spec(spec: str) -> tuple[str, str, str | None]:
+    """``(name, guest path, size or None)`` for a ``NAME:/path[:SIZE]`` volume
+    entry. Raises :class:`ConfigError` naming what is wrong."""
+    parts = str(spec).split(":")
+    if len(parts) not in (2, 3):
+        raise ConfigError(f"volume {spec!r}: expected NAME:/path or "
+                          f"NAME:/path:SIZE, such as pgdata:/var/lib/postgresql:8G")
+    name, path = parts[0], parts[1]
+    size = parts[2] if len(parts) == 3 else None
+    if not LAUNCH_VOLUME_NAME.fullmatch(name):
+        raise ConfigError(f"volume {spec!r}: the name must start with a letter "
+                          f"or digit and use only letters, digits, _ . and -")
+    if not path.startswith("/"):
+        raise ConfigError(f"volume {spec!r}: the guest path must be absolute")
+    if size is not None:
+        nbytes = parse_size_bytes(size)
+        if nbytes is None:
+            raise ConfigError(f"volume {spec!r}: {size!r} is not a size such "
+                              f"as 512M, 8G or 1T")
+        if nbytes < LAUNCH_VOLUME_MIN_BYTES:
+            raise ConfigError(f"volume {spec!r}: the smallest size is 1M")
+    return name, path, size
+
+
+def _check_launch_volumes(where: str, entries: list) -> None:
+    """Refuse one volume name at two guest paths or with two sizes, since the
+    VM would attach one disk image twice."""
+    seen: dict = {}
+    for entry in entries:
+        name, path, size = parse_volume_spec(entry)
+        if name in seen:
+            path0, size0 = seen[name]
+            if path0 != path:
+                raise ConfigError(f"{where}: volume {name!r} is mounted at both "
+                                  f"{path0} and {path}")
+            if size0 != size:
+                raise ConfigError(f"{where}: volume {name!r} has two sizes, "
+                                  f"{size0 or 'the default'} and "
+                                  f"{size or 'the default'}")
+        seen[name] = (path, size)
+
+
+def _parse_launch_level(where: str, raw: dict, keys) -> dict:
+    """Shape checks for one level of ``launch.container``. Returns the parsed
+    values of the keys present; nothing here touches the filesystem."""
+    _warn_unknown_keys(where, raw, keys, strict=True)
+    out: dict = {}
+
+    def strings(key) -> list:
+        value = raw.get(key)
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(
+                isinstance(v, str) and v.strip() for v in value):
+            raise ConfigError(f"{where}.{key}: expected a list of strings, "
+                              f"got {value!r}")
+        return [v.strip() for v in value]
+
+    def flag(key):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ConfigError(f"{where}.{key}: expected true or false, got {value!r}")
+        return value
+
+    def choice(key, choices):
+        value = raw.get(key)
+        if value is None:
+            return None
+        if key == "clipboard" and value is False:    # YAML reads a bare off as false
+            value = "off"
+        if not isinstance(value, str) or value not in choices:
+            raise ConfigError(f"{where}.{key}: {value!r} is not one of "
+                              f"{'/'.join(choices)}")
+        return value
+
+    for key in ("enabled", "mount_cwd", "ssh_agent", "open_browser"):
+        if key in raw:
+            out[key] = flag(key)
+    for key in ("mounts", "volumes", "env", "packages", "seed"):
+        if key in raw:
+            out[key] = list(dict.fromkeys(strings(key)))
+    if "network" in raw:
+        out["network"] = choice("network", LAUNCH_NETWORKS)
+    if "clipboard" in raw:
+        out["clipboard"] = choice("clipboard", LAUNCH_CLIPBOARD)
+    if raw.get("cpus") is not None:
+        cpus = raw["cpus"]
+        if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1:
+            raise ConfigError(f"{where}.cpus: expected a whole number of at "
+                              f"least 1, got {cpus!r}")
+        out["cpus"] = cpus
+    if raw.get("memory") is not None:
+        memory = raw["memory"]
+        if not isinstance(memory, str) or parse_size_bytes(memory) is None:
+            raise ConfigError(f"{where}.memory: {memory!r} is not a size such "
+                              f"as 4G or 6144M")
+        out["memory"] = memory.strip()
+    if raw.get("forward") is not None:
+        ports = raw["forward"]
+        if not isinstance(ports, list) or not all(
+                isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 65535
+                for v in ports):
+            raise ConfigError(f"{where}.forward: expected a list of port "
+                              f"numbers from 1 to 65535, got {ports!r}")
+        out["forward"] = list(dict.fromkeys(ports))
+    for entry in out.get("env", []):
+        name = entry.split("=", 1)[0]
+        if not _LAUNCH_ENV_NAME.fullmatch(name):
+            raise ConfigError(f"{where}.env: {entry!r} is not NAME or NAME=VALUE")
+        if name in LAUNCH_RESERVED_ENV:
+            raise ConfigError(f"{where}.env: launch sets {name} in the "
+                              f"container itself, so it cannot be configured")
+    if "volumes" in out:
+        _check_launch_volumes(f"{where}.volumes", out["volumes"])
+    for name in out.get("packages", []):
+        if not _LAUNCH_PACKAGE.fullmatch(name):
+            raise ConfigError(f"{where}.packages: {name!r} is not a Debian "
+                              f"package name")
+    for key in ("image", "build"):
+        if raw.get(key) is not None:
+            value = raw[key]
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where}.{key}: expected a non-empty string, "
+                                  f"got {value!r}")
+            out[key] = value.strip()
+    if raw.get("command") is not None:
+        command = raw["command"]
+        if command != "image" and not (
+                isinstance(command, list) and command
+                and all(isinstance(v, str) and v for v in command)):
+            raise ConfigError(f"{where}.command: expected a list of strings "
+                              f"such as [my-client, --flag], or the word image, "
+                              f"got {command!r}")
+        out["command"] = command if command == "image" else list(command)
+    return out
+
+
+def _parse_launch(raw) -> LaunchCfg:
+    """Parse + validate the top-level ``launch:`` block. Shape only: paths are
+    checked when a launch resolves them."""
+    raw = _section_mapping("launch", raw)
+    _warn_unknown_keys("launch", raw, _LAUNCH_KEYS, strict=True)
+    box = _section_mapping("launch.container", raw.get("container"))
+    values = _parse_launch_level("launch.container", box, _LAUNCH_CONTAINER_KEYS)
+    cfg = LaunchContainerCfg(**{k: v for k, v in values.items() if v is not None})
+    for client, client_raw in _section_mapping(
+            "launch.container.clients", box.get("clients")).items():
+        if client not in LAUNCH_CLIENTS:
+            raise ConfigError(f"launch.container.clients: {client!r} is not a "
+                              f"launch client (known: {', '.join(LAUNCH_CLIENTS)})")
+        where = f"launch.container.clients.{client}"
+        client_values = _parse_launch_level(
+            where, _section_mapping(where, client_raw), _LAUNCH_CLIENT_KEYS)
+        if client_values.get("image") and client_values.get("build"):
+            raise ConfigError(f"{where}: image and build are alternatives; "
+                              f"set one of them")
+        if client_values.get("image") and client_values.get("packages"):
+            raise ConfigError(f"{where}: packages apply only to the image gmlx "
+                              f"builds, not to image {client_values['image']!r}")
+        cfg.clients[client] = LaunchClientCfg(**client_values)
+        _check_launch_volumes(f"{where}.volumes", cfg.for_client(client).volumes)
+    return LaunchCfg(container=cfg)
+
+
 def build_config(doc: dict) -> ServerCfg:
     """Build (and validate) a :class:`ServerCfg` from a parsed YAML mapping. Split out
     from :func:`load_config` so discovery / tests can build a config in memory."""
@@ -1868,6 +2184,7 @@ def build_config(doc: dict) -> ServerCfg:
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),
+        launch=_parse_launch(doc.get("launch")),
         assistant=_parse_assistant(doc.get("assistant")),
         assistants=_parse_assistant_aliases(srv.get("assistants")),
         assistant_allow_remote=bool(srv.get("assistant_allow_remote", False)),

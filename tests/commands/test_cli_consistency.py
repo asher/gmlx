@@ -86,7 +86,13 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
         f"    family: qwen3.6\n"
         f"    profiles: {{coding: {{sampling: {{min_p: 0.05}}}}}}\n"
         f"    overrides: {{sampling: {{top_k: 50}}}}\n"
-        "aliases: {fast: qw@coding}\n")
+        "aliases: {fast: qw@coding}\n"
+        "launch:\n"
+        "  container:\n"
+        "    forward: [6379]\n"
+        "    clipboard: off\n"
+        "    clients:\n"
+        "      open-webui: {command: image, volumes: ['pg:/var/lib/pg:8G']}\n")
     rc = srv._cmd_serve(["--print-config", "--config", str(cfg_in)])
     assert rc == 0
     out = capsys.readouterr().out
@@ -100,6 +106,11 @@ def test_serve_print_config_round_trips_through_load_config(tmp_path, capsys):
     assert cfg.models["qw"].family == "qwen3.6"
     assert cfg.models["qw"].profiles == {"coding": {"sampling": {"min_p": 0.05}}}
     assert cfg.aliases == {"fast": "qw@coding"}
+    box = cfg.launch.container
+    assert box.forward == [6379] and box.clipboard == "off"
+    assert box.clients["open-webui"].command == "image"
+    assert box.clients["open-webui"].volumes == ["pg:/var/lib/pg:8G"]
+    assert box.clients["open-webui"].mount_cwd is None     # unset survives the dump
 
 
 def test_serve_background_broken_config_fails_fast(tmp_path, capsys):

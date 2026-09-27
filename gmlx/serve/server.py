@@ -1664,6 +1664,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
            "discover": d.pop("discover"), "talk": talk,
+           "launch": d.pop("launch"),
            "assistant": d.pop("assistant"),
            "theme": d.pop("theme"), "themes": d.pop("themes")}
     assert not d, f"ServerCfg fields missing from --print-config: {sorted(d)}"

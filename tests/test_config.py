@@ -2091,3 +2091,213 @@ def test_default_disk_path_follows_xdg_cache_home(monkeypatch):
     assert cfgmod.default_apc_disk_path() == "/xdg/gmlx/apc"
     monkeypatch.delenv("XDG_CACHE_HOME")
     assert cfgmod.default_apc_disk_path() == "~/.cache/gmlx/apc"
+
+
+# launch: the container block of `gmlx launch`, read from the user config only
+def _launch(block: dict):
+    return build_config({"launch": {"container": block}}).launch.container
+
+
+def test_launch_defaults_when_absent():
+    box = build_config({}).launch.container
+    assert box.enabled is False and box.mount_cwd is None
+    assert (box.network, box.cpus, box.memory, box.clipboard) == (
+        "default", 4, "4G", "off")
+    assert box.clients == {}
+
+
+def test_launch_mount_cwd_keeps_unset_apart_from_true():
+    box = _launch({"clients": {"elia": {}, "pi": {"mount_cwd": False}}})
+    assert box.for_client("elia").mount_cwd is None       # built-in default applies
+    assert box.for_client("pi").mount_cwd is False
+    box = _launch({"mount_cwd": True, "clients": {"pi": {"mount_cwd": False}}})
+    assert box.for_client("elia").mount_cwd is True       # the global value
+    assert box.for_client("pi").mount_cwd is False        # the client value wins
+
+
+def test_launch_client_values_win_and_lists_add_up():
+    box = _launch({"memory": "4G", "forward": [6379, 5432], "env": ["A"],
+                   "mounts": ["~/a:ro"],
+                   "clients": {"claude-code": {"memory": "6G", "forward": [5432, 8000],
+                                               "env": ["B=1"], "mounts": ["~/a:ro"]}}})
+    eff = box.for_client("claude-code")
+    assert eff.memory == "6G"
+    assert eff.forward == [6379, 5432, 8000]              # duplicates dropped
+    assert eff.env == ["A", "B=1"]
+    assert eff.mounts == ["~/a:ro"]
+    assert box.for_client("pi").memory == "4G"
+
+
+def test_launch_unknown_keys_and_clients_are_hard_errors():
+    with pytest.raises(ConfigError, match="unrecognized"):
+        build_config({"launch": {"box": {}}})
+    with pytest.raises(ConfigError, match="unrecognized"):
+        _launch({"mount": ["~/a"]})
+    with pytest.raises(ConfigError, match="unrecognized"):
+        _launch({"clients": {"pi": {"imagee": "x"}}})
+    with pytest.raises(ConfigError, match="not a launch client"):
+        _launch({"clients": {"cursor": {}}})
+    with pytest.raises(ConfigError, match="unrecognized"):
+        _launch({"image": "debian"})                      # image is per client
+
+
+@pytest.mark.parametrize("command", ["image", ["my-client", "--flag"]])
+def test_launch_command_forms(command):
+    assert _launch({"clients": {"pi": {"command": command}}}).clients["pi"].command == command
+
+
+@pytest.mark.parametrize("command", ["other", [], ["ok", ""], [1], {"a": 1}])
+def test_launch_command_bad_shapes(command):
+    with pytest.raises(ConfigError, match="command"):
+        _launch({"clients": {"pi": {"command": command}}})
+
+
+@pytest.mark.parametrize("name", sorted(cfgmod.LAUNCH_RESERVED_ENV))
+def test_launch_env_refuses_names_launch_sets(name):
+    with pytest.raises(ConfigError, match=f"launch sets {name}"):
+        _launch({"env": [f"{name}=x"]})
+    with pytest.raises(ConfigError, match=f"launch sets {name}"):
+        _launch({"clients": {"pi": {"env": [name]}}})
+
+
+def test_launch_env_entries_need_a_name():
+    with pytest.raises(ConfigError, match="NAME or NAME=VALUE"):
+        _launch({"env": ["=x"]})
+    assert _launch({"env": ["GH_TOKEN", "A=b=c"]}).env == ["GH_TOKEN", "A=b=c"]
+
+
+def test_launch_image_and_build_conflict():
+    with pytest.raises(ConfigError, match="image and build"):
+        _launch({"clients": {"pi": {"image": "debian", "build": "./box"}}})
+
+
+def test_launch_packages_with_image_refused():
+    with pytest.raises(ConfigError, match="packages apply only"):
+        _launch({"clients": {"pi": {"image": "debian", "packages": ["make"]}}})
+    assert _launch({"clients": {"pi": {"build": "./b", "packages": ["make"]}}})
+
+
+@pytest.mark.parametrize("name", ["Make", "-x", "a;rm", "a b", "x"])
+def test_launch_packages_must_be_debian_names(name):
+    with pytest.raises(ConfigError, match="Debian package"):
+        _launch({"clients": {"pi": {"packages": [name]}}})
+
+
+def test_launch_volumes_parse_and_add_up():
+    box = _launch({"volumes": ["cache:/root/.cache"],
+                   "clients": {"claude-code": {"volumes": ["pg:/var/lib/pg:8G",
+                                                          "cache:/root/.cache"]}}})
+    assert box.for_client("claude-code").volumes == ["cache:/root/.cache",
+                                                     "pg:/var/lib/pg:8G"]
+    assert cfgmod.parse_volume_spec("pg:/var/lib/pg:8G") == ("pg", "/var/lib/pg", "8G")
+    assert cfgmod.parse_volume_spec("pg:/data") == ("pg", "/data", None)
+
+
+@pytest.mark.parametrize("entry, match", [
+    ("pg", "expected NAME:/path"),
+    ("pg:/a:8G:x", "expected NAME:/path"),
+    ("-pg:/a", "the name must start"),
+    ("p/g:/a", "the name must start"),
+    ("pg:rel", "must be absolute"),
+    ("pg:/a:8", "is not a size"),
+    ("pg:/a:lots", "is not a size"),
+    ("pg:/a:512K", "smallest size is 1M"),
+])
+def test_launch_volume_bad_entries(entry, match):
+    with pytest.raises(ConfigError, match=match):
+        _launch({"volumes": [entry]})
+
+
+def test_launch_volume_name_at_two_paths_or_sizes_refused():
+    with pytest.raises(ConfigError, match="mounted at both"):
+        _launch({"volumes": ["pg:/a"], "clients": {"pi": {"volumes": ["pg:/b"]}}})
+    with pytest.raises(ConfigError, match="two sizes"):
+        _launch({"volumes": ["pg:/a:8G", "pg:/a:16G"]})
+
+
+def test_launch_forward_ports():
+    assert _launch({"forward": [5432, 5432, 6379]}).forward == [5432, 6379]
+    for bad in ([0], [65536], ["5432"], [True], 5432):
+        with pytest.raises(ConfigError, match="forward"):
+            _launch({"forward": bad})
+
+
+def test_launch_clipboard_accepts_off_images_and_bare_off():
+    import yaml
+    assert _launch({"clipboard": "images"}).clipboard == "images"
+    doc = yaml.safe_load("launch: {container: {clipboard: off}}")
+    assert doc["launch"]["container"]["clipboard"] is False    # PyYAML's reading
+    assert build_config(doc).launch.container.clipboard == "off"
+    assert _launch({"clients": {"pi": {"clipboard": "images"}}}).for_client(
+        "pi").clipboard == "images"
+    for bad in ("on", True, "text"):
+        with pytest.raises(ConfigError, match="clipboard"):
+            _launch({"clipboard": bad})
+
+
+@pytest.mark.parametrize("block, match", [
+    ({"network": "host"}, "network"),
+    ({"cpus": 0}, "cpus"),
+    ({"cpus": "4"}, "cpus"),
+    ({"memory": 4096}, "memory"),
+    ({"memory": "4"}, "memory"),
+    ({"enabled": "yes"}, "enabled"),
+    ({"mounts": "~/a"}, "mounts"),
+    ({"mounts": [""]}, "mounts"),
+])
+def test_launch_scalar_shapes(block, match):
+    with pytest.raises(ConfigError, match=match):
+        _launch(block)
+
+
+def test_launch_settings_come_from_the_user_config_only(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text(
+        "launch:\n  container:\n    enabled: true\n    memory: 6G\n"
+        "models: {broken: 1}\n")               # only the launch block is parsed
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "gmlx.yaml").write_text(
+        "launch:\n  container:\n    enabled: false\n    mounts: [~/.ssh]\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    cfg, notice = cfgmod.load_launch_settings()
+    assert cfg.container.enabled is True and cfg.container.memory == "6G"
+    assert cfg.container.mounts == []           # the hostile repo block is ignored
+    assert notice and "ignoring the launch block" in notice
+    assert str(repo / "gmlx.yaml") in notice
+
+
+def test_launch_settings_fall_back_to_home_dotfile(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gmlx.yaml").write_text("launch: {container: {cpus: 2}}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    cfg, notice = cfgmod.load_launch_settings()
+    assert cfg.container.cpus == 2 and notice is None
+
+
+def test_launch_settings_in_the_user_config_folder_are_not_ignored(tmp_path, monkeypatch):
+    # Run from ~/.config/gmlx, ./gmlx.yaml is the user config itself.
+    home = tmp_path / "home"
+    folder = home / ".config" / "gmlx"
+    folder.mkdir(parents=True)
+    (folder / "gmlx.yaml").write_text("launch: {container: {cpus: 3}}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(folder)
+    cfg, notice = cfgmod.load_launch_settings()
+    assert cfg.container.cpus == 3 and notice is None
+
+
+def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    cfg, notice = cfgmod.load_launch_settings()
+    assert cfg.container.enabled is False and notice is None
+
+
+def test_launch_clients_match_the_launch_handlers():
+    from gmlx.commands.launch import _HARNESSES
+    assert set(_HARNESSES) == set(cfgmod.LAUNCH_CLIENTS)
