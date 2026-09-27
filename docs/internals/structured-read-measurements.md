@@ -2,9 +2,9 @@
 
 The timings behind [Structured reads](structured-reads.md) and the
 [Letter readout](letter-readout.md) show where a `/v1/systemone` decision's
-time goes on one machine, and how the model, the request options and a
-question's wording change the answers. The commands in [Setup](#setup)
-measure both again.
+time goes, and how the model, the request options and a question's wording
+change the answers. [Setup](#setup) names the machine behind each section
+and gives the commands that measure them again.
 
 - [Setup](#setup)
 - [Prefill](#prefill)
@@ -22,20 +22,22 @@ measure both again.
 
 | Item | Value |
 |------|-------|
-| Machine | The bench ran on an Apple M3 Max with 128 GB on macOS 26.6. |
+| Bench machine | The bench ran on an Apple M5 Max with 128 GB on macOS 26.5, with mlx 0.32.1 and mlx-kquant 0.4.14. |
+| Other sections | Question wording, both accuracy sections, the two thinking tables and the HTTP times ran on an Apple M3 Max with 128 GB on macOS 26.6. |
 | Model | The model is diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and the Accuracy and Thinking on mixed requests sections also use Q8_0. |
-| Letter readout model | The letter readout sections use OpenJev Q4_K_M from `openjev/openjev-GGUF`, a 16.5 GB file, with mlx-kquant 0.4.14 on macOS 26.6.2. |
+| Letter readout model | The letter readout sections use OpenJev Q4_K_M from `openjev/openjev-GGUF`, a 16.5 GB file. |
 | Base model | The letter readout accuracy also uses Qwen3.8-27B UD-Q6_K_XL from `unsloth/Qwen3.8-27B-GGUF`, a 25.3 GB file. |
 | Canvas | The canvas is 64, the `server.systemone.canvas` default. |
-| Peak memory | Peak memory reached 19.7 GB over the whole bench. |
+| Peak memory | Peak memory in the bench reached 19.7 GB on DiffusionGemma and 19.4 GB on OpenJev. |
 
 `scripts/structured_read_bench.py` loaded the model in process and timed
 each arm with a device synchronization on both sides. Every arm is the
 median of five timed runs after two untimed ones, with the arm order
-reversed on every other round and 15 s of idle between blocks. `pmset`
-recorded no thermal or performance warning before or after. The schema is
-three questions, one of each type, whose answer template is 16 tokens, so
-the narrowest canvas it fits is 32.
+reversed on every other round and 15 s of idle between blocks. The GPU
+lowers its clock after a few seconds of idle, so a second of matmuls
+starts each block. `pmset` recorded no thermal or performance warning
+before or after. The schema is three questions, one of each type, whose
+answer template is 16 tokens, so the narrowest canvas it fits is 32.
 
 ```sh
 python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
@@ -46,10 +48,9 @@ the prefix of a 700-word state and the tails of 1, 5 and 20 questions at
 each forward size, one tail by length, 20 tails grouped and one per
 forward, a prefix store and lookup, and whole decisions. Its long blocks
 rest 15 s after each round, since a few minutes of steady load lower the
-GPU clock on some machines. The GPU also lowers its clock after a few
-seconds of idle, so a second of matmuls follows each rest before the next
-round. The JSON output keeps every run's time, so a clock drop shows as a
-rise across rounds.
+GPU clock on some machines, and a second of matmuls follows each rest.
+The JSON output keeps every run's time, so a clock drop shows as a rise
+across rounds.
 
 ```sh
 python scripts/structured_read_bench.py OpenJev-Q4_K_M.gguf
@@ -87,45 +88,47 @@ python scripts/structured_read_accuracy.py OpenJev-Q4_K_M.gguf labeled
 ## Prefill
 
 A group prefills its prompt at most once, since a later stage extends the
-earlier prompt when it can. Past a few hundred tokens the prefill is the
-largest part of a decision. Chunking at 512 tokens applies only to
-longer prompts, where it costs about 5 percent.
+earlier prompt when it can. From a few hundred tokens, the prefill is the
+largest part of a decision. Chunking at 512 tokens applies only to longer
+prompts, where it adds about a fifth.
 
 | Prompt tokens | Prefill ms | Chunked at 512, ms |
 |---------------|------------|--------------------|
-| 178 | 217 | 224 |
-| 472 | 428 | 415 |
-| 955 | 795 | 845 |
-| 1900 | 1657 | 1738 |
+| 178 | 78 | 79 |
+| 472 | 132 | 132 |
+| 955 | 208 | 247 |
+| 1900 | 410 | 488 |
 
 ## Reads and samples
 
-A one-step read on a prefilled 472-token prompt costs about one decoder
-pass. Samples run as one batch, so extra samples cost a fraction of a pass
-each, while reading them one at a time costs a whole pass each.
+A one-step read on a prefilled 472-token prompt costs 40 to 50 ms, about
+one decoder pass. Samples run as one batch, so extra samples cost a
+fraction of a pass each, while reading them one at a time costs a whole
+pass each. At width 32, one sample takes longer than two or four, since a
+read of 32 rows costs more than one of 64 or 128 on this machine.
 
 | Width | Samples | Batched ms | One at a time, ms |
 |-------|---------|------------|-------------------|
-| 32 | 1 | 91 | |
-| 32 | 2 | 100 | 180 |
-| 32 | 4 | 140 | 363 |
-| 64 | 1 | 96 | |
-| 64 | 2 | 138 | 193 |
-| 64 | 4 | 212 | 386 |
+| 32 | 1 | 51 | |
+| 32 | 2 | 40 | 103 |
+| 32 | 4 | 48 | 206 |
+| 64 | 1 | 39 | |
+| 64 | 2 | 46 | 76 |
+| 64 | 4 | 67 | 151 |
 
 ## Steps and unembedding
 
-Constrained unembedding saves about 17 ms on a one-sample read and 59 ms on
+Constrained unembedding saves about 11 ms on a one-sample read and 44 ms on
 a four-sample read, since the full-vocabulary product multiplies each slot
 row by the whole embedding table.
 
 | Read at width 32 | Constrained ms | Full vocabulary ms |
 |------------------|----------------|--------------------|
-| 1 sample, 1 step | 98 | 115 |
-| 4 samples, 1 step | 144 | 203 |
-| 1 sample, 2 steps | 198 | 248 |
-| 1 sample, 4 steps | 402 | 243 |
-| 1 sample, 8 steps | 776 | 229 |
+| 1 sample, 1 step | 55 | 66 |
+| 4 samples, 1 step | 48 | 92 |
+| 1 sample, 2 steps | 112 | 132 |
+| 1 sample, 4 steps | 220 | 134 |
+| 1 sample, 8 steps | 432 | 128 |
 
 Past one step, a read costs one pass per step until it converges. On the
 bench prompt the full-vocabulary read converged after two steps and the
@@ -135,14 +138,14 @@ to the cap in both modes. The stop rule is the one in
 
 ## Extension and thoughts
 
-Appending tokens to a prefilled prompt for a later stage costs 12.7 ms for
-one token and 33.1 ms for eight.
+Appending tokens to a prefilled prompt for a later stage costs 9.5 ms for
+one token and 21.2 ms for eight.
 
-A 64-token thought on the bench's 472-token prompt took 2068 ms at the
-median, with a range of 1341 to 2556 ms. A thought's time follows the
-number of denoise steps its canvas takes to converge, at about 150 ms a
-step. The `thoughts` mode wrote a 64-token thought three times for each
-request in this table.
+A 64-token thought on the bench's 472-token prompt took 554 ms at the
+median, with a range of 382 to 729 ms. A thought's time follows the number
+of denoise steps its canvas takes to converge. On the M3 Max, the
+`thoughts` mode wrote a 64-token thought three times for each request in
+this table, at about 150 ms a step.
 
 | Request | Denoise steps | Median ms |
 |---------|---------------|-----------|
@@ -164,16 +167,17 @@ decisions took these times.
 
 | Samples | Reads | Decision ms |
 |---------|-------|-------------|
-| 1 | 1 | 708 |
-| 4 | 4 | 687 |
-| `"auto"` | 4 | 822 |
+| 1 | 1 | 170 |
+| 4 | 4 | 165 |
+| `"auto"` | 4 | 214 |
 
-The difference between one and four samples is within the run-to-run
-spread. On this prompt `"auto"` extended to four samples, which adds a
-second batched pass after the first read.
+Four samples took slightly less than one, for the reason that
+[Reads and samples](#reads-and-samples) gives. On this prompt `"auto"`
+extended to four samples, which adds a second batched pass after the first
+read.
 
 Over HTTP, `tests/e2e/run_systemone_e2e.py` measured these wall times on
-the same machine. Its ticket asks one question about "Everything is down
+the M3 Max. Its ticket asks one question about "Everything is down
 and we have a demo at noon."
 
 | Request | Reads | Prompt tokens | Wall ms |
@@ -275,21 +279,21 @@ slowest request that thought took 3.0 s.
 
 On OpenJev, a decision's time is the sum of its forwards. The state here is
 a 710-token support thread, and the questions are a random mix of the
-three types with three or four options. The forward sizes ran in the order
-128, 64, 128, 256, 128, 64, 128, 256, 128, and the table gives the
-medians.
+three types with three or four options. The table gives the median of five
+runs at each forward size.
 
 | Forward size | Prefix of 710 tokens, s | Longest forward, ms | Tails of 1, 5 and 20 questions, s |
 |--------------|-------------------------|---------------------|-----------------------------------|
-| 64 | 4.73 | 450 | 0.46, 2.17, 8.88 |
-| 128 | 4.34 | 760 | 0.44, 1.95, 7.98 |
-| 256 | 4.22 | 1420 | 0.44, 1.87, 7.53 |
+| 64 | 1.31 | 145 | 0.14, 0.64, 2.70 |
+| 128 | 0.98 | 209 | 0.14, 0.48, 1.91 |
+| 256 | 0.84 | 377 | 0.14, 0.42, 1.70 |
 
 The longest forward is how long a chat stream on the same model waits
-between two tokens while a decision runs. At 128, a decision is within 3 to
-6 percent of the speed at 256 and holds chat up for half as long. At 64, it
-is 9 to 11 percent slower to save about 300 ms per wait. The reader uses
-128.
+between two tokens while a decision runs. At 128, a decision takes 12 to
+17 percent longer than at 256 and holds chat up for a little over half as
+long. At 64, it takes another third longer to save about 60 ms per wait.
+The reader uses 128, chosen on the M3 Max, where 128 came within 3 to 6
+percent of 256.
 
 One forward of a single tail on the same prefix took these times. Up to 32
 tokens, the Q4_K matrix products take their small-batch route, and above
@@ -298,18 +302,18 @@ much as one of 64.
 
 | Tokens | 8 | 16 | 24 | 32 | 33 | 40 | 48 | 64 | 96 | 128 |
 |--------|---|----|----|----|----|----|----|----|----|-----|
-| ms | 105 | 186 | 250 | 250 | 405 | 410 | 415 | 425 | 690 | 715 |
+| ms | 42 | 58 | 71 | 68 | 125 | 127 | 131 | 118 | 176 | 182 |
 
-Twenty tails on the same prefix took 7.9 to 9.2 s in 11 grouped forwards,
-and 9.5 to 10.2 s in 20 forwards of one tail each, over five alternating
-runs whose times rose as the machine warmed. Keeping a new 710-token
-prefix in the checkpoint tier took 27 to 52 ms, 29 ms at the median, and
-finding it again took 6 to 9 ms.
+Twenty tails on the same prefix took 1.87 s in 10 grouped forwards, and
+2.70 s in 20 forwards of one tail each. Keeping a new 710-token prefix in
+the checkpoint tier took 22 ms, and finding it again took 2 ms. A whole
+decision on a new state took 1.09 s for one question and 1.47 s for five.
 
-The mixed set of [Thinking on mixed requests](#thinking-on-mixed-requests)
-took 1.43 s per request on OpenJev, from about 1.0 s for one question to
-2.6 to 3.1 s for the five-question tickets. DiffusionGemma took 0.32 s per
-request without thoughts in the same bench run.
+On the M3 Max, the mixed set of
+[Thinking on mixed requests](#thinking-on-mixed-requests) took 1.43 s per
+request on OpenJev, from about 1.0 s for one question to 2.6 to 3.1 s for
+the five-question tickets. DiffusionGemma took 0.32 s per request without
+thoughts in the same bench run.
 
 ## Letter readout accuracy
 
