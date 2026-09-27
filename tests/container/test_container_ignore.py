@@ -140,3 +140,36 @@ def test_load_reports_an_unsupported_pattern(tmp_path):
     matcher, notice = ignore.load(cf, tmp_path)
     assert matcher is None
     assert "every context file counts" in notice
+
+
+def test_an_invalid_range_is_unsupported_not_a_crash(tmp_path):
+    with pytest.raises(ignore.UnsupportedPattern, match="not a valid pattern"):
+        ignore.Matcher(["a[z-a]b"])
+    (tmp_path / "Containerfile").write_text("FROM x\n")
+    (tmp_path / ".dockerignore").write_text("a[z-a]b\n")
+    matcher, notice = ignore.load(tmp_path / "Containerfile", tmp_path)
+    assert matcher is None and "every context file counts" in notice
+
+
+def test_a_pattern_ends_at_the_end_of_the_text_as_in_go():
+    assert not ignore.Matcher(["*.txt"]).excluded("a.txt\n")
+    assert ignore.Matcher(["*.txt"]).excluded("a.txt")
+
+
+def test_lines_split_on_newlines_only():
+    assert ignore.read_patterns("a\r\nb\rc\n\x0cd\n") == ["a", "b\rc", "d"]
+
+
+@pytest.mark.parametrize("patterns, folder, prune", [
+    (["node_modules"], "node_modules", True),
+    (["node_modules", "!keep.txt"], "node_modules", True),        # one component
+    (["build", "!build/keep"], "build", False),                   # below the folder
+    (["build", "!src/keep"], "build", False),                      # two components
+    (["a/build", "!src/keep"], "a/build", True),
+    (["build", "!**/keep"], "build", False),
+    (["build", "![k]eep"], "build", False),
+    (["build", "!build"], "build", False),                         # not excluded
+    (["other"], "build", False),
+])
+def test_excludes_all_below(patterns, folder, prune):
+    assert ignore.Matcher(patterns).excludes_all_below(folder) is prune

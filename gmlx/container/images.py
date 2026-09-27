@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,9 +40,6 @@ CONTAINERFILE_MAX = 16 * 1024
 DEFAULT_CONTAINERFILES = ("Containerfile", "Dockerfile")
 AGE_NOTE_DAYS = 30
 LAUNCH_LABELS = {cli.LAUNCH_LABEL: "1"}
-# A launch's build starts the builder seconds after the launch writes its
-# marker, so a builder that started this soon after a marker is that launch's.
-BUILDER_START_WINDOW = 60.0
 
 # The command each shipped image installs for its client.
 CLIENT_BINARY = {
@@ -169,7 +167,14 @@ def shipped_hash(client: str, packages: list[str]) -> str:
 
 
 def _shipped_args(client: str, packages: list[str]) -> dict[str, str]:
-    return {"CLIENT": client, "EXTRA_PACKAGES": " ".join(packages)}
+    # Sorted, so the same packages in another order use the same image.
+    return {"CLIENT": client, "EXTRA_PACKAGES": " ".join(sorted(set(packages)))}
+
+
+def _node_base() -> str:
+    """The base image the shipped Containerfile names."""
+    m = re.search(r"^FROM\s+(\S+)", SHIPPED_CONTAINERFILE.read_text(), re.M)
+    return m[1] if m else ""
 
 
 def shipped_tag(client: str, packages: list[str]) -> str:
@@ -178,16 +183,24 @@ def shipped_tag(client: str, packages: list[str]) -> str:
 
 def context_files(context: Path, matcher: ignore.Matcher | None):
     """``(relative path, lstat)`` of every file a build of ``context`` can
-    see, sorted. The ``.git`` folder at the root is left out."""
-    found = []
-    prune = matcher is not None and not matcher.has_exclusions
-    for root, dirs, files in os.walk(context):
+    see, sorted. The ``.git`` folder at the root is left out. A folder or a
+    file that cannot be read is listed with a stat of None, so the hash
+    still sees it and the build itself reports the error."""
+    found: list = []
+
+    def unreadable(error: OSError) -> None:
+        if error.filename:
+            rel = os.path.relpath(error.filename, context)
+            if matcher is None or not matcher.excluded(rel):
+                found.append((rel, None))
+
+    for root, dirs, files in os.walk(context, onerror=unreadable):
         rel_root = os.path.relpath(root, context)
         rel_root = "" if rel_root == "." else rel_root + "/"
         if not rel_root:
             dirs[:] = [d for d in dirs if d != ".git"]
-        if prune:
-            dirs[:] = [d for d in dirs if not matcher.excluded(rel_root + d)]
+        if matcher is not None:
+            dirs[:] = [d for d in dirs if not matcher.excludes_all_below(rel_root + d)]
         dirs.sort()
         for name in files + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
             rel = rel_root + name
@@ -197,6 +210,8 @@ def context_files(context: Path, matcher: ignore.Matcher | None):
                 found.append((rel, os.lstat(os.path.join(root, name))))
             except FileNotFoundError:
                 continue
+            except OSError:
+                found.append((rel, None))
     found.sort(key=lambda item: item[0])
     return found
 
@@ -212,6 +227,9 @@ def build_hash(plan: ImagePlan, base_digests: dict[str, str], say: Say) -> str:
     h = hashlib.sha256(plan.containerfile.read_bytes())
     h.update(json.dumps(sorted(base_digests.items())).encode())
     for rel, st in context_files(plan.context, matcher):
+        if st is None:
+            h.update(f"{rel}\0unreadable\n".encode())
+            continue
         link = ""
         if os.path.islink(plan.context / rel):
             link = os.readlink(plan.context / rel)
@@ -227,6 +245,7 @@ class ReadyImage:
     info: ImageInfo
     run_ref: str                      # <repository>@sha256:<digest>
     action: str                       # "built", "pulled" or "found"
+    client: str = ""
 
 
 def _lock_path(repo: str) -> Path:
@@ -246,13 +265,15 @@ def _records_path() -> Path:
 
 def _update_records(fn: Callable[[dict], None]) -> dict:
     """Read, change and write the record of the references launch added,
-    under its own lock. Each entry maps a reference to the clients using it
-    and the process ID of the launch that last pinned it."""
+    under its own lock. Each entry maps a reference to the clients that use
+    it and the process IDs of the launches that pinned it."""
     with FileLock(images_dir() / "references.lock"):
         path = _records_path()
         try:
             records = json.loads(path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
+            records = {}
+        if not isinstance(records, dict):
             records = {}
         fn(records)
         tmp = path.with_suffix(".tmp")
@@ -261,33 +282,14 @@ def _update_records(fn: Callable[[dict], None]) -> dict:
         return records
 
 
-def _pin(source: str, repo: str, info: ImageInfo, client: str) -> str:
-    """Add ``<repo>@<digest>`` to the local store and record it."""
-    run_ref = f"{repo}@{info.digest}"
-    present = cli.image_info(run_ref)
-    if present is None or present.digest != info.digest:
-        cli.tag(source, run_ref)
-
-    def add(records):
-        clients = _owners(records.get(run_ref))
-        clients.add(client)
-        records[run_ref] = {"clients": sorted(clients), "pid": os.getpid()}
-    _update_records(add)
-    return run_ref
-
-
 def _owners(entry) -> set[str]:
     if isinstance(entry, dict):
         return set(entry.get("clients") or [])
-    return set(entry or [])
+    return set()
 
 
-def _pinned_by_another_launch(entry) -> bool:
-    """Whether another launch that is still running pinned the reference. It
-    may still be on its way to ``container run``, which only then shows the
-    reference as in use."""
-    pid = entry.get("pid") if isinstance(entry, dict) else None
-    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+def _alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -296,6 +298,32 @@ def _pinned_by_another_launch(entry) -> bool:
     except OSError:
         return False
     return True
+
+
+def _pids(entry) -> set[int]:
+    """The launches that pinned the reference and still run."""
+    raw = entry.get("pids") if isinstance(entry, dict) else None
+    return {p for p in raw or [] if _alive(p)}
+
+
+def _pin(source: str, repo: str, info: ImageInfo, client: str) -> str:
+    """Add ``<repo>@<digest>`` to the local store. The reference is recorded
+    as launch's only when launch added it, so a reference you added yourself
+    is never deleted."""
+    run_ref = f"{repo}@{info.digest}"
+    present = cli.image_info(run_ref)
+    added = present is None or present.digest != info.digest
+    if added:
+        cli.tag(source, run_ref)
+
+    def add(records):
+        entry = records.get(run_ref)
+        if entry is None and not added:
+            return
+        records[run_ref] = {"clients": sorted(_owners(entry) | {client}),
+                            "pids": sorted(_pids(entry) | {os.getpid()})}
+    _update_records(add)
+    return run_ref
 
 
 def _in_use() -> tuple[set[str], set[str]]:
@@ -309,38 +337,59 @@ def _in_use() -> tuple[set[str], set[str]]:
     return refs, digests
 
 
-def _cleanup(repo: str, keep: set[str], client: str, *, tags: bool) -> None:
+def _cleanup(repo: str, keep: set[str], client: str, *, tags: bool, say: Say) -> None:
     """Delete the older references in ``repo``: its tags when ``tags`` is
-    set, and the digest references launch recorded for ``client``. ``:base``
-    and any reference a running launch container uses stay."""
+    set, and the digest references launch recorded. ``client`` stops using
+    each recorded reference it does not keep, and a reference is deleted
+    once no client uses it. ``:base``, any reference a running launch
+    container uses, and any reference a running launch pinned stay. A
+    failure here only warns, because the image the launch needs is ready."""
+    try:
+        _cleanup_or_raise(repo, keep, client, tags=tags)
+    except ContainerError as e:
+        say(f"[launch] warning: could not delete older images of {repo}: {e}")
+
+
+def _cleanup_or_raise(repo: str, keep: set[str], client: str, *, tags: bool) -> None:
     used_refs, used_digests = _in_use()
-    doomed = []
-    records_seen: dict = {}
-    _update_records(lambda r: records_seen.update(r))
-    for name, digest in cli.image_names():
-        if name in keep or repository_of(name) != repo or name.endswith(":base"):
-            continue
-        if name in used_refs or digest in used_digests:
-            continue
-        if "@" in name:
-            entry = records_seen.get(name)
-            owners = _owners(entry)
-            if client not in owners or owners - {client} or _pinned_by_another_launch(entry):
+    names = cli.image_names()
+    store = {name for name, _digest in names}
+    doomed: list[str] = []
+
+    def choose(records):
+        for ref in [r for r in records if r not in store]:
+            del records[ref]              # the image is gone
+        for ref, entry in records.items():
+            if isinstance(entry, dict):
+                entry["pids"] = sorted(_pids(entry))
+        for name, digest in names:
+            if name in keep or repository_of(name) != repo or name.endswith(":base"):
                 continue
-        elif not tags:
-            continue
-        doomed.append(name)
+            if "@" in name:
+                entry = records.get(name)
+                if not isinstance(entry, dict):
+                    continue              # not added by launch
+                owners = _owners(entry) - {client}
+                entry["clients"] = sorted(owners)
+                if owners or _pids(entry) - {os.getpid()}:
+                    continue
+            elif not tags:
+                continue
+            if name in used_refs or digest in used_digests:
+                continue
+            doomed.append(name)
+    _update_records(choose)
     if not doomed:
         return
     cli.image_delete(doomed)
-    # A reference the store refused to delete stays recorded, so a later
-    # cleanup tries it again.
+    # A reference the store refused to delete stays recorded with no
+    # client, so a later cleanup tries it again.
     left = {name for name, _digest in cli.image_names()}
-    gone = [name for name in doomed if name not in left]
 
     def drop(records):
-        for name in gone:
-            records.pop(name, None)
+        for name in doomed:
+            if name not in left:
+                records.pop(name, None)
     _update_records(drop)
 
 
@@ -351,85 +400,114 @@ def check_arch(info: ImageInfo, ref: str) -> None:
                          "runs Linux arm64 images only.")
 
 
-def _build(context: str, **kw) -> None:
-    """Run ``container build``, then stop the image builder when a launch
-    started it and no other launch is building. The builder is a virtual
-    machine of its own that keeps its memory until it stops.
-
-    The marker file holds the process ID of the launch that started the
-    builder. A marker whose launch is gone is dropped, and the builder stops
-    only when it started after the marker was written, so a builder that
-    you started yourself keeps running."""
-    marker = images_dir() / "builder-started"
+def _build(context: str, *, say: Say, **kw) -> None:
+    """Run ``container build``. The image builder is a virtual machine of
+    its own that keeps its memory until it stops, so the launch that found
+    it stopped stops it again after the build, when no other build uses it.
+    A builder that was already running gets its own settings passed back,
+    so the build never makes 1.4.1 create it again."""
     using = FileLock(images_dir() / "builder.lock", shared=True)
+    # Earlier versions kept a marker file here.
+    (images_dir() / "builder-started").unlink(missing_ok=True)
+    started_here = False
     try:
-        if cli.builder_running():
-            _drop_stale_marker(marker)
+        current = cli.builder()
+        if current is not None and current.state == "running":
+            kw["builder_args"] = cli.builder_build_args(current)
         else:
-            marker.write_text(str(os.getpid()))
+            started_here = True
         cli.build(context, **kw)
     finally:
         using.release()
-        try:
-            last = FileLock(images_dir() / "builder.lock", blocking=False)
-        except LockHeld:
-            last = None                   # another launch is still building
-        if last is not None:
-            try:
-                _stop_builder_if_ours(marker)
-            finally:
-                last.release()
+        if started_here:
+            _stop_builder(say)
 
 
-def _drop_stale_marker(marker: Path) -> None:
-    """Handle a marker whose launch is gone. A builder that started within
-    :data:`BUILDER_START_WINDOW` of the marker is the one that launch
-    started, so this launch adopts it and stops it later. Any other builder
-    was started by someone else, so the marker is dropped."""
+def _other_builds() -> bool:
+    """Whether a ``container build`` or ``container builder`` command runs
+    on the Mac, such as a build you started yourself."""
     try:
-        pid = int(marker.read_text().strip() or "0")
-        written = marker.stat().st_mtime
-    except (OSError, ValueError):
-        return
-    try:
-        if pid > 0:
-            os.kill(pid, 0)
-            return                        # that launch is still running
-    except PermissionError:
-        return
-    except OSError:
-        pass
-    _state, started = cli.builder_status()
-    if started is not None and written - 2 <= started <= written + BUILDER_START_WINDOW:
-        marker.write_text(str(os.getpid()))
-        os.utime(marker, (written, written))   # the stop check compares with it
-    else:
-        marker.unlink(missing_ok=True)
+        out = subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True                       # unknown, so keep the builder
+    return any(_BUILD_COMMAND.search(line) for line in out.splitlines())
 
 
-def _stop_builder_if_ours(marker: Path) -> None:
+_BUILD_COMMAND = re.compile(r"(^|/)container\s+(build|builder)(\s|$)")
+
+
+def _stop_builder(say: Say) -> None:
+    """Stop the builder unless another build uses it. A failure only warns,
+    since the image is ready."""
     try:
-        written = marker.stat().st_mtime
-    except FileNotFoundError:
-        return
-    marker.unlink(missing_ok=True)
-    state, started = cli.builder_status()
-    # startedDate has whole seconds, so allow for the rounding.
-    if state == "running" and started is not None and started >= written - 2:
+        last = FileLock(images_dir() / "builder.lock", blocking=False)
+    except LockHeld:
+        return                            # another launch is still building
+    try:
+        if _other_builds():
+            return
         cli.builder_stop()
+    except ContainerError as e:
+        say(f"[launch] warning: could not stop the image builder ({e}). Stop it with: "
+            "container builder stop")
+    finally:
+        last.release()
+
+
+def builder_notice() -> str | None:
+    """One line about a builder that runs while no build uses it, with the
+    command that stops it, or None. It never raises."""
+    try:
+        current = cli.builder()
+    except ContainerError:
+        return None
+    if current is None or current.state != "running":
+        return None
+    try:
+        idle = FileLock(images_dir() / "builder.lock", blocking=False)
+    except LockHeld:
+        return None                       # a launch is building
+    try:
+        if _other_builds():
+            return None
+    finally:
+        idle.release()
+    size = (f" and holds {current.memory_bytes / (1 << 30):.0f} GB of memory"
+            if current.memory_bytes else "")
+    return (f"[launch] the image builder is running{size}. Stop it with: "
+            "container builder stop")
+
+
+class _Announce:
+    """Prints the build and pull lines, and puts the first-run step number
+    on the first of them only."""
+
+    def __init__(self, say: Say, step: str | None):
+        self.say, self.step = say, step
+
+    def __call__(self, text: str) -> None:
+        prefix = f"{self.step}: " if self.step else ""
+        self.step = None
+        self.say(f"[launch] {prefix}{text}")
 
 
 def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
-                    say: Say) -> ReadyImage:
+                    say: Say, announce: _Announce | None = None) -> ReadyImage:
+    announce = announce or _Announce(say, None)
     repo, tag, base = recipe_repo(client), shipped_tag(client, packages), base_ref(client)
     with repo_lock(repo, say=say):
         info = None if rebuild else cli.image_info(tag)
         action = "found"
         if info is None:
-            say(f"[launch] building the {client} image")
-            _build(str(SHIPPED_CONTAINERFILE.parent), file=str(SHIPPED_CONTAINERFILE),
-                      tags=[tag, base], build_args=_shipped_args(client, packages),
-                      labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
+            node = _node_base()
+            download = rebuild or (node and cli.image_info(node) is None)
+            announce(f"building the {client} image" + (
+                f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for {node}"
+                if download else ""))
+            _build(str(SHIPPED_CONTAINERFILE.parent), say=say, file=str(SHIPPED_CONTAINERFILE),
+                   tags=[tag, base], build_args=_shipped_args(client, packages),
+                   labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
             info = cli.image_info(tag)
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store.")
@@ -439,17 +517,18 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
             if current is None or current.digest != info.digest:
                 cli.tag(tag, base)
         run_ref = _pin(tag, repo, info, client)
-        _cleanup(repo, {tag, base, run_ref}, client, tags=True)
-    return ReadyImage("shipped", tag, info, run_ref, action)
+        _cleanup(repo, {tag, base, run_ref}, client, tags=True, say=say)
+    return ReadyImage("shipped", tag, info, run_ref, action, client)
 
 
-def _ensure_build(plan: ImagePlan, *, rebuild: bool, say: Say) -> ReadyImage:
+def _ensure_build(plan: ImagePlan, *, rebuild: bool, say: Say,
+                  announce: _Announce) -> ReadyImage:
     bases = sorted(plan.bases)
     rebuilt: set[str] = set()
     while True:
         for b in bases:
             _ensure_shipped(b, plan.base_packages.get(b, []),
-                            rebuild=rebuild and b not in rebuilt, say=say)
+                            rebuild=rebuild and b not in rebuilt, say=say, announce=announce)
             rebuilt.add(b)
         held: list[FileLock] = []
         try:
@@ -463,14 +542,15 @@ def _ensure_build(plan: ImagePlan, *, rebuild: bool, say: Say) -> ReadyImage:
                     break
                 digests[b] = info.digest
             else:
-                return _build_user_image(plan, digests, rebuild=rebuild, say=say)
+                return _build_user_image(plan, digests, rebuild=rebuild, say=say,
+                                         announce=announce)
         finally:
             for lock in held:
                 lock.release()
 
 
 def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool,
-                      say: Say) -> ReadyImage:
+                      say: Say, announce: _Announce) -> ReadyImage:
     assert plan.containerfile is not None and plan.context is not None
     repo = build_repo(plan.client)
     tag = f"{repo}:{build_hash(plan, digests, say)}"
@@ -478,27 +558,27 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
         info = None if rebuild else cli.image_info(tag)
         action = "found"
         if info is None:
-            say(f"[launch] building {plan.containerfile}")
-            _build(str(plan.context), file=str(plan.containerfile), tags=[tag],
-                      labels=LAUNCH_LABELS, no_cache=rebuild,
-                      pull=rebuild and not plan.bases)
+            announce(f"building {plan.containerfile}")
+            _build(str(plan.context), say=say, file=str(plan.containerfile), tags=[tag],
+                   labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
             info = cli.image_info(tag)
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store.")
             action = "built"
         check_arch(info, tag)
         run_ref = _pin(tag, repo, info, plan.client)
-        _cleanup(repo, {tag, run_ref}, plan.client, tags=True)
-    return ReadyImage("build", tag, info, run_ref, action)
+        _cleanup(repo, {tag, run_ref}, plan.client, tags=True, say=say)
+    return ReadyImage("build", tag, info, run_ref, action, plan.client)
 
 
-def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say) -> ReadyImage:
+def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
+                   announce: _Announce) -> ReadyImage:
     assert plan.ref is not None
     ref = plan.ref
     info = None if rebuild else cli.image_info(ref)
     action = "found"
     if info is None:
-        say(f"[launch] pulling {ref}")
+        announce(f"pulling {ref}")
         cli.pull(ref)
         info = cli.image_info(ref)
         if info is None:
@@ -508,18 +588,41 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say) -> ReadyImage:
     repo = repository_of(info.name or ref)
     with repo_lock(repo, say=say):
         run_ref = _pin(ref, repo, info, plan.client)
-        _cleanup(repo, {run_ref}, plan.client, tags=False)
-    return ReadyImage("image", ref, info, run_ref, action)
+        _cleanup(repo, {run_ref}, plan.client, tags=False, say=say)
+    return ReadyImage("image", ref, info, run_ref, action, plan.client)
 
 
-def ensure_image(plan: ImagePlan, *, rebuild: bool = False,
-                 say: Say = _say) -> ReadyImage:
-    """Build, pull or find the planned image and pin it by digest."""
+def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
+                 step: str | None = None) -> ReadyImage:
+    """Build, pull or find the planned image and pin it by digest. ``step``,
+    such as ``"step 2 of 3"``, goes on the first build or pull line."""
+    announce = _Announce(say, step)
     if plan.kind == "shipped":
-        return _ensure_shipped(plan.client, plan.packages, rebuild=rebuild, say=say)
+        return _ensure_shipped(plan.client, plan.packages, rebuild=rebuild, say=say,
+                               announce=announce)
     if plan.kind == "build":
-        return _ensure_build(plan, rebuild=rebuild, say=say)
-    return _ensure_pulled(plan, rebuild=rebuild, say=say)
+        return _ensure_build(plan, rebuild=rebuild, say=say, announce=announce)
+    return _ensure_pulled(plan, rebuild=rebuild, say=say, announce=announce)
+
+
+def pending_work(plan: ImagePlan, rebuild: bool) -> str | None:
+    """``"build"`` or ``"pull"`` when :func:`ensure_image` would build or
+    pull, None when the image is ready. It only reads the image store."""
+    if plan.kind == "image":
+        assert plan.ref is not None
+        return "pull" if rebuild or cli.image_info(plan.ref) is None else None
+    if rebuild:
+        return "build"
+    if plan.kind == "shipped":
+        return "build" if cli.image_info(shipped_tag(plan.client, plan.packages)) is None else None
+    digests: dict[str, str] = {}
+    for b in plan.bases:
+        info = cli.image_info(shipped_tag(b, plan.base_packages.get(b, [])))
+        if info is None:
+            return "build"
+        digests[b] = info.digest
+    tag = f"{build_repo(plan.client)}:{build_hash(plan, digests, lambda _line: None)}"
+    return "build" if cli.image_info(tag) is None else None
 
 
 def _checks_path() -> Path:
@@ -529,9 +632,11 @@ def _checks_path() -> Path:
 def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool,
                   say: Say = _say) -> None:
     """Confirm once per image and command that the command exists in the
-    image, by running ``gmlx-entry --check`` in it with no network. Shipped
-    images skip the check. Under ``--shell`` a missing command only warns."""
-    if ready.kind == "shipped":
+    image and can run, by running ``gmlx-entry --check`` in it with no
+    network. A shipped image running its own client skips the check. Under
+    ``--shell`` a missing command, or one without the execute bit, only
+    warns. Only a passed check is remembered."""
+    if ready.kind == "shipped" and word == CLIENT_BINARY.get(ready.client):
         return
     key = f"{ready.info.digest} {word}"
     with FileLock(images_dir() / "checks.lock"):
@@ -550,7 +655,7 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
             seen[key] = True
             _checks_path().write_text(json.dumps(seen, indent=1, sort_keys=True))
         return
-    if rc != 127:
+    if rc not in (126, 127):
         raise ImageError(f"the check of {ready.tag} for {word} failed (exit {rc})"
                          + (f": {line}" if line else "."))
     if shell:

@@ -4,7 +4,9 @@ none of them, so the Linux CI job can run it with ``--noconftest``."""
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -38,9 +40,20 @@ class FakeContainer:
 
 
 @pytest.fixture
-def fake_container(tmp_path, monkeypatch) -> FakeContainer:
+def short_tmpdir(monkeypatch):
+    """A short ``TMPDIR`` of this test's own. Session folders move there when
+    the cache path is too long for a socket, and cleanup deletes launch
+    folders there, so the real temporary folder must stay out of reach."""
+    path = tempfile.mkdtemp(prefix="gmlx-t-", dir="/tmp")
+    monkeypatch.setenv("TMPDIR", path)
+    yield Path(path)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_container(tmp_path, monkeypatch, short_tmpdir) -> FakeContainer:
     """A fake ``container`` first on ``PATH``, with the launch data and cache
-    folders under ``tmp_path``."""
+    folders under ``tmp_path`` and a short ``TMPDIR`` of its own."""
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir()
     script = bin_dir / "container"

@@ -103,7 +103,12 @@ class _Pattern:
             index += 1
         self.kind = kind
         if kind == _REGEXP:
-            self.regex = re.compile(reg + "$", re.S)
+            # \Z, since Go's $ matches only at the end of the text.
+            try:
+                self.regex = re.compile(reg + r"\Z", re.S)
+            except re.error as e:
+                # BuildKit refuses such a pattern too, as Go's regexp does.
+                raise UnsupportedPattern(f"{self.cleaned!r} is not a valid pattern ({e})") from None
 
     def match(self, path: str) -> bool:
         if self.kind == _EXACT:
@@ -160,10 +165,39 @@ class Matcher:
         return matched
 
 
+    def excludes_all_below(self, folder: str) -> bool:
+        """Whether ``folder`` and every path below it are excluded, so a walk
+        can skip the folder. The folder must be excluded, and no ``!``
+        exception may match a path below it. An exception without ``**`` or
+        a character class matches only paths with as many components as it
+        has, so it cannot match below a folder at that depth or deeper. The
+        folder's own result then carries to every path below it."""
+        if not self.excluded(folder):
+            return False
+        depth = folder.count("/") + 1
+        for pat in self.patterns:
+            if not pat.exclusion:
+                continue
+            if "**" in pat.cleaned or "[" in pat.cleaned:
+                return False
+            if pat.cleaned.count("/") + 1 > depth:
+                return False
+        return True
+
+
+def _lines(text: str) -> list[str]:
+    """Go's ``bufio.ScanLines``: split on newlines only, and drop one
+    carriage return at the end of each line."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def read_patterns(text: str) -> list[str]:
     """``ignorefile.ReadAll``: comments, blank lines and leading slashes."""
     out = []
-    for number, line in enumerate(text.splitlines()):
+    for number, line in enumerate(_lines(text)):
         if number == 0:
             line = line.removeprefix("\ufeff")
         if line.startswith("#"):

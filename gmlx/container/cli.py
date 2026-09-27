@@ -9,8 +9,11 @@ progress and can ask the user a question.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import secrets
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -35,11 +38,32 @@ def find() -> str | None:
     return shutil.which("container")
 
 
-def _run(args: list[str], *, capture: bool = True, timeout: float | None = QUERY_TIMEOUT,
+# Set by query_timeout. None means QUERY_TIMEOUT.
+_query_timeout: float | None = None
+_QUERY = object()
+
+
+@contextlib.contextmanager
+def query_timeout(seconds: float):
+    """Give every query in the block ``seconds`` instead of
+    :data:`QUERY_TIMEOUT`, as ``gmlx doctor`` does so it never waits long."""
+    global _query_timeout
+    saved, _query_timeout = _query_timeout, seconds
+    try:
+        yield
+    finally:
+        _query_timeout = saved
+
+
+def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
          check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
     text, else it goes to the terminal. ``check`` raises
-    :class:`ContainerError` on a nonzero exit."""
+    :class:`ContainerError` on a nonzero exit. A query without a timeout of
+    its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
+    sets."""
+    if timeout is _QUERY:
+        timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = find()
     if binary is None:
         raise ContainerError(f"container is not on PATH. {INSTALL_HINT}")
@@ -52,6 +76,9 @@ def _run(args: list[str], *, capture: bool = True, timeout: float | None = QUERY
             f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s. "
             "The container service may be stuck: try `container system stop` "
             "and `container system start`.") from None
+    except OSError as e:
+        # Such as too many open files, or a binary that went away.
+        raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
         raise ContainerError(
@@ -135,11 +162,22 @@ def _image_info(entry: dict) -> ImageInfo:
     return info
 
 
+# What `container image inspect` prints for a reference the store does not hold.
+_IMAGE_NOT_FOUND = re.compile(r"\bimage not found:")
+
+
 def image_info(ref: str) -> ImageInfo | None:
-    """The image stored under ``ref``, or None when the store has none."""
+    """The image stored under ``ref``, or None when the store has none. Any
+    other failure raises, so a service error never looks like a missing
+    image that launch would pull again."""
     proc = _run(["image", "inspect", ref], check=False)
     if proc.returncode != 0:
-        return None
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if _IMAGE_NOT_FOUND.search(detail):
+            return None
+        raise ContainerError(
+            f"`container image inspect {ref}` failed (exit {proc.returncode})"
+            + (f": {detail.splitlines()[-1]}" if detail else "."))
     try:
         data = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
@@ -169,41 +207,53 @@ def launch_images() -> tuple[int, int]:
     return len(sizes), sum(sizes.values())
 
 
-def builder_status() -> tuple[str, float | None]:
-    """The state of Apple container's image builder, a virtual machine of
-    its own, and when it last started, in seconds since the epoch. The state
-    is empty when there is no builder."""
-    proc = _run(["builder", "status", "--format", "json"], check=False)
-    if proc.returncode != 0:
-        return "", None
-    try:
-        rows = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return "", None
-    for row in rows or []:
+@dataclass
+class Builder:
+    """Apple container's image builder, a virtual machine of its own, from
+    ``container builder status``."""
+    state: str                        # "running", "stopped" and so on
+    cpus: int | None = None
+    memory_bytes: int | None = None
+    ssh: bool = False
+
+
+def builder() -> Builder | None:
+    """The image builder, or None when there is none."""
+    rows = _json(["builder", "status", "--format", "json"]) or []
+    for row in rows:
+        conf = row.get("configuration") or {}
+        res = conf.get("resources") or {}
         status = row.get("status") or {}
-        started = None
-        try:
-            started = datetime.fromisoformat(
-                str(status.get("startedDate", "")).replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            pass
-        return str(status.get("state", "")), started
-    return "", None
+        return Builder(state=str(status.get("state", "")) if isinstance(status, dict)
+                       else str(status),
+                       cpus=res.get("cpus"), memory_bytes=res.get("memoryInBytes"),
+                       ssh=bool(conf.get("ssh")))
+    return None
 
 
-def builder_running() -> bool:
-    return builder_status()[0] == "running"
+def builder_build_args(running: Builder) -> list[str]:
+    """The ``container build`` options that match a running builder. A build
+    with other settings makes 1.4.1 stop, delete and create the builder
+    again, which ends any build that runs on it."""
+    args = []
+    if running.cpus:
+        args += ["--cpus", str(running.cpus)]
+    if running.memory_bytes:
+        # The builder takes memory in whole MiB.
+        args += ["--memory", f"{running.memory_bytes >> 20}M"]
+    if running.ssh and os.environ.get("SSH_AUTH_SOCK"):
+        args += ["--ssh", "default"]
+    return args
 
 
 def builder_stop() -> None:
-    _run(["builder", "stop"], check=False)
+    _run(["builder", "stop"])
 
 
 def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,
           labels: dict[str, str] | None = None, no_cache: bool = False,
-          pull: bool = False) -> None:
-    args = ["build", "--file", file]
+          pull: bool = False, builder_args: list[str] | None = None) -> None:
+    args = ["build", *(builder_args or []), "--file", file]
     for tag in tags:
         args += ["--tag", tag]
     for key, value in (build_args or {}).items():
@@ -285,13 +335,25 @@ def delete(name: str) -> None:
     _run(["delete", "--force", name], check=False)
 
 
+CHECK_TIMEOUT = 120.0
+
+
 def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
     """Run ``gmlx-entry --check WORD`` in the image with no network, and
-    return its exit code and its last line of output."""
-    proc = _run(["run", "--rm", "--progress", "none", "--network", "none",
-                 "--entrypoint", "/opt/gmlx/gmlx-entry",
-                 "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
-                 ref, "--check", word], check=False, timeout=120.0)
+    return its exit code and its last line of output. The container has a
+    name, so a check that gives no answer can be removed."""
+    name = f"gmlx-check-{secrets.token_hex(3)}"
+    try:
+        proc = _run(["run", "--rm", "--name", name, "--progress", "none",
+                     "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
+                     "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
+                     ref, "--check", word], check=False, timeout=CHECK_TIMEOUT)
+    except ContainerError:
+        try:
+            delete(name)
+        except ContainerError:
+            pass
+        raise
     lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
     return proc.returncode, lines[-1] if lines else ""
 

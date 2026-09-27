@@ -2,19 +2,26 @@
 # image: nor build:. The CLIENT build argument picks the one client it
 # installs, and EXTRA_PACKAGES carries the launch config's packages: list.
 # gmlx tags the result gmlx.invalid/launch-<client>:<hash> and :base.
+#
+# The layers go from the most shared to the least: the common packages are
+# one layer for every client, and a packages: change rebuilds only the last
+# layer, never the client install.
 FROM docker.io/library/node:22-bookworm-slim
 
-ARG CLIENT
-ARG EXTRA_PACKAGES=""
-
 RUN set -eux; \
-    python=""; \
-    case "$CLIENT" in hermes|elia|open-webui) python="python3 python3-venv" ;; esac; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        git ripgrep ca-certificates curl openssh-client less procps bzip2 \
-        $python $EXTRA_PACKAGES; \
+        git ripgrep ca-certificates curl openssh-client less procps bzip2; \
     rm -rf /var/lib/apt/lists/*
+
+ARG CLIENT
+
+RUN set -eux; \
+    case "$CLIENT" in hermes|elia|open-webui) \
+        apt-get update; \
+        apt-get install -y --no-install-recommends python3 python3-venv; \
+        rm -rf /var/lib/apt/lists/* ;; \
+    esac
 
 RUN set -eux; \
     gh=https://github.com; \
@@ -47,3 +54,12 @@ RUN set -eux; \
     npm cache clean --force
 
 ENV PATH=/opt/venv/bin:$PATH
+
+ARG EXTRA_PACKAGES=""
+
+RUN set -eux; \
+    if [ -n "$EXTRA_PACKAGES" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $EXTRA_PACKAGES; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi

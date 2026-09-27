@@ -104,72 +104,113 @@ def test_shipped_build_tags_hash_and_base(fake_container):
     assert again.action == "found" and len(fake_container.load()["builds"]) == 1
 
 
-def test_a_builder_launch_started_is_stopped_after_the_build(fake_container):
+@pytest.fixture
+def no_other_builds(monkeypatch):
+    monkeypatch.setattr(images, "_other_builds", lambda: False)
+
+
+def test_a_builder_launch_started_is_stopped_after_the_build(fake_container, no_other_builds):
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert fake_container.calls("builder", "stop")
     assert not fake_container.load()["builder"]
+    assert fake_container.load()["builder_args"] == [[]]
 
 
-def test_a_builder_that_was_running_keeps_running(fake_container):
-    fake_container.update(builder=True)
+def test_a_stopped_builder_is_started_and_stopped_again(fake_container, no_other_builds):
+    fake_container.update(builder=False)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert fake_container.calls("builder", "stop")
+
+
+def test_a_running_builder_keeps_running_with_its_own_settings(fake_container, monkeypatch,
+                                                               no_other_builds):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    fake_container.update(builder=True, builder_config={"cpus": 6, "memory": 8 << 30,
+                                                        "ssh": True})
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert not fake_container.calls("builder", "stop")
+    assert fake_container.load()["builder_args"] == [
+        ["--cpus", "6", "--memory", "8192M", "--ssh", "default"]]
 
 
-def test_the_builder_stays_while_another_launch_builds(fake_container):
+def test_builder_ssh_passes_only_with_an_agent(fake_container, monkeypatch):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    running = cli.Builder("running", cpus=4, memory_bytes=4 << 30, ssh=True)
+    assert cli.builder_build_args(running) == ["--cpus", "4", "--memory", "4096M"]
+
+
+def test_the_builder_stays_while_another_launch_builds(fake_container, no_other_builds):
     other = FileLock(images.images_dir() / "builder.lock", shared=True)
     try:
         images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
-        assert not fake_container.calls("builder", "stop")
     finally:
         other.release()
-    # The marker stays, so the launch that finishes last stops it.
-    assert (images.images_dir() / "builder-started").exists()
+    assert not fake_container.calls("builder", "stop")
 
 
-def test_a_stale_marker_never_stops_a_builder_you_started(fake_container):
-    # A launch killed mid-build left its marker, and you started the builder
-    # afterwards.
-    marker = images.images_dir() / "builder-started"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("999999")
-    fake_container.update(builder=True, builder_started="2099-01-01T00:00:00Z")
+def test_the_builder_stays_while_another_build_runs(fake_container, monkeypatch):
+    monkeypatch.setattr(images, "_other_builds", lambda: True)
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert not fake_container.calls("builder", "stop")
-    assert not marker.exists()
 
 
-def test_a_killed_launchs_builder_is_adopted_and_stopped(fake_container):
-    # A killed launch left its marker, and the builder it started runs on.
-    marker = images.images_dir() / "builder-started"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("999999")
-    written = time.time() - 600
-    os.utime(marker, (written, written))
-    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(written + 5))
-    fake_container.update(builder=True, builder_started=started)
-    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+def test_other_builds_reads_the_process_list(monkeypatch):
+    def ps(lines):
+        return lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="\n".join(lines))
+    monkeypatch.setattr(images.subprocess, "run", ps(["/usr/local/bin/container build -t x .",
+                                                      "zsh"]))
+    assert images._other_builds()
+    monkeypatch.setattr(images.subprocess, "run", ps(["container builder start"]))
+    assert images._other_builds()
+    monkeypatch.setattr(images.subprocess, "run", ps([
+        "/usr/local/bin/container-apiserver start", "container system status",
+        "/usr/local/libexec/container/container-runtime-linux start --uuid buildkit"]))
+    assert not images._other_builds()
+
+
+def test_a_failed_builder_stop_only_warns(fake_container, no_other_builds):
+    fake_container.update(fail_builder_stop=True)
+    said = []
+    ready = images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert ready.action == "built"
+    warn = [line for line in said if "could not stop the image builder" in line]
+    assert len(warn) == 1 and "container builder stop" in warn[0]
+
+
+def test_a_failed_build_still_stops_the_builder_it_started(fake_container, no_other_builds):
+    fake_container.update(fail_build=True)
+    with pytest.raises(cli.ContainerError):
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert fake_container.calls("builder", "stop")
-    assert not marker.exists()
 
 
-def test_a_builder_started_before_the_marker_keeps_running(fake_container, monkeypatch):
-    # The marker was written, but the builder that runs after the build
-    # started earlier, so it is not the one the launch started.
-    real = images.cli.build
-
-    def build(context, **kw):
-        real(context, **kw)
-        fake_container.update(builder_started="2000-01-01T00:00:00Z")
-    monkeypatch.setattr(images.cli, "build", build)
-    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
-    assert not fake_container.calls("builder", "stop")
+def test_builder_notice(fake_container, no_other_builds):
+    assert images.builder_notice() is None                  # no builder
+    fake_container.update(builder=False)
+    assert images.builder_notice() is None
+    fake_container.update(builder=True, builder_config={"cpus": 2, "memory": 4 << 30,
+                                                        "ssh": False})
+    notice = images.builder_notice()
+    assert "holds 4 GB" in notice and notice.endswith("Stop it with: container builder stop")
+    held = FileLock(images.images_dir() / "builder.lock", shared=True)
+    try:
+        assert images.builder_notice() is None              # a launch is building
+    finally:
+        held.release()
+    fake_container.update(running=False)
+    fake_container.update(inspect_error="x")
+    os.environ["PATH"], saved = "/nonexistent", os.environ["PATH"]
+    try:
+        assert images.builder_notice() is None              # never raises
+    finally:
+        os.environ["PATH"] = saved
 
 
 def test_packages_change_the_hash_and_reach_the_build(fake_container):
     assert images.shipped_tag("pi", []) != images.shipped_tag("pi", ["make"])
+    assert images.shipped_tag("pi", ["make", "jq"]) == images.shipped_tag("pi", ["jq", "make"])
     images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make", "jq"]), say=_quiet)
-    assert fake_container.load()["builds"][0]["build_args"]["EXTRA_PACKAGES"] == "make jq"
+    assert fake_container.load()["builds"][0]["build_args"]["EXTRA_PACKAGES"] == "jq make"
 
 
 def test_base_is_retagged_when_it_names_another_image(fake_container):
@@ -216,7 +257,7 @@ def test_cleanup_deletes_only_recorded_digest_references(fake_container):
 
 def _set_pin_pid(run_ref, pid):
     def edit(records):
-        records[run_ref]["pid"] = pid
+        records[run_ref]["pids"] = [pid]
     images._update_records(edit)
 
 
@@ -410,9 +451,9 @@ def test_non_arm64_image_is_refused(fake_container):
 
 # The one-time command check
 
-def _ready(fake_container, kind="image"):
+def _ready(fake_container, kind="image", client="claude-code"):
     fake_container.update(images={"x:1": _img()})
-    return images.ReadyImage(kind, "x:1", cli.image_info("x:1"), "x@" + D1, "found")
+    return images.ReadyImage(kind, "x:1", cli.image_info("x:1"), "x@" + D1, "found", client)
 
 
 def test_check_runs_by_digest_and_is_cached(fake_container):
@@ -438,10 +479,51 @@ def test_missing_command_refuses_or_warns_under_shell(fake_container):
     assert said == [f"[launch] warning: {msg}"]
 
 
-def test_shipped_images_skip_the_check(fake_container):
-    images.check_command(_ready(fake_container, "shipped"), "claude", "/rt", shell=False,
-                         say=_quiet)
+def test_shipped_images_skip_the_check_only_for_their_own_client(fake_container):
+    ready = _ready(fake_container, "shipped")
+    images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
     assert fake_container.calls("run") == []
+    # A command: list on the shipped image names a command the image may lack.
+    fake_container.update(checks={"start.sh": [127, "gmlx-entry: start.sh is not there."]})
+    with pytest.raises(images.ImageError, match="start.sh is not there"):
+        images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
+
+
+def test_a_command_without_the_execute_bit_refuses_like_a_missing_one(fake_container):
+    ready = _ready(fake_container)
+    msg = "gmlx-entry: /usr/local/bin/start.sh has no execute bit. Run chmod 755 on it."
+    fake_container.update(checks={"start.sh": [126, msg]})
+    with pytest.raises(images.ImageError, match="has no execute bit"):
+        images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
+    said = []
+    images.check_command(ready, "start.sh", "/rt", shell=True, say=said.append)
+    assert said == [f"[launch] warning: {msg}"]
+    # A failed check is never remembered, so the fixed image passes next time.
+    fake_container.update(checks={})
+    images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
+    images.check_command(ready, "start.sh", "/rt", shell=False, say=_quiet)
+    assert len(fake_container.calls("run")) == 3
+
+
+def test_other_check_failures_refuse_even_under_shell(fake_container):
+    ready = _ready(fake_container)
+    fake_container.update(checks={"x": [125, "gmlx-entry: cannot listen."]})
+    with pytest.raises(images.ImageError, match="failed \\(exit 125\\)"):
+        images.check_command(ready, "x", "/rt", shell=True, say=_quiet)
+
+
+def test_the_check_container_has_a_name_and_is_removed_on_a_timeout(fake_container,
+                                                                   monkeypatch):
+    ready = _ready(fake_container)
+    images.check_command(ready, "claude", "/rt", shell=False, say=_quiet)
+    (run,) = fake_container.calls("run")
+    name = run[run.index("--name") + 1]
+    assert name.startswith("gmlx-check-")
+    monkeypatch.setattr(cli, "CHECK_TIMEOUT", 0.001)
+    with pytest.raises(cli.ContainerError, match="gave no answer"):
+        images.check_command(ready, "other", "/rt", shell=False, say=_quiet)
+    (delete,) = fake_container.calls("delete")
+    assert delete[:2] == ["delete", "--force"] and delete[2].startswith("gmlx-check-")
 
 
 def test_image_command_forms(fake_container):
@@ -538,3 +620,206 @@ def test_lock_file_descriptor_is_not_inherited(tmp_path):
     lock = FileLock(tmp_path / "x.lock")
     assert not os.get_inheritable(lock.fd)
     lock.release()
+
+
+# Service errors, the reference records and the first-run lines
+
+def test_image_info_raises_on_a_service_error(fake_container):
+    fake_container.update(inspect_error="XPC connection error: the service is not running")
+    with pytest.raises(cli.ContainerError, match="XPC connection error"):
+        cli.image_info("x:1")
+    # So a launch never pulls again because the service failed.
+    fake_container.update(registry={"debian:12": {"digest": D1}})
+    with pytest.raises(cli.ContainerError):
+        images.ensure_image(images.ImagePlan("image", "pi", ref="debian:12"), say=_quiet)
+    assert not fake_container.calls("image", "pull")
+
+
+def test_an_os_error_becomes_a_container_error(fake_container, monkeypatch):
+    def boom(*a, **k):
+        raise OSError(24, "Too many open files")
+    monkeypatch.setattr(cli.subprocess, "run", boom)
+    with pytest.raises(cli.ContainerError, match="Too many open files"):
+        cli.containers()
+
+
+def _records():
+    return images._update_records(lambda r: None)
+
+
+def test_a_digest_reference_you_added_is_never_recorded(fake_container):
+    tag = images.shipped_tag("pi", [])
+    run_ref = f"gmlx.invalid/launch-pi@{D1}"
+    fake_container.update(images={tag: _img(D1), "gmlx.invalid/launch-pi:base": _img(D1),
+                                  run_ref: _img(D1)})
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert run_ref not in _records()
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert run_ref in fake_container.load()["images"]
+
+
+def test_a_shared_reference_goes_once_no_client_uses_it(fake_container):
+    fake_container.update(registry={"debian:12": {"digest": D1}})
+    first = images.ensure_image(images.ImagePlan("image", "pi", ref="debian:12"), say=_quiet)
+    images.ensure_image(images.ImagePlan("image", "omp", ref="debian:12"), say=_quiet)
+    assert set(_records()[first.run_ref]["clients"]) == {"pi", "omp"}
+    _set_pin_pid(first.run_ref, 999999)          # both launches are gone
+    fake_container.update(registry={"debian:12": {"digest": D2}})
+    images.ensure_image(images.ImagePlan("image", "pi", ref="debian:12"), rebuild=True,
+                        say=_quiet)
+    assert first.run_ref in fake_container.load()["images"]       # omp still uses it
+    assert _records()[first.run_ref]["clients"] == ["omp"]
+    images.ensure_image(images.ImagePlan("image", "omp", ref="debian:12"), rebuild=True,
+                        say=_quiet)
+    assert first.run_ref not in fake_container.load()["images"]
+    assert first.run_ref not in _records()
+
+
+def test_records_drop_dead_pids_and_gone_images(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    gone = "gmlx.invalid/launch-omp@" + D2
+
+    def plant(records):
+        records[gone] = {"clients": ["omp"], "pids": []}
+        records[first.run_ref]["pids"] = [999999, os.getpid()]
+    images._update_records(plant)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    records = _records()
+    assert gone not in records
+    assert records[first.run_ref]["pids"] == [os.getpid()]
+
+
+def test_a_cleanup_failure_only_warns(fake_container, monkeypatch):
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+
+    def fail():
+        raise cli.ContainerError("`container image list` gave no answer in 60 s.")
+    monkeypatch.setattr(cli, "image_names", fail)
+    said = []
+    ready = images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]),
+                                say=said.append)
+    assert ready.action == "built"
+    assert any("warning: could not delete older images" in line for line in said)
+
+
+def test_a_refused_delete_does_not_fail_the_launch(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    fake_container.update(refuse_delete=[first.run_ref])
+    ready = images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert ready.action == "built"
+    assert _records()[first.run_ref]["clients"] == []
+    fake_container.update(refuse_delete=[])
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert first.run_ref not in fake_container.load()["images"]
+
+
+def test_pending_work(fake_container, tmp_path):
+    shipped = images.ImagePlan("shipped", "pi")
+    assert images.pending_work(shipped, False) == "build"
+    images.ensure_image(shipped, say=_quiet)
+    assert images.pending_work(shipped, False) is None
+    assert images.pending_work(shipped, True) == "build"
+    pulled = images.ImagePlan("image", "pi", ref="debian:12")
+    assert images.pending_work(pulled, False) == "pull"
+    fake_container.update(registry={"debian:12": {"digest": D1}})
+    images.ensure_image(pulled, say=_quiet)
+    assert images.pending_work(pulled, False) is None
+    assert images.pending_work(pulled, True) == "pull"
+    _, plan = _user_build(tmp_path)
+    assert images.pending_work(plan, False) == "build"
+    images.ensure_image(plan, say=_quiet)
+    assert images.pending_work(plan, False) is None
+    builds = len(fake_container.load()["builds"])
+    assert images.pending_work(plan, False) is None and len(fake_container.load()["builds"]) == builds
+
+
+def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
+    _, plan = _user_build(tmp_path)
+    said = []
+    images.ensure_image(plan, say=said.append, step="step 2 of 3")
+    builds = [line for line in said if "building" in line]
+    assert len(builds) == 2
+    assert builds[0].startswith("[launch] step 2 of 3: building the pi image, which first "
+                                "downloads about 80 MB for docker.io/library/node:22")
+    assert builds[1].startswith("[launch] building ")
+    assert sum("step 2 of 3" in line for line in said) == 1
+
+
+def test_the_node_download_is_named_only_when_it_happens(fake_container):
+    fake_container.update(images={"docker.io/library/node:22-bookworm-slim": _img(D2)})
+    said = []
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
+    assert "[launch] building the pi image" in said
+
+
+def test_the_shipped_layers_share_the_common_packages():
+    text = images.SHIPPED_CONTAINERFILE.read_text()
+    first_run = text.index("RUN ")
+    assert text.index("ARG CLIENT") > first_run
+    assert text.index("ARG EXTRA_PACKAGES") > text.index("npm install -g opencode-ai")
+    assert "$EXTRA_PACKAGES" not in text[:text.index("ARG EXTRA_PACKAGES")]
+
+
+def test_the_hash_walk_keeps_going_past_an_unreadable_folder(fake_container, tmp_path):
+    ctx, plan = _user_build(tmp_path, text="FROM debian\n")
+    locked = ctx / "locked"
+    locked.mkdir()
+    (locked / "a").write_text("1")
+    locked.chmod(0o300)                              # listable, not searchable
+    closed = ctx / "closed"
+    closed.mkdir()
+    closed.chmod(0)
+    try:
+        files = dict(images.context_files(ctx, None))
+        assert files["locked"] is None or "locked/a" in files
+        assert "closed" in files and files["closed"] is None
+        images.build_hash(plan, {}, _quiet)
+    finally:
+        locked.chmod(0o755)
+        closed.chmod(0o755)
+
+
+def test_an_excluded_folder_is_pruned_when_no_exception_reaches_below(fake_container, tmp_path,
+                                                                      monkeypatch):
+    ctx, _plan = _user_build(tmp_path, text="FROM debian\n")
+    (ctx / "node_modules" / "deep").mkdir(parents=True)
+    (ctx / "node_modules" / "deep" / "x.js").write_text("1")
+    (ctx / "keep.txt").write_text("1")
+    seen = []
+    real = images.os.walk
+
+    def walk(top, **kw):
+        for root, dirs, files in real(top, **kw):
+            seen.append(root)
+            yield root, dirs, files
+    monkeypatch.setattr(images.os, "walk", walk)
+    matcher = images.ignore.Matcher(["node_modules", "!keep.txt"])
+    files = dict(images.context_files(ctx, matcher))
+    assert "keep.txt" in files
+    assert not any("node_modules" in root for root in seen)
+
+
+def test_the_launch_tests_get_a_short_temporary_folder(fake_container, short_tmpdir):
+    assert os.environ["TMPDIR"] == str(short_tmpdir)
+    assert str(short_tmpdir).startswith("/tmp/gmlx-t-") and len(str(short_tmpdir)) < 30
+
+
+def test_query_timeout_shortens_queries_in_its_block(fake_container, monkeypatch):
+    seen = []
+    real = cli.subprocess.run
+
+    def run(argv, **kw):
+        seen.append(kw.get("timeout"))
+        return real(argv, **kw)
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    with cli.query_timeout(5):
+        cli.containers()
+        cli.build("/ctx", file="/ctx/Containerfile", tags=["t"])   # no timeout of its own
+    cli.containers()
+    assert seen == [5, None, cli.QUERY_TIMEOUT]
+
+    def slow(argv, **kw):
+        raise cli.subprocess.TimeoutExpired(argv, kw["timeout"])
+    monkeypatch.setattr(cli.subprocess, "run", slow)
+    with cli.query_timeout(5), pytest.raises(cli.ContainerError, match="no answer in 5 s"):
+        cli.containers()

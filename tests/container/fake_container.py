@@ -83,9 +83,12 @@ def main(state: dict, args: list[str]) -> int:
         state["running"] = True
         return 0
     if args[:2] == ["image", "inspect"]:
+        if state.get("inspect_error"):
+            print(f"Error: {state['inspect_error']}", file=sys.stderr)
+            return 1
         img = images.get(_normalize(args[2]))
         if img is None:
-            print(f"Error: image {args[2]} not found", file=sys.stderr)
+            print(f"Error: image not found: {args[2]}", file=sys.stderr)
             return 1
         print(json.dumps([_image_json(_normalize(args[2]), img)]))
         return 0
@@ -98,10 +101,14 @@ def main(state: dict, args: list[str]) -> int:
         images[_normalize(args[3])] = dict(images[_normalize(args[2])])
         return 0
     if args[:2] == ["image", "delete"]:
+        refused = [ref for ref in args[2:] if ref in state.get("refuse_delete", [])]
         for ref in args[2:]:
-            if ref not in state.get("refuse_delete", []):
+            if ref not in refused:
                 images.pop(_normalize(ref), None)
         state.setdefault("deleted", []).extend(args[2:])
+        if refused:
+            print(f"Error: failed to delete one or more images: {refused}", file=sys.stderr)
+            return 1
         return 0
     if args[:2] == ["image", "pull"]:
         img = state.get("registry", {}).get(args[2])
@@ -111,17 +118,31 @@ def main(state: dict, args: list[str]) -> int:
         images[_normalize(args[2])] = dict(img)
         return 0
     if args[:2] == ["builder", "status"]:
-        print(json.dumps([{"id": "buildkit", "status": {
-            "state": "running" if state.get("builder") else "stopped",
-            "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]))
+        # With no builder at all, 1.4.1 prints an empty list.
+        if state.get("builder") is None:
+            print("[]")
+            return 0
+        conf = state.get("builder_config", {"cpus": 2, "memory": 2 << 30, "ssh": False})
+        print(json.dumps([{"id": "buildkit", "configuration": {
+            "id": "buildkit", "ssh": conf["ssh"],
+            "resources": {"cpus": conf["cpus"], "memoryInBytes": conf["memory"]}},
+            "status": {"state": "running" if state["builder"] else "stopped",
+                       "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]))
         return 0
     if args[:2] == ["builder", "stop"]:
-        state["builder"] = False
+        if state.get("fail_builder_stop"):
+            print("Error: internalError: the builder did not stop", file=sys.stderr)
+            return 1
+        if state.get("builder") is not None:
+            state["builder"] = False
         return 0
     if args[0] == "build":
         if not state.get("builder"):
             state["builder_started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         state["builder"] = True
+        state.setdefault("builder_args", []).append(
+            [a for i, a in enumerate(args) if a in ("--cpus", "--memory", "--ssh")
+             or (i and args[i - 1] in ("--cpus", "--memory", "--ssh"))])
         if state.get("fail_build"):
             return 1
         state["next"] = state.get("next", 0) + 1
