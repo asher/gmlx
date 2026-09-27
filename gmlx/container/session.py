@@ -12,9 +12,11 @@ launch.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import resource
 import secrets
 import shutil
 import signal
@@ -31,7 +33,7 @@ from gmlx.config import parse_size_bytes
 
 from . import cli, runtime
 from .clipboard import ClipboardServer
-from .relay import Relay, RelayLoop, loopback_targets
+from .relay import Address, Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
 from .state import FileLock, LockHeld, cache_dir, data_dir
 
@@ -43,6 +45,12 @@ CLIP_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-clip.sock"
 SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
 STOP_GRACE = 10
+# The supervisor raises its open-file limit to this, or to the hard limit
+# when that is lower, so guest connections cannot use up a soft limit of 256.
+NOFILE_TARGET = 10240
+LOG_MAX = 1 << 20
+# How long a signal that arrives before the container exists waits for it.
+PENDING_SIGNAL_WAIT = 60.0
 
 Say = Callable[[str], None]
 
@@ -328,16 +336,18 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
 
 # Cleanup
 
-def cleanup_stale(client: str, *, keep_runtime: str | None) -> None:
-    """Remove what a killed session of ``client`` left behind. The caller
-    holds the client's session lock, so every labelled container and session
-    folder of this client is stale. Other clients are never touched."""
+def cleanup_stale(client: str, *, keep_runtime: str | None, say: Say = _say) -> None:
+    """Remove what a killed session of ``client`` left behind, with one line
+    per container. The caller holds the client's session lock, so every
+    labelled container and session folder of this client is stale. Other
+    clients are never touched."""
     for c in cli.list_launch_containers():
         if c.labels.get("gmlx.launch.client") != client:
             continue
         if c.state == "running":
             cli.stop(c.name, timeout=5)
         cli.delete(c.name)
+        say(f"[launch] removed the leftover container {c.name} of an earlier session")
     for folder in session_dir_candidates(client):
         shutil.rmtree(folder, ignore_errors=True)
     runtime.cleanup_runtime(keep=keep_runtime)
@@ -414,6 +424,8 @@ class _Signals:
         self.child: subprocess.Popen | None = None
         self.count = 0
         self.saved: dict[int, object] = {}
+        # Set when the child exits, so a pending stop gives up.
+        self.done = threading.Event()
 
     def install(self) -> None:
         for sig, handler in ((signal.SIGINT, self._on_int), (signal.SIGTERM, self._on_term),
@@ -428,9 +440,23 @@ class _Signals:
         def run() -> None:
             try:
                 fn(*args, **kw)
-            except cli.ContainerError as e:
+            except Exception as e:  # noqa: BLE001 - a signal thread must never raise
                 self.log(f"signal: {e}")
         threading.Thread(target=run, daemon=True).start()
+
+    def _listed(self) -> bool:
+        return any(c.name == self.name for c in cli.containers())
+
+    def _when_listed(self, fn, *args, **kw) -> None:
+        """Run ``fn`` once the container exists. A signal can arrive before
+        ``container run`` has created it, and a stop of a missing name does
+        nothing. When the child exits first, nothing is left to stop."""
+        deadline = time.monotonic() + PENDING_SIGNAL_WAIT
+        while not self._listed():
+            if self.done.is_set() or time.monotonic() > deadline:
+                return
+            self.done.wait(0.2)
+        fn(*args, **kw)
 
     def _on_int(self, signum, frame) -> None:
         if not self.tty:
@@ -439,11 +465,17 @@ class _Signals:
     def _on_term(self, signum, frame) -> None:
         self.count += 1
         if self.count == 1:
-            self._bg(cli.stop, self.name, timeout=STOP_GRACE)
+            self._bg(self._when_listed, cli.stop, self.name, timeout=STOP_GRACE)
         elif self.count == 2:
-            self._bg(cli.kill, self.name)
+            self._bg(self._kill)
         elif self.child is not None:
             self.child.kill()
+
+    def _kill(self) -> None:
+        if self._listed():
+            cli.kill(self.name)
+        elif self.child is not None:
+            self.child.kill()             # the container does not exist yet
 
 
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
@@ -451,34 +483,29 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               summary: list[str] = ()) -> int:
     """Run the session and return the client's exit code."""
     s = spec.session
-    log_path = cache_dir() / f"last-{s.client}.log"
-    log_file = open(log_path, "w", buffering=1)
-
-    def log(line: str) -> None:
-        try:
-            log_file.write(f"{time.strftime('%H:%M:%S')} {line}\n")
-        except (OSError, ValueError):
-            pass
+    raise_nofile_limit()
+    log = _SessionLog(cache_dir() / f"last-{s.client}.log")
     loop = RelayLoop(log)
     loop.start()
     relays: list[Relay | ClipboardServer] = []
     child: subprocess.Popen | None = None
     signals: _Signals | None = None
+    reader: threading.Thread | None = None
     stop_open = threading.Event()
     try:
-        try:
-            if spec.api_port is not None and api_targets:
-                relays.append(Relay(loop, str(s.sock("api.sock")), api_targets, name="gmlx api"))
-            for port in spec.plan.forward:
-                relays.append(Relay(loop, str(s.sock(f"fwd-{port}.sock")),
-                                    loopback_targets(port), name=f"port {port}"))
-            if spec.web_port is not None:
-                relays.append(Relay(loop, ("127.0.0.1", spec.web_port),
-                                    str(s.sock("web.sock")), name="web"))
-            if spec.plan.clipboard == "images":
-                relays.append(ClipboardServer(loop, str(s.sock("clip.sock"))))
-        except OSError as e:
-            raise SettingsError(f"cannot listen for the session ({e}). Is the port busy?") from None
+        if spec.api_port is not None and api_targets:
+            relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api"),
+                                  str(s.sock("api.sock")), "the gmlx API"))
+        for port in spec.plan.forward:
+            relays.append(_listen(lambda a, p=port: Relay(loop, a, loopback_targets(p),
+                                                          name=f"port {p}"),
+                                  str(s.sock(f"fwd-{port}.sock")), f"forwarded port {port}"))
+        if spec.web_port is not None:
+            relays.append(_listen(lambda a: Relay(loop, a, str(s.sock("web.sock")), name="web"),
+                                  ("127.0.0.1", spec.web_port), "the web app"))
+        if spec.plan.clipboard == "images":
+            relays.append(_listen(lambda a: ClipboardServer(loop, a),
+                                  str(s.sock("clip.sock")), "the clipboard"))
         write_record(s.client, record)
         for line in summary:
             say(line)
@@ -497,31 +524,112 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         # the child starts with the default dispositions.
         signals = _Signals(s.name, spec.tty, log)
         signals.install()
-        try:
-            child = subprocess.Popen(
-                argv, env={**os.environ, **spec.child_env},
-                process_group=None if foreground else 0,
-                stdin=None if spec.interactive else subprocess.DEVNULL,
-                stdout=subprocess.PIPE if spec.url_pattern else None)
-            signals.child = child
-            if spec.url_pattern and child.stdout is not None:
-                reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
-                    child.stdout, spec.url_pattern, spec.web_port, opener))
-                reader.start()
-            rc = child.wait()
-        finally:
-            signals.restore()
+        child = subprocess.Popen(
+            argv, env={**os.environ, **spec.child_env},
+            process_group=None if foreground else 0,
+            stdin=None if spec.interactive else subprocess.DEVNULL,
+            stdout=subprocess.PIPE if spec.url_pattern else None)
+        signals.child = child
+        if spec.url_pattern and child.stdout is not None:
+            reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
+                child.stdout, spec.url_pattern, spec.web_port, opener, log))
+            reader.start()
+        rc = child.wait()
+        signals.done.set()
+        if reader is not None:
+            reader.join(2)                # the last output reaches the terminal
         return rc if rc >= 0 else 128 - rc
     finally:
-        stop_open.set()
-        remove_record(s.client)
-        for relay in relays:
-            relay.close()
-        loop.stop()
-        if child is not None:
-            _remove_container(s.name, stop=signals is None or signals.count < 3, log=log)
-        log_file.close()
-        shutil.rmtree(s.dir, ignore_errors=True)
+        # Each step runs even when one before it fails, and the signal
+        # handlers stay until the end, so a Ctrl-C here cannot stop the
+        # cleanup halfway.
+        try:
+            if signals is not None:
+                signals.done.set()
+            stop_open.set()
+            _step(log, "remove the session record", remove_record, s.client)
+            for relay in relays:
+                _step(log, "close a relay", relay.close)
+            _step(log, "stop the relay loop", loop.stop)
+            if child is not None:
+                _step(log, "remove the container", _remove_container, s.name,
+                      stop=signals is None or signals.count < 3, log=log)
+        finally:
+            try:
+                shutil.rmtree(s.dir, ignore_errors=True)
+            finally:
+                if signals is not None:
+                    signals.restore()
+                log.close()
+
+
+def _step(log: Callable[[str], None], what: str, fn, /, *args, **kw) -> None:
+    try:
+        fn(*args, **kw)
+    except Exception as e:  # noqa: BLE001 - one failed cleanup step must not skip the rest
+        log(f"cleanup: cannot {what} ({type(e).__name__}: {e})")
+
+
+def _listen(make: Callable[[Address], object], addr: Address, what: str):
+    """Make one session listener, and name its address when that fails."""
+    try:
+        return make(addr)
+    except OSError as e:
+        where = addr if isinstance(addr, str) else f"{addr[0]}:{addr[1]}"
+        reason = e.strerror or str(e)
+        hint = (" Stop that program first." if e.errno == errno.EADDRINUSE
+                and not isinstance(addr, str) else "")
+        raise SettingsError(f"cannot listen on {where} for {what}: {reason}.{hint}") from None
+
+
+def raise_nofile_limit(target: int = NOFILE_TARGET) -> None:
+    """Raise the soft limit on open files toward ``target``, never past the
+    hard limit. A failure leaves the limit as it was."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ValueError, OSError):
+        pass
+
+
+class _SessionLog:
+    """The host log ``last-<client>.log``, replaced per session and capped at
+    :data:`LOG_MAX` bytes. Writes are thread-safe and never raise."""
+
+    def __init__(self, path: Path, limit: int = LOG_MAX):
+        self.limit = limit
+        self.size = 0
+        self.full = False
+        self._lock = threading.Lock()
+        try:
+            self._file = open(path, "w", buffering=1)
+        except OSError:
+            self._file = None
+
+    def __call__(self, line: str) -> None:
+        text = f"{time.strftime('%H:%M:%S')} {line}\n"
+        with self._lock:
+            if self._file is None or self.full:
+                return
+            if self.size + len(text) > self.limit:
+                self.full = True
+                text = f"{time.strftime('%H:%M:%S')} the log reached its size limit\n"
+            try:
+                self._file.write(text)
+                self.size += len(text)
+            except (OSError, ValueError):
+                pass
+
+    def close(self) -> None:
+        with self._lock:
+            if self._file is not None:
+                try:
+                    self._file.close()
+                except OSError:
+                    pass
+                self._file = None
 
 
 def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> None:
@@ -535,15 +643,17 @@ def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> N
         if stop:
             cli.stop(name, timeout=5)
         cli.delete(name)
-    except cli.ContainerError as e:
+    except (cli.ContainerError, OSError) as e:
         log(f"cleanup: {e}")
 
 
 def _tee_for_url(stream, pattern: str, web_port: int | None,
-                 opener: Callable[[str], object] | None) -> None:
+                 opener: Callable[[str], object] | None,
+                 log: Callable[[str], None] = lambda line: None) -> None:
     """Copy the client's output to the terminal, and open the first URL the
     pattern finds. Only a URL of the session's own web port opens, so the
-    guest cannot make the Mac open anything else."""
+    guest cannot make the Mac open anything else. The copy goes on whatever
+    the opener does, or the client would block on a full pipe."""
     regex = re.compile(pattern)
     opened = False
     out = sys.stdout.buffer
@@ -558,13 +668,16 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
         m = regex.search(raw.decode("utf-8", "replace"))
         if m and m.group(1).startswith(f"http://127.0.0.1:{web_port}/"):
             opened = True
-            opener(m.group(1))
+            try:
+                opener(m.group(1))
+            except Exception as e:  # noqa: BLE001 - see the docstring
+                log(f"cannot open the browser ({type(e).__name__}: {e})")
 
 
 def _safe_containers() -> list[cli.Container]:
     try:
         return cli.containers()
-    except cli.ContainerError:
+    except (cli.ContainerError, OSError):
         return []
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -25,6 +26,9 @@ GUEST_ENTRY = f"{GUEST_MOUNT}/gmlx-entry"
 GUEST_BIN = f"{GUEST_MOUNT}/bin"
 BUILD_HINT = "python scripts/build_guest_entry.py"
 CLIP_TOOLS = ("xclip", "xsel", "wl-paste")
+# An install folder older than this belongs to a launch that was killed,
+# since an install takes a few seconds.
+TMP_STALE = 600.0
 
 
 def entry_path() -> Path:
@@ -102,7 +106,15 @@ def cleanup_runtime(keep: str | None = None) -> list[Path]:
         if folder.name == keep or not folder.is_dir():
             continue
         if folder.name.startswith(".tmp-"):
-            continue                  # another launch is installing it
+            # A recent one is another launch's install in progress.
+            try:
+                age = time.time() - folder.stat().st_mtime
+            except OSError:
+                continue
+            if age > TMP_STALE:
+                shutil.rmtree(folder, ignore_errors=True)
+                removed.append(folder)
+            continue
         lock_file = folder / ".lock"
         if not lock_file.exists():
             shutil.rmtree(folder, ignore_errors=True)

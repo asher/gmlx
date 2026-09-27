@@ -195,7 +195,10 @@ def test_cleanup_stale_touches_only_the_launching_client(fake_container, tmp_pat
     theirs.mkdir()
     lookalike = session.cache_dir() / "pi-extra-eeeeee"
     lookalike.mkdir()
-    session.cleanup_stale("pi", keep_runtime=None)
+    said = []
+    session.cleanup_stale("pi", keep_runtime=None, say=said.append)
+    assert said == ["[launch] removed the leftover container gmlx-pi-aaaaaa of an earlier "
+                    "session"]
     assert ["stop", "--time", "5", "gmlx-pi-aaaaaa"] in fake_container.log
     assert ["delete", "--force", "gmlx-pi-aaaaaa"] in fake_container.log
     assert not any("gmlx-omp-bbbbbb" in a for a in fake_container.log)
@@ -294,14 +297,19 @@ def test_runtime_retries_when_the_folder_goes_between_find_and_lock(fake_contain
 
     def racing(path, **kw):
         calls["n"] += 1
+        lock = real(path, **kw)
         if calls["n"] == 1:
-            shutil.rmtree(Path(path).parent)          # a cleanup wins the race
-            Path(path).parent.mkdir()
-            Path(path).touch()
-        return real(path, **kw)
+            # A cleanup removes the folder after the lock opened, and another
+            # launch installs it again: complete, but with a new lock file.
+            folder = Path(path).parent
+            inode = os.stat(path).st_ino
+            shutil.rmtree(folder)
+            runtime._install(folder, _entry(tmp_path))
+            assert os.stat(path).st_ino != inode
+        return lock
     monkeypatch.setattr(runtime, "FileLock", racing)
     folder, lock = runtime.acquire_runtime(_entry(tmp_path))
-    assert calls["n"] >= 2 and (folder / "gmlx-entry").is_file()
+    assert calls["n"] == 2 and lock.still_current()
     lock.release()
 
 
@@ -476,6 +484,7 @@ def test_signal_thread_errors_go_to_the_log(monkeypatch):
     def stuck(name, *, timeout=10):
         raise session.cli.ContainerError("stuck")
     monkeypatch.setattr(session.cli, "stop", stuck)
+    monkeypatch.setattr(session.cli, "containers", lambda: [_listed("gmlx-pi-1")])
     sig = session._Signals("gmlx-pi-1", tty=False,
                            log=lambda line: (logged.append(line), done.set()))
     sig._on_term(signal.SIGTERM, None)
@@ -483,17 +492,26 @@ def test_signal_thread_errors_go_to_the_log(monkeypatch):
     assert logged == ["signal: stuck"]
 
 
-def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path):
-    busy = socket.socket()
-    busy.bind(("127.0.0.1", 0))
+@pytest.mark.parametrize("family, host", [(socket.AF_INET, "127.0.0.1"),
+                                          (socket.AF_INET, "0.0.0.0"),
+                                          (socket.AF_INET6, "::")])
+def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path, family, host):
+    # A bind to 127.0.0.1 succeeds while another program listens on the
+    # wildcard address, so the port is probed first.
+    busy = socket.socket(family)
+    busy.bind((host, 0))
     busy.listen()
+    port = busy.getsockname()[1]
     sess = session.new_session("dsh", [])
-    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]),
-                 web_port=busy.getsockname()[1])
-    with pytest.raises(SettingsError, match="busy"):
-        session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={})
-    busy.close()
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=port)
+    try:
+        with pytest.raises(SettingsError, match=rf"cannot listen on 127\.0\.0\.1:{port} for "
+                           r"the web app: another program answers on .*Stop that program"):
+            session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={})
+    finally:
+        busy.close()
     assert fake_container.load().get("runs") is None
+    assert not sess.dir.exists()
 
 
 def test_token_url_opens_only_the_session_web_port(monkeypatch):
@@ -516,9 +534,15 @@ def test_web_app_with_a_token_line_reads_no_terminal(tmp_path):
     assert "-i" not in argv and "-t" not in argv
 
 
+def _listed(name):
+    from gmlx.container import cli
+    return cli.Container(name=name, state="running", labels={}, image="", image_digest="")
+
+
 def test_signals_stop_then_kill_then_end_the_cli(monkeypatch):
     from gmlx.container import cli
     calls = []
+    monkeypatch.setattr(cli, "containers", lambda: [_listed("gmlx-pi-1")])
     monkeypatch.setattr(cli, "stop", lambda name, timeout=10: calls.append(("stop", name)))
     monkeypatch.setattr(cli, "kill", lambda name, signal=None: calls.append(("kill", signal)))
     monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: fn(*a, **k)))
@@ -534,3 +558,144 @@ def test_signals_stop_then_kill_then_end_the_cli(monkeypatch):
     tty = session._Signals("gmlx-pi-1", tty=True)
     tty._on_int(signal.SIGINT, None)                 # the terminal delivers it
     assert len(calls) == 3
+
+
+def test_a_sigterm_before_the_container_exists_stops_it_once_listed(monkeypatch):
+    from gmlx.container import cli
+    listings = iter([[], [], [_listed("gmlx-pi-1")]])
+    calls, done = [], threading.Event()
+    monkeypatch.setattr(cli, "containers", lambda: next(listings))
+    monkeypatch.setattr(cli, "stop", lambda name, timeout=10: (calls.append(name), done.set()))
+    sig = session._Signals("gmlx-pi-1", tty=False)
+    sig._on_term(signal.SIGTERM, None)
+    assert done.wait(5) and calls == ["gmlx-pi-1"]
+
+
+def test_a_pending_stop_gives_up_when_the_child_exits(monkeypatch):
+    from gmlx.container import cli
+    calls, logged = [], []
+    monkeypatch.setattr(cli, "containers", lambda: [])
+    monkeypatch.setattr(cli, "stop", lambda name, timeout=10: calls.append(name))
+    monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: fn(*a, **k)))
+    sig = session._Signals("gmlx-pi-1", tty=False, log=logged.append)
+    sig.done.set()
+    sig._on_term(signal.SIGTERM, None)
+    assert calls == []
+
+
+def test_a_second_signal_before_the_container_exists_kills_the_cli(monkeypatch):
+    from gmlx.container import cli
+    monkeypatch.setattr(cli, "containers", lambda: [])
+    monkeypatch.setattr(session._Signals, "_bg", staticmethod(lambda fn, *a, **k: None))
+    child = subprocess.Popen(["sleep", "30"])
+    sig = session._Signals("gmlx-pi-1", tty=False)
+    sig.child = child
+    sig._on_term(signal.SIGTERM, None)
+    sig.count = 1
+    sig._kill()
+    assert child.wait(5) == -signal.SIGKILL
+
+
+def test_signal_threads_log_any_error(monkeypatch):
+    from gmlx.container import cli
+    logged, done = [], threading.Event()
+
+    def broken():
+        raise OSError(24, "Too many open files")
+    monkeypatch.setattr(cli, "containers", broken)
+    sig = session._Signals("gmlx-pi-1", tty=False,
+                           log=lambda line: (logged.append(line), done.set()))
+    sig._on_term(signal.SIGTERM, None)
+    assert done.wait(5) and "Too many open files" in logged[0]
+
+
+def test_teardown_steps_run_even_when_each_fails(fake_container, tmp_path, monkeypatch):
+    from gmlx.container import cli
+    fake_container.update(run_rc=5)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+
+    def emfile(*a, **k):
+        raise OSError(24, "Too many open files")
+    monkeypatch.setattr(session, "remove_record", emfile)
+    monkeypatch.setattr(cli, "containers", emfile)
+    monkeypatch.setattr(session.RelayLoop, "stop", emfile)
+    rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                           say=lambda line: None)
+    assert rc == 5 and not sess.dir.exists()
+    log = (session.cache_dir() / "last-pi.log").read_text()
+    assert "cannot remove the session record" in log and "cannot stop the relay loop" in log
+
+
+def test_signal_handlers_stay_until_teardown_ends(fake_container, tmp_path, monkeypatch):
+    before = signal.getsignal(signal.SIGINT)
+    seen = []
+
+    def remove(name, *, stop, log):
+        seen.append(signal.getsignal(signal.SIGINT))
+    monkeypatch.setattr(session, "_remove_container", remove)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert seen and seen[0] is not before and getattr(seen[0], "__self__", None) is not None
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_web_app_without_an_opener_only_prints_the_address(fake_container, tmp_path,
+                                                            monkeypatch):
+    monkeypatch.setattr(session, "open_when_ready",
+                        lambda *a, **k: pytest.fail("no browser under --shell"))
+    sess = session.new_session("open-webui", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0)
+    said = []
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
+                      opener=None)
+    assert said == ["[launch] open http://127.0.0.1:0/ in a browser"]
+
+
+def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):
+    import io
+    out = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": out})())
+    logged = []
+
+    def opener(url):
+        raise RuntimeError("no browser")
+    lines = b"dsh web: http://127.0.0.1:3080/?token=abc\n" + b"x\n" * 1000
+    session._tee_for_url(io.BytesIO(lines), r"dsh web: (\S+)", 3080, opener, logged.append)
+    assert out.getvalue() == lines
+    assert logged == ["cannot open the browser (RuntimeError: no browser)"]
+
+
+def test_the_session_log_stops_at_its_limit(tmp_path):
+    log = session._SessionLog(tmp_path / "last-pi.log", limit=200)
+    for i in range(100):
+        log(f"line {i}")
+    log.close()
+    log("after close")                                   # never raises
+    text = (tmp_path / "last-pi.log").read_text()
+    assert len(text) <= 200 + 60 and text.rstrip().endswith("the log reached its size limit")
+
+
+def test_the_open_file_limit_is_raised_toward_the_target():
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+        session.raise_nofile_limit(1024)
+        want = 1024 if hard == resource.RLIM_INFINITY else min(1024, hard)
+        assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == want
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_cleanup_removes_only_stale_install_folders(fake_container, tmp_path):
+    root = runtime.runtime_root()
+    root.mkdir(parents=True, exist_ok=True)
+    old, new = root / ".tmp-deadbeef", root / ".tmp-0badcafe"
+    old.mkdir()
+    new.mkdir()
+    stale = time.time() - runtime.TMP_STALE - 60
+    os.utime(old, (stale, stale))
+    assert runtime.cleanup_runtime(keep=None) == [old]
+    assert new.exists() and not old.exists()

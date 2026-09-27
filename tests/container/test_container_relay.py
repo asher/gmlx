@@ -101,6 +101,7 @@ def test_sse_events_arrive_unbunched(loop, tmp_path):
     gaps = [b - a for a, b in zip(times, times[1:])]
     assert len(times) == 8
     assert min(gaps) > 0.02                  # each event arrives on its own
+    assert max(gaps) < 0.5                   # and none waits for a later one
 
 
 def test_twenty_concurrent_streams(loop, tmp_path):
@@ -328,6 +329,105 @@ def test_resolve_targets_lists_localhost_addresses():
     assert {host for host, _ in addrs} <= {"127.0.0.1", "::1"}
 
 
+def _echo_server():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(64)
+
+    def handle(conn):
+        with conn:
+            while data := conn.recv(4096):
+                conn.sendall(data)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1], srv.close
+
+
+def _echoes(c, timeout):
+    c.settimeout(timeout)
+    c.sendall(b"ping")
+    try:
+        return c.recv(4) == b"ping"
+    except TimeoutError:
+        return False
+
+
+def test_a_listener_holds_at_most_its_cap_of_connections(loop, tmp_path):
+    port, stop = _echo_server()
+    path = str(tmp_path / "cap.sock")
+    relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api", max_connections=2)
+    first, second = _unix_client(path), _unix_client(path)
+    assert _echoes(first, 5) and _echoes(second, 5)
+    third = _unix_client(path)                     # waits in the listen queue
+    assert not _echoes(third, 0.5)
+    first.close()                                  # frees a slot
+    third.settimeout(5)
+    assert third.recv(4) == b"ping"
+    second.close()
+    third.close()
+    stop()
+    assert sum("connections are open" in line for line in loop.logged) == 1
+
+
+def test_unreachable_is_logged_once_per_run_of_failures(loop, tmp_path):
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    port = free.getsockname()[1]
+    free.close()
+    path = str(tmp_path / "down.sock")
+    relay.Relay(loop, path, ("127.0.0.1", port), name="port 5432")
+    for _ in range(5):
+        with _unix_client(path) as c:
+            assert c.recv(10) == b""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", port))                  # the service comes up
+    srv.listen(1)
+    with _unix_client(path) as c:
+        conn, _ = srv.accept()
+        conn.close()
+        assert c.recv(10) == b""
+    srv.close()
+    with _unix_client(path) as c:                  # and goes down again
+        assert c.recv(10) == b""
+    _in_loop(loop, lambda: None)
+    assert sum("cannot reach" in line for line in loop.logged) == 2
+
+
+@pytest.mark.parametrize("family, host", [(socket.AF_INET, "127.0.0.1"),
+                                          (socket.AF_INET, "0.0.0.0"),
+                                          (socket.AF_INET6, "::"),
+                                          (socket.AF_INET6, "::1")])
+def test_a_port_another_program_answers_on_is_busy(loop, family, host):
+    held = socket.socket(family)
+    held.bind((host, 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    try:
+        with pytest.raises(OSError, match="another program answers on"):
+            relay.Relay(loop, ("127.0.0.1", port), "/nowhere")
+    finally:
+        held.close()
+
+
+def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):
+    def no_threads(*a, **k):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(relay.threading, "Timer", no_threads)
+    ran = threading.Event()
+    loop.call_soon(lambda: loop.call_later(0.05, ran.set))
+    assert ran.wait(5)
+    ran.clear()
+    loop.call_later(0.05, ran.set)                 # from another thread as well
+    assert ran.wait(5)
+
+
 # The clipboard server
 
 class StubPasteboard:
@@ -461,13 +561,13 @@ def test_slow_read_delays_no_relay_connection(loop, tmp_path):
 def _captured_handoffs(server):
     """Record each socket the loop hands to the worker."""
     handed = []
-    real = server._queue.put
+    real = server._queue.put_nowait
 
     def put(item):
+        real(item)
         if item is not None:
             handed.append(item[0])
-        real(item)
-    server._queue.put = put
+    server._queue.put_nowait = put
     return handed
 
 
@@ -536,6 +636,77 @@ def test_long_or_unfinished_requests_never_reach_the_worker(loop, tmp_path):
     c.close()
     assert handed == [] and pb.reads == []
     assert "clipboard: request too long, connection closed" in loop.logged
+
+
+def test_an_idle_connection_is_closed_after_the_read_deadline(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES})
+    server, path = _server(loop, tmp_path, pb, read_deadline=0.2)
+    idle = _unix_client(path)
+    start = time.monotonic()
+    assert idle.recv(10) == b""                     # closed by the server
+    assert time.monotonic() - start < 3
+    idle.close()
+    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
+    assert any("no request in" in line for line in loop.logged)
+    assert _in_loop(loop, lambda: server.open) == 0
+
+
+def test_a_full_queue_answers_busy(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=1.0)
+    server, path = _server(loop, tmp_path, pb, queue_max=1)
+    slow = [threading.Thread(target=_ask, args=(path, b"IMAGE image/png\n"))
+            for _ in range(2)]
+    slow[0].start()
+    deadline = time.monotonic() + 5
+    while not pb.reads and time.monotonic() < deadline:
+        time.sleep(0.01)                            # the worker holds the first
+    slow[1].start()                                 # the second fills the queue
+    deadline = time.monotonic() + 5
+    while server._queue.qsize() < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _ask(path, b"TYPES\n") == clipboard._err(clipboard.BUSY)
+    for t in slow:
+        t.join(10)
+
+
+def test_the_clipboard_holds_at_most_its_cap_of_connections(loop, tmp_path):
+    server, path = _server(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}),
+                           max_connections=2)
+    idle = [_unix_client(path), _unix_client(path)]
+    _in_loop(loop, lambda: None)
+    waiting = _unix_client(path)
+    waiting.settimeout(0.5)
+    waiting.sendall(b"TYPES\n")
+    with pytest.raises(TimeoutError):
+        waiting.recv(20)                            # not accepted yet
+    idle[0].close()
+    waiting.settimeout(5)
+    assert waiting.recv(20) == b"OK 10\nimage/png\n"
+    idle[1].close()
+    waiting.close()
+
+
+def test_close_closes_the_requests_that_wait_for_the_worker(loop, tmp_path):
+    pb = StubPasteboard({"public.png": PNG_BYTES}, delay=1.0)
+    server, path = _server(loop, tmp_path, pb)
+    handed = _captured_handoffs(server)
+    busy = threading.Thread(target=_ask, args=(path, b"IMAGE image/png\n"))
+    busy.start()
+    deadline = time.monotonic() + 5
+    while not pb.reads and time.monotonic() < deadline:
+        time.sleep(0.01)
+    waiting = _unix_client(path)
+    waiting.sendall(b"TYPES\n")
+    deadline = time.monotonic() + 5
+    while len(handed) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    server.close()
+    assert handed[1].fileno() == -1                 # closed without an answer
+    assert waiting.recv(20) == b""
+    waiting.close()
+    busy.join(10)
+    server._worker.join(5)
+    assert not server._worker.is_alive()
 
 
 def test_close_removes_the_socket(loop, tmp_path):

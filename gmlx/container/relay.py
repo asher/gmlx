@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import collections
 import errno
+import heapq
+import itertools
 import os
 import selectors
 import socket
 import threading
+import time
 from typing import Callable, Union
 
 # An address is a Unix socket path or a (host, port) pair.
@@ -30,6 +33,11 @@ _CHUNK = 64 * 1024
 LASTING_ACCEPT_ERRORS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
 ACCEPT_PAUSE = 0.1
 BUFFER_CAP = 256 * 1024
+# The most connections one listener holds open at a time. More wait in the
+# listen queue until one closes, so a guest cannot use up the supervisor's
+# file descriptors.
+CONNECTIONS_MAX = 256
+PROBE_TIMEOUT = 1.0
 
 
 def _describe(addr: Address) -> str:
@@ -45,9 +53,33 @@ def _family(addr: Address) -> int:
     return socket.AF_INET6 if ":" in addr[0] else socket.AF_INET
 
 
+def answering(addr: tuple) -> bool:
+    """Whether a program accepts connections at ``addr``."""
+    try:
+        sock = socket.socket(_family(addr), socket.SOCK_STREAM)
+    except OSError:
+        return False
+    with sock:
+        sock.settimeout(PROBE_TIMEOUT)
+        return sock.connect_ex(addr) == 0
+
+
+def check_port_free(port: int) -> None:
+    """Raise OSError when a program already answers on the loopback port.
+    A bind to 127.0.0.1 succeeds while another program listens on 0.0.0.0
+    or ::, and that program would then lose its own loopback traffic."""
+    for addr in (("127.0.0.1", port), ("::1", port)):
+        if answering(addr):
+            raise OSError(errno.EADDRINUSE,
+                          f"another program answers on {_describe(addr)}")
+
+
 def listen_socket(addr: Address, backlog: int = 128) -> socket.socket:
     """A bound, listening, non-blocking socket. A Unix path is replaced when a
-    stale socket file sits there."""
+    stale socket file sits there. A loopback TCP port is refused when another
+    program answers on it, on either loopback address."""
+    if not isinstance(addr, str) and addr[0] in ("127.0.0.1", "::1") and addr[1]:
+        check_port_free(addr[1])
     sock = socket.socket(_family(addr), socket.SOCK_STREAM)
     try:
         if isinstance(addr, str):
@@ -81,6 +113,8 @@ class RelayLoop:
         self._stopping = False
         self._thread: threading.Thread | None = None
         self._owned: set = set()          # every socket to close at stop
+        self._timers: list = []           # (due, seq, fn), loop thread only
+        self._seq = itertools.count()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="gmlx-relay",
@@ -96,10 +130,16 @@ class RelayLoop:
             pass                          # a wake byte is already pending
 
     def call_later(self, delay: float, fn: Callable[[], None]) -> None:
-        """Run ``fn`` in the loop thread after ``delay`` seconds."""
-        timer = threading.Timer(delay, self.call_soon, args=(fn,))
-        timer.daemon = True
-        timer.start()
+        """Run ``fn`` in the loop thread after ``delay`` seconds. The loop
+        keeps the timers itself and starts no thread for them."""
+        due = time.monotonic() + delay
+
+        def add() -> None:
+            heapq.heappush(self._timers, (due, next(self._seq), fn))
+        if threading.current_thread() is self._thread:
+            add()
+        else:
+            self.call_soon(add)
 
     def stop(self, timeout: float = 5.0) -> None:
         """End the loop and close every socket it serves."""
@@ -149,10 +189,25 @@ class RelayLoop:
         except (KeyError, ValueError):
             return False
 
+    def _run_due_timers(self) -> float | None:
+        """Run the timers that are due, and return the wait until the next."""
+        while self._timers:
+            due = self._timers[0][0]
+            now = time.monotonic()
+            if due > now:
+                return due - now
+            _, _, fn = heapq.heappop(self._timers)
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - one bad timer must not end the loop
+                self.log(f"relay loop: {type(e).__name__}: {e}")
+        return None
+
     def _run(self) -> None:
         while not self._stopping:
+            wait = self._run_due_timers()
             try:
-                events = self._sel.select()
+                events = self._sel.select(wait)
             except OSError as e:
                 self.log(f"relay loop: select failed ({e})")
                 return
@@ -209,8 +264,8 @@ class _Pair:
     """One accepted connection joined to its upstream connection."""
 
     def __init__(self, loop: RelayLoop, down: socket.socket, targets: list,
-                 name: str):
-        self.loop, self.down, self.name = loop, down, name
+                 name: str, owner: "Relay | None" = None):
+        self.loop, self.down, self.name, self.owner = loop, down, name, owner
         self.targets = list(targets)
         self.tried: list = []
         self.up: socket.socket | None = None
@@ -238,13 +293,23 @@ class _Pair:
             if rc in (0, errno.EINPROGRESS, errno.EAGAIN):
                 self.up, self.connecting = sock, rc != 0
                 self.loop.own(sock)
+                if rc == 0:
+                    self._reached()
                 self._update()
                 return
             sock.close()
             self.last_error = os.strerror(rc)
         where = " or ".join(_describe(a) for a in self.tried)
-        self.loop.log(f"{self.name}: cannot reach {where} ({self.last_error})")
+        message = f"{self.name}: cannot reach {where} ({self.last_error})"
+        if self.owner is not None:
+            self.owner.unreachable(message)
+        else:
+            self.loop.log(message)
         self.close()
+
+    def _reached(self) -> None:
+        if self.owner is not None:
+            self.owner.reached()
 
     def _update(self) -> None:
         if self.closed:
@@ -322,6 +387,7 @@ class _Pair:
                 self._connect_next()
                 return
             self.connecting = False
+            self._reached()
         try:
             if mask & _READ:
                 data = self._recv(self.up)
@@ -351,19 +417,29 @@ class _Pair:
                 sock.close()
             except OSError:
                 pass
+        if self.owner is not None:
+            self.owner.released()
 
 
 class Relay:
     """Accepts on ``listen`` and joins each connection to ``connect``, a
     target address or a list of them tried in order until one accepts. The
-    listener binds here, so a busy port fails before the container starts."""
+    listener binds here, so a busy port fails before the container starts.
+    At most ``max_connections`` connections are open at a time, and a run of
+    failures to reach the target is logged once."""
 
     def __init__(self, loop: RelayLoop, listen: Address,
-                 connect: Address | list, *, name: str | None = None):
+                 connect: Address | list, *, name: str | None = None,
+                 max_connections: int = CONNECTIONS_MAX):
         self.loop = loop
         self.listen = listen
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
+        self.max_connections = max_connections
+        self.open = 0
+        self.full = False
+        self.cap_logged = False
+        self.failing = False
         self.sock = listen_socket(listen)
         self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name)
         loop.call_soon(self._register)
@@ -374,6 +450,13 @@ class Relay:
 
     def _on_accept(self, mask: int) -> None:
         while True:
+            if self.open >= self.max_connections:
+                if not self.cap_logged:
+                    self.loop.log(f"{self.name}: {self.open} connections are open, so new "
+                                  "ones wait until one closes")
+                self.cap_logged = self.full = True
+                self.loop.unwatch(self.sock)
+                return
             try:
                 conn, _ = self.sock.accept()
             except (BlockingIOError, InterruptedError):
@@ -382,13 +465,31 @@ class Relay:
                 self.pause.failed(e)
                 return
             self.pause.ok()
+            self.open += 1
             try:
-                _Pair(self.loop, conn, self.targets, self.name)
+                _Pair(self.loop, conn, self.targets, self.name, owner=self)
             except OSError as e:
                 # A socket for the upstream side could not be made.
                 self.loop.log(f"{self.name}: cannot relay a connection ({e})")
                 self.loop.disown(conn)
                 conn.close()
+                self.released()
+
+    # Called by each _Pair, in the loop thread.
+
+    def released(self) -> None:
+        self.open -= 1
+        if self.full and self.open < self.max_connections and not self.pause.closed:
+            self.full = False
+            self.loop.watch(self.sock, _READ, self._on_accept)
+
+    def unreachable(self, message: str) -> None:
+        if not self.failing:
+            self.loop.log(message)
+        self.failing = True
+
+    def reached(self) -> None:
+        self.failing = False
 
     def close(self) -> None:
         """Stop accepting; connections already joined keep running."""
