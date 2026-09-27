@@ -22,3 +22,7 @@ venv/
 
 # mkdocs build output
 /site/
+
+# The guest entry binary is built by scripts/build_guest_entry.py, never committed
+/gmlx/container/guest/gmlx-entry
+/crates/gmlx-entry/target/

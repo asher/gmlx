@@ -30,6 +30,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Rust toolchain for the guest entry
+        # rustup reads the pinned version and the musl target from
+        # rust-toolchain.toml in the crate folder, so the pin lives there only.
+        working-directory: crates/gmlx-entry
+        run: |
+          rustup toolchain install
+          cargo test --locked --offline
       - name: Install
         run: |
           pip install "mlx==0.32.1"
@@ -106,6 +113,31 @@ jobs:
           # the default device to CPU when this is set.
           KQUANT_FORCE_CPU: "1"
         run: pytest -q
+
+  guest-entry:
+    # The static Linux binary `gmlx launch --container` ships, built the way
+    # the release job builds it and tested as is, without a VM.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Rust toolchain
+        working-directory: crates/gmlx-entry
+        run: |
+          rustup toolchain install
+          cargo test --locked --offline
+      - name: Build and test the release binary
+        run: |
+          python scripts/build_guest_entry.py
+          pip install pytest build
+          GMLX_ENTRY_BIN="$PWD/gmlx/container/guest/gmlx-entry" \
+            pytest -q --noconftest tests/container/test_container_entry.py
+      - name: The sdist and wheel ship it
+        run: |
+          python -m build
+          python scripts/check_guest_entry_dist.py
 
   lint:
     runs-on: ubuntu-latest

@@ -24,6 +24,28 @@ git clone https://github.com/asher/gmlx
 pip install -e "./gmlx[chat,assistant]" pytest ruff
 ```
 
+## Rust toolchain for the guest entry
+
+Container mode runs a small static Linux program, the guest entry, from
+`crates/gmlx-entry/`. The default test tier builds it for your Mac, so it
+needs the Rust version that `crates/gmlx-entry/rust-toolchain.toml` pins.
+Install it once through rustup, which Homebrew keeps beside its own `rust`:
+
+```sh
+brew install rustup
+export PATH="$(brew --prefix rustup)/bin:$PATH"
+cd crates/gmlx-entry && rustup toolchain install
+```
+
+With that `PATH`, `python scripts/build_guest_entry.py` builds the Linux
+binary into `gmlx/container/guest/gmlx-entry`, and `--native` builds one
+for the Mac. Every build checks the toolchain first and prints these
+commands when it does not match. Builds use the vendored `libc` crate, so
+they need no network. The same source gives identical bytes on one kind of
+machine but not across macOS and Linux, because cargo hashes the build
+machine into symbol names, so a release ships the binary the release job
+builds on arm64 Linux.
+
 ## Tests
 
 There are three tiers, described in full in

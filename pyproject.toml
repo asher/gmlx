@@ -162,6 +162,7 @@ include = ["gmlx*"]
 [tool.setuptools.package-data]
 "gmlx.upstream" = ["seams.json"]
 "gmlx.models.deepseek_v41" = ["chat_template.jinja"]
+"gmlx.container" = ["guest/gmlx-entry"]
 gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
 
@@ -292,7 +293,8 @@ backlog = [
 
 [tool.ruff]
 # Vendored third-party code is linted upstream, not here.
-extend-exclude = ["gmlx/_vendor", "tests/systemone/_openjev_helper_ref.py"]
+extend-exclude = ["gmlx/_vendor", "tests/systemone/_openjev_helper_ref.py",
+                  "crates/gmlx-entry/vendor"]
 
 [tool.ruff.lint]
 # S110: a silent try-except-pass needs a reason on its except line

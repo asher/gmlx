@@ -2,8 +2,10 @@ name: release
 
 # Tag-triggered build + publish. Push a vX.Y.Z tag (matching the version in
 # pyproject.toml) to build the sdist + wheel and publish to PyPI via trusted
-# publishing (no API token stored). Pure-Python package: one ubuntu build job,
-# no compile matrix.
+# publishing (no API token stored). One build job on arm64 Linux: the only
+# compiled part is the static guest entry of `gmlx launch --container`, built
+# on the same runner type as the tests' guest-entry job and shipped in both
+# the sdist and the wheel.
 #
 # After the publish, the homebrew job regenerates the formula and pushes it to
 # the asher/homebrew-gmlx tap. homebrew-verify then installs and tests it on
@@ -36,7 +38,7 @@ jobs:
   build:
     name: build sdist + wheel
     if: ${{ !inputs.homebrew_only }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -51,10 +53,19 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml ($pkg_version)"
             exit 1
           fi
+      - name: Rust toolchain
+        working-directory: crates/gmlx-entry
+        run: rustup toolchain install
+      - name: Build and test the guest entry
+        run: |
+          python scripts/build_guest_entry.py
+          python -m pip install --upgrade pip build pytest
+          GMLX_ENTRY_BIN="$PWD/gmlx/container/guest/gmlx-entry" \
+            pytest -q --noconftest tests/container/test_container_entry.py
       - name: Build sdist + wheel
         run: |
-          python -m pip install --upgrade pip build
           python -m build
+          python scripts/check_guest_entry_dist.py
       - uses: actions/upload-artifact@v7
         with:
           name: dist

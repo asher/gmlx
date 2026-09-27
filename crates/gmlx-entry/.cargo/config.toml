@@ -1,0 +1,10 @@
+# Builds use only the vendored crates, so an offline checkout or sdist builds.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+# The musl target links with the linker Rust ships, so no C toolchain is needed.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
