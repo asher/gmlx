@@ -2146,6 +2146,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from . import lifecycle
 
     lifecycle.stamp_run(host, port)
+    # Each client connection holds a descriptor, and the soft limit of 256
+    # that Terminal gives would let a few hundred idle connections reset
+    # every other client.
+    from gmlx.rlimit import raise_nofile_limit
+    raise_nofile_limit()
 
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,

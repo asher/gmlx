@@ -699,3 +699,88 @@ def test_cleanup_removes_only_stale_install_folders(fake_container, tmp_path):
     os.utime(old, (stale, stale))
     assert runtime.cleanup_runtime(keep=None) == [old]
     assert new.exists() and not old.exists()
+
+
+def test_a_shell_on_a_web_app_names_the_address_without_open(fake_container, tmp_path):
+    sess = session.new_session("open-webui", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), web_port=0,
+                 shell=True)
+    said = []
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=said.append,
+                      opener=None)
+    assert said == ["[launch] the web app answers at http://127.0.0.1:0/ once you start "
+                    "it from the shell"]
+
+
+def test_a_container_run_that_cannot_start_is_a_clean_error(fake_container, tmp_path,
+                                                            monkeypatch):
+    from gmlx.container import cli
+
+    def emfile(*a, **k):
+        raise OSError(24, "Too many open files")
+    monkeypatch.setattr(session.subprocess, "Popen", emfile)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    with pytest.raises(cli.ContainerError, match="cannot start `container run` "
+                                                 r"\(Too many open files\)"):
+        session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                          say=lambda line: None)
+    assert not sess.dir.exists()
+
+
+def test_session_folder_and_record_errors_are_clean(fake_container, tmp_path, monkeypatch):
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    monkeypatch.setattr(session, "cache_dir", lambda: blocker)
+    monkeypatch.setenv("TMPDIR", str(blocker))
+    with pytest.raises(SettingsError, match="cannot create the session folder"):
+        session.new_session("pi", [])
+    monkeypatch.setattr(session, "record_path", lambda client: blocker / "session.json")
+    with pytest.raises(SettingsError, match="cannot write the session record"):
+        session.write_record("pi", {})
+
+
+def test_a_sigint_without_a_terminal_waits_for_the_container(monkeypatch):
+    from gmlx.container import cli
+    listings = iter([[], [], [_listed("gmlx-pi-1")]])
+    calls, done = [], threading.Event()
+    monkeypatch.setattr(cli, "containers", lambda: next(listings))
+    monkeypatch.setattr(cli, "kill", lambda name, signal=None: (calls.append((name, signal)),
+                                                                done.set()))
+    sig = session._Signals("gmlx-pi-1", tty=False)
+    sig._on_int(signal.SIGINT, None)
+    assert done.wait(5) and calls == [("gmlx-pi-1", "SIGINT")]
+
+
+def test_teardown_queries_use_a_short_timeout(fake_container, tmp_path, monkeypatch):
+    from gmlx.container import cli
+    seen = []
+
+    def remove(name, *, stop, log):
+        seen.append(cli._query_timeout)
+    monkeypatch.setattr(session, "_remove_container", remove)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert seen == [session.TEARDOWN_QUERY_TIMEOUT] == [5.0]
+    assert cli._query_timeout is None
+
+
+def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path, monkeypatch):
+    fake_container.update(run_rc=3)
+    before = signal.getsignal(signal.SIGTERM)
+
+    def hung(name, *, stop, log):
+        for _ in range(3):
+            os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(30)                             # a service that gives no answer
+    monkeypatch.setattr(session, "_remove_container", hung)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    start = time.monotonic()
+    rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                           say=lambda line: None)
+    assert rc == 3 and time.monotonic() - start < 10
+    assert not sess.dir.exists() and signal.getsignal(signal.SIGTERM) is before
+    assert "abandoned after a third signal" in (
+        session.cache_dir() / "last-pi.log").read_text()

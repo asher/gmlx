@@ -37,6 +37,11 @@ BUFFER_CAP = 256 * 1024
 # listen queue until one closes, so a guest cannot use up the supervisor's
 # file descriptors.
 CONNECTIONS_MAX = 256
+# A relayed connection that moves no byte in either direction in this many
+# seconds closes. Each one holds a connection to the target too, such as the
+# gmlx server, so idle guest connections cannot use up its descriptors. Once
+# bytes flow there is no deadline, so a quiet stream stays open.
+IDLE_DEADLINE = 30.0
 PROBE_TIMEOUT = 1.0
 
 
@@ -64,30 +69,49 @@ def answering(addr: tuple) -> bool:
         return sock.connect_ex(addr) == 0
 
 
-def check_port_free(port: int) -> None:
-    """Raise OSError when a program already answers on the loopback port.
-    A bind to 127.0.0.1 succeeds while another program listens on 0.0.0.0
-    or ::, and that program would then lose its own loopback traffic."""
-    for addr in (("127.0.0.1", port), ("::1", port)):
-        if answering(addr):
-            raise OSError(errno.EADDRINUSE,
-                          f"another program answers on {_describe(addr)}")
+def _other_loopback(addr: tuple) -> tuple:
+    return ("::1" if addr[0] == "127.0.0.1" else "127.0.0.1", addr[1])
 
 
 def listen_socket(addr: Address, backlog: int = 128) -> socket.socket:
     """A bound, listening, non-blocking socket. A Unix path is replaced when a
-    stale socket file sits there. A loopback TCP port is refused when another
-    program answers on it, on either loopback address."""
-    if not isinstance(addr, str) and addr[0] in ("127.0.0.1", "::1") and addr[1]:
-        check_port_free(addr[1])
+    stale socket file sits there.
+
+    A loopback TCP port binds without ``SO_REUSEADDR`` first, which fails
+    while another program listens on that port on any address, such as
+    0.0.0.0 or ::. Only then does launch ask whether a program answers. When
+    none does, the port holds only closed connections in TIME_WAIT, and the
+    bind repeats with ``SO_REUSEADDR``. Once bound, the other loopback
+    address is checked too, since a program that listens only on ::1 would
+    take the traffic of a browser that tries ::1 first."""
+    if isinstance(addr, str):
+        try:
+            os.unlink(addr)
+        except FileNotFoundError:
+            pass
+        return _bind(addr, backlog, reuse=False)
+    loopback = addr[0] in ("127.0.0.1", "::1")
+    try:
+        sock = _bind(addr, backlog, reuse=not loopback)
+    except OSError as e:
+        if not loopback or e.errno != errno.EADDRINUSE:
+            raise
+        if answering(addr):
+            raise OSError(errno.EADDRINUSE,
+                          f"another program answers on {_describe(addr)}") from None
+        sock = _bind(addr, backlog, reuse=True)
+    if loopback:
+        other = _other_loopback((addr[0], sock.getsockname()[1]))
+        if answering(other):
+            sock.close()
+            raise OSError(errno.EADDRINUSE, f"another program answers on {_describe(other)}")
+    return sock
+
+
+def _bind(addr: Address, backlog: int, *, reuse: bool) -> socket.socket:
     sock = socket.socket(_family(addr), socket.SOCK_STREAM)
     try:
-        if isinstance(addr, str):
-            try:
-                os.unlink(addr)
-            except FileNotFoundError:
-                pass
-        else:
+        if reuse:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(addr)
         sock.listen(backlog)
@@ -260,11 +284,17 @@ class AcceptPause:
             self.loop.watch(self.sock, _READ, self.callback)
 
 
+def _upstream_socket(family: int) -> socket.socket:
+    """A socket for the target side of a pair. Tests replace it."""
+    return socket.socket(family, socket.SOCK_STREAM)
+
+
 class _Pair:
     """One accepted connection joined to its upstream connection."""
 
     def __init__(self, loop: RelayLoop, down: socket.socket, targets: list,
-                 name: str, owner: "Relay | None" = None):
+                 name: str, owner: "Relay | None" = None,
+                 idle_deadline: float | None = IDLE_DEADLINE):
         self.loop, self.down, self.name, self.owner = loop, down, name, owner
         self.targets = list(targets)
         self.tried: list = []
@@ -276,15 +306,28 @@ class _Pair:
         self.up_shut = self.down_shut = False
         self.closed = False
         self.last_error = "no address to connect to"
+        self.moved = False                # a byte went one way or the other
         down.setblocking(False)
         loop.own(down)
+        if idle_deadline is not None:
+            loop.call_later(idle_deadline, self._expire)
         self._connect_next()
+
+    def _expire(self) -> None:
+        if not self.closed and not self.moved:
+            self.close()
 
     def _connect_next(self) -> None:
         while self.targets:
             addr = self.targets.pop(0)
             self.tried.append(addr)
-            sock = socket.socket(_family(addr), socket.SOCK_STREAM)
+            try:
+                sock = _upstream_socket(_family(addr))
+            except OSError as e:
+                # Such as no free file descriptor. The pair closes below
+                # when no address is left, which frees its slot.
+                self.last_error = e.strerror or str(e)
+                continue
             sock.setblocking(False)
             try:
                 rc = sock.connect_ex(addr)
@@ -365,6 +408,7 @@ class _Pair:
                     self.down_eof = True
                 elif data:
                     self.to_up += data
+                    self.moved = True
             if mask & _WRITE and self.to_down:
                 sent = self.down.send(self.to_down)
                 del self.to_down[:sent]
@@ -395,6 +439,7 @@ class _Pair:
                     self.up_eof = True
                 elif data:
                     self.to_down += data
+                    self.moved = True
             if mask & _WRITE and self.to_up:
                 sent = self.up.send(self.to_up)
                 del self.to_up[:sent]
@@ -430,12 +475,14 @@ class Relay:
 
     def __init__(self, loop: RelayLoop, listen: Address,
                  connect: Address | list, *, name: str | None = None,
-                 max_connections: int = CONNECTIONS_MAX):
+                 max_connections: int = CONNECTIONS_MAX,
+                 idle_deadline: float | None = IDLE_DEADLINE):
         self.loop = loop
         self.listen = listen
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
         self.max_connections = max_connections
+        self.idle_deadline = idle_deadline
         self.open = 0
         self.full = False
         self.cap_logged = False
@@ -467,7 +514,8 @@ class Relay:
             self.pause.ok()
             self.open += 1
             try:
-                _Pair(self.loop, conn, self.targets, self.name, owner=self)
+                _Pair(self.loop, conn, self.targets, self.name, owner=self,
+                      idle_deadline=self.idle_deadline)
             except OSError as e:
                 # A socket for the upstream side could not be made.
                 self.loop.log(f"{self.name}: cannot relay a connection ({e})")
@@ -479,6 +527,10 @@ class Relay:
 
     def released(self) -> None:
         self.open -= 1
+        if self.open <= self.max_connections // 2:
+            # The count fell well below the cap, so reaching it again is a
+            # new run and is logged again.
+            self.cap_logged = False
         if self.full and self.open < self.max_connections and not self.pause.closed:
             self.full = False
             self.loop.watch(self.sock, _READ, self._on_accept)

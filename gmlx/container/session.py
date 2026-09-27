@@ -16,7 +16,6 @@ import errno
 import json
 import os
 import re
-import resource
 import secrets
 import shutil
 import signal
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from gmlx.config import parse_size_bytes
+from gmlx.rlimit import raise_nofile_limit
 
 from . import cli, runtime
 from .clipboard import ClipboardServer
@@ -45,12 +45,11 @@ CLIP_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-clip.sock"
 SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
 STOP_GRACE = 10
-# The supervisor raises its open-file limit to this, or to the hard limit
-# when that is lower, so guest connections cannot use up a soft limit of 256.
-NOFILE_TARGET = 10240
 LOG_MAX = 1 << 20
 # How long a signal that arrives before the container exists waits for it.
 PENDING_SIGNAL_WAIT = 60.0
+# Each query of the session cleanup waits at most this long.
+TEARDOWN_QUERY_TIMEOUT = 5.0
 
 Say = Callable[[str], None]
 
@@ -86,8 +85,12 @@ def record_path(client: str) -> Path:
 def write_record(client: str, record: dict) -> None:
     path = record_path(client)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=1))
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(record, indent=1))
+        os.replace(tmp, path)
+    except OSError as e:
+        raise SettingsError(f"cannot write the session record {path} "
+                            f"({e.strerror or e}).") from None
 
 
 def read_record(client: str) -> dict | None:
@@ -152,8 +155,12 @@ def new_session(client: str, forward: list[int]) -> Session:
         raise SettingsError(f"the session folder {folder} contains ':', which "
                             "`container run -v` cannot take. Set XDG_CACHE_HOME or TMPDIR "
                             "to a path without one.")
-    folder.mkdir(mode=0o700, parents=True)
-    os.chmod(folder, 0o700)
+    try:
+        folder.mkdir(mode=0o700, parents=True)
+        os.chmod(folder, 0o700)
+    except OSError as e:
+        raise SettingsError(f"cannot create the session folder {folder} "
+                            f"({e.strerror or e}).") from None
     return Session(client, token, folder)
 
 
@@ -408,6 +415,12 @@ def open_when_ready(port: int, opener: Callable[[str], object], stop: threading.
             "not opened. A custom command must listen on 127.0.0.1:$PORT.")
 
 
+class TeardownAbandoned(BaseException):
+    """Raised by a third signal during the cleanup of a session. It is not
+    an Exception, so a cleanup step that catches errors lets it through and
+    the remaining steps are skipped."""
+
+
 class _Signals:
     """Signal handling while ``container run`` runs.
 
@@ -415,8 +428,13 @@ class _Signals:
     SIGINT to the guest, so launch sends it with ``container kill``. A first
     SIGTERM or SIGHUP stops the container, a second kills it, and a third
     kills the ``container run`` process, for a runtime that no longer
-    answers. The commands run in threads, and their errors go to the session
-    log, never to the client's screen.
+    answers. A signal that arrives before the container exists waits for it.
+    The commands run in threads, and their errors go to the session log,
+    never to the client's screen.
+
+    The handlers stay installed while the session is cleaned up. A third
+    signal of any kind during the cleanup abandons the step that waits, for
+    a container service that no longer answers.
     """
 
     def __init__(self, name: str, tty: bool, log: Callable[[str], None] = lambda line: None):
@@ -426,6 +444,9 @@ class _Signals:
         self.saved: dict[int, object] = {}
         # Set when the child exits, so a pending stop gives up.
         self.done = threading.Event()
+        # Set while the session is cleaned up; counts the signals since.
+        self.tearing_down = False
+        self.teardown_count = 0
 
     def install(self) -> None:
         for sig, handler in ((signal.SIGINT, self._on_int), (signal.SIGTERM, self._on_term),
@@ -458,11 +479,26 @@ class _Signals:
             self.done.wait(0.2)
         fn(*args, **kw)
 
+    def _abandon_teardown(self) -> bool:
+        """Count a signal during the cleanup, and abandon the cleanup at the
+        third. Returns True when the signal belongs to the cleanup."""
+        if not self.tearing_down:
+            return False
+        self.teardown_count += 1
+        if self.teardown_count >= 3:
+            self.tearing_down = False
+            raise TeardownAbandoned
+        return True
+
     def _on_int(self, signum, frame) -> None:
+        if self._abandon_teardown():
+            return
         if not self.tty:
-            self._bg(cli.kill, self.name, signal="SIGINT")
+            self._bg(self._when_listed, cli.kill, self.name, signal="SIGINT")
 
     def _on_term(self, signum, frame) -> None:
+        if self._abandon_teardown():
+            return
         self.count += 1
         if self.count == 1:
             self._bg(self._when_listed, cli.stop, self.name, timeout=STOP_GRACE)
@@ -509,7 +545,10 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         write_record(s.client, record)
         for line in summary:
             say(line)
-        if spec.web_port is not None and spec.url_pattern is None:
+        if spec.web_port is not None and spec.shell:
+            say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
+                "once you start it from the shell")
+        elif spec.web_port is not None and spec.url_pattern is None:
             say(f"[launch] open http://127.0.0.1:{spec.web_port}/ in a browser")
             if opener is not None:
                 threading.Thread(target=open_when_ready,
@@ -524,11 +563,15 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         # the child starts with the default dispositions.
         signals = _Signals(s.name, spec.tty, log)
         signals.install()
-        child = subprocess.Popen(
-            argv, env={**os.environ, **spec.child_env},
-            process_group=None if foreground else 0,
-            stdin=None if spec.interactive else subprocess.DEVNULL,
-            stdout=subprocess.PIPE if spec.url_pattern else None)
+        try:
+            child = subprocess.Popen(
+                argv, env={**os.environ, **spec.child_env},
+                process_group=None if foreground else 0,
+                stdin=None if spec.interactive else subprocess.DEVNULL,
+                stdout=subprocess.PIPE if spec.url_pattern else None)
+        except OSError as e:
+            raise cli.ContainerError(f"cannot start `container run` "
+                                     f"({e.strerror or e}).") from None
         signals.child = child
         if spec.url_pattern and child.stdout is not None:
             reader = threading.Thread(target=_tee_for_url, daemon=True, args=(
@@ -542,23 +585,29 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     finally:
         # Each step runs even when one before it fails, and the signal
         # handlers stay until the end, so a Ctrl-C here cannot stop the
-        # cleanup halfway.
+        # cleanup halfway. The queries get a short timeout, and a third
+        # signal abandons a step that still waits.
         try:
             if signals is not None:
                 signals.done.set()
+                signals.tearing_down = True
             stop_open.set()
             _step(log, "remove the session record", remove_record, s.client)
             for relay in relays:
                 _step(log, "close a relay", relay.close)
             _step(log, "stop the relay loop", loop.stop)
             if child is not None:
-                _step(log, "remove the container", _remove_container, s.name,
-                      stop=signals is None or signals.count < 3, log=log)
+                with cli.query_timeout(TEARDOWN_QUERY_TIMEOUT):
+                    _step(log, "remove the container", _remove_container, s.name,
+                          stop=signals is None or signals.count < 3, log=log)
+        except TeardownAbandoned:
+            log("cleanup: abandoned after a third signal")
         finally:
             try:
                 shutil.rmtree(s.dir, ignore_errors=True)
             finally:
                 if signals is not None:
+                    signals.tearing_down = False
                     signals.restore()
                 log.close()
 
@@ -580,18 +629,6 @@ def _listen(make: Callable[[Address], object], addr: Address, what: str):
         hint = (" Stop that program first." if e.errno == errno.EADDRINUSE
                 and not isinstance(addr, str) else "")
         raise SettingsError(f"cannot listen on {where} for {what}: {reason}.{hint}") from None
-
-
-def raise_nofile_limit(target: int = NOFILE_TARGET) -> None:
-    """Raise the soft limit on open files toward ``target``, never past the
-    hard limit. A failure leaves the limit as it was."""
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
-        if soft != resource.RLIM_INFINITY and soft < want:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
-    except (ValueError, OSError):
-        pass
 
 
 class _SessionLog:

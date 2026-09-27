@@ -6,6 +6,7 @@ test, which writes a private named NSPasteboard and never the user's own."""
 from __future__ import annotations
 
 import errno
+import os
 import socket
 import threading
 import time
@@ -221,20 +222,19 @@ def test_forward_tries_ipv6_loopback_when_ipv4_refuses(loop, tmp_path):
 
 
 def test_unreachable_target_closes_the_client_and_logs_once(loop, tmp_path):
-    free = socket.socket()
-    free.bind(("127.0.0.1", 0))
-    port = free.getsockname()[1]
-    free.close()                                        # nothing listens there
+    # Unix socket paths where nothing listens. A TCP port closed for the test
+    # could be taken by another program, and on macOS a port that is bound
+    # but not listening does not refuse: the connection times out.
+    first, second = str(tmp_path / "a.sock"), str(tmp_path / "b.sock")
     path = str(tmp_path / "down.sock")
-    relay.Relay(loop, path, relay.loopback_targets(port), name="forward 5432")
+    relay.Relay(loop, path, [first, second], name="forward 5432")
     with _unix_client(path) as c:
         assert c.recv(10) == b""                       # closed at once
     deadline = time.monotonic() + 5
     while not loop.logged and time.monotonic() < deadline:
         time.sleep(0.02)
     assert len(loop.logged) == 1
-    assert loop.logged[0].startswith(
-        f"forward 5432: cannot reach 127.0.0.1:{port} or [::1]:{port} (")
+    assert loop.logged[0].startswith(f"forward 5432: cannot reach {first} or {second} (")
 
 
 def test_tcp_listener_to_unix_target(loop, tmp_path):
@@ -362,38 +362,50 @@ def _echoes(c, timeout):
 def test_a_listener_holds_at_most_its_cap_of_connections(loop, tmp_path):
     port, stop = _echo_server()
     path = str(tmp_path / "cap.sock")
-    relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api", max_connections=2)
-    first, second = _unix_client(path), _unix_client(path)
-    assert _echoes(first, 5) and _echoes(second, 5)
-    third = _unix_client(path)                     # waits in the listen queue
-    assert not _echoes(third, 0.5)
-    first.close()                                  # frees a slot
-    third.settimeout(5)
-    assert third.recv(4) == b"ping"
-    second.close()
-    third.close()
-    stop()
+    r = relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api", max_connections=4)
+    held = [_unix_client(path) for _ in range(4)]
+    assert all(_echoes(c, 5) for c in held)
+    extra = _unix_client(path)                     # waits in the listen queue
+    assert not _echoes(extra, 0.5)
+    held.pop().close()                             # frees a slot
+    extra.settimeout(5)
+    assert extra.recv(4) == b"ping"
+    held.append(extra)
+    # Back at the cap at once is the same run, so it is logged once.
+    _in_loop(loop, lambda: None)
     assert sum("connections are open" in line for line in loop.logged) == 1
+    for c in held:
+        c.close()
+    deadline = time.monotonic() + 5
+    while _in_loop(loop, lambda: r.open) != 0:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    # The count fell to half the cap or less, so a new run is logged again.
+    again = [_unix_client(path) for _ in range(5)]
+    assert all(_echoes(c, 5) for c in again[:4])
+    _in_loop(loop, lambda: None)
+    assert sum("connections are open" in line for line in loop.logged) == 2
+    for c in again:
+        c.close()
+    stop()
 
 
 def test_unreachable_is_logged_once_per_run_of_failures(loop, tmp_path):
-    free = socket.socket()
-    free.bind(("127.0.0.1", 0))
-    port = free.getsockname()[1]
-    free.close()
+    target = str(tmp_path / "service.sock")        # nothing listens yet
     path = str(tmp_path / "down.sock")
-    relay.Relay(loop, path, ("127.0.0.1", port), name="port 5432")
+    relay.Relay(loop, path, target, name="port 5432")
     for _ in range(5):
         with _unix_client(path) as c:
             assert c.recv(10) == b""
-    srv = socket.socket()
-    srv.bind(("127.0.0.1", port))                  # the service comes up
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(target)                               # the service comes up
     srv.listen(1)
     with _unix_client(path) as c:
         conn, _ = srv.accept()
         conn.close()
         assert c.recv(10) == b""
     srv.close()
+    os.unlink(target)
     with _unix_client(path) as c:                  # and goes down again
         assert c.recv(10) == b""
     _in_loop(loop, lambda: None)
@@ -414,6 +426,128 @@ def test_a_port_another_program_answers_on_is_busy(loop, family, host):
             relay.Relay(loop, ("127.0.0.1", port), "/nowhere")
     finally:
         held.close()
+
+
+def test_a_port_in_time_wait_still_binds(loop):
+    lst = socket.socket()
+    lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lst.bind(("127.0.0.1", 0))
+    lst.listen(1)
+    port = lst.getsockname()[1]
+    c = socket.create_connection(("127.0.0.1", port))
+    conn, _ = lst.accept()
+    conn.close()                                   # this side closes first: TIME_WAIT
+    c.close()
+    lst.close()
+    plain = socket.socket()
+    with pytest.raises(OSError):
+        plain.bind(("127.0.0.1", port))            # the case the fallback covers
+    plain.close()
+    sock = relay.listen_socket(("127.0.0.1", port))
+    sock.close()
+
+
+def test_the_bound_address_is_never_probed(monkeypatch):
+    """The busy check asks whether a program answers only after a bind
+    fails, so no other program can take the port between the check and the
+    bind. The other loopback address is still asked."""
+    asked = []
+    monkeypatch.setattr(relay, "answering", lambda addr: asked.append(addr) or False)
+    sock = relay.listen_socket(("127.0.0.1", 0))
+    sock.close()
+    assert [a[0] for a in asked] == ["::1"]
+
+
+def _silent_server():
+    """A server that accepts and never sends, with the count of the
+    connections it saw closed by the other side."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    closed = []
+
+    def handle(conn):
+        with conn:
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    closed.append(1)
+                    return
+                conn.sendall(data)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, closed
+
+
+def test_an_idle_relayed_connection_closes_at_the_deadline(loop, tmp_path):
+    srv, closed = _silent_server()
+    path = str(tmp_path / "idle.sock")
+    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
+    c = _unix_client(path)
+    start = time.monotonic()
+    assert c.recv(10) == b""                       # the relay closed it
+    assert 0.25 < time.monotonic() - start < 5
+    c.close()
+    deadline = time.monotonic() + 5
+    while not closed or _in_loop(loop, lambda: r.open) != 0:
+        assert time.monotonic() < deadline         # the server side closed too
+        time.sleep(0.01)
+    srv.close()
+
+
+def test_a_connection_that_moved_bytes_has_no_deadline(loop, tmp_path):
+    srv, _closed = _silent_server()
+    path = str(tmp_path / "busy.sock")
+    relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
+    c = _unix_client(path)
+    assert _echoes(c, 5)
+    time.sleep(0.8)                                # quiet, past the deadline
+    assert _echoes(c, 5)
+    c.close()
+    srv.close()
+
+
+def test_a_server_that_speaks_first_keeps_the_connection(loop, tmp_path):
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    path = str(tmp_path / "greet.sock")
+    relay.Relay(loop, path, srv.getsockname(), name="port 3306", idle_deadline=0.3)
+    c = _unix_client(path)
+    conn, _ = srv.accept()
+    conn.sendall(b"hello")                         # such as a MySQL greeting
+    assert c.recv(5) == b"hello"
+    time.sleep(0.8)
+    conn.sendall(b"again")
+    assert c.recv(5) == b"again"
+    c.close()
+    conn.close()
+    srv.close()
+
+
+def test_no_socket_for_the_target_frees_the_slot(loop, tmp_path, monkeypatch):
+    port, stop = _echo_server()
+    path = str(tmp_path / "emfile.sock")
+    r = relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api")
+
+    def no_descriptor(family):
+        raise OSError(errno.EMFILE, "Too many open files")
+    monkeypatch.setattr(relay, "_upstream_socket", no_descriptor)
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""                   # closed, not left open
+    assert _in_loop(loop, lambda: r.open) == 0
+    assert any("Too many open files" in line for line in loop.logged)
+    monkeypatch.undo()
+    with _unix_client(path) as c:
+        assert _echoes(c, 5)
+    stop()
 
 
 def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):
@@ -648,7 +782,12 @@ def test_an_idle_connection_is_closed_after_the_read_deadline(loop, tmp_path):
     idle.close()
     assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"
     assert any("no request in" in line for line in loop.logged)
-    assert _in_loop(loop, lambda: server.open) == 0
+    # The worker frees the slot of the answered request after it closes the
+    # socket, so the count reaches 0 a moment after the answer.
+    deadline = time.monotonic() + 5
+    while _in_loop(loop, lambda: server.open) != 0:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
 
 
 def test_a_full_queue_answers_busy(loop, tmp_path):
