@@ -110,6 +110,21 @@ def test_normalize_drops_a_duplicate_that_differs_only_in_its_note():
     assert out == [auto]
 
 
+def test_normalize_stores_the_normalized_guest_path():
+    out = settings.normalize_mounts([Mount("/h/a", "/data/"), Mount("/h/b", "/data//x/../y")])
+    assert [m.target for m in out] == ["/data", "/data/y"]
+    with pytest.raises(SettingsError, match="both mount at /data"):
+        settings.normalize_mounts([Mount("/h/a", "/data/"), Mount("/h/b", "/data")])
+
+
+def test_a_read_only_mount_of_the_current_folder_replaces_the_default_share(home):
+    proj = os.path.realpath(home / "src" / "proj")
+    plan = _plan(home, cli_mounts=[f"{proj}:ro"])
+    shares = [m for m in plan.mounts if m.kind == "share"]
+    assert [(m.source, m.target, m.readonly) for m in shares] == [(proj, proj, True)]
+    assert plan.workdir == proj and plan.cwd_shared
+
+
 @pytest.mark.parametrize("target", ["/", "/proc", "/sys/x", "/dev", "/opt/gmlx",
                                     "/var/host-services/x", "/opt", "/var"])
 def test_reserved_targets_are_refused(target):
@@ -222,6 +237,35 @@ def test_git_is_ignored_when_the_repo_root_is_refused(home):
     assert not any("git" in n for n in plan.notes)
 
 
+def test_a_worktree_of_a_dotfiles_repo_never_shares_the_home_git_folder(home):
+    _git("init", "-q", "-b", "main", cwd=home)         # a dotfiles repo at $HOME
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=home)
+    wt = home / "src" / "dots"
+    _git("worktree", "add", "-q", str(wt), cwd=home)
+    plan = _plan(home, cwd=str(wt))
+    assert not [m for m in plan.mounts if m.kind == "git"]
+    assert any("cannot reach this repository's git folder ~/.git" in n
+               and "your home folder" in n for n in plan.notes)
+
+
+def test_a_submodule_shares_its_git_folder(home):
+    lib = home / "src" / "lib"
+    lib.mkdir()
+    _git("init", "-q", "-b", "main", cwd=lib)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=lib)
+    top = home / "src" / "top"
+    top.mkdir()
+    _git("init", "-q", "-b", "main", cwd=top)
+    _git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "lib",
+         cwd=top)
+    plan = _plan(home, cwd=str(top / "lib"))
+    git = [m for m in plan.mounts if m.kind == "git"]
+    assert [m.source for m in git] == [os.path.realpath(top / ".git" / "modules" / "lib")]
+    assert git[0].note == "the git folder of this submodule"
+
+
 # Protected folders and memory
 
 def test_protected_folder_warning(home):
@@ -232,9 +276,14 @@ def test_protected_folder_warning(home):
     assert not _plan(home).warnings
 
 
-def test_memory_warning():
+def test_memory_warning(monkeypatch):
     assert settings.memory_warning("1024G") is not None
     assert settings.memory_warning("1G") is None
+    # A 16 GB Mac: the 4G default is exactly a quarter, so it does not warn.
+    pages = {"SC_PAGE_SIZE": 16384, "SC_PHYS_PAGES": (16 << 30) // 16384}
+    monkeypatch.setattr(settings.os, "sysconf", lambda name: pages[name])
+    assert settings.memory_warning("4G") is None
+    assert settings.memory_warning("4097M") is not None
 
 
 # The guest environment and the private home
@@ -326,6 +375,13 @@ def test_a_relative_seed_is_read_from_home(home, monkeypatch):
     private = settings.private_home("pi")
     assert settings.seed_home(private, ["notes.md"]) == []
     assert (private / "notes.md").read_text() == "n"
+
+
+def test_a_missing_seed_is_reported_and_skipped(home):
+    private = settings.private_home("pi")
+    assert settings.seed_home(private, ["~/nope.md"]) == [
+        "[launch] seed: ~/nope.md does not exist, so nothing was copied."]
+    assert not (private / "nope.md").exists()
 
 
 def test_seed_keeps_modes_and_links_and_reports_copy_errors(home):

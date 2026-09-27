@@ -14,7 +14,7 @@ import os
 import stat
 import subprocess
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
@@ -187,11 +187,12 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
     seen: set[tuple] = set()
     by_target: dict[str, Mount] = {}
     for m in mounts:
-        key = (m.source, os.path.normpath(m.target), m.readonly, m.kind, m.size)
+        target = os.path.normpath(m.target)
+        m = replace(m, target=target)
+        key = (m.source, target, m.readonly, m.kind, m.size)
         if key in seen:
             continue
         seen.add(key)
-        target = os.path.normpath(m.target)
         if target == "/":
             raise SettingsError(f"{_label(m)} cannot be mounted at /.")
         for reserved in RESERVED_TARGETS:
@@ -275,9 +276,22 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
                           f"{_tilde(toplevel, home)}, which is not shared. Launch from it "
                           "to use git there."]
         return None, []
-    if git_dir == common or covered(common):
+    if covered(common):
         return None, []
-    return Mount(common, common, kind="git", note="the git folder of this worktree"), []
+    # The git folder of a linked worktree or a submodule lies outside the
+    # share. Its hooks and config run on the Mac the next time you use git
+    # there, so it gets the same checks as the current folder, and so does
+    # the main worktree above a .git folder, such as a dotfiles repository
+    # at $HOME.
+    owner = os.path.dirname(common) if os.path.basename(common) == ".git" else None
+    for path in filter(None, (common, owner)):
+        why = auto_share_refusal(path, home)
+        if why is not None:
+            return None, [f"[launch] git in the container cannot reach this repository's "
+                          f"git folder {_tilde(common, home)}, because {why}. Use git on "
+                          "the Mac for this repository."]
+    what = "worktree" if git_dir != common else "submodule"
+    return Mount(common, common, kind="git", note=f"the git folder of this {what}"), []
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:
@@ -349,7 +363,12 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                                 "from a project folder, or pass --no-mount-cwd.")
         mounts.append(Mount(cwd_real, cwd_real, note="working folder"))
     for spec in [*cfg.mounts, *cli_mounts]:
-        mounts.append(_explicit_mount(spec, warns, home))
+        mount = _explicit_mount(spec, warns, home)
+        if share_cwd and (mount.source, os.path.normpath(mount.target)) == (cwd_real, cwd_real):
+            # A mount of the current folder at its own path sets how it is
+            # shared, such as read-only, in place of the default share.
+            mounts = [m for m in mounts if m.note != "working folder"]
+        mounts.append(mount)
     git_mount, git_notes = (git_extra_mount(cwd_real, list(mounts), home)
                             if share_cwd else (None, []))
     if git_mount is not None:
