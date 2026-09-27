@@ -174,10 +174,18 @@ and output limit from the server's model list.
 `launch` merges the gmlx provider into hermes's own `config.yaml`, in
 `$HERMES_HOME` or `~/.hermes`, and keeps every other setting. hermes reads
 its settings from no other file, and it sends an API key to a local server
-only from that file. Before it changes the file, `launch` copies it to
-`config.yaml.gmlx-<date>-<time>` beside it, prints the copy's path and
-keeps the three newest copies. A launch that would change nothing writes
-nothing.
+only from that file. A launch that would change nothing writes nothing.
+
+Before it changes the file, `launch` copies it to a new
+`config.yaml.gmlx-<date>-<time>` beside it, with `-<n>` added when that
+name is taken, and prints the copy's path. It keeps the three newest copies
+and deletes only older files named that way. The rewritten file keeps its
+settings and its file mode, but not its comments or layout, which the copy
+keeps.
+
+A `config.yaml` that is a symbolic link is written through when the link
+stays inside your home folder. Launch refuses a link that points
+elsewhere.
 
 hermes refuses a model with less than 64K tokens of context, so give it a
 model trained for at least that length.

@@ -292,9 +292,20 @@ A launch that stops with `is not on the image's PATH` names the command
 and the search path it used. The image lacks the client or the command in
 [`command`](config.md#launchcontainerclientscommand). Install it in the
 image, as [Custom container images](container-images.md) shows, or fix the
-`command` list. A session that exits 127 on its own has the same cause,
-and one that exits 126 found the command but could not run it, which a
-start script without its execute bit causes.
+`command` list. A session that exits 127 on its own has the same cause.
+
+A launch or session that stops with `has no execute bit` found the file
+but cannot run it, and exits 126. Add `RUN chmod 755` for that file to the
+Containerfile, as the
+[start script example](container-images.md#starting-services-with-the-client)
+does. Exit 126 without that message means the file is no program for Linux
+on arm64, such as a script without a `#!` line.
+
+### A container command gave no answer
+
+A launch or `gmlx doctor` that reports `gave no answer` found the
+container service stuck. Run `container system stop` and then
+`container system start`, and try again.
 
 ### An image has no linux/arm64 variant
 
@@ -338,9 +349,10 @@ packages to the image, as
 
 ### Postgres refuses the data folder on a share
 
-Every file in a share appears to belong to root in the container, so
-Postgres does not own its data folder there. Put the data on a volume, as
-the [Postgres recipe](container-images.md#postgres) shows.
+A share keeps no file owners in the container, as
+[Shares](launch-container.md#shares) describes, so Postgres does not own
+its data folder there. Put the data on a volume, as the
+[Postgres recipe](container-images.md#postgres) shows.
 
 ## Voice
 

@@ -11,6 +11,7 @@ shell commands and edits files, so it is the part worth isolating.
 
 - [Turning on container mode](#turning-on-container-mode)
 - [What the client sees](#what-the-client-sees)
+- [Security model](#security-model)
 - [The image](#the-image)
 - [The clients](#the-clients)
 - [Browser apps](#browser-apps)
@@ -21,7 +22,6 @@ shell commands and edits files, so it is the part worth isolating.
 - [Sessions, signals and exit codes](#sessions-signals-and-exit-codes)
 - [The dry run](#the-dry-run)
 - [What does not work in a container](#what-does-not-work-in-a-container)
-- [Security model](#security-model)
 - [Limits](#limits)
 - [Removing container data](#removing-container-data)
 
@@ -29,9 +29,10 @@ shell commands and edits files, so it is the part worth isolating.
 
 Container mode needs Apple container 1.4 or newer, which
 [Installation](installation.md#apple-container) covers. Turn it on for one
-run with `--container`:
+run with `--container`, from the project folder the client should see:
 
 ```sh
+cd ~/src/my-project
 gmlx launch claude-code --container --model qwen3.8-27b-ud-q6
 gmlx launch pi --container -- --continue
 ```
@@ -39,15 +40,16 @@ gmlx launch pi --container -- --continue
 To make it the default, set
 [`launch.container.enabled`](config.md#launchcontainerenabled) for every
 client or for one client. `--no-container` then runs a client on the Mac for
-one launch. The flags that only make sense in a container, such as
-`--mount` or `--shell`, turn on container mode by themselves. The
-[CLI reference](cli.md#gmlx-launch) lists them.
+one launch. The flags that only make sense in a container turn on container
+mode by themselves: `--mount`, `--mount-cwd` and `--no-mount-cwd`,
+`--image`, `--rebuild`, `--network` and `--shell`. The
+[CLI reference](cli.md#gmlx-launch) describes each one.
 
 Launch reads its container settings only from the config file in your
 home folder, as [Launch](config.md#launch) explains.
 
-The first container launch takes a few minutes, and launch numbers its
-steps so that a slow download does not look like a hang:
+The first container launch takes a few minutes. Launch numbers the steps
+it runs, so that a slow download does not look like a hang:
 
 1. The container service starts. Its first start asks to install a Linux
    kernel and downloads about 700 MB. When the service is stopped and the
@@ -64,17 +66,18 @@ Later launches start the virtual machine in about a second.
 The client sees the folders you share, its
 [private home](glossary.md#private-home), its volumes, the
 gmlx server, the forwarded ports and, when you turn it on, images from the
-Mac clipboard. It does not see the rest of your Mac. Your keychain, SSH
+Mac clipboard. It does not see the rest of your files. Your keychain, SSH
 keys, other projects and `gmlx.yaml` stay out of reach unless you share
-them.
+them. The [security model](#security-model) lists the ways a session can
+still reach the Mac.
 
 ### Shares
 
 By default launch shares the current folder, read-write, at the same path
-in the container, and the client starts there. The chat apps share nothing
-by default, and [`launch.container.mount_cwd`](config.md#launchcontainermount_cwd)
-names them and sets the share in the config. `--no-mount-cwd` turns the
-share off for one launch.
+in the container, and the client starts there. Open WebUI and elia share
+nothing by default.
+[`launch.container.mount_cwd`](config.md#launchcontainermount_cwd) sets the
+share in the config, and `--no-mount-cwd` turns it off for one launch.
 
 Launch refuses to share these folders by default, and it asks you to launch
 from a project folder instead:
@@ -90,6 +93,8 @@ from a project folder instead:
 folders. A mount can name any folder. A mount of a credential folder is
 honored, and launch prints a warning that names it. Only folders can be
 shared, not single files, and a path that contains `,` or `=` is refused.
+A mount of the current folder at its own path replaces the default share,
+so `--mount .:ro` shares the project read-only.
 
 Files the client writes in a share appear on the Mac with your user as
 their owner, and modes and symbolic links are kept. Inside the container
@@ -129,10 +134,57 @@ commands, fails in the container. Seed a copy without those settings.
 ### Git in a worktree
 
 Git in the container works when you launch from the root of a repository.
-A linked worktree keeps part of its repository outside its own folder, so
-launch also shares that git folder and prints a line saying so. Launched
-from a subfolder of a repository, the client sees only that subfolder, and
-launch notes that git needs the repository root.
+A linked worktree or a submodule keeps its git folder outside its own
+folder, so launch also shares that git folder, read-write, and prints a
+line saying so. Launch applies the same refusals to that folder, and to
+the repository that holds it, as to the current folder. A worktree of a
+dotfiles repository in your home folder therefore gets no git folder, and
+launch prints a note instead. Launched from a subfolder of a repository,
+the client sees only that subfolder, and launch notes that git needs the
+repository root.
+
+## Security model
+
+The container limits what the client can reach. It does not limit what the
+client does in the folders you share, and a read-write share leads back to
+the Mac in these ways:
+
+- Files the client writes in a read-write share run on the Mac when you
+  use them. Examples are `.git/hooks`, `.git/config`, `.envrc` and the
+  scripts in `package.json`.
+- A `./gmlx.yaml` the client writes in a share is read by the next
+  `gmlx serve` from that folder. It can change where the server listens,
+  turn off its key, or add a tool server command that the server runs on
+  the Mac.
+- The client can make the running server read its configuration again
+  through the API. When that configuration, a model folder the server
+  scans, or a model file it lists is inside a read-write share, the client
+  can make the server load files of its choosing. Launch prints a warning
+  when it finds any of these in a share.
+
+The client gets the server's API key, which also unloads models and
+reloads the server's configuration, not only chat. It can therefore
+unload models that other clients are using.
+
+Other access is opt-in:
+
+- Only the variables in [`env`](config.md#launchcontainerenv) and the ones
+  the client's configuration needs reach the container.
+- [`ssh_agent`](config.md#launchcontainerssh_agent) lets the client sign
+  with every key loaded in your Mac's SSH agent. For example, it can push
+  to any repository those keys reach, so load only the keys the task needs.
+- Each forwarded port gives the client that Mac service with the rights of
+  a local user. Homebrew's Postgres and Redis accept local connections
+  without a password, so set a password or a limited role before you
+  forward one. Never forward a browser's remote debugging port, such as
+  9222, because that gives the client your logged-in browser.
+
+The container has internet access unless you set
+[`network: none`](config.md#launchcontainernetwork). On the default
+network, a Mac service that listens on all addresses is reachable from the
+container. The connection to the server needs no sudo, changes no network
+setting and raises no firewall prompt, and the server sees
+`Host: 127.0.0.1:<port>` on every request.
 
 ## The image
 
@@ -150,7 +202,8 @@ suggests `--rebuild` when the image is older than 30 days.
 your own Containerfile and ready-made images. Any image works when it is
 for Linux on arm64 and contains the command that runs. Launch refuses an
 image for another architecture. It also checks an image of your own once
-for each command, so a missing command fails before the session starts.
+for each command, so a command that is missing or cannot run fails before
+the session starts. Under `--shell`, that check only prints a warning.
 
 ### The command that runs
 
@@ -166,13 +219,13 @@ The container runs the client's command, followed by the arguments after
 ## The clients
 
 Each client gets the same configuration as on the Mac, written into its
-private home, and a few clients change further in a container:
+private home. A client that merges into its own files, such as pi or
+hermes, changes only the copies in the private home. Two clients change
+further in a container:
 
 | Client | In a container |
 |--------|----------------|
 | `claude-code` | Launch sets `IS_SANDBOX=1`, so `-- --dangerously-skip-permissions` works as root, and turns off its auto-updater. |
-| `hermes` | Launch merges the gmlx provider into the private home's `~/.hermes/config.yaml`, not into yours. |
-| `pi`, `omp`, `goose` | Launch merges its provider into the files in the private home, so your own files stay unchanged. |
 | `dsh` | A `--dsh-profile` must exist in the private home. The stdio profiles `acp`, `sdk` and `sdk-minimal` run only with `--no-container`. |
 
 Under `network: none`, Claude Code also gets
@@ -235,10 +288,11 @@ Anything you install from the shell is gone when the session ends, and
 
 ## Volumes
 
-A share shows every file as owned by root, and it is slower than a local
-disk for work with many small files. A named volume is a disk image that
-the container mounts as its own disk, so ownership, file modes and locks
-work as on Linux. Databases and large caches belong on a volume.
+A share keeps no file owners in the container, as [Shares](#shares)
+describes, and it is slower than a local disk for work with many small
+files. A named volume is a disk image that the container mounts as its own
+disk, so ownership, file modes and locks work as on Linux. Databases and
+large caches belong on a volume.
 
 [`volumes`](config.md#launchcontainervolumes) entries take the form
 `NAME:/path[:SIZE]`:
@@ -254,11 +308,11 @@ launch:
 Launch creates a missing volume with the size in its entry, or the default
 size that [`volumes`](config.md#launchcontainervolumes) gives. The disk
 image on the Mac grows only as the container writes, up to that limit, and
-the size is fixed when the volume is created. Launch prints one
-line per volume with its limit and the space it takes on the Mac, and it
-warns when the Mac disk has less free space than the volumes could still
-use. A volume created with a different size gets a line that says how to
-recreate it, which deletes its data.
+the size is fixed when the volume is created. Launch prints one line per
+volume with its limit and the space it takes on the Mac, and it warns when
+the Mac disk has less free space than the volumes could still use. A
+volume created with a different size gets a line that says how to recreate
+it, which deletes its data.
 
 The volume's root holds a `lost+found` folder, so put data in a subfolder.
 Two containers never mount one volume at the same time. Launch refuses a
@@ -308,6 +362,9 @@ launch:
     clipboard: images
 ```
 
+Paste with the client's own key for images, such as Ctrl-V in Claude Code.
+Cmd-V pastes only text into a terminal.
+
 The container gets images only. It cannot read clipboard text, and it
 cannot write the Mac clipboard at all. An image arrives as PNG, and an
 image of more than 20 MB is refused. Each image read adds a line to the
@@ -319,8 +376,8 @@ a paste in the client fails or finds the image's own clipboard tools. To
 hand over one image, save it into the shared folder instead.
 
 macOS can deny an app access to the clipboard. The replacement commands
-then fail with a message that names the setting to change, under Privacy
-and Security, Paste from Other Apps.
+then fail with a message that names the setting to change: System
+Settings, Privacy & Security, Paste from Other Apps.
 
 ## Sessions, signals and exit codes
 
@@ -345,7 +402,7 @@ the cause:
 | Code | Meaning |
 |------|---------|
 | 125 | The relay inside the container could not start, for example because a port it needs is in use. |
-| 126 | The command is in the image but cannot run, for example a start script without its execute bit. |
+| 126 | The command is in the image but cannot run, such as a file without its execute bit or a program for another architecture. |
 | 127 | The command, or a shell for `--shell`, is not in the image. |
 
 Launch exits 1 when it refuses a session, such as for a folder it will not
@@ -380,50 +437,6 @@ Some client features call into the Mac and stop working in a container:
   `osxkeychain` helper. Pass a token through
   [`env`](config.md#launchcontainerenv) instead.
 
-## Security model
-
-The container limits what the client can reach. It does not limit what the
-client does in the folders you share, and a read-write share leads back to
-the Mac in these ways:
-
-- Files the client writes in a read-write share run on the Mac when you
-  use them. Examples are `.git/hooks`, `.git/config`, `.envrc` and the
-  scripts in `package.json`.
-- A `./gmlx.yaml` the client writes in a share is read by the next
-  `gmlx serve` from that folder. It can change where the server listens,
-  turn off its key, or add a tool server command that the server runs on
-  the Mac.
-- The client can make the running server read its configuration again
-  through the API. When that configuration, a model folder the server
-  scans, or a model file it lists is inside a read-write share, the client
-  can make the server load files of its choosing. Launch prints a warning
-  when it finds any of these in a share.
-
-The client gets the server's API key, which also unloads models and
-reloads the server's configuration, not only chat. It can therefore
-unload models that other clients are using.
-
-Other access is opt-in:
-
-- Only the variables in [`env`](config.md#launchcontainerenv) and the ones
-  the client's configuration needs reach the container.
-- [`ssh_agent`](config.md#launchcontainerssh_agent) lets the client sign
-  with every key loaded in your Mac's SSH agent. For example, it can push
-  to any repository those keys reach, so load only the keys the task needs.
-- Each forwarded port gives the client that Mac service with the rights of
-  a local user. Homebrew's Postgres and Redis accept local connections
-  without a password, so set a password or a limited role before you
-  forward one. Never forward a browser's remote debugging port, such as
-  9222, because that gives the client your logged-in browser.
-
-The container has internet access unless you set
-[`network: none`](config.md#launchcontainernetwork). On the default
-network, a Mac service that listens on all addresses is reachable from the
-container. The connection to
-the server needs no sudo, changes no network setting and raises no
-firewall prompt, and the server sees `Host: 127.0.0.1:<port>` on every
-request.
-
 ## Limits
 
 Each file the container reads in a share holds one file handle on the Mac
@@ -453,7 +466,7 @@ the space that volumes, private homes and images take:
 |------|------------------|
 | A private home | Delete `~/.local/share/gmlx/launch/<client>/home` to reset that client. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
-| Images | Run `container image delete` on the `gmlx.invalid/launch-*` images, then `container image prune`. |
+| Images | Run `container image delete` on the `gmlx.invalid/launch-*` and `<repository>@sha256:` entries of `container image list`, then `container image prune`. |
 | The guest program | Delete `~/.local/share/gmlx/launch/runtime`. |
 | Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete that folder. |
 | Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes that folder. |

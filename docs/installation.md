@@ -101,8 +101,9 @@ brew install container
 Apple also publishes a signed installer on its
 [releases page](https://github.com/apple/container/releases). The first
 container launch starts the container service, which asks once to install
-a Linux kernel and downloads about 700 MB. `gmlx doctor` reports the
-version and whether the service runs.
+a Linux kernel, as
+[Container mode](launch-container.md#turning-on-container-mode) describes.
+`gmlx doctor` reports the version and whether the service runs.
 
 ## Tab completion
 

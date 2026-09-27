@@ -35,7 +35,9 @@ launch:
 ```
 
 The next launch builds the image again with the packages, and later
-launches reuse it.
+launches reuse it. With your own Containerfile, the packages apply only
+through the client's own `:base`, as
+[`packages`](config.md#launchcontainerclientspackages) says.
 
 ## Your own Containerfile
 
@@ -59,7 +61,8 @@ launch:
         build: ~/containers/claude-code
 ```
 
-A folder that `build` names is also the build context. Write the
+`build` names the Containerfile, or a folder that holds a file named
+`Containerfile` or `Dockerfile` and is also the build context. Write the
 `gmlx.invalid/launch-<client>:base` reference literally, since launch finds
 it by reading the file. Any client's `:base` works, and launch refuses any
 other `gmlx.invalid` reference, because those tags are deleted when a newer
@@ -81,9 +84,13 @@ rebuilds that base with fresh downloads, and it does not pull the other
 registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own that holds about
-4 GB of memory while it runs. Launch stops the builder after a build that
-started it, so a `container build` of your own that runs at the same time
-ends with it.
+4 GB of memory while it runs. A launch that finds the builder stopped
+stops it again after its build, unless another launch is building or
+another `container build` runs. A failed stop prints one warning. When the
+builder already runs, launch builds with its CPU, memory and SSH settings,
+so the build does not replace it. The next launch and `gmlx doctor` report
+a builder left running, such as by a killed launch, with its
+`container builder stop` command.
 
 ## A ready-made image
 
@@ -100,16 +107,17 @@ launch:
 
 Launch pulls a missing image once and then runs it by its content digest,
 so a later push to the same tag changes nothing until `--rebuild` pulls it
-again. The image must be for Linux on arm64 and contain the command that
-runs, which is the client's own command unless
-[`command`](config.md#launchcontainerclientscommand) says otherwise.
+again. The image must meet the requirements in
+[The image](launch-container.md#the-image), with the client's own command
+or the one [`command`](config.md#launchcontainerclientscommand) names.
 `--image REF` runs another image for one launch.
 
 ## Starting services with the client
 
-To start a service before the client, give the image a start script and
+To start a service before the client, add a start script to the image and
 name it first in [`command`](config.md#launchcontainerclientscommand). The
-script starts its services, then runs the rest of its arguments:
+script starts its services, then runs the rest of its arguments. Put it in
+a folder as `start.sh`:
 
 ```sh
 #!/bin/sh
@@ -118,11 +126,23 @@ set -e
 exec "$@"
 ```
 
+Beside it, a Containerfile copies the script into the image and gives it
+its execute bit:
+
+```dockerfile
+FROM gmlx.invalid/launch-claude-code:base
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod 755 /usr/local/bin/start.sh
+```
+
+Then name the folder and the command:
+
 ```yaml
 launch:
   container:
     clients:
       claude-code:
+        build: ~/containers/claude-code
         command: [/usr/local/bin/start.sh, claude]
 ```
 
@@ -175,8 +195,8 @@ Containerfile.
 Postgres can run in the container with its data on a
 [volume](launch-container.md#volumes), or on the Mac with a
 [forwarded port](launch-container.md#forwarded-ports). A share does not
-work for its data, because every file in a share appears to belong to root
-and Postgres refuses a data folder it does not own.
+work for its data, because Postgres refuses a data folder it does not own
+and a share keeps no owners in the container.
 
 To run it in the container, put this Containerfile and a `start-pg` script
 in one folder:
@@ -218,9 +238,9 @@ launch:
         volumes: [claude-pg:/var/lib/postgresql:8G]
 ```
 
-The data lives in a subfolder of the volume, because the volume's root
-holds `lost+found`. It survives from one session to the next, and the
-client connects with `psql -U postgres`.
+The data lives in a subfolder of the volume, as
+[Volumes](launch-container.md#volumes) advises. It survives from one
+session to the next, and the client connects with `psql -U postgres`.
 
 To use Postgres on the Mac instead, add `forward: [5432]`, after you give
 it a password or a limited role as the

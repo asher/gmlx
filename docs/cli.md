@@ -636,10 +636,13 @@ These flags control `gmlx launch`:
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
 own. Before that, the command exits 0 after `--config-only` and 1 when the
 server is unreachable, has died or has timed out, or when the tool is not
-installed. It
-exits 2 when the config is missing or malformed, and 130 when interrupted
-during the start wait. In container mode it exits 1 when it refuses the
-session, and 125, 126 or 127 when the container cannot start the client, as
+installed. It exits 2 when the config is missing or malformed, and 130 when
+interrupted during the start wait.
+
+In container mode, launch supervises the client instead of replacing
+itself and passes the client's exit status through. It exits 1 when it
+refuses the session or when a container launch finds a malformed `launch`
+block, and 125, 126 or 127 when the container cannot start the client, as
 [Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
 describes.
 

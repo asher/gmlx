@@ -66,6 +66,11 @@ and gmlx never reads it from the current directory. Pass `--config FILE` to
 read a different file. Without any file, `gmlx serve` scans the current
 directory for GGUFs and prints a hint to run `init`.
 
+A command reads only the first file it finds and takes nothing from the
+others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block
+makes the server stop reading `~/.gmlx.yaml` and lose its models, so add
+the block to the file you already have.
+
 To see the configuration a server would run with, including every default
 you did not set, run `gmlx serve --print-config`. It prints the result as
 YAML and exits without loading a model.
@@ -1360,11 +1365,15 @@ describes which facts go first. The value is at least 1. The default is `20000`.
 ## Launch
 
 The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
-[container mode](launch-container.md). Launch reads it only from
-`~/.config/gmlx/gmlx.yaml` or `~/.gmlx.yaml`. A `launch` block in
-`./gmlx.yaml` is ignored with a notice, because a cloned repository could
-otherwise share `~/.ssh` with the client or turn the container off. The
-server never reads the block.
+[container mode](launch-container.md). Launch reads it from the first of
+`~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that exists, the same file the
+server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
+
+A `launch` block in `./gmlx.yaml` is ignored with a notice, because a
+cloned repository could otherwise share `~/.ssh` with the client or turn
+the container off. The server takes no setting from the block. When the
+block is malformed, the server prints one warning and still loads the
+rest of the file, and only a container launch refuses it.
 
 ```yaml
 # doctest: build
@@ -1431,9 +1440,9 @@ The container gets this many CPUs. The default is `4`.
 
 ### `launch.container.memory`
 
-The container gets this much memory, such as `4G` or `6144M`. The model
-server cannot use that memory while the container runs. The default is
-`4G`.
+The container gets this much memory, such as `4G` or `6144M`, and
+[Limits](launch-container.md#limits) describes how it counts against the
+model server. The default is `4G`.
 
 ### `launch.container.ssh_agent`
 
