@@ -352,8 +352,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
                             "with --no-container.")
     image_plan = images.resolve_image(client, cfg, launch_cfg.container, image_override=a.image)
     for line in [*plan.warnings, *plan.notes, *image_plan.notices,
-                 *settings.server_config_warnings(settings.server_config_path(host, port),
-                                                  plan.shares)]:
+                 *settings.server_config_warnings(
+                     settings.server_config_path(host, port,
+                                                 autostart=not (a.base_url or a.no_start)),
+                     plan.shares)]:
         say(line)
     running = prereqs.running
     ready = None

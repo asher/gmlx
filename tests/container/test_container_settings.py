@@ -373,3 +373,5 @@ def test_server_config_path_prefers_the_running_server(home, monkeypatch):
     user = _config(home / ".config" / "gmlx" / "gmlx.yaml", "server: {}\n")
     monkeypatch.chdir(home / "src" / "proj")
     assert settings.server_config_path("127.0.0.1", 8080) == user
+    # --base-url never autostarts, so only a runfile names its config.
+    assert settings.server_config_path("box.local", 8000, autostart=False) is None

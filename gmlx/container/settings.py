@@ -447,15 +447,18 @@ def _seed_git_identity(home: Path) -> None:
 
 # The server config the guest could change
 
-def server_config_path(host: str, port: int) -> str | None:
+def server_config_path(host: str, port: int, *, autostart: bool = True) -> str | None:
     """The config file the target server runs with: the one in its runfile
-    while it runs, else the one autostart would use."""
+    while it runs, else the one autostart would use. With ``autostart``
+    False, as for ``--base-url``, only a runfile counts."""
     from gmlx.config import default_config_paths
     from gmlx.serve import lifecycle
 
     run = lifecycle.read_run(host, port) or {}
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
         return str(run["config_abspath"])
+    if not autostart:
+        return None
     for path in default_config_paths():
         if path.exists():
             return str(path)
