@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-09-27
+
 ### Added
 
 - `gmlx --help` ends with the address of the docs site.
