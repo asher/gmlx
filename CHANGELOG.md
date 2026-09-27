@@ -34,6 +34,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as they already did for DeepSeek-V4.
 - Gemma-4 31B and 26B-A4B decode faster with an mlx-kquant build that
   provides `add_rmsnorm_norm`.
+- On GPUs with NAX (M5), Gemma-4 31B and 26B-A4B decode faster at long
+  context with mlx-kquant 0.4.15. `GMLX_GQA_SDPA_NAX512=0` restores the
+  previous routing.
 
 ### Fixed
 
