@@ -204,6 +204,7 @@ include = [
     "gmlx/systemone/engine.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
+    "scripts/structured_read_bench.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"

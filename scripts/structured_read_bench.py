@@ -31,6 +31,7 @@ import statistics
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 import mlx.core as mx
 
@@ -79,7 +80,8 @@ class Bench:
         self.cooldown = cooldown
         self.rows: list[dict] = []
 
-    def block(self, name: str, arms: list[tuple[str, dict, object]], rest: float = 0.0):
+    def block(self, name: str, arms: list[tuple[str, dict, Callable[[], float]]],
+              rest: float = 0.0):
         """``arms``: (label, params, fn) where ``fn()`` runs once and returns
         the milliseconds to record. ``rest`` seconds of idle follow each
         round, so a block of long arms does not heat the GPU into a lower
