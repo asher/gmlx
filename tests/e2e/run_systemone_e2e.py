@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live check of POST /v1/systemone on a real DiffusionGemma GGUF.
+"""Live check of POST /v1/systemone on a real DiffusionGemma or text model GGUF.
 
 Boots ``gmlx.serve.server`` from a one-model config with the default
 ``server.systemone`` settings and posts structured-decision requests over
@@ -12,6 +12,14 @@ served chat prompt starts with one BOS.
 
     python tests/e2e/run_systemone_e2e.py \
         --model ~/llm/gguf/unsloth__diffusiongemma-26B-A4B-it-GGUF/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
+
+On any other model, such as OpenJev, the server answers through the letter
+readout, and the checks follow it: a question set past 52 options, a replay
+and a warm decision equal to the cold one, POST /v1/prewarm, image states
+refused, and a chat request that finishes while a long decision runs.
+
+    python tests/e2e/run_systemone_e2e.py \
+        --model ~/llm/gguf/openjev__openjev-GGUF/OpenJev-Q4_K_M.gguf
 
 Each response body is written under ``--out`` for a slot-by-slot diff
 against another implementation. Exit status 0 means every check passed.
@@ -39,6 +47,7 @@ _DEFAULT_GLOBS = (
     "~/llm/gguf-test/**/diffusiongemma*.gguf",
 )
 _MODEL_ID = "dgemma"
+_LETTERS_MODEL_ID = "openjev"
 
 TICKET = {
     "model": "jev-latest",
@@ -105,6 +114,18 @@ _WORDS = ["sky", "fire", "fish", "stone", "sun", "ice", "birds", "moon",
 FACTS_WORD_IDS = {**FACTS, "questions": {
     w: q for w, q in zip(_WORDS, FACTS["questions"].values())}}
 
+# Sixty options: two chunks of thirty, then a read over the two winners.
+MANY = {
+    "model": "jev-latest",
+    "state": "The ticket number is 42.",
+    "questions": {"number": {
+        "type": "choice", "instructions": "Which option is the ticket number?",
+        "criteria": {f"n{i}": f"ticket number {i}" for i in range(60)}}},
+}
+
+# The state of the prewarm example in docs/decisions.md.
+PREWARM_STATE = "Everything is down and we have a demo at noon."
+
 
 def find_default_model() -> str | None:
     for pattern in _DEFAULT_GLOBS:
@@ -125,9 +146,9 @@ class Report:
             self.failures.append(name)
 
 
-def post(base: str, body: dict, *, timeout: float = 900.0):
+def post(base: str, body: dict, *, timeout: float = 900.0, path: str = "/v1/systemone"):
     t0 = time.perf_counter()
-    r = requests.post(f"{base}/v1/systemone", json=body, timeout=timeout)
+    r = requests.post(f"{base}{path}", json=body, timeout=timeout)
     ms = (time.perf_counter() - t0) * 1e3
     try:
         data = r.json()
@@ -136,10 +157,10 @@ def post(base: str, body: dict, *, timeout: float = 900.0):
     return r.status_code, data, ms
 
 
-def check_shapes(rep: Report, name: str, body: dict, data: dict):
+def check_shapes(rep: Report, name: str, body: dict, data: dict, *, letters: bool = False):
     answers = data.get("answers") or {}
-    rep.check(f"{name}: every question answered",
-              set(answers) == set(body["questions"]), f"{sorted(answers)}")
+    asked = set(body.get("ask") or body["questions"])
+    rep.check(f"{name}: every question answered", set(answers) == asked, f"{sorted(answers)}")
     for qid, a in answers.items():
         if a is None:
             continue
@@ -157,9 +178,8 @@ def check_shapes(rep: Report, name: str, body: dict, data: dict):
         rep.check(f"{name}: {qid} probabilities sum to 1",
                   math.isclose(total, 1.0, abs_tol=1e-3), f"sum={total:.4f}")
     usage = data.get("usage") or {}
-    rep.check(f"{name}: usage counts",
-              usage.get("input_tokens", 0) > 0 and usage.get("output_tokens", 0) > 0,
-              f"{usage}")
+    outputs = usage.get("output_tokens", 0) == 0 if letters else usage.get("output_tokens", 0) > 0
+    rep.check(f"{name}: usage counts", usage.get("input_tokens", 0) > 0 and outputs, f"{usage}")
 
 
 def dump(out_dir: str, name: str, body: dict, data: dict):
@@ -167,18 +187,7 @@ def dump(out_dir: str, name: str, body: dict, data: dict):
         json.dump({"request": body, "response": data}, f, indent=2)
 
 
-def run_decisions(rep: Report, base: str, out_dir: str):
-    print("\n[decisions]")
-    cases = [
-        ("ticket", TICKET),
-        ("ticket_samples4", {**TICKET, "samples": 4}),
-        ("ticket_think64", {**TICKET, "think": 64}),
-        ("triage_chain", TRIAGE),
-        ("facts_indexed", FACTS),
-        ("century_think_auto", {**CENTURY, "think": "auto", "think_threshold": 0.9,
-                                "think_budget": 128}),
-        ("ticket_think_auto", {**TICKET, "think": "auto"}),
-    ]
+def run_cases(rep: Report, base: str, out_dir: str, cases, *, letters: bool = False) -> dict:
     results = {}
     for name, body in cases:
         status, data, ms = post(base, body)
@@ -187,11 +196,43 @@ def run_decisions(rep: Report, base: str, out_dir: str):
         if status != 200:
             continue
         results[name] = data
-        check_shapes(rep, name, body, data)
+        check_shapes(rep, name, body, data, letters=letters)
         diag = data.get("diagnostics") or {}
         timing = diag.get("timing") or {}
         rep.timings.append((name, ms, timing.get("reads"),
                             (data.get("usage") or {}).get("input_tokens")))
+    return results
+
+
+def check_triage(rep: Report, tr: dict):
+    a = tr["answers"]
+    rep.check("triage_chain: area billing", (a.get("area") or {}).get("choice") == "billing",
+              f"{a.get('area')}")
+    rep.check("triage_chain: refund asked and yes",
+              a.get("refund") is not None and a["refund"]["noul"] > 0.5, f"{a.get('refund')}")
+    rep.check("triage_chain: outage skipped", a.get("outage") is None, f"{a.get('outage')}")
+    stages = (tr.get("diagnostics") or {}).get("stages") or []
+    rep.check("triage_chain: two stages", len(stages) == 2, f"{stages}")
+
+
+def check_facts(rep: Report, name: str, fx: dict, ids):
+    wrong = [k for k, (_, _, truth) in zip(ids, _FACTS)
+             if (fx["answers"][k]["noul"] > 0.5) != truth]
+    rep.check(f"{name}: obvious answers", not wrong, f"wrong={wrong}")
+
+
+def run_decisions(rep: Report, base: str, out_dir: str):
+    print("\n[decisions]")
+    results = run_cases(rep, base, out_dir, [
+        ("ticket", TICKET),
+        ("ticket_samples4", {**TICKET, "samples": 4}),
+        ("ticket_think64", {**TICKET, "think": 64}),
+        ("triage_chain", TRIAGE),
+        ("facts_indexed", FACTS),
+        ("century_think_auto", {**CENTURY, "think": "auto", "think_threshold": 0.9,
+                                "think_budget": 128}),
+        ("ticket_think_auto", {**TICKET, "think": "auto"}),
+    ])
 
     t = results.get("ticket")
     if t:
@@ -211,14 +252,7 @@ def run_decisions(rep: Report, base: str, out_dir: str):
                   0 < int(thought.get("tokens") or 0) <= 64, f"{thought.get('tokens')}")
     tr = results.get("triage_chain")
     if tr:
-        a = tr["answers"]
-        rep.check("triage_chain: area billing", (a.get("area") or {}).get("choice") == "billing",
-                  f"{a.get('area')}")
-        rep.check("triage_chain: refund asked and yes",
-                  a.get("refund") is not None and a["refund"]["noul"] > 0.5, f"{a.get('refund')}")
-        rep.check("triage_chain: outage skipped", a.get("outage") is None, f"{a.get('outage')}")
-        stages = (tr.get("diagnostics") or {}).get("stages") or []
-        rep.check("triage_chain: two stages", len(stages) == 2, f"{stages}")
+        check_triage(rep, tr)
     ca = results.get("century_think_auto")
     if ca:
         auto = (ca.get("diagnostics") or {}).get("think_auto") or {}
@@ -236,9 +270,51 @@ def run_decisions(rep: Report, base: str, out_dir: str):
                   f"{auto}")
     fx = results.get("facts_indexed")
     if fx:
-        wrong = [k for k, _, truth in _FACTS
-                 if (fx["answers"][k]["noul"] > 0.5) != truth]
-        rep.check("facts_indexed: obvious answers", not wrong, f"wrong={wrong}")
+        check_facts(rep, "facts_indexed", fx, FACTS["questions"])
+
+
+def run_letter_decisions(rep: Report, base: str, out_dir: str):
+    print("\n[letter decisions]")
+    results = run_cases(rep, base, out_dir, [
+        ("ticket", TICKET),
+        ("ticket_samples4", {**TICKET, "samples": 4}),
+        ("triage_chain", TRIAGE),
+        ("facts_indexed", FACTS),
+        ("facts_word_ids", FACTS_WORD_IDS),
+        ("century", CENTURY),
+        ("many_options", MANY),
+        ("triage_ask", {**TRIAGE, "ask": ["area", "severity"]}),
+    ], letters=True)
+    t = results.get("ticket")
+    if t:
+        a = t["answers"]["urgent"]
+        rep.check("ticket: urgent is yes", a["noul"] > 0.8, f"noul={a['noul']:.3f}")
+        rep.check("ticket: model echoed", t.get("model") == _MODEL_ID, f"{t.get('model')}")
+        diag = t.get("diagnostics") or {}
+        rep.check("ticket: letter readout", diag.get("readout") == "letters", f"{diag.get('readout')}")
+    s4 = results.get("ticket_samples4")
+    if s4:
+        diag = s4.get("diagnostics") or {}
+        rep.check("ticket_samples4: four orders, four passes",
+                  diag.get("orderings") == 4 and diag.get("passes") == 4,
+                  f"orderings={diag.get('orderings')} passes={diag.get('passes')}")
+    if results.get("triage_chain"):
+        check_triage(rep, results["triage_chain"])
+    for name, body in (("facts_indexed", FACTS), ("facts_word_ids", FACTS_WORD_IDS)):
+        if results.get(name):
+            check_facts(rep, name, results[name], body["questions"])
+    ce = results.get("century")
+    if ce:
+        rep.check("century: 19th", ce["answers"]["century"]["choice"] == "19th",
+                  f"{ce['answers']['century']}")
+    mo = results.get("many_options")
+    if mo:
+        a = mo["answers"]["number"]
+        diag = mo.get("diagnostics") or {}
+        rep.check("many_options: n42 of 60 in three passes",
+                  a["choice"] == "n42" and len(a["probabilities"]) == 60
+                  and diag.get("passes") == 3,
+                  f"choice={a['choice']} p={a['probabilities'].get('n42')} passes={diag.get('passes')}")
 
 
 def run_determinism(rep: Report, base: str):
@@ -259,10 +335,70 @@ def run_determinism(rep: Report, base: str):
               status == 200 and c["diagnostics"]["samples"]["tops"] != tops_a)
 
 
+def _prefix(data: dict) -> dict:
+    return (data.get("diagnostics") or {}).get("prefix") or {}
+
+
+def run_letter_reuse(rep: Report, base: str):
+    print("\n[replay and kept states]")
+    nonce = f"{os.getpid()}-{time.time_ns()}"
+    body = {**TRIAGE, "state": {**TRIAGE["state"], "run": nonce}}
+    runs = [post(base, body) for _ in range(3)]
+    ok = all(s == 200 for s, _, _ in runs)
+    rep.check("replay: 200", ok, "" if ok else f"{[(s, d) for s, d, _ in runs]}")
+    if not ok:
+        return
+    (_, cold, _), (_, warm, _), (_, again, _) = runs
+    pc, pw = _prefix(cold), _prefix(warm)
+    rep.check("cold: prefix stored, not reused",
+              pc.get("stored") is True and pc.get("reused") is False, f"{pc}")
+    rep.check("warm: prefix reused", pw.get("reused") is True, f"{pw}")
+    rep.check("warm equals cold: answers identical",
+              cold["answers"] == warm["answers"] == again["answers"])
+    rep.check("warm: fewer computed tokens",
+              warm["diagnostics"]["computed_tokens"] < cold["diagnostics"]["computed_tokens"],
+              f"{cold['diagnostics']['computed_tokens']} -> {warm['diagnostics']['computed_tokens']}")
+
+    status, pre, ms = post(base, {"model": _MODEL_ID, "state": PREWARM_STATE}, path="/v1/prewarm")
+    print(f"  prewarm example: {status} {json.dumps(pre)} in {ms:.0f} ms")
+    rep.check("prewarm: 200, ok and stored",
+              status == 200 and pre.get("ok") is True
+              and (pre.get("prefix") or {}).get("stored") is True, f"{status} {pre}")
+    status, data, _ = post(base, {**TICKET, "state": PREWARM_STATE})
+    rep.check("prewarm: the next decision reuses the state",
+              status == 200 and _prefix(data).get("reused") is True
+              and _prefix(data).get("tokens") == pre.get("prompt_tokens"),
+              f"{status} {_prefix(data)}")
+    status, again, _ = post(base, {"model": _MODEL_ID, "state": PREWARM_STATE}, path="/v1/prewarm")
+    rep.check("prewarm: a kept state is reused",
+              status == 200 and (again.get("prefix") or {}).get("reused") is True, f"{again}")
+    status, data, _ = post(base, {"model": _MODEL_ID}, path="/v1/prewarm")
+    rep.check("prewarm: no state 422", status == 422, f"{status} {data}")
+
+
+def run_letter_refusals(rep: Report, base: str):
+    print("\n[refusals]")
+    status, data, _ = post(base, {**TICKET, "images": ["data:image/png;base64,AAAA"]})
+    rep.check("images: 400", status == 400, f"{status} {data}")
+    shot = {**TICKET, "state": {"screenshot": "data:image/png;base64,AAAA"}}
+    status, data, _ = post(base, shot)
+    rep.check("image state: 400", status == 400, f"{status} {data}")
+    status, data, _ = post(base, {"model": _MODEL_ID, "state": shot["state"]}, path="/v1/prewarm")
+    rep.check("prewarm image state: 400", status == 400, f"{status} {data}")
+    for name, q in (("bad question", {"type": "nope", "instructions": "x"}),
+                    ("no instructions", {"type": "noul"})):
+        status, data, _ = post(base, {**TICKET, "questions": {"x": q}})
+        err = (data.get("error") or {}) if isinstance(data, dict) else {}
+        rep.check(f"{name}: 422 validation_error",
+                  status == 422 and err.get("type") == "validation_error", f"{status} {data}")
+
+
 def run_refusals(rep: Report, base: str):
     print("\n[refusals]")
     status, data, _ = post(base, {**TICKET, "images": ["data:image/png;base64,AAAA"]})
     rep.check("images: 400", status == 400, f"{status} {data}")
+    status, data, _ = post(base, {"model": _MODEL_ID, "state": PREWARM_STATE}, path="/v1/prewarm")
+    rep.check("prewarm on DiffusionGemma: 400", status == 400, f"{status} {data}")
     status, data, _ = post(base, {**TICKET, "questions": {"x": {"type": "nope"}}})
     err = (data.get("error") or {}) if isinstance(data, dict) else {}
     rep.check("bad question: 422 validation_error",
@@ -274,17 +410,20 @@ def run_refusals(rep: Report, base: str):
               f"{status} {data}")
 
 
-def run_concurrent_chat(rep: Report, base: str):
+def run_concurrent_chat(rep: Report, base: str, *, letters: bool = False):
     print("\n[concurrent chat]")
     out = {}
+    # On the letter readout, a long decision must not hold the chat back.
+    body = {**MANY, "samples": 4} if letters else {**TICKET, "think": 64, "samples": 4}
 
     def decision():
-        out["decision"] = post(base, {**TICKET, "think": 64, "samples": 4})
+        out["decision"] = post(base, body)
 
     def chat():
         t0 = time.perf_counter()
+        extra = {"enable_thinking": False} if letters else {}
         r = requests.post(f"{base}/v1/chat/completions", timeout=900, json={
-            "model": _MODEL_ID, "max_tokens": 32, "temperature": 0.0,
+            "model": _MODEL_ID, "max_tokens": 32, "temperature": 0.0, **extra,
             "messages": [{"role": "user", "content": "Say hello in one word."}]})
         out["chat"] = (r.status_code, r.json(), (time.perf_counter() - t0) * 1e3)
 
@@ -300,6 +439,9 @@ def run_concurrent_chat(rep: Report, base: str):
         if isinstance(c_body, dict) else None
     rep.check("concurrent: chat 200 with content", c_status == 200 and bool(content),
               f"{c_ms:.0f} ms {content!r}")
+    if letters:
+        rep.check("concurrent: chat finished before the decision", c_ms < d_ms,
+                  f"chat {c_ms:.0f} ms, decision {d_ms:.0f} ms")
     return c_body
 
 
@@ -336,7 +478,7 @@ def run_cli(rep: Report, base: str, python: str, out_dir: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--model", default=None, help="DiffusionGemma GGUF path")
+    ap.add_argument("--model", default=None, help="DiffusionGemma or text model GGUF path")
     ap.add_argument("--python", default=sys.executable)
     ap.add_argument("--out", default=os.path.expanduser(
         "~/.local/state/claude-scratch/gmlx/systemone/e2e"))
@@ -346,9 +488,15 @@ def main() -> int:
         print("no DiffusionGemma GGUF found; pass --model", file=sys.stderr)
         return 2
     os.makedirs(a.out, exist_ok=True)
+    global _MODEL_ID
+    config = {"server": {"systemone": {"canvas": 64}}}
+    if "diffusiongemma" not in os.path.basename(model).lower():
+        # The letter readout keeps decision states in the prompt cache.
+        _MODEL_ID = _LETTERS_MODEL_ID
+        config["server"]["cache"] = {"enabled": True}
+    config["models"] = {_MODEL_ID: {"path": os.path.expanduser(model)}}
     cfg = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
-    cfg.write(json.dumps({"models": {_MODEL_ID: {"path": os.path.expanduser(model)}},
-                          "server": {"systemone": {"canvas": 64}}}))
+    cfg.write(json.dumps(config))
     cfg.close()
     rep = Report()
     log = os.path.join(a.out, "server.log")
@@ -359,11 +507,19 @@ def main() -> int:
         base = sp.base_url
         status, data, ms = post(base, TICKET)
         print(f"warm-up: {status} in {ms:.0f} ms (includes the load)")
-        run_decisions(rep, base, a.out)
-        run_determinism(rep, base)
-        run_refusals(rep, base)
-        run_concurrent_chat(rep, base)
-        run_single_bos(rep, base, model)
+        letters = (data.get("diagnostics") or {}).get("readout") == "letters"
+        print(f"readout: {'letters' if letters else 'diffusion'}")
+        if letters:
+            run_letter_decisions(rep, base, a.out)
+            run_letter_reuse(rep, base)
+            run_letter_refusals(rep, base)
+            run_concurrent_chat(rep, base, letters=True)
+        else:
+            run_decisions(rep, base, a.out)
+            run_determinism(rep, base)
+            run_refusals(rep, base)
+            run_concurrent_chat(rep, base)
+            run_single_bos(rep, base, model)
         run_cli(rep, base, a.python, a.out)
     finally:
         sp.stop()
