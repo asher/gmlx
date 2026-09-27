@@ -603,6 +603,7 @@ gmlx launch claude-code --model qwen3.8-27b-ud-q6
 gmlx launch open-webui
 gmlx launch dsh --model qwen3.8-27b-ud-q6
 gmlx launch omp --config-only
+gmlx launch claude-code -- --continue
 ```
 
 These flags control `gmlx launch`:
@@ -621,6 +622,7 @@ These flags control `gmlx launch`:
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Do not keep `--model` resident. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
+| `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
 own. Before that, the command exits 0 after `--config-only` and 1 when the

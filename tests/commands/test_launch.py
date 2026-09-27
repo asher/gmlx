@@ -591,6 +591,50 @@ def test_cmd_launch_menubar_routes(monkeypatch):
     assert seen["argv"] == ["--interval", "9"]              # menubar opts passed through
 
 
+def test_cmd_launch_menubar_keeps_its_double_dash(monkeypatch):
+    # The `--` split runs after the menubar dispatch, so menubar sees its
+    # arguments exactly as before.
+    seen = {}
+    import gmlx.commands.menubar as mb
+
+    monkeypatch.setattr(mb, "cmd_menubar",
+                        lambda argv, prog=None: seen.update(argv=argv) or 0)
+    assert launch.cmd_launch(["menubar", "--interval", "9", "--", "x"]) == 0
+    assert seen["argv"] == ["--interval", "9", "--", "x"]
+
+
+# `--` passes the rest of the command line to the client
+def test_passthrough_split_before_argparse():
+    a = _parse_launch_args(["claude-code", "--model", "m", "--",
+                            "--continue", "--model", "other"])
+    assert a.harness == "claude-code" and a.model == "m"   # launch flags before `--`
+    assert a.passthrough == ["--continue", "--model", "other"]
+
+
+def test_passthrough_empty_without_double_dash():
+    assert _parse_launch_args(["pi"]).passthrough == []
+    assert _parse_launch_args(["pi", "--"]).passthrough == []
+
+
+def test_passthrough_appended_to_client_argv(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls["argv"] = argv
+        return 0
+
+    a = _args(harness="elia", config_path=str(tmp_path), passthrough=["--x", "y"])
+    assert launch._launch_elia(a, exec_fn=fake_exec) == 0
+    assert calls["argv"] == ["elia", "-m", "gmlx/qwen3.6-27b", "--x", "y"]
+
+
+def test_passthrough_quoted_in_config_only_line(capsys):
+    a = _args(config_only=True, passthrough=["-c", "npm test"])
+    assert launch._finish(a, None, ["pi"], {}, exec_fn=lambda *x: 0) == 0
+    assert capsys.readouterr().out == "[launch] run it with:  pi -c 'npm test'\n"
+
+
 # pi: build_pi_configs (pure) - merge into the user's own ~/.pi/agent files
 def test_build_pi_configs_shape():
     models_doc, settings_doc = launch.build_pi_configs(

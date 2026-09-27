@@ -75,6 +75,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -133,15 +134,18 @@ def _summary(name: str, base_url: str, models: list,
 def _finish(a, binary, argv: list, pairs: dict, *, drop=(), exec_fn) -> int:
     """The shared end of every harness: under --config-only, print the command
     that runs the client and return 0; otherwise exec it with ``pairs`` added
-    to the environment and the ``drop`` names removed from it."""
+    to the environment and the ``drop`` names removed from it. The arguments
+    after ``--`` on the launch command line follow ``argv``."""
+    extra = list(getattr(a, "passthrough", None) or ())
     if a.config_only:
-        words = [f"{k}={v}" for k, v in pairs.items()] + list(argv)
+        words = ([f"{k}={v}" for k, v in pairs.items()] + list(argv)
+                 + [shlex.quote(w) for w in extra])
         print(f"[launch] run it with:  {' '.join(words)}")
         return 0
     env = dict(os.environ, **pairs)
     for name in drop:
         env.pop(name, None)
-    return exec_fn(binary, list(argv), env)
+    return exec_fn(binary, list(argv) + extra, env)
 
 
 # server probe (HTTP only - launch never imports the model stack)
@@ -1546,14 +1550,21 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if argv and argv[0] == "menubar":
         from .menubar import cmd_menubar
         return cmd_menubar(argv[1:], prog=f"{prog} menubar")
+    # Everything after the first `--` goes to the client untouched; argparse
+    # would reject the client's own flags.
+    passthrough: list = []
+    if "--" in argv:
+        cut = argv.index("--")
+        argv, passthrough = argv[:cut], argv[cut + 1:]
 
     ap = argparse.ArgumentParser(
         prog=prog,
         description="Point a coding harness at a gmlx server and run it, starting "
                     "the server from a default-location config if none is reachable "
                     "(no harness auto-install).",
-        epilog="Also: `gmlx launch menubar` raises the macOS menu-bar monitor for "
-               "a running server.",
+        epilog="Arguments after `--` go to the client, as in `gmlx launch "
+               "claude-code -- --continue`. Also: `gmlx launch menubar` raises "
+               "the macOS menu-bar monitor for a running server.",
     )
     ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
                     help="The coding harness, chat TUI (aichat/elia), or web app "
@@ -1598,6 +1609,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                          f"instead of the {_DSH_PROFILE} profile, for example "
                          f"headless or a terminal UI profile you set up.")
     a = ap.parse_args(argv)
+    a.passthrough = passthrough
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
     if a.harness is None:

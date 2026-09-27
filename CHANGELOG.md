@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `/v1/systemone` and `gmlx systemone` answer on OpenJev and any other text
   model with OpenJev's letter readout, and `POST /v1/prewarm` reads a
   decision state ahead of its questions.
+- `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
+  client.
 
 ### Changed
 
