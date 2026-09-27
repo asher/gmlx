@@ -41,19 +41,38 @@ def _say(line: str) -> None:
     print(line, flush=True)
 
 
+def _flag_name(dest: str, value) -> str:
+    """The flag as the user typed it. ``--no-mount-cwd`` sets False."""
+    if dest == "mount_cwd" and value is False:
+        return "--no-mount-cwd"
+    return CONTAINER_FLAGS.get(dest) or "--" + dest.replace("_", "-")
+
+
 def _flag_set(a, dest: str) -> bool:
     value = getattr(a, dest, None)
+    if dest == "mount_cwd":           # --mount-cwd and --no-mount-cwd both count
+        return value is not None
     return value not in (None, False, [])
 
 
 def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
     """Whether this launch runs in a container, from the flags and the
-    ``enabled`` keys of the user-level config, and those settings."""
-    implied = [flag for dest, flag in CONTAINER_FLAGS.items() if _flag_set(a, dest)]
+    ``enabled`` keys of the user-level config, and those settings. A broken
+    ``launch`` block stops only a launch that asks for container mode on the
+    command line. Any other launch runs on the Mac with one notice."""
+    implied = [_flag_name(dest, getattr(a, dest, None))
+               for dest in CONTAINER_FLAGS if _flag_set(a, dest)]
     if a.container is False and implied:
         ap.error(f"{implied[0]} applies only in container mode, so it cannot go with "
                  "--no-container")
-    launch_cfg, notice = load_launch_settings()
+    try:
+        launch_cfg, notice = load_launch_settings()
+    except ConfigError as e:
+        if a.container or implied:
+            raise
+        print(f"[launch] ignoring the launch settings, so {a.harness} runs on the Mac: {e}",
+              file=sys.stderr)
+        return False, LaunchCfg()
     if notice:
         print(f"[launch] {notice}", file=sys.stderr)
     if a.container is not None:
@@ -184,8 +203,9 @@ def _attach(a, exec_fn, say) -> int:
     from gmlx.commands.launch import LaunchError
 
     for dest, default in _ATTACH_DEFAULTS.items():
-        if getattr(a, dest, default) != default:
-            flag = "--" + dest.replace("_", "-")
+        value = getattr(a, dest, default)
+        if value != default:
+            flag = _flag_name(dest, value)
             raise LaunchError(f"a {a.harness} session is already running, so --shell attaches "
                               f"to it, and {flag} applies only to a new session.")
     record = session.read_record(a.harness)

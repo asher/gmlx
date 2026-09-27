@@ -74,6 +74,30 @@ def test_container_only_flags_imply_container(env):
     assert env.runs
 
 
+def test_no_mount_cwd_implies_container(env):
+    assert _run(["pi", "--no-mount-cwd"]) == 0
+    assert env.runs
+
+
+def test_no_mount_cwd_conflicts_with_no_container(env, capsys):
+    with pytest.raises(SystemExit):
+        _run(["pi", "--no-mount-cwd", "--no-container"])
+    assert "--no-mount-cwd applies only in container mode" in capsys.readouterr().err
+
+
+def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, "launch:\n  container:\n    bogus: 1\n")
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls and not env.runs
+    assert "ignoring the launch settings, so pi runs on the Mac" in capsys.readouterr().err
+    assert _run(["pi", "--container"]) == 1                 # asked for, so it stops
+    assert _run(["pi", "--rebuild"]) == 1
+
+
 def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",
