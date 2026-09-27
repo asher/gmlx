@@ -200,6 +200,24 @@ def test_launch_dsh_profile_completes_private_home_profiles_in_container_mode(
     assert "mac-only" in vals and "boxed" not in vals
 
 
+def test_private_home_profiles_never_follow_a_planted_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    mac = tmp_path / "mac-profiles"
+    (mac / "secret-project").mkdir(parents=True)
+    (mac / "secret-project" / "package.json").write_text("{}")
+    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    (guest / "boxed").mkdir(parents=True)
+    (guest / "boxed" / "package.json").write_text("{}")
+    (guest / "linked").symlink_to(mac / "secret-project", target_is_directory=True)
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "boxed" in vals and "linked" not in vals
+    guest.rename(guest.with_name("real"))
+    guest.symlink_to(mac, target_is_directory=True)     # the whole folder is a link
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "secret-project" not in vals
+
+
 _HOSTILE = ("$(touch${IFS}PWNED)", "`touch PWNED2`", "a;touch PWNED3")
 
 

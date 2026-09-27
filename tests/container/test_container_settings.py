@@ -266,6 +266,52 @@ def test_a_submodule_shares_its_git_folder(home):
     assert git[0].note == "the git folder of this submodule"
 
 
+def _private_repo(home):
+    repo = home / "work" / "private"
+    repo.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    return repo
+
+
+def _proj_git_mounts(home, proj):
+    plan = _plan(home, cwd=str(proj))
+    return [m for m in plan.mounts if m.kind == "git"], plan.notes
+
+
+def test_a_commondir_file_in_a_shared_git_folder_mounts_nothing(home):
+    """The guest writes a commondir file into the project's .git folder."""
+    private = _private_repo(home)
+    proj = home / "src" / "proj"
+    _git("init", "-q", "-b", "main", cwd=proj)
+    (proj / ".git" / "commondir").write_text(str(private / ".git") + "\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+
+
+def test_a_gitfile_naming_another_repository_mounts_nothing(home):
+    private = _private_repo(home)
+    proj = home / "src" / "proj"
+    (proj / ".git").write_text(f"gitdir: {private / '.git'}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("does not name ~/src/proj" in n and "--mount ~/work/private/.git" in n
+               for n in notes)
+
+
+def test_a_gitfile_naming_another_worktree_mounts_nothing(home):
+    private = _private_repo(home)
+    other = home / "work" / "other-wt"
+    _git("worktree", "add", "-q", str(other), cwd=private)
+    proj = home / "src" / "proj"
+    wt_id = next((private / ".git" / "worktrees").iterdir()).name
+    (proj / ".git").write_text(f"gitdir: {private / '.git' / 'worktrees' / wt_id}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("--mount" in n for n in notes)
+
+
 # Protected folders and memory
 
 def test_protected_folder_warning(home):
@@ -355,10 +401,49 @@ def test_git_identity_never_writes_through_a_planted_gitconfig(home, tmp_path):
     secret = tmp_path / "mac-gitconfig"
     secret.write_text("[core]\n")
     (private / ".gitconfig").symlink_to(secret)
-    with pytest.raises(SettingsError, match="symbolic link"):
-        settings.seed_home(private, [])
+    warns = settings.seed_home(private, [])
+    assert len(warns) == 1 and "symbolic link" in warns[0] and "git identity" in warns[0]
     assert secret.read_text() == "[core]\n"
     assert not list(tmp_path.glob("mac-gitconfig.lock"))
+
+
+@pytest.mark.parametrize("plant", ["latin1", "socket"])
+def test_an_unreadable_gitconfig_only_warns(home, plant, tmp_path):
+    import socket
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n")
+    private = settings.private_home("pi")
+    target = private / ".gitconfig"
+    if plant == "latin1":
+        target.write_bytes(b"[user]\n\tname = J\xf6rg\n")
+        expect = "not UTF-8 text"
+    else:
+        import tempfile
+        sock = socket.socket(socket.AF_UNIX)
+        short = os.path.join(tempfile.mkdtemp(dir="/tmp"), "s")   # a socket path stays short
+        sock.bind(short)
+        os.rename(short, target)
+        os.rmdir(os.path.dirname(short))
+        expect = "cannot be used"
+    try:
+        warns = settings.seed_home(private, [])
+    finally:
+        if plant == "socket":
+            sock.close()
+    assert len(warns) == 1 and expect in warns[0]
+
+
+def test_confine_refuses_a_private_home_outside_confined(home):
+    from gmlx.container import confine
+    private = settings.private_home("pi")
+    for call in (lambda: confine.read_text(private / "x"),
+                 lambda: confine.write_text(private / "x", "y"),
+                 lambda: confine.exists(private / "x"),
+                 lambda: confine.mkdirs(private / "d"),
+                 lambda: confine.listdir(private)):
+        with pytest.raises(confine.ConfinedError, match="private home"):
+            call()
+    confine.write_text(home / "ok.txt", "fine")          # the Mac's own files still work
+    assert (home / "ok.txt").read_text() == "fine"
 
 
 def test_seed_refuses_the_launch_data_folder(home):

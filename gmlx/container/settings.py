@@ -248,8 +248,9 @@ def forward_ports(ports: list[int], *, api_port: int | None,
 
 def _git(cwd: str, *args: str) -> list[str] | None:
     try:
-        proc = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
-                              timeout=5)
+        # The repository config is the guest's, so no command it names runs.
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", cwd, *args],
+                              capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return proc.stdout.splitlines() if proc.returncode == 0 else None
@@ -278,11 +279,19 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
         return None, []
     if covered(common):
         return None, []
-    # The git folder of a linked worktree or a submodule lies outside the
-    # share. Its hooks and config run on the Mac the next time you use git
-    # there, so it gets the same checks as the current folder, and so does
-    # the main worktree above a .git folder, such as a dotfiles repository
-    # at $HOME.
+    # git finds the git folder through files in the share, which the guest
+    # can change: the .git file, and a commondir file in a .git folder. So
+    # an outside git folder is shared only when it names this project back,
+    # from a file outside the share.
+    what = _git_back_reference(toplevel, git_dir, common)
+    if what is None:
+        return None, [f"[launch] git in the container cannot use the git folder "
+                      f"{_tilde(common, home)}, because it does not name "
+                      f"{_tilde(toplevel, home)} as one of its worktrees or submodules. "
+                      f"Share it with --mount {_tilde(common, home)} if you intend to."]
+    # Its hooks and config run on the Mac the next time you use git there,
+    # so it gets the same checks as the current folder, and so does the main
+    # worktree above a .git folder, such as a dotfiles repository at $HOME.
     owner = os.path.dirname(common) if os.path.basename(common) == ".git" else None
     for path in filter(None, (common, owner)):
         why = auto_share_refusal(path, home)
@@ -290,8 +299,49 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
             return None, [f"[launch] git in the container cannot reach this repository's "
                           f"git folder {_tilde(common, home)}, because {why}. Use git on "
                           "the Mac for this repository."]
-    what = "worktree" if git_dir != common else "submodule"
     return Mount(common, common, kind="git", note=f"the git folder of this {what}"), []
+
+
+def _read_small(path: str) -> str | None:
+    """A small regular file's text, or None. Never blocks on a named pipe."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
+            return None
+        return os.read(fd, 4096).decode(errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _git_back_reference(toplevel: str, git_dir: str, common: str) -> str | None:
+    """``"worktree"`` or ``"submodule"`` when the git folder outside the
+    share names ``toplevel`` back, else None.
+
+    - A linked worktree's ``<common>/worktrees/<id>/gitdir`` names the
+      project's ``.git`` file.
+    - A submodule's ``core.worktree`` names the project folder.
+    - A ``.git`` folder inside the share never counts, because its
+      ``commondir`` file can name any repository."""
+    dotgit = os.path.join(toplevel, ".git")
+    if os.path.islink(dotgit) or not os.path.isfile(dotgit):
+        return None
+    if git_dir != common:
+        if os.path.dirname(git_dir) != os.path.join(common, "worktrees"):
+            return None
+        named = (_read_small(os.path.join(git_dir, "gitdir")) or "").strip()
+        return "worktree" if named and _real(named) == _real(dotgit) else None
+    out = _git(toplevel, "config", "--file", os.path.join(git_dir, "config"),
+               "--get", "core.worktree")
+    if not out:
+        return None
+    worktree = out[0].strip()
+    return "submodule" if _real(os.path.join(git_dir, worktree)) == toplevel else None
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:
@@ -462,7 +512,9 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
         try:
             _seed_git_identity(home)
         except confine.ConfinedError as e:
-            raise SettingsError(str(e)) from None
+            # The guest owns the file, so a file launch cannot read or
+            # replace costs only the identity, never the launch.
+            out.append(f"[launch] warning: {e} Launch did not add your git identity to it.")
     return out
 
 

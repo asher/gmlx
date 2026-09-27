@@ -68,7 +68,10 @@ def _refuse_link(shown: str, e: OSError):
     if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
         raise ConfinedError(f"{shown} in the private home is a symbolic link or not a "
                             "folder, so launch will not follow it.") from None
-    raise e
+    # Anything else the guest can put there, such as a socket, is refused
+    # with its path rather than a traceback.
+    raise ConfinedError(f"{shown} in the private home cannot be used "
+                        f"({e.strerror or e}).") from None
 
 
 def _open_dir(parts: list[str], *, create: bool) -> int:
@@ -133,12 +136,29 @@ def _host_target(path: Path) -> Path:
     return Path(real)
 
 
+def _refuse_unconfined(path) -> None:
+    """Fail closed: a private home is read or written only inside
+    :func:`confined`, so a new call site can never follow the guest's links
+    by mistake."""
+    from .state import data_path
+
+    data = os.path.realpath(data_path())
+    for p in {os.path.abspath(os.path.expanduser(str(path))),
+              os.path.realpath(os.path.expanduser(str(path)))}:
+        if p.startswith(data.rstrip("/") + "/"):
+            rest = p[len(data.rstrip("/")) + 1:].split("/")
+            if len(rest) >= 2 and rest[1] == "home":
+                raise ConfinedError(f"{p} is in a private home, which launch reads "
+                                    "only with the links in it checked.")
+
+
 # The functions the handlers use
 
 def exists(path: Path) -> bool:
     """Whether ``path`` exists. In the private home a symbolic link at the
     path, or at a folder above it, is refused."""
     if _root is None:
+        _refuse_unconfined(path)
         return os.path.exists(path)
     parts = _parts(path)
     if not parts:
@@ -162,6 +182,7 @@ def read_text(path: Path) -> str | None:
     only a regular file is read, never through a link, and never one that
     would block, such as a named pipe."""
     if _root is None:
+        _refuse_unconfined(path)
         try:
             return Path(path).read_text()
         except FileNotFoundError:
@@ -199,12 +220,16 @@ def read_text(path: Path) -> str | None:
             left -= len(chunk)
     finally:
         os.close(fd)
-    return b"".join(chunks).decode()
+    try:
+        return b"".join(chunks).decode()
+    except UnicodeDecodeError:
+        raise ConfinedError(f"{path} in the private home is not UTF-8 text.") from None
 
 
 def mkdirs(path: Path) -> None:
     """Create ``path`` and the folders above it."""
     if _root is None:
+        _refuse_unconfined(path)
         Path(path).mkdir(parents=True, exist_ok=True)
         return
     os.close(_open_dir(_parts(path), create=True))
@@ -226,6 +251,7 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
     0600 file that holds keys stays 0600. ``mode`` sets the mode of a new
     file."""
     if _root is None:
+        _refuse_unconfined(path)
         target = _host_target(Path(path))
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -282,6 +308,7 @@ def symlink(target: str, path: Path) -> None:
     """Create a symbolic link at ``path``, as a seeded folder may hold. The
     link is never followed here."""
     if _root is None:
+        _refuse_unconfined(path)
         os.symlink(target, path)
         return
     parts = _parts(path)
@@ -290,6 +317,25 @@ def symlink(target: str, path: Path) -> None:
         os.symlink(target, parts[-1], dir_fd=dir_fd)
     finally:
         os.close(dir_fd)
+
+
+def listdir(path: Path) -> list[str]:
+    """The names in a folder, or [] when it does not exist. In the private
+    home no link on the way is followed."""
+    if _root is None:
+        _refuse_unconfined(path)
+        try:
+            return os.listdir(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+    try:
+        fd = _open_dir(_parts(path), create=False)
+    except FileNotFoundError:
+        return []
+    try:
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
 
 
 def _write_all(fd: int, data: bytes) -> None:

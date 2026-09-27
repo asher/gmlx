@@ -273,15 +273,31 @@ def _dsh_profile_candidates(container: bool = False) -> list[str]:
 
     names = {n: "shipped dsh profile" for n in _DSH_SHIPPED - _DSH_STDIO}
     names[_DSH_PROFILE] = "gmlx profile (default)"
-    root = _dsh_home() / "profiles"
     if container:
+        from gmlx.container import confine
         from gmlx.container.settings import private_home_path
-        root = private_home_path("dsh") / ".dsh" / "profiles"
-    for d in (root.iterdir() if root.is_dir() else ()):
-        # A folder name is untrusted, since a container session can create
-        # one in the private home.
-        if _SAFE_NAME.fullmatch(d.name) and (d / "package.json").is_file():
-            names.setdefault(d.name, "dsh profile")
+
+        # The guest owns the private home, so no link in it is followed.
+        home = private_home_path("dsh")
+        root = home / ".dsh" / "profiles"
+        found = []
+        with confine.confined(home):
+            try:
+                listed = confine.listdir(root)
+            except confine.ConfinedError:
+                listed = []
+            for name in filter(_SAFE_NAME.fullmatch, listed):
+                try:
+                    if confine.exists(root / name / "package.json"):
+                        found.append(name)
+                except confine.ConfinedError:
+                    pass
+    else:
+        root = _dsh_home() / "profiles"
+        found = [d.name for d in (root.iterdir() if root.is_dir() else ())
+                 if _SAFE_NAME.fullmatch(d.name) and (d / "package.json").is_file()]
+    for name in found:
+        names.setdefault(name, "dsh profile")
     return [f"{n}\t{h}" for n, h in sorted(names.items())]
 
 
