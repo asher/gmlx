@@ -189,6 +189,72 @@ fn fail_unresolved(resolved: Resolved, cmd: &OsStr, path_env: Option<&OsStr>) ->
     }
 }
 
+/// The longest `#!` line the Linux kernel reads.
+const SHEBANG_MAX: usize = 256;
+
+/// The `env` options that take the next word as their value.
+const ENV_VALUE_OPTIONS: [&str; 6] = ["-u", "--unset", "-C", "--chdir", "-P", "-a"];
+
+/// The program a `#!` line of `file` needs that is not in the image, if
+/// any. An absolute or relative interpreter must be an executable file.
+/// For `env`, the command it runs is looked up on `PATH` as env would. A
+/// file with no `#!` line, or one that cannot be read, needs nothing here.
+pub fn missing_interpreter(file: &Path, path_env: Option<&OsStr>) -> Option<OsString> {
+    use std::io::Read;
+    let mut head = [0u8; SHEBANG_MAX];
+    let mut f = std::fs::File::open(file).ok()?;
+    let mut len = 0;
+    while len < head.len() {
+        match f.read(&mut head[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(_) => return None,
+        }
+    }
+    let line = head[..len].strip_prefix(b"#!")?;
+    let line = &line[..line.iter().position(|b| *b == b'\n').unwrap_or(line.len())];
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let words: Vec<&[u8]> = line.split(blank).filter(|w| !w.is_empty()).collect();
+    let interpreter = OsStr::from_bytes(words.first()?);
+    if file_state(Path::new(interpreter)) != Some(true) {
+        return Some(interpreter.to_os_string());
+    }
+    if Path::new(interpreter).file_name() != Some(OsStr::new("env")) {
+        return None;
+    }
+    // The kernel passes the rest of the line to env as one argument, and
+    // env -S splits it. Either way the command is the first word that is
+    // not an option, an option's value or a NAME=VALUE setting.
+    let mut rest = words[1..].iter();
+    while let Some(word) = rest.next() {
+        let text = OsStr::from_bytes(word).to_str().unwrap_or("");
+        if ENV_VALUE_OPTIONS.contains(&text) {
+            rest.next();
+        } else if word.starts_with(b"-") || word.contains(&b'=') {
+            continue;
+        } else {
+            let cmd = OsStr::from_bytes(word);
+            return match resolve_full(cmd, path_env) {
+                Resolved::Found(_) => None,
+                _ => Some(cmd.to_os_string()),
+            };
+        }
+    }
+    None
+}
+
+fn missing_interpreter_message(file: &Path, interpreter: &OsStr) -> String {
+    format!("gmlx-entry: {} names {} in its #! line, which is not in the image.",
+            file.display(), interpreter.to_string_lossy())
+}
+
+/// Exits 126 when `file` needs an interpreter that is not in the image.
+fn check_interpreter(file: &Path, path_env: Option<&OsStr>) {
+    if let Some(interpreter) = missing_interpreter(file, path_env) {
+        fail(EXIT_CANNOT_RUN, &missing_interpreter_message(file, &interpreter));
+    }
+}
+
 fn not_found_message(cmd: &OsStr, path_env: Option<&OsStr>) -> String {
     let name = cmd.to_string_lossy();
     if cmd.as_bytes().contains(&b'/') {
@@ -244,7 +310,10 @@ fn main() {
     let path_env = std::env::var_os("PATH");
     match mode {
         Mode::Check(cmd) => match resolve_full(&cmd, path_env.as_deref()) {
-            Resolved::Found(found) => println!("{}", found.display()),
+            Resolved::Found(found) => {
+                check_interpreter(&found, path_env.as_deref());
+                println!("{}", found.display())
+            }
             other => fail_unresolved(other, &cmd, path_env.as_deref()),
         },
         Mode::Run(spec) => run(spec, path_env),
@@ -271,6 +340,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         };
         (found, cmd, spec.argv[1..].to_vec())
     };
+    check_interpreter(&program, path_env.as_deref());
 
     if !spec.tcp.is_empty() || !spec.unix.is_empty() {
         let listeners = relay::bind_all(&spec.tcp, &spec.unix)
@@ -290,8 +360,17 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }
     let err = command.exec();
-    let code = if err.kind() == std::io::ErrorKind::NotFound { EXIT_NOT_FOUND } else { EXIT_CANNOT_RUN };
-    fail(code, &format!("gmlx-entry: cannot run {}: {err}", program.display()))
+    if err.kind() == std::io::ErrorKind::NotFound {
+        // The file itself was found, so the missing file is the program
+        // that runs it: a #! interpreter or the ELF program loader.
+        if let Some(interpreter) = missing_interpreter(&program, path_env.as_deref()) {
+            fail(EXIT_CANNOT_RUN, &missing_interpreter_message(&program, &interpreter));
+        }
+        fail(EXIT_CANNOT_RUN, &format!(
+            "gmlx-entry: cannot run {}: its #! interpreter or its program loader is not in \
+             the image.", program.display()));
+    }
+    fail(EXIT_CANNOT_RUN, &format!("gmlx-entry: cannot run {}: {err}", program.display()))
 }
 
 #[cfg(test)]
@@ -396,6 +475,38 @@ mod tests {
         make(&dir.join("plain"), 0o644);
         assert_eq!(resolve_full(dir.join("plain").as_os_str(), None),
                    Resolved::NotExecutable(dir.join("plain")));
+    }
+
+    fn script(path: &Path, text: &str) -> PathBuf {
+        fs::write(path, text).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn finds_a_missing_shebang_interpreter() {
+        let dir = scratch("shebang");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("tool"), "#!/bin/sh\n");
+        let path = OsString::from(format!("{}:/usr/bin:/bin", bin.display()));
+        let p = Some(path.as_os_str());
+        let absolute = script(&dir.join("a"), "#!/nope/python3 -u\nprint(1)\n");
+        assert_eq!(missing_interpreter(&absolute, p), Some(OsString::from("/nope/python3")));
+        let present = script(&dir.join("b"), "#! /bin/sh\necho hi\n");
+        assert_eq!(missing_interpreter(&present, p), None);
+        let env_missing = script(&dir.join("c"), "#!/usr/bin/env missingtool\n");
+        assert_eq!(missing_interpreter(&env_missing, p), Some(OsString::from("missingtool")));
+        let env_found = script(&dir.join("d"), "#!/usr/bin/env tool --flag\n");
+        assert_eq!(missing_interpreter(&env_found, p), None);
+        let env_split = script(&dir.join("e"), "#!/usr/bin/env -S -u HOME X=1 missingtool -x\n");
+        assert_eq!(missing_interpreter(&env_split, p), Some(OsString::from("missingtool")));
+        let env_split_found = script(&dir.join("f"), "#!/usr/bin/env -S tool -x\n");
+        assert_eq!(missing_interpreter(&env_split_found, p), None);
+        let plain = script(&dir.join("g"), "echo no shebang\n");
+        assert_eq!(missing_interpreter(&plain, p), None);
+        let bare_env = script(&dir.join("h"), "#!/usr/bin/env\n");
+        assert_eq!(missing_interpreter(&bare_env, p), None);
     }
 
     #[test]

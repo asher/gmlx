@@ -79,9 +79,12 @@ def _start_relay_client(entry, sock: Path, env) -> tuple:
     only the relay still carries ``sock`` in its arguments."""
     for _ in range(3):
         port = _free_port()
+        # The client must not inherit an ignored SIGINT from the test run,
+        # or the Ctrl-C the test sends would not end it.
         client = subprocess.Popen(
             [entry, "--tcp", f"{port}={sock}", "--", "sh", "-c", "echo ready; exec sleep 30"],
-            env=env, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            env=env, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         if client.stdout.readline() == b"ready\n":
             return client, port
         err = client.stderr.read().decode()
@@ -161,16 +164,21 @@ def test_run_missing_command_exits_127(entry):
     assert "Install it in the image" in done.stderr
 
 
-def test_command_resolves_on_the_image_path(entry, tmp_path):
+def test_command_resolves_on_the_image_path_in_order(entry, tmp_path):
     tool = tmp_path / "bin" / "mytool"
     tool.parent.mkdir()
     tool.write_text("#!/bin/sh\necho from-mytool\n")
     tool.chmod(0o755)
-    env = dict(os.environ, PATH=f"{tool.parent}:/usr/bin:/bin")
+    # A second executable match later on PATH, so the test fails if the
+    # search does not stop at the first one.
+    later = _script(tmp_path / "later" / "mytool", "#!/bin/sh\necho from-later\n", 0o755)
+    env = dict(os.environ, PATH=f"{tool.parent}:{later.parent}:/usr/bin:/bin")
     done = _run(entry, "--", "mytool", env=env)
     assert done.returncode == 0 and done.stdout.strip() == "from-mytool"
     done = _run(entry, "--check", "mytool", env=env)
     assert done.stdout.strip() == str(tool)
+    env = dict(os.environ, PATH=f"{later.parent}:{tool.parent}:/usr/bin:/bin")
+    assert _run(entry, "--", "mytool", env=env).stdout.strip() == "from-later"
 
 
 def test_shell_falls_back_to_sh_and_passes_arguments(entry, tmp_path):
@@ -225,6 +233,43 @@ def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
     os.symlink(shutil.which("sh"), folder / "sh")
     done = _run(entry, "--shell", "--", "-c", "echo sh-ran", env=dict(os.environ, PATH=str(folder)))
     assert done.returncode == 0 and done.stdout.strip() == "sh-ran", done.stderr
+
+
+@pytest.mark.parametrize("line, missing", [
+    ("#!/nope/python3 -u", "/nope/python3"),
+    ("#!/usr/bin/env missingtool", "missingtool"),
+    ("#!/usr/bin/env -S -u HOME X=1 missingtool --flag", "missingtool"),
+])
+def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing):
+    script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    message = f"gmlx-entry: {script} names {missing} in its #! line, which is not in the image."
+    for args in (("--", "start"), ("--check", "start"), ("--", str(script)),
+                 ("--check", str(script))):
+        done = _run(entry, *args, env=env)
+        assert done.returncode == CANNOT_RUN, (args, done.stderr)
+        assert done.stderr.strip() == message, args
+        assert done.stdout == "", args
+
+
+@pytest.mark.parametrize("line", ["#!/bin/sh -e", "#! /usr/bin/env sh",
+                                  "#!/usr/bin/env -S sh -e"])
+def test_a_present_shebang_interpreter_runs(entry, tmp_path, line):
+    script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    done = _run(entry, "--", "start", env=env)
+    assert done.returncode == 0 and done.stdout.strip() == "ran", done.stderr
+    check = _run(entry, "--check", "start", env=env)
+    assert check.returncode == 0 and check.stdout.strip() == str(script), check.stderr
+
+
+def test_shell_reports_a_bash_whose_interpreter_is_missing(entry, tmp_path):
+    bash = _script(tmp_path / "bin" / "bash", "#!/nope/bash-real\n", 0o755)
+    os.symlink(shutil.which("sh"), bash.parent / "sh")
+    done = _run(entry, "--shell", "--", "-c", "echo x", env=dict(os.environ, PATH=str(bash.parent)))
+    assert done.returncode == CANNOT_RUN
+    assert done.stderr.strip() == (f"gmlx-entry: {bash} names /nope/bash-real in its #! line, "
+                                   "which is not in the image.")
 
 
 def test_busy_port_exits_125_with_a_message(entry, short_dir):
