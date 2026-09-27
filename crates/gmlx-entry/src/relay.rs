@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 /// The relay stops logging once its log reaches this size.
 const LOG_CAP: usize = 1 << 20;
@@ -90,16 +91,18 @@ pub fn start_detached(listeners: Vec<Listener>) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     if child > 0 {
-        let mut status = 0;
-        // SAFETY: waits for the intermediate child, which exits at once.
-        unsafe { libc::waitpid(child, &mut status, 0) };
-        return Ok(());
+        return wait_intermediate(child);
     }
     // SAFETY: plain system calls in the single-threaded child; _exit never
     // returns, so the intermediate child leaves without running destructors.
+    // It exits 1 when the relay's own fork fails, so the parent reports it.
     unsafe {
         libc::setsid();
-        if libc::fork() != 0 {
+        let grandchild = libc::fork();
+        if grandchild < 0 {
+            libc::_exit(1);
+        }
+        if grandchild > 0 {
             libc::_exit(0);
         }
         libc::signal(libc::SIGINT, libc::SIG_IGN);
@@ -112,6 +115,27 @@ pub fn start_detached(listeners: Vec<Listener>) -> io::Result<()> {
     serve(listeners);
     // SAFETY: the relay ends only when every accept loop has failed.
     unsafe { libc::_exit(0) }
+}
+
+/// Waits for the intermediate child, which exits at once: 0 when the relay
+/// started, 1 when its fork failed.
+fn wait_intermediate(child: libc::pid_t) -> io::Result<()> {
+    let mut status = 0;
+    loop {
+        // SAFETY: waits for our own child; status is a valid out-pointer.
+        if unsafe { libc::waitpid(child, &mut status, 0) } >= 0 {
+            break;
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other("the relay process did not start"))
+    }
 }
 
 fn redirect_stdio(log: Option<&File>) {
@@ -134,6 +158,19 @@ fn redirect_stdio(log: Option<&File>) {
     }
 }
 
+/// Starts a thread, or returns false when the system cannot start one. The
+/// release profile aborts on a panic, so a failed `thread::spawn` would end
+/// every relayed connection.
+fn spawn<F: FnOnce() + Send + 'static>(f: F) -> Option<thread::JoinHandle<()>> {
+    match thread::Builder::new().spawn(f) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            log_line(&format!("cannot start a thread ({e})"));
+            None
+        }
+    }
+}
+
 /// Runs every accept loop until all of them end.
 pub fn serve(listeners: Vec<Listener>) {
     let mut loops = Vec::new();
@@ -142,11 +179,11 @@ pub fn serve(listeners: Vec<Listener>) {
             Listener::Tcp { port, sockets, target } => {
                 for socket in sockets {
                     let target = target.clone();
-                    loops.push(thread::spawn(move || accept_tcp(port, socket, target)));
+                    loops.extend(spawn(move || accept_tcp(port, socket, target)));
                 }
             }
             Listener::Unix { path, socket, port } => {
-                loops.push(thread::spawn(move || accept_unix(path, socket, port)));
+                loops.extend(spawn(move || accept_unix(path, socket, port)));
             }
         }
     }
@@ -155,11 +192,35 @@ pub fn serve(listeners: Vec<Listener>) {
     }
 }
 
+/// Handles an accept error. One that lasts, such as running out of file
+/// descriptors, is logged once per run of failures and pauses the loop for
+/// 100 ms, so the loop does not spin.
+fn accept_failed(what: &str, e: &io::Error, logged: &mut bool) {
+    let lasting = matches!(e.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM));
+    if !lasting {
+        return;
+    }
+    if !*logged {
+        log_line(&format!("{what}: cannot accept a connection ({e})"));
+        *logged = true;
+    }
+    thread::sleep(Duration::from_millis(100));
+}
+
 fn accept_tcp(port: u16, socket: TcpListener, target: PathBuf) {
+    let mut logged = false;
     for conn in socket.incoming() {
-        let Ok(conn) = conn else { continue };
+        let conn = match conn {
+            Ok(conn) => conn,
+            Err(e) => {
+                accept_failed(&format!("port {port}"), &e, &mut logged);
+                continue;
+            }
+        };
+        logged = false;
         let target = target.clone();
-        thread::spawn(move || match UnixStream::connect(&target) {
+        spawn(move || match UnixStream::connect(&target) {
             Ok(up) => join(Conn::Tcp(conn), Conn::Unix(up)),
             Err(e) => log_line(&format!("port {port}: cannot reach {} ({e})", target.display())),
         });
@@ -167,12 +228,21 @@ fn accept_tcp(port: u16, socket: TcpListener, target: PathBuf) {
 }
 
 fn accept_unix(path: PathBuf, socket: UnixListener, port: u16) {
+    let mut logged = false;
     for conn in socket.incoming() {
-        let Ok(conn) = conn else { continue };
+        let conn = match conn {
+            Ok(conn) => conn,
+            Err(e) => {
+                accept_failed(&path.display().to_string(), &e, &mut logged);
+                continue;
+            }
+        };
+        logged = false;
         let path = path.clone();
-        thread::spawn(move || {
+        spawn(move || {
+            // The first error names 127.0.0.1, the address the message gives.
             let up = TcpStream::connect(("127.0.0.1", port))
-                .or_else(|_| TcpStream::connect(("::1", port)));
+                .or_else(|e| TcpStream::connect(("::1", port)).map_err(|_| e));
             match up {
                 Ok(up) => join(Conn::Unix(conn), Conn::Tcp(up)),
                 Err(e) => log_line(&format!(
@@ -254,7 +324,9 @@ fn join(down: Conn, up: Conn) {
         log_line("cannot duplicate a connection");
         return;
     };
-    let back = thread::spawn(move || pump(up2, down2));
+    let Some(back) = spawn(move || pump(up2, down2)) else {
+        return;
+    };
     pump(down, up);
     let _ = back.join();
 }
@@ -263,6 +335,21 @@ fn join(down: Conn, up: Conn) {
 mod tests {
     use super::*;
     use std::io::BufRead;
+
+    fn exit_child(code: i32) -> libc::pid_t {
+        // SAFETY: the child only calls _exit, which is async-signal-safe.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe { libc::_exit(code) };
+        }
+        pid
+    }
+
+    #[test]
+    fn a_failed_relay_fork_is_an_error() {
+        assert!(wait_intermediate(exit_child(0)).is_ok());
+        assert!(wait_intermediate(exit_child(1)).is_err());
+    }
 
     fn scratch_sock(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gmlx-relay-{}", std::process::id()));
