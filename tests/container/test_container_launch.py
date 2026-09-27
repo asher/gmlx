@@ -438,3 +438,93 @@ def test_dsh_reads_its_token_url_instead_of_the_terminal(env):
     assert _run(["dsh", "--container"]) == 0
     spec = env.runs[0]["spec"]
     assert spec.url_pattern and not spec.interactive and not spec.tty
+
+
+# The guest owns its private home, so no handler follows a link it plants
+
+def _written_files(home: Path) -> list[Path]:
+    return sorted(p for p in home.rglob("*") if p.is_file() and not p.is_symlink()
+                  and not p.name.startswith(".gmlx-entry"))
+
+
+@pytest.mark.parametrize("client", sorted(set(launch._HARNESSES) - {"claude-code", "open-webui"}))
+def test_a_planted_link_never_reaches_a_mac_file(env, client, tmp_path, capsys):
+    from gmlx.container import settings
+    assert _run([client, "--container"]) == 0
+    home = settings.private_home_path(client)
+    written = _written_files(home)
+    assert written, f"{client} wrote nothing into its private home"
+    secret = tmp_path / "mac-secret"
+    outside = tmp_path / "mac-folder"
+    outside.mkdir()
+    for target in written:
+        rel = target.relative_to(home)
+        # A link at the file itself, pointing at a Mac file.
+        secret.write_text("mac: secret\n")
+        target.unlink()
+        target.symlink_to(secret)
+        assert _run([client, "--container"]) == 1, rel
+        assert secret.read_text() == "mac: secret\n" and target.is_symlink()
+        assert "symbolic link" in capsys.readouterr().err
+        target.unlink()
+        # A link at the folder above it, pointing at a Mac folder.
+        parent = target.parent
+        if parent == home:
+            continue
+        kept = parent.with_name(parent.name + ".kept")
+        parent.rename(kept)
+        parent.symlink_to(outside, target_is_directory=True)
+        assert _run([client, "--container"]) == 1, rel
+        assert list(outside.iterdir()) == [], rel
+        assert "symbolic link" in capsys.readouterr().err
+        parent.unlink()
+        kept.rename(parent)
+
+
+def test_open_webui_data_dir_is_never_created_through_a_link(env, tmp_path, capsys):
+    from gmlx.container import settings
+    assert _run(["open-webui", "--container"]) == 0
+    data = settings.private_home_path("open-webui") / ".open-webui"
+    assert data.is_dir() and not data.is_symlink()
+    data.rmdir()
+    outside = tmp_path / "mac-folder"
+    outside.mkdir()
+    data.symlink_to(outside / "sub", target_is_directory=True)
+    assert _run(["open-webui", "--container"]) == 1
+    assert not (outside / "sub").exists()
+    assert "symbolic link" in capsys.readouterr().err
+
+
+def test_a_named_pipe_in_the_private_home_never_blocks_a_read(env, capsys):
+    from gmlx.container import settings
+    assert _run(["hermes", "--container"]) == 0
+    cfg = settings.private_home_path("hermes") / ".hermes" / "config.yaml"
+    cfg.unlink()
+    os.mkfifo(cfg)
+    assert _run(["hermes", "--container"]) == 1
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_handlers_touch_files_only_through_the_confined_helpers():
+    """The handlers run on the Mac against a private home the guest can
+    change, so every file access must go through gmlx.container.confine."""
+    tree = ast.parse(Path(launch.__file__).read_text())
+    # Host mode only: the Mac's own dsh install and the Mac's hermes backup.
+    allowed = {"_dsh_version", "_hermes_backup"}
+    bad = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name in allowed:
+            continue
+        if not (fn.name.startswith("_launch_") or fn.name.startswith("_dsh")
+                or fn.name in {"_load_json", "_load_yaml"}):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                name = ast.unparse(node.func)
+                if (name in {"open", "os.makedirs", "shutil.copy", "shutil.copyfile"}
+                        or name.endswith((".read_text", ".write_text", ".read_bytes",
+                                          ".write_bytes", ".mkdir", ".open",
+                                          ".touch", ".rename", ".replace"))):
+                    if not name.startswith("confine."):
+                        bad.append(f"{fn.name}: {name}")
+    assert bad == []

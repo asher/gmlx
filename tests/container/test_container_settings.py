@@ -288,6 +288,67 @@ def test_seed_outside_home_is_refused_and_sensitive_warns(home, tmp_path):
     assert any("~/.npmrc" in w for w in warns)
 
 
+def test_seed_never_writes_through_a_link_the_guest_planted(home, tmp_path):
+    (home / ".claude").mkdir()
+    (home / ".claude" / "CLAUDE.md").write_text("rules")
+    private = settings.private_home("claude-code")
+    outside = tmp_path / "mac-folder"
+    outside.mkdir()
+    (private / ".claude").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SettingsError, match="symbolic link"):
+        settings.seed_home(private, ["~/.claude/CLAUDE.md"])
+    assert list(outside.iterdir()) == []
+
+
+def test_git_identity_never_writes_through_a_planted_gitconfig(home, tmp_path):
+    (home / ".gitconfig").write_text("[user]\n\tname = Host Name\n")
+    private = settings.private_home("pi")
+    secret = tmp_path / "mac-gitconfig"
+    secret.write_text("[core]\n")
+    (private / ".gitconfig").symlink_to(secret)
+    with pytest.raises(SettingsError, match="symbolic link"):
+        settings.seed_home(private, [])
+    assert secret.read_text() == "[core]\n"
+    assert not list(tmp_path.glob("mac-gitconfig.lock"))
+
+
+def test_seed_refuses_the_launch_data_folder(home):
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="launch data folder"):
+        settings.seed_home(private, ["~/.local"])
+    with pytest.raises(SettingsError, match="launch data folder"):
+        settings.seed_home(private, ["~/.local/share/gmlx/launch/omp"])
+
+
+def test_a_relative_seed_is_read_from_home(home, monkeypatch):
+    (home / "notes.md").write_text("n")
+    monkeypatch.chdir(home / "src" / "proj")
+    private = settings.private_home("pi")
+    assert settings.seed_home(private, ["notes.md"]) == []
+    assert (private / "notes.md").read_text() == "n"
+
+
+def test_seed_keeps_modes_and_links_and_reports_copy_errors(home):
+    tools = home / "tools"
+    tools.mkdir()
+    (tools / "run.sh").write_text("#!/bin/sh\n")
+    (tools / "run.sh").chmod(0o755)
+    (tools / "latest").symlink_to("run.sh")
+    os.mkfifo(tools / "pipe")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/tools"])
+    assert (private / "tools" / "run.sh").stat().st_mode & 0o777 == 0o755
+    assert os.readlink(private / "tools" / "latest") == "run.sh"
+    assert not (private / "tools" / "pipe").exists()
+    (home / "locked").write_text("x")
+    (home / "locked").chmod(0)
+    try:
+        with pytest.raises(SettingsError, match="cannot copy ~/locked"):
+            settings.seed_home(private, ["~/locked"])
+    finally:
+        (home / "locked").chmod(0o600)
+
+
 # The server config the guest could change
 
 def _share(path):

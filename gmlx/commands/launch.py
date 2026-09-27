@@ -77,6 +77,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -86,6 +87,8 @@ import urllib.request
 from pathlib import Path
 
 import yaml
+
+from gmlx.container import confine
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8080
@@ -325,7 +328,6 @@ def _launch_opencode(a, *, exec_fn) -> int:
                                 default_model=default_model, api_key=a.api_key)
 
     out = Path(os.path.expanduser(a.config_path or f"{_CONFIG_HOME}/opencode.json"))
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, json.dumps(cfg, indent=2) + "\n")
 
     print(_summary("opencode", base_url, models, default_model)
@@ -341,22 +343,45 @@ def _launch_opencode(a, *, exec_fn) -> int:
 _PI_AGENT_HOME = "~/.pi/agent"
 
 
+# Every file a handler touches goes through these helpers and
+# gmlx.container.confine. In container mode the private home is the guest's
+# to change, so a handler must never follow a link the guest planted there.
+
 def _write_text_atomic(path: Path, text: str) -> None:
-    """tmp + rename. Several of these targets are another tool's live config -
-    a crash or full disk mid-write must not leave it truncated."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    """A new file + rename, creating the folders above it. Several of these
+    targets are another tool's live config - a crash or full disk mid-write
+    must not leave it truncated - and the file keeps its mode."""
+    try:
+        confine.write_text(path, text)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+
+
+def _mkdirs(path: Path) -> None:
+    try:
+        confine.mkdirs(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
+
+
+def _exists(path: Path) -> bool:
+    try:
+        return confine.exists(path)
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
 
 
 def _read_config_text(path: Path) -> str:
     """The read half of the edit-in-place flows, with the same refusal contract
-    as the parsers: unreadable/binary -> LaunchError, never a traceback."""
+    as the parsers: unreadable/binary -> LaunchError, never a traceback. A
+    missing file reads as empty."""
     try:
-        return path.read_text().strip()
+        return (confine.read_text(path) or "").strip()
     except UnicodeDecodeError:
         raise LaunchError(f"{path} is not a text file; refusing to "
                           f"overwrite it")
+    except confine.ConfinedError as e:
+        raise LaunchError(str(e)) from None
     except OSError as e:
         raise LaunchError(f"cannot read {path}: {e}")
 
@@ -365,7 +390,7 @@ def _load_json(path: Path) -> dict:
     """Read a JSON object from ``path``; ``{}`` if it's absent or empty. Raises
     :class:`LaunchError` on malformed JSON (we won't silently clobber a file we
     can't parse)."""
-    if not path.exists():
+    if not _exists(path):
         return {}
     text = _read_config_text(path)
     if not text:
@@ -466,7 +491,6 @@ def _launch_pi(a, *, exec_fn) -> int:
         existing_models=_load_json(models_path),
         existing_settings=_load_json(settings_path))
 
-    agent_dir.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(models_path, json.dumps(models_doc, indent=2) + "\n")
     _write_text_atomic(settings_path, json.dumps(settings_doc, indent=2) + "\n")
 
@@ -487,7 +511,7 @@ def _load_yaml(path: Path) -> dict:
     """Read a YAML mapping from ``path``; ``{}`` if absent or empty. Raises
     :class:`LaunchError` on malformed YAML or a non-mapping document (we won't
     clobber a file we can't parse)."""
-    if not path.exists():
+    if not _exists(path):
         return {}
     text = _read_config_text(path)
     if not text:
@@ -550,7 +574,6 @@ def _launch_omp(a, *, exec_fn) -> int:
         existing_models=_load_yaml(models_path),
         existing_config=_load_yaml(config_path))
 
-    agent_dir.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(models_path, yaml.safe_dump(models_doc, sort_keys=False))
     _write_text_atomic(config_path, yaml.safe_dump(config_doc, sort_keys=False))
 
@@ -571,6 +594,43 @@ def _launch_omp(a, *, exec_fn) -> int:
 
 
 HERMES_BACKUPS = 3
+_HERMES_BACKUP_NAME = re.compile(r"\.gmlx-(\d{8}-\d{6})(?:-(\d+))?")
+
+
+def _hermes_backup(path: Path) -> Path:
+    """Copy ``path`` to a new ``<name>.gmlx-<date>-<time>[-n]`` beside it,
+    with its mode, then delete all but the newest few of those copies. Only
+    names of that form are touched."""
+    data = path.read_bytes()
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+
+    def age(p: Path):
+        m = _HERMES_BACKUP_NAME.fullmatch(p.name[len(path.name):])
+        return (m.group(1), int(m.group(2) or 0)) if m else None
+
+    def ours():
+        return [p for p in path.parent.iterdir()
+                if p.name.startswith(path.name + ".gmlx-") and age(p) is not None
+                and not p.is_symlink()]
+    # A later backup in the same second always gets a higher number, so the
+    # names sort by age.
+    first = max((age(p)[1] + 1 for p in ours() if age(p)[0] == stamp), default=0)
+    for n in range(first, first + 1000):
+        backup = path.with_name(f"{path.name}.gmlx-{stamp}" + (f"-{n}" if n else ""))
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+        break
+    else:
+        raise LaunchError(f"cannot find a free backup name beside {path}")
+    for old in sorted(ours(), key=age)[:-HERMES_BACKUPS]:
+        old.unlink(missing_ok=True)
+    return backup
 
 
 def _hermes_config_path() -> Path:
@@ -628,16 +688,13 @@ def _launch_hermes(a, *, exec_fn) -> int:
         print(f"[launch] {path} already points hermes at the server")
     else:
         # The private home is gmlx's own, so only a file on the Mac is backed up.
-        if path.exists() and not getattr(a, "container_mode", False):
-            backup = path.with_name(f"{path.name}.gmlx-{time.strftime('%Y%m%d-%H%M%S')}")
-            shutil.copy2(path, backup)
+        backup = None
+        if not getattr(a, "container_mode", False) and _exists(path):
+            backup = _hermes_backup(path)
             print(f"[launch] backed up {path} to {backup}")
-            # The names sort by time, so all but the newest few go.
-            for old in sorted(path.parent.glob(f"{path.name}.gmlx-*"))[:-HERMES_BACKUPS]:
-                old.unlink(missing_ok=True)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False))
-        print(f"[launch] wrote {path}")
+        _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+        print(f"[launch] wrote {path}" + (
+            ", without its comments and layout, which the backup keeps" if backup else ""))
     print("[launch] note: hermes requires >=64k context - serve "
           f"{default_model} with a context window of at least 64k tokens")
     return _finish(a, binary, ["hermes"], {"CUSTOM_BASE_URL": base_url}, exec_fn=exec_fn)
@@ -686,8 +743,7 @@ def _launch_goose(a, *, exec_fn) -> int:
     # Persist only the non-secret pointer keys; OPENAI_API_KEY stays env-only so
     # we never clobber a real credential in the user's config.yaml.
     cfg.update({k: v for k, v in pairs.items() if k != "OPENAI_API_KEY"})
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(cfg_path, yaml.safe_dump(cfg, sort_keys=False))
+    _write_text_atomic(cfg_path, yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
 
     print(_summary("goose", base_url, models, default_model)
           + f"\n[launch] merged {cfg_path} "
@@ -782,7 +838,7 @@ def _launch_aichat(a, *, exec_fn) -> int:
                               default_model=default_model, api_key=a.api_key)
 
     cfg_dir = Path(os.path.expanduser(a.config_path or _AICHAT_CONFIG_HOME))
-    cfg_dir.mkdir(parents=True, exist_ok=True)
+    _mkdirs(cfg_dir)
     cfg_file = cfg_dir / "config.yaml"
     _write_text_atomic(cfg_file, yaml.safe_dump(cfg, sort_keys=False))
 
@@ -853,7 +909,6 @@ def _launch_elia(a, *, exec_fn) -> int:
 
     xdg_home = Path(os.path.expanduser(a.config_path or _ELIA_CONFIG_HOME))
     out = xdg_home / "elia" / "config.toml"
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, toml_text)
 
     print(_summary("elia", base_url, models, default_model)
@@ -1138,7 +1193,9 @@ def build_dsh_overlay(base_url: str, models: list, *, default_model: str,
 def _dsh_home() -> Path:
     """dsh's home: ``$DSH_HOME`` (blank counts as unset), else ``~/.dsh``."""
     raw = os.environ.get("DSH_HOME", "").strip() or "~/.dsh"
-    return Path(os.path.expanduser(raw)).resolve()
+    home = Path(os.path.expanduser(raw))
+    # In the private home a link is the guest's, so it is never resolved.
+    return home if confine.active() else home.resolve()
 
 
 def _dsh_version(binary: str) -> str | None:
@@ -1181,8 +1238,8 @@ def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
     bundle. A profile without a readable manifest is judged by name."""
     try:
         return _DSH_WEB_BUNDLE in json.loads(
-            manifest.read_text())["dsh"]["profile"]["bundles"]
-    except (OSError, ValueError, KeyError, TypeError):
+            confine.read_text(manifest) or "")["dsh"]["profile"]["bundles"]
+    except (OSError, ValueError, KeyError, TypeError, confine.ConfinedError):
         return name in (_DSH_PROFILE, _DSH_TEMPLATE)
 
 
@@ -1225,12 +1282,12 @@ def _launch_dsh(a, *, exec_fn) -> int:
 
     profile_dir = _dsh_home() / "profiles" / profile
     manifest = profile_dir / "package.json"
-    create = profile == _DSH_PROFILE and not manifest.exists()
-    if create and profile_dir.exists():
+    create = profile == _DSH_PROFILE and not _exists(manifest)
+    if create and _exists(profile_dir):
         raise LaunchError(
             f"{profile_dir} exists but is not a dsh profile (no package.json). "
             f"Remove or rename it, then re-run to create the profile.")
-    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not manifest.exists():
+    if profile not in _DSH_SHIPPED | {_DSH_PROFILE} and not _exists(manifest):
         raise LaunchError(
             f"dsh has no profile {profile!r} ({manifest} is missing). Set it "
             f"up with dsh first, then re-run.")
@@ -1240,7 +1297,6 @@ def _launch_dsh(a, *, exec_fn) -> int:
                              provider_id=a.provider_id)
     out = Path(os.path.expanduser(
         a.config_path or f"{_CONFIG_HOME}/dsh/gmlx.cordis.yml"))
-    out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, yaml.safe_dump(rows, sort_keys=False))
 
     argv = ["dsh", "--profile", profile]

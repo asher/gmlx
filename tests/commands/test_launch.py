@@ -974,6 +974,66 @@ def test_launch_hermes_keeps_the_newest_three_backups(monkeypatch, tmp_path):
     assert (tmp_path / "config.yaml.gmlx-20260103-000000").exists()
 
 
+def test_launch_hermes_backups_get_unique_names_and_skip_other_files(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(launch.time, "strftime", lambda fmt: "20260927-120000")
+    own = tmp_path / "config.yaml"
+    mine = [tmp_path / "config.yaml.gmlx-mine", tmp_path / "config.yaml.gmlx-20250101-000000.txt"]
+    for p in mine:
+        p.write_text("user file\n")
+    for n in range(5):
+        own.write_text(f"gateway: {{run: {n}}}\n")
+        assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                     exec_fn=lambda *a: 0) == 0
+    left = sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-2026*"))
+    assert left == ["config.yaml.gmlx-20260927-120000-2", "config.yaml.gmlx-20260927-120000-3",
+                    "config.yaml.gmlx-20260927-120000-4"]
+    assert all(p.read_text() == "user file\n" for p in mine)
+
+
+def test_launch_hermes_keeps_the_mode_and_non_ascii_text(monkeypatch, tmp_path):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    own = tmp_path / "config.yaml"
+    own.write_text("agent:\n  persona: \u00c9lodie \u2014 \u65e5\u672c\n")
+    own.chmod(0o600)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert own.stat().st_mode & 0o777 == 0o600
+    backup = next(tmp_path.glob("config.yaml.gmlx-*"))
+    assert backup.stat().st_mode & 0o777 == 0o600
+    text = own.read_text()
+    assert "\u00c9lodie \u2014 \u65e5\u672c" in text and "\\u" not in text
+    assert _yaml.safe_load(text)["agent"]["persona"] == "\u00c9lodie \u2014 \u65e5\u672c"
+
+
+def test_launch_hermes_writes_through_a_link_only_inside_home(monkeypatch, tmp_path, capsys):
+    _fake_probe(monkeypatch)
+    home = tmp_path / "home"
+    dots = home / "dotfiles"
+    dots.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    (home / ".hermes").mkdir()
+    real = dots / "hermes.yaml"
+    real.write_text("gateway: {}\n")
+    link = home / ".hermes" / "config.yaml"
+    link.symlink_to(real)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert link.is_symlink() and "custom" in real.read_text()
+    outside = tmp_path / "elsewhere.yaml"
+    outside.write_text("gateway: {}\n")
+    link.unlink()
+    link.symlink_to(outside)
+    with pytest.raises(launch.LaunchError, match="outside your home folder"):
+        launch._launch_hermes(_args(harness="hermes", config_only=True),
+                              exec_fn=lambda *a: 0)
+    assert outside.read_text() == "gateway: {}\n"
+
+
 def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)
     with pytest.raises(launch.LaunchError, match="HERMES_HOME"):

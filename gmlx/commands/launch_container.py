@@ -19,7 +19,7 @@ import webbrowser
 from pathlib import Path
 
 from gmlx.config import ConfigError, LaunchCfg, load_launch_settings
-from gmlx.container import cli, images, runtime, session, settings
+from gmlx.container import cli, confine, images, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
 
@@ -91,7 +91,10 @@ def guest_home(home: Path):
     for key in hidden:
         os.environ.pop(key, None)
     try:
-        yield
+        # The guest can plant links in the private home, so every file the
+        # handler touches is checked against them.
+        with confine.confined(home):
+            yield
     finally:
         for key, value in saved.items():
             if value is None:
@@ -337,7 +340,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         finally:
             for item in reversed(held):
                 item.release()
-    except (L.LaunchError, SettingsError, ContainerError, ConfigError) as e:
+    except (L.LaunchError, SettingsError, ContainerError, ConfigError,
+            confine.ConfinedError) as e:
         print(f"[launch] {e}", file=sys.stderr)
         return 1
 
@@ -426,7 +430,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     if client == "open-webui":
         # The official image does not create its data folder, and SQLite
         # cannot open a database in a folder that does not exist.
-        Path(captured["pairs"]["DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+        with confine.confined(plan.home):
+            confine.mkdirs(Path(captured["pairs"]["DATA_DIR"]))
     # Step 12
     passthrough = captured["extra"]
     if a.shell:

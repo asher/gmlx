@@ -11,7 +11,6 @@ Nothing here starts a container.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 import warnings
@@ -405,49 +404,107 @@ def guest_env(home: Path) -> dict[str, str]:
 def seed_home(home: Path, seeds: list[str]) -> list[str]:
     """Copy each seed into the private home once, at the same path relative
     to ``$HOME``, then add the host git identity where it is missing.
-    Returns the warnings to print."""
+    Returns the warnings to print. Every write is confined to the private
+    home, since the guest can plant links there."""
+    from . import confine
+
     # Relative to $HOME as written, so a seed that is a link into a dotfiles
     # repository still lands at its own path.
     host_home = os.path.abspath(os.path.expanduser("~"))
+    launch_data = os.path.realpath(data_path())
     out = []
-    for seed in seeds:
-        src = os.path.abspath(os.path.expanduser(seed))
-        if not _inside(src, host_home) or src == host_home:
-            raise SettingsError(f"seed: {seed} is not inside your home folder.")
-        if not os.path.exists(src):
-            out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
-            continue
-        hits = sensitive_hits(_real(src))
-        if hits:
-            out.append(f"[launch] warning: seed {_tilde(src, host_home)} copies "
-                       f"{', '.join(_tilde(h) for h in hits)} into the private home.")
-        dst = home / os.path.relpath(src, host_home)
-        if dst.exists() or dst.is_symlink():
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if os.path.isdir(src):
-            shutil.copytree(src, dst, symlinks=True)
-        else:
-            shutil.copy2(src, dst)
-    _seed_git_identity(home)
+    with confine.confined(home):
+        for seed in seeds:
+            expanded = os.path.expanduser(seed)
+            src = os.path.abspath(os.path.join(host_home, expanded))
+            if not _inside(src, host_home) or src == host_home:
+                raise SettingsError(f"seed: {seed} is not inside your home folder.")
+            real = _real(src)
+            if _inside(real, launch_data) or _inside(launch_data, real):
+                raise SettingsError(f"seed: {seed} holds or lies in the launch data "
+                                    f"folder {_tilde(launch_data, host_home)}, which "
+                                    "holds the private homes.")
+            if not os.path.exists(src):
+                out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
+                continue
+            hits = sensitive_hits(real)
+            if hits:
+                out.append(f"[launch] warning: seed {_tilde(src, host_home)} copies "
+                           f"{', '.join(_tilde(h) for h in hits)} into the private home.")
+            dst = home / os.path.relpath(src, host_home)
+            try:
+                if confine.exists(dst):
+                    continue
+                _copy_confined(src, dst)
+            except confine.ConfinedError as e:
+                raise SettingsError(f"seed: {e}") from None
+            except OSError as e:
+                raise SettingsError(f"seed: cannot copy {seed} ({e}).") from None
+        try:
+            _seed_git_identity(home)
+        except confine.ConfinedError as e:
+            raise SettingsError(str(e)) from None
     return out
 
 
+def _copy_confined(src: str, dst: Path) -> None:
+    """Copy a file, a folder or a link into the private home with its mode.
+    Links inside a folder are copied as links, never followed, and named
+    pipes and devices inside it are skipped."""
+    from . import confine
+
+    if os.path.isdir(src):
+        confine.mkdirs(dst)
+        for root, dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src)
+            here = dst if rel == "." else dst / rel
+            for name in dirs + files:
+                path = os.path.join(root, name)
+                st = os.lstat(path)
+                if stat.S_ISLNK(st.st_mode):
+                    confine.symlink(os.readlink(path), here / name)
+                elif stat.S_ISDIR(st.st_mode):
+                    confine.mkdirs(here / name)
+                elif stat.S_ISREG(st.st_mode):
+                    confine.write_bytes(here / name, Path(path).read_bytes(),
+                                        stat.S_IMODE(st.st_mode))
+        return
+    st = os.stat(src)
+    if not stat.S_ISREG(st.st_mode):
+        raise SettingsError(f"seed: {src} is not a file or a folder.")
+    confine.write_bytes(dst, Path(src).read_bytes(), stat.S_IMODE(st.st_mode))
+
+
 def _seed_git_identity(home: Path) -> None:
-    gitconfig = str(home / ".gitconfig")
-    for key in ("user.name", "user.email"):
-        try:
-            have = subprocess.run(["git", "config", "--file", gitconfig, "--get", key],
-                                  capture_output=True, text=True, timeout=5)
-            if have.returncode == 0:
-                continue
-            value = subprocess.run(["git", "config", "--global", "--get", key],
-                                   capture_output=True, text=True, timeout=5)
-            if value.returncode == 0 and value.stdout.strip():
-                subprocess.run(["git", "config", "--file", gitconfig, key,
-                                value.stdout.strip()], capture_output=True, timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            return
+    """Add the host ``user.name`` and ``user.email`` to the private home's
+    ``.gitconfig`` where they are missing. git edits a copy outside the
+    private home, since git follows a link at the file it writes, and the
+    result goes back through the confined write."""
+    import tempfile
+
+    from . import confine
+
+    gitconfig = home / ".gitconfig"
+    before = confine.read_text(gitconfig) or ""
+    with tempfile.TemporaryDirectory() as tmp:
+        work = os.path.join(tmp, "gitconfig")
+        Path(work).write_text(before)
+        for key in ("user.name", "user.email"):
+            try:
+                have = subprocess.run(["git", "config", "--file", work, "--get", key],
+                                      capture_output=True, text=True, timeout=5)
+                if have.returncode == 0:
+                    continue
+                value = subprocess.run(["git", "config", "--global", "--get", key],
+                                       capture_output=True, text=True, timeout=5)
+                if value.returncode == 0 and value.stdout.strip():
+                    subprocess.run(["git", "config", "--file", work, key,
+                                    value.stdout.strip()], capture_output=True, timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                return
+        after = Path(work).read_text()
+    if after != before:
+        confine.write_text(gitconfig, after)
 
 
 # The server config the guest could change
