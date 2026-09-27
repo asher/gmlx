@@ -21,6 +21,7 @@ CONTAINER_MIN = (1, 4, 0)
 KERNEL_DOWNLOAD_MB = 700
 NODE_BASE_DOWNLOAD_MB = 80
 QUERY_TIMEOUT = 60.0
+DELETE_TIMEOUT = 600.0
 INSTALL_HINT = ("Install Apple container with `brew install container`, or the "
                 "signed installer from https://github.com/apple/container/releases.")
 LAUNCH_LABEL = "gmlx.launch"
@@ -225,8 +226,10 @@ def tag(source: str, target: str) -> None:
 
 
 def image_delete(refs: list[str]) -> None:
+    # A delete collects unreferenced content store-wide, which can take
+    # minutes when it frees gigabytes.
     if refs:
-        _run(["image", "delete", *refs], check=False)
+        _run(["image", "delete", *refs], check=False, timeout=DELETE_TIMEOUT)
 
 
 @dataclass

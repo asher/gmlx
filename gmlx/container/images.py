@@ -243,7 +243,8 @@ def _records_path() -> Path:
 
 def _update_records(fn: Callable[[dict], None]) -> dict:
     """Read, change and write the record of the references launch added,
-    under its own lock. Each entry maps a reference to the clients using it."""
+    under its own lock. Each entry maps a reference to the clients using it
+    and the process ID of the launch that last pinned it."""
     with FileLock(images_dir() / "references.lock"):
         path = _records_path()
         try:
@@ -265,11 +266,33 @@ def _pin(source: str, repo: str, info: ImageInfo, client: str) -> str:
         cli.tag(source, run_ref)
 
     def add(records):
-        clients = set(records.get(run_ref, []))
+        clients = _owners(records.get(run_ref))
         clients.add(client)
-        records[run_ref] = sorted(clients)
+        records[run_ref] = {"clients": sorted(clients), "pid": os.getpid()}
     _update_records(add)
     return run_ref
+
+
+def _owners(entry) -> set[str]:
+    if isinstance(entry, dict):
+        return set(entry.get("clients") or [])
+    return set(entry or [])
+
+
+def _pinned_by_another_launch(entry) -> bool:
+    """Whether another launch that is still running pinned the reference. It
+    may still be on its way to ``container run``, which only then shows the
+    reference as in use."""
+    pid = entry.get("pid") if isinstance(entry, dict) else None
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _in_use() -> tuple[set[str], set[str]]:
@@ -297,8 +320,9 @@ def _cleanup(repo: str, keep: set[str], client: str, *, tags: bool) -> None:
         if name in used_refs or digest in used_digests:
             continue
         if "@" in name:
-            owners = set(records_seen.get(name, []))
-            if client not in owners or owners - {client}:
+            entry = records_seen.get(name)
+            owners = _owners(entry)
+            if client not in owners or owners - {client} or _pinned_by_another_launch(entry):
                 continue
         elif not tags:
             continue
@@ -306,9 +330,13 @@ def _cleanup(repo: str, keep: set[str], client: str, *, tags: bool) -> None:
     if not doomed:
         return
     cli.image_delete(doomed)
+    # A reference the store refused to delete stays recorded, so a later
+    # cleanup tries it again.
+    left = {name for name, _digest in cli.image_names()}
+    gone = [name for name in doomed if name not in left]
 
     def drop(records):
-        for name in doomed:
+        for name in gone:
             records.pop(name, None)
     _update_records(drop)
 

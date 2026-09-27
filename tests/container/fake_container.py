@@ -99,7 +99,8 @@ def main(state: dict, args: list[str]) -> int:
         return 0
     if args[:2] == ["image", "delete"]:
         for ref in args[2:]:
-            images.pop(_normalize(ref), None)
+            if ref not in state.get("refuse_delete", []):
+                images.pop(_normalize(ref), None)
         state.setdefault("deleted", []).extend(args[2:])
         return 0
     if args[:2] == ["image", "pull"]:

@@ -5,6 +5,8 @@ references, tag cleanup, the one-time command check and the rebuild hash."""
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -196,6 +198,36 @@ def test_cleanup_deletes_only_recorded_digest_references(fake_container):
     store = fake_container.load()["images"]
     assert first.run_ref not in store            # recorded by launch, replaced
     assert stray in store                         # never recorded, kept
+
+
+def _set_pin_pid(run_ref, pid):
+    def edit(records):
+        records[run_ref]["pid"] = pid
+    images._update_records(edit)
+
+
+def test_cleanup_keeps_a_reference_another_running_launch_pinned(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    # Another launch pinned it and has not reached `container run` yet.
+    other = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                             stdin=subprocess.PIPE)
+    try:
+        _set_pin_pid(first.run_ref, other.pid)
+        images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+        assert first.run_ref in fake_container.load()["images"]
+    finally:
+        other.communicate(b"")
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert first.run_ref not in fake_container.load()["images"]
+
+
+def test_a_refused_delete_stays_recorded(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    fake_container.update(refuse_delete=[first.run_ref])
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert first.run_ref in fake_container.load()["images"]
+    assert first.run_ref in images._update_records(lambda r: None)
 
 
 def test_base_refs_in_accepts_known_bases_and_refuses_the_rest():
