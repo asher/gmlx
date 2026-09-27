@@ -18,7 +18,7 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-from gmlx.config import ConfigError, LaunchCfg, load_launch_settings
+from gmlx.config import ConfigError, LaunchCfg, launch_block_enables, load_launch_settings
 from gmlx.container import cli, confine, images, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
@@ -69,6 +69,16 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
     except ConfigError as e:
         if a.container or implied:
             raise
+        if a.container is None:
+            # The block may be broken in a key that has nothing to do with
+            # this client, but a block that turns container mode on must
+            # never run the client on the Mac without the sandbox.
+            on, path = launch_block_enables(a.harness)
+            if on is not False:
+                raise ConfigError(
+                    f"{e}. {path} {'turns container mode on for' if on else 'may run'} "
+                    f"{a.harness}, so launch stops until the launch block is fixed. Pass "
+                    "--no-container to run it on the Mac instead.") from None
         print(f"[launch] ignoring the launch settings, so {a.harness} runs on the Mac: {e}",
               file=sys.stderr)
         return False, LaunchCfg()
@@ -137,9 +147,12 @@ def _server_precheck(a) -> int | None:
     from gmlx.commands import launch as L
     from gmlx.serve import lifecycle
 
-    if a.base_url or a.host or a.port:
+    if a.base_url:                    # the server check never starts a server for it
         return None
-    host, port = lifecycle.auto_target(None, None)
+    if a.host or a.port:
+        host, port = a.host or L._DEFAULT_HOST, int(a.port or L._DEFAULT_PORT)
+    else:
+        host, port = lifecycle.auto_target(None, None)
     if L._server_ready(f"http://{host}:{port}/v1", a.api_key):
         return None
     cfg, cfg_path = L._discover_config()
@@ -211,9 +224,8 @@ class _Prereqs:
                          f"with: {runtime.BUILD_HINT}")
         return lines
 
-    def require(self, say) -> bool:
-        """Refuse what cannot run, and start a stopped service. Returns True
-        when the service had to start, which marks a first run."""
+    def require_installed(self) -> None:
+        """Refuse what cannot run. This check downloads nothing."""
         from gmlx.commands.launch import LaunchError
 
         if not self.binary:
@@ -226,6 +238,12 @@ class _Prereqs:
         if not self.entry.is_file():
             raise LaunchError(f"the guest entry {self.entry} is not built. In a git "
                               f"checkout, build it with: {runtime.BUILD_HINT}")
+
+    def start_service(self, say) -> bool:
+        """Start a stopped service. Returns True when it had to start, which
+        marks a first run."""
+        from gmlx.commands.launch import LaunchError
+
         if self.running:
             return False
         if not session.stdin_is_tty():
@@ -234,6 +252,7 @@ class _Prereqs:
         say(f"[launch] step 1: start the container service. The first start asks to "
             f"install a Linux kernel and downloads about {cli.KERNEL_DOWNLOAD_MB} MB.")
         cli.system_start()
+        self.running = True
         return True
 
 
@@ -256,7 +275,7 @@ def _attach(a, exec_fn, say) -> int:
     if not record or not running:
         raise LaunchError(f"the {a.harness} session is still starting. Try again in a moment.")
     shares = [Mount(s["host"], s["guest"], bool(s.get("readonly"))) for s in record["shares"]]
-    cwd = settings.guest_path(os.path.realpath(os.getcwd()), shares)
+    cwd = settings.guest_path(os.path.realpath(_cwd()), shares)
     say(f"[launch] attaching to {name} (working folder {record['workdir']})")
     if cwd is None:
         say("[launch] the current folder is not shared with this session, so the shell "
@@ -368,9 +387,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if a.config_path:
             raise L.LaunchError("--config-path does not apply in container mode, where the "
                                 "client's configuration goes in its private home.")
-        # Step 3
+        # Step 3. A stopped service starts only after the refusals of step 6.
         prereqs = _Prereqs()
-        first_run = False
         if dry:
             for line in prereqs.report():
                 say(line)
@@ -387,8 +405,8 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         held = [lock]
         try:
             if not dry:
-                first_run = prereqs.require(say)
-            return _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say)
+                prereqs.require_installed()
+            return _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say)
         finally:
             for item in reversed(held):
                 item.release()
@@ -398,7 +416,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         return 1
 
 
-def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> int:
+def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     from gmlx.commands import launch as L
 
     client = a.harness
@@ -435,6 +453,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     rc = _server_precheck(a)
     if rc is not None:
         return rc
+    # The service start and its kernel download come after every refusal.
+    first_run = False if dry else prereqs.start_service(say)
     running = prereqs.running
     ready = None
     steps = int(first_run)
@@ -517,7 +537,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
         command, image_workdir = images.image_command(ready, cfg.command, captured["argv"],
                                                       passthrough)
     elif cfg.command == "image":            # the dry run, with the image not in the store
-        command = ["<ENTRYPOINT and CMD of the image>", *passthrough]
+        # The arguments after -- replace CMD, so only ENTRYPOINT stays.
+        command = (["<ENTRYPOINT of the image>", *passthrough] if passthrough
+                   else ["<ENTRYPOINT and CMD of the image>"])
         image_workdir = None
     else:
         command = ([*cfg.command, *passthrough] if isinstance(cfg.command, list)

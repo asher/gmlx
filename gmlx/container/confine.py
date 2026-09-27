@@ -319,6 +319,57 @@ def symlink(target: str, path: Path) -> None:
         os.close(dir_fd)
 
 
+def rename(path: Path, new_name: str) -> None:
+    """Rename ``path`` to ``new_name`` in the same folder. An entry that
+    already has the new name is never replaced."""
+    if _root is None:
+        raise ConfinedError(f"rename of {path} is only for a private home.")
+    parts = _parts(path)
+    if not parts or "/" in new_name or new_name in (".", ".."):
+        raise ConfinedError(f"cannot rename {path} to {new_name}.")
+    dir_fd = _open_dir(parts[:-1], create=False)
+    try:
+        if _lstat_in(dir_fd, new_name) is not None:
+            raise ConfinedError(f"{new_name} already exists beside {path}.")
+        os.rename(parts[-1], new_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def remove_tree(path: Path) -> None:
+    """Delete ``path`` and everything below it, never through a link. A
+    missing path is not an error."""
+    if _root is None:
+        raise ConfinedError(f"remove_tree of {path} is only for a private home.")
+    parts = _parts(path)
+    if not parts:
+        raise ConfinedError(f"{path} is the private home itself.")
+    try:
+        dir_fd = _open_dir(parts[:-1], create=False)
+    except FileNotFoundError:
+        return
+    try:
+        _remove_in(dir_fd, parts[-1])
+    finally:
+        os.close(dir_fd)
+
+
+def _remove_in(dir_fd: int, name: str) -> None:
+    st = _lstat_in(dir_fd, name)
+    if st is None:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        os.unlink(name, dir_fd=dir_fd)
+        return
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    try:
+        for child in os.listdir(fd):
+            _remove_in(fd, child)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=dir_fd)
+
+
 def listdir(path: Path) -> list[str]:
     """The names in a folder, or [] when it does not exist. In the private
     home no link on the way is followed."""

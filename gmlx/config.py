@@ -828,6 +828,27 @@ def _launch_block(path: Path):
     return doc.get("launch") if isinstance(doc, dict) else None
 
 
+def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
+    """Whether the raw ``launch`` block of the user-level config turns
+    container mode on for ``client``, read without the shape checks, and
+    the file. None when the file cannot be read as YAML, so the answer is
+    unknown."""
+    found = next((q for q in default_config_paths()[1:] if q.is_file()), None)
+    if found is None:
+        return False, None
+    try:
+        block = _launch_block(found)
+    except ConfigError:
+        return None, found
+    box = block.get("container") if isinstance(block, dict) else None
+    if not isinstance(box, dict):
+        return (None if block is not None and not isinstance(block, dict) else False), found
+    clients = box.get("clients")
+    own = clients.get(client) if isinstance(clients, dict) else None
+    on = box.get("enabled") is True or (isinstance(own, dict) and own.get("enabled") is True)
+    return on, found
+
+
 def load_launch_settings() -> tuple[LaunchCfg, str | None]:
     """The ``launch`` block of the user-level config: the first of
     ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. A
@@ -2136,8 +2157,9 @@ def _parse_launch_leniently(raw) -> LaunchCfg:
         return _parse_launch(raw)
     except ConfigError as e:
         import warnings
-        warnings.warn(f"{e}. The server ignores the launch block, and gmlx launch "
-                      "refuses it until it is fixed.", stacklevel=3)
+        warnings.warn(f"{e}. The server ignores the launch block. Until it is fixed, "
+                      "gmlx launch refuses a client that the block runs in a container, "
+                      "and runs the others on the Mac.", stacklevel=3)
         return LaunchCfg()
 
 

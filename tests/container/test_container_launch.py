@@ -98,6 +98,47 @@ def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch
     assert _run(["pi", "--rebuild"]) == 1
 
 
+@pytest.mark.parametrize("block", [
+    "launch:\n  container:\n    enabled: true\n    bogus: 1\n",
+    "launch:\n  container:\n    clients:\n      pi:\n        enabled: true\n"
+    "        memory: lots\n",
+    "launch:\n  container:\n    enabled: true\n    network: offline\n",
+])
+def test_a_broken_block_that_enables_container_mode_never_runs_on_the_mac(env, capsys,
+                                                                           monkeypatch,
+                                                                           block):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, block)
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    err = capsys.readouterr().err
+    assert not calls and not env.runs
+    assert "turns container mode on for pi" in err and "--no-container" in err
+    assert ".config/gmlx/gmlx.yaml" in err
+    assert _run(["pi", "--no-container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls                                            # asked for the Mac
+
+
+def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env, capsys,
+                                                                             monkeypatch):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      omp:\n"
+                           "        enabled: true\n        bogus: 1\n")
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls and "ignoring the launch settings" in capsys.readouterr().err
+
+
+def test_unreadable_yaml_never_runs_on_the_mac(env, capsys):
+    _user_config(env.home, "launch: [unclosed\n")
+    assert _run(["pi"]) == 1
+    assert "may run pi" in capsys.readouterr().err
+
+
 def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",
@@ -665,8 +706,29 @@ def test_dry_run_names_the_build_tag_and_the_image_command(env, capsys):
     out = capsys.readouterr().out
     assert "would be pulled" in out
     assert "<ENTRYPOINT and CMD of the image>" in out
+    assert _run(["pi", "--container", "--config-only", "--", "check"]) == 0
+    assert capsys.readouterr().out.rstrip().endswith("-- '<ENTRYPOINT of the image>' check")
     assert _run(["pi", "--container"]) == 0            # pulls it
     capsys.readouterr()
     assert _run(["pi", "--container", "--config-only", "--", "check"]) == 0
     out = capsys.readouterr().out
     assert "--workdir /srv" in out and out.rstrip().endswith("-- /bin/tool check")
+
+
+def test_a_refusal_comes_before_the_service_start(env, capsys, monkeypatch):
+    env.update(running=False)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    monkeypatch.chdir(env.home)                        # the home folder is refused
+    assert _run(["pi", "--container"]) == 1
+    assert "will not share the current folder" in capsys.readouterr().err
+    assert not env.calls("system", "start")
+
+
+def test_an_explicit_port_with_no_server_and_no_config_stops_early(env, monkeypatch):
+    env.update(running=False)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
+    monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
+    monkeypatch.setattr(launch, "_guide_to_init", lambda *a: None)
+    assert _run(["pi", "--container", "--port", "9999"]) == 2
+    assert not env.calls("system", "start") and not env.calls("build")

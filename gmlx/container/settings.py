@@ -10,7 +10,9 @@ Nothing here starts a container.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import secrets
 import stat
 import subprocess
 import warnings
@@ -501,13 +503,20 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
                 out.append(f"[launch] warning: seed {_tilde(src, host_home)} copies "
                            f"{', '.join(_tilde(h) for h in hits)} into the private home.")
             dst = home / os.path.relpath(src, host_home)
+            # The copy goes to a new name first and is renamed into place
+            # only when it is whole, so a failed copy is never taken for a
+            # finished one at the next launch.
+            tmp = dst.with_name(f".{dst.name}.gmlx-seed-{secrets.token_hex(4)}")
             try:
                 if confine.exists(dst):
                     continue
-                _copy_confined(src, dst)
-            except confine.ConfinedError as e:
-                raise SettingsError(f"seed: {e}") from None
-            except OSError as e:
+                _copy_confined(src, tmp)
+                confine.rename(tmp, dst.name)
+            except (confine.ConfinedError, OSError) as e:
+                with contextlib.suppress(confine.ConfinedError, OSError):
+                    confine.remove_tree(tmp)
+                if isinstance(e, confine.ConfinedError):
+                    raise SettingsError(f"seed: {e}") from None
                 raise SettingsError(f"seed: cannot copy {seed} ({e}).") from None
         try:
             _seed_git_identity(home)

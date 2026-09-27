@@ -462,6 +462,23 @@ def test_a_relative_seed_is_read_from_home(home, monkeypatch):
     assert (private / "notes.md").read_text() == "n"
 
 
+def test_a_failed_seed_copy_leaves_nothing_behind(home):
+    tools = home / "tools"
+    tools.mkdir()
+    (tools / "a.txt").write_text("a")
+    (tools / "z.txt").write_text("z")
+    (tools / "z.txt").chmod(0)
+    private = settings.private_home("pi")
+    try:
+        with pytest.raises(SettingsError, match="cannot copy ~/tools"):
+            settings.seed_home(private, ["~/tools"])
+    finally:
+        (tools / "z.txt").chmod(0o600)
+    assert sorted(p.name for p in private.iterdir()) == []
+    settings.seed_home(private, ["~/tools"])          # the next launch copies it whole
+    assert sorted(p.name for p in (private / "tools").iterdir()) == ["a.txt", "z.txt"]
+
+
 def test_a_missing_seed_is_reported_and_skipped(home):
     private = settings.private_home("pi")
     assert settings.seed_home(private, ["~/nope.md"]) == [
