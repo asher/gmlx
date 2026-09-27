@@ -528,3 +528,92 @@ def test_handlers_touch_files_only_through_the_confined_helpers():
                     if not name.startswith("confine."):
                         bad.append(f"{fn.name}: {name}")
     assert bad == []
+
+
+# Refusals come before any build or download
+
+@pytest.mark.parametrize("argv, message", [
+    (["pi", "--container", "--base-url", "http://nosuch.invalid:8080/v1"],
+     "cannot resolve the server host"),
+    (["pi", "--container", "--network", "none", "--base-url", "https://example.com/v1"],
+     "network: none cannot reach"),
+    (["pi", "--container", "--base-url", "http://127.0.0.1:99999/v1"],
+     "not a number from 0 to 65535"),
+])
+def test_refusals_come_before_the_image(env, capsys, argv, message):
+    assert _run(argv) == 1
+    assert message in capsys.readouterr().err
+    assert not env.calls("build") and not env.calls("image", "pull")
+
+
+def test_a_bad_seed_and_a_deleted_cwd_stop_before_the_image(env, capsys,
+                                                                        monkeypatch):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        seed: [/etc]\n")
+    assert _run(["pi", "--container"]) == 1
+    assert "not inside your home" in capsys.readouterr().err
+    assert not env.calls("build")
+    _user_config(env.home, "launch:\n  container:\n    enabled: false\n")
+    gone = env.home / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert _run(["pi", "--container"]) == 1
+    assert "the current folder no longer exists" in capsys.readouterr().err
+    assert not env.calls("build")
+
+
+def test_no_server_and_no_config_stops_before_the_image(env, monkeypatch, capsys):
+    monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: False)
+    monkeypatch.setattr(launch, "_discover_config", lambda: (None, None))
+    guided = []
+    monkeypatch.setattr(launch, "_guide_to_init", lambda *a: guided.append(a))
+    assert _run(["pi", "--container"]) == 2
+    assert guided and not env.calls("build") and not env.calls("image", "pull")
+
+
+def test_ports_follow_the_server_the_check_found(env, monkeypatch):
+    """Step 6 guesses the server port before the server check, which may
+    find the server elsewhere, so the web port is worked out again."""
+    monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 3000))
+    real = launch._ensure_server
+
+    def moved(a):
+        a.host, a.port = "127.0.0.1", 8080
+        a.base_url = "http://127.0.0.1:8080/v1"
+        return real(a)
+    monkeypatch.setattr(launch, "_ensure_server", moved)
+    assert _run(["open-webui", "--container"]) == 0
+    assert env.runs[0]["spec"].web_port == 3000
+
+
+def test_https_server_allows_forwarding_port_443(env):
+    _user_config(env.home, "launch:\n  container:\n    forward: [443]\n")
+    assert _run(["pi", "--container", "--base-url", "https://example.com/v1"]) == 0
+    assert env.runs[0]["spec"].plan.forward == [443]
+
+
+def test_shell_on_a_web_app_opens_no_browser(env):
+    assert _run(["open-webui", "--shell"]) == 0
+    assert env.runs[0]["opener"] is None
+
+
+def test_command_image_checks_the_first_word_with_the_passthrough(env):
+    env.update(registry={"docker.io/me/bare:1": {"digest": "sha256:" + "7" * 64}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: docker.io/me/bare:1\n        command: image\n")
+    assert _run(["pi", "--container", "--", "node", "x.js"]) == 0
+    assert env.calls("run")[0][-2:] == ["--check", "node"]
+    assert env.runs[0]["spec"].command == ["node", "x.js"]
+
+
+def test_attach_defaults_match_the_parser():
+    """--shell refuses every flag whose value differs from these defaults
+    when it attaches, so they must follow the parser."""
+    from tests.commands.test_launch import _parse_launch_args
+    a = _parse_launch_args(["pi"])
+    for dest, default in lc._ATTACH_DEFAULTS.items():
+        assert getattr(a, dest) == default, dest
+    rest = set(vars(a)) - set(lc._ATTACH_DEFAULTS) - {
+        "harness", "container", "shell", "passthrough"}
+    assert rest == set(), rest

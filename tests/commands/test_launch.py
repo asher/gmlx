@@ -616,6 +616,13 @@ def test_passthrough_empty_without_double_dash():
     assert _parse_launch_args(["pi", "--"]).passthrough == []
 
 
+def test_passthrough_without_a_client_is_an_error(capsys):
+    with pytest.raises(SystemExit) as e:
+        launch.cmd_launch(["--", "pi"])
+    assert e.value.code == 2
+    assert "name the client before --" in capsys.readouterr().err
+
+
 def test_passthrough_appended_to_client_argv(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)
     calls = {}

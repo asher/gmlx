@@ -1651,6 +1651,7 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return cmd_menubar(argv[1:], prog=f"{prog} menubar")
     # Everything after the first `--` goes to the client untouched; argparse
     # would reject the client's own flags.
+    argv_given = list(argv)
     passthrough: list = []
     if "--" in argv:
         cut = argv.index("--")
@@ -1733,6 +1734,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     a.passthrough = passthrough
 
     # Bare `gmlx launch` -> long-form help, not an argparse "required" error.
+    if a.harness is None and "--" in argv_given:
+        ap.error("name the client before --, as in: gmlx launch pi -- --help")
     if a.harness is None:
         ap.print_help()
         return 0

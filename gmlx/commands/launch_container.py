@@ -122,6 +122,34 @@ def _server_endpoint(a) -> tuple[str, int]:
     return host, int(port)
 
 
+def _cwd() -> str:
+    try:
+        return os.getcwd()
+    except FileNotFoundError:
+        raise SettingsError("the current folder no longer exists. Change to a folder "
+                            "that exists, then launch again.") from None
+
+
+def _server_precheck(a) -> int | None:
+    """Stop before any build or download when the server check in step 9
+    would stop anyway: no server answers and there is no config to start
+    one from, or --no-start is set. This check only reads."""
+    from gmlx.commands import launch as L
+    from gmlx.serve import lifecycle
+
+    if a.base_url or a.host or a.port:
+        return None
+    host, port = lifecycle.auto_target(None, None)
+    if L._server_ready(f"http://{host}:{port}/v1", a.api_key):
+        return None
+    cfg, cfg_path = L._discover_config()
+    if cfg_path is None or cfg is None or a.no_start:
+        # These paths of the server check print their guidance and start
+        # nothing.
+        return L._ensure_server(a)
+    return None
+
+
 def guest_url(base_url: str) -> tuple[str, int | None, list]:
     """``(guest URL, API port, relay targets)`` for the server URL. An https
     URL passes through unchanged with no relay."""
@@ -131,7 +159,11 @@ def guest_url(base_url: str) -> tuple[str, int | None, list]:
     if split.scheme == "https":
         return base_url, None, []
     host = split.hostname or "127.0.0.1"
-    port = split.port or 80
+    try:
+        port = split.port or 80
+    except ValueError:
+        raise SettingsError(f"the server URL {base_url} has a port that is not a number "
+                            "from 0 to 65535.") from None
     if host in ("127.0.0.1", "0.0.0.0"):
         targets = [("127.0.0.1", port)]
     elif host in ("::1", "::"):
@@ -269,7 +301,8 @@ def _dsh_profile_is_web(a, home: Path) -> bool:
 
     profile = L._DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
     manifest = home / ".dsh" / "profiles" / profile / "package.json"
-    return L._dsh_runs_web_app(profile, manifest)
+    with confine.confined(home):
+        return L._dsh_runs_web_app(profile, manifest)
 
 
 def _image_state(image_plan, rebuild: bool, running: bool) -> tuple[str, str]:
@@ -354,17 +387,23 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     # Step 5
     session.remove_record(client)
     # Step 6
-    host, port = _server_endpoint(a)
-    home = settings.private_home(client)
-    web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a, home))
-    web_port = L.web_port_for(client, port) if web else None
-    plan = settings.resolve_plan(client, cfg, cwd=os.getcwd(), mount_cwd=a.mount_cwd,
-                                 cli_mounts=a.mount, network=a.network, api_port=port,
-                                 web_port=web_port)
+    # Every refusal that needs no build or download comes first, so a
+    # mistake never waits behind the kernel download or an image build.
     if client == "dsh" and a.dsh_profile in L._DSH_STDIO:
         raise L.LaunchError(f"the {a.dsh_profile} profile serves another program over stdio, "
                             "which a container session cannot hand over. Use it on the Mac "
                             "with --no-container.")
+    host, port = _server_endpoint(a)
+    _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
+    home = settings.private_home(client)
+    web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a, home))
+    web_port = L.web_port_for(client, port) if web else None
+    plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
+                                 cli_mounts=a.mount, network=a.network, api_port=api_port,
+                                 web_port=web_port)
+    if api_port is None and plan.network == "none":
+        raise L.LaunchError(f"network: none cannot reach {a.base_url}, which is not a local "
+                            "http server. Use the default network for this server.")
     image_plan = images.resolve_image(client, cfg, launch_cfg.container, image_override=a.image)
     for line in [*plan.warnings, *plan.notes, *image_plan.notices,
                  *settings.server_config_warnings(
@@ -372,6 +411,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
                                                  autostart=not (a.base_url or a.no_start)),
                      plan.shares)]:
         say(line)
+    for line in settings.seed_home(plan.home, plan.seed):
+        say(line)
+    rc = _server_precheck(a)
+    if rc is not None:
+        return rc
     running = prereqs.running
     ready = None
     runtime_dir = runtime.runtime_root() / (
@@ -393,7 +437,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
                                     say=lambda line: say(line.replace("[launch] ", step, 1)))
         try:
             word = (cfg.command[0] if isinstance(cfg.command, list)
-                    else images.image_command(ready, "image", [], [])[0][0]
+                    else images.image_command(ready, "image", [], a.passthrough)[0][0]
                     if cfg.command == "image" else images.CLIENT_BINARY[client])
         except images.ImageError as e:
             if not a.shell:                # a shell is how you look into such an image
@@ -410,13 +454,17 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {base}, which is not a local http "
                             "server. Use the default network for this server.")
+    if int(a.port) != port:
+        # The server check found the server on another port than step 6
+        # assumed, so the ports that depend on it are worked out again.
+        web_port = L.web_port_for(client, int(a.port)) if web else None
+        plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
+                                              web_port=web_port)
     # Step 10
     if a.model and not a.no_keep and not dry:
         L._pick_default(L.probe_models(base, a.api_key), a.model)
         L._keep_model(a)
     # Step 11
-    for line in settings.seed_home(plan.home, plan.seed):
-        say(line)
     captured: dict = {}
 
     def sink(argv, pairs, extra):
@@ -474,7 +522,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
                          for m in plan.shares]}
     if first_run:
         summary.insert(0, f"[launch] step 3: start {client}")
-    opener = webbrowser.open if (web_port and plan.open_browser) else None
+    # Under --shell the app is not running yet, so there is nothing to open.
+    opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
                              opener=opener, summary=summary)
 
@@ -507,7 +556,8 @@ def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:
 
 
 def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
-    say("[launch] container dry run: nothing is built, pulled or started.")
+    say("[launch] container dry run: no image is built or pulled, and no container is "
+        "started.")
     say(image_line)
     say(f"[launch] runtime folder {spec.runtime_dir}")
     if plan.volumes:
