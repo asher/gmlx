@@ -194,13 +194,25 @@ def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
                 "Apple's 512 GB default. To give it the configured size, delete it with "
                 f"`container volume delete {v.source}`, which loses its data.")
         elif want is not None and have.size_bytes != want:
-            say(f"[launch] the volume {v.source} has {_gb(have.size_bytes)}, not the "
+            say(f"[launch] the volume {v.source} has {gb(have.size_bytes)}, not the "
                 f"configured {v.size}. The size applies only when a volume is created: "
                 f"`container volume delete {v.source}` recreates it, and loses its data.")
 
 
-def _gb(n: int) -> str:
+def gb(n: int) -> str:
+    """A size as G, or as M below one gibibyte."""
+    if n < 1 << 30:
+        return f"{n / (1 << 20):.0f}M"
     return f"{n / (1 << 30):.1f}G".replace(".0G", "G")
+
+
+def allocated_bytes(path: str) -> int:
+    """The disk space a file takes on the Mac: its allocated blocks, not its
+    apparent size, since a volume's disk image is sparse."""
+    try:
+        return os.stat(path).st_blocks * 512
+    except OSError:
+        return 0
 
 
 def volume_lines(volumes: list[Mount]) -> list[str]:
@@ -213,21 +225,18 @@ def volume_lines(volumes: list[Mount]) -> list[str]:
     for v in volumes:
         info = by_name.get(v.source)
         used = 0
-        if info is not None and info.source:
-            try:
-                used = os.stat(info.source).st_blocks * 512
-                disk = os.path.dirname(info.source)
-            except OSError:
-                pass
+        if info is not None and info.source and os.path.exists(info.source):
+            used = allocated_bytes(info.source)
+            disk = os.path.dirname(info.source)
         limit = parse_size_bytes(v.size or "32G") or 0
         unused += max(0, limit - used)
         lines.append(f"[launch] volume {v.source} at {v.target} ({v.size} limit, "
-                     f"{_gb(used)} used on the Mac)")
+                     f"{gb(used)} used on the Mac)")
     if disk is not None:
         free = shutil.disk_usage(disk).free
         if free < unused:
-            lines.append(f"[launch] warning: the Mac disk has {_gb(free)} free, less than the "
-                         f"{_gb(unused)} these volumes may still grow into.")
+            lines.append(f"[launch] warning: the Mac disk has {gb(free)} free, less than the "
+                         f"{gb(unused)} these volumes may still grow into.")
     return lines
 
 
@@ -339,17 +348,23 @@ def _pid_alive(pid: str | None) -> bool:
     return True
 
 
+def leftover_containers(containers: list[cli.Container],
+                        skip_client: str | None = None) -> list[cli.Container]:
+    """Running launch containers whose ``gmlx launch`` process is gone. A
+    reused process ID can only hide one, never mark a live one."""
+    return [c for c in containers
+            if c.labels.get("gmlx.launch") == "1" and c.state == "running"
+            and c.labels.get("gmlx.launch.client") != skip_client
+            and not _pid_alive(c.labels.get("gmlx.launch.pid"))]
+
+
 def orphan_notices(client: str, containers: list[cli.Container]) -> list[str]:
     """Lines for other clients' launch containers whose launch is gone. Only
     reports: it probes no lock and deletes nothing."""
     out = []
-    for c in containers:
+    for c in leftover_containers(containers, skip_client=client):
         other = c.labels.get("gmlx.launch.client")
-        if c.labels.get("gmlx.launch") != "1" or other == client or c.state != "running":
-            continue
-        if _pid_alive(c.labels.get("gmlx.launch.pid")):
-            continue
-        memory = f" and holds {_gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
+        memory = f" and holds {gb(c.memory_bytes)} of memory" if c.memory_bytes else ""
         out.append(f"[launch] {c.name} from an earlier {other} launch is still running{memory}. "
                    f"Stop it with: container stop {c.name}")
     return out

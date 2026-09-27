@@ -297,6 +297,100 @@ def check_launcher():
     return _check("launcher", "PASS", stub)
 
 
+def _sysctl_int(name: str) -> int | None:
+    try:
+        out = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True,
+                             timeout=5).stdout.strip()
+        return int(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _folder_bytes(root) -> int:
+    total = 0
+    for folder, _, files in os.walk(root):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(folder, name)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+
+def check_container():
+    """None off macOS, and when container mode is neither configured nor
+    installed. Otherwise the Apple container version and service, the
+    packaged guest entry, file handles, and what launch keeps on disk:
+    volumes, private homes and images. Leftover launch containers warn,
+    because their memory stays taken until they stop."""
+    if sys.platform != "darwin":
+        return None
+    from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
+    from gmlx.container import cli, runtime, session
+    from gmlx.container.state import data_dir
+    try:
+        box = load_launch_settings()[0].container
+        enabled = any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
+    except (ConfigError, OSError):
+        enabled = False               # the config row reports a broken file
+    if cli.find() is None:
+        if not enabled:
+            return None
+        return _check("container", "FAIL",
+                      f"container mode is on in the launch config, but Apple container "
+                      f"is not installed. {cli.INSTALL_HINT}")
+    status, parts = "PASS", []
+
+    def flag(level: str, text: str) -> None:
+        nonlocal status
+        if level == "FAIL" or status == "PASS":
+            status = level
+        parts.append(text)
+    try:
+        version = cli.version()
+        if version is None or version < cli.CONTAINER_MIN:
+            have = ".".join(map(str, version)) if version else "an unknown version"
+            need = ".".join(map(str, cli.CONTAINER_MIN))
+            flag("WARN", f"container {have} is older than {need} (brew upgrade container)")
+        else:
+            parts.append("container " + ".".join(map(str, version)))
+        if not runtime.entry_path().is_file():
+            flag("FAIL" if enabled else "WARN",
+                 f"the guest entry is not built ({runtime.BUILD_HINT})")
+        if not cli.system_running():
+            flag("WARN", "the container service is stopped (container system start)")
+            return _check("container", status, "; ".join(parts))
+        containers = cli.containers()
+        files, limit = _sysctl_int("kern.num_files"), _sysctl_int("kern.maxfiles")
+        per_process = _sysctl_int("kern.maxfilesperproc")
+        if files is not None and limit:
+            running = any(c.labels.get(cli.LAUNCH_LABEL) == "1" and c.state == "running"
+                          for c in containers)
+            text = f"{files:,} of {limit:,} open files ({per_process or 0:,} per process)"
+            if running and files > limit // 2:
+                flag("WARN", text + " while a launch container runs; narrow its shares")
+            else:
+                parts.append(text)
+        volumes = [v for v in cli.volume_list() if v.labels.get(cli.LAUNCH_LABEL) == "1"]
+        if volumes:
+            parts.append("volumes " + ", ".join(
+                f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
+                for v in volumes))
+        homes = sum(_folder_bytes(data_dir() / c / "home") for c in LAUNCH_CLIENTS
+                    if (data_dir() / c / "home").is_dir())
+        if homes:
+            parts.append(f"private homes {session.gb(homes)}")
+        count, layers = cli.launch_images()
+        if count:
+            parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")
+        for c in session.leftover_containers(containers):
+            memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
+            flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")
+    except cli.ContainerError as e:
+        flag("WARN", str(e))
+    return _check("container", status, "; ".join(parts))
+
+
 def _running_configs(primary_path) -> list:
     """(cfg, path) for each live server whose runfile records a --config
     other than the file doctor is already checking. Extras and ffmpeg are
@@ -528,7 +622,7 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
     running = _running_configs(path)
     checks = [check_macos(), check_runtime(), check_kernels(), cfg_check,
               check_models(cfg, deep=deep), check_server()]
-    for c in (check_agents(), check_launcher(), check_services(cfg),
+    for c in (check_agents(), check_launcher(), check_container(), check_services(cfg),
               check_extras(cfg, running), check_ffmpeg(cfg, running),
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:

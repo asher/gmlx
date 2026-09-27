@@ -154,6 +154,20 @@ def image_names() -> list[tuple[str, str]]:
             for r in rows]
 
 
+def launch_images() -> tuple[int, int]:
+    """The number of images under the reserved launch domain and the bytes
+    of their layers, counting each image once."""
+    sizes: dict[str, int] = {}
+    for row in _json(["image", "list", "--format", "json"]) or []:
+        conf = row.get("configuration") or {}
+        if not conf.get("name", "").startswith("gmlx.invalid/"):
+            continue
+        digest = (conf.get("descriptor") or {}).get("digest", "")
+        sizes[digest] = sum(v.get("size") or 0 for v in row.get("variants") or []
+                            if (v.get("platform") or {}).get("os") != "unknown")
+    return len(sizes), sum(sizes.values())
+
+
 def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,
           labels: dict[str, str] | None = None, no_cache: bool = False,
           pull: bool = False) -> None:

@@ -1,0 +1,119 @@
+"""gmlx doctor's container row: the Apple container install, the service, the
+guest entry, file handles, and what launch keeps on disk."""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+import gmlx.commands.doctor as doctor
+from gmlx.container import runtime
+
+
+@pytest.fixture
+def box(fake_container, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(home)
+    entry = tmp_path / "gmlx-entry"
+    entry.write_bytes(b"\x7fELF-fake")
+    monkeypatch.setattr(runtime, "entry_path", lambda: entry)
+    counts = {"kern.num_files": 1000, "kern.maxfiles": 491520,
+              "kern.maxfilesperproc": 245760}
+    monkeypatch.setattr(doctor, "_sysctl_int", lambda name: counts.get(name))
+    fake_container.home, fake_container.entry, fake_container.counts = home, entry, counts
+    return fake_container
+
+
+def _enable(home):
+    cfg = home / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("launch:\n  container:\n    enabled: true\n")
+
+
+def test_absent_when_neither_installed_nor_configured(box, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert doctor.check_container() is None
+
+
+def test_fails_when_enabled_but_not_installed(box, monkeypatch):
+    _enable(box.home)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    row = doctor.check_container()
+    assert row["status"] == "FAIL" and "brew install container" in row["detail"]
+
+
+def test_absent_off_macos(box, monkeypatch):
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+    assert doctor.check_container() is None
+
+
+def test_passes_with_the_version_and_file_handles(box):
+    row = doctor.check_container()
+    assert row["status"] == "PASS"
+    assert row["detail"] == "container 1.4.1; 1,000 of 491,520 open files (245,760 per process)"
+
+
+@pytest.mark.parametrize("enabled,status", [(True, "FAIL"), (False, "WARN")])
+def test_missing_entry_fails_only_when_enabled(box, enabled, status):
+    if enabled:
+        _enable(box.home)
+    box.entry.unlink()
+    row = doctor.check_container()
+    assert row["status"] == status
+    assert "scripts/build_guest_entry.py" in row["detail"]
+
+
+def test_old_version_and_stopped_service_warn(box):
+    box.update(version="1.3.0", running=False)
+    row = doctor.check_container()
+    assert row["status"] == "WARN"
+    assert "container 1.3.0 is older than 1.4.0" in row["detail"]
+    assert "container system start" in row["detail"]
+    assert not box.calls("ls")                   # no queries on a stopped service
+
+
+def test_file_handles_warn_only_while_a_launch_container_runs(box):
+    box.counts["kern.num_files"] = 300000
+    assert doctor.check_container()["status"] == "PASS"
+    box.update(containers=[{"name": "gmlx-pi-1", "labels": {
+        "gmlx.launch": "1", "gmlx.launch.client": "pi", "gmlx.launch.pid": str(os.getpid())}}])
+    row = doctor.check_container()
+    assert row["status"] == "WARN" and "narrow its shares" in row["detail"]
+
+
+def test_reports_volumes_homes_and_images(box, tmp_path):
+    disk = tmp_path / "volume.img"
+    with open(disk, "wb") as f:
+        f.truncate(8 << 30)                      # sparse: 8G apparent size
+        f.write(b"x" * (2 << 20))
+    box.update(volumes=[
+        {"name": "pg", "labels": {"gmlx.launch": "1"}, "source": str(disk)},
+        {"name": "theirs", "labels": {}, "source": str(disk)}],
+        images={"gmlx.invalid/launch-pi:abc": {"digest": "sha256:" + "1" * 64,
+                                               "size": 3 << 30},
+                "gmlx.invalid/launch-pi:base": {"digest": "sha256:" + "1" * 64,
+                                                "size": 3 << 30},
+                "debian:bookworm-slim": {"digest": "sha256:" + "2" * 64, "size": 1 << 30}})
+    home = tmp_path / "data" / "gmlx" / "launch" / "pi" / "home"
+    home.mkdir(parents=True)
+    (home / "big").write_bytes(b"y" * (1 << 20))
+    detail = doctor.check_container()["detail"]
+    assert "volumes pg 2M" in detail and "theirs" not in detail   # allocated, not 8G
+    assert "private homes 1M" in detail
+    assert "1 launch image, 3G of layers" in detail
+
+
+def test_leftover_containers_warn_with_memory_and_stop_command(box):
+    box.update(containers=[
+        {"name": "gmlx-omp-1", "memory": 4 << 30,
+         "labels": {"gmlx.launch": "1", "gmlx.launch.client": "omp",
+                    "gmlx.launch.pid": "999999"}},
+        {"name": "gmlx-pi-2", "labels": {"gmlx.launch": "1", "gmlx.launch.client": "pi",
+                                         "gmlx.launch.pid": str(os.getpid())}}])
+    row = doctor.check_container()
+    assert row["status"] == "WARN"
+    assert "gmlx-omp-1 is left over, 4G (container stop gmlx-omp-1)" in row["detail"]
+    assert "gmlx-pi-2" not in row["detail"]

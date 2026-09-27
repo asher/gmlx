@@ -33,6 +33,7 @@ def _image_json(name: str, img: dict) -> dict:
                                    ("Cmd", img.get("cmd")),
                                    ("WorkingDir", img.get("workdir"))) if v is not None}
         variants.append({"platform": {"os": os_, "architecture": arch},
+                         "size": img.get("size", 0),
                          "config": {"created": img.get("created", "2026-09-01T00:00:00Z"),
                                     "config": inner}})
     variants.append({"platform": {"os": "unknown", "architecture": "unknown"}, "config": {}})

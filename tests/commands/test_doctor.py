@@ -65,6 +65,7 @@ def _quiet_env(monkeypatch):
     monkeypatch.setattr(doctor, "check_hf_token",
                         lambda: doctor._check("hf token", "SKIP", "pinned"))
     monkeypatch.setattr(doctor, "check_launcher", lambda: None)
+    monkeypatch.setattr(doctor, "check_container", lambda: None)
     monkeypatch.setattr(doctor, "check_agents", lambda: None)
     # Keep tests hermetic from whatever server the host machine is running.
     monkeypatch.setattr(doctor, "_running_configs", lambda path: [])
