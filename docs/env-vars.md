@@ -142,6 +142,7 @@ routes. [Models larger than memory](streaming.md) and
 | `GMLX_NATIVE_FP` | It sets the MXFP4 and NVFP4 layout. `wire` keeps the file bytes, `packed` repacks them, and `auto` picks wire when streaming or past 90% of the working set. |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | The cascade route handles shared prefixes of at least this many tokens. The default is `1024`. |
+| `GMLX_GQA_SDPA_NAX512` | On NAX GPUs (M5), gemma-4 global-layer decode moves to a faster kernel past 768 to 3072 keys by model. `0` restores the previous routing. |
 | `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode. It is lossy and off by default. |
 | `GMLX_SPARSE_K` | Sparse attention keeps this many tokens. The default is `2048`. |
 | `GMLX_SPARSE_MIN_S` | Sparse attention begins at this depth in tokens. The default is `8192`. |
