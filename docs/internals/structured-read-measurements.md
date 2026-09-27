@@ -24,7 +24,7 @@ measure both again.
 |------|-------|
 | Machine | The bench ran on an Apple M3 Max with 128 GB on macOS 26.6. |
 | Model | The model is diffusiongemma-26B-A4B-it Q4_K_M, a 16.8 GB file, and the Accuracy and Thinking on mixed requests sections also use Q8_0. |
-| Letter readout model | The letter readout sections use OpenJev Q4_K_M from `openjev/openjev-GGUF`, a 16.5 GB file, on macOS 26.6.2. |
+| Letter readout model | The letter readout sections use OpenJev Q4_K_M from `openjev/openjev-GGUF`, a 16.5 GB file, with mlx-kquant 0.4.14 on macOS 26.6.2. |
 | Base model | The letter readout accuracy also uses Qwen3.8-27B UD-Q6_K_XL from `unsloth/Qwen3.8-27B-GGUF`, a 25.3 GB file. |
 | Canvas | The canvas is 64, the `server.systemone.canvas` default. |
 | Peak memory | Peak memory reached 19.7 GB over the whole bench. |
@@ -61,10 +61,10 @@ python scripts/structured_read_accuracy.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```
 
 The same script runs the `wording`, `labeled` and `mixed` sets on any
-other model through the letter readout. There, `wording` runs the letter
-prompt with the subject in the state, as plain text and named in the
-question, `labeled` takes the methods `base` and `s4`, and `mixed` runs
-without thoughts.
+other model through the letter readout. On such a model, `wording` runs the
+letter prompt in three layouts, with the subject only in an object state,
+in a plain-text state, and named in the question. `labeled` runs the
+methods `base` and `s4`, and `mixed` runs without thoughts.
 
 ```sh
 python scripts/structured_read_accuracy.py OpenJev-Q4_K_M.gguf labeled

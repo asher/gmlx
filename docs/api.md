@@ -211,7 +211,7 @@ The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
 in the server log naming them all. `/v1/systemone` has its own fields, and
-[Choose a model](decisions.md#choose-a-model) lists which of them each
+[Choosing a model](decisions.md#choosing-a-model) lists which of them each
 model reads.
 
 The generation routes honor the standard sampling parameters.

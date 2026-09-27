@@ -179,12 +179,12 @@ selects it.
 ## Letter readout
 
 The letter readout is how [`/v1/systemone`](decisions.md) answers on any
-model other than DiffusionGemma, with the prompt of OpenJev's helper. Each
-question becomes one prompt that lists its options under the letters `A`
-to `Z` and `a` to `z`. The model's probability for each letter at the
-first position of its reply is the answer. The diagnostics name it
-`"readout": "letters"`, and [Letter readout](internals/letter-readout.md)
-describes it.
+model other than DiffusionGemma. It uses the prompt from the helper code
+that OpenJev publishes. Each question becomes one prompt that lists its
+options under the letters `A` to `Z` and `a` to `z`, and the model's
+probability for each letter at the first position of its reply is the
+answer. The diagnostics name it `"readout": "letters"`, and
+[Letter readout](internals/letter-readout.md) describes it.
 
 ## MCP
 
@@ -302,8 +302,8 @@ A structured read is how [`/v1/systemone`](decisions.md) answers its
 questions on DiffusionGemma, in one denoise step by default. The
 [canvas](#canvas) holds an answer template with a random token at each
 answer position. The model's prediction at that position, limited to the
-question's labels, is the answer. A sample is one such read with its own random tokens, and a
-request averages one or more samples.
+question's labels, is the answer. A sample is one such read with its own
+random tokens, and a request averages one or more samples.
 
 ## Thinking model
 

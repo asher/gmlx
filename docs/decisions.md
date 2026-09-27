@@ -7,7 +7,7 @@ The answers come straight from the model's predictions, so there is no
 reply text to parse. The route is also served at `/systemone`.
 
 - [What the endpoint does](#what-the-endpoint-does)
-- [Choose a model](#choose-a-model)
+- [Choosing a model](#choosing-a-model)
 - [Serving the model](#serving-the-model)
 - [A first decision](#a-first-decision)
 - [Reading the answers](#reading-the-answers)
@@ -42,47 +42,53 @@ is deterministic, so the same request gives the same numbers on the same
 model file and server settings. On DiffusionGemma, the `seed` field, 42 by
 default, sets the random tokens that each read starts from.
 
-## Choose a model
+## Choosing a model
 
-Two models are made for this endpoint. DiffusionGemma, a Gemma 4 diffusion
-model, answers every question of a request in one pass of the model.
-OpenJev, a Qwen3.8-27B that its authors trained to answer decisions, reads
-each question as a prompt of its own. On the labeled questions of the
+gmlx recommends two models for this endpoint. DiffusionGemma, a Gemma 4
+diffusion model, reads every question of a request in one pass. OpenJev, a
+Qwen3.8-27B that its authors trained on decisions, reads each question as a
+prompt of its own. On the labeled questions of the
 [measurements](internals/structured-read-measurements.md#letter-readout-accuracy),
-OpenJev answered almost every question right and gave reliable
-probabilities, while DiffusionGemma answered three to five times as fast
-and missed about one question in eight.
+OpenJev answered almost every question right, and its probabilities were
+close to how often it was right. DiffusionGemma answered three to five
+times as fast and missed about one question in eight.
 
-DiffusionGemma suits requests with many questions, questions whose answer
-depends on an earlier one through `depends_on`, and unsure answers that a
-thought can settle. OpenJev suits answers that matter more than their
-latency, questions with more than 26 options, and states that come back
-with new questions, since the server keeps the state it read, as
+DiffusionGemma is the better choice for a request with many questions and
+for questions that depend on an earlier answer through `depends_on`. A
+thought can also settle its unsure answers. OpenJev is the better choice
+when accuracy matters more than speed, and for questions with more than 26
+options. On OpenJev, a state that comes back with new questions costs less
+the second time. The server can keep the state, as
 [Repeated states](#repeated-states) describes. The OpenJev weights are
 licensed CC BY-NC 4.0, which allows only non-commercial use.
+
+Both models answer from general knowledge as well as from the state, so a
+question can ask which currency a city uses. Knowledge questions are also
+where answers most often go wrong, as
+[When answers go wrong](#when-answers-go-wrong) explains.
 
 Any other text chat model also answers, through the same
 [letter readout](glossary.md#letter-readout) that OpenJev uses. Such a
 model was not trained on the letter prompt, and the readout's calibration
-comes from OpenJev, so its probabilities can be too sure or too unsure even
-when its answers are right. A large dense model is also slow here, since it
-reads each question's prompt in full. Run it on states whose answers you
-know before your code acts on its numbers.
+comes from OpenJev. Its probabilities can therefore be too sure or too
+unsure, even when its answers are right. Each question runs as a prompt of
+its own, so a large model is slow on a request with many questions. Test
+it on states whose answers you know before your code acts on its numbers.
 
-Both readouts take the same request and return the same answer shapes. The
-letter readout ignores the fields that only DiffusionGemma uses and names
-them in the server's `ignoring unsupported parameter(s)` warning. This
-table lists how each field applies:
+Both readouts take the same request and return the same answer shapes, and
+`state`, `questions`, `ask` and `ask_if` work the same way on both. The
+letter readout ignores the fields that only DiffusionGemma uses, and the
+server names them in an `ignoring unsupported parameter(s)` warning. These
+fields differ between the two:
 
 | Field | DiffusionGemma | Letter readout |
 |-------|----------------|----------------|
-| `state`, `questions`, `ask`, `ask_if` | Used as described on this page. | Used as described on this page. |
-| `instructions` in a question | Optional. | Required. |
-| `criteria` of a choice or score | From 2 to 26 alternatives. | Any number from 2. |
-| `samples` | Reads averaged, each with its own random tokens. | Option orders averaged. |
-| `depends_on` and `alone` in a question | Used. | Ignored. |
-| `instructions`, `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold`, `chunk_rows`, `chunk_prompt`, `sequential` and `seed` | Used. | Ignored, with the server's think defaults too. |
-| An image under `screenshot` or `image` in an object `state` | Read as text. | Refused with a 400. |
+| `instructions` in a question | The field is optional. | The field is required. |
+| `criteria` of a choice or score | It takes 2 to 26 alternatives. | It takes 2 or more alternatives. |
+| `samples` | Reads with different random tokens are averaged. | Reads with different option orders are averaged. |
+| `depends_on` and `alone` in a question | Both fields apply. | Both fields are ignored. |
+| `instructions`, `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold`, `chunk_rows`, `chunk_prompt`, `sequential` and `seed` | These fields apply. | These fields and the server's think defaults are ignored. |
+| An image under `screenshot` or `image` in an object `state` | The image is read as text. | The request gets a 400. |
 
 ## Serving the model
 
@@ -90,8 +96,8 @@ The endpoint needs a model file, such as
 `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` from the
 `unsloth/diffusiongemma-26B-A4B-it-GGUF` repository or
 `OpenJev-Q4_K_M.gguf` from the `openjev/openjev-GGUF` repository. Name
-them in a configuration file, saved here as `decisions.yaml`, and start the
-server with that file:
+one or both in a configuration file, saved here as `decisions.yaml`, and
+start the server with that file:
 
 ```yaml
 models:
@@ -204,22 +210,15 @@ which gives answers from other model providers the Jev shape.
 On DiffusionGemma, `usage.input_tokens` is the token count of the longest
 prompt that a read ran on, and `usage.output_tokens` counts the tokens of
 the answer template and of any thought. On the letter readout,
-`input_tokens` is the sum of every question's prompt and `output_tokens` is
-0, as in OpenJev's own server.
+`input_tokens` counts the tokens of every question's prompt, and
+`output_tokens` is 0, as OpenJev's own server reports.
 
-`diagnostics` describes how the decision ran. On DiffusionGemma it holds
+`diagnostics` describes how the decision ran. On DiffusionGemma, it holds
 the `stages` and `chunks` that ran, the `skipped` questions, the `thought`,
 the entropies of each question under `questions`, and the `timing`. It
 also records the `steps`, the `chunk_prompt` and `sequential` settings, the
 `conditioning`, the `prompt_tokens`, and `think_auto` when that setting was
 used.
-
-On the letter readout, `diagnostics` has `"readout": "letters"`, the
-`stages` and `skipped` questions, the `orderings` read, and the number of
-`passes`. `prefix` gives the length of the state part and whether it was
-`reused` or `stored`, as [Repeated states](#repeated-states) describes.
-`prompt_tokens` counts every prompt in full, `computed_tokens` counts the
-tokens the model actually ran, and `timing.reads` counts its forwards.
 
 `samples.tops` has one entry for each sample. The entry maps each question
 to its top label as the answer template writes it, with the probability of
@@ -230,11 +229,19 @@ the letters `A` onward instead. When a decision has stages, chunks or a
 skipped question, `samples.n`, `samples.tops` and `samples.policy` are
 lists with one entry for each chunk of each stage.
 
+On the letter readout, `diagnostics` has `"readout": "letters"`, the
+`stages` and `skipped` questions, and the option `orderings` it read.
+`passes` counts the question prompts, and `timing.reads` counts the model
+runs, each of which can hold several prompts. `prompt_tokens` counts every
+prompt in full, while `computed_tokens` counts only the tokens that the
+model ran. `prefix.tokens` is the length of the state part, and
+[Repeated states](#repeated-states) describes the other `prefix` fields.
+
 ## Examples
 
 Each example gives a `questions` map and the answers that DiffusionGemma
-gives for a few states, with the default settings. Post the map with a `state`, as in
-[A first decision](#a-first-decision).
+gives for a few states, with the default settings. Post the map with a
+`state`, as in [A first decision](#a-first-decision).
 
 ### Gate on priority
 
@@ -393,8 +400,9 @@ answer is `null`, and `diagnostics.skipped` says why. With
 Each stage extends the prompt with the earlier answers and reads again, so a
 decision with stages takes longer than one without. Use `depends_on` only
 for questions whose answer changes with the earlier one. The letter readout
-runs the same stages and skips the same questions, but a question's prompt
-does not carry the earlier answers.
+ignores `depends_on`, so on that readout only `ask_if` puts a question in a
+later stage. It skips questions the same way, but its prompts do not carry
+the earlier answers.
 
 ## Samples, steps and thoughts
 
@@ -422,13 +430,6 @@ stages or `sequential: true`, every read uses the full question list,
 `chunk_prompt` has no effect, and `diagnostics.chunk_prompt` reports
 `"full"`.
 
-On the letter readout, `samples: N` reads each question with its options in
-N orders and averages the probabilities by option. The orders are the same
-for every request, and `"auto"` reads the given order once. Each order is
-one more read of every question, and on OpenJev four orders changed no
-answer in the
-[measurements](internals/structured-read-measurements.md#letter-readout-accuracy).
-
 A thought is the costliest of these settings. The model writes it with its
 full denoise loop, which takes seconds, while a read without one takes a
 single pass. `think: "auto"` spends that cost only on unsure decisions.
@@ -446,9 +447,9 @@ floor on the probability of each chosen answer, so a higher value runs a
 thought more often. It reads that probability, not the `confidence` field,
 which rescales it by the number of options. `auto_threshold` is a ceiling
 on the entropy at a label position, so a higher value adds reads less
-often. Without `"auto"`, the server ignores
-`think_threshold` and `think_budget` and logs them in an
-`ignoring unsupported parameter(s)` warning.
+often. Without `"auto"`, the server ignores `think_threshold` and
+`think_budget` and logs them in an `ignoring unsupported parameter(s)`
+warning.
 
 A question without one right answer, such as the tone of a message, often
 stays unsure after a thought, so `"auto"` suits questions that need
@@ -457,13 +458,21 @@ recalled facts. How the samples share a decoder pass is in
 [Structured read measurements](internals/structured-read-measurements.md)
 gives what each setting costs.
 
+On the letter readout, `samples: N` reads each question with its options
+in N orders and averages the probabilities by option. The orders are the
+same for every request, and `"auto"` reads the given order once. Each
+order adds one read of every question. On OpenJev, four orders changed no
+answer in the
+[measurements](internals/structured-read-measurements.md#letter-readout-accuracy),
+so the default of one order is enough.
+
 ## Repeated states
 
 On the letter readout, every question's prompt starts with the state, so a
 decision reads the state once and then each question after it. With
-[`cache.enabled`](config.md#cacheenabled) on, the server keeps the state
-part in its [prompt cache](glossary.md#prompt-cache), and the next decision
-on the same state reads only its questions.
+[`server.cache.enabled`](config.md#cacheenabled) on, the server keeps the
+state part in its [prompt cache](glossary.md#prompt-cache). The next
+decision on the same state then reads only its questions.
 `diagnostics.prefix` has `"reused": true` when a decision found a kept
 state, `"stored": true` when it kept its own, and the cache `tier`.
 
@@ -481,14 +490,14 @@ curl localhost:8080/v1/prewarm -d '{"model": "openjev", "state": "Everything is 
 ```
 
 `ok` is true when the state is now kept. `prompt_tokens` is the length of
-the state part in tokens. The route answers 400 on DiffusionGemma, which keeps no
-state between requests.
+the state part in tokens. The route answers 400 on DiffusionGemma, which
+keeps no state between requests.
 
 The cache holds a limited number of states and drops the least recently
-used first. A model whose cache layers no cache tier takes, such as one
-with a rotating attention window, reports `"tier": "unsupported"` and reads
-the state every time. A server with the cache off and the offline command
-line report `"tier": "off"` and keep nothing.
+used first. The prompt cache cannot store the cache layers of every
+model, and such a model reports `"tier": "unsupported"` and reads the state
+every time. With the cache off, and on the offline command line, the tier
+is `"off"` and nothing is kept.
 
 ## When answers go wrong
 
@@ -510,8 +519,9 @@ These changes help, from the cheapest to the most expensive:
 3. On DiffusionGemma, let the model think when it is unsure, with
    `think: "auto"`. A thought takes several times as long as a plain
    decision.
-4. Answer with OpenJev, which gets most such questions right and takes
-   three to five times as long as DiffusionGemma without a thought.
+4. Answer with OpenJev, which answered almost every labeled question
+   right in the measurements. It is also the slowest of these changes, as
+   [Choosing a model](#choosing-a-model) describes.
 
 Before your code acts on the numbers, run states whose answers you know,
 and choose each threshold from how the model scores them. Some answers stay
@@ -531,18 +541,19 @@ A request that fails gets one of these status codes.
 | 400 | `profile` names no profile, with the error type `unknown_profile`. `model` is absent and there is no fallback, with the error type `no_model_specified`. |
 | 401 | The server has an API key, and the request does not present it. |
 | 404 | `model` names nothing and there is no fallback, with the error type `model_not_found`, or the model file is missing, with the error type `model_file_missing`. |
-| 422 | A field fails validation, such as a missing `state`, a value out of range or a letter question without `instructions`, with the error type `validation_error`. |
+| 422 | A field fails validation, such as a missing `state` or a value out of range, with the error type `validation_error`. |
 | 503 | The queue is full or the model load is deferred, as [Limits and back-pressure](api.md#limits-and-back-pressure) describes. |
 | 504 | The decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s), counted from when it left the queue. The type is `timeout`. |
 | 500 | The engine failed, with the error type `server_error`. |
 
 On DiffusionGemma, a decision holds the model from its first read to its
 last, so a chat request to the same model waits behind it. On the letter
-readout, a decision runs one forward of at most 128 tokens between two chat
-steps, so chat on the same model keeps streaming, more slowly, while the
-decision runs. Before the server queues a decision, it checks the context
-and memory budgets against the largest prompt that the decision can build.
-A client that disconnects cancels its decision.
+readout, the server splits a decision into model runs of at most 128 tokens,
+and it does one run between each two chat tokens. Chat on the same model
+keeps streaming while the decision runs, more slowly. Before the server
+queues a decision, it checks the context and memory budgets against the
+largest prompt that the decision can build. A client that disconnects
+cancels its decision.
 
 ## The command line
 
@@ -573,6 +584,6 @@ mechanism.
 On any other model, each question becomes one user message that holds the
 state, the question and its options under the letters `A`, `B` and so on.
 The model's probability for each letter at the first position of its reply
-is the answer, with the temperature and yes or no calibration of OpenJev's
-helper. [Letter readout](internals/letter-readout.md) describes the
-mechanism.
+is the answer. The temperature and the calibration of yes or no answers
+come from the helper code that OpenJev publishes.
+[Letter readout](internals/letter-readout.md) describes the mechanism.

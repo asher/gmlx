@@ -1,10 +1,10 @@
 # Letter readout
 
 The letter readout answers `POST /v1/systemone` on any model other than
-DiffusionGemma, with the prompt and calibration of OpenJev's helper. A
-decision reads the state once and runs each question's prompt as a short
-tail after it, in fixed forwards that the server's batch loop interleaves
-with chat. The request and response contract is in
+DiffusionGemma, with the prompt and calibration of the helper code that
+OpenJev publishes. A decision reads the state once and runs each question's
+prompt as a short tail after it, in fixed forwards that the server's batch
+loop interleaves with chat. The request and response contract is in
 [Structured decisions](../decisions.md), and the timings are in
 [Structured read measurements](structured-read-measurements.md#letter-readout-timings).
 
@@ -56,12 +56,13 @@ of each listed letter at the first reply position, divided by 0.85 and
 normalized over those letters. Each letter must be a single token of its
 own, which the route checks once per model.
 
-A yes or no question lists `yes` and `no`, described by `criteria.true` and
-`criteria.false` or by "The statement is true." and "The statement is
-false.". Its answer is `sigmoid(logit(p_yes) / 1.829074)`, the helper's
-calibration. A score question lists its levels as `0` to `n-1`, its
-instructions gain " Rate along the ordered levels below (lowest first).",
-and the score is the expected level.
+A yes or no question lists `yes` and `no`, described by `criteria.true`
+and `criteria.false`. Without criteria, the descriptions are "The statement
+is true." and "The statement is false." The answer is
+`sigmoid(logit(p_yes) / 1.829074)`, the helper's calibration. A score
+question lists its levels as `0` to `n-1`, and its instructions end with
+the added sentence `Rate along the ordered levels below (lowest first).`
+The score is the expected level.
 
 The letters run from `A` to `Z` and then `a` to `z`, so one prompt holds 52
 options. A question with more is read in near-equal chunks of at most 52,
@@ -131,12 +132,14 @@ multimodal model, sets the prefill command-buffer phase and restores the
 previous one, and holds the wired limit. With per-row adapters, it
 publishes the request's adapter scales around each forward.
 
-The deadline, `token_queue_timeout_s`, starts when the job leaves the
-queue, and the job's stop event is checked at each forward. A client that
-disconnects sets it too. An engine cancel for the job's id never reaches
-the job, since the batch loop consumes the id and finds no row, so the
-route cancels only through the stop event. A diffusion job receives engine
-cancels, and `tests/serve/test_engine_jobs.py` pins both behaviors.
+The deadline,
+[`server.token_queue_timeout_s`](../config.md#servertoken_queue_timeout_s),
+starts when the job leaves the queue, and the job's stop event is checked at
+each forward. A client that disconnects sets it too. An engine cancel for
+the job's id never reaches the job, since the batch loop consumes the id and
+finds no row, so the route cancels only through the stop event. A diffusion
+job receives engine cancels, and `tests/serve/test_engine_jobs.py` pins both
+behaviors.
 
 Before queueing, the route tokenizes every pass that the decision can send
 and checks the longest against the context and memory budgets, with room
@@ -159,7 +162,7 @@ decision never adopts a chat record, which was prefilled in other chunks.
 The reader's caches are never quantized, so a kept prefix equals a
 computed one bit for bit.
 
-Decision records keep to themselves in the checkpoint tier. One is never
+The checkpoint tier has its own rules for decision records. One is never
 promoted to anchor, a decision insert strips only decision records on its
 chain, and no other insert strips a decision record. The manager keeps at
 most eight of them, so a stream of new states cannot push the chat records

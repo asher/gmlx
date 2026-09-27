@@ -797,9 +797,9 @@ with an error or is not gmlx, and 3 when no server was reachable.
 `gmlx systemone` sends a JSON file holding a `/v1/systemone` request body
 to a running server and prints one line per question. The body is described in
 [Structured decisions](decisions.md). With `--model` the verb loads the GGUF
-itself and answers offline, with no server. A DiffusionGemma model reads its
-answer slots, and any other text model answers with the
-[letter readout](glossary.md#letter-readout).
+itself and answers offline, with no server. DiffusionGemma answers with a
+[structured read](glossary.md#structured-read), and any other text model
+with the [letter readout](glossary.md#letter-readout).
 
 ```sh
 gmlx systemone ticket.json
@@ -808,9 +808,9 @@ gmlx systemone ticket.json --model OpenJev-Q4_K_M.gguf
 ```
 
 A yes or no answer prints as its probability, a choice as the chosen
-option with its
-[confidence](decisions.md#reading-the-answers), and a score as the
-expected level with its confidence. A question skipped by `ask_if` prints `skipped`.
+option with its [confidence](decisions.md#reading-the-answers), and a
+score as the expected level with its confidence. A question skipped by
+`ask_if` prints `skipped`.
 
 These flags control `gmlx systemone`:
 
