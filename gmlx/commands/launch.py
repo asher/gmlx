@@ -570,6 +570,9 @@ def _launch_omp(a, *, exec_fn) -> int:
 # (``model.default``).
 
 
+HERMES_BACKUPS = 3
+
+
 def _hermes_config_path() -> Path:
     home = os.environ.get("HERMES_HOME")
     return Path(os.path.expanduser(home or "~/.hermes")) / "config.yaml"
@@ -629,6 +632,9 @@ def _launch_hermes(a, *, exec_fn) -> int:
             backup = path.with_name(f"{path.name}.gmlx-{time.strftime('%Y%m%d-%H%M%S')}")
             shutil.copy2(path, backup)
             print(f"[launch] backed up {path} to {backup}")
+            # The names sort by time, so all but the newest few go.
+            for old in sorted(path.parent.glob(f"{path.name}.gmlx-*"))[:-HERMES_BACKUPS]:
+                old.unlink(missing_ok=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False))
         print(f"[launch] wrote {path}")

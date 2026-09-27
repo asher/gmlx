@@ -39,6 +39,9 @@ CONTAINERFILE_MAX = 16 * 1024
 DEFAULT_CONTAINERFILES = ("Containerfile", "Dockerfile")
 AGE_NOTE_DAYS = 30
 LAUNCH_LABELS = {cli.LAUNCH_LABEL: "1"}
+# A launch's build starts the builder seconds after the launch writes its
+# marker, so a builder that started this soon after a marker is that launch's.
+BUILDER_START_WINDOW = 60.0
 
 # The command each shipped image installs for its client.
 CLIENT_BINARY = {
@@ -379,8 +382,13 @@ def _build(context: str, **kw) -> None:
 
 
 def _drop_stale_marker(marker: Path) -> None:
+    """Handle a marker whose launch is gone. A builder that started within
+    :data:`BUILDER_START_WINDOW` of the marker is the one that launch
+    started, so this launch adopts it and stops it later. Any other builder
+    was started by someone else, so the marker is dropped."""
     try:
         pid = int(marker.read_text().strip() or "0")
+        written = marker.stat().st_mtime
     except (OSError, ValueError):
         return
     try:
@@ -391,7 +399,12 @@ def _drop_stale_marker(marker: Path) -> None:
         return
     except OSError:
         pass
-    marker.unlink(missing_ok=True)
+    _state, started = cli.builder_status()
+    if started is not None and written - 2 <= started <= written + BUILDER_START_WINDOW:
+        marker.write_text(str(os.getpid()))
+        os.utime(marker, (written, written))   # the stop check compares with it
+    else:
+        marker.unlink(missing_ok=True)
 
 
 def _stop_builder_if_ours(marker: Path) -> None:

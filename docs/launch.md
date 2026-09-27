@@ -175,8 +175,9 @@ and output limit from the server's model list.
 `$HERMES_HOME` or `~/.hermes`, and keeps every other setting. hermes reads
 its settings from no other file, and it sends an API key to a local server
 only from that file. Before it changes the file, `launch` copies it to
-`config.yaml.gmlx-<date>-<time>` beside it and prints the copy's path. A
-launch that would change nothing writes nothing.
+`config.yaml.gmlx-<date>-<time>` beside it, prints the copy's path and
+keeps the three newest copies. A launch that would change nothing writes
+nothing.
 
 hermes refuses a model with less than 64K tokens of context, so give it a
 model trained for at least that length.

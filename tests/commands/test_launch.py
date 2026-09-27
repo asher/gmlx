@@ -960,6 +960,20 @@ def test_launch_hermes_backs_up_and_keeps_other_keys(monkeypatch, tmp_path, caps
     assert "already points hermes at the server" in capsys.readouterr().out
 
 
+def test_launch_hermes_keeps_the_newest_three_backups(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    own = tmp_path / "config.yaml"
+    own.write_text("gateway: {}\n")
+    for stamp in ("20260101-000000", "20260102-000000", "20260103-000000"):
+        (tmp_path / f"config.yaml.gmlx-{stamp}").write_text("old\n")
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    left = sorted(p.name for p in tmp_path.glob("config.yaml.gmlx-*"))
+    assert len(left) == 3 and "config.yaml.gmlx-20260101-000000" not in left
+    assert (tmp_path / "config.yaml.gmlx-20260103-000000").exists()
+
+
 def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_path):
     _fake_probe(monkeypatch)
     with pytest.raises(launch.LaunchError, match="HERMES_HOME"):

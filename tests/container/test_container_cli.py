@@ -139,6 +139,20 @@ def test_a_stale_marker_never_stops_a_builder_you_started(fake_container):
     assert not marker.exists()
 
 
+def test_a_killed_launchs_builder_is_adopted_and_stopped(fake_container):
+    # A killed launch left its marker, and the builder it started runs on.
+    marker = images.images_dir() / "builder-started"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("999999")
+    written = time.time() - 600
+    os.utime(marker, (written, written))
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(written + 5))
+    fake_container.update(builder=True, builder_started=started)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert fake_container.calls("builder", "stop")
+    assert not marker.exists()
+
+
 def test_a_builder_started_before_the_marker_keeps_running(fake_container, monkeypatch):
     # The marker was written, but the builder that runs after the build
     # started earlier, so it is not the one the launch started.
