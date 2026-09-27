@@ -99,6 +99,11 @@ def _model_path(name: str, cfg) -> str:
 
 def _run_letters(model, processor, parsed, path: str) -> dict:
     """The letter readout on a text model, to completion on this thread."""
+    import contextlib
+    from typing import Any
+
+    import mlx.core as mx
+
     from gmlx.systemone import jev_response, letters
     from gmlx.systemone.ar_reader import LetterReader, LetterTokens, decide_letters, run_to_end
 
@@ -110,9 +115,11 @@ def _run_letters(model, processor, parsed, path: str) -> dict:
         letter_ids = tokens.letter_ids()
     except ValueError as e:
         raise SystemExit(f"error: {path} cannot answer letter reads: {e}") from e
-    wired = importlib.import_module("mlx_lm.generate").wired_limit
+    wired: Any = contextlib.nullcontext()
+    if mx.default_device() == mx.gpu and mx.metal.is_available():
+        wired = importlib.import_module("mlx_lm.generate").wired_limit(model)
     started = time.perf_counter()
-    with wired(model):
+    with wired:
         result = run_to_end(decide_letters(
             LetterReader(model, letter_ids), tokens, schema, state))
     print(f"[systemone] {result['diagnostics']['timing']['reads']} forwards in "

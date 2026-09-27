@@ -200,6 +200,7 @@ include = [
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
     "gmlx/spec/mtp_load.py",
+    "gmlx/systemone/ar_reader.py",
     "gmlx/systemone/engine.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",

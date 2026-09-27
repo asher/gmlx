@@ -197,7 +197,7 @@ def _step_scope(model):
     before = cb_phase.phase()
     cb_phase.flip("prefill")
     wired: Any = contextlib.nullcontext()
-    if model is not None and mx.metal.is_available():
+    if model is not None and mx.default_device() == mx.gpu and mx.metal.is_available():
         wired = importlib.import_module("mlx_lm.generate").wired_limit(model)
     try:
         with wired:
@@ -213,8 +213,9 @@ def _start(rg, request) -> Optional[_StepJob]:
     job, stop = request.raw_inputs[_STEP_JOB_KEY]
     rqueue = request.rqueue
     rg._log_prefill_started(request, backend="decision")
+    # A negative uid never names a batch row.
     rqueue.put(_generation.GenerationContext(
-        uid=f"job-{next(_job_ids)}", prompt_tokens=request.prompt_tokens))
+        uid=-next(_job_ids), prompt_tokens=request.prompt_tokens))
     if stop.is_set():
         rqueue.put(_JobError(JobCancelled("cancelled before the job ran")))
         return None
