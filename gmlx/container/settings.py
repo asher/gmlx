@@ -180,19 +180,23 @@ def _volume_mount(spec: str) -> Mount:
 
 
 def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
-    """Drop exact duplicates, refuse two mounts at one guest path and any
-    mount over a reserved path, and order by guest path depth so a parent
-    is mounted before anything inside it."""
+    """Drop duplicates, refuse two mounts at one guest path and any mount
+    over or inside a reserved path, and order by guest path depth so a
+    parent is mounted before anything inside it. A duplicate differs at most
+    in its note, so ``--mount .`` beside the current-folder share is dropped."""
     out: list[Mount] = []
+    seen: set[tuple] = set()
     by_target: dict[str, Mount] = {}
     for m in mounts:
-        if m in out:
+        key = (m.source, os.path.normpath(m.target), m.readonly, m.kind, m.size)
+        if key in seen:
             continue
+        seen.add(key)
         target = os.path.normpath(m.target)
         if target == "/":
             raise SettingsError(f"{_label(m)} cannot be mounted at /.")
         for reserved in RESERVED_TARGETS:
-            if _inside(target, reserved):
+            if _inside(target, reserved) or _inside(reserved, target):
                 raise SettingsError(f"{_label(m)} cannot be mounted at {target}, which "
                                     f"covers {reserved}.")
         if m.kind != "volume":

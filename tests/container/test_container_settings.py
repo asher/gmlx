@@ -104,8 +104,14 @@ def test_normalize_drops_duplicates_and_orders_by_depth():
     assert [m.target for m in out] == ["/w", "/w/a", "/w/a/b"]
 
 
+def test_normalize_drops_a_duplicate_that_differs_only_in_its_note():
+    auto = Mount("/h/proj", "/h/proj", note="working folder")
+    out = settings.normalize_mounts([auto, Mount("/h/proj", "/h/proj")])
+    assert out == [auto]
+
+
 @pytest.mark.parametrize("target", ["/", "/proc", "/sys/x", "/dev", "/opt/gmlx",
-                                    "/var/host-services/x"])
+                                    "/var/host-services/x", "/opt", "/var"])
 def test_reserved_targets_are_refused(target):
     with pytest.raises(SettingsError):
         settings.normalize_mounts([Mount("/h/a", target)])
