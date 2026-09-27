@@ -306,6 +306,9 @@ def _sysctl_int(name: str) -> int | None:
         return None
 
 
+# Seconds doctor waits for one container query.
+DOCTOR_QUERY_TIMEOUT = 5.0
+
 # The most files doctor measures in the private homes, so a home that holds
 # a large tree cannot make doctor slow.
 _WALK_CAP = 100_000
@@ -337,8 +340,7 @@ def check_container():
     if sys.platform != "darwin":
         return None
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
-    from gmlx.container import cli, runtime, session
-    from gmlx.container.state import data_dir
+    from gmlx.container import cli
     try:
         box = load_launch_settings()[0].container
         enabled = any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
@@ -350,6 +352,16 @@ def check_container():
         return _check("container", "FAIL",
                       f"container mode is on in the launch config, but Apple container "
                       f"is not installed. {cli.INSTALL_HINT}")
+    # A service that does not answer costs doctor seconds, not minutes.
+    with cli.query_timeout(DOCTOR_QUERY_TIMEOUT):
+        return _container_row(enabled)
+
+
+def _container_row(enabled: bool) -> dict:
+    from gmlx.config import LAUNCH_CLIENTS
+    from gmlx.container import cli, images, runtime, session
+    from gmlx.container.state import data_dir
+
     status, parts = "PASS", []
 
     def flag(level: str, text: str) -> None:
@@ -403,6 +415,9 @@ def check_container():
         for c in session.leftover_containers(containers):
             memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
             flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")
+        notice = images.builder_notice()
+        if notice:
+            flag("WARN", notice.removeprefix("[launch] ").rstrip("."))
     except cli.ContainerError as e:
         flag("WARN", str(e))
     return _check("container", status, "; ".join(parts))

@@ -617,3 +617,56 @@ def test_attach_defaults_match_the_parser():
     rest = set(vars(a)) - set(lc._ATTACH_DEFAULTS) - {
         "harness", "container", "shell", "passthrough"}
     assert rest == set(), rest
+
+
+# First-run steps, the builder notice and the dry run's image
+
+def test_steps_are_numbered_only_when_they_run(env, capsys):
+    assert _run(["pi", "--container"]) == 0            # a first build on a running service
+    out = capsys.readouterr().out
+    assert "[launch] step 1: building" in out
+    assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
+    assert _run(["pi", "--container"]) == 0            # the image exists now
+    assert "step " not in capsys.readouterr().out
+    assert not any(line.startswith("[launch] step") for line in env.runs[-1]["summary"]), env.runs[-1]["summary"]
+
+
+def test_a_restarted_service_with_a_ready_image_gets_two_steps(env, capsys, monkeypatch):
+    assert _run(["pi", "--container"]) == 0
+    capsys.readouterr()
+    env.update(running=False)
+    monkeypatch.setattr(session, "stdin_is_tty", lambda: True)
+    assert _run(["pi", "--container"]) == 0
+    out = capsys.readouterr().out
+    assert "[launch] step 1: start the container service" in out and "building" not in out
+    assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
+
+
+def test_step_7_reports_an_idle_builder(env, capsys):
+    env.update(builder=True)
+    assert _run(["pi", "--container"]) == 0
+    assert "container builder stop" in capsys.readouterr().out
+
+
+def test_dry_run_names_the_build_tag_and_the_image_command(env, capsys):
+    ctx = env.home / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM debian:bookworm-slim\n")
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           f"        build: {ctx}\n")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert "[launch] image gmlx.invalid/launch-pi-build:" in capsys.readouterr().out
+    env.update(registry={"docker.io/me/tool:1": {
+        "digest": "sha256:" + "8" * 64, "entrypoint": ["/bin/tool"], "cmd": ["serve"],
+        "workdir": "/srv"}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: docker.io/me/tool:1\n        command: image\n")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert "would be pulled" in out
+    assert "<ENTRYPOINT and CMD of the image>" in out
+    assert _run(["pi", "--container"]) == 0            # pulls it
+    capsys.readouterr()
+    assert _run(["pi", "--container", "--config-only", "--", "check"]) == 0
+    out = capsys.readouterr().out
+    assert "--workdir /srv" in out and out.rstrip().endswith("-- /bin/tool check")

@@ -134,3 +134,28 @@ def test_leftover_containers_warn_with_memory_and_stop_command(box):
     assert row["status"] == "WARN"
     assert "gmlx-omp-1 is left over, 4G (container stop gmlx-omp-1)" in row["detail"]
     assert "gmlx-pi-2" not in row["detail"]
+
+
+def test_queries_time_out_quickly_and_an_idle_builder_warns(box, monkeypatch):
+    from gmlx.container import cli
+    seen = []
+    real = cli.query_timeout
+
+    def spy(seconds):
+        seen.append(seconds)
+        return real(seconds)
+    monkeypatch.setattr(cli, "query_timeout", spy)
+    box.update(builder=True)
+    row = doctor.check_container()
+    assert seen == [doctor.DOCTOR_QUERY_TIMEOUT] == [5.0]
+    assert row["status"] == "WARN" and "container builder stop" in row["detail"]
+
+
+def test_a_service_that_does_not_answer_warns(box, monkeypatch):
+    from gmlx.container import cli
+
+    def hang(*a, **k):
+        raise cli.ContainerError("container gave no answer in 5 s")
+    monkeypatch.setattr(cli, "containers", hang)
+    row = doctor.check_container()
+    assert row["status"] == "WARN" and "no answer in 5 s" in row["detail"]

@@ -305,36 +305,55 @@ def _dsh_profile_is_web(a, home: Path) -> bool:
         return L._dsh_runs_web_app(profile, manifest)
 
 
-def _image_state(image_plan, rebuild: bool, running: bool) -> tuple[str, str]:
-    """For the dry run: the reference the command would name and a line
-    about the image, without building or pulling anything."""
+def _image_state(image_plan, rebuild: bool, running: bool
+                 ) -> tuple[str, str, images.ReadyImage | None]:
+    """For the dry run: the reference the command would name, the lines
+    about the image, and the image when it is in the store. Nothing is
+    built or pulled."""
+    kind, client = image_plan.kind, image_plan.client
     if not running:
-        tag = (image_plan.ref if image_plan.kind == "image"
-               else images.shipped_tag(image_plan.client, image_plan.packages)
-               if image_plan.kind == "shipped" else images.build_repo(image_plan.client))
-        return tag, f"[launch] image {tag}: its state is unknown until the service runs"
-    if image_plan.kind == "image":
-        tag = image_plan.ref
-        info = cli.image_info(tag)
-        verb = "pulled again" if rebuild else ("present" if info else "pulled")
-    elif image_plan.kind == "shipped":
-        tag = images.shipped_tag(image_plan.client, image_plan.packages)
-        info = cli.image_info(tag)
-        verb = "rebuilt" if rebuild else ("present" if info else "built")
-    else:
-        tag = images.build_repo(image_plan.client)
-        info = None
-        verb = "rebuilt" if rebuild else "checked, and built when its context changed"
-    ref = f"{images.repository_of(info.name or tag)}@{info.digest}" if info else tag
-    state = "present" if verb == "present" else f"would be {verb}"
-    lines = [f"[launch] image {tag}: {state}"]
-    for base in sorted(image_plan.bases) if image_plan.kind == "build" else []:
-        present = cli.image_info(images.shipped_tag(
-            base, image_plan.base_packages.get(base, []))) is not None
-        base_state = ("would be rebuilt" if rebuild else "present" if present
+        tag = (image_plan.ref if kind == "image"
+               else images.shipped_tag(client, image_plan.packages)
+               if kind == "shipped" else images.build_repo(client))
+        return tag, f"[launch] image {tag}: its state is unknown until the service runs", None
+    lines = []
+    bases_ready = True
+    digests: dict[str, str] = {}
+    for base in sorted(image_plan.bases) if kind == "build" else []:
+        info = cli.image_info(images.shipped_tag(base, image_plan.base_packages.get(base, [])))
+        if info is not None:
+            digests[base] = info.digest
+        bases_ready = bases_ready and info is not None
+        base_state = ("would be rebuilt" if rebuild else "present" if info
                       else "would be built first")
         lines.append(f"[launch] base {images.base_ref(base)}: {base_state}")
-    return ref, "\n".join(lines)
+    if kind == "image":
+        tag = image_plan.ref
+        verb = "pulled again"
+    elif kind == "shipped":
+        tag = images.shipped_tag(client, image_plan.packages)
+        verb = "rebuilt"
+    elif bases_ready and not rebuild:
+        # The tag hashes the build context and the base digests, which
+        # reading only can work out.
+        tag = f"{images.build_repo(client)}:{images.build_hash(image_plan, digests, _say)}"
+        verb = "rebuilt"
+    else:
+        tag = images.build_repo(client)
+        lines.insert(0, f"[launch] image {tag}: would be "
+                        f"{'rebuilt' if rebuild else 'built after its bases'}")
+        return tag, "\n".join(lines), None
+    info = cli.image_info(tag)
+    if rebuild:
+        state = f"would be {verb}"
+    else:
+        state = "present" if info else ("would be pulled" if kind == "image"
+                                        else "would be built")
+    lines.insert(0, f"[launch] image {tag}: {state}")
+    if info is None:
+        return tag, "\n".join(lines), None
+    ref = f"{images.repository_of(info.name or tag)}@{info.digest}"
+    return ref, "\n".join(lines), images.ReadyImage(kind, tag, info, ref, "found", client)
 
 
 def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
@@ -418,23 +437,30 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
         return rc
     running = prereqs.running
     ready = None
+    steps = int(first_run)
     runtime_dir = runtime.runtime_root() / (
         runtime.entry_digest() if prereqs.entry.is_file() else "<sha256>")
     if not dry:
         # Step 7
-        session.cleanup_stale(client, keep_runtime=runtime_dir.name)
+        session.cleanup_stale(client, keep_runtime=runtime_dir.name, say=say)
         containers = cli.containers()
         for line in session.orphan_notices(client, containers):
             say(line)
+        notice = images.builder_notice()
+        if notice:
+            say(notice)
         # Step 8
         runtime_dir, runtime_lock = runtime.acquire_runtime()
         held.append(runtime_lock)
         held.extend(session.lock_volumes(plan.volumes))
         session.check_volumes_free(plan.volumes, containers)
         session.ensure_volumes(plan.volumes, say)
-        step = "[launch] step 2: " if first_run else "[launch] "
-        ready = images.ensure_image(image_plan, rebuild=a.rebuild,
-                                    say=lambda line: say(line.replace("[launch] ", step, 1)))
+        # The steps are numbered when this launch starts the service or
+        # builds or pulls an image, and only the steps that run get a number.
+        if images.pending_work(image_plan, a.rebuild):
+            steps += 1
+        ready = images.ensure_image(image_plan, rebuild=a.rebuild, say=say,
+                                    step=f"step {steps}" if steps > int(first_run) else None)
         try:
             word = (cfg.command[0] if isinstance(cfg.command, list)
                     else images.image_command(ready, "image", [], a.passthrough)[0][0]
@@ -482,11 +508,17 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
             confine.mkdirs(Path(captured["pairs"]["DATA_DIR"]))
     # Step 12
     passthrough = captured["extra"]
+    image_line = ""
+    if dry:
+        image_ref, image_line, ready = _image_state(image_plan, a.rebuild, prereqs.running)
     if a.shell:
         command, image_workdir = list(passthrough), None
     elif ready is not None:
         command, image_workdir = images.image_command(ready, cfg.command, captured["argv"],
                                                       passthrough)
+    elif cfg.command == "image":            # the dry run, with the image not in the store
+        command = ["<ENTRYPOINT and CMD of the image>", *passthrough]
+        image_workdir = None
     else:
         command = ([*cfg.command, *passthrough] if isinstance(cfg.command, list)
                    else [*captured["argv"], *passthrough])
@@ -501,9 +533,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     # browser needs, so launch reads it from the client's output.
     token_url = client == "dsh" and web_port is not None and not a.shell
     if dry:
-        tag, image_line = _image_state(image_plan, a.rebuild, prereqs.running)
         sess = session.Session(client, "xxxxxx", Path("<session folder>"))
-        image_ref = tag
     else:
         sess = session.new_session(client, plan.forward)
         image_ref = ready.run_ref
@@ -514,14 +544,14 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
         tty=session.stdin_is_tty() and not token_url, interactive=not token_url,
         shell=a.shell, url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
-    summary = _summary_lines(plan, ready, a.shell, client)
+    summary = _summary_lines(plan, None if dry else ready, a.shell, client)
     if dry:
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
     record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares]}
-    if first_run:
-        summary.insert(0, f"[launch] step 3: start {client}")
+    if steps:
+        summary.insert(0, f"[launch] step {steps + 1}: start {client}")
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
