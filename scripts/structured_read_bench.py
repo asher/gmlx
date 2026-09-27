@@ -1,15 +1,21 @@
 #!/usr/bin/env python
-"""Time the parts of a structured read on a DiffusionGemma GGUF.
+"""Time the parts of a ``/v1/systemone`` decision on a GGUF.
 
-    python scripts/structured_read_bench.py DIFFUSIONGEMMA.gguf [--rounds 5]
+    python scripts/structured_read_bench.py MODEL.gguf [--rounds 5]
 
-Loads the model in process and times prompt prefill, reads across canvas
-widths and sample counts, batched and one sample at a time, denoise steps,
-constrained and unconstrained unembedding, prompt extension, a thought, and
-whole decisions. Each arm reports the median of ``--rounds`` timed runs
-after ``--warmup`` untimed ones, with the arm order reversed on every other
-round. Run it on an idle machine. Writes JSON and a markdown table under
-``--out``.
+Loads the model in process. On DiffusionGemma it times prompt prefill, reads
+across canvas widths and sample counts, batched and one sample at a time,
+denoise steps, constrained and unconstrained unembedding, prompt extension,
+a thought, and whole decisions. On any other text model it times the letter
+readout: the prefix of a 700-word state and the tails of 1, 5 and 20
+questions at each forward size, one tail by length, 20 tails grouped and one
+per forward, a prefix store and lookup in the prompt cache, and whole
+decisions. Each arm reports the median of ``--rounds`` timed runs after
+``--warmup`` untimed ones, with the arm order reversed on every other round.
+The letter readout's long blocks rest ``--cooldown`` seconds after each
+round, since a few minutes of steady load lower the GPU clock on some
+machines. Run it on an idle machine. Writes JSON, with every run's time,
+and a markdown table under ``--out``.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import importlib
 import json
 import os
 import platform
+import random
 import statistics
 import subprocess
 import sys
@@ -40,6 +47,12 @@ _QUESTIONS = {
 }
 _FILLER = ("The service returned errors for several minutes before recovering, "
            "and the customer asked for an explanation of the incident. ")
+_THREAD_WORDS = ("order invoice refund shipping delay account password login error "
+                 "charge customer support ticket billing warehouse carrier tracking "
+                 "address payment card declined subscription renewal cancel upgrade "
+                 "plan outage server").split()
+_FORWARD_SIZES = (64, 128, 256)
+_TAIL_LENGTHS = (8, 16, 24, 32, 33, 40, 48, 64, 96, 128)
 
 
 def _sync():
@@ -66,9 +79,11 @@ class Bench:
         self.cooldown = cooldown
         self.rows: list[dict] = []
 
-    def block(self, name: str, arms: list[tuple[str, dict, object]]):
+    def block(self, name: str, arms: list[tuple[str, dict, object]], rest: float = 0.0):
         """``arms``: (label, params, fn) where ``fn()`` runs once and returns
-        the milliseconds to record."""
+        the milliseconds to record. ``rest`` seconds of idle follow each
+        round, so a block of long arms does not heat the GPU into a lower
+        clock."""
         print(f"\n[{name}]", flush=True)
         times: dict[str, list[float]] = {label: [] for label, _, _ in arms}
         for r in range(self.warmup + self.rounds):
@@ -77,11 +92,13 @@ class Bench:
                 ms = fn()
                 if r >= self.warmup:
                     times[label].append(ms)
+            if rest:
+                time.sleep(rest)
         for label, params, _ in arms:
             ts = times[label]
             row = {"block": name, "arm": label, **params,
                    "median_ms": statistics.median(ts), "min_ms": min(ts),
-                   "max_ms": max(ts), "runs": len(ts)}
+                   "max_ms": max(ts), "runs": len(ts), "times_ms": ts}
             self.rows.append(row)
             print(f"  {label:<40} {row['median_ms']:9.1f} ms "
                   f"(min {row['min_ms']:.1f}, max {row['max_ms']:.1f})", flush=True)
@@ -97,29 +114,98 @@ def _timed(fn):
     return (time.perf_counter() - t0) * 1e3
 
 
+def _drive(step, forwards: list):
+    """Run a letter-reader step generator to its value and append each
+    forward's milliseconds. Every step evaluates its forward before it
+    yields."""
+    while True:
+        t0 = time.perf_counter()
+        try:
+            next(step)
+        except StopIteration as stop:
+            return stop.value
+        forwards.append((time.perf_counter() - t0) * 1e3)
+
+
+def _thread(seed: int, words: int = 700) -> str:
+    r = random.Random(seed)
+    return "Customer thread:\n" + " ".join(r.choice(_THREAD_WORDS) for _ in range(words))
+
+
+def _letter_questions(n: int, seed: int) -> dict:
+    """``n`` questions of mixed types, with three or four options."""
+    r = random.Random(seed)
+    out = {}
+    for i in range(n):
+        kind = r.choice(("choice", "noul", "score"))
+        if kind == "choice":
+            out[f"q{i}"] = {"type": "choice", "instructions": f"Which team owns item {i}?",
+                            "criteria": {w: f"handles {w}" for w in r.sample(_THREAD_WORDS, 4)}}
+        elif kind == "noul":
+            out[f"q{i}"] = {"type": "noul", "instructions": f"Is point {i} resolved?"}
+        else:
+            out[f"q{i}"] = {"type": "score", "instructions": f"How urgent is point {i}?",
+                            "criteria": ["low", "medium", "high"]}
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("gguf")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--cooldown", type=float, default=15.0,
-                    help="seconds of idle between blocks")
-    ap.add_argument("--canvas", type=int, default=64)
-    ap.add_argument("--prompts", default="200,500,1000,2000")
-    ap.add_argument("--out", default=os.path.expanduser(
-        "~/.local/state/claude-scratch/gmlx/systemone"))
+                    help="seconds of idle between blocks, and between the rounds "
+                         "of the letter readout's long blocks")
+    ap.add_argument("--canvas", type=int, default=64,
+                    help="canvas width on DiffusionGemma")
+    ap.add_argument("--prompts", default="200,500,1000,2000",
+                    help="prefill prompt lengths on DiffusionGemma")
+    ap.add_argument("--out", default=".",
+                    help="directory for the JSON and markdown results")
     a = ap.parse_args()
 
     from gmlx.gen.diffusion import is_diffusion_model
     from gmlx.load.loader import load_model
-    from gmlx.serve.bridge_vlm import _make_text_processor
 
     therm_start = _therm()
     t0 = time.perf_counter()
     model, _config, tokenizer = load_model(a.gguf, verbose=False)
     load_s = time.perf_counter() - t0
-    if not is_diffusion_model(model):
-        sys.exit(f"{a.gguf} is not a DiffusionGemma GGUF")
+    bench = Bench(a.rounds, a.warmup, a.cooldown)
+    blocks = _diffusion_blocks if is_diffusion_model(model) else _letter_blocks
+    fields = blocks(model, tokenizer, a, bench)
+
+    result = {
+        "gguf": os.path.abspath(a.gguf),
+        "machine": platform.machine(),
+        "chip": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                               capture_output=True, text=True).stdout.strip(),
+        "load_s": load_s,
+        **fields,
+        "peak_gb": _peak_gb(),
+        "therm_start": therm_start,
+        "therm_end": _therm(),
+        "rows": bench.rows,
+    }
+    os.makedirs(a.out, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = os.path.join(a.out, f"structured-read-bench-{stamp}")
+    with open(base + ".json", "w") as f:
+        json.dump(result, f, indent=2)
+    with open(base + ".md", "w") as f:
+        f.write("| Block | Arm | Median ms | Min | Max |\n|---|---|---|---|---|\n")
+        for row in bench.rows:
+            f.write(f"| {row['block']} | {row['arm']} | {row['median_ms']:.1f} | "
+                    f"{row['min_ms']:.1f} | {row['max_ms']:.1f} |\n")
+    print(f"\npeak memory {result['peak_gb']:.1f} GB, {json.dumps(fields)}")
+    print(f"wrote {base}.json and {base}.md")
+    return 0
+
+
+def _diffusion_blocks(model, tokenizer, a, bench: Bench) -> dict:
+    from gmlx.serve.bridge_vlm import _make_text_processor
+
     processor = _make_text_processor(tokenizer)
     gen = importlib.import_module("mlx_vlm.server.generation")
     step_size = int(gen.get_prefill_step_size())
@@ -143,7 +229,6 @@ def main() -> int:
     lengths = [int(x) for x in a.prompts.split(",")]
     prompts = {p: prompt_ids(p) for p in lengths}
     mid = 500 if 500 in prompts else lengths[0]
-    bench = Bench(a.rounds, a.warmup, a.cooldown)
 
     with engine_scope(model, 0):
         reader = StructuredReader(model, prefill_step_size=step_size)
@@ -249,37 +334,160 @@ def main() -> int:
             ('decide samples="auto"', {"samples": "auto"}, lambda: decide_ms("auto")),
         ])
 
-    result = {
-        "gguf": os.path.abspath(a.gguf),
-        "machine": platform.machine(),
-        "chip": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
-                               capture_output=True, text=True).stdout.strip(),
-        "load_s": load_s,
+    return {
         "prefill_step_size": step_size,
         "canvas": canvas,
         "template_tokens": len(template),
         "min_width": need,
         "thought_tokens": thought_tokens,
         "decide_reads": reads_seen,
-        "peak_gb": _peak_gb(),
-        "therm_start": therm_start,
-        "therm_end": _therm(),
-        "rows": bench.rows,
     }
-    os.makedirs(a.out, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    base = os.path.join(a.out, f"structured-read-bench-{stamp}")
-    with open(base + ".json", "w") as f:
-        json.dump(result, f, indent=2)
-    with open(base + ".md", "w") as f:
-        f.write("| Block | Arm | Median ms | Min | Max |\n|---|---|---|---|---|\n")
-        for row in bench.rows:
-            f.write(f"| {row['block']} | {row['arm']} | {row['median_ms']:.1f} | "
-                    f"{row['min_ms']:.1f} | {row['max_ms']:.1f} |\n")
-    print(f"\npeak memory {result['peak_gb']:.1f} GB, thought tokens {thought_tokens}, "
-          f"decide reads {reads_seen}")
-    print(f"wrote {base}.json and {base}.md")
-    return 0
+
+
+def _letter_blocks(model, tokenizer, a, bench: Bench) -> dict:
+    from mlx_lm.generate import wired_limit
+    from mlx_vlm.apc import APCManager
+
+    from gmlx.serve.bridge_vlm import _make_text_processor
+    from gmlx.systemone import ar_reader, letters
+    from gmlx.systemone.ar_reader import (
+        LetterReader,
+        LetterTokens,
+        decide_letters,
+        run_to_end,
+        split_point,
+    )
+    from gmlx.systemone.prefixes import ApcPrefixes, prefix_salt
+
+    tokens = LetterTokens(_make_text_processor(tokenizer))
+    reader = LetterReader(model, tokens.letter_ids())
+    default_size = ar_reader.FORWARD_TOKENS
+    plan = ar_reader.plan_buckets
+    longest = {f: 0.0 for f in _FORWARD_SIZES}
+    grouped_forwards = {}
+
+    def use(size):
+        ar_reader.FORWARD_TOKENS = size
+
+    def tails_of(n, state):
+        body = {"state": state, "questions": _letter_questions(n, 7000 + n)}
+        texts = letters.pass_texts(letters.parse(body), letters.state_text(body))
+        return [tokens.ids(t)[split:] for t in texts]
+
+    try:
+        with wired_limit(model):
+            path = reader.check()
+            state = _thread(5000)
+            ids, split = split_point(tokens, state)
+
+            def prefix_ms(size):
+                use(size)
+                forwards = []
+                ms = _timed(lambda: _drive(reader.prefill(ids), forwards))
+                longest[size] = max(longest[size], *forwards)
+                return ms
+
+            bench.block(f"letter prefix of {split} tokens", [
+                (f"prefix F={f}", {"forward_tokens": f}, lambda f=f: prefix_ms(f))
+                for f in _FORWARD_SIZES], rest=a.cooldown)
+
+            prefixes = {}
+            for f in _FORWARD_SIZES:
+                use(f)
+                prefixes[f] = run_to_end(reader.prefill(ids))
+            tails = {n: tails_of(n, state) for n in (1, 5, 20)}
+
+            def tails_ms(size, n):
+                use(size)
+                forwards = []
+                ms = _timed(lambda: _drive(reader.tails(prefixes[size], ids, tails[n]),
+                                           forwards))
+                longest[size] = max(longest[size], *forwards)
+                return ms
+
+            for n in (1, 5, 20):
+                bench.block(f"letter tails of {n} questions after {split} tokens", [
+                    (f"tails n={n} F={f}", {"forward_tokens": f, "questions": n},
+                     lambda f=f, n=n: tails_ms(f, n))
+                    for f in _FORWARD_SIZES], rest=a.cooldown if n > 1 else 0.0)
+
+            use(default_size)
+            prefix = prefixes[default_size]
+            pool = [t for tail in tails[20] for t in tail]
+            bench.block(f"one letter tail by length, F={default_size}", [
+                (f"tail of {m} tokens", {"tail_tokens": m},
+                 lambda m=m: _timed(lambda: run_to_end(reader.tails(prefix, ids, [pool[:m]]))))
+                for m in _TAIL_LENGTHS if m <= default_size])
+
+            def twenty_ms(one_each):
+                ar_reader.plan_buckets = (
+                    (lambda lengths, fits, overhead=0: [[i] for i in range(len(lengths))])
+                    if one_each else plan)
+                forwards = []
+                try:
+                    ms = _timed(lambda: _drive(reader.tails(prefix, ids, tails[20]), forwards))
+                finally:
+                    ar_reader.plan_buckets = plan
+                grouped_forwards["one per forward" if one_each else "grouped"] = len(forwards)
+                return ms
+
+            bench.block("20 letter tails", [
+                ("grouped", {"grouped": True}, lambda: twenty_ms(False)),
+                ("one per forward", {"grouped": False}, lambda: twenty_ms(True)),
+            ], rest=a.cooldown)
+
+            kept = ApcPrefixes(APCManager(num_blocks=4096, block_size=16),
+                               prefix_salt(), reader.make_cache)
+            if kept.tier != "unsupported":
+                # A new state for every store, into one manager, as a server
+                # sees them.
+                fresh = []
+                for k in range(a.warmup + a.rounds + 1):
+                    s_ids, _ = split_point(tokens, _thread(6000 + k))
+                    fresh.append((s_ids, run_to_end(reader.prefill(s_ids))))
+                last = fresh.pop()
+                kept.store(*last)
+
+                def store_ms():
+                    nonlocal last
+                    last = fresh.pop()
+                    return _timed(lambda: kept.store(*last))
+
+                def lookup_ms():
+                    def run():
+                        warm = kept.lookup(last[0])
+                        if warm is None:
+                            raise RuntimeError("the kept prefix was not found")
+                        mx.eval([c.state for c in warm])
+                    return _timed(run)
+
+                bench.block(f"letter prefix in the {kept.tier} tier", [
+                    ("store a new prefix", {}, store_ms),
+                    ("look up a kept prefix", {}, lookup_ms),
+                ])
+
+            def decide_ms(n):
+                body = {"state": state, "questions": _letter_questions(n, 8000 + n)}
+                schema = letters.parse(body)
+                text = letters.state_text(body)
+                return _timed(lambda: run_to_end(decide_letters(reader, tokens, schema, text)))
+
+            bench.block("whole letter decisions", [
+                ("decide 1 question", {"questions": 1}, lambda: decide_ms(1)),
+                ("decide 5 questions", {"questions": 5}, lambda: decide_ms(5)),
+            ], rest=a.cooldown)
+    finally:
+        use(default_size)
+        ar_reader.plan_buckets = plan
+
+    return {
+        "readout": "letters",
+        "path": path,
+        "prefix_tokens": split,
+        "longest_forward_ms": longest,
+        "twenty_tails_forwards": grouped_forwards,
+        "prefix_tier": kept.tier,
+    }
 
 
 if __name__ == "__main__":

@@ -41,6 +41,18 @@ the narrowest canvas it fits is 32.
 python scripts/structured_read_bench.py diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```
 
+On any other text model, the same script times the letter readout. It runs
+the prefix of a 700-word state and the tails of 1, 5 and 20 questions at
+each forward size, one tail by length, 20 tails grouped and one per
+forward, a prefix store and lookup, and whole decisions. Its long blocks
+rest 15 s after each round, since a few minutes of steady load lower the
+GPU clock on some machines. The JSON output keeps every run's time, so a
+clock drop shows as a rise across rounds.
+
+```sh
+python scripts/structured_read_bench.py OpenJev-Q4_K_M.gguf
+```
+
 `scripts/structured_read_accuracy.py` holds the facts, the labeled set and
 the requests behind [Question wording](#question-wording),
 [Accuracy](#accuracy) and
