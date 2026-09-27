@@ -357,8 +357,12 @@ mod tests {
         dir.join(name)
     }
 
-    fn free_port() -> u16 {
-        TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+    /// A TCP listener already bound to a port the system picked, so tests
+    /// running in parallel threads never race for the same port.
+    fn tcp_listener(target: PathBuf) -> (u16, Vec<Listener>) {
+        let socket = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        (port, vec![Listener::Tcp { port, sockets: vec![socket], target }])
     }
 
     /// An echo server that answers each line and half-closes after EOF.
@@ -382,8 +386,7 @@ mod tests {
     fn tcp_to_unix_with_half_close() {
         let target = scratch_sock("echo-a.sock");
         echo_unix(&target);
-        let port = free_port();
-        let listeners = bind_all(&[(port, target)], &[]).unwrap();
+        let (port, listeners) = tcp_listener(target);
         thread::spawn(move || serve(listeners));
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(b"one\ntwo\n").unwrap();
@@ -425,8 +428,7 @@ mod tests {
 
     #[test]
     fn unreachable_target_closes_the_client() {
-        let port = free_port();
-        let listeners = bind_all(&[(port, scratch_sock("missing.sock"))], &[]).unwrap();
+        let (port, listeners) = tcp_listener(scratch_sock("missing.sock"));
         thread::spawn(move || serve(listeners));
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let mut got = Vec::new();

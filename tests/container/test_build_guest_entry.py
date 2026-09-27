@@ -193,14 +193,19 @@ def test_dist_check_refuses_the_symmetric_cases(tmp_path):
 
 def test_cargo_build_pins_the_target_folder_and_the_remaps(tmp_path, monkeypatch):
     seen = {}
+    crate = tmp_path / "my src" / "gmlx-entry"
+    home = tmp_path / "cargo home"
     monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "elsewhere"))
-    monkeypatch.setenv("CARGO_ENCODED_RUSTFLAGS", "-Cdebuginfo=2")
+    monkeypatch.setenv("CARGO_HOME", str(home))
+    monkeypatch.setenv("RUSTFLAGS", "-Cdebuginfo=2")
     monkeypatch.setattr(build.subprocess, "run",
                         lambda argv, cwd, env, check: seen.update(env=env))
-    build._cargo_build([], CRATE)
-    assert seen["env"]["CARGO_TARGET_DIR"] == str(CRATE / "target")
-    assert "CARGO_ENCODED_RUSTFLAGS" not in seen["env"]
-    assert "--remap-path-prefix" in seen["env"]["RUSTFLAGS"]
+    build._cargo_build([], crate)
+    assert seen["env"]["CARGO_TARGET_DIR"] == str(crate / "target")
+    assert "RUSTFLAGS" not in seen["env"]
+    # Each flag stays whole even though both folder names hold a space.
+    assert seen["env"]["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") == [
+        f"--remap-path-prefix={crate}=/gmlx-entry", f"--remap-path-prefix={home}=/cargo"]
 
 
 def test_gitignore_keeps_the_binary_out_of_git():

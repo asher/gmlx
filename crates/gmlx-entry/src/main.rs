@@ -112,33 +112,81 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
     Err("missing -- before the command".into())
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
-        return false;
-    }
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
-    // SAFETY: c_path is a valid NUL-terminated string for the call's duration.
-    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
+/// What a lookup of a command found.
+#[derive(Debug, PartialEq)]
+pub enum Resolved {
+    /// An executable file.
+    Found(PathBuf),
+    /// A regular file without the execute bit, and no executable match.
+    NotExecutable(PathBuf),
+    Missing,
 }
 
-/// Finds `cmd` as the image would run it: as given when it contains `/`,
-/// otherwise in each `PATH` folder in turn, with an empty entry meaning the
-/// current folder.
-pub fn resolve(cmd: &OsStr, path_env: Option<&OsStr>) -> Option<PathBuf> {
-    if cmd.is_empty() {
+/// Whether `path` is a regular file, and whether it can be executed.
+fn file_state(path: &Path) -> Option<bool> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
         return None;
+    }
+    if meta.permissions().mode() & 0o111 == 0 {
+        return Some(false);
+    }
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return Some(false);
+    };
+    // SAFETY: c_path is a valid NUL-terminated string for the call's duration.
+    Some(unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 })
+}
+
+/// Finds `cmd` as execvp would: as given when it contains `/`, otherwise in
+/// each `PATH` folder in turn, with an empty entry meaning the current
+/// folder. A file without the execute bit is remembered and the search goes
+/// on, so a later executable match still wins.
+pub fn resolve_full(cmd: &OsStr, path_env: Option<&OsStr>) -> Resolved {
+    if cmd.is_empty() {
+        return Resolved::Missing;
     }
     if cmd.as_bytes().contains(&b'/') {
         let path = PathBuf::from(cmd);
-        return is_executable_file(&path).then_some(path);
+        return match file_state(&path) {
+            Some(true) => Resolved::Found(path),
+            Some(false) => Resolved::NotExecutable(path),
+            None => Resolved::Missing,
+        };
     }
     let search = path_env.unwrap_or(OsStr::new(DEFAULT_PATH));
-    search.as_bytes().split(|b| *b == b':').find_map(|dir| {
+    let mut first_denied = None;
+    for dir in search.as_bytes().split(|b| *b == b':') {
         let dir = if dir.is_empty() { Path::new(".") } else { Path::new(OsStr::from_bytes(dir)) };
         let candidate = dir.join(cmd);
-        is_executable_file(&candidate).then_some(candidate)
-    })
+        match file_state(&candidate) {
+            Some(true) => return Resolved::Found(candidate),
+            Some(false) if first_denied.is_none() => first_denied = Some(candidate),
+            _ => {}
+        }
+    }
+    first_denied.map_or(Resolved::Missing, Resolved::NotExecutable)
+}
+
+/// The executable match for `cmd`, if there is one.
+pub fn resolve(cmd: &OsStr, path_env: Option<&OsStr>) -> Option<PathBuf> {
+    match resolve_full(cmd, path_env) {
+        Resolved::Found(path) => Some(path),
+        _ => None,
+    }
+}
+
+fn no_execute_bit_message(path: &Path) -> String {
+    format!("gmlx-entry: {} has no execute bit. Run chmod 755 on it in the Containerfile.",
+            path.display())
+}
+
+/// Exits 126 or 127 with the message for a lookup that found no executable.
+fn fail_unresolved(resolved: Resolved, cmd: &OsStr, path_env: Option<&OsStr>) -> ! {
+    match resolved {
+        Resolved::NotExecutable(path) => fail(EXIT_CANNOT_RUN, &no_execute_bit_message(&path)),
+        _ => fail(EXIT_NOT_FOUND, &not_found_message(cmd, path_env)),
+    }
 }
 
 fn not_found_message(cmd: &OsStr, path_env: Option<&OsStr>) -> String {
@@ -153,9 +201,21 @@ fn not_found_message(cmd: &OsStr, path_env: Option<&OsStr>) -> String {
     }
 }
 
-/// The shell for `--shell`: `bash`, else `sh`.
-pub fn resolve_shell(path_env: Option<&OsStr>) -> Option<PathBuf> {
-    resolve(OsStr::new("bash"), path_env).or_else(|| resolve(OsStr::new("sh"), path_env))
+/// The shell for `--shell`: `bash`, else `sh`. When neither can run, the
+/// first one found without the execute bit is reported.
+pub fn resolve_shell(path_env: Option<&OsStr>) -> Resolved {
+    let bash = resolve_full(OsStr::new("bash"), path_env);
+    if matches!(bash, Resolved::Found(_)) {
+        return bash;
+    }
+    let sh = resolve_full(OsStr::new("sh"), path_env);
+    match (bash, sh) {
+        (_, Resolved::Found(path)) => Resolved::Found(path),
+        (Resolved::NotExecutable(path), _) | (_, Resolved::NotExecutable(path)) => {
+            Resolved::NotExecutable(path)
+        }
+        _ => Resolved::Missing,
+    }
 }
 
 fn fail(code: i32, message: &str) -> ! {
@@ -163,10 +223,10 @@ fn fail(code: i32, message: &str) -> ! {
     exit(code)
 }
 
-/// The `PATH` the client gets under `--clipboard`: the stand-ins first,
-/// then the image's own search path.
-pub fn clipboard_path(path_env: Option<&OsStr>) -> OsString {
-    let mut path = OsString::from(clipboard::CLIP_BIN);
+/// The `PATH` the client gets under `--clipboard`: the stand-in folder
+/// `bin` first, then the image's own search path.
+pub fn clipboard_path(bin: &OsStr, path_env: Option<&OsStr>) -> OsString {
+    let mut path = bin.to_os_string();
     path.push(":");
     path.push(path_env.unwrap_or(OsStr::new(DEFAULT_PATH)));
     path
@@ -183,9 +243,9 @@ fn main() {
         .unwrap_or_else(|e| fail(EXIT_USAGE, &format!("gmlx-entry: {e}\n{USAGE}")));
     let path_env = std::env::var_os("PATH");
     match mode {
-        Mode::Check(cmd) => match resolve(&cmd, path_env.as_deref()) {
-            Some(found) => println!("{}", found.display()),
-            None => fail(EXIT_NOT_FOUND, &not_found_message(&cmd, path_env.as_deref())),
+        Mode::Check(cmd) => match resolve_full(&cmd, path_env.as_deref()) {
+            Resolved::Found(found) => println!("{}", found.display()),
+            other => fail_unresolved(other, &cmd, path_env.as_deref()),
         },
         Mode::Run(spec) => run(spec, path_env),
     }
@@ -193,16 +253,22 @@ fn main() {
 
 fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     let (program, name, rest) = if spec.shell {
-        let shell = resolve_shell(path_env.as_deref()).unwrap_or_else(|| {
-            fail(EXIT_NOT_FOUND,
-                 "gmlx-entry: the image has no shell (bash or sh), so --shell cannot open one.")
-        });
+        let shell = match resolve_shell(path_env.as_deref()) {
+            Resolved::Found(path) => path,
+            Resolved::NotExecutable(path) => {
+                fail(EXIT_CANNOT_RUN, &no_execute_bit_message(&path))
+            }
+            Resolved::Missing => fail(EXIT_NOT_FOUND,
+                "gmlx-entry: the image has no shell (bash or sh), so --shell cannot open one."),
+        };
         let name = shell.file_name().map(OsStr::to_os_string).unwrap_or_default();
         (shell, name, spec.argv)
     } else {
         let cmd = spec.argv[0].clone();
-        let found = resolve(&cmd, path_env.as_deref())
-            .unwrap_or_else(|| fail(EXIT_NOT_FOUND, &not_found_message(&cmd, path_env.as_deref())));
+        let found = match resolve_full(&cmd, path_env.as_deref()) {
+            Resolved::Found(path) => path,
+            other => fail_unresolved(other, &cmd, path_env.as_deref()),
+        };
         (found, cmd, spec.argv[1..].to_vec())
     };
 
@@ -221,7 +287,7 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     let mut command = Command::new(&program);
     command.arg0(&name).args(&rest);
     if spec.clipboard {
-        command.env("PATH", clipboard_path(path_env.as_deref()));
+        command.env("PATH", clipboard_path(&clipboard::clip_bin(), path_env.as_deref()));
     }
     let err = command.exec();
     let code = if err.kind() == std::io::ErrorKind::NotFound { EXIT_NOT_FOUND } else { EXIT_CANNOT_RUN };
@@ -264,8 +330,9 @@ mod tests {
         let Mode::Run(spec) = parse_args(&os(&["--clipboard", "--", "claude"])).unwrap()
         else { panic!("not a run") };
         assert!(spec.clipboard);
-        assert_eq!(clipboard_path(Some(OsStr::new("/usr/bin"))), "/opt/gmlx/bin:/usr/bin");
-        assert_eq!(clipboard_path(None), format!("/opt/gmlx/bin:{DEFAULT_PATH}").as_str());
+        let bin = OsStr::new(clipboard::CLIP_BIN);
+        assert_eq!(clipboard_path(bin, Some(OsStr::new("/usr/bin"))), "/opt/gmlx/bin:/usr/bin");
+        assert_eq!(clipboard_path(bin, None), format!("/opt/gmlx/bin:{DEFAULT_PATH}").as_str());
     }
 
     #[test]
@@ -306,10 +373,14 @@ mod tests {
         let (a, b) = (dir.join("a"), dir.join("b"));
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
-        make(&a.join("tool"), 0o644); // not executable: skipped
+        make(&a.join("tool"), 0o644); // not executable: remembered, the search goes on
         make(&b.join("tool"), 0o755);
         let path = OsString::from(format!("{}:{}", a.display(), b.display()));
         assert_eq!(resolve(OsStr::new("tool"), Some(&path)), Some(b.join("tool")));
+        make(&a.join("only"), 0o644);
+        assert_eq!(resolve_full(OsStr::new("only"), Some(&path)),
+                   Resolved::NotExecutable(a.join("only")));
+        assert_eq!(resolve(OsStr::new("only"), Some(&path)), None);
         assert_eq!(resolve(OsStr::new("missing"), Some(&path)), None);
         fs::create_dir_all(a.join("dir")).unwrap();
         assert_eq!(resolve(OsStr::new("dir"), Some(&path)), None); // folders never match
@@ -321,7 +392,10 @@ mod tests {
         make(&dir.join("run"), 0o755);
         let given = dir.join("run");
         assert_eq!(resolve(given.as_os_str(), Some(OsStr::new(""))), Some(given.clone()));
-        assert_eq!(resolve(dir.join("nope").as_os_str(), None), None);
+        assert_eq!(resolve_full(dir.join("nope").as_os_str(), None), Resolved::Missing);
+        make(&dir.join("plain"), 0o644);
+        assert_eq!(resolve_full(dir.join("plain").as_os_str(), None),
+                   Resolved::NotExecutable(dir.join("plain")));
     }
 
     #[test]
@@ -334,10 +408,17 @@ mod tests {
         let dir = scratch("shell");
         make(&dir.join("sh"), 0o755);
         let path = dir.clone().into_os_string();
-        assert_eq!(resolve_shell(Some(&path)), Some(dir.join("sh")));
+        assert_eq!(resolve_shell(Some(&path)), Resolved::Found(dir.join("sh")));
+        make(&dir.join("bash"), 0o644); // not executable: sh still wins
+        assert_eq!(resolve_shell(Some(&path)), Resolved::Found(dir.join("sh")));
         make(&dir.join("bash"), 0o755);
-        assert_eq!(resolve_shell(Some(&path)), Some(dir.join("bash")));
+        assert_eq!(resolve_shell(Some(&path)), Resolved::Found(dir.join("bash")));
         let empty = scratch("noshell").into_os_string();
-        assert_eq!(resolve_shell(Some(&empty)), None);
+        assert_eq!(resolve_shell(Some(&empty)), Resolved::Missing);
+        let denied = scratch("deniedshell");
+        make(&denied.join("bash"), 0o644);
+        make(&denied.join("sh"), 0o644);
+        assert_eq!(resolve_shell(Some(denied.as_os_str())),
+                   Resolved::NotExecutable(denied.join("bash")));
     }
 }

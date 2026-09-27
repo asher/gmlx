@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-NOT_FOUND, LISTEN = 127, 125
+NOT_FOUND, CANNOT_RUN, LISTEN = 127, 126, 125
 
 
 @pytest.fixture(scope="session")
@@ -58,6 +58,37 @@ def _run(entry, *args, env=None, **kw):
     return subprocess.run([entry, *args], capture_output=True, text=True,
                           env=env if env is not None else dict(os.environ),
                           timeout=30, **kw)
+
+
+def _run_relay(entry, args_for, env):
+    """Run the entry with a TCP listener on a free port. Another process can
+    take the port between the probe and the entry's bind, which makes the
+    entry exit 125, so a busy port is tried again with a new one."""
+    for _ in range(3):
+        port = _free_port()
+        done = _run(entry, *args_for(port), env=env)
+        if done.returncode != LISTEN:
+            break
+    return port, done
+
+
+def _start_relay_client(entry, sock: Path, env) -> tuple:
+    """Start the entry with a TCP listener in front of ``sock`` and a client
+    that prints a line once it runs. The relay is bound and detached before
+    the client starts, and the client has replaced the entry by then, so
+    only the relay still carries ``sock`` in its arguments."""
+    for _ in range(3):
+        port = _free_port()
+        client = subprocess.Popen(
+            [entry, "--tcp", f"{port}={sock}", "--", "sh", "-c", "echo ready; exec sleep 30"],
+            env=env, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if client.stdout.readline() == b"ready\n":
+            return client, port
+        err = client.stderr.read().decode()
+        client.wait(10)
+        if client.returncode != LISTEN:
+            pytest.fail(f"the entry exited {client.returncode}: {err}")
+    pytest.fail(f"no free port after three tries: {err}")
 
 
 def _relay_pids(marker: str) -> list:
@@ -159,6 +190,43 @@ def test_shell_without_any_shell_exits_127(entry, tmp_path):
     assert "has no shell (bash or sh)" in done.stderr
 
 
+def _script(path: Path, text: str, mode: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(mode)
+    return path
+
+
+def test_a_later_executable_match_wins_over_one_without_the_bit(entry, tmp_path):
+    _script(tmp_path / "a" / "tool", "#!/bin/sh\necho from-a\n", 0o644)
+    later = _script(tmp_path / "b" / "tool", "#!/bin/sh\necho from-b\n", 0o755)
+    env = dict(os.environ, PATH=f"{tmp_path / 'a'}:{tmp_path / 'b'}:/usr/bin:/bin")
+    done = _run(entry, "--", "tool", env=env)
+    assert done.returncode == 0 and done.stdout.strip() == "from-b", done.stderr
+    check = _run(entry, "--check", "tool", env=env)
+    assert check.returncode == 0 and check.stdout.strip() == str(later), check.stderr
+
+
+def test_a_match_without_the_execute_bit_exits_126(entry, tmp_path):
+    plain = _script(tmp_path / "a" / "start.sh", "#!/bin/sh\necho ran\n", 0o644)
+    env = dict(os.environ, PATH=f"{tmp_path / 'a'}:/usr/bin:/bin")
+    message = f"{plain} has no execute bit. Run chmod 755 on it in the Containerfile."
+    for args in (("--", "start.sh"), ("--check", "start.sh"), ("--", str(plain)),
+                 ("--check", str(plain))):
+        done = _run(entry, *args, env=env)
+        assert done.returncode == CANNOT_RUN, (args, done.stderr)
+        assert done.stderr.strip() == f"gmlx-entry: {message}", args
+        assert done.stdout == "", args
+
+
+def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
+    folder = tmp_path / "bin"
+    _script(folder / "bash", "#!/bin/sh\necho wrong-shell\n", 0o644)
+    os.symlink(shutil.which("sh"), folder / "sh")
+    done = _run(entry, "--shell", "--", "-c", "echo sh-ran", env=dict(os.environ, PATH=str(folder)))
+    assert done.returncode == 0 and done.stdout.strip() == "sh-ran", done.stderr
+
+
 def test_busy_port_exits_125_with_a_message(entry, short_dir):
     held = socket.socket()
     held.bind(("127.0.0.1", 0))
@@ -173,13 +241,12 @@ def test_busy_port_exits_125_with_a_message(entry, short_dir):
 def test_tcp_listener_relays_to_a_unix_socket(entry, short_dir):
     sock = short_dir / "api.sock"
     srv = _echo_unix(sock)
-    port = _free_port()
     home = short_dir / "home"
     home.mkdir()
     try:
-        done = _run(entry, "--tcp", f"{port}={sock}", "--", "true",
-                    env=dict(os.environ, HOME=str(home)))
-        assert done.returncode == 0                  # the client ran and exited
+        port, done = _run_relay(entry, lambda port: ("--tcp", f"{port}={sock}", "--", "true"),
+                                dict(os.environ, HOME=str(home)))
+        assert done.returncode == 0, done.stderr     # the client ran and exited
         with _connect_retry(port) as c:              # the detached relay lives on
             c.sendall(b"ping")
             assert c.recv(100) == b"echo ping"
@@ -204,7 +271,7 @@ def test_unix_listener_relays_to_a_tcp_port(entry, short_dir):
     try:
         done = _run(entry, "--unix", f"{web}={port}", "--", "true",
                     env=dict(os.environ, HOME=str(short_dir)))
-        assert done.returncode == 0
+        assert done.returncode == 0, done.stderr
         c = socket.socket(socket.AF_UNIX)
         c.settimeout(5)
         c.connect(str(web))
@@ -219,10 +286,7 @@ def test_unix_listener_relays_to_a_tcp_port(entry, short_dir):
 def test_relay_has_its_own_session_and_survives_sigint(entry, short_dir):
     sock = short_dir / "api.sock"
     srv = _echo_unix(sock)
-    port = _free_port()
-    client = subprocess.Popen([entry, "--tcp", f"{port}={sock}", "--", "sleep", "30"],
-                              env=dict(os.environ, HOME=str(short_dir)),
-                              start_new_session=True)
+    client, port = _start_relay_client(entry, sock, dict(os.environ, HOME=str(short_dir)))
     try:
         with _connect_retry(port) as c:
             c.sendall(b"a")
@@ -245,11 +309,10 @@ def test_relay_log_is_truncated_per_session(entry, short_dir):
     log = short_dir / ".gmlx-entry.log"
     log.write_text("old session line\n" * 100)
     missing = short_dir / "missing.sock"
-    port = _free_port()
     try:
-        done = _run(entry, "--tcp", f"{port}={missing}", "--", "true",
-                    env=dict(os.environ, HOME=str(short_dir)))
-        assert done.returncode == 0
+        port, done = _run_relay(entry, lambda port: ("--tcp", f"{port}={missing}", "--", "true"),
+                                dict(os.environ, HOME=str(short_dir)))
+        assert done.returncode == 0, done.stderr
         with _connect_retry(port) as c:
             assert c.recv(10) == b""                 # target down: closed at once
         deadline = time.monotonic() + 5
@@ -264,11 +327,11 @@ def test_relay_log_is_truncated_per_session(entry, short_dir):
 
 def test_relay_log_stops_at_one_mebibyte(entry, short_dir):
     missing = short_dir / "m.sock"
-    port = _free_port()
     log = short_dir / ".gmlx-entry.log"
     try:
-        _run(entry, "--tcp", f"{port}={missing}", "--", "true",
-             env=dict(os.environ, HOME=str(short_dir)))
+        port, done = _run_relay(entry, lambda port: ("--tcp", f"{port}={missing}", "--", "true"),
+                                dict(os.environ, HOME=str(short_dir)))
+        assert done.returncode == 0, done.stderr
         line = len(f"port {port}: cannot reach {missing} (No such file or directory "
                    f"(os error 2))\n")
         for _ in range((1 << 20) // line + 200):
@@ -295,18 +358,21 @@ def test_bad_arguments_exit_2(entry):
 # The PATH under --clipboard
 
 def test_clipboard_puts_the_stand_ins_first_after_resolving(entry, tmp_path):
-    own = tmp_path / "bin"
-    own.mkdir()
-    tool = own / "xclip"
-    tool.write_text('#!/bin/sh\necho "own xclip $PATH"\n')
-    tool.chmod(0o755)
-    env = dict(os.environ, PATH=f"{own}:/usr/bin:/bin")
+    own = _script(tmp_path / "bin" / "xclip", '#!/bin/sh\necho "own xclip $PATH"\n', 0o755)
+    # A stand-in folder with its own xclip: resolving CMD with it first
+    # would run this one instead.
+    stand_ins = _script(tmp_path / "stand-ins" / "xclip", "#!/bin/sh\necho stand-in\n",
+                        0o755).parent
+    env = dict(os.environ, PATH=f"{own.parent}:/usr/bin:/bin", GMLX_CLIP_BIN=str(stand_ins))
     done = _run(entry, "--clipboard", "--", "xclip", env=env)
     # The command resolved on the image's own PATH, and the client sees the
     # stand-ins first.
-    assert done.stdout.strip() == f"own xclip /opt/gmlx/bin:{own}:/usr/bin:/bin"
+    assert done.stdout.strip() == f"own xclip {stand_ins}:{own.parent}:/usr/bin:/bin", done.stderr
     shell = _run(entry, "--clipboard", "--shell", "--", "-c", 'echo "$PATH"', env=env)
-    assert shell.stdout.strip() == f"/opt/gmlx/bin:{own}:/usr/bin:/bin"
+    assert shell.stdout.strip() == f"{stand_ins}:{own.parent}:/usr/bin:/bin"
+    plain = _run(entry, "--clipboard", "--", "sh", "-c", 'echo "$PATH"',
+                 env=dict(os.environ, PATH="/usr/bin:/bin"))
+    assert plain.stdout.strip() == "/opt/gmlx/bin:/usr/bin:/bin"      # the default folder
 
 
 def test_without_clipboard_the_image_path_stays(entry, tmp_path):
@@ -343,7 +409,10 @@ def _clip_server(path: Path, answer: bytes, requests: list):
                         break
                     line += chunk
                 requests.append(line.decode())
-                conn.sendall(answer)
+                try:
+                    conn.sendall(answer)
+                except OSError:
+                    pass                          # the stand-in stopped reading
 
     threading.Thread(target=serve, daemon=True).start()
     return srv
@@ -368,6 +437,20 @@ def test_stand_ins_read_an_image_through_their_links(entry, short_dir):
         done = _clip_run(xclip, "-selection", "clipboard", "-t", "TARGETS", "-o", sock=sock)
         assert done.returncode == 0
         assert requests == ["IMAGE image/png\n", "IMAGE image/png\n", "TYPES\n"]
+    finally:
+        srv.close()
+
+
+def test_a_stand_in_piped_into_head_exits_quietly(entry, short_dir):
+    sock = short_dir / "clip.sock"
+    size = 4 << 20
+    srv = _clip_server(sock, f"OK {size}\n".encode() + b"\0" * size, [])
+    try:
+        xclip = _stand_in(entry, short_dir, "xclip")
+        done = subprocess.run(
+            ["sh", "-c", f"'{xclip}' -selection clipboard -t image/png -o | head -c 1 >/dev/null"],
+            capture_output=True, timeout=30, env=dict(os.environ, GMLX_CLIP_SOCK=str(sock)))
+        assert done.returncode == 0 and done.stderr == b"", done.stderr
     finally:
         srv.close()
 

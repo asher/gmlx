@@ -17,6 +17,13 @@ pub const CLIP_SOCK: &str = "/var/host-services/gmlx-clip.sock";
 pub const CLIP_SOCK_ENV: &str = "GMLX_CLIP_SOCK";
 /// The folder of the stand-in links, first on `PATH` under `--clipboard`.
 pub const CLIP_BIN: &str = "/opt/gmlx/bin";
+/// Names another stand-in folder, for tests on the Mac.
+pub const CLIP_BIN_ENV: &str = "GMLX_CLIP_BIN";
+
+/// The stand-in folder: `CLIP_BIN`, or the folder `GMLX_CLIP_BIN` names.
+pub fn clip_bin() -> std::ffi::OsString {
+    std::env::var_os(CLIP_BIN_ENV).unwrap_or_else(|| CLIP_BIN.into())
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Request {
@@ -179,13 +186,43 @@ pub fn run(tool: &str, args: &[OsString]) -> i32 {
     };
     let sock = std::env::var_os(CLIP_SOCK_ENV).unwrap_or_else(|| CLIP_SOCK.into());
     let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let mut out = PipeOut { inner: stdout.lock(), closed: false };
     match ask(Path::new(&sock), &request, &mut out).and_then(|()| out.flush().map_err(|e| e.to_string())) {
         Ok(()) => 0,
+        // The reader went away, as when a paste pipes into `head`. The real
+        // tools die of SIGPIPE there without a message, which is exit 141.
+        Err(_) if out.closed => 128 + libc::SIGPIPE,
         Err(message) => {
             eprintln!("{tool}: {message}");
             1
         }
+    }
+}
+
+/// Standard output that notes when its reader has gone away.
+struct PipeOut<W: Write> {
+    inner: W,
+    closed: bool,
+}
+
+impl<W: Write> PipeOut<W> {
+    fn note(&mut self, result: io::Result<usize>) -> io::Result<usize> {
+        if matches!(&result, Err(e) if e.kind() == io::ErrorKind::BrokenPipe) {
+            self.closed = true;
+        }
+        result
+    }
+}
+
+impl<W: Write> Write for PipeOut<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let result = self.inner.write(buf);
+        self.note(result)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let result = self.inner.flush().map(|()| 0);
+        self.note(result).map(|_| ())
     }
 }
 

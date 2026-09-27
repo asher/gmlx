@@ -93,19 +93,22 @@ def check_toolchain(*, musl: bool, crate: Path = CRATE) -> None:
 
 
 def _rustflags(crate: Path) -> str:
-    """Path remaps, so the binary never names a folder of the build machine."""
+    """Path remaps, so the binary never names a folder of the build machine.
+    The flags are joined with 0x1f for CARGO_ENCODED_RUSTFLAGS, so a folder
+    name with a space stays one flag."""
     cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
-    return " ".join([f"--remap-path-prefix={crate}=/gmlx-entry",
-                     f"--remap-path-prefix={cargo_home}=/cargo"])
+    return "\x1f".join([f"--remap-path-prefix={crate}=/gmlx-entry",
+                        f"--remap-path-prefix={cargo_home}=/cargo"])
 
 
 def _cargo_build(args: list, crate: Path) -> None:
     env = _env()
-    env["RUSTFLAGS"] = _rustflags(crate)
-    # The script reads the binary from the crate's own target folder, and
-    # CARGO_ENCODED_RUSTFLAGS would replace the path remaps above.
+    env["CARGO_ENCODED_RUSTFLAGS"] = _rustflags(crate)
+    # The script reads the binary from the crate's own target folder. Cargo
+    # ignores RUSTFLAGS when the encoded form is set, so it is removed to
+    # keep the build free of flags from the caller.
     env["CARGO_TARGET_DIR"] = str(crate / "target")
-    env.pop("CARGO_ENCODED_RUSTFLAGS", None)
+    env.pop("RUSTFLAGS", None)
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline", *args],
                    cwd=crate, env=env, check=True)
 
