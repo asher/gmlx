@@ -125,6 +125,31 @@ def test_the_builder_stays_while_another_launch_builds(fake_container):
     assert (images.images_dir() / "builder-started").exists()
 
 
+def test_a_stale_marker_never_stops_a_builder_you_started(fake_container):
+    # A launch killed mid-build left its marker, and you started the builder
+    # afterwards.
+    marker = images.images_dir() / "builder-started"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("999999")
+    fake_container.update(builder=True, builder_started="2099-01-01T00:00:00Z")
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert not fake_container.calls("builder", "stop")
+    assert not marker.exists()
+
+
+def test_a_builder_started_before_the_marker_keeps_running(fake_container, monkeypatch):
+    # The marker was written, but the builder that runs after the build
+    # started earlier, so it is not the one the launch started.
+    real = images.cli.build
+
+    def build(context, **kw):
+        real(context, **kw)
+        fake_container.update(builder_started="2000-01-01T00:00:00Z")
+    monkeypatch.setattr(images.cli, "build", build)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert not fake_container.calls("builder", "stop")
+
+
 def test_packages_change_the_hash_and_reach_the_build(fake_container):
     assert images.shipped_tag("pi", []) != images.shipped_tag("pi", ["make"])
     images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make", "jq"]), say=_quiet)

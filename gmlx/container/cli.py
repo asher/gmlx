@@ -168,17 +168,31 @@ def launch_images() -> tuple[int, int]:
     return len(sizes), sum(sizes.values())
 
 
-def builder_running() -> bool:
-    """Whether Apple container's image builder, a virtual machine of its
-    own, is running."""
+def builder_status() -> tuple[str, float | None]:
+    """The state of Apple container's image builder, a virtual machine of
+    its own, and when it last started, in seconds since the epoch. The state
+    is empty when there is no builder."""
     proc = _run(["builder", "status", "--format", "json"], check=False)
     if proc.returncode != 0:
-        return False
+        return "", None
     try:
         rows = json.loads(proc.stdout or "[]")
     except json.JSONDecodeError:
-        return False
-    return any((r.get("status") or {}).get("state") == "running" for r in rows)
+        return "", None
+    for row in rows or []:
+        status = row.get("status") or {}
+        started = None
+        try:
+            started = datetime.fromisoformat(
+                str(status.get("startedDate", "")).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+        return str(status.get("state", "")), started
+    return "", None
+
+
+def builder_running() -> bool:
+    return builder_status()[0] == "running"
 
 
 def builder_stop() -> None:

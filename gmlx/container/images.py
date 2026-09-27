@@ -323,12 +323,19 @@ def check_arch(info: ImageInfo, ref: str) -> None:
 def _build(context: str, **kw) -> None:
     """Run ``container build``, then stop the image builder when a launch
     started it and no other launch is building. The builder is a virtual
-    machine of its own that keeps its memory until it stops."""
+    machine of its own that keeps its memory until it stops.
+
+    The marker file holds the process ID of the launch that started the
+    builder. A marker whose launch is gone is dropped, and the builder stops
+    only when it started after the marker was written, so a builder that
+    you started yourself keeps running."""
     marker = images_dir() / "builder-started"
     using = FileLock(images_dir() / "builder.lock", shared=True)
     try:
-        if not cli.builder_running():
-            marker.touch()
+        if cli.builder_running():
+            _drop_stale_marker(marker)
+        else:
+            marker.write_text(str(os.getpid()))
         cli.build(context, **kw)
     finally:
         using.release()
@@ -338,11 +345,37 @@ def _build(context: str, **kw) -> None:
             last = None                   # another launch is still building
         if last is not None:
             try:
-                if marker.exists():
-                    marker.unlink()
-                    cli.builder_stop()
+                _stop_builder_if_ours(marker)
             finally:
                 last.release()
+
+
+def _drop_stale_marker(marker: Path) -> None:
+    try:
+        pid = int(marker.read_text().strip() or "0")
+    except (OSError, ValueError):
+        return
+    try:
+        if pid > 0:
+            os.kill(pid, 0)
+            return                        # that launch is still running
+    except PermissionError:
+        return
+    except OSError:
+        pass
+    marker.unlink(missing_ok=True)
+
+
+def _stop_builder_if_ours(marker: Path) -> None:
+    try:
+        written = marker.stat().st_mtime
+    except FileNotFoundError:
+        return
+    marker.unlink(missing_ok=True)
+    state, started = cli.builder_status()
+    # startedDate has whole seconds, so allow for the rounding.
+    if state == "running" and started is not None and started >= written - 2:
+        cli.builder_stop()
 
 
 def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,

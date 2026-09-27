@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 
 def _normalize(ref: str) -> str:
@@ -110,12 +111,15 @@ def main(state: dict, args: list[str]) -> int:
         return 0
     if args[:2] == ["builder", "status"]:
         print(json.dumps([{"id": "buildkit", "status": {
-            "state": "running" if state.get("builder") else "stopped"}}]))
+            "state": "running" if state.get("builder") else "stopped",
+            "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]))
         return 0
     if args[:2] == ["builder", "stop"]:
         state["builder"] = False
         return 0
     if args[0] == "build":
+        if not state.get("builder"):
+            state["builder_started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         state["builder"] = True
         if state.get("fail_build"):
             return 1
