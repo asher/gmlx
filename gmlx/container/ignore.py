@@ -165,7 +165,7 @@ def read_patterns(text: str) -> list[str]:
     out = []
     for number, line in enumerate(text.splitlines()):
         if number == 0:
-            line = line.removeprefix("﻿")
+            line = line.removeprefix("\ufeff")
         if line.startswith("#"):
             continue
         line = line.strip()

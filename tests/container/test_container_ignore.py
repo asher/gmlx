@@ -118,7 +118,7 @@ def test_unsupported_patterns_are_refused(pattern):
 
 
 def test_read_patterns_follows_readall():
-    text = "﻿# comment\n\n  /build/  \n! /dist/x \nsrc/../out\n#!keep\n"
+    text = "\ufeff# comment\n\n  /build/  \n! /dist/x \nsrc/../out\n#!keep\n"
     assert ignore.read_patterns(text) == ["build", "!dist/x", "out"]
 
 
