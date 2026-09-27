@@ -65,7 +65,7 @@ def _buffered_types() -> tuple:
         return ()
 
 
-def _clone_single_row(cache: Any) -> Any | None:
+def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | None:
     """Deep-copy an already-single-row cache, preserving its concrete kind.
 
     Rotating layers canonicalize: min(offset, W) tokens in temporal order
@@ -74,8 +74,11 @@ def _clone_single_row(cache: Any) -> Any | None:
     required form -- the chain key is content-addressed over the canonical
     window and a future request can never reproduce this stream's ring
     phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
+
+    With ``eval_targets``, the copies of a plain row go into that list and
+    the caller evaluates them, so a many-layer clone syncs once.
     """
-    return _clone_row(cache, rot_canonical=True)
+    return _clone_row(cache, rot_canonical=True, eval_targets=eval_targets)
 
 
 def _clone_row_faithful(cache: Any) -> Any | None:
@@ -90,7 +93,8 @@ def _clone_row_faithful(cache: Any) -> Any | None:
     return _clone_row(cache, rot_canonical=False)
 
 
-def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
+def _clone_row(cache: Any, *, rot_canonical: bool,
+               eval_targets: list | None = None) -> Any | None:
     from mlx_vlm import apc as _apc
     from .compat import cache_types
 
@@ -98,17 +102,17 @@ def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
         return _clone_buffered_window(cache)
     if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
-    eval_targets: list[Any] = []
+    targets: list[Any] = [] if eval_targets is None else eval_targets
     out = _apc._clone_cache_entry_for_apc(
-        cache, min_capacity_tokens=None, eval_targets=eval_targets)
+        cache, min_capacity_tokens=None, eval_targets=targets)
     if out is None:
         # Upstream isinstance-gates on the mlx_vlm cache classes; gmlx text
         # models carry the mlx_lm twins. Mirror the same per-kind copy for
         # any class cache_types recognizes.
-        out = _clone_lm_twin(cache, eval_targets)
-    if eval_targets:
+        out = _clone_lm_twin(cache, targets)
+    if eval_targets is None and targets:
         import mlx.core as mx
-        mx.eval(*eval_targets)
+        mx.eval(*targets)
     return out
 
 
@@ -1526,7 +1530,9 @@ def ckpt_store(
                 return 0
             bounded_blocks = got_win
 
-        states = [_clone_single_row(c) for c in inline_caches]
+        # The clones sync once, before the record takes them.
+        pending: list[Any] = []
+        states = [_clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
@@ -1565,13 +1571,18 @@ def ckpt_store(
                 t = runtime_cache_module().KVCache()
                 t.state = (c.keys[..., b_full:p, :],
                            c.values[..., b_full:p, :])
-                t = _clone_single_row(t)
+                t = _clone_single_row(t, pending)
                 if t is None:
                     _ckpt_decline(manager, "clone")
                     manager.release(main_blocks)
                     manager.release(bounded_blocks)
                     return 0
                 tails.append(t)
+        if pending:
+            # Owned survivors, as on the main chain: the clones read the
+            # live prompt cache and its pending graph.
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="ckpt-store-clones", owner="owned")
 
         rec = _CkptRecord(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
@@ -1742,6 +1753,8 @@ def _assemble_from_record(manager, rec, geometry_check=None):
                 return None
             layer_rot.append(rc)
     warm: list[Any] = []
+    # The array clones join the one eval below.
+    targets: list[Any] = []
     kv_i = rot_i = arr_i = qsa_i = 0
     for tag in rec.layout:
         if tag == "kv":
@@ -1763,12 +1776,11 @@ def _assemble_from_record(manager, rec, geometry_check=None):
             warm.append(layer_rot[rot_i])
             rot_i += 1
         else:
-            clone = _clone_single_row(rec.states[arr_i])
+            clone = _clone_single_row(rec.states[arr_i], targets)
             if clone is None:
                 return None
             warm.append(clone)
             arr_i += 1
-    targets: list[Any] = []
     for c in warm:
         if getattr(c, "keys", None) is not None:
             targets.extend([c.keys, c.values])

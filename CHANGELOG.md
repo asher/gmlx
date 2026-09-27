@@ -21,6 +21,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The prompt cache stores and restores a checkpoint of a model with
+  recurrent layers faster, with one GPU sync in place of one per layer.
 - `/v1/systemone` reports the official Jev confidence for choice and score
   answers in place of the chosen probability. `think_threshold` still
   compares the chosen probability, which `diagnostics.think_auto` now names

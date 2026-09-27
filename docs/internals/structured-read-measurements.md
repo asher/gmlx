@@ -288,9 +288,9 @@ much as one of 64.
 
 Twenty tails on the same prefix took 7.9 to 9.2 s in 11 grouped forwards,
 and 9.5 to 10.2 s in 20 forwards of one tail each, over five alternating
-runs whose times rose as the machine warmed. Keeping the 710-token prefix
-in the checkpoint tier took 15 to 42 ms, and finding it again took 13 to
-17 ms.
+runs whose times rose as the machine warmed. Keeping a new 710-token
+prefix in the checkpoint tier took 27 to 52 ms, 29 ms at the median, and
+finding it again took 6 to 9 ms.
 
 The mixed set of [Thinking on mixed requests](#thinking-on-mixed-requests)
 took 1.43 s per request on OpenJev, from about 1.0 s for one question to
