@@ -559,12 +559,14 @@ def _launch_omp(a, *, exec_fn) -> int:
 
 
 # hermes  (NousResearch hermes-agent - https://github.com/NousResearch/hermes-agent)
-# hermes reads ``HERMES_CONFIG`` for an alternate config file, so we get
-# opencode-style injection: the user's ``~/.hermes/config.yaml`` is read and
-# merged with our provider block into our namespace, never written back. The
-# provider *type* is hermes's literal ``custom`` (``--provider-id`` does not
-# apply); ``CUSTOM_BASE_URL`` is exported too - hermes's documented override
-# for ``provider: custom``. A default model is mandatory (``inference.model``).
+# On the Mac the user's ``~/.hermes/config.yaml`` is read and merged with our
+# provider block into our namespace, never written back, and the result is
+# named by ``HERMES_CONFIG``. hermes 0.19 reads only ``$HERMES_HOME/config.yaml``,
+# so in container mode the merge goes into the private home's own
+# ``~/.hermes/config.yaml``. The provider *type* is hermes's literal ``custom``
+# (``--provider-id`` does not apply); ``CUSTOM_BASE_URL`` is exported too -
+# hermes's override for ``provider: custom``. A default model is mandatory
+# (``model.default``).
 _HERMES_CONFIG = "~/.hermes/config.yaml"
 
 
@@ -572,14 +574,19 @@ def build_hermes_config(base_url: str, *, default_model: str,
                         api_key: str | None = None,
                         existing: dict | None = None) -> dict:
     """The merged hermes ``config.yaml`` document: the user's existing settings
-    with ``inference`` pointed at our ``custom`` provider. Key paths follow
-    ``hermes config set inference.provider/inference.model`` and
-    ``providers.<name>.*``. Pure - no IO."""
+    with ``model`` pointed at our ``custom`` provider. Key paths follow
+    ``hermes config set model.provider/model.default/model.base_url`` and
+    ``providers.<name>.*``; hermes resolves a ``providers.custom`` entry before
+    ``model.base_url``, so both name the server. Pure - no IO."""
     cfg = dict(existing or {})
-    inference = dict(cfg.get("inference") or {})
-    inference["provider"] = "custom"
-    inference["model"] = default_model
-    cfg["inference"] = inference
+    model = cfg.get("model")
+    model = dict(model) if isinstance(model, dict) else {}
+    model["provider"] = "custom"
+    model["default"] = default_model
+    model["base_url"] = base_url
+    if api_key:
+        model["api_key"] = api_key
+    cfg["model"] = model
     providers = dict(cfg.get("providers") or {})
     custom = dict(providers.get("custom") or {})
     custom["base_url"] = base_url
@@ -601,24 +608,28 @@ def _launch_hermes(a, *, exec_fn) -> int:
     base_url, models, default_model = _probe_target(
         a, require_default="its config pins inference.model")
 
+    in_container = getattr(a, "container_mode", False)
     user_cfg = Path(os.path.expanduser(
         os.environ.get("HERMES_CONFIG") or _HERMES_CONFIG))
     cfg = build_hermes_config(base_url, default_model=default_model,
                               api_key=a.api_key, existing=_load_yaml(user_cfg))
 
-    out = Path(os.path.expanduser(
+    # The private home is ours, so container mode writes hermes's own file.
+    out = user_cfg if in_container else Path(os.path.expanduser(
         a.config_path or f"{_CONFIG_HOME}/hermes-config.yaml"))
     out.parent.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(out, yaml.safe_dump(cfg, sort_keys=False))
 
+    where = ("" if in_container
+             else f" (merged from {user_cfg}, which stays untouched)")
     print(_summary("hermes", base_url, models, default_model)
-          + f"\n[launch] wrote {out} "
-          f"(merged from {user_cfg}, which stays untouched)")
+          + f"\n[launch] wrote {out}{where}")
     print("[launch] note: hermes requires >=64k context - serve "
           f"{default_model} with a context window of at least 64k tokens")
-    return _finish(a, binary, ["hermes"],
-                   {"HERMES_CONFIG": str(out), "CUSTOM_BASE_URL": base_url},
-                   exec_fn=exec_fn)
+    pairs = {"CUSTOM_BASE_URL": base_url}
+    if not in_container:
+        pairs = {"HERMES_CONFIG": str(out), **pairs}
+    return _finish(a, binary, ["hermes"], pairs, exec_fn=exec_fn)
 
 
 # goose  (Block - https://github.com/block/goose)

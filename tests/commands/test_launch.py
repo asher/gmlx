@@ -875,7 +875,8 @@ def test_launch_omp_malformed_existing_refuses(monkeypatch, tmp_path):
 def test_build_hermes_config_shape():
     cfg = launch.build_hermes_config("http://127.0.0.1:8080/v1",
                                      default_model="qwen3.6-27b")
-    assert cfg["inference"] == {"provider": "custom", "model": "qwen3.6-27b"}
+    assert cfg["model"] == {"provider": "custom", "default": "qwen3.6-27b",
+                            "base_url": "http://127.0.0.1:8080/v1"}
     custom = cfg["providers"]["custom"]
     assert custom["base_url"] == "http://127.0.0.1:8080/v1"
     assert custom["api_key"] == "gmlx"
@@ -883,19 +884,27 @@ def test_build_hermes_config_shape():
 
 def test_build_hermes_config_preserves_existing():
     existing = {
-        "inference": {"provider": "openrouter", "model": "x", "temperature": 0.6},
+        "model": {"provider": "openrouter", "default": "x", "context_length": 65536},
         "providers": {"openrouter": {"api_key": "sk-or-keep"},
                       "custom": {"api_key": "user-key"}},
         "gateway": {"telegram": True},
     }
     cfg = launch.build_hermes_config("http://h/v1", default_model="m",
                                      existing=existing)
-    assert cfg["inference"]["provider"] == "custom"            # repointed
-    assert cfg["inference"]["temperature"] == 0.6              # other keys kept
+    assert cfg["model"]["provider"] == "custom"                # repointed
+    assert cfg["model"]["context_length"] == 65536             # other keys kept
     assert cfg["providers"]["openrouter"] == {"api_key": "sk-or-keep"}
     assert cfg["providers"]["custom"]["api_key"] == "user-key"  # not clobbered
     assert cfg["gateway"] == {"telegram": True}
-    assert existing["inference"]["provider"] == "openrouter"   # input not mutated
+    assert existing["model"]["provider"] == "openrouter"       # input not mutated
+
+
+def test_build_hermes_config_key_and_string_model():
+    cfg = launch.build_hermes_config("http://h/v1", default_model="m",
+                                     api_key="k", existing={"model": "old"})
+    assert cfg["model"] == {"provider": "custom", "default": "m",
+                            "base_url": "http://h/v1", "api_key": "k"}
+    assert cfg["providers"]["custom"]["api_key"] == "k"
 
 
 def test_launch_hermes_injects_config_env(monkeypatch, tmp_path):
@@ -916,7 +925,7 @@ def test_launch_hermes_injects_config_env(monkeypatch, tmp_path):
     assert calls["env"]["HERMES_CONFIG"] == str(out)
     assert calls["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:8080/v1"
     cfg = _yaml.safe_load(out.read_text())
-    assert cfg["inference"]["model"] == "qwen3.6-27b"
+    assert cfg["model"]["default"] == "qwen3.6-27b"
 
 
 def test_launch_hermes_merges_user_config_without_touching_it(monkeypatch, tmp_path):
@@ -933,6 +942,30 @@ def test_launch_hermes_merges_user_config_without_touching_it(monkeypatch, tmp_p
     assert rc == 0
     assert user.read_text() == user_text                       # untouched
     assert _yaml.safe_load(out.read_text())["gateway"] == {"discord": True}
+
+
+def test_launch_hermes_container_writes_the_home_config(monkeypatch, tmp_path):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_CONFIG", raising=False)
+    own = tmp_path / ".hermes" / "config.yaml"
+    own.parent.mkdir()
+    own.write_text("gateway:\n  discord: true\n")
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls["env"] = env
+        return 0
+
+    a = _args(harness="hermes")
+    a.container_mode = True
+    assert launch._launch_hermes(a, exec_fn=fake_exec) == 0
+    cfg = _yaml.safe_load(own.read_text())
+    assert cfg["gateway"] == {"discord": True}
+    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert "HERMES_CONFIG" not in calls["env"]
+    assert not (tmp_path / ".config" / "gmlx" / "hermes-config.yaml").exists()
 
 
 def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
