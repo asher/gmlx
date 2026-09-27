@@ -376,10 +376,16 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
         step = "[launch] step 2: " if first_run else "[launch] "
         ready = images.ensure_image(image_plan, rebuild=a.rebuild,
                                     say=lambda line: say(line.replace("[launch] ", step, 1)))
-        word = (cfg.command[0] if isinstance(cfg.command, list)
-                else images.image_command(ready, "image", [], [])[0][0]
-                if cfg.command == "image" else images.CLIENT_BINARY[client])
-        images.check_command(ready, word, str(runtime_dir), shell=a.shell, say=say)
+        try:
+            word = (cfg.command[0] if isinstance(cfg.command, list)
+                    else images.image_command(ready, "image", [], [])[0][0]
+                    if cfg.command == "image" else images.CLIENT_BINARY[client])
+        except images.ImageError as e:
+            if not a.shell:                # a shell is how you look into such an image
+                raise
+            say(f"[launch] warning: {e}")
+        else:
+            images.check_command(ready, word, str(runtime_dir), shell=a.shell, say=say)
     # Step 9
     rc = L._ensure_server(a)
     if rc is not None:

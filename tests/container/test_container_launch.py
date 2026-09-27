@@ -248,6 +248,28 @@ def test_open_webui_command_image_gets_a_secret_key_file(env):
     assert env.calls("run")[0][-2:] == ["--check", "bash"]
 
 
+@pytest.mark.parametrize("command, word", [
+    ("", "pi"),                                                    # the handler's binary
+    ("        command: [/usr/local/bin/start.sh, pi]\n", "/usr/local/bin/start.sh"),
+])
+def test_the_check_word_follows_the_command_form(env, command, word):
+    env.update(registry={"docker.io/me/pi:1": {"digest": "sha256:" + "6" * 64}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: docker.io/me/pi:1\n" + command)
+    assert _run(["pi", "--container"]) == 0
+    assert env.calls("run")[0][-2:] == ["--check", word]
+
+
+def test_command_image_with_nothing_to_run_warns_under_shell(env, capsys):
+    env.update(registry={"docker.io/me/bare:1": {"digest": "sha256:" + "7" * 64}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: docker.io/me/bare:1\n        command: image\n")
+    assert _run(["pi", "--container"]) == 1
+    assert "sets no ENTRYPOINT or CMD" in capsys.readouterr().err
+    assert _run(["pi", "--container", "--shell"]) == 0
+    assert "warning:" in capsys.readouterr().out and env.runs[-1]["spec"].shell
+
+
 def test_dsh_web_profile_gets_no_open_and_a_port(env):
     assert _run(["dsh", "--container"]) == 0
     spec = env.runs[0]["spec"]
