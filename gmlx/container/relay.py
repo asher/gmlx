@@ -26,6 +26,9 @@ Log = Callable[[str], None]
 _READ, _WRITE = selectors.EVENT_READ, selectors.EVENT_WRITE
 _CHUNK = 64 * 1024
 # Per direction: stop reading once this much waits for the other side.
+# Accept errors that last until something else frees a resource.
+LASTING_ACCEPT_ERRORS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
+ACCEPT_PAUSE = 0.1
 BUFFER_CAP = 256 * 1024
 
 
@@ -91,6 +94,12 @@ class RelayLoop:
             self._wake_w.send(b"x")
         except (BlockingIOError, OSError):
             pass                          # a wake byte is already pending
+
+    def call_later(self, delay: float, fn: Callable[[], None]) -> None:
+        """Run ``fn`` in the loop thread after ``delay`` seconds."""
+        timer = threading.Timer(delay, self.call_soon, args=(fn,))
+        timer.daemon = True
+        timer.start()
 
     def stop(self, timeout: float = 5.0) -> None:
         """End the loop and close every socket it serves."""
@@ -167,6 +176,35 @@ class RelayLoop:
                     self.log(f"relay loop: {type(e).__name__}: {e}")
 
 
+class AcceptPause:
+    """Handles accept errors for one listener. An error that lasts, such as
+    running out of file descriptors, is logged once per run of failures and
+    stops watching the listener for 100 ms, so the loop does not spin on it
+    and the log does not grow with one line per attempt."""
+
+    def __init__(self, loop: RelayLoop, sock: socket.socket,
+                 callback: Callable[[int], None], name: str):
+        self.loop, self.sock, self.callback, self.name = loop, sock, callback, name
+        self.logged = False
+        self.closed = False
+
+    def ok(self) -> None:
+        self.logged = False
+
+    def failed(self, e: OSError) -> None:
+        lasting = e.errno in LASTING_ACCEPT_ERRORS
+        if not (lasting and self.logged):
+            self.loop.log(f"{self.name}: accept failed ({e})")
+        if lasting:
+            self.logged = True
+            self.loop.unwatch(self.sock)
+            self.loop.call_later(ACCEPT_PAUSE, self._resume)
+
+    def _resume(self) -> None:
+        if not self.closed:
+            self.loop.watch(self.sock, _READ, self.callback)
+
+
 class _Pair:
     """One accepted connection joined to its upstream connection."""
 
@@ -182,6 +220,7 @@ class _Pair:
         self.down_eof = self.up_eof = False
         self.up_shut = self.down_shut = False
         self.closed = False
+        self.last_error = "no address to connect to"
         down.setblocking(False)
         loop.own(down)
         self._connect_next()
@@ -326,6 +365,7 @@ class Relay:
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
         self.sock = listen_socket(listen)
+        self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name)
         loop.call_soon(self._register)
 
     def _register(self) -> None:
@@ -339,13 +379,21 @@ class Relay:
             except (BlockingIOError, InterruptedError):
                 return
             except OSError as e:
-                self.loop.log(f"{self.name}: accept failed ({e})")
+                self.pause.failed(e)
                 return
-            _Pair(self.loop, conn, self.targets, self.name)
+            self.pause.ok()
+            try:
+                _Pair(self.loop, conn, self.targets, self.name)
+            except OSError as e:
+                # A socket for the upstream side could not be made.
+                self.loop.log(f"{self.name}: cannot relay a connection ({e})")
+                self.loop.disown(conn)
+                conn.close()
 
     def close(self) -> None:
         """Stop accepting; connections already joined keep running."""
         def done():
+            self.pause.closed = True
             self.loop.unwatch(self.sock)
             self.loop.disown(self.sock)
             self.sock.close()

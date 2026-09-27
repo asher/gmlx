@@ -5,6 +5,7 @@ server. The clipboard tests read a stub pasteboard, except the conversion
 test, which writes a private named NSPasteboard and never the user's own."""
 from __future__ import annotations
 
+import errno
 import socket
 import threading
 import time
@@ -272,6 +273,53 @@ def test_close_stops_accepting_and_removes_the_socket(loop, tmp_path):
     while path.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not path.exists()
+
+
+class _FakeLoop:
+    def __init__(self):
+        self.logged, self.watching, self.later = [], True, []
+
+    def log(self, line):
+        self.logged.append(line)
+
+    def unwatch(self, sock):
+        self.watching = False
+
+    def watch(self, sock, events, callback):
+        self.watching = True
+
+    def call_later(self, delay, fn):
+        self.later.append((delay, fn))
+
+
+def test_a_lasting_accept_error_pauses_the_listener_and_logs_once():
+    lp = _FakeLoop()
+    pause = relay.AcceptPause(lp, object(), lambda mask: None, "gmlx api")
+    for _ in range(50):
+        pause.failed(OSError(errno.EMFILE, "Too many open files"))
+    assert len(lp.logged) == 1 and "accept failed" in lp.logged[0]
+    assert not lp.watching and lp.later[0][0] == relay.ACCEPT_PAUSE
+    lp.later[0][1]()
+    assert lp.watching                                # resumed after the pause
+    pause.ok()
+    pause.failed(OSError(errno.EMFILE, "Too many open files"))
+    assert len(lp.logged) == 2                        # a new run of failures
+    pause.closed = True
+    lp.watching = False
+    lp.later[-1][1]()
+    assert not lp.watching                            # never resumes after close
+
+
+def test_a_relay_with_no_target_closes_the_connection(loop, tmp_path):
+    path = str(tmp_path / "none.sock")
+    relay.Relay(loop, path, [], name="gmlx api")
+    c = _unix_client(path)
+    assert c.recv(1) == b""
+    c.close()
+    deadline = time.monotonic() + 5
+    while not loop.logged and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert "no address to connect to" in loop.logged[0]
 
 
 def test_resolve_targets_lists_localhost_addresses():

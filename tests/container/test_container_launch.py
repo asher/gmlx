@@ -289,6 +289,21 @@ def test_shell_runs_the_shell_with_the_passthrough(env):
     assert spec.shell and spec.command == ["-c", "npm test"]
 
 
+def test_guest_url_refuses_a_host_that_does_not_resolve(monkeypatch):
+    import socket as _socket
+
+    import gmlx.container.relay as relay
+
+    def fail(h, p):
+        raise _socket.gaierror(8, "nodename nor servname provided")
+    monkeypatch.setattr(relay, "resolve_targets", fail)
+    with pytest.raises(lc.SettingsError, match="cannot resolve the server host box.invalid"):
+        lc.guest_url("http://box.invalid:8000/v1")
+    monkeypatch.setattr(relay, "resolve_targets", lambda h, p: [])
+    with pytest.raises(lc.SettingsError, match="no IPv4 or IPv6 address"):
+        lc.guest_url("http://box.invalid:8000/v1")
+
+
 def test_guest_url_rules(monkeypatch):
     import gmlx.container.relay as relay
     monkeypatch.setattr(relay, "resolve_targets", lambda h, p: [("10.0.0.2", p)])

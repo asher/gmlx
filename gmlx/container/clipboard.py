@@ -21,7 +21,7 @@ import socket
 import threading
 from typing import Callable
 
-from .relay import RelayLoop, listen_socket
+from .relay import AcceptPause, RelayLoop, listen_socket
 
 REQUEST_MAX = 256
 IMAGE_MAX = 20 * 1024 * 1024
@@ -100,6 +100,7 @@ class ClipboardServer:
         self.pasteboard = pasteboard
         self.send_timeout = send_timeout
         self.sock = listen_socket(path)
+        self.pause = AcceptPause(loop, self.sock, self._on_accept, "clipboard")
         self._queue: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="gmlx-clipboard",
                                         daemon=True)
@@ -119,8 +120,9 @@ class ClipboardServer:
             except (BlockingIOError, InterruptedError):
                 return
             except OSError as e:
-                self.loop.log(f"clipboard: accept failed ({e})")
+                self.pause.failed(e)
                 return
+            self.pause.ok()
             conn.setblocking(False)
             self.loop.own(conn)
             buf = bytearray()
@@ -203,6 +205,7 @@ class ClipboardServer:
     def close(self) -> None:
         """Stop accepting and end the worker once its queue is empty."""
         def done():
+            self.pause.closed = True
             self.loop.unwatch(self.sock)
             self.loop.disown(self.sock)
             self.sock.close()

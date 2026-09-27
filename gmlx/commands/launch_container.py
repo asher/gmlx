@@ -134,7 +134,12 @@ def guest_url(base_url: str) -> tuple[str, int | None, list]:
     elif host in ("::1", "::"):
         targets = [("::1", port)]
     else:
-        targets = resolve_targets(host, port)
+        try:
+            targets = resolve_targets(host, port)
+        except OSError as e:
+            raise SettingsError(f"cannot resolve the server host {host} ({e}).") from None
+        if not targets:
+            raise SettingsError(f"the server host {host} has no IPv4 or IPv6 address.")
     url = urllib.parse.urlunsplit(("http", f"127.0.0.1:{port}", split.path, split.query,
                                    split.fragment))
     return url, port, targets
