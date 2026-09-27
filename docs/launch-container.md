@@ -43,10 +43,8 @@ one launch. The flags that only make sense in a container, such as
 `--mount` or `--shell`, turn on container mode by themselves. The
 [CLI reference](cli.md#gmlx-launch) lists them.
 
-Launch reads its container settings only from `~/.config/gmlx/gmlx.yaml`
-or `~/.gmlx.yaml`, never from a `./gmlx.yaml` in the current folder. A
-cloned repository could otherwise share `~/.ssh` with the client or turn
-the container off. Launch prints a notice when it ignores such a block.
+Launch reads its container settings only from the config file in your
+home folder, as [Launch](config.md#launch) explains.
 
 The first container launch takes a few minutes, and launch numbers its
 steps so that a slow download does not look like a hang:
@@ -73,10 +71,10 @@ them.
 ### Shares
 
 By default launch shares the current folder, read-write, at the same path
-in the container, and the client starts there. The chat apps `open-webui`
-and `elia` share nothing by default. `--no-mount-cwd` turns the share off
-for one launch, and [`launch.container.mount_cwd`](config.md#launchcontainermount_cwd)
-sets it in the config.
+in the container, and the client starts there. The chat apps share nothing
+by default, and [`launch.container.mount_cwd`](config.md#launchcontainermount_cwd)
+names them and sets the share in the config. `--no-mount-cwd` turns the
+share off for one launch.
 
 Launch refuses to share these folders by default, and it asks you to launch
 from a project folder instead:
@@ -119,10 +117,9 @@ configuration into the private home instead.
 
 A fresh private home starts empty, so a client such as Claude Code shows
 its first-run steps once. [`seed`](config.md#launchcontainerclientsseed)
-copies files from your home into the private home, once and only while the
-copy is missing. Launch also copies your git `user.name` and `user.email`
-into the private home's `.gitconfig` when they are missing there, so
-commits made in the container carry your name.
+copies chosen files from your home into it. Launch also copies your git
+`user.name` and `user.email` into the private home's `.gitconfig` when they
+are missing there, so commits made in the container carry your name.
 
 A seeded settings file can hold settings that only work on the Mac. A
 `.gitconfig` with `credential.helper = osxkeychain` or commit signing, or a
@@ -254,9 +251,10 @@ launch:
         volumes: [claude-pg:/var/lib/postgresql:8G]
 ```
 
-Launch creates a missing volume with the size you give, or 32G without one.
-The disk image on the Mac grows only as the container writes, up to that
-limit, and the size is fixed when the volume is created. Launch prints one
+Launch creates a missing volume with the size in its entry, or the default
+size that [`volumes`](config.md#launchcontainervolumes) gives. The disk
+image on the Mac grows only as the container writes, up to that limit, and
+the size is fixed when the volume is created. Launch prints one
 line per volume with its limit and the space it takes on the Mac, and it
 warns when the Mac disk has less free space than the volumes could still
 use. A volume created with a different size gets a line that says how to
@@ -267,8 +265,9 @@ Two containers never mount one volume at the same time. Launch refuses a
 session whose volume another session or another container is using, so two
 clients that list the same volume do not run side by side.
 
-Deleting files in a volume does not free space on the Mac. To give it back,
-trim the volume from a container that no session is using:
+`container system df` shows the space that all volumes and images take
+on the Mac. Deleting files in a volume does not free that space. To give it
+back, trim the volume from a container that no session is using:
 
 ```sh
 container run --rm --cap-add CAP_SYS_ADMIN \
@@ -339,13 +338,14 @@ client, and a launch of any other client prints a line with its
 `container stop` command, since the leftover virtual machine holds memory
 until it stops.
 
-The exit code is the client's own. Two codes come from the container
+The exit code is the client's own. Three codes come from the container
 before the client starts, and each prints a one-line message that names
 the cause:
 
 | Code | Meaning |
 |------|---------|
-| 125 | A port the session needs inside the container is already in use. |
+| 125 | The relay inside the container could not start, for example because a port it needs is in use. |
+| 126 | The command is in the image but cannot run, for example a start script without its execute bit. |
 | 127 | The command, or a shell for `--shell`, is not in the image. |
 
 Launch exits 1 when it refuses a session, such as for a folder it will not
@@ -357,7 +357,10 @@ share or a volume in use. The session log is
 
 `--config-only` in container mode writes the client's configuration into
 the private home and prints the `container run` command that a session
-would use, with variable names but no values. It builds nothing, pulls
+would use. The variables launch sets itself, such as `HOME`, `TERM`, `LANG`
+and `IS_SANDBOX`, appear with their values. The client's own settings and
+your [`env`](config.md#launchcontainerenv) entries appear by name only,
+because they can hold keys. The dry run builds nothing, pulls
 nothing and starts no container, and it reports whether the image and
 volumes exist yet. Use it to inspect a session. The printed command cannot
 run by itself, because the connection to the server exists only while
@@ -413,10 +416,10 @@ Other access is opt-in:
   forward one. Never forward a browser's remote debugging port, such as
   9222, because that gives the client your logged-in browser.
 
-The container has internet access by default.
-[`network: none`](config.md#launchcontainernetwork) leaves it only the gmlx
-server and the forwarded ports. On the default network, a Mac service that
-listens on all addresses is reachable from the container. The connection to
+The container has internet access unless you set
+[`network: none`](config.md#launchcontainernetwork). On the default
+network, a Mac service that listens on all addresses is reachable from the
+container. The connection to
 the server needs no sudo, changes no network setting and raises no
 firewall prompt, and the server sees `Host: 127.0.0.1:<port>` on every
 request.
@@ -432,8 +435,8 @@ file count, and it warns when more than half of the Mac's limit is open
 while a session runs.
 
 The container's memory counts against the model server's memory until the
-container stops, even when the client inside frees it. The default is 4G,
-set with [`memory`](config.md#launchcontainermemory), and launch warns
+container stops, even when the client inside frees it.
+[`memory`](config.md#launchcontainermemory) sets its size, and launch warns
 when you give the container more than a quarter of the Mac's memory.
 
 Work with many small files, such as `npm install`, runs slower in a share
@@ -442,8 +445,9 @@ than on a volume.
 ## Removing container data
 
 Uninstalling gmlx leaves container data in place, and each kind is removed
-separately. `gmlx doctor` reports the space that volumes, private homes and
-images take:
+separately. Apple container keeps its images, volumes and Linux kernel in
+`~/Library/Application Support/com.apple.container`. `gmlx doctor` reports
+the space that volumes, private homes and images take:
 
 | Data | How to remove it |
 |------|------------------|
@@ -451,4 +455,5 @@ images take:
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
 | Images | Run `container image delete` on the `gmlx.invalid/launch-*` images, then `container image prune`. |
 | The guest program | Delete `~/.local/share/gmlx/launch/runtime`. |
-| Apple container with its images, volumes and Linux kernel | Run `uninstall-container.sh -d`. |
+| Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete that folder. |
+| Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes that folder. |

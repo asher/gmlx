@@ -61,11 +61,10 @@ A command that needs the file uses the first one it finds:
 3. It looks for `~/.gmlx.yaml` last.
 
 The file in the current directory comes first, so a project can carry its
-own models and settings. Pass `--config FILE` to read a different file.
-`gmlx launch` reads the [`launch`](#launch) block only from the two files
-in your home folder, never from `./gmlx.yaml`.
-Without any file, `gmlx serve` scans the current directory for GGUFs and
-prints a hint to run `init`.
+own models and settings. The [`launch`](#launch) block is the exception,
+and gmlx never reads it from the current directory. Pass `--config FILE` to
+read a different file. Without any file, `gmlx serve` scans the current
+directory for GGUFs and prints a hint to run `init`.
 
 To see the configuration a server would run with, including every default
 you did not set, run `gmlx serve --print-config`. It prints the result as
@@ -88,7 +87,7 @@ scan.
 | [`server`](#server) | It sets where the server listens, its API key, the model folders, how much memory models may use, and optional services. |
 | [`talk`](#voice) | It sets the voice client's model, voice, wake phrase and listening thresholds. |
 | [`assistant`](#assistant) | It gives the built-in assistant its tool servers and long-term memory. |
-| [`launch`](#launch) | It sets how `gmlx launch` runs clients in containers. Launch reads it only from a user-level file. |
+| [`launch`](#launch) | It sets how `gmlx launch` runs clients in containers. |
 | [`theme`, `themes`](#chat-themes) | They set the colors of the terminal chat. |
 
 A key is named by its full path, such as `server.port`. A path such as
@@ -1362,9 +1361,10 @@ describes which facts go first. The value is at least 1. The default is `20000`.
 
 The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
 [container mode](launch-container.md). Launch reads it only from
-`~/.config/gmlx/gmlx.yaml` or `~/.gmlx.yaml`, and it ignores a `launch`
-block in `./gmlx.yaml`, which a cloned repository could carry. The server
-never reads it.
+`~/.config/gmlx/gmlx.yaml` or `~/.gmlx.yaml`. A `launch` block in
+`./gmlx.yaml` is ignored with a notice, because a cloned repository could
+otherwise share `~/.ssh` with the client or turn the container off. The
+server never reads the block.
 
 ```yaml
 # doctest: build
@@ -1491,7 +1491,8 @@ describes. The default is the client's own command.
 
 These Debian packages are added to the image that gmlx builds for the
 client. With `build`, they apply only when the Containerfile starts from
-the client's own `:base`. The default is no packages.
+the client's own `:base`, and launch refuses them otherwise. The default is
+no packages.
 
 ### `launch.container.clients.*.seed`
 

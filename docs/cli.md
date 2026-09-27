@@ -617,7 +617,7 @@ These flags control `gmlx launch`:
 | `--host H`, `--port P` | The managed server | Select the server. |
 | `--api-key KEY` | The config's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
 | `--provider-id NAME` | `gmlx` | Write this provider id into the tool's config. |
-| `--config-path PATH` | The client's location | Write the tool config to this file or directory, depending on the client. [How a launch works](launch.md#how-a-launch-works) lists each one. |
+| `--config-path PATH` | The client's location | Write the tool config to this file or directory, as [How a launch works](launch.md#how-a-launch-works) lists. Container mode refuses it. |
 | `--config-only` | Off | Write the config and print the run command without running it. In container mode, print the `container run` command. |
 | `--no-start` | Off | Never start a server. |
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
@@ -625,10 +625,10 @@ These flags control `gmlx launch`:
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
 | `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
 | `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured [mounts](config.md#launchcontainermounts). Repeatable. |
-| `--mount-cwd`, `--no-mount-cwd` | On, off for `open-webui` and `elia` | Share the current folder with the container. |
+| `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
-| `--network {default,none}` | `default` | With `none`, the container reaches only the gmlx server and the forwarded ports. |
+| `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container, as [The shell](launch-container.md#the-shell) describes. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
@@ -638,7 +638,7 @@ server is unreachable, has died or has timed out, or when the tool is not
 installed. It
 exits 2 when the config is missing or malformed, and 130 when interrupted
 during the start wait. In container mode it exits 1 when it refuses the
-session, and 125 or 127 when the container cannot start the client, as
+session, and 125, 126 or 127 when the container cannot start the client, as
 [Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
 describes.
 
@@ -1313,6 +1313,7 @@ FAIL or SKIP line for each check, with the fix named. No check accesses the
 network. The checks cover the macOS version, the runtime and kernels, the
 config, and the files of each configured model and service. They also cover background
 servers, the login items and the launcher that background starts use,
+the Apple container service with the disk space container mode takes,
 optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
 address. The last checks
 are the Hugging Face token, RAM against each model's size, and disk space.

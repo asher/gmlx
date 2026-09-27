@@ -1,9 +1,9 @@
 # Custom container images
 
-This page covers changing what the container of a
-[container mode](launch-container.md) session contains: extra packages,
-your own Containerfile, a ready-made image, and services that start with
-the client. The keys it uses are in the
+This page covers changing what runs in the container of a
+[container mode](launch-container.md) session, from a few extra packages to
+an image of your own and services that start with the client. The keys it
+uses, with their rules and defaults, are in the
 [configuration reference](config.md#launch).
 
 - [What persists](#what-persists)
@@ -35,8 +35,7 @@ launch:
 ```
 
 The next launch builds the image again with the packages, and later
-launches reuse it. `packages` applies only to the image gmlx builds, so it
-cannot be combined with `image`.
+launches reuse it.
 
 ## Your own Containerfile
 
@@ -60,25 +59,26 @@ launch:
         build: ~/containers/claude-code
 ```
 
-`build` names the Containerfile, or a folder that holds a `Containerfile`
-or `Dockerfile` and is also the build context. The path must be absolute
-or start with `~`. Write the `gmlx.invalid/launch-<client>:base` reference
-literally, since launch finds it by reading the file. Any client's `:base`
-works, and launch refuses any other `gmlx.invalid` reference, because those
-tags are deleted when a newer build replaces them.
+A folder that `build` names is also the build context. Write the
+`gmlx.invalid/launch-<client>:base` reference literally, since launch finds
+it by reading the file. Any client's `:base` works, and launch refuses any
+other `gmlx.invalid` reference, because those tags are deleted when a newer
+build replaces them.
 
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. A
 `.dockerignore` in the context keeps folders such as `node_modules` out of
 both the build and that check. A `<Containerfile>.dockerignore` beside the
-Containerfile takes its place when it exists. A Containerfile must stay
-under 16 KiB, which `container build` requires.
+Containerfile takes its place when it exists. Launch leaves the `.git`
+folder at the root of the context out of that check, but the build still
+receives it, so list `.git` in the ignore file to keep it out of the image. A Containerfile must stay under 16 KiB,
+which `container build` requires.
 
-`--rebuild` rebuilds the base with fresh downloads, then builds your image
-without its cache. It does not pull other registry images that your
-Containerfile names again. A `packages` list reaches a `build` image only
-when its Containerfile starts from that client's own `:base`, and launch
-refuses the list otherwise.
+`--rebuild` builds your image again without its cache. When the
+Containerfile names no `:base`, it also pulls the registry images the
+Containerfile starts from again. When it names a `:base`, launch first
+rebuilds that base with fresh downloads, and it does not pull the other
+registry images your Containerfile names.
 
 ## A ready-made image
 
@@ -160,8 +160,10 @@ Chromium prints D-Bus errors in a container, because no D-Bus service
 runs there. They do not affect the screenshot.
 
 Puppeteer downloads its own Chrome by default, which may have no Linux
-arm64 build. Set `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` in the
-image to use the installed Chromium.
+arm64 build. To use the installed Chromium, add
+`PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium` to
+[`env`](config.md#launchcontainerenv), or set it with `ENV` in your own
+Containerfile.
 
 ## Postgres
 
@@ -215,7 +217,6 @@ The data lives in a subfolder of the volume, because the volume's root
 holds `lost+found`. It survives from one session to the next, and the
 client connects with `psql -U postgres`.
 
-To use Postgres on the Mac instead, add `forward: [5432]`. Homebrew's
-Postgres accepts local connections without a password, which would give
-the client every database, so first create a role with a password and only
-the rights the task needs.
+To use Postgres on the Mac instead, add `forward: [5432]`, after you give
+it a password or a limited role as the
+[security model](launch-container.md#security-model) says.

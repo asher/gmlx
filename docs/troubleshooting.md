@@ -281,11 +281,10 @@ stop it or restart the Mac.
 
 ### A container launch waits with no output
 
-A share inside `~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive or
-`/Volumes` makes macOS ask whether the container runtime may read it, and
-the container waits for the answer. Look for the prompt behind other
-windows. Launch prints a line before the run for each such share, and a
-project folder outside those places avoids the question.
+macOS is asking whether the container runtime may read a
+[protected folder](launch-container.md#shares) that the session shares,
+and the container waits for the answer. Look for the prompt behind other
+windows, or launch from a project folder outside the protected places.
 
 ### A command is not in the image
 
@@ -293,54 +292,55 @@ A launch that stops with `is not on the image's PATH` names the command
 and the search path it used. The image lacks the client or the command in
 [`command`](config.md#launchcontainerclientscommand). Install it in the
 image, as [Custom container images](container-images.md) shows, or fix the
-`command` list. A session that exits 127 on its own has the same cause.
+`command` list. A session that exits 127 on its own has the same cause,
+and one that exits 126 found the command but could not run it, which a
+start script without its execute bit causes.
 
 ### An image has no linux/arm64 variant
 
-Container mode runs only images for Linux on arm64, and launch names the
-platforms the image has. Use an arm64 or multi-platform tag of the image,
-or build one with [`build`](config.md#launchcontainerclientsbuild).
+Launch names the platforms the image has, and
+[container mode](launch-container.md#the-image) runs only Linux on arm64.
+Use an arm64 or multi-platform tag of the image, or build one with
+[`build`](config.md#launchcontainerclientsbuild).
 
 ### Launch asks whether the port is busy
 
-A browser app's port on the Mac is taken, often by the same app running
-outside the container. Open WebUI uses 3000 and dsh uses 3080. Stop the
-other program, or stop the leftover session that holds the port.
+Another program holds the Mac port of a
+[browser app](launch-container.md#browser-apps), often the same app
+running outside the container. Stop that program, or stop the leftover
+session that holds the port.
 
 ### A leftover container of another client keeps running
 
-Launch prints `still running` with a `container stop` command when a
-killed launch of another client left its container behind. The container
-holds its memory until it stops, so run the command it prints.
-`gmlx doctor` lists these containers too.
+A killed launch of another client left its container behind, and launch
+prints `still running` with a `container stop` command. The container holds
+its memory until it stops, so run that command. `gmlx doctor` lists these
+containers too.
 
 ### A volume is in use
 
-Two containers cannot attach one volume. A launch that names a volume in
-use by another session or another container is refused with its name.
+Another session or container has the volume attached, and
+[one volume serves one container](launch-container.md#volumes) at a time.
 Stop that session first, or give each client its own volume.
 
 ### The Mac runs out of file handles
 
-A container holds one Mac file handle for each file it reads in a share,
-until it stops. A client that reads a very large tree can reach the limit
-for one process, and then its own file reads fail. Two such sessions can
-reach the limit of the whole Mac, and then other apps fail to open files.
-Stop the session to release the handles, and share a narrower folder next
-time. `gmlx doctor` reports the count.
+A session that reads a very large shared tree holds a Mac file handle for
+each file, as [Limits](launch-container.md#limits) explains. Stop the
+session to release the handles, and share a narrower folder next time.
+`gmlx doctor` reports the count.
 
 ### Installed in --shell, gone next launch
 
-The container's own files are discarded when a session ends, so packages
-installed from `--shell` do not survive. Add them to the image, as
+The container's own files are discarded when a session ends. Add the
+packages to the image, as
 [Custom container images](container-images.md#extra-packages) shows.
 
 ### Postgres refuses the data folder on a share
 
-Every file in a share appears to belong to root in the container, and
-Postgres refuses a data folder that it does not own. Put the data on a
-volume, as the
-[Postgres recipe](container-images.md#postgres) shows.
+Every file in a share appears to belong to root in the container, so
+Postgres does not own its data folder there. Put the data on a volume, as
+the [Postgres recipe](container-images.md#postgres) shows.
 
 ## Voice
 
