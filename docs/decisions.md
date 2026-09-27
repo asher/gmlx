@@ -431,8 +431,8 @@ stages or `sequential: true`, every read uses the full question list,
 `"full"`.
 
 A thought is the costliest of these settings. The model writes it with its
-full denoise loop, which takes seconds, while a read without one takes a
-single pass. `think: "auto"` spends that cost only on unsure decisions.
+full denoise loop, one decoder pass per step, while a read without one
+takes a single pass. `think: "auto"` spends that cost only on unsure decisions.
 
 Under `"auto"`, the decision first runs without a thought. When the
 probability of any answer's chosen label is below `think_threshold`, it

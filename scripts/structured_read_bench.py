@@ -14,7 +14,7 @@ decisions. Each arm reports the median of ``--rounds`` timed runs after
 ``--warmup`` untimed ones, with the arm order reversed on every other round.
 The letter readout's long blocks rest ``--cooldown`` seconds after each
 round, since a few minutes of steady load lower the GPU clock on some
-machines. Run it on an idle machine. Writes JSON, with every run's time,
+machines, and warm the GPU for a second before the next round. Run it on an idle machine. Writes JSON, with every run's time,
 and a markdown table under ``--out``.
 """
 
@@ -68,6 +68,41 @@ def _therm() -> str:
         return ""
 
 
+def _warm_gpu(seconds: float) -> None:
+    """Keep the GPU busy with matmuls for ``seconds``. After a few seconds
+    of idle the GPU clock drops, and the first forward then runs up to half
+    again as long; half a second of load brings the clock back."""
+    a = mx.ones((4096, 4096), dtype=mx.bfloat16)
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < seconds:
+        mx.eval(a @ a)
+
+
+def _versions() -> dict:
+    """Package versions, with the gmlx commit and mlx-kquant's own version
+    string, since an editable install keeps the version it was installed at."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    import mlx_kquant
+
+    out = {}
+    for name in ("mlx", "mlx-lm", "mlx-vlm"):
+        try:
+            out[name] = version(name)
+        except PackageNotFoundError:
+            out[name] = None
+    out["mlx-kquant"] = getattr(mlx_kquant, "__version__", None)
+    rev = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                          "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+    out["gmlx"] = rev.stdout.strip() or None
+    return out
+
+
+def _memory_gb() -> float:
+    out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True)
+    return int(out.stdout.strip() or 0) / 2**30
+
+
 def _peak_gb() -> float:
     get = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
     return get() / 1e9
@@ -79,23 +114,29 @@ class Bench:
         self.warmup = warmup
         self.cooldown = cooldown
         self.rows: list[dict] = []
+        self.timed = False  # True while a round's times count
 
     def block(self, name: str, arms: list[tuple[str, dict, Callable[[], float]]],
               rest: float = 0.0):
         """``arms``: (label, params, fn) where ``fn()`` runs once and returns
-        the milliseconds to record. ``rest`` seconds of idle follow each
-        round, so a block of long arms does not heat the GPU into a lower
-        clock."""
+        the milliseconds to record. A second of warm-up starts the block, since
+        the cooldown before it lowers the GPU clock. ``rest`` seconds of idle
+        follow each round, so a block of long arms does not heat the GPU into
+        a lower clock, and a second of warm-up then brings the clock back
+        before the next round's first arm."""
         print(f"\n[{name}]", flush=True)
+        _warm_gpu(1.0)
         times: dict[str, list[float]] = {label: [] for label, _, _ in arms}
         for r in range(self.warmup + self.rounds):
             order = arms if r % 2 == 0 else list(reversed(arms))
+            self.timed = r >= self.warmup
             for label, _, fn in order:
                 ms = fn()
-                if r >= self.warmup:
+                if self.timed:
                     times[label].append(ms)
             if rest:
                 time.sleep(rest)
+                _warm_gpu(1.0)
         for label, params, _ in arms:
             ts = times[label]
             row = {"block": name, "arm": label, **params,
@@ -183,6 +224,9 @@ def main() -> int:
         "machine": platform.machine(),
         "chip": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
                                capture_output=True, text=True).stdout.strip(),
+        "memory_gb": _memory_gb(),
+        "macos": platform.mac_ver()[0],
+        "versions": _versions(),
         "load_s": load_s,
         **fields,
         "peak_gb": _peak_gb(),
@@ -386,7 +430,8 @@ def _letter_blocks(model, tokenizer, a, bench: Bench) -> dict:
                 use(size)
                 forwards = []
                 ms = _timed(lambda: _drive(reader.prefill(ids), forwards))
-                longest[size] = max(longest[size], *forwards)
+                if bench.timed:
+                    longest[size] = max(longest[size], *forwards)
                 return ms
 
             bench.block(f"letter prefix of {split} tokens", [
@@ -404,7 +449,8 @@ def _letter_blocks(model, tokenizer, a, bench: Bench) -> dict:
                 forwards = []
                 ms = _timed(lambda: _drive(reader.tails(prefixes[size], ids, tails[n]),
                                            forwards))
-                longest[size] = max(longest[size], *forwards)
+                if bench.timed:
+                    longest[size] = max(longest[size], *forwards)
                 return ms
 
             for n in (1, 5, 20):
