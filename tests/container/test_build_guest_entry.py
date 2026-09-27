@@ -56,6 +56,17 @@ def _sysroot(tmp_path, *, musl: bool) -> Path:
     return root
 
 
+def test_workflows_install_the_pinned_toolchain():
+    version, target = build.pinned_version(CRATE), build.TARGET
+    for name in ("test.yml", "release.yml"):
+        text = (ROOT / ".github" / "workflows" / name).read_text()
+        installs = re.findall(r"^[ \t]*(?:run: )?(rustup toolchain install[^\n]*)", text, re.M)
+        assert installs, name
+        for line in installs:
+            assert line.split() == ["rustup", "toolchain", "install", version,
+                                    "--profile", "minimal", "--target", target], line
+
+
 def test_check_passes_with_the_pinned_version_and_target(tmp_path, monkeypatch):
     version = build.pinned_version()
     _fake_tools(tmp_path, monkeypatch, cargo=version, rustc=version,
@@ -158,6 +169,38 @@ def test_dist_check_refuses_a_missing_or_non_executable_binary(tmp_path):
         t.add(tmp_path / "x", arcname="gmlx-0/README.md")
     with pytest.raises(SystemExit, match="is missing"):
         dist.check_sdist(sdist)
+
+
+def test_dist_check_refuses_the_symmetric_cases(tmp_path):
+    import io
+    import tarfile
+    import zipfile
+    dist = _load("check_guest_entry_dist")
+    wheel = tmp_path / "gmlx-0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("gmlx/__init__.py", "")
+    with pytest.raises(SystemExit, match="is missing"):
+        dist.check_wheel(wheel)
+    sdist = tmp_path / "gmlx-0.tar.gz"
+    data = _elf()
+    with tarfile.open(sdist, "w:gz") as t:
+        info = tarfile.TarInfo(f"gmlx-0/{dist.MEMBER}")
+        info.size, info.mode = len(data), 0o644
+        t.addfile(info, io.BytesIO(data))
+    with pytest.raises(SystemExit, match="no execute bit"):
+        dist.check_sdist(sdist)
+
+
+def test_cargo_build_pins_the_target_folder_and_the_remaps(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setenv("CARGO_TARGET_DIR", str(tmp_path / "elsewhere"))
+    monkeypatch.setenv("CARGO_ENCODED_RUSTFLAGS", "-Cdebuginfo=2")
+    monkeypatch.setattr(build.subprocess, "run",
+                        lambda argv, cwd, env, check: seen.update(env=env))
+    build._cargo_build([], CRATE)
+    assert seen["env"]["CARGO_TARGET_DIR"] == str(CRATE / "target")
+    assert "CARGO_ENCODED_RUSTFLAGS" not in seen["env"]
+    assert "--remap-path-prefix" in seen["env"]["RUSTFLAGS"]
 
 
 def test_gitignore_keeps_the_binary_out_of_git():

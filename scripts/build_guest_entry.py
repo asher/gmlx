@@ -102,6 +102,10 @@ def _rustflags(crate: Path) -> str:
 def _cargo_build(args: list, crate: Path) -> None:
     env = _env()
     env["RUSTFLAGS"] = _rustflags(crate)
+    # The script reads the binary from the crate's own target folder, and
+    # CARGO_ENCODED_RUSTFLAGS would replace the path remaps above.
+    env["CARGO_TARGET_DIR"] = str(crate / "target")
+    env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     subprocess.run(["cargo", "build", "--release", "--locked", "--offline", *args],
                    cwd=crate, env=env, check=True)
 

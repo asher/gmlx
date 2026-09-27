@@ -55,7 +55,7 @@ jobs:
           fi
       - name: Rust toolchain
         working-directory: crates/gmlx-entry
-        run: rustup toolchain install
+        run: rustup toolchain install 1.92.0 --profile minimal --target aarch64-unknown-linux-musl
       - name: Build and test the guest entry
         run: |
           python scripts/build_guest_entry.py
