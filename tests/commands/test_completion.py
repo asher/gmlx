@@ -184,6 +184,27 @@ def test_launch_dsh_profile_completes_profiles(tmp_path, monkeypatch):
     assert set(vals) == {"gmlx", "headless", "tui", "web"}
 
 
+def test_launch_dsh_profile_completes_private_home_profiles_in_container_mode(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    (tmp_path / "host-dsh" / "profiles" / "mac-only").mkdir(parents=True)
+    (tmp_path / "host-dsh" / "profiles" / "mac-only" / "package.json").write_text("{}")
+    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    (guest / "boxed").mkdir(parents=True)
+    (guest / "boxed" / "package.json").write_text("{}")
+    vals = _vals(completion._complete(["launch", "dsh", "--container", "--dsh-profile", ""]))
+    assert "boxed" in vals and "mac-only" not in vals
+    vals = _vals(completion._complete(["launch", "dsh", "--dsh-profile", ""]))
+    assert "mac-only" in vals and "boxed" not in vals
+
+
+def test_launch_container_flags_complete():
+    assert completion._complete(["launch", "pi", "--mount", ""]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--network", ""]) == ["default", "none"]
+
+
 def test_service_completes_actions():
     vals = _vals(completion._complete(["service", ""]))
     assert vals == ["install", "uninstall", "status"] or set(vals) == {

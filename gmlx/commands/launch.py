@@ -100,7 +100,10 @@ class LaunchError(RuntimeError):
 def _find_binary(name: str, a, install_hint: str, *,
                  label: str | None = None):
     """``shutil.which`` + the standard not-on-PATH refusal shared by every
-    harness (skipped under --config-only, which only writes the config)."""
+    harness (skipped under --config-only, which only writes the config). In
+    container mode the client runs in the image, so the bare name stands."""
+    if getattr(a, "container_mode", False):
+        return name
     binary = shutil.which(name)
     if binary is None and not a.config_only:
         raise LaunchError(
@@ -120,7 +123,9 @@ def _probe_target(a, *, require_default: str | None = None):
         raise LaunchError(
             f"{a.harness} needs a default model ({require_default}): pass "
             f"--model, or mark one default in the server config.")
-    return base_url, models, default_model
+    # In container mode the probe runs from the Mac, and the client reaches
+    # the server at the guest URL.
+    return getattr(a, "guest_base_url", None) or base_url, models, default_model
 
 
 def _summary(name: str, base_url: str, models: list,
@@ -137,6 +142,9 @@ def _finish(a, binary, argv: list, pairs: dict, *, drop=(), exec_fn) -> int:
     to the environment and the ``drop`` names removed from it. The arguments
     after ``--`` on the launch command line follow ``argv``."""
     extra = list(getattr(a, "passthrough", None) or ())
+    sink = getattr(a, "container_sink", None)
+    if sink is not None:                  # container mode runs it in the image
+        return sink(list(argv), dict(pairs), extra)
     if a.config_only:
         words = ([f"{k}={v}" for k, v in pairs.items()] + list(argv)
                  + [shlex.quote(w) for w in extra])
@@ -935,9 +943,7 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     tts = any(m.get("tts") for m in models)
     rerank = any(m.get("rerank") for m in models)
 
-    server_port = a.port or _DEFAULT_PORT
-    webui_port = (_OPEN_WEBUI_PORT if server_port != _OPEN_WEBUI_PORT
-                  else _OPEN_WEBUI_PORT + 1)
+    webui_port = web_port_for("open-webui", a.port or _DEFAULT_PORT)
     data_dir = os.path.abspath(
         os.path.expanduser(a.config_path or _OPEN_WEBUI_DATA_HOME))
     pairs = build_open_webui_env(base_url, default_model=default_model,
@@ -966,6 +972,9 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     # the UI would try 8080 and collide with the gmlx server (crash: address in
     # use). PORT stays in `pairs` only for any self-URL construction Open WebUI does.
     argv = ["open-webui", "serve", "--port", str(webui_port)]
+    if getattr(a, "container_mode", False):
+        # Inside the guest it listens on loopback, where the entry relays it.
+        argv[2:2] = ["--host", "127.0.0.1"]
     # Our single endpoint must win - drop any inherited plural OpenAI vars that
     # Open WebUI would otherwise merge ahead of it.
     return _finish(a, binary, argv, pairs,
@@ -1175,7 +1184,7 @@ def _launch_dsh(a, *, exec_fn) -> int:
         "Install it first, then re-run - see "
         "https://github.com/deepseek-ai/deepseek-harness  "
         f"(`{_DSH_UPGRADE}`).", label="dsh (DeepSeek Harness)")
-    if not a.config_only:
+    if not a.config_only and not getattr(a, "container_mode", False):
         _check_dsh_version(_dsh_version(binary))
     base_url, models, default_model = _probe_target(a)
     chat = chat_models(models)
@@ -1216,7 +1225,10 @@ def _launch_dsh(a, *, exec_fn) -> int:
     if create:
         argv += ["--from-default-profile", _DSH_TEMPLATE]
     argv += ["--patch", str(out)]
-    if web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
+    if web and getattr(a, "container_mode", False):
+        # The Mac opens the browser; the guest has none.
+        argv += ["--no-open", "--port", str(web_port_for("dsh", a.port or _DEFAULT_PORT))]
+    elif web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
         argv += ["--port", str(_DSH_WEB_PORT + 1)]
     key = a.api_key or _PROVIDER_ID                  # placeholder: no auth
 
@@ -1238,6 +1250,15 @@ def _launch_dsh(a, *, exec_fn) -> int:
               f"there needs a {need}-token context, and this model has "
               f"{window}")
     return _finish(a, binary, argv, {_DSH_KEY_ENV: key}, exec_fn=exec_fn)
+
+
+def web_port_for(harness: str, server_port: int) -> int | None:
+    """The port a browser app listens on: its usual one, or the next when
+    the gmlx server holds it. None for the terminal clients."""
+    usual = {"open-webui": _OPEN_WEBUI_PORT, "dsh": _DSH_WEB_PORT}.get(harness)
+    if usual is None:
+        return None
+    return usual + 1 if int(server_port) == usual else usual
 
 
 # dispatch
@@ -1608,6 +1629,28 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help=f"dsh only: boot this dsh profile with the gmlx overlay "
                          f"instead of the {_DSH_PROFILE} profile, for example "
                          f"headless or a terminal UI profile you set up.")
+    box = ap.add_argument_group(
+        "container mode",
+        "Run the client in an Apple container that sees only the shared folders. "
+        "The launch.container config block sets the defaults.")
+    box.add_argument("--container", action=argparse.BooleanOptionalAction, default=None,
+                     help="Run the client in an Apple container, or on the Mac with "
+                          "--no-container, whatever the config says.")
+    box.add_argument("--mount", action="append", default=[], metavar="PATH[:DST][:ro]",
+                     help="Share another folder with the container. Repeatable, and "
+                          "added to the configured mounts.")
+    box.add_argument("--mount-cwd", action=argparse.BooleanOptionalAction, default=None,
+                     help="Share the current folder, or not with --no-mount-cwd.")
+    box.add_argument("--image", default=None, metavar="REF",
+                     help="Run this image instead of the configured or shipped one.")
+    box.add_argument("--rebuild", action="store_true",
+                     help="Rebuild the client's image, or pull an image: reference again.")
+    box.add_argument("--network", choices=("default", "none"), default=None,
+                     help="none leaves the client only the gmlx server and the "
+                          "forwarded ports.")
+    box.add_argument("--shell", action="store_true",
+                     help="Open a shell in the container instead of the client, or in "
+                          "the running session's container.")
     a = ap.parse_args(argv)
     a.passthrough = passthrough
 
@@ -1617,6 +1660,15 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return 0
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
+    from gmlx.config import ConfigError
+    from .launch_container import container_mode, run_container
+    try:
+        in_container, launch_cfg = container_mode(a, ap)
+    except ConfigError as e:
+        print(f"[launch] {e}", file=sys.stderr)
+        return 1
+    if in_container:
+        return run_container(a, launch_cfg, exec_fn=exec_fn)
 
     try:
         rc = _ensure_server(a)

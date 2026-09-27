@@ -107,6 +107,12 @@ def main(state: dict, args: list[str]) -> int:
         for tag in tags:
             images[_normalize(tag)] = {"digest": digest, "created": state.get("now", "2026-09-27T00:00:00Z")}
         return 0
+    if args[0] == "run" and "--check" not in args:
+        names = [args[i + 1] for i, a in enumerate(args[:-1])
+                 if a == "-e" and "=" not in args[i + 1]]
+        state.setdefault("runs", []).append(
+            {"argv": args, "env": {n: os.environ.get(n) for n in names}})
+        return state.get("run_rc", 0)
     if args[0] == "run":
         word = args[args.index("--check") + 1] if "--check" in args else ""
         rc, line = state.get("checks", {}).get(word, [0, f"/usr/bin/{word}"])

@@ -274,9 +274,7 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
         return None, []
     if git_dir == common or covered(common):
         return None, []
-    return (Mount(common, common, kind="git", note="the git folder of this worktree"),
-            [f"[launch] sharing {_tilde(common, home)} (read-write, the git folder of "
-             "this worktree)"])
+    return Mount(common, common, kind="git", note="the git folder of this worktree"), []
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:

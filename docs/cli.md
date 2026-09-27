@@ -622,6 +622,13 @@ These flags control `gmlx launch`:
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Do not keep `--model` resident. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
+| `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac. |
+| `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured mounts. Repeatable. |
+| `--mount-cwd`, `--no-mount-cwd` | On, off for `open-webui` and `elia` | Share the current folder with the container. |
+| `--image REF` | The configured or shipped image | Run this image in the container. |
+| `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
+| `--network {default,none}` | `default` | With `none`, the container reaches only the gmlx server and the forwarded ports. |
+| `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's

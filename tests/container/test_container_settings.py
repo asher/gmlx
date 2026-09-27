@@ -200,7 +200,7 @@ def test_linked_worktree_shares_its_git_folder(home):
     git = [m for m in plan.mounts if m.kind == "git"]
     assert [m.source for m in git] == [os.path.realpath(repo / ".git")]
     assert not git[0].readonly
-    assert any("the git folder of this worktree" in n for n in plan.notes)
+    assert git[0].note == "the git folder of this worktree"
     (wt / "sub").mkdir()
     below = _plan(home, cwd=str(wt / "sub"))
     assert not [m for m in below.mounts if m.kind == "git"]

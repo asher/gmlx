@@ -18,6 +18,7 @@ import io
 import os
 import re
 import sys
+from pathlib import Path
 
 # Verb one-liners for first-word completion. Mirrors the umbrella help; a test
 # asserts every dispatchable verb has an entry so this can't silently drift.
@@ -138,7 +139,7 @@ def _choice_values(metavar: str) -> list[str]:
     return [v.strip() for v in m.group(1).split(",") if v.strip()]
 
 
-def _named_value_candidates(flag: str) -> list[str]:
+def _named_value_candidates(flag: str, words: list[str] = ()) -> list[str]:
     """Value candidates for flags whose metavar hides an enumerable set
     (themes, sampling profiles)."""
     try:
@@ -151,7 +152,7 @@ def _named_value_candidates(flag: str) -> list[str]:
 
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
         if flag == "--dsh-profile":
-            return _dsh_profile_candidates()
+            return _dsh_profile_candidates(_container_launch(words))
     except Exception:  # noqa: BLE001 - value candidates are best-effort
         return []
     return []
@@ -224,13 +225,29 @@ def _harness_candidates() -> list[str]:
     return out
 
 
-def _dsh_profile_candidates() -> list[str]:
-    """dsh's shipped profiles plus the profiles under $DSH_HOME."""
+def _container_launch(words: list[str]) -> bool:
+    """Whether a ``gmlx launch dsh`` command line runs in container mode, from
+    its flags and then the user-level config."""
+    if "--no-container" in words:
+        return False
+    if "--container" in words:
+        return True
+    from gmlx.config import load_launch_settings
+
+    return bool(load_launch_settings()[0].container.for_client("dsh").enabled)
+
+
+def _dsh_profile_candidates(container: bool = False) -> list[str]:
+    """dsh's shipped profiles plus the profiles under $DSH_HOME, or under the
+    private home in container mode."""
     from .launch import _DSH_PROFILE, _DSH_SHIPPED, _DSH_STDIO, _dsh_home
 
     names = {n: "shipped dsh profile" for n in _DSH_SHIPPED - _DSH_STDIO}
     names[_DSH_PROFILE] = "gmlx profile (default)"
     root = _dsh_home() / "profiles"
+    if container:
+        data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        root = Path(data) / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
     for d in (root.iterdir() if root.is_dir() else ()):
         if (d / "package.json").is_file():
             names.setdefault(d.name, "dsh profile")
@@ -358,7 +375,7 @@ def _complete(argv: list[str]) -> list[str]:
                 return choices
             if _is_pathish(opt[1]):
                 return ["::files"]
-            named = _named_value_candidates(opt[0])
+            named = _named_value_candidates(opt[0], pre)
             if named:
                 return named
             if opt[1] == "MODEL":            # a served model id (launch --model)
