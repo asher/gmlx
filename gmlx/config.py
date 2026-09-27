@@ -2017,6 +2017,9 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
                 isinstance(v, str) and v.strip() for v in value):
             raise ConfigError(f"{where}.{key}: expected a list of strings, "
                               f"got {value!r}")
+        if key == "env":        # a value keeps its spaces, as the shell would pass it
+            return [(lambda n, eq, v: n.strip() + eq + v)(*e.partition("=")) if "=" in e
+                    else e.strip() for e in value]
         return [v.strip() for v in value]
 
     def flag(key):
@@ -2125,6 +2128,19 @@ def _parse_launch(raw) -> LaunchCfg:
     return LaunchCfg(container=cfg)
 
 
+def _parse_launch_leniently(raw) -> LaunchCfg:
+    """The ``launch`` block for the server's own config. Only ``gmlx launch``
+    uses the block, and it parses the block strictly itself, so an error here
+    is one warning and never stops the server."""
+    try:
+        return _parse_launch(raw)
+    except ConfigError as e:
+        import warnings
+        warnings.warn(f"{e}. The server ignores the launch block, and gmlx launch "
+                      "refuses it until it is fixed.", stacklevel=3)
+        return LaunchCfg()
+
+
 def build_config(doc: dict) -> ServerCfg:
     """Build (and validate) a :class:`ServerCfg` from a parsed YAML mapping. Split out
     from :func:`load_config` so discovery / tests can build a config in memory."""
@@ -2184,7 +2200,7 @@ def build_config(doc: dict) -> ServerCfg:
         discover=[_parse_discover(d) for d in
                   _section_list("discover", doc.get("discover"))],
         talk=_parse_talk(doc.get("talk")),
-        launch=_parse_launch(doc.get("launch")),
+        launch=_parse_launch_leniently(doc.get("launch")),
         assistant=_parse_assistant(doc.get("assistant")),
         assistants=_parse_assistant_aliases(srv.get("assistants")),
         assistant_allow_remote=bool(srv.get("assistant_allow_remote", False)),

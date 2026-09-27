@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("yaml")
 
 from gmlx import config as cfgmod  # noqa: E402
-from gmlx.config import ConfigError, build_config, resolve_model  # noqa: E402
+from gmlx.config import ConfigError, _parse_launch, build_config, resolve_model  # noqa: E402
 
 
 # A reusable config exercising every layer of the precedence ladder.
@@ -2095,7 +2095,7 @@ def test_default_disk_path_follows_xdg_cache_home(monkeypatch):
 
 # launch: the container block of `gmlx launch`, read from the user config only
 def _launch(block: dict):
-    return build_config({"launch": {"container": block}}).launch.container
+    return _parse_launch({"container": block}).container
 
 
 def test_launch_defaults_when_absent():
@@ -2130,7 +2130,7 @@ def test_launch_client_values_win_and_lists_add_up():
 
 def test_launch_unknown_keys_and_clients_are_hard_errors():
     with pytest.raises(ConfigError, match="unrecognized"):
-        build_config({"launch": {"box": {}}})
+        _parse_launch({"box": {}})
     with pytest.raises(ConfigError, match="unrecognized"):
         _launch({"mount": ["~/a"]})
     with pytest.raises(ConfigError, match="unrecognized"):
@@ -2139,6 +2139,32 @@ def test_launch_unknown_keys_and_clients_are_hard_errors():
         _launch({"clients": {"cursor": {}}})
     with pytest.raises(ConfigError, match="unrecognized"):
         _launch({"image": "debian"})                      # image is per client
+
+
+@pytest.mark.parametrize("block", [{"clipboard": True}, {"network": "offline"},
+                                   {"box": {}}])
+def test_a_broken_launch_block_is_one_warning_for_the_server(block):
+    doc = {"launch": {"container": block}} if "box" not in block else {"launch": block}
+    with pytest.warns(UserWarning, match="The server ignores the launch block"):
+        cfg = build_config(doc)
+    assert cfg.launch.container.enabled is False and cfg.launch.container.clients == {}
+
+
+def test_a_broken_launch_block_never_stops_a_server_start(tmp_path):
+    """No server runs yet, so gmlx serve and autostart load the file
+    themselves, and they must still get its models."""
+    from gmlx.config import load_config
+    path = tmp_path / "gmlx.yaml"
+    path.write_text("models:\n  m:\n    path: /models/m.gguf\n"
+                    "launch:\n  container:\n    clipboard: on\n")
+    with pytest.warns(UserWarning, match="launch.container.clipboard"):
+        cfg = load_config(path)
+    assert "m" in cfg.models
+
+
+def test_launch_env_values_keep_their_spaces():
+    box = _launch({"env": [" GH_TOKEN ", "GREETING= hello there "]})
+    assert box.env == ["GH_TOKEN", "GREETING= hello there "]
 
 
 @pytest.mark.parametrize("command", ["image", ["my-client", "--flag"]])
