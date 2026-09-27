@@ -14,7 +14,7 @@ decisions. Each arm reports the median of ``--rounds`` timed runs after
 ``--warmup`` untimed ones, with the arm order reversed on every other round.
 The letter readout's long blocks rest ``--cooldown`` seconds after each
 round, since a few minutes of steady load lower the GPU clock on some
-machines. Run it on an idle machine. Writes JSON, with every run's time,
+machines, and warm the GPU for a second before the next round. Run it on an idle machine. Writes JSON, with every run's time,
 and a markdown table under ``--out``.
 """
 
@@ -68,6 +68,16 @@ def _therm() -> str:
         return ""
 
 
+def _warm_gpu(seconds: float) -> None:
+    """Keep the GPU busy with matmuls for ``seconds``. After a few seconds
+    of idle the GPU clock drops, and the first forward then runs up to half
+    again as long; half a second of load brings the clock back."""
+    a = mx.ones((4096, 4096), dtype=mx.bfloat16)
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < seconds:
+        mx.eval(a @ a)
+
+
 def _peak_gb() -> float:
     get = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
     return get() / 1e9
@@ -85,7 +95,8 @@ class Bench:
         """``arms``: (label, params, fn) where ``fn()`` runs once and returns
         the milliseconds to record. ``rest`` seconds of idle follow each
         round, so a block of long arms does not heat the GPU into a lower
-        clock."""
+        clock, and a second of warm-up then brings the clock back before the
+        next round's first arm."""
         print(f"\n[{name}]", flush=True)
         times: dict[str, list[float]] = {label: [] for label, _, _ in arms}
         for r in range(self.warmup + self.rounds):
@@ -96,6 +107,7 @@ class Bench:
                     times[label].append(ms)
             if rest:
                 time.sleep(rest)
+                _warm_gpu(1.0)
         for label, params, _ in arms:
             ts = times[label]
             row = {"block": name, "arm": label, **params,

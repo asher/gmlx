@@ -46,8 +46,10 @@ the prefix of a 700-word state and the tails of 1, 5 and 20 questions at
 each forward size, one tail by length, 20 tails grouped and one per
 forward, a prefix store and lookup, and whole decisions. Its long blocks
 rest 15 s after each round, since a few minutes of steady load lower the
-GPU clock on some machines. The JSON output keeps every run's time, so a
-clock drop shows as a rise across rounds.
+GPU clock on some machines. The GPU also lowers its clock after a few
+seconds of idle, so a second of matmuls follows each rest before the next
+round. The JSON output keeps every run's time, so a clock drop shows as a
+rise across rounds.
 
 ```sh
 python scripts/structured_read_bench.py OpenJev-Q4_K_M.gguf
