@@ -306,10 +306,21 @@ def _sysctl_int(name: str) -> int | None:
         return None
 
 
-def _folder_bytes(root) -> int:
+# The most files doctor measures in the private homes, so a home that holds
+# a large tree cannot make doctor slow.
+_WALK_CAP = 100_000
+
+
+def _folder_bytes(root, budget: list[int]) -> int:
+    """The disk space of the files under ``root``. ``budget`` holds the
+    number of files still to measure; at zero the walk stops, and the total
+    is then a lower bound."""
     total = 0
     for folder, _, files in os.walk(root):
         for name in files:
+            if budget[0] <= 0:
+                return total
+            budget[0] -= 1
             try:
                 total += os.lstat(os.path.join(folder, name)).st_blocks * 512
             except OSError:
@@ -358,7 +369,11 @@ def check_container():
             flag("FAIL" if enabled else "WARN",
                  f"the guest entry is not built ({runtime.BUILD_HINT})")
         if not cli.system_running():
-            flag("WARN", "the container service is stopped (container system start)")
+            text = "the container service is stopped (container system start)"
+            if enabled:
+                flag("WARN", text)
+            else:                     # nothing needs it until container mode is on
+                parts.append(text)
             return _check("container", status, "; ".join(parts))
         containers = cli.containers()
         files, limit = _sysctl_int("kern.num_files"), _sysctl_int("kern.maxfiles")
@@ -376,10 +391,12 @@ def check_container():
             parts.append("volumes " + ", ".join(
                 f"{v.name} {session.gb(session.allocated_bytes(v.source))}"
                 for v in volumes))
-        homes = sum(_folder_bytes(data_dir() / c / "home") for c in LAUNCH_CLIENTS
+        budget = [_WALK_CAP]
+        homes = sum(_folder_bytes(data_dir() / c / "home", budget) for c in LAUNCH_CLIENTS
                     if (data_dir() / c / "home").is_dir())
         if homes:
-            parts.append(f"private homes {session.gb(homes)}")
+            more = "at least " if budget[0] <= 0 else ""
+            parts.append(f"private homes {more}{session.gb(homes)}")
         count, layers = cli.launch_images()
         if count:
             parts.append(f"{count} launch image{_s(count)}, {session.gb(layers)} of layers")

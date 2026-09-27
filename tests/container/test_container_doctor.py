@@ -66,7 +66,24 @@ def test_missing_entry_fails_only_when_enabled(box, enabled, status):
     assert "scripts/build_guest_entry.py" in row["detail"]
 
 
+def test_a_stopped_service_is_only_information_when_container_mode_is_off(box):
+    box.update(running=False)
+    row = doctor.check_container()
+    assert row["status"] == "PASS" and "container system start" in row["detail"]
+
+
+def test_the_private_home_walk_is_capped(box, monkeypatch):
+    from gmlx.container.state import data_dir
+    home = data_dir() / "pi" / "home"
+    home.mkdir(parents=True)
+    for n in range(5):
+        (home / f"f{n}").write_bytes(b"x" * 5000)
+    monkeypatch.setattr(doctor, "_WALK_CAP", 2)
+    assert "private homes at least" in doctor.check_container()["detail"]
+
+
 def test_old_version_and_stopped_service_warn(box):
+    _enable(box.home)
     box.update(version="1.3.0", running=False)
     row = doctor.check_container()
     assert row["status"] == "WARN"
