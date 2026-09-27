@@ -130,6 +130,20 @@ def _summary(name: str, base_url: str, models: list,
             + extra + ")")
 
 
+def _finish(a, binary, argv: list, pairs: dict, *, drop=(), exec_fn) -> int:
+    """The shared end of every harness: under --config-only, print the command
+    that runs the client and return 0; otherwise exec it with ``pairs`` added
+    to the environment and the ``drop`` names removed from it."""
+    if a.config_only:
+        words = [f"{k}={v}" for k, v in pairs.items()] + list(argv)
+        print(f"[launch] run it with:  {' '.join(words)}")
+        return 0
+    env = dict(os.environ, **pairs)
+    for name in drop:
+        env.pop(name, None)
+    return exec_fn(binary, list(argv), env)
+
+
 # server probe (HTTP only - launch never imports the model stack)
 def _http_get_json(url: str, timeout: float = 5.0, headers: dict | None = None):
     """GET ``url`` and parse JSON (lifecycle.get_json). Seam: monkeypatched in
@@ -303,12 +317,8 @@ def _launch_opencode(a, *, exec_fn) -> int:
 
     print(_summary("opencode", base_url, models, default_model)
           + f"\n[launch] wrote {out}")
-    if a.config_only:
-        print(f"[launch] run it with:  OPENCODE_CONFIG={out} opencode")
-        return 0
-
-    env = dict(os.environ, OPENCODE_CONFIG=str(out))
-    return exec_fn(binary, ["opencode"], env)
+    return _finish(a, binary, ["opencode"], {"OPENCODE_CONFIG": str(out)},
+                   exec_fn=exec_fn)
 
 
 # pi  (https://github.com/parsfaghfouri/pi - "ollama launch pi")
@@ -449,11 +459,7 @@ def _launch_pi(a, *, exec_fn) -> int:
 
     print(_summary("pi", base_url, models, default_model)
           + f"\n[launch] merged {models_path} + {settings_path}")
-    if a.config_only:
-        print("[launch] run it with:  pi")
-        return 0
-
-    return exec_fn(binary, ["pi"], dict(os.environ))
+    return _finish(a, binary, ["pi"], {}, exec_fn=exec_fn)
 
 
 # omp  (oh-my-pi - https://github.com/can1357/oh-my-pi - "ollama launch omp")
@@ -537,11 +543,7 @@ def _launch_omp(a, *, exec_fn) -> int:
 
     print(_summary("omp", base_url, models, default_model)
           + f"\n[launch] merged {models_path} + {config_path}")
-    if a.config_only:
-        print("[launch] run it with:  omp")
-        return 0
-
-    return exec_fn(binary, ["omp"], dict(os.environ))
+    return _finish(a, binary, ["omp"], {}, exec_fn=exec_fn)
 
 
 # hermes  (NousResearch hermes-agent - https://github.com/NousResearch/hermes-agent)
@@ -602,13 +604,9 @@ def _launch_hermes(a, *, exec_fn) -> int:
           f"(merged from {user_cfg}, which stays untouched)")
     print("[launch] note: hermes requires >=64k context - serve "
           f"{default_model} with a context window of at least 64k tokens")
-    if a.config_only:
-        print(f"[launch] run it with:  HERMES_CONFIG={out} "
-              f"CUSTOM_BASE_URL={base_url} hermes")
-        return 0
-
-    env = dict(os.environ, HERMES_CONFIG=str(out), CUSTOM_BASE_URL=base_url)
-    return exec_fn(binary, ["hermes"], env)
+    return _finish(a, binary, ["hermes"],
+                   {"HERMES_CONFIG": str(out), "CUSTOM_BASE_URL": base_url},
+                   exec_fn=exec_fn)
 
 
 # goose  (Block - https://github.com/block/goose)
@@ -660,12 +658,7 @@ def _launch_goose(a, *, exec_fn) -> int:
     print(_summary("goose", base_url, models, default_model)
           + f"\n[launch] merged {cfg_path} "
           f"(OPENAI_API_KEY is supplied via the environment, not written)")
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} goose session")
-        return 0
-
-    return exec_fn(binary, ["goose", "session"], dict(os.environ, **pairs))
+    return _finish(a, binary, ["goose", "session"], pairs, exec_fn=exec_fn)
 
 
 # claude-code  (Anthropic Claude Code - https://claude.com/claude-code)
@@ -706,15 +699,9 @@ def _launch_claude_code(a, *, exec_fn) -> int:
           "so KV-prefix reuse is limited - expect prefill-dominated turn "
           "latency on local models; serve with the prompt cache (cache:) "
           "enabled to soften repeated prefixes")
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} claude")
-        return 0
-
-    env = dict(os.environ, **pairs)
     # An inherited real key would take precedence over our ANTHROPIC_AUTH_TOKEN.
-    env.pop("ANTHROPIC_API_KEY", None)
-    return exec_fn(binary, ["claude"], env)
+    return _finish(a, binary, ["claude"], pairs, drop=("ANTHROPIC_API_KEY",),
+                   exec_fn=exec_fn)
 
 
 # aichat  (sigoden/aichat - all-in-one LLM CLI: chat-REPL, roles, sessions, RAG,
@@ -769,12 +756,8 @@ def _launch_aichat(a, *, exec_fn) -> int:
           + f"\n[launch] wrote {cfg_file}")
     print("[launch] note: tool/agent use also needs aichat functions installed "
           "(aichat's llm-functions); the server already parses tool calls.")
-    if a.config_only:
-        print(f"[launch] run it with:  AICHAT_CONFIG_DIR={cfg_dir} aichat")
-        return 0
-
-    env = dict(os.environ, AICHAT_CONFIG_DIR=str(cfg_dir))
-    return exec_fn(binary, ["aichat"], env)
+    return _finish(a, binary, ["aichat"], {"AICHAT_CONFIG_DIR": str(cfg_dir)},
+                   exec_fn=exec_fn)
 
 
 # elia  (darrenburns/elia - a keyboard-centric chat TUI, not a coding harness).
@@ -847,12 +830,8 @@ def _launch_elia(a, *, exec_fn) -> int:
     argv = ["elia"]
     if default_model:
         argv += ["-m", f"{a.provider_id}/{default_model}"]
-    if a.config_only:
-        print(f"[launch] run it with:  XDG_CONFIG_HOME={xdg_home} {' '.join(argv)}")
-        return 0
-
-    env = dict(os.environ, XDG_CONFIG_HOME=str(xdg_home))
-    return exec_fn(binary, argv, env)
+    return _finish(a, binary, argv, {"XDG_CONFIG_HOME": str(xdg_home)},
+                   exec_fn=exec_fn)
 
 
 # open-webui  (Open WebUI - a browser chat app, not a terminal client: it runs as its
@@ -983,17 +962,11 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     # the UI would try 8080 and collide with the gmlx server (crash: address in
     # use). PORT stays in `pairs` only for any self-URL construction Open WebUI does.
     argv = ["open-webui", "serve", "--port", str(webui_port)]
-    if a.config_only:
-        env_line = " ".join(f"{k}={v}" for k, v in pairs.items())
-        print(f"[launch] run it with:  {env_line} {' '.join(argv)}")
-        return 0
-
-    env = dict(os.environ, **pairs)
     # Our single endpoint must win - drop any inherited plural OpenAI vars that
     # Open WebUI would otherwise merge ahead of it.
-    env.pop("OPENAI_API_BASE_URLS", None)
-    env.pop("OPENAI_API_KEYS", None)
-    return exec_fn(binary, argv, env)
+    return _finish(a, binary, argv, pairs,
+                   drop=("OPENAI_API_BASE_URLS", "OPENAI_API_KEYS"),
+                   exec_fn=exec_fn)
 
 
 # dsh  (DeepSeek Harness - https://github.com/deepseek-ai/deepseek-harness)
@@ -1260,11 +1233,7 @@ def _launch_dsh(a, *, exec_fn) -> int:
               f"after the server reports an overflow. Automatic compaction "
               f"there needs a {need}-token context, and this model has "
               f"{window}")
-    if a.config_only:
-        print(f"[launch] run it with:  {_DSH_KEY_ENV}={key} {' '.join(argv)}")
-        return 0
-
-    return exec_fn(binary, argv, dict(os.environ, **{_DSH_KEY_ENV: key}))
+    return _finish(a, binary, argv, {_DSH_KEY_ENV: key}, exec_fn=exec_fn)
 
 
 # dispatch

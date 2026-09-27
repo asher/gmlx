@@ -380,6 +380,43 @@ def test_launch_config_only_works_without_binary(monkeypatch, tmp_path):
     assert rc == 0 and out.exists()
 
 
+# _finish: the shared config-only line and exec that end every harness
+def test_finish_config_only_prints_pairs_then_argv(capsys):
+    execd = []
+    rc = launch._finish(_args(config_only=True), "/usr/bin/goose",
+                        ["goose", "session"], {"A": "1", "B": "two"},
+                        exec_fn=lambda *x: execd.append(x) or 0)
+    assert rc == 0 and execd == []
+    assert capsys.readouterr().out == "[launch] run it with:  A=1 B=two goose session\n"
+
+
+def test_finish_config_only_empty_pairs_has_no_stray_space(capsys):
+    rc = launch._finish(_args(config_only=True), None, ["pi"], {},
+                        exec_fn=lambda *x: 0)
+    assert rc == 0
+    assert capsys.readouterr().out == "[launch] run it with:  pi\n"
+
+
+def test_finish_execs_with_pairs_and_drops(monkeypatch):
+    monkeypatch.setenv("KEEP_ME", "yes")
+    monkeypatch.setenv("DROP_ME", "secret")
+    monkeypatch.setenv("A", "old")
+    calls = {}
+
+    def fake_exec(binary, argv, env):
+        calls.update(binary=binary, argv=argv, env=env)
+        return 7
+
+    rc = launch._finish(_args(), "/usr/bin/tool", ["tool", "--x"], {"A": "new"},
+                        drop=("DROP_ME", "NOT_SET"), exec_fn=fake_exec)
+    assert rc == 7                                     # the exec seam's return passes up
+    assert calls["binary"] == "/usr/bin/tool"
+    assert calls["argv"] == ["tool", "--x"]
+    assert calls["env"]["A"] == "new"                  # pairs override the inherited value
+    assert calls["env"]["KEEP_ME"] == "yes"
+    assert "DROP_ME" not in calls["env"]
+
+
 def test_handler_prefers_base_url_over_host_port(monkeypatch, tmp_path):
     # _ensure_server can resolve a base_url that disagrees with host/port (e.g.
     # a config endpoint); every request must follow base_url, not the pair.
