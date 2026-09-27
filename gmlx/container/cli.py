@@ -349,8 +349,9 @@ def list_launch_containers() -> list[Container]:
 
 
 def stop(name: str, *, timeout: int = 10) -> None:
+    # The grace time plus the query time, which query_timeout() shortens.
     _run(["stop", "--time", str(timeout), name], check=False,
-         timeout=timeout + QUERY_TIMEOUT)
+         timeout=timeout + (_query_timeout or QUERY_TIMEOUT))
 
 
 def kill(name: str, *, signal: str | None = None) -> None:

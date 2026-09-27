@@ -145,12 +145,14 @@ def test_queries_time_out_quickly_and_an_idle_builder_is_reported(box, monkeypat
         seen.append(seconds)
         return real(seconds)
     monkeypatch.setattr(cli, "query_timeout", spy)
+    from gmlx.container import images
+    # Other test runs can start the fake `container build` at the same time.
+    monkeypatch.setattr(images, "_other_builds", lambda: False)
     box.update(builder=True)
     row = doctor.check_container()
     assert seen == [doctor.DOCTOR_QUERY_TIMEOUT] == [5.0]
     # A builder launch did not start is information only.
     assert row["status"] == "PASS" and "container builder stop" in row["detail"]
-    from gmlx.container import images
     started = cli.builder().started
     images._owed_path().parent.mkdir(parents=True, exist_ok=True)
     images._owed_path().write_text(started + "\n")

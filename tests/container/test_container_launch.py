@@ -683,7 +683,10 @@ def test_a_restarted_service_with_a_ready_image_gets_two_steps(env, capsys, monk
     assert env.runs[-1]["summary"][0] == "[launch] step 2: start pi"
 
 
-def test_step_7_reports_an_idle_builder(env, capsys):
+def test_step_7_reports_an_idle_builder(env, capsys, monkeypatch):
+    from gmlx.container import images
+    # Other test runs can start the fake `container build` at the same time.
+    monkeypatch.setattr(images, "_other_builds", lambda: False)
     env.update(builder=True)
     assert _run(["pi", "--container"]) == 0
     assert "container builder stop" in capsys.readouterr().out
