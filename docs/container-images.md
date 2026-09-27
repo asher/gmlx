@@ -71,14 +71,19 @@ build context changes, and when a gmlx upgrade changes the base. A
 both the build and that check. A `<Containerfile>.dockerignore` beside the
 Containerfile takes its place when it exists. Launch leaves the `.git`
 folder at the root of the context out of that check, but the build still
-receives it, so list `.git` in the ignore file to keep it out of the image. A Containerfile must stay under 16 KiB,
-which `container build` requires.
+receives it, so list `.git` in the ignore file to keep it out of the image.
+A Containerfile must stay under 16 KiB, which `container build` requires.
 
 `--rebuild` builds your image again without its cache. When the
 Containerfile names no `:base`, it also pulls the registry images the
 Containerfile starts from again. When it names a `:base`, launch first
 rebuilds that base with fresh downloads, and it does not pull the other
 registry images your Containerfile names.
+
+Apple's image builder is a virtual machine of its own that holds about
+4 GB of memory while it runs. Launch stops the builder after a build that
+started it, so a `container build` of your own that runs at the same time
+ends with it.
 
 ## A ready-made image
 
