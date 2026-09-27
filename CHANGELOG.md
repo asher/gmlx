@@ -32,10 +32,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx run` and `gmlx chat` turn speculation on by themselves when they
   find the companion drafter of a Qwen3.8-Flash-Next or Muse Glimmer model,
   as they already did for DeepSeek-V4.
-- Gemma-4 31B and 26B-A4B decode faster with an mlx-kquant build that
-  provides `add_rmsnorm_norm`.
-- Gemma-4 decodes faster on NAX GPUs (M5) with mlx-kquant 0.4.15 beyond a
-  few thousand tokens of context. `GMLX_GQA_SDPA_NAX512=0` opts out.
+- Requires mlx-kquant 0.4.15. With it, gemma-4 31B and 26B-A4B decode
+  faster, and so does plain decode of `Q6_K` models under sustained load.
+- Gemma-4 decodes faster on NAX GPUs (M5) beyond a few thousand tokens of
+  context. `GMLX_GQA_SDPA_NAX512=0` opts out.
 
 ### Fixed
 
