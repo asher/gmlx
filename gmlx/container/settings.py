@@ -152,7 +152,7 @@ def parse_mount_spec(spec: str) -> tuple[str, str | None, bool]:
     return os.path.expanduser(parts[0]), target, readonly
 
 
-def _check_mount_chars(path: str, what: str) -> None:
+def check_mount_chars(path: str, what: str) -> None:
     if "," in path or "=" in path:
         raise SettingsError(f"{what} {path} contains ',' or '=', which "
                             "`container run --mount` cannot take.")
@@ -200,8 +200,8 @@ def normalize_mounts(mounts: list[Mount]) -> list[Mount]:
                 raise SettingsError(f"{_label(m)} cannot be mounted at {target}, which "
                                     f"covers {reserved}.")
         if m.kind != "volume":
-            _check_mount_chars(m.source, "the folder")
-        _check_mount_chars(target, "the guest path")
+            check_mount_chars(m.source, "the folder")
+        check_mount_chars(target, "the guest path")
         other = by_target.get(target)
         if other is not None:
             raise SettingsError(f"{_label(other)} and {_label(m)} both mount at {target}.")

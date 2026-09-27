@@ -74,8 +74,11 @@ def _install(folder: Path, source: Path) -> None:
 def acquire_runtime(source: Path | None = None) -> tuple[Path, FileLock]:
     """The runtime folder of the packaged entry, with a shared lock on it that
     the caller holds until its session ends."""
+    from .settings import check_mount_chars
+
     source = source or entry_path()
     folder = runtime_root() / entry_digest(source)
+    check_mount_chars(str(folder), "the runtime folder")
     for _ in range(5):
         if not _complete(folder):
             if folder.exists():

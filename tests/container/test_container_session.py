@@ -226,6 +226,28 @@ def _entry(tmp_path, data=b"\x7fELF-fake"):
     return path
 
 
+def test_a_colon_in_the_cache_path_moves_the_session_to_tmpdir(fake_container, tmp_path,
+                                                                 monkeypatch, request):
+    import shutil
+    import tempfile
+    short_root = tempfile.mkdtemp(dir="/tmp")
+    request.addfinalizer(lambda: shutil.rmtree(short_root, ignore_errors=True))
+    monkeypatch.setenv("XDG_CACHE_HOME", f"{short_root}/a:b")
+    monkeypatch.setenv("TMPDIR", short_root)
+    sess = session.new_session("pi", [])
+    assert sess.dir.parent == Path(short_root)
+    monkeypatch.setenv("TMPDIR", f"{short_root}/c:d")
+    with pytest.raises(SettingsError, match="contains ':'"):
+        session.new_session("pi", [])
+
+
+def test_a_runtime_folder_container_cannot_mount_is_refused(fake_container, tmp_path,
+                                                            monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "a,b"))
+    with pytest.raises(SettingsError, match="the runtime folder"):
+        runtime.acquire_runtime(_entry(tmp_path))
+
+
 def test_runtime_copy_and_cleanup(fake_container, tmp_path):
     folder, lock = runtime.acquire_runtime(_entry(tmp_path))
     assert folder.name == runtime.entry_digest(_entry(tmp_path))

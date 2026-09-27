@@ -132,13 +132,18 @@ def _tmpdir() -> str:
 
 def new_session(client: str, forward: list[int]) -> Session:
     """A fresh session folder, mode 0700. It moves to ``$TMPDIR`` when its
-    longest socket path would pass the macOS limit."""
+    longest socket path would pass the macOS limit, or when the cache path
+    holds a ``:``, which ends the Mac side of a ``-v`` socket relay."""
     token = secrets.token_hex(3)
     longest = max([len("api.sock"), len("web.sock"), len("clip.sock")]
                   + [len(f"fwd-{p}.sock") for p in forward])
     folder = cache_dir() / f"{client}-{token}"
-    if len(str(folder)) + 1 + longest > SOCKET_PATH_MAX:
+    if len(str(folder)) + 1 + longest > SOCKET_PATH_MAX or ":" in str(folder):
         folder = Path(_tmpdir()) / f"gmlx-launch-{client}-{token}"
+    if ":" in str(folder):
+        raise SettingsError(f"the session folder {folder} contains ':', which "
+                            "`container run -v` cannot take. Set XDG_CACHE_HOME or TMPDIR "
+                            "to a path without one.")
     folder.mkdir(mode=0o700, parents=True)
     os.chmod(folder, 0o700)
     return Session(client, token, folder)
