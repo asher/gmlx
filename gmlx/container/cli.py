@@ -168,6 +168,23 @@ def launch_images() -> tuple[int, int]:
     return len(sizes), sum(sizes.values())
 
 
+def builder_running() -> bool:
+    """Whether Apple container's image builder, a virtual machine of its
+    own, is running."""
+    proc = _run(["builder", "status", "--format", "json"], check=False)
+    if proc.returncode != 0:
+        return False
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    return any((r.get("status") or {}).get("state") == "running" for r in rows)
+
+
+def builder_stop() -> None:
+    _run(["builder", "stop"], check=False)
+
+
 def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,
           labels: dict[str, str] | None = None, no_cache: bool = False,
           pull: bool = False) -> None:

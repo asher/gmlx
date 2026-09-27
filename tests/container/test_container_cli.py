@@ -102,6 +102,29 @@ def test_shipped_build_tags_hash_and_base(fake_container):
     assert again.action == "found" and len(fake_container.load()["builds"]) == 1
 
 
+def test_a_builder_launch_started_is_stopped_after_the_build(fake_container):
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert fake_container.calls("builder", "stop")
+    assert not fake_container.load()["builder"]
+
+
+def test_a_builder_that_was_running_keeps_running(fake_container):
+    fake_container.update(builder=True)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert not fake_container.calls("builder", "stop")
+
+
+def test_the_builder_stays_while_another_launch_builds(fake_container):
+    other = FileLock(images.images_dir() / "builder.lock", shared=True)
+    try:
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+        assert not fake_container.calls("builder", "stop")
+    finally:
+        other.release()
+    # The marker stays, so the launch that finishes last stops it.
+    assert (images.images_dir() / "builder-started").exists()
+
+
 def test_packages_change_the_hash_and_reach_the_build(fake_container):
     assert images.shipped_tag("pi", []) != images.shipped_tag("pi", ["make"])
     images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make", "jq"]), say=_quiet)

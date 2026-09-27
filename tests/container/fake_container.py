@@ -95,7 +95,15 @@ def main(state: dict, args: list[str]) -> int:
             return 1
         images[_normalize(args[2])] = dict(img)
         return 0
+    if args[:2] == ["builder", "status"]:
+        print(json.dumps([{"id": "buildkit", "status": {
+            "state": "running" if state.get("builder") else "stopped"}}]))
+        return 0
+    if args[:2] == ["builder", "stop"]:
+        state["builder"] = False
+        return 0
     if args[0] == "build":
+        state["builder"] = True
         if state.get("fail_build"):
             return 1
         state["next"] = state.get("next", 0) + 1

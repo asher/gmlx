@@ -30,7 +30,7 @@ from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
 from . import cli, ignore
 from .cli import ContainerError, ImageInfo
-from .state import FileLock, images_dir
+from .state import FileLock, LockHeld, images_dir
 
 DOMAIN = "gmlx.invalid"
 SHIPPED_CONTAINERFILE = Path(__file__).parent / "files" / "Containerfile"
@@ -320,6 +320,31 @@ def check_arch(info: ImageInfo, ref: str) -> None:
                          "runs Linux arm64 images only.")
 
 
+def _build(context: str, **kw) -> None:
+    """Run ``container build``, then stop the image builder when a launch
+    started it and no other launch is building. The builder is a virtual
+    machine of its own that keeps its memory until it stops."""
+    marker = images_dir() / "builder-started"
+    using = FileLock(images_dir() / "builder.lock", shared=True)
+    try:
+        if not cli.builder_running():
+            marker.touch()
+        cli.build(context, **kw)
+    finally:
+        using.release()
+        try:
+            last = FileLock(images_dir() / "builder.lock", blocking=False)
+        except LockHeld:
+            last = None                   # another launch is still building
+        if last is not None:
+            try:
+                if marker.exists():
+                    marker.unlink()
+                    cli.builder_stop()
+            finally:
+                last.release()
+
+
 def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                     say: Say) -> ReadyImage:
     repo, tag, base = recipe_repo(client), shipped_tag(client, packages), base_ref(client)
@@ -328,7 +353,7 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
         action = "found"
         if info is None:
             say(f"[launch] building the {client} image")
-            cli.build(str(SHIPPED_CONTAINERFILE.parent), file=str(SHIPPED_CONTAINERFILE),
+            _build(str(SHIPPED_CONTAINERFILE.parent), file=str(SHIPPED_CONTAINERFILE),
                       tags=[tag, base], build_args=_shipped_args(client, packages),
                       labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
             info = cli.image_info(tag)
@@ -380,7 +405,7 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
         action = "found"
         if info is None:
             say(f"[launch] building {plan.containerfile}")
-            cli.build(str(plan.context), file=str(plan.containerfile), tags=[tag],
+            _build(str(plan.context), file=str(plan.containerfile), tags=[tag],
                       labels=LAUNCH_LABELS, no_cache=rebuild,
                       pull=rebuild and not plan.bases)
             info = cli.image_info(tag)
