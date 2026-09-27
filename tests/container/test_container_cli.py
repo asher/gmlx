@@ -4,6 +4,7 @@ references, tag cleanup, the one-time command check and the rebuild hash."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -204,6 +205,137 @@ def test_builder_notice(fake_container, no_other_builds):
         assert images.builder_notice() is None              # never raises
     finally:
         os.environ["PATH"] = saved
+
+
+def _stops(fake_container) -> int:
+    return len(fake_container.calls("builder", "stop"))
+
+
+def test_overlapping_builds_leave_no_builder_running(fake_container, no_other_builds):
+    """Launch A starts the builder while launch B holds the lock, so A
+    cannot stop it. B stops it when it settles, because the recorded start
+    date still names the builder that runs."""
+    other = FileLock(images.images_dir() / "builder.lock", shared=True)
+    try:
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+        assert _stops(fake_container) == 0
+    finally:
+        other.release()
+    images._settle_builder(_quiet)
+    assert _stops(fake_container) == 1 and not fake_container.load()["builder"]
+    assert not images._owed_path().exists()
+
+
+def test_a_builder_you_started_later_is_never_stopped(fake_container, no_other_builds):
+    other = FileLock(images.images_dir() / "builder.lock", shared=True)
+    try:
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    finally:
+        other.release()
+    state = fake_container.load()
+    state.update(builder=True, builder_started="2026-09-28T09:00:00Z")   # your own start
+    fake_container.save(state)
+    images._settle_builder(_quiet)
+    assert _stops(fake_container) == 0 and fake_container.load()["builder"]
+    assert not images._owed_path().exists()
+
+
+def test_a_base_and_a_user_build_start_and_stop_the_builder_once(fake_container,
+                                                                 no_other_builds, tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM gmlx.invalid/launch-pi:base\n")
+    plan = images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), LaunchContainerCfg())
+    images.ensure_image(plan, say=_quiet)
+    state = fake_container.load()
+    assert len(state["builds"]) == 2
+    assert state["builder_starts"] == 1 and _stops(fake_container) == 1
+
+
+def test_the_idle_builder_notice_comes_once_per_start(fake_container, no_other_builds):
+    fake_container.update(builder=True, builder_started="2026-09-28T09:00:00Z")
+    assert images.builder_notice() is not None
+    assert images.builder_notice() is None
+    line, owed = images.builder_report()
+    assert not owed and line.endswith("container builder stop")
+    fake_container.update(builder_started="2026-09-28T10:00:00Z")    # started again
+    assert images.builder_notice() is not None
+    assert _stops(fake_container) == 0
+
+
+def test_an_owed_stop_is_settled_by_the_next_launch(fake_container, no_other_builds,
+                                                   monkeypatch):
+    """A launch killed after its build leaves the stop owed. The next launch
+    stops that builder instead of reporting it, and doctor reports it as
+    owed until then."""
+    settle = images._settle_builder
+    monkeypatch.setattr(images, "_settle_builder", lambda say: None)   # killed first
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    monkeypatch.setattr(images, "_settle_builder", settle)
+    line, owed = images.builder_report()
+    assert owed and "container builder stop" in line
+    assert images.builder_notice() is None
+    assert _stops(fake_container) == 1 and not fake_container.load()["builder"]
+
+
+@pytest.mark.parametrize("env_set, builder_env", [
+    ({"NO_COLOR": "1"}, []),
+    ({}, ["NO_COLOR=true"]),
+    ({"BUILDKIT_COLORS": "run=green"}, ["BUILDKIT_COLORS=error=red"]),
+])
+def test_a_running_builder_keeps_its_colour_settings(fake_container, no_other_builds,
+                                                    monkeypatch, env_set, builder_env):
+    for name in ("NO_COLOR", "BUILDKIT_COLORS"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env_set.items():
+        monkeypatch.setenv(name, value)
+    fake_container.update(builder=True, builder_env=builder_env)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    state = fake_container.load()
+    assert state.get("builder_recreated", 0) == 0
+    assert state["builder_env"] == builder_env
+
+
+def test_a_build_waits_while_the_builder_stops(fake_container, no_other_builds, monkeypatch):
+    waits = []
+    monkeypatch.setattr(images.time, "sleep", waits.append)
+    fake_container.update(builder=False, builder_stopping=2)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert waits == [0.5, 0.5] and len(fake_container.load()["builds"]) == 1
+
+
+@pytest.mark.parametrize("line, found", [
+    ("container --debug build -t x .", True),
+    ("/usr/local/bin/container --debug --help build", True),
+    ("container -d builder start", True),
+    ("container --debug run --rm build", False),
+    ("container-apiserver start", False),
+])
+def test_the_build_pattern_accepts_options_first(line, found):
+    assert bool(images._BUILD_COMMAND.search(line)) is found
+
+
+def test_old_list_records_are_migrated_and_cleaned(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    path = images._records_path()
+    records = _records()
+    records[first.run_ref] = ["pi"]
+    path.write_text(json.dumps(records))
+    assert _records()[first.run_ref] == {"clients": ["pi"], "pids": []}
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert first.run_ref not in fake_container.load()["images"]
+    assert first.run_ref not in _records()
+
+
+def test_the_gone_image_sweep_covers_only_the_cleaned_repository(fake_container):
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    elsewhere = "gmlx.invalid/launch-omp@" + D2        # not in the store
+
+    def plant(records):
+        records[elsewhere] = {"clients": ["omp"], "pids": []}
+    images._update_records(plant)
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    assert elsewhere in _records()
 
 
 def test_packages_change_the_hash_and_reach_the_build(fake_container):
@@ -677,7 +809,7 @@ def test_a_shared_reference_goes_once_no_client_uses_it(fake_container):
 
 def test_records_drop_dead_pids_and_gone_images(fake_container):
     first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
-    gone = "gmlx.invalid/launch-omp@" + D2
+    gone = "gmlx.invalid/launch-pi@" + D2
 
     def plant(records):
         records[gone] = {"clients": ["omp"], "pids": []}

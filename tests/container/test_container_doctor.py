@@ -136,7 +136,7 @@ def test_leftover_containers_warn_with_memory_and_stop_command(box):
     assert "gmlx-pi-2" not in row["detail"]
 
 
-def test_queries_time_out_quickly_and_an_idle_builder_warns(box, monkeypatch):
+def test_queries_time_out_quickly_and_an_idle_builder_is_reported(box, monkeypatch):
     from gmlx.container import cli
     seen = []
     real = cli.query_timeout
@@ -148,7 +148,15 @@ def test_queries_time_out_quickly_and_an_idle_builder_warns(box, monkeypatch):
     box.update(builder=True)
     row = doctor.check_container()
     assert seen == [doctor.DOCTOR_QUERY_TIMEOUT] == [5.0]
+    # A builder launch did not start is information only.
+    assert row["status"] == "PASS" and "container builder stop" in row["detail"]
+    from gmlx.container import images
+    started = cli.builder().started
+    images._owed_path().parent.mkdir(parents=True, exist_ok=True)
+    images._owed_path().write_text(started + "\n")
+    row = doctor.check_container()                   # a launch owes its stop
     assert row["status"] == "WARN" and "container builder stop" in row["detail"]
+    assert cli.builder().state == "running"          # doctor never stops it
 
 
 def test_a_service_that_does_not_answer_warns(box, monkeypatch):

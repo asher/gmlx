@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 
 
 def _normalize(ref: str) -> str:
@@ -123,10 +122,17 @@ def main(state: dict, args: list[str]) -> int:
             print("[]")
             return 0
         conf = state.get("builder_config", {"cpus": 2, "memory": 2 << 30, "ssh": False})
+        env = ["PATH=/usr/bin:/bin", *state.get("builder_env", [])]
+        if state.get("builder_stopping"):
+            # A builder that is stopping reports it this many more times.
+            state["builder_stopping"] -= 1
+            builder_state = "stopping"
+        else:
+            builder_state = "running" if state["builder"] else "stopped"
         print(json.dumps([{"id": "buildkit", "configuration": {
-            "id": "buildkit", "ssh": conf["ssh"],
+            "id": "buildkit", "ssh": conf["ssh"], "initProcess": {"environment": env},
             "resources": {"cpus": conf["cpus"], "memoryInBytes": conf["memory"]}},
-            "status": {"state": "running" if state["builder"] else "stopped",
+            "status": {"state": builder_state,
                        "startedDate": state.get("builder_started", "2026-01-01T00:00:00Z")}}]))
         return 0
     if args[:2] == ["builder", "stop"]:
@@ -137,8 +143,23 @@ def main(state: dict, args: list[str]) -> int:
             state["builder"] = False
         return 0
     if args[0] == "build":
+        # As 1.4.1 does, the builder takes BUILDKIT_COLORS and NO_COLOR from
+        # the build command, and a running builder whose copy differs is
+        # created again.
+        wanted = sorted([f"BUILDKIT_COLORS={os.environ['BUILDKIT_COLORS']}"]
+                        if "BUILDKIT_COLORS" in os.environ else []) + (
+            ["NO_COLOR=true"] if "NO_COLOR" in os.environ else [])
+        wanted.sort()
+        if state.get("builder") and state.get("builder_env", []) != wanted:
+            state["builder_recreated"] = state.get("builder_recreated", 0) + 1
+            state["builder"] = False
         if not state.get("builder"):
-            state["builder_started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            # Each start gets its own start date, as whole seconds would
+            # not tell two quick starts apart.
+            state["builder_starts"] = state.get("builder_starts", 0) + 1
+            state["builder_started"] = f"2026-09-27T12:{state['builder_starts'] // 60:02d}:" \
+                                       f"{state['builder_starts'] % 60:02d}Z"
+        state["builder_env"] = wanted
         state["builder"] = True
         state.setdefault("builder_args", []).append(
             [a for i, a in enumerate(args) if a in ("--cpus", "--memory", "--ssh")

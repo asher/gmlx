@@ -466,7 +466,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         containers = cli.containers()
         for line in session.orphan_notices(client, containers):
             say(line)
-        notice = images.builder_notice()
+        notice = images.builder_notice(say=say)
         if notice:
             say(notice)
         # Step 8

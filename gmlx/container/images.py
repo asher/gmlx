@@ -22,6 +22,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,6 +276,11 @@ def _update_records(fn: Callable[[dict], None]) -> dict:
             records = {}
         if not isinstance(records, dict):
             records = {}
+        for ref, entry in list(records.items()):
+            if isinstance(entry, list):   # the older form: only the clients
+                records[ref] = {"clients": sorted(str(c) for c in entry), "pids": []}
+            elif not isinstance(entry, dict):
+                del records[ref]
         fn(records)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(records, indent=1, sort_keys=True))
@@ -352,12 +358,16 @@ def _cleanup(repo: str, keep: set[str], client: str, *, tags: bool, say: Say) ->
 
 def _cleanup_or_raise(repo: str, keep: set[str], client: str, *, tags: bool) -> None:
     used_refs, used_digests = _in_use()
-    names = cli.image_names()
-    store = {name for name, _digest in names}
     doomed: list[str] = []
+    names: list[tuple[str, str]] = []
 
     def choose(records):
-        for ref in [r for r in records if r not in store]:
+        # The store is read while the record lock is held, so a reference
+        # that another launch added before it waited for the lock is in it.
+        # Only this repository is swept, which its own lock guards.
+        names[:] = cli.image_names()
+        store = {name for name, _digest in names}
+        for ref in [r for r in records if repository_of(r) == repo and r not in store]:
             del records[ref]              # the image is gone
         for ref, entry in records.items():
             if isinstance(entry, dict):
@@ -400,27 +410,74 @@ def check_arch(info: ImageInfo, ref: str) -> None:
                          "runs Linux arm64 images only.")
 
 
-def _build(context: str, *, say: Say, **kw) -> None:
+# The longest wait for a builder that is stopping. 1.4.1 refuses to build
+# while the builder stops.
+BUILDER_STOP_WAIT = 60.0
+
+
+def _owed_path() -> Path:
+    """Holds the start date of a builder that a launch started and that no
+    launch stopped yet."""
+    return images_dir() / "builder-owed"
+
+
+def _noticed_path() -> Path:
+    """Holds the start date of the running builder that launch last reported."""
+    return images_dir() / "builder-noticed"
+
+
+def _read_date(path: Path) -> str | None:
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _write_date(path: Path, value: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(value + "\n")
+    os.replace(tmp, path)
+
+
+def _current_builder() -> cli.Builder | None:
+    """The builder, after waiting while it stops."""
+    deadline = time.monotonic() + BUILDER_STOP_WAIT
+    while True:
+        current = cli.builder()
+        if current is None or current.state != "stopping" or time.monotonic() > deadline:
+            return current
+        time.sleep(0.5)
+
+
+def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
     """Run ``container build``. The image builder is a virtual machine of
-    its own that keeps its memory until it stops, so the launch that found
-    it stopped stops it again after the build, when no other build uses it.
-    A builder that was already running gets its own settings passed back,
-    so the build never makes 1.4.1 create it again."""
+    its own that keeps its memory until it stops. When the build starts it,
+    its start date is recorded as a stop that launch owes, and
+    :func:`_settle_builder` stops it once no build uses it. A builder that
+    was already running gets its own settings and colour variables passed
+    back, so the build never makes 1.4.1 create it again."""
     using = FileLock(images_dir() / "builder.lock", shared=True)
     # Earlier versions kept a marker file here.
     (images_dir() / "builder-started").unlink(missing_ok=True)
+    announce.built = True
     started_here = False
     try:
-        current = cli.builder()
+        current = _current_builder()
         if current is not None and current.state == "running":
             kw["builder_args"] = cli.builder_build_args(current)
+            kw["env"] = cli.builder_build_env(current)
         else:
             started_here = True
         cli.build(context, **kw)
     finally:
-        using.release()
-        if started_here:
-            _stop_builder(say)
+        try:
+            after = cli.builder() if started_here else None
+            if after is not None and after.state == "running" and after.started:
+                _write_date(_owed_path(), after.started)
+        except ContainerError:
+            pass
+        finally:
+            using.release()
 
 
 def _other_builds() -> bool:
@@ -434,20 +491,32 @@ def _other_builds() -> bool:
     return any(_BUILD_COMMAND.search(line) for line in out.splitlines())
 
 
-_BUILD_COMMAND = re.compile(r"(^|/)container\s+(build|builder)(\s|$)")
+# Flags, such as --debug, can come before the subcommand.
+_BUILD_COMMAND = re.compile(r"(^|/)container(\s+-\S+)*\s+(build|builder)(\s|$)")
 
 
-def _stop_builder(say: Say) -> None:
-    """Stop the builder unless another build uses it. A failure only warns,
+def _settle_builder(say: Say) -> None:
+    """Stop the builder when launch owes the stop: the builder that runs
+    now is the one a launch started, no launch holds the builder lock, and
+    no other build runs. The recorded start date identifies that one start,
+    so a builder you started later is never stopped. A failure only warns,
     since the image is ready."""
     try:
         last = FileLock(images_dir() / "builder.lock", blocking=False)
     except LockHeld:
         return                            # another launch is still building
     try:
+        owed = _read_date(_owed_path())
+        if owed is None:
+            return
+        current = cli.builder()
+        if current is None or current.state != "running" or current.started != owed:
+            _owed_path().unlink(missing_ok=True)
+            return
         if _other_builds():
             return
         cli.builder_stop()
+        _owed_path().unlink(missing_ok=True)
     except ContainerError as e:
         say(f"[launch] warning: could not stop the image builder ({e}). Stop it with: "
             "container builder stop")
@@ -455,13 +524,10 @@ def _stop_builder(say: Say) -> None:
         last.release()
 
 
-def builder_notice() -> str | None:
-    """One line about a builder that runs while no build uses it, with the
-    command that stops it, or None. It never raises."""
-    try:
-        current = cli.builder()
-    except ContainerError:
-        return None
+def _idle_builder() -> tuple[cli.Builder, bool] | None:
+    """The running builder when no build uses it, and whether launch owes
+    its stop."""
+    current = cli.builder()
     if current is None or current.state != "running":
         return None
     try:
@@ -473,18 +539,59 @@ def builder_notice() -> str | None:
             return None
     finally:
         idle.release()
+    owed = current.started is not None and _read_date(_owed_path()) == current.started
+    return current, owed
+
+
+def _builder_line(current: cli.Builder) -> str:
     size = (f" and holds {current.memory_bytes / (1 << 30):.0f} GB of memory"
             if current.memory_bytes else "")
     return (f"[launch] the image builder is running{size}. Stop it with: "
             "container builder stop")
 
 
+def builder_report() -> tuple[str, bool] | None:
+    """For ``gmlx doctor``: a line about a running builder that no build
+    uses, and whether launch owes its stop, or None. It never raises."""
+    try:
+        found = _idle_builder()
+    except (ContainerError, OSError):
+        return None
+    if found is None:
+        return None
+    current, owed = found
+    return _builder_line(current), owed
+
+
+def builder_notice(say: Say = _say) -> str | None:
+    """For a launch: stop a builder whose stop launch owes, else one line
+    about a running builder that no build uses, once for each start of the
+    builder. None otherwise. It never raises."""
+    try:
+        found = _idle_builder()
+        if found is None:
+            return None
+        current, owed = found
+        if owed:
+            _settle_builder(say)
+            return None
+        if current.started and _read_date(_noticed_path()) == current.started:
+            return None
+        if current.started:
+            _write_date(_noticed_path(), current.started)
+        return _builder_line(current)
+    except (ContainerError, OSError):
+        return None
+
+
 class _Announce:
     """Prints the build and pull lines, and puts the first-run step number
-    on the first of them only."""
+    on the first of them only. It also notes whether a build ran, so the
+    builder is settled once for the whole image."""
 
     def __init__(self, say: Say, step: str | None):
         self.say, self.step = say, step
+        self.built = False
 
     def __call__(self, text: str) -> None:
         prefix = f"{self.step}: " if self.step else ""
@@ -505,7 +612,8 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
             announce(f"building the {client} image" + (
                 f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for {node}"
                 if download else ""))
-            _build(str(SHIPPED_CONTAINERFILE.parent), say=say, file=str(SHIPPED_CONTAINERFILE),
+            _build(str(SHIPPED_CONTAINERFILE.parent), say=say, announce=announce,
+                   file=str(SHIPPED_CONTAINERFILE),
                    tags=[tag, base], build_args=_shipped_args(client, packages),
                    labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
             info = cli.image_info(tag)
@@ -559,7 +667,8 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
         action = "found"
         if info is None:
             announce(f"building {plan.containerfile}")
-            _build(str(plan.context), say=say, file=str(plan.containerfile), tags=[tag],
+            _build(str(plan.context), say=say, announce=announce,
+                   file=str(plan.containerfile), tags=[tag],
                    labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
             info = cli.image_info(tag)
             if info is None:
@@ -597,12 +706,18 @@ def ensure_image(plan: ImagePlan, *, rebuild: bool = False, say: Say = _say,
     """Build, pull or find the planned image and pin it by digest. ``step``,
     such as ``"step 2 of 3"``, goes on the first build or pull line."""
     announce = _Announce(say, step)
-    if plan.kind == "shipped":
-        return _ensure_shipped(plan.client, plan.packages, rebuild=rebuild, say=say,
-                               announce=announce)
-    if plan.kind == "build":
-        return _ensure_build(plan, rebuild=rebuild, say=say, announce=announce)
-    return _ensure_pulled(plan, rebuild=rebuild, say=say, announce=announce)
+    try:
+        if plan.kind == "shipped":
+            return _ensure_shipped(plan.client, plan.packages, rebuild=rebuild, say=say,
+                                   announce=announce)
+        if plan.kind == "build":
+            return _ensure_build(plan, rebuild=rebuild, say=say, announce=announce)
+        return _ensure_pulled(plan, rebuild=rebuild, say=say, announce=announce)
+    finally:
+        # Once for the whole image, so a base build and a user build do not
+        # stop and start the builder between them.
+        if announce.built:
+            _settle_builder(say)
 
 
 def pending_work(plan: ImagePlan, rebuild: bool) -> str | None:

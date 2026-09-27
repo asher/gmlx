@@ -415,9 +415,14 @@ def _container_row(enabled: bool) -> dict:
         for c in session.leftover_containers(containers):
             memory = f", {session.gb(c.memory_bytes)}" if c.memory_bytes else ""
             flag("WARN", f"{c.name} is left over{memory} (container stop {c.name})")
-        notice = images.builder_notice()
-        if notice:
-            flag("WARN", notice.removeprefix("[launch] ").rstrip("."))
+        report = images.builder_report()
+        if report is not None:
+            line, stop_owed = report
+            text = line.removeprefix("[launch] ").rstrip(".")
+            if stop_owed:                 # a launch started it and could not stop it
+                flag("WARN", text)
+            else:                         # yours, or started before a launch looked
+                parts.append(text)
     except cli.ContainerError as e:
         flag("WARN", str(e))
     return _check("container", status, "; ".join(parts))

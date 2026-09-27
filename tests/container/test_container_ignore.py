@@ -156,6 +156,12 @@ def test_a_pattern_ends_at_the_end_of_the_text_as_in_go():
     assert ignore.Matcher(["*.txt"]).excluded("a.txt")
 
 
+def test_a_double_star_does_not_cross_a_newline_as_in_go():
+    matcher = ignore.Matcher(["a/**/b"])
+    assert matcher.excluded("a/x/y/b")
+    assert not matcher.excluded("a/x\ny/b")
+
+
 def test_lines_split_on_newlines_only():
     assert ignore.read_patterns("a\r\nb\rc\n\x0cd\n") == ["a", "b\rc", "d"]
 

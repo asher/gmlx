@@ -103,9 +103,10 @@ class _Pattern:
             index += 1
         self.kind = kind
         if kind == _REGEXP:
-            # \Z, since Go's $ matches only at the end of the text.
+            # \Z, since Go's $ matches only at the end of the text. No
+            # re.S, since Go's . does not match a newline either.
             try:
-                self.regex = re.compile(reg + r"\Z", re.S)
+                self.regex = re.compile(reg + r"\Z")
             except re.error as e:
                 # BuildKit refuses such a pattern too, as Go's regexp does.
                 raise UnsupportedPattern(f"{self.cleaned!r} is not a valid pattern ({e})") from None

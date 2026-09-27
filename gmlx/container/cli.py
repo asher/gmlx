@@ -211,10 +211,19 @@ def launch_images() -> tuple[int, int]:
 class Builder:
     """Apple container's image builder, a virtual machine of its own, from
     ``container builder status``."""
-    state: str                        # "running", "stopped" and so on
+    state: str                        # "running", "stopping", "stopped" and so on
     cpus: int | None = None
     memory_bytes: int | None = None
     ssh: bool = False
+    # When the builder last started, as whole-second UTC text. A new start
+    # gives a new value, so it identifies one start of the builder.
+    started: str | None = None
+    # The builder's BUILDKIT_COLORS and NO_COLOR entries, which 1.4.1
+    # compares with the build command's own environment.
+    colors: tuple[str, ...] = ()
+
+
+_BUILDER_ENV = ("BUILDKIT_COLORS=", "NO_COLOR=")
 
 
 def builder() -> Builder | None:
@@ -224,10 +233,14 @@ def builder() -> Builder | None:
         conf = row.get("configuration") or {}
         res = conf.get("resources") or {}
         status = row.get("status") or {}
-        return Builder(state=str(status.get("state", "")) if isinstance(status, dict)
-                       else str(status),
-                       cpus=res.get("cpus"), memory_bytes=res.get("memoryInBytes"),
-                       ssh=bool(conf.get("ssh")))
+        env = (conf.get("initProcess") or {}).get("environment") or []
+        state = status.get("state", "") if isinstance(status, dict) else status
+        started = status.get("startedDate") if isinstance(status, dict) else None
+        return Builder(state=str(state), cpus=res.get("cpus"),
+                       memory_bytes=res.get("memoryInBytes"), ssh=bool(conf.get("ssh")),
+                       started=str(started) if started else None,
+                       colors=tuple(sorted(e for e in env if isinstance(e, str)
+                                           and e.startswith(_BUILDER_ENV))))
     return None
 
 
@@ -246,13 +259,26 @@ def builder_build_args(running: Builder) -> list[str]:
     return args
 
 
+def builder_build_env(running: Builder) -> dict[str, str]:
+    """The environment for ``container build`` that matches a running
+    builder. 1.4.1 gives the builder ``BUILDKIT_COLORS`` from the build
+    command's environment, and ``NO_COLOR=true`` when that environment sets
+    ``NO_COLOR``, and it creates the builder again when these differ."""
+    env = {k: v for k, v in os.environ.items() if k not in ("BUILDKIT_COLORS", "NO_COLOR")}
+    for entry in running.colors:
+        name, _, value = entry.partition("=")
+        env[name] = value
+    return env
+
+
 def builder_stop() -> None:
     _run(["builder", "stop"])
 
 
 def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str] | None = None,
           labels: dict[str, str] | None = None, no_cache: bool = False,
-          pull: bool = False, builder_args: list[str] | None = None) -> None:
+          pull: bool = False, builder_args: list[str] | None = None,
+          env: dict[str, str] | None = None) -> None:
     args = ["build", *(builder_args or []), "--file", file]
     for tag in tags:
         args += ["--tag", tag]
@@ -264,7 +290,7 @@ def build(context: str, *, file: str, tags: list[str], build_args: dict[str, str
         args.append("--no-cache")
     if pull:
         args.append("--pull")
-    _run([*args, context], capture=False, timeout=None)
+    _run([*args, context], capture=False, timeout=None, env=env)
 
 
 def pull(ref: str) -> None:
