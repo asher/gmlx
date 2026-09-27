@@ -28,11 +28,11 @@ the DeepSeek Harness web app (dsh):
 - **omp** (oh-my-pi) - merged non-destructively into ``~/.omp/agent/{models,config}.yml``
   (YAML). Provider goes in ``models.yml``; the default model is pinned via
   ``modelRoles.default`` in ``config.yml``. Existing providers/roles are preserved.
-- **hermes** (NousResearch hermes-agent) - the user's ``~/.hermes/config.yaml`` is
-  read, merged with our ``inference``/``providers.custom`` block, written into our
-  namespace, and injected via ``HERMES_CONFIG`` (plus ``CUSTOM_BASE_URL``) - the
-  user's file is never touched. Hermes refuses models with <64k context at startup,
-  so launch prints that requirement.
+- **hermes** (NousResearch hermes-agent) - our ``model``/``providers.custom`` block is
+  merged into ``$HERMES_HOME/config.yaml`` (default ``~/.hermes/config.yaml``), the
+  only config file hermes 0.19 reads, after a timestamped backup of the previous
+  file; ``CUSTOM_BASE_URL`` is exported too. Hermes refuses models with <64k context
+  at startup, so launch prints that requirement.
 - **goose** (Block) - pointer keys (``GOOSE_PROVIDER: openai`` + ``OPENAI_HOST``-family)
   merged non-destructively into ``~/.config/goose/config.yaml``; ``OPENAI_API_KEY`` is
   exec-environment-only (env takes precedence in goose, and the YAML may hold a real
@@ -79,6 +79,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -559,15 +560,19 @@ def _launch_omp(a, *, exec_fn) -> int:
 
 
 # hermes  (NousResearch hermes-agent - https://github.com/NousResearch/hermes-agent)
-# On the Mac the user's ``~/.hermes/config.yaml`` is read and merged with our
-# provider block into our namespace, never written back, and the result is
-# named by ``HERMES_CONFIG``. hermes 0.19 reads only ``$HERMES_HOME/config.yaml``,
-# so in container mode the merge goes into the private home's own
-# ``~/.hermes/config.yaml``. The provider *type* is hermes's literal ``custom``
+# hermes 0.19 reads its settings only from ``$HERMES_HOME/config.yaml``, and
+# sends an API key to a local server only from that file, so launch merges
+# its provider block into it: a merge client, not an injection one. On the
+# Mac the previous file is backed up first. In container mode the file is the
+# private home's own. The provider *type* is hermes's literal ``custom``
 # (``--provider-id`` does not apply); ``CUSTOM_BASE_URL`` is exported too -
 # hermes's override for ``provider: custom``. A default model is mandatory
 # (``model.default``).
-_HERMES_CONFIG = "~/.hermes/config.yaml"
+
+
+def _hermes_config_path() -> Path:
+    home = os.environ.get("HERMES_HOME")
+    return Path(os.path.expanduser(home or "~/.hermes")) / "config.yaml"
 
 
 def build_hermes_config(base_url: str, *, default_model: str,
@@ -605,31 +610,31 @@ def _launch_hermes(a, *, exec_fn) -> int:
         "Install hermes-agent first, then re-run - see "
         "https://github.com/NousResearch/hermes-agent  (e.g. `curl -fsSL "
         "https://hermes-agent.nousresearch.com/install.sh | bash`).")
+    if a.config_path:
+        raise LaunchError("--config-path does not apply to hermes, which reads only "
+                          "$HERMES_HOME/config.yaml. Set HERMES_HOME to use another folder.")
     base_url, models, default_model = _probe_target(
-        a, require_default="its config pins inference.model")
+        a, require_default="its config pins model.default")
 
-    in_container = getattr(a, "container_mode", False)
-    user_cfg = Path(os.path.expanduser(
-        os.environ.get("HERMES_CONFIG") or _HERMES_CONFIG))
+    path = _hermes_config_path()
+    existing = _load_yaml(path)
     cfg = build_hermes_config(base_url, default_model=default_model,
-                              api_key=a.api_key, existing=_load_yaml(user_cfg))
-
-    # The private home is ours, so container mode writes hermes's own file.
-    out = user_cfg if in_container else Path(os.path.expanduser(
-        a.config_path or f"{_CONFIG_HOME}/hermes-config.yaml"))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _write_text_atomic(out, yaml.safe_dump(cfg, sort_keys=False))
-
-    where = ("" if in_container
-             else f" (merged from {user_cfg}, which stays untouched)")
-    print(_summary("hermes", base_url, models, default_model)
-          + f"\n[launch] wrote {out}{where}")
+                              api_key=a.api_key, existing=existing)
+    print(_summary("hermes", base_url, models, default_model))
+    if cfg == existing:
+        print(f"[launch] {path} already points hermes at the server")
+    else:
+        # The private home is gmlx's own, so only a file on the Mac is backed up.
+        if path.exists() and not getattr(a, "container_mode", False):
+            backup = path.with_name(f"{path.name}.gmlx-{time.strftime('%Y%m%d-%H%M%S')}")
+            shutil.copy2(path, backup)
+            print(f"[launch] backed up {path} to {backup}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_text_atomic(path, yaml.safe_dump(cfg, sort_keys=False))
+        print(f"[launch] wrote {path}")
     print("[launch] note: hermes requires >=64k context - serve "
           f"{default_model} with a context window of at least 64k tokens")
-    pairs = {"CUSTOM_BASE_URL": base_url}
-    if not in_container:
-        pairs = {"HERMES_CONFIG": str(out), **pairs}
-    return _finish(a, binary, ["hermes"], pairs, exec_fn=exec_fn)
+    return _finish(a, binary, ["hermes"], {"CUSTOM_BASE_URL": base_url}, exec_fn=exec_fn)
 
 
 # goose  (Block - https://github.com/block/goose)

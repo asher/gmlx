@@ -907,65 +907,87 @@ def test_build_hermes_config_key_and_string_model():
     assert cfg["providers"]["custom"]["api_key"] == "k"
 
 
-def test_launch_hermes_injects_config_env(monkeypatch, tmp_path):
-    import yaml as _yaml
-    _fake_probe(monkeypatch)
-    monkeypatch.setenv("HERMES_CONFIG", str(tmp_path / "no-user-config.yaml"))
-    out = tmp_path / "hermes-config.yaml"
-    calls = {}
+# hermes-agent 0.19.0 reads its settings only from $HERMES_HOME/config.yaml
+# (hermes_cli/config.py get_config_path), with the main model under
+# model.provider, model.default, model.base_url and model.api_key
+# (hermes_cli/runtime_provider.py _resolve_openrouter_runtime). HERMES_CONFIG
+# appears only in an env-writer denylist, and a key reaches a local server
+# only from model.api_key, so launch merges into that file.
 
+def _hermes_exec(calls):
     def fake_exec(binary, argv, env):
         calls["binary"], calls["argv"], calls["env"] = binary, argv, env
         return 0
-
-    rc = launch._launch_hermes(_args(harness="hermes", config_path=str(out)),
-                               exec_fn=fake_exec)
-    assert rc == 0
-    assert calls["binary"] == "/usr/bin/hermes"
-    assert calls["env"]["HERMES_CONFIG"] == str(out)
-    assert calls["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:8080/v1"
-    cfg = _yaml.safe_load(out.read_text())
-    assert cfg["model"]["default"] == "qwen3.6-27b"
+    return fake_exec
 
 
-def test_launch_hermes_merges_user_config_without_touching_it(monkeypatch, tmp_path):
+def test_launch_hermes_merges_into_its_own_config(monkeypatch, tmp_path):
     import yaml as _yaml
     _fake_probe(monkeypatch)
-    user = tmp_path / "user-hermes.yaml"
-    user_text = "gateway:\n  discord: true\n"
-    user.write_text(user_text)
-    monkeypatch.setenv("HERMES_CONFIG", str(user))
-    out = tmp_path / "ours.yaml"
-    rc = launch._launch_hermes(
-        _args(harness="hermes", config_path=str(out), config_only=True),
-        exec_fn=lambda *a: 0)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    calls = {}
+    rc = launch._launch_hermes(_args(harness="hermes"), exec_fn=_hermes_exec(calls))
     assert rc == 0
-    assert user.read_text() == user_text                       # untouched
-    assert _yaml.safe_load(out.read_text())["gateway"] == {"discord": True}
+    assert calls["binary"] == "/usr/bin/hermes"
+    assert calls["env"]["CUSTOM_BASE_URL"] == "http://127.0.0.1:8080/v1"
+    assert "HERMES_CONFIG" not in calls["env"]
+    cfg = _yaml.safe_load((tmp_path / ".hermes" / "config.yaml").read_text())
+    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert not list((tmp_path / ".hermes").glob("config.yaml.gmlx-*"))   # nothing to back up
+
+
+def test_launch_hermes_backs_up_and_keeps_other_keys(monkeypatch, tmp_path, capsys):
+    import yaml as _yaml
+    _fake_probe(monkeypatch)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    own = tmp_path / "hh" / "config.yaml"
+    own.parent.mkdir()
+    before = "gateway:\n  discord: true\nmodel:\n  provider: openrouter\n  context_length: 65536\n"
+    own.write_text(before)
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    cfg = _yaml.safe_load(own.read_text())
+    assert cfg["gateway"] == {"discord": True}
+    assert cfg["model"]["provider"] == "custom" and cfg["model"]["context_length"] == 65536
+    backups = list(own.parent.glob("config.yaml.gmlx-*"))
+    assert len(backups) == 1 and backups[0].read_text() == before
+    assert f"backed up {own} to {backups[0]}" in capsys.readouterr().out
+    # A second launch changes nothing, so it neither writes nor backs up.
+    assert launch._launch_hermes(_args(harness="hermes", config_only=True),
+                                 exec_fn=lambda *a: 0) == 0
+    assert len(list(own.parent.glob("config.yaml.gmlx-*"))) == 1
+    assert "already points hermes at the server" in capsys.readouterr().out
+
+
+def test_launch_hermes_refuses_config_path_and_a_broken_file(monkeypatch, tmp_path):
+    _fake_probe(monkeypatch)
+    with pytest.raises(launch.LaunchError, match="HERMES_HOME"):
+        launch._launch_hermes(_args(harness="hermes", config_path=str(tmp_path / "x.yaml")),
+                              exec_fn=lambda *a: 0)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("model: [unclosed\n")
+    with pytest.raises(launch.LaunchError, match="refusing to overwrite"):
+        launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
 
 
 def test_launch_hermes_container_writes_the_home_config(monkeypatch, tmp_path):
     import yaml as _yaml
     _fake_probe(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("HERMES_CONFIG", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
     own = tmp_path / ".hermes" / "config.yaml"
     own.parent.mkdir()
     own.write_text("gateway:\n  discord: true\n")
     calls = {}
-
-    def fake_exec(binary, argv, env):
-        calls["env"] = env
-        return 0
-
     a = _args(harness="hermes")
     a.container_mode = True
-    assert launch._launch_hermes(a, exec_fn=fake_exec) == 0
+    assert launch._launch_hermes(a, exec_fn=_hermes_exec(calls)) == 0
     cfg = _yaml.safe_load(own.read_text())
     assert cfg["gateway"] == {"discord": True}
     assert cfg["model"]["default"] == "qwen3.6-27b"
     assert "HERMES_CONFIG" not in calls["env"]
-    assert not (tmp_path / ".config" / "gmlx" / "hermes-config.yaml").exists()
+    assert not list(own.parent.glob("config.yaml.gmlx-*"))   # the private home is ours
 
 
 def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
@@ -973,18 +995,14 @@ def test_launch_hermes_requires_default_model(monkeypatch, tmp_path):
                         lambda base, api_key=None: [{"id": "a"}, {"id": "b"}])  # no default mark
     monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
     with pytest.raises(launch.LaunchError) as e:
-        launch._launch_hermes(_args(harness="hermes",
-                                    config_path=str(tmp_path / "h.yaml")),
-                              exec_fn=lambda *a: 0)
+        launch._launch_hermes(_args(harness="hermes"), exec_fn=lambda *a: 0)
     assert "--model" in str(e.value)
 
 
 def test_launch_hermes_prints_context_note(monkeypatch, tmp_path, capsys):
     _fake_probe(monkeypatch)
-    launch._launch_hermes(_args(harness="hermes",
-                                config_path=str(tmp_path / "h.yaml"),
-                                config_only=True),
-                          exec_fn=lambda *a: 0)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    launch._launch_hermes(_args(harness="hermes", config_only=True), exec_fn=lambda *a: 0)
     assert "64k" in capsys.readouterr().out
 
 

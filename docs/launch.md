@@ -56,7 +56,7 @@ Each client uses one or two of these styles:
 | `opencode` | It is a coding agent. | Injection | The configuration goes in `~/.config/gmlx/opencode.json`, through `OPENCODE_CONFIG`. |
 | `pi` | It is a coding agent. | Merge | The configuration goes in `~/.pi/agent/models.json` and `settings.json`. |
 | `omp` | It is oh-my-pi, a coding agent. | Merge | The configuration goes in `~/.omp/agent/models.yml` and `config.yml`. |
-| `hermes` | It is NousResearch hermes-agent. | Injection | The configuration goes in `~/.config/gmlx/hermes-config.yaml`, through `HERMES_CONFIG`. |
+| `hermes` | It is NousResearch hermes-agent. | Merge | The configuration goes in `~/.hermes/config.yaml`, after a backup of the previous file. |
 | `goose` | It is Block's agent runtime. | Merge and environment | The configuration goes in `~/.config/goose/config.yaml`. |
 | `aichat` | It is a terminal chat client with tools. | Injection | The configuration goes in `~/.config/gmlx/aichat/`, through `AICHAT_CONFIG_DIR`. |
 | `elia` | It is a terminal chat app. | Injection | The configuration goes in `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME`. |
@@ -71,9 +71,11 @@ lists, as [Container mode](launch-container.md) describes.
 
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
-It names a file for opencode, hermes and dsh, and a directory for pi, omp
-and aichat. For goose it names the `config.yaml`, for elia the
-`XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
+It names a file for opencode and dsh, and a directory for pi, omp and
+aichat. For goose it names the `config.yaml`, for elia the
+`XDG_CONFIG_HOME` directory, and for Open WebUI the data directory. hermes
+refuses it, because hermes reads only `$HERMES_HOME/config.yaml`, so set
+`HERMES_HOME` to use another folder.
 
 ## Starting the server
 
@@ -134,7 +136,7 @@ the key in its own setting:
 | `opencode` | The key goes in `options.apiKey` in the injected file. |
 | `pi` | The key goes in `apiKey` in the merged provider. |
 | `omp` | The key goes nowhere, because omp has no setting for it. `launch` prints a note, and you set up omp's authentication yourself. |
-| `hermes` | The key goes in `providers.custom.api_key` in the injected file. |
+| `hermes` | The key goes in `model.api_key` and `providers.custom.api_key` in the merged file. |
 | `goose` | The key goes in `OPENAI_API_KEY` in the environment only, never in the file. |
 | `claude-code` | The key goes in `ANTHROPIC_AUTH_TOKEN` in the environment. |
 | `aichat`, `elia` | The key goes in `api_key` in the injected file. |
@@ -169,11 +171,15 @@ and output limit from the server's model list.
 
 ### hermes
 
-`launch` reads your `~/.hermes/config.yaml`, adds the gmlx provider, and
-writes the result to the injected file, which it passes through
-`HERMES_CONFIG` and `CUSTOM_BASE_URL`. Your own file is not changed. hermes
-refuses a model with less than 64K tokens of context, so give it a model
-trained for at least that length.
+`launch` merges the gmlx provider into hermes's own `config.yaml`, in
+`$HERMES_HOME` or `~/.hermes`, and keeps every other setting. hermes reads
+its settings from no other file, and it sends an API key to a local server
+only from that file. Before it changes the file, `launch` copies it to
+`config.yaml.gmlx-<date>-<time>` beside it and prints the copy's path. A
+launch that would change nothing writes nothing.
+
+hermes refuses a model with less than 64K tokens of context, so give it a
+model trained for at least that length.
 
 ### goose
 

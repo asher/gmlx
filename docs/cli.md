@@ -592,8 +592,8 @@ send turns verbatim with `--no-chat-template`.
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
 installs the tool on the Mac, and [container mode](launch-container.md)
-installs it in the container's image. `opencode`, `hermes`, `aichat`, `elia` and `dsh` get a
-configuration of their own under `~/.config/gmlx`. `pi`, `omp` and `goose`
+installs it in the container's image. `opencode`, `aichat`, `elia` and `dsh` get a
+configuration of their own under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose`
 get a provider merged into their own files, and `claude-code` and
 `open-webui` get environment variables only. [Agents and chat apps](launch.md) describes each client.
 

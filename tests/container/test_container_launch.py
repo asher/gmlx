@@ -407,13 +407,14 @@ def test_shell_attach_while_the_session_starts(running_session, capsys):
 def test_guest_home_restores_after_an_exception(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", "/real")
     monkeypatch.setenv("DSH_HOME", "/real/dsh")
-    monkeypatch.delenv("HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("HERMES_HOME", "/real/hermes")
     with pytest.raises(RuntimeError):
         with lc.guest_home(tmp_path):
-            assert os.environ["HOME"] == str(tmp_path) and "DSH_HOME" not in os.environ
+            assert os.environ["HOME"] == str(tmp_path)
+            assert "DSH_HOME" not in os.environ and "HERMES_HOME" not in os.environ
             raise RuntimeError
     assert os.environ["HOME"] == "/real" and os.environ["DSH_HOME"] == "/real/dsh"
-    assert "HERMES_CONFIG" not in os.environ
+    assert os.environ["HERMES_HOME"] == "/real/hermes"
 
 
 def test_handlers_read_only_the_host_variables_guest_home_covers():
@@ -430,7 +431,7 @@ def test_handlers_read_only_the_host_variables_guest_home_covers():
         if isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ":
             if isinstance(node.slice, ast.Constant):
                 names.add(node.slice.value)
-    assert names == {"HERMES_CONFIG", "AUDIO_TTS_VOICE", "DSH_HOME"}
+    assert names == {"HERMES_HOME", "AUDIO_TTS_VOICE", "DSH_HOME"}
 
 
 def test_dsh_reads_its_token_url_instead_of_the_terminal(env):

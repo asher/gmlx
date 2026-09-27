@@ -85,10 +85,11 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
 def guest_home(home: Path):
     """Point ``HOME`` at the private home while a handler runs, and hide the
     variables that would send it to the user's own files."""
-    saved = {k: os.environ.get(k) for k in ("HOME", "DSH_HOME", "HERMES_CONFIG")}
+    hidden = ("DSH_HOME", "HERMES_HOME")
+    saved = {k: os.environ.get(k) for k in ("HOME", *hidden)}
     os.environ["HOME"] = str(home)
-    os.environ.pop("DSH_HOME", None)
-    os.environ.pop("HERMES_CONFIG", None)
+    for key in hidden:
+        os.environ.pop(key, None)
     try:
         yield
     finally:
