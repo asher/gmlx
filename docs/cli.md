@@ -591,7 +591,8 @@ send turns verbatim with `--no-chat-template`.
 
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
-installs the tool. `opencode`, `hermes`, `aichat`, `elia` and `dsh` get a
+installs the tool on the Mac, and [container mode](launch-container.md)
+installs it in the container's image. `opencode`, `hermes`, `aichat`, `elia` and `dsh` get a
 configuration of their own under `~/.config/gmlx`. `pi`, `omp` and `goose`
 get a provider merged into their own files, and `claude-code` and
 `open-webui` get environment variables only. [Agents and chat apps](launch.md) describes each client.
@@ -617,18 +618,18 @@ These flags control `gmlx launch`:
 | `--api-key KEY` | The config's `server.api_key` | Write this key to the tool's native config field. Without a key, tools that require one get the provider id. |
 | `--provider-id NAME` | `gmlx` | Write this provider id into the tool's config. |
 | `--config-path PATH` | The client's location | Write the tool config to this file or directory, depending on the client. [How a launch works](launch.md#how-a-launch-works) lists each one. |
-| `--config-only` | Off | Write the config and print the run command without running it. |
+| `--config-only` | Off | Write the config and print the run command without running it. In container mode, print the `container run` command. |
 | `--no-start` | Off | Never start a server. |
 | `--start-timeout S` | `0`, no limit | Cap the auto-start wait. |
 | `--no-keep` | Off | Do not keep `--model` resident. |
 | `--dsh-profile NAME` | `gmlx` | Boot this dsh profile with the gmlx overlay, for dsh only, as [dsh](launch.md#dsh) describes. |
-| `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac. |
-| `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured mounts. Repeatable. |
+| `--container`, `--no-container` | The config's `enabled` | Run the client in an Apple container, or on the Mac, as [Container mode](launch-container.md) describes. |
+| `--mount PATH[:DST][:ro]` | None | Share another folder with the container, in addition to the configured [mounts](config.md#launchcontainermounts). Repeatable. |
 | `--mount-cwd`, `--no-mount-cwd` | On, off for `open-webui` and `elia` | Share the current folder with the container. |
-| `--image REF` | The configured or shipped image | Run this image in the container. |
+| `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--network {default,none}` | `default` | With `none`, the container reaches only the gmlx server and the forwarded ports. |
-| `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container. |
+| `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container, as [The shell](launch-container.md#the-shell) describes. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
@@ -636,7 +637,10 @@ own. Before that, the command exits 0 after `--config-only` and 1 when the
 server is unreachable, has died or has timed out, or when the tool is not
 installed. It
 exits 2 when the config is missing or malformed, and 130 when interrupted
-during the start wait.
+during the start wait. In container mode it exits 1 when it refuses the
+session, and 125 or 127 when the container cannot start the client, as
+[Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
+describes.
 
 ### launch menubar
 

@@ -31,6 +31,10 @@ These pages are the starting points:
   request gets its settings.
 - [Agents and chat apps](launch.md): Claude Code, other coding agents and Open
   WebUI, set up by `gmlx launch`.
+- [Container mode](launch-container.md): A client in an Apple container that
+  sees only the folders you share.
+- [Custom container images](container-images.md): Packages, Containerfiles,
+  ready-made images and services for container mode.
 - [Menu bar app](menubar.md): Server status and controls in the macOS menu
   bar.
 - [Speech, embeddings and rerank](services.md): The services a server can host

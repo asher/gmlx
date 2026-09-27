@@ -88,6 +88,22 @@ command keeps the extras that are already there. When you turn on speech in
 that speech needs. A message that says a feature is not installed also
 gives the command for your kind of install.
 
+## Apple container
+
+[Container mode](launch-container.md) runs a client from `gmlx launch` in
+an Apple container, and it needs Apple container 1.4 or newer. Install it
+with Homebrew:
+
+```sh
+brew install container
+```
+
+Apple also publishes a signed installer on its
+[releases page](https://github.com/apple/container/releases). The first
+container launch starts the container service, which asks once to install
+a Linux kernel and downloads about 700 MB. `gmlx doctor` reports the
+version and whether the service runs.
+
 ## Tab completion
 
 gmlx completes its commands, flags, your model ids and the ports of running
@@ -126,6 +142,9 @@ To remove gmlx completely:
 3. Delete the files that gmlx wrote, which
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
    lists, and the models you downloaded.
+4. If you used container mode, remove its images and volumes as
+   [Removing container data](launch-container.md#removing-container-data)
+   describes.
 
 Steps 1 and 2 leave your configuration, caches and models in place, so a
 later install finds them again.

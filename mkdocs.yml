@@ -93,6 +93,8 @@ nav:
       - Serving:
           - config.md
           - launch.md
+          - launch-container.md
+          - container-images.md
           - menubar.md
           - services.md
           - rag.md

@@ -14,6 +14,7 @@ or chat app that does not connect, read its entry under
 - [Starting the server](#starting-the-server)
 - [Requests](#requests)
 - [Memory](#memory)
+- [Container mode](#container-mode)
 - [Voice](#voice)
 - [Distillation](#distillation)
 - [Logs and files](#logs-and-files)
@@ -268,6 +269,79 @@ server with several models, lower
 [`GMLX_TOOL_PREFLIGHT=0`](env-vars.md#commands), which skips the refusal on
 `run` and `chat`.
 
+## Container mode
+
+### Launch says the container service is not running
+
+A container launch from a script or another program cannot answer the
+service's first-start question, so it exits 1 and names the command. Run
+`container system start` once in a terminal, answer its question about the
+Linux kernel, and launch again. The service then keeps running until you
+stop it or restart the Mac.
+
+### A container launch waits with no output
+
+A share inside `~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive or
+`/Volumes` makes macOS ask whether the container runtime may read it, and
+the container waits for the answer. Look for the prompt behind other
+windows. Launch prints a line before the run for each such share, and a
+project folder outside those places avoids the question.
+
+### A command is not in the image
+
+A launch that stops with `is not on the image's PATH` names the command
+and the search path it used. The image lacks the client or the command in
+[`command`](config.md#launchcontainerclientscommand). Install it in the
+image, as [Custom container images](container-images.md) shows, or fix the
+`command` list. A session that exits 127 on its own has the same cause.
+
+### An image has no linux/arm64 variant
+
+Container mode runs only images for Linux on arm64, and launch names the
+platforms the image has. Use an arm64 or multi-platform tag of the image,
+or build one with [`build`](config.md#launchcontainerclientsbuild).
+
+### Launch asks whether the port is busy
+
+A browser app's port on the Mac is taken, often by the same app running
+outside the container. Open WebUI uses 3000 and dsh uses 3080. Stop the
+other program, or stop the leftover session that holds the port.
+
+### A leftover container of another client keeps running
+
+Launch prints `still running` with a `container stop` command when a
+killed launch of another client left its container behind. The container
+holds its memory until it stops, so run the command it prints.
+`gmlx doctor` lists these containers too.
+
+### A volume is in use
+
+Two containers cannot attach one volume. A launch that names a volume in
+use by another session or another container is refused with its name.
+Stop that session first, or give each client its own volume.
+
+### The Mac runs out of file handles
+
+A container holds one Mac file handle for each file it reads in a share,
+until it stops. A client that reads a very large tree can reach the limit
+for one process, and then its own file reads fail. Two such sessions can
+reach the limit of the whole Mac, and then other apps fail to open files.
+Stop the session to release the handles, and share a narrower folder next
+time. `gmlx doctor` reports the count.
+
+### Installed in --shell, gone next launch
+
+The container's own files are discarded when a session ends, so packages
+installed from `--shell` do not survive. Add them to the image, as
+[Custom container images](container-images.md#extra-packages) shows.
+
+### Postgres refuses the data folder on a share
+
+Every file in a share appears to belong to root in the container, and
+Postgres refuses a data folder that it does not own. Put the data on a
+volume, as the
+[Postgres recipe](container-images.md#postgres) shows.
+
 ## Voice
 
 ### The mic never works in talk
@@ -328,6 +402,8 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | `~/Library/Application Support/gmlx/` | The menu bar runs from an app bundle that gmlx writes here. |
 | `~/Library/LaunchAgents/com.gmlx.*.plist` | `gmlx service install` writes its login items here. |
 | `~/.open-webui/` | Open WebUI keeps its chat history here. |
+| `~/.local/share/gmlx/launch/` | Container mode keeps the private homes and its locks and records here. |
+| `~/.cache/gmlx/launch/` | Container mode keeps the session logs and session folders here. |
 | Your model folders | `pull` downloads GGUFs into them. |
 
 [Removing gmlx](installation.md#removing-gmlx) gives the steps that remove

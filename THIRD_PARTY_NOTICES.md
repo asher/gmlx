@@ -20,7 +20,7 @@ in [`licenses/`](licenses/).
 | [misaki](https://github.com/hexgrad/misaki) | Apache-2.0 | Whole package vendored at `gmlx/_vendor/misaki` (commit `fba1236`): Kokoro's grapheme-to-phoneme front-end, used by the TTS service until upstream's next PyPI release. |
 | [musl](https://musl.libc.org) | MIT | Statically linked into the guest entry binary `gmlx/container/guest/gmlx-entry` as its C library ([`licenses/musl-COPYRIGHT`](licenses/musl-COPYRIGHT)). |
 | [Rust standard library](https://github.com/rust-lang/rust) | MIT OR Apache-2.0 | Statically linked into the guest entry binary ([`licenses/rust-LICENSE-MIT`](licenses/rust-LICENSE-MIT)). |
-| [libc crate](https://github.com/rust-lang/libc) | MIT OR Apache-2.0 | Vendored at `crates/gmlx-entry/vendor/` and statically linked into the guest entry binary ([`licenses/libc-crate-LICENSE-MIT`](licenses/libc-crate-LICENSE-MIT)). |
+| [libc crate](https://github.com/rust-lang/libc) | MIT OR Apache-2.0 | Vendored at `crates/gmlx-entry/vendor/` and linked into the static guest entry binary ([`licenses/libc-crate-LICENSE-MIT`](licenses/libc-crate-LICENSE-MIT)). |
 | [LLVM libunwind](https://github.com/llvm/llvm-project/tree/main/libunwind) | Apache-2.0 WITH LLVM-exception | Statically linked into the guest entry binary through the Rust musl target ([`licenses/llvm-libunwind-LICENSE`](licenses/llvm-libunwind-LICENSE)). |
 
 The [mlx-kquant](https://github.com/asher/mlx-kquant) dependency ships its own

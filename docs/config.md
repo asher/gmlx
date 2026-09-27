@@ -62,6 +62,8 @@ A command that needs the file uses the first one it finds:
 
 The file in the current directory comes first, so a project can carry its
 own models and settings. Pass `--config FILE` to read a different file.
+`gmlx launch` reads the [`launch`](#launch) block only from the two files
+in your home folder, never from `./gmlx.yaml`.
 Without any file, `gmlx serve` scans the current directory for GGUFs and
 prints a hint to run `init`.
 
@@ -86,6 +88,7 @@ scan.
 | [`server`](#server) | It sets where the server listens, its API key, the model folders, how much memory models may use, and optional services. |
 | [`talk`](#voice) | It sets the voice client's model, voice, wake phrase and listening thresholds. |
 | [`assistant`](#assistant) | It gives the built-in assistant its tool servers and long-term memory. |
+| [`launch`](#launch) | It sets how `gmlx launch` runs clients in containers. Launch reads it only from a user-level file. |
 | [`theme`, `themes`](#chat-themes) | They set the colors of the terminal chat. |
 
 A key is named by its full path, such as `server.port`. A path such as
@@ -1354,6 +1357,147 @@ default is to keep facts forever.
 The store holds at most this many facts, and [Memory](assistant.md#memory)
 describes which facts go first. The value is at least 1. The default is `20000`.
 
+
+## Launch
+
+The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
+[container mode](launch-container.md). Launch reads it only from
+`~/.config/gmlx/gmlx.yaml` or `~/.gmlx.yaml`, and it ignores a `launch`
+block in `./gmlx.yaml`, which a cloned repository could carry. The server
+never reads it.
+
+```yaml
+# doctest: build
+launch:
+  container:
+    enabled: true
+    memory: 6G
+    clients:
+      claude-code:
+        volumes: [claude-pg:/var/lib/postgresql:8G]
+        seed: [~/.claude/CLAUDE.md]
+      open-webui:
+        image: ghcr.io/open-webui/open-webui:main
+        command: image
+```
+
+The keys under `launch.container` apply to every client. Each of them also
+goes under `launch.container.clients.<client>` for one client, where the
+client's value wins over the global one and the lists of the two levels add
+up. Five more keys exist only for one client, and they follow the shared
+keys.
+
+### `launch.container.enabled`
+
+With `true`, `gmlx launch` runs the client in a container. `--container`
+and `--no-container` override it for one launch. The default is `false`.
+
+### `launch.container.mount_cwd`
+
+With `true`, the current folder is shared read-write at the same path, and
+the client starts there. `--mount-cwd` and `--no-mount-cwd` override it for
+one launch. When neither level sets it, the folder is shared for every
+client except `open-webui` and `elia`.
+
+### `launch.container.mounts`
+
+Each entry `PATH[:DST][:ro]` shares another folder at `DST`, or at the same
+path without one, and `:ro` makes the share read-only. `--mount` adds
+entries for one launch. The default is no extra folders.
+
+### `launch.container.volumes`
+
+Each entry `NAME:/path[:SIZE]` mounts the named volume at the path, and a
+missing volume is created with `SIZE`, such as `8G`. The name starts with a
+letter or digit and holds only letters, digits, `_`, `.` and `-`. One name
+cannot appear at two paths or with two sizes. The default size is `32G`,
+and [Volumes](launch-container.md#volumes) describes how they behave.
+
+### `launch.container.forward`
+
+Each port in this list, from 1 to 65535, reaches the same port on the
+Mac's `127.0.0.1` from the container's own `127.0.0.1`. The default is no
+ports.
+
+### `launch.container.network`
+
+With `default`, the container has internet access. With `none`, it reaches
+only the gmlx server and the forwarded ports. `--network` overrides it for
+one launch. The default is `default`.
+
+### `launch.container.cpus`
+
+The container gets this many CPUs. The default is `4`.
+
+### `launch.container.memory`
+
+The container gets this much memory, such as `4G` or `6144M`. The model
+server cannot use that memory while the container runs. The default is
+`4G`.
+
+### `launch.container.ssh_agent`
+
+With `true`, the client can sign with the keys loaded in the Mac's SSH
+agent. The default is `false`.
+
+### `launch.container.env`
+
+Each entry `NAME` passes that variable from your environment into the
+container, and `NAME=VALUE` sets it. Values never appear on a command line.
+`HOME`, `TERM`, `COLORTERM`, `LANG`, `TZ`, `PATH` and `SSH_AUTH_SOCK` are
+refused, because launch sets them itself or keeps the image's own. The
+default is no variables.
+
+### `launch.container.open_browser`
+
+With `true`, launch opens a browser app such as Open WebUI in the Mac's
+browser once the app answers. The default is `true`.
+
+### `launch.container.clipboard`
+
+With `images`, clients in the container can paste images from the Mac
+clipboard, as [Clipboard images](launch-container.md#clipboard-images)
+describes. A bare `off` also works. The default is `off`.
+
+### `launch.container.clients`
+
+This mapping holds the settings of single clients, keyed by `claude-code`,
+`opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui`
+or `dsh`. Each takes the shared keys above and the keys below.
+
+### `launch.container.clients.*.image`
+
+The client runs this image, a local tag or a registry reference, instead
+of the one gmlx builds. It cannot be combined with `build` or `packages`.
+[A ready-made image](container-images.md#a-ready-made-image) describes it.
+The default is the image gmlx builds.
+
+### `launch.container.clients.*.build`
+
+Launch builds the client's image from this Containerfile, or from a folder
+that holds a `Containerfile` or `Dockerfile`. The path must be absolute or
+start with `~`, and it cannot be combined with `image`.
+[Your own Containerfile](container-images.md#your-own-containerfile)
+describes it. The default is the image gmlx builds.
+
+### `launch.container.clients.*.command`
+
+A list of strings replaces the client's own command, and the word `image`
+runs the image's own ENTRYPOINT and CMD, as
+[The command that runs](launch-container.md#the-command-that-runs)
+describes. The default is the client's own command.
+
+### `launch.container.clients.*.packages`
+
+These Debian packages are added to the image that gmlx builds for the
+client. With `build`, they apply only when the Containerfile starts from
+the client's own `:base`. The default is no packages.
+
+### `launch.container.clients.*.seed`
+
+Each file named here, which must be inside your home folder, is copied
+into the private home at the same relative path. A copy is made once, while
+it is missing. The default is no files.
 
 ## Chat themes
 

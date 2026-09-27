@@ -20,6 +20,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decision state ahead of its questions.
 - `gmlx launch <client> -- ARGS` passes the arguments after `--` to the
   client.
+- `gmlx launch <client> --container` runs the client in an Apple container
+  that sees only the folders you share, with a private home, named volumes,
+  forwarded Mac ports and optional clipboard images. `gmlx doctor` reports
+  the container service and the disk space container mode uses.
 
 ### Changed
 

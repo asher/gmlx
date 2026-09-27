@@ -235,6 +235,14 @@ Prestaging reads the experts that the router is predicted to select before
 the router runs, so that the read overlaps with compute. It moves bytes
 only and never changes which experts run.
 
+## Private home
+
+A private home is the folder that [container mode](launch-container.md)
+gives each client as its home folder, at
+`~/.local/share/gmlx/launch/<client>/home`. The client's settings and
+sessions stay there from one launch to the next, and your own home folder
+stays out of the container.
+
 ## Prompt cache
 
 The prompt cache is the server's store of prefilled prompts. A request

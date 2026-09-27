@@ -149,6 +149,10 @@ configuration so that it uses the server, starts the server first if it is
 not running, and then runs the tool. `gmlx launch` works for the common
 coding agents, two terminal chat clients and two browser apps, Open WebUI and
 DeepSeek Harness, each listed with its quirks in [Agents and chat apps](https://asher.github.io/gmlx/launch.html).
+With `--container`, the tool runs in an Apple container that sees only the
+folders you share, as
+[Container mode](https://asher.github.io/gmlx/launch-container.html)
+describes.
 A menu bar app shows what is resident, and `gmlx service install` keeps the
 server running from login.
 
@@ -273,6 +277,11 @@ which covers the latest release and has navigation and search.
 - [Agents and chat
   apps](https://asher.github.io/gmlx/launch.html): Claude Code,
   other coding agents and Open WebUI, set up by `gmlx launch`.
+- [Container mode](https://asher.github.io/gmlx/launch-container.html): A
+  client in an Apple container that sees only the folders you share.
+- [Custom container
+  images](https://asher.github.io/gmlx/container-images.html): Packages,
+  Containerfiles, ready-made images and services for container mode.
 - [Menu bar app](https://asher.github.io/gmlx/menubar.html):
   Server status and controls in the macOS menu bar.
 - [Speech, embeddings and

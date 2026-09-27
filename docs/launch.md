@@ -10,9 +10,11 @@ gmlx launch opencode                         # the server's default model
 gmlx launch open-webui                       # a chat app in the browser
 ```
 
-gmlx never installs the tool itself. When the tool is not on your PATH,
-`launch` prints how to install it and exits. The flags and exit codes are
-in the [CLI reference](cli.md#gmlx-launch).
+gmlx never installs the tool on your Mac. When the tool is not on your
+PATH, `launch` prints how to install it and exits. In
+[container mode](launch-container.md), gmlx installs the tool in the
+container's image instead. The flags and exit codes are in the
+[CLI reference](cli.md#gmlx-launch).
 
 - [How a launch works](#how-a-launch-works)
 - [Starting the server](#starting-the-server)
@@ -60,6 +62,12 @@ Each client uses one or two of these styles:
 | `elia` | It is a terminal chat app. | Injection | The configuration goes in `~/.config/gmlx/elia-xdg`, through `XDG_CONFIG_HOME`. |
 | `open-webui` | It is a chat app for the browser. | Environment | The configuration goes in `OPENAI_API_BASE_URL` and related variables. |
 | `dsh` | It is DeepSeek Harness, an agent app for the browser. | Injection | The configuration goes in `~/.config/gmlx/dsh/gmlx.cordis.yml`, through `--patch`. |
+
+With `--container`, the third step starts the tool in an Apple container
+instead, a Linux virtual machine that sees only the folders you share. The
+configuration then goes into the tool's
+[private home](glossary.md#private-home) rather than the places the table
+lists, as [Container mode](launch-container.md) describes.
 
 `--config-path` moves the written configuration to the path you give,
 which takes the place of the location that the table lists for the client.
