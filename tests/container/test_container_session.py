@@ -394,6 +394,73 @@ def test_supervise_passes_values_only_in_the_child_env(fake_container, tmp_path)
     assert not sess.dir.exists() and session.read_record("pi") is None
 
 
+@pytest.mark.parametrize("stdin_terminal, same_group", [(True, True), (False, False)])
+def test_supervise_keeps_a_terminal_reader_in_the_foreground(
+        fake_container, tmp_path, monkeypatch, stdin_terminal, same_group):
+    # stdin a terminal and stdout a pipe: no -t, but the child reads the
+    # terminal, so a background group would stop it with SIGTTIN.
+    monkeypatch.setattr(session, "stdin_is_terminal", lambda: stdin_terminal)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]), tty=False)
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    run = fake_container.load()["runs"][0]
+    assert (run["pgid"] == os.getpgrp()) is same_group
+    assert "-t" not in run["argv"]
+
+
+def test_supervise_keeps_lock_descriptors_out_of_the_child(fake_container, tmp_path):
+    lock = session.try_session_lock("pi")
+    assert lock is not None
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    try:
+        session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    finally:
+        lock.release()
+    files = fake_container.load()["runs"][0]["open_files"]
+    assert files and not [f for f in files if f.endswith("session.lock")]
+
+
+def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tmp_path):
+    sess = session.new_session("pi", [])
+    fake_container.update(containers=[{"name": sess.name}])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    log = fake_container.load()["log"]
+    assert ["stop", "--time", "5", sess.name] in log
+    assert ["delete", "--force", sess.name] in log
+    assert not sess.dir.exists()
+
+
+def test_cleanup_errors_leave_the_exit_code_and_remove_the_folder(
+        fake_container, tmp_path, monkeypatch):
+    sess = session.new_session("pi", [])
+    fake_container.update(containers=[{"name": sess.name}], run_rc=3)
+
+    def stuck(name, *, timeout=10):
+        raise session.cli.ContainerError("`container stop` gave no answer in 65 s.")
+    monkeypatch.setattr(session.cli, "stop", stuck)
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert rc == 3
+    assert not sess.dir.exists()
+    assert "cleanup: `container stop` gave no answer" in (
+        session.cache_dir() / "last-pi.log").read_text()
+
+
+def test_signal_thread_errors_go_to_the_log(monkeypatch):
+    logged, done = [], threading.Event()
+
+    def stuck(name, *, timeout=10):
+        raise session.cli.ContainerError("stuck")
+    monkeypatch.setattr(session.cli, "stop", stuck)
+    sig = session._Signals("gmlx-pi-1", tty=False,
+                           log=lambda line: (logged.append(line), done.set()))
+    sig._on_term(signal.SIGTERM, None)
+    assert done.wait(5)
+    assert logged == ["signal: stuck"]
+
+
 def test_supervise_refuses_a_busy_web_port(fake_container, tmp_path):
     busy = socket.socket()
     busy.bind(("127.0.0.1", 0))

@@ -400,11 +400,12 @@ class _Signals:
     SIGINT to the guest, so launch sends it with ``container kill``. A first
     SIGTERM or SIGHUP stops the container, a second kills it, and a third
     kills the ``container run`` process, for a runtime that no longer
-    answers.
+    answers. The commands run in threads, and their errors go to the session
+    log, never to the client's screen.
     """
 
-    def __init__(self, name: str, tty: bool):
-        self.name, self.tty = name, tty
+    def __init__(self, name: str, tty: bool, log: Callable[[str], None] = lambda line: None):
+        self.name, self.tty, self.log = name, tty, log
         self.child: subprocess.Popen | None = None
         self.count = 0
         self.saved: dict[int, object] = {}
@@ -418,9 +419,13 @@ class _Signals:
         for sig, handler in self.saved.items():
             signal.signal(sig, handler)
 
-    @staticmethod
-    def _bg(fn, *args, **kw) -> None:
-        threading.Thread(target=fn, args=args, kwargs=kw, daemon=True).start()
+    def _bg(self, fn, *args, **kw) -> None:
+        def run() -> None:
+            try:
+                fn(*args, **kw)
+            except cli.ContainerError as e:
+                self.log(f"signal: {e}")
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_int(self, signum, frame) -> None:
         if not self.tty:
@@ -453,6 +458,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     loop.start()
     relays: list[Relay | ClipboardServer] = []
     child: subprocess.Popen | None = None
+    signals: _Signals | None = None
     stop_open = threading.Event()
     try:
         try:
@@ -478,14 +484,18 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                                  args=(spec.web_port, opener, stop_open, say),
                                  daemon=True).start()
         argv = compose_run_argv(spec, cli.find() or "container")
+        # A child that reads the terminal stays in the foreground group, or its
+        # first read stops it with SIGTTIN. Any other child gets its own group,
+        # so a Ctrl-C reaches only the supervisor, which forwards it.
+        foreground = spec.tty or (spec.interactive and stdin_is_terminal())
         # Installed before the child starts. A handler resets across exec, so
         # the child starts with the default dispositions.
-        signals = _Signals(s.name, spec.tty)
+        signals = _Signals(s.name, spec.tty, log)
         signals.install()
         try:
             child = subprocess.Popen(
                 argv, env={**os.environ, **spec.child_env},
-                process_group=None if spec.tty else 0,
+                process_group=None if foreground else 0,
                 stdin=None if spec.interactive else subprocess.DEVNULL,
                 stdout=subprocess.PIPE if spec.url_pattern else None)
             signals.child = child
@@ -503,11 +513,25 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         for relay in relays:
             relay.close()
         loop.stop()
+        if child is not None:
+            _remove_container(s.name, stop=signals is None or signals.count < 3, log=log)
         log_file.close()
-        if child is not None and any(c.name == s.name for c in _safe_containers()):
-            cli.stop(s.name, timeout=5)
-            cli.delete(s.name)
         shutil.rmtree(s.dir, ignore_errors=True)
+
+
+def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> None:
+    """Stop and delete the session's container when it is still listed. After
+    a third signal the runtime did not answer ``container stop``, so the
+    container goes straight to ``container delete --force``. Errors go to the
+    session log, so the client's exit code stands."""
+    try:
+        if not any(c.name == name for c in _safe_containers()):
+            return
+        if stop:
+            cli.stop(name, timeout=5)
+        cli.delete(name)
+    except cli.ContainerError as e:
+        log(f"cleanup: {e}")
 
 
 def _tee_for_url(stream, pattern: str, web_port: int | None,
@@ -540,7 +564,15 @@ def _safe_containers() -> list[cli.Container]:
 
 
 def stdin_is_tty() -> bool:
+    """Whether the session gets a terminal (``-t``): stdin and stdout both."""
     try:
         return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def stdin_is_terminal() -> bool:
+    try:
+        return sys.stdin.isatty()
     except (AttributeError, ValueError):
         return False

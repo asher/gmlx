@@ -53,6 +53,19 @@ def _flag(args: list[str], *names: str) -> list[str]:
     return out
 
 
+def _open_files() -> list[str]:
+    """The paths of this process's open file descriptors, so a test can
+    check that no lock descriptor reached the child."""
+    paths = []
+    for fd in range(3, 256):
+        try:
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+        except OSError:
+            continue
+        paths.append(raw.split(b"\0", 1)[0].decode())
+    return paths
+
+
 def main(state: dict, args: list[str]) -> int:
     state.setdefault("log", []).append(args)
     images = state["images"] = {_normalize(k): v for k, v in state.get("images", {}).items()}
@@ -120,7 +133,8 @@ def main(state: dict, args: list[str]) -> int:
         names = [args[i + 1] for i, a in enumerate(args[:-1])
                  if a == "-e" and "=" not in args[i + 1]]
         state.setdefault("runs", []).append(
-            {"argv": args, "env": {n: os.environ.get(n) for n in names}})
+            {"argv": args, "env": {n: os.environ.get(n) for n in names},
+             "pgid": os.getpgrp(), "open_files": _open_files()})
         return state.get("run_rc", 0)
     if args[0] == "run":
         word = args[args.index("--check") + 1] if "--check" in args else ""
