@@ -34,13 +34,13 @@ at GMLX_GQA_SDPA_MINKV (default 4096): stock MLX's fused vector path
 plateaus near 37% of read-once bandwidth at long KV; the kq kernel's coarse
 contiguous splits + GQA-shared K/V tile staging reach ~55-60% (1.3-1.6x per
 call from 16k up). head_dim 512 (gemma-4 global layers) engages from
-GMLX_GQA_SDPA_MINKV512 keys. On GPUs with tensor-op units and mlx-kquant
-0.4.15 or later the op runs its hd512 pass on the matrix units, and every
-layout with a group of 8 or less takes it once KV heads x batch x keys
-reaches 3072 (768 keys at 4 KV heads, 3072 at 1). Elsewhere layouts
-with 4 or more KV heads, or a group of 4 or less, take it from 32768 keys,
-where it overtakes the kq.sdpa_vector route below (1.02x-1.28x per call on
-gemma-4-31b from 32k to 131k, token-exact +1.7% whole-step at 49k).
+GMLX_GQA_SDPA_MINKV512 keys. On NAX GPUs with mlx-kquant 0.4.15 or later
+the op runs its hd512 pass on the matrix units, and every layout with a
+group of 2 to 8 takes it once KV heads x batch x keys reaches 3072 (768
+keys at 4 KV heads, 3072 at 1). Elsewhere layouts with 4 or more KV heads,
+or a group of 4 or less, take it from 32768 keys, where it overtakes the
+kq.sdpa_vector route below (1.02x-1.28x per call on gemma-4-31b from 32k to
+131k, token-exact +1.7% whole-step at 49k).
 Attention sinks ride through the kernel's merge pass. Disable with
 GMLX_GQA_SDPA=0.
 
@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import mlx.core as mx
 
@@ -121,23 +122,34 @@ _GQA_DECODE = env_bool("GMLX_GQA_SDPA", True)
 _GQA_MIN_KV = env_int("GMLX_GQA_SDPA_MINKV", 4096)
 _GQA_HD256 = env_bool("GMLX_GQA_SDPA_HD256", False)
 _GQA_MIN_KV_256 = env_int("GMLX_GQA_SDPA_MINKV256", 49152)
-# hd512 GQA decode (gemma-4 global layers). On GPUs with tensor-op units,
-# mlx-kquant 0.4.15 and later runs the op's one-query hd512 pass on the
-# matrix units (KQ_GQA_NAX=0 turns that off), and decode takes it at every
-# KV-head count with a group of 8 or less once KV heads x batch x keys
-# reaches 3072, twelve of its 256-key tiles. Chained per call at 1 to 4 KV
-# heads, that is where it passes stock (1.10x at 4 KV heads and 768 keys)
-# and kq.sdpa_vector (1.07-1.08x at 1536 keys over 2 and 3072 over 1).
+# hd512 GQA decode (gemma-4 global layers). On NAX GPUs, mlx-kquant 0.4.15
+# and later runs the op's one-query hd512 pass on the matrix units
+# (KQ_GQA_NAX=0 turns that off), and decode takes it at every KV-head count
+# with a group of 2 to 8 once KV heads x batch x keys reaches 3072, twelve
+# of its 256-key tiles. Chained per call at 1 to 4 KV heads, that is where
+# it passes stock (1.10x at 4 KV heads and 768 keys) and kq.sdpa_vector
+# (1.07-1.08x at 1536 keys over 2 and 3072 over 1).
 # Below it, too few tiles hold keys. GMLX_GQA_SDPA_NAX512=0 or 1 overrides
-# the detection, and GMLX_GQA_SDPA_MINKV512 sets a fixed key floor.
+# the detection, and a positive GMLX_GQA_SDPA_MINKV512 sets a fixed key
+# floor. Calls under kq's 3072-row switch, or with K/V strides that are not
+# multiples of 8 elements, run the op's simdgroup kernel. Every gemma-4
+# cache layout meets the stride rule.
 # Elsewhere it takes the simdgroup kernel from 32768 keys, where that beats
 # kq.sdpa_vector at 4 or more KV heads (31b 32/4: 1.02-1.07x at 32k-48k,
 # 1.28x @131k) and at groups of 4 or less (e4b 8/2: 1.11-1.22x at 32k-64k).
 # A group of 8 over 2 KV heads (26b-a4b 16/2) underfills the split grid and
 # loses 1.06-1.16x at 32k-48k, and one KV head (e2b, 12b) loses at every
 # depth. Those decode by _hd512_route.
+def _c_int(text) -> int:
+    """``text`` read as C's atoi does: the leading integer, else 0."""
+    m = re.match(r"\s*([+-]?\d+)", text)
+    return int(m.group(1)) if m else 0
+
+
 def _nax512_default() -> bool:
-    if not _HAS_GQA_DECODE or os.environ.get("KQ_GQA_NAX", "1").strip() == "0":
+    # kq reads KQ_GQA_NAX with atoi at each call. This reads it at import.
+    flag = os.environ.get("KQ_GQA_NAX")
+    if not _HAS_GQA_DECODE or (flag is not None and _c_int(flag) == 0):
         return False
     from gmlx.cache.kvarn_sdpa import _version_tuple
     try:

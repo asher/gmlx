@@ -270,9 +270,9 @@ def _gqa_elig(hq, hkv, kL):
 
 
 def test_gqa_decode_hd512_eligibility(monkeypatch):
-    # without the tensor-op pass, head_dim 512 decode takes
+    # Without the tensor-op pass, head_dim 512 decode takes
     # kq.sdpa_decode_gqa from 32768 keys at 4 or more KV heads or a group
-    # of 4 or less; 16/2 and one KV head stay on _hd512_route
+    # of 4 or less. 16/2 and one KV head stay on _hd512_route.
     monkeypatch.setattr(attn_hd512, "_GQA_NAX512", False)
     monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_512", 0)
     assert _gqa_elig(32, 4, 32768)
@@ -284,9 +284,9 @@ def test_gqa_decode_hd512_eligibility(monkeypatch):
 
 
 def test_gqa_decode_hd512_nax_eligibility(monkeypatch):
-    # with it, every KV-head count with a group of 8 or less takes the op
-    # once KV heads x batch x keys reaches 3072; a group of 16 stays on
-    # _hd512_route, and GMLX_GQA_SDPA_MINKV512 sets a fixed floor
+    # With it, every KV-head count with a group of 2 to 8 takes the op
+    # once KV heads x batch x keys reaches 3072. A group of 16 stays on
+    # _hd512_route, and GMLX_GQA_SDPA_MINKV512 sets a fixed floor.
     monkeypatch.setattr(attn_hd512, "_GQA_NAX512", True)
     monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_512", 0)
     assert _gqa_elig(32, 4, 768)
@@ -306,8 +306,8 @@ def test_gqa_decode_hd512_nax_eligibility(monkeypatch):
 
 
 def test_gqa_decode_hd512_nax_detection(monkeypatch):
-    # the route needs the kq release with the tensor-op pass, and
-    # KQ_GQA_NAX=0 turns the detection off with the kq kernel
+    # The route needs the kq release with the tensor-op pass. KQ_GQA_NAX
+    # turns the detection off for every value kq's atoi reads as 0.
     kq = attn_hd512.mlx_kquant
     if kq is None or not attn_hd512._HAS_GQA_DECODE:
         pytest.skip("mlx_kquant.sdpa_decode_gqa unavailable")
@@ -319,9 +319,16 @@ def test_gqa_decode_hd512_nax_detection(monkeypatch):
     assert not attn_hd512._nax512_default()
     monkeypatch.setattr(kq, "__version__", "0.5.0")
     assert attn_hd512._nax512_default()
-    monkeypatch.setenv("KQ_GQA_NAX", "0")
-    assert not attn_hd512._nax512_default()
+    monkeypatch.setattr(kq, "__version__", "0.4.15.dev0")
+    assert attn_hd512._nax512_default()
+    for flag, on in (("0", False), ("", False), ("false", False),
+                     ("00", False), (" 0", False), ("1", True), ("2x", True)):
+        monkeypatch.setenv("KQ_GQA_NAX", flag)
+        assert attn_hd512._nax512_default() is on, repr(flag)
     monkeypatch.delenv("KQ_GQA_NAX")
+    monkeypatch.delattr(kq, "__version__")
+    assert not attn_hd512._nax512_default()
+    monkeypatch.setattr(kq, "__version__", "0.4.15", raising=False)
     monkeypatch.setattr(kq, "nax_available", lambda: False)
     assert not attn_hd512._nax512_default()
 
@@ -365,6 +372,38 @@ def test_hd512_nax_decode_matches_reference(hq, hkv, kL, monkeypatch):
     assert grew == ["gqa_decode"], grew
     err = mx.abs(out.astype(mx.float32) - _ref(q, k, v, False)).max().item()
     assert err < 2e-2, f"{hq}/{hkv} kL={kL} err={err}"
+
+
+@pytest.mark.skipif(
+    not attn_hd512._HAS_GQA_DECODE or bool(os.environ.get("KQUANT_FORCE_CPU"))
+    or not attn_hd512.mlx_kquant.nax_available(),
+    reason="the tensor-op pass needs NAX and mlx_kquant.sdpa_decode_gqa")
+@pytest.mark.parametrize("b,hq,hkv,kL", [
+    (1, 32, 4, 768), (1, 16, 2, 1536), (1, 8, 1, 3072), (2, 32, 4, 384)])
+def test_hd512_nax_route_runs_the_tensor_op_pass(b, hq, hkv, kL, monkeypatch):
+    # The two kq kernels round differently, so the routed output equals a
+    # direct call on the tensor-op pass and differs from one on the
+    # simdgroup kernel. A kq build without the pass runs the simdgroup
+    # kernel for both flags. kq reads KQ_GQA_NAX when it evaluates, so each
+    # arm evaluates before the flag changes.
+    monkeypatch.setattr(attn_hd512, "_GQA_NAX512", True)
+    monkeypatch.setattr(attn_hd512, "_GQA_MIN_KV_512", 0)
+    monkeypatch.delenv("KQ_GQA_NAX", raising=False)
+    kq = attn_hd512.mlx_kquant
+    q, k, v = _rand(1, kL=kL, hq=hq, hkv=hkv)
+    if b > 1:
+        q, k, v = (mx.concatenate([t, t * 0.5]) for t in (q, k, v))
+    out, grew = _routed_sdpa(q, k, v, SCALE)
+    mx.eval(out)
+    assert grew == ["gqa_decode"], grew
+    arms = {}
+    for flag in ("1", "0"):
+        monkeypatch.setenv("KQ_GQA_NAX", flag)
+        arms[flag] = kq.sdpa_decode_gqa(q, k, v, SCALE)
+        mx.eval(arms[flag])
+    if mx.array_equal(arms["1"], arms["0"]).item():
+        pytest.skip("mlx-kquant without the hd512 tensor-op pass")
+    assert mx.array_equal(out, arms["1"]).item()
 
 
 def test_hd512_fa_shape_unmasked_is_stock():
