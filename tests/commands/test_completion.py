@@ -200,6 +200,93 @@ def test_launch_dsh_profile_completes_private_home_profiles_in_container_mode(
     assert "mac-only" in vals and "boxed" not in vals
 
 
+_HOSTILE = ("$(touch${IFS}PWNED)", "`touch PWNED2`", "a;touch PWNED3")
+
+
+def _profile(root, name):
+    (root / name).mkdir(parents=True)
+    (root / name / "package.json").write_text("{}")
+
+
+def test_dsh_profile_folders_with_shell_syntax_are_dropped(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    host = tmp_path / "host-dsh" / "profiles"
+    guest = tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+    for root in (host, guest):
+        _profile(root, "fine-1.0")
+        for name in _HOSTILE:
+            _profile(root, name)
+    for line in (["launch", "dsh", "--dsh-profile", ""],
+                 ["launch", "dsh", "--container", "--dsh-profile", ""]):
+        vals = _vals(completion._complete(line))
+        assert "fine-1.0" in vals
+        assert not set(vals) & set(_HOSTILE)
+
+
+def test_cmd_complete_drops_unsafe_values_and_cleans_descriptions(monkeypatch, capsys):
+    monkeypatch.setattr(completion, "_complete", lambda argv: [
+        "::files", "ok-model\tdesc\x1bwith escape", *(f"{h}\tx" for h in _HOSTILE),
+        "http://127.0.0.1:8080/v1\trunning server"])
+    assert completion.cmd_complete(["run", ""]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "::files", "ok-model\tdesc with escape", "http://127.0.0.1:8080/v1\trunning server"]
+
+
+def test_bash_script_never_expands_a_candidate(tmp_path):
+    """Candidates reach bash as literal words, even ones that get past the
+    Python filter, so completing a line runs nothing."""
+    import shutil
+    import subprocess
+    bash = "/bin/bash" if shutil.which("/bin/bash") else shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash")
+    script = tmp_path / "gmlx.bash"
+    script.write_text(completion._BASH_SCRIPT)
+    driver = textwrap.dedent(f"""
+        cd {tmp_path}
+        gmlx() {{ printf '%s\\n' '$(touch PWNED)' '`touch PWNED2`' 'safe-one' 'other'; }}
+        complete() {{ :; }}
+        . {script}
+        COMP_WORDS=(gmlx launch dsh --dsh-profile "")
+        COMP_CWORD=4
+        _gmlx
+        printf '%s\\n' "${{COMPREPLY[@]}}"
+        COMP_WORDS=(gmlx launch dsh --dsh-profile s)
+        _gmlx
+        printf 'prefix:%s\\n' "${{COMPREPLY[@]}}"
+    """)
+    done = subprocess.run([bash, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    assert not list(tmp_path.glob("PWNED*"))
+    lines = done.stdout.splitlines()
+    assert "$(touch PWNED)" in lines and "safe-one" in lines
+    assert [ln for ln in lines if ln.startswith("prefix:")] == ["prefix:safe-one"]
+
+
+@pytest.mark.parametrize("flag", ["--shell", "--rebuild", "--mount=/x", "--no-mount-cwd",
+                                  "--image", "--network"])
+def test_container_only_flags_select_private_home_profiles(tmp_path, monkeypatch, flag):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "host-dsh"))
+    _profile(tmp_path / "host-dsh" / "profiles", "mac-only")
+    _profile(tmp_path / "data" / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles",
+             "boxed")
+    vals = _vals(completion._complete(["launch", "dsh", flag, "--dsh-profile", ""]))
+    assert "boxed" in vals and "mac-only" not in vals
+    vals = _vals(completion._complete(
+        ["launch", "dsh", "--no-container", flag, "--dsh-profile", ""]))
+    assert "mac-only" in vals and "boxed" not in vals
+
+
+def test_launch_offers_no_gmlx_flags_after_a_bare_separator():
+    assert completion._complete(["launch", "pi", "--", "-"]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--", "--model", ""]) == ["::files"]
+    assert completion._complete(["launch", "pi", "--", ""]) == ["::files"]
+
+
 def test_launch_container_flags_complete():
     assert completion._complete(["launch", "pi", "--mount", ""]) == ["::files"]
     assert completion._complete(["launch", "pi", "--network", ""]) == ["default", "none"]

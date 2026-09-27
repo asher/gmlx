@@ -55,6 +55,29 @@ _SERVICE_ACTIONS = ("install", "uninstall", "status")
 _DISTILL_ACTIONS = ("gen", "filter", "cache", "align", "train", "eval", "census")
 
 
+# A candidate value is typed into the user's command line, and some come from
+# files that another program could write: a config file, a runfile, a folder
+# a container session created. Only these characters pass.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_SAFE_VALUE = re.compile(r"[A-Za-z0-9._:/@+=,%~{}\[\]-]+")
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_lines(lines: list[str]) -> list[str]:
+    """Drop candidates whose value holds a character outside the safe set,
+    and blank out control characters in descriptions."""
+    out = []
+    for line in lines:
+        if line == "::files":
+            out.append(line)
+            continue
+        value, tab, desc = line.partition("\t")
+        if not _SAFE_VALUE.fullmatch(value):
+            continue
+        out.append(value + tab + _UNPRINTABLE.sub(" ", desc) if tab else value)
+    return out
+
+
 def _canon(verb: str) -> str:
     """Resolve a verb alias (``ls`` -> ``list``) to its canonical form."""
     from .cli import _VERB_ALIASES
@@ -226,10 +249,17 @@ def _harness_candidates() -> list[str]:
 
 def _container_launch(words: list[str]) -> bool:
     """Whether a ``gmlx launch dsh`` command line runs in container mode, from
-    its flags and then the user-level config."""
+    its flags and then the user-level config. A container-only flag such as
+    ``--shell`` implies container mode, as it does for launch itself."""
+    from .launch_container import CONTAINER_FLAGS
+
+    words = words[:words.index("--")] if "--" in words else list(words)
     if "--no-container" in words:
         return False
     if "--container" in words:
+        return True
+    implied = {*CONTAINER_FLAGS.values(), "--no-mount-cwd"}
+    if any(w.split("=", 1)[0] in implied for w in words):
         return True
     from gmlx.config import load_launch_settings
 
@@ -248,7 +278,9 @@ def _dsh_profile_candidates(container: bool = False) -> list[str]:
         from gmlx.container.settings import private_home_path
         root = private_home_path("dsh") / ".dsh" / "profiles"
     for d in (root.iterdir() if root.is_dir() else ()):
-        if (d / "package.json").is_file():
+        # A folder name is untrusted, since a container session can create
+        # one in the private home.
+        if _SAFE_NAME.fullmatch(d.name) and (d / "package.json").is_file():
             names.setdefault(d.name, "dsh profile")
     return [f"{n}\t{h}" for n, h in sorted(names.items())]
 
@@ -357,6 +389,9 @@ def _complete(argv: list[str]) -> list[str]:
     verb = _canon(pre[0])
     if verb not in _known_verbs():
         return []
+    if "--" in pre[1:]:
+        # After a bare --, the words belong to the client, never to gmlx.
+        return ["::files"] if verb == "launch" else []
     if verb == "distill" and len(pre) > 1 and pre[1] in _DISTILL_ACTIONS:
         # the action's own parser carries the flags: scrape `distill <action> --help`
         verb = f"distill {pre[1]}"
@@ -393,7 +428,7 @@ def cmd_complete(argv: list[str]) -> int:
     shell's filename completion). Always exits 0 - a completion path must never
     surface an error to the shell."""
     try:
-        for line in _complete(list(argv)):
+        for line in _safe_lines(_complete(list(argv))):
             print(line)
     except Exception:  # noqa: BLE001, S110 - never let completion fail loudly
         pass
@@ -488,11 +523,13 @@ _gmlx() {
     _cands+=("${_line%%$'\t'*}")
   done <<< "$_out"
 
+  # Match by prefix in bash itself. compgen -W would expand each candidate,
+  # running any command substitution a candidate holds.
   COMPREPLY=()
-  if (( ${#_cands[@]} )); then
-    local IFS=$'\n'
-    COMPREPLY+=( $(compgen -W "${_cands[*]}" -- "$cur") )
-  fi
+  local _c
+  for _c in "${_cands[@]}"; do
+    [[ $_c == "$cur"* ]] && COMPREPLY+=("$_c")
+  done
   if (( _files )); then
     COMPREPLY+=( $(compgen -f -- "$cur") )
     compopt -o filenames 2>/dev/null
