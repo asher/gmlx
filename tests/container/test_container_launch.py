@@ -206,6 +206,7 @@ def test_open_webui_listens_on_loopback_with_host_and_port(env):
     assert "PORT" not in spec.env_names
     assert not spec.plan.cwd_shared                      # no share by default
     assert spec.child_env["DATA_DIR"].startswith(str(spec.plan.home))
+    assert os.path.isdir(spec.child_env["DATA_DIR"])      # the official image needs it
 
 
 def test_open_webui_command_image_gets_a_secret_key_file(env):

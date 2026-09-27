@@ -384,6 +384,10 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
         rc = L._HARNESSES[client](a, exec_fn=exec_fn)
     if rc != 0 or not captured:
         return rc
+    if client == "open-webui":
+        # The official image does not create its data folder, and SQLite
+        # cannot open a database in a folder that does not exist.
+        Path(captured["pairs"]["DATA_DIR"]).mkdir(parents=True, exist_ok=True)
     # Step 12
     passthrough = captured["extra"]
     if a.shell:
