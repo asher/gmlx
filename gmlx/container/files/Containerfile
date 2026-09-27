@@ -1,0 +1,49 @@
+# The image `gmlx launch --container` builds for a client that sets neither
+# image: nor build:. The CLIENT build argument picks the one client it
+# installs, and EXTRA_PACKAGES carries the launch config's packages: list.
+# gmlx tags the result gmlx.invalid/launch-<client>:<hash> and :base.
+FROM docker.io/library/node:22-bookworm-slim
+
+ARG CLIENT
+ARG EXTRA_PACKAGES=""
+
+RUN set -eux; \
+    python=""; \
+    case "$CLIENT" in hermes|elia|open-webui) python="python3 python3-venv" ;; esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        git ripgrep ca-certificates curl openssh-client less procps bzip2 \
+        $python $EXTRA_PACKAGES; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    gh=https://github.com; \
+    venv() { python3 -m venv /opt/venv; /opt/venv/bin/pip install --no-cache-dir -U pip; }; \
+    case "$CLIENT" in \
+    opencode) npm install -g opencode-ai ;; \
+    claude-code) npm install -g @anthropic-ai/claude-code ;; \
+    pi) npm install -g @mariozechner/pi-coding-agent ;; \
+    dsh) npm install -g @deepseek-ai/dsh@next ;; \
+    omp) \
+        curl -fsSL -o /usr/local/bin/omp \
+            "$gh/can1357/oh-my-pi/releases/latest/download/omp-linux-arm64"; \
+        chmod 755 /usr/local/bin/omp ;; \
+    goose) \
+        curl -fsSL "$gh/aaif-goose/goose/releases/latest/download/goose-aarch64-unknown-linux-musl.tar.bz2" \
+            | tar -xj -C /usr/local/bin ./goose ;; \
+    aichat) \
+        tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$gh/sigoden/aichat/releases/latest"); \
+        tag=${tag##*/}; \
+        curl -fsSL "$gh/sigoden/aichat/releases/download/$tag/aichat-$tag-aarch64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C /usr/local/bin aichat ;; \
+    hermes) venv; /opt/venv/bin/pip install --no-cache-dir hermes-agent ;; \
+    elia) venv; /opt/venv/bin/pip install --no-cache-dir elia-chat ;; \
+    open-webui) \
+        venv; \
+        /opt/venv/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+        /opt/venv/bin/pip install --no-cache-dir open-webui ;; \
+    *) echo "unknown CLIENT '$CLIENT'" >&2; exit 1 ;; \
+    esac; \
+    npm cache clean --force
+
+ENV PATH=/opt/venv/bin:$PATH

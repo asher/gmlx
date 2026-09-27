@@ -165,3 +165,15 @@ def test_gitignore_keeps_the_binary_out_of_git():
     assert "/gmlx/container/guest/gmlx-entry" in text
     assert "/crates/gmlx-entry/target/" in text
     assert os.path.exists(CRATE / "Cargo.lock")
+
+
+def test_package_data_covers_the_tracked_container_files():
+    import subprocess
+    manifest = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    patterns = manifest["tool"]["setuptools"]["package-data"]["gmlx.container"]
+    tracked = subprocess.run(["git", "ls-files", "gmlx/container/files"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout.split()
+    assert tracked
+    for path in tracked:
+        rel = str(Path(path).relative_to("gmlx/container"))
+        assert any(Path(rel).match(p) for p in patterns), f"{path} is not package data"
