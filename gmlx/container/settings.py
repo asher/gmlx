@@ -20,7 +20,7 @@ from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
-from .state import data_dir
+from .state import data_dir, data_path
 
 # Clients whose built-in default shares no current folder.
 NO_CWD_CLIENTS = frozenset({"open-webui", "elia"})
@@ -295,6 +295,11 @@ def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> l
                        "macOS guards. macOS may ask once whether the container runtime can "
                        "read it, and the container waits until you answer.")
     return out
+
+
+def private_home_path(client: str) -> Path:
+    """Where the client's private home lives, without creating it."""
+    return data_path() / client / "home"
 
 
 def private_home(client: str) -> Path:

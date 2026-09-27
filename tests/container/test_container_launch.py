@@ -151,6 +151,27 @@ def test_dry_run_reports_rebuild(env, capsys):
     assert not env.calls("build")
 
 
+def test_dry_run_reports_the_base_of_a_build_image(env, capsys):
+    ctx = env.home / "ctx"
+    ctx.mkdir()
+    (ctx / "Containerfile").write_text("FROM gmlx.invalid/launch-claude-code:base\n")
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           f"        build: {ctx}\n")
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    out = capsys.readouterr().out
+    assert "[launch] base gmlx.invalid/launch-claude-code:base: would be built first" in out
+    assert not env.calls("build")
+
+
+def test_shell_config_only_on_a_running_session_names_the_flag(env, capsys):
+    lock = session.try_session_lock("pi")
+    try:
+        assert _run(["pi", "--shell", "--config-only"]) == 1
+    finally:
+        lock.release()
+    assert "--config-only applies only to a new session" in capsys.readouterr().err
+
+
 def test_dry_run_prints_the_replaced_command(env, capsys):
     _user_config(env.home, "launch:\n  container:\n    clients:\n      elia:\n"
                            "        command: [/usr/local/bin/start.sh, elia]\n")

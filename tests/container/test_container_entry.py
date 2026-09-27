@@ -390,6 +390,17 @@ def test_stand_ins_without_the_socket_name_the_config_key(entry, short_dir):
     assert done.returncode == 1 and b"clipboard: images" in done.stderr
 
 
+def test_stand_in_says_so_when_the_mac_side_stopped_answering(entry, short_dir):
+    import socket
+    sock = short_dir / "stale.sock"
+    s = socket.socket(socket.AF_UNIX)
+    s.bind(str(sock))
+    s.close()                                       # the file stays, nothing listens
+    done = _clip_run(_stand_in(entry, short_dir, "xclip"), "-selection", "clipboard",
+                     "-t", "image/png", "-o", sock=sock)
+    assert done.returncode == 1 and b"does not answer" in done.stderr
+
+
 def test_stand_ins_refuse_text_and_writes(entry, short_dir):
     sock = short_dir / "clip.sock"
     requests: list = []

@@ -135,10 +135,13 @@ pub fn parse(tool: &str, args: &[OsString]) -> Result<Request, String> {
 /// `OK <length>` and that many bytes, or `ERR <message>`.
 pub fn ask(sock: &Path, request: &Request, out: &mut dyn Write) -> Result<(), String> {
     let mut stream = UnixStream::connect(sock).map_err(|e| match e.kind() {
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+        io::ErrorKind::NotFound => {
             "the Mac clipboard is not available in this session. \
              Turn on clipboard: images in the launch config to paste images."
                 .to_string()
+        }
+        io::ErrorKind::ConnectionRefused => {
+            "the Mac clipboard does not answer. The session may be ending.".to_string()
         }
         _ => format!("cannot reach the Mac clipboard ({e})"),
     })?;

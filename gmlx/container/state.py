@@ -16,10 +16,15 @@ from pathlib import Path
 from typing import Callable
 
 
+def data_path() -> Path:
+    """``$XDG_DATA_HOME/gmlx/launch``, without creating it."""
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return Path(base) / "gmlx" / "launch"
+
+
 def data_dir() -> Path:
     """``$XDG_DATA_HOME/gmlx/launch``, created on first use."""
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    d = Path(base) / "gmlx" / "launch"
+    d = data_path()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

@@ -222,6 +222,15 @@ def test_cleanup_keeps_a_reference_another_running_launch_pinned(fake_container)
     assert first.run_ref not in fake_container.load()["images"]
 
 
+def test_cleanup_keeps_a_digest_reference_a_running_container_uses(fake_container):
+    first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    fake_container.update(containers=[{
+        "name": "gmlx-pi-aaaaaa", "labels": {"gmlx.launch": "1"},
+        "image": first.run_ref, "image_digest": ""}])
+    images.ensure_image(images.ImagePlan("shipped", "pi", packages=["make"]), say=_quiet)
+    assert first.run_ref in fake_container.load()["images"]
+
+
 def test_a_refused_delete_stays_recorded(fake_container):
     first = images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     fake_container.update(refuse_delete=[first.run_ref])

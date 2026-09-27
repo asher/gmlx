@@ -33,7 +33,6 @@ _ATTACH_DEFAULTS = {
     "no_start": False, "start_timeout": 0.0, "no_keep": False, "dsh_profile": None,
     "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "network": None,
 }
-_DSH_STDIO = frozenset({"acp", "sdk", "sdk-minimal"})
 _DSH_URL_LINE = r"dsh web: (\S+)"
 
 
@@ -291,7 +290,14 @@ def _image_state(image_plan, rebuild: bool, running: bool) -> tuple[str, str]:
         verb = "rebuilt" if rebuild else "checked, and built when its context changed"
     ref = f"{images.repository_of(info.name or tag)}@{info.digest}" if info else tag
     state = "present" if verb == "present" else f"would be {verb}"
-    return ref, f"[launch] image {tag}: {state}"
+    lines = [f"[launch] image {tag}: {state}"]
+    for base in sorted(image_plan.bases) if image_plan.kind == "build" else []:
+        present = cli.image_info(images.shipped_tag(
+            base, image_plan.base_packages.get(base, []))) is not None
+        base_state = ("would be rebuilt" if rebuild else "present" if present
+                      else "would be built first")
+        lines.append(f"[launch] base {images.base_ref(base)}: {base_state}")
+    return ref, "\n".join(lines)
 
 
 def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
@@ -302,7 +308,6 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
     cfg = launch_cfg.container.for_client(client)
     dry = bool(a.config_only)
     a.container_mode = True
-    a.container_dry_run = dry
     try:
         if a.config_path:
             raise L.LaunchError("--config-path does not apply in container mode, where the "
@@ -316,7 +321,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         # Step 4
         lock = session.try_session_lock(client)
         if lock is None:
-            if a.shell and not dry:
+            if a.shell:                   # attaching refuses --config-only itself
                 return _attach(a, exec_fn, say)
             record = session.read_record(client) or {}
             raise L.LaunchError(
@@ -351,7 +356,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     plan = settings.resolve_plan(client, cfg, cwd=os.getcwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=port,
                                  web_port=web_port)
-    if client == "dsh" and a.dsh_profile in _DSH_STDIO:
+    if client == "dsh" and a.dsh_profile in L._DSH_STDIO:
         raise L.LaunchError(f"the {a.dsh_profile} profile serves another program over stdio, "
                             "which a container session cannot hand over. Use it on the Mac "
                             "with --no-container.")

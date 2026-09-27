@@ -18,7 +18,6 @@ import io
 import os
 import re
 import sys
-from pathlib import Path
 
 # Verb one-liners for first-word completion. Mirrors the umbrella help; a test
 # asserts every dispatchable verb has an entry so this can't silently drift.
@@ -246,8 +245,8 @@ def _dsh_profile_candidates(container: bool = False) -> list[str]:
     names[_DSH_PROFILE] = "gmlx profile (default)"
     root = _dsh_home() / "profiles"
     if container:
-        data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-        root = Path(data) / "gmlx" / "launch" / "dsh" / "home" / ".dsh" / "profiles"
+        from gmlx.container.settings import private_home_path
+        root = private_home_path("dsh") / ".dsh" / "profiles"
     for d in (root.iterdir() if root.is_dir() else ()):
         if (d / "package.json").is_file():
             names.setdefault(d.name, "dsh profile")
