@@ -75,6 +75,9 @@ dependencies = [
     # the Accessibility permission it needs.
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # `gmlx launch --container` with `clipboard: images` reads clipboard
+    # images through AppKit's NSPasteboard.
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

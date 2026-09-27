@@ -4,8 +4,10 @@ The wheel ships ``guest/gmlx-entry``, a static Linux arm64 program. Launch
 copies it once to ``runtime/<sha256>/`` under the launch data folder and
 shares that folder read-only at ``/opt/gmlx``, so the mount depends neither on
 the install's file modes nor on a site-packages path that ``--mount`` cannot
-take. Each launch holds a shared lock on the folder until its session ends,
-and :func:`cleanup_runtime` removes the folders no launch holds.
+take. The folder's ``bin/`` holds the clipboard stand-ins, links named
+``xclip``, ``xsel`` and ``wl-paste`` to the same binary. Each launch holds a
+shared lock on the folder until its session ends, and :func:`cleanup_runtime`
+removes the folders no launch holds.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from .state import FileLock, LockHeld, data_dir
 
 GUEST_MOUNT = "/opt/gmlx"
 GUEST_ENTRY = f"{GUEST_MOUNT}/gmlx-entry"
+GUEST_BIN = f"{GUEST_MOUNT}/bin"
 BUILD_HINT = "python scripts/build_guest_entry.py"
+CLIP_TOOLS = ("xclip", "xsel", "wl-paste")
 
 
 def entry_path() -> Path:
@@ -37,7 +41,13 @@ def runtime_root() -> Path:
 
 
 def _complete(folder: Path) -> bool:
-    return (folder / "gmlx-entry").is_file() and (folder / ".lock").exists()
+    if not ((folder / "gmlx-entry").is_file() and (folder / ".lock").exists()):
+        return False
+    bin_dir = folder / "bin"
+    return all(
+        (bin_dir / tool).is_symlink() and os.readlink(bin_dir / tool) == "../gmlx-entry"
+        for tool in CLIP_TOOLS
+    )
 
 
 def _install(folder: Path, source: Path) -> None:
@@ -48,6 +58,9 @@ def _install(folder: Path, source: Path) -> None:
     try:
         shutil.copyfile(source, tmp / "gmlx-entry")
         os.chmod(tmp / "gmlx-entry", 0o755)
+        (tmp / "bin").mkdir()
+        for tool in CLIP_TOOLS:
+            os.symlink("../gmlx-entry", tmp / "bin" / tool)
         (tmp / ".lock").touch()
         try:
             os.rename(tmp, folder)

@@ -172,6 +172,23 @@ def test_claude_code_guest_env(env):
     assert spec.child_env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8080"
 
 
+def test_clipboard_images_reaches_the_session_and_the_record(env):
+    _user_config(env.home, "launch:\n  container:\n    clipboard: images\n"
+                           "    clients:\n      pi:\n        clipboard: off\n")
+    assert _run(["pi", "--container"]) == 0
+    assert env.runs[0]["spec"].plan.clipboard == "off"     # the client value wins
+    assert env.runs[0]["record"]["clipboard"] is False
+    assert _run(["omp", "--container"]) == 0
+    spec = env.runs[1]["spec"]
+    assert spec.plan.clipboard == "images" and env.runs[1]["record"]["clipboard"] is True
+    assert spec.env_values["WAYLAND_DISPLAY"] == "wayland-0"
+
+
+def test_no_display_variable_without_clipboard_images(env):
+    assert _run(["omp", "--container"]) == 0
+    assert "WAYLAND_DISPLAY" not in env.runs[0]["spec"].env_values
+
+
 def test_configured_env_passes_by_name(env):
     _user_config(env.home, "launch:\n  container:\n    env: [GH_TOKEN, MODE=fast]\n")
     assert _run(["pi", "--container"]) == 0
@@ -272,6 +289,15 @@ def test_shell_attaches_to_the_running_session(running_session, capsys):
     assert argv[1:] == ["exec", "-i", "--cwd", f"{proj}/sub", "gmlx-pi-abc123",
                         "/opt/gmlx/gmlx-entry", "--shell", "--", "-c", "ls"]
     assert "attaching to gmlx-pi-abc123" in capsys.readouterr().out
+
+
+def test_shell_attach_passes_clipboard_when_the_session_has_it(running_session):
+    record = session.read_record("pi")
+    session.write_record("pi", {**record, "clipboard": True})
+    calls = []
+    assert _run(["pi", "--shell"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    argv = calls[0][1]
+    assert argv[argv.index("/opt/gmlx/gmlx-entry") + 1:] == ["--clipboard", "--shell", "--"]
 
 
 def test_shell_attach_from_an_unshared_folder(running_session, capsys):

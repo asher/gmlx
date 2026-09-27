@@ -1,11 +1,13 @@
 //! Guest entry for `gmlx launch --container`.
 //!
-//! `gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... [--shell] -- CMD ARGS`
+//! `gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... [--clipboard] [--shell] -- CMD ARGS`
 //! binds the relay listeners, starts the relay as a detached process, and
 //! replaces itself with the client. `gmlx-entry --check CMD` only resolves CMD.
-//! The binary is static and needs nothing from the image but the command it
-//! runs.
+//! Started as `xclip`, `xsel` or `wl-paste`, the binary is a clipboard
+//! stand-in instead. The binary is static and needs nothing from the image
+//! but the command it runs.
 
+mod clipboard;
 mod relay;
 
 use std::ffi::{OsStr, OsString};
@@ -28,7 +30,7 @@ pub const EXIT_USAGE: i32 = 2;
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 const USAGE: &str = "usage: gmlx-entry [--tcp PORT=SOCK]... [--unix SOCK=PORT]... \
-                     [--shell] -- CMD [ARGS]...\n       gmlx-entry --check CMD";
+                     [--clipboard] [--shell] -- CMD [ARGS]...\n       gmlx-entry --check CMD";
 
 #[derive(Debug, PartialEq)]
 pub enum Mode {
@@ -44,6 +46,8 @@ pub struct RunSpec {
     pub unix: Vec<(PathBuf, u16)>,
     /// Run `bash` or `sh` with the arguments after `--`.
     pub shell: bool,
+    /// Put the clipboard stand-ins first on the client's `PATH`.
+    pub clipboard: bool,
     /// The command and its arguments, or the shell's arguments.
     pub argv: Vec<OsString>,
 }
@@ -100,6 +104,7 @@ pub fn parse_args(args: &[OsString]) -> Result<Mode, String> {
                 i += 1;
             }
             Some("--shell") => spec.shell = true,
+            Some("--clipboard") => spec.clipboard = true,
             _ => return Err(format!("unknown argument {}", arg.to_string_lossy())),
         }
         i += 1;
@@ -158,8 +163,22 @@ fn fail(code: i32, message: &str) -> ! {
     exit(code)
 }
 
+/// The `PATH` the client gets under `--clipboard`: the stand-ins first,
+/// then the image's own search path.
+pub fn clipboard_path(path_env: Option<&OsStr>) -> OsString {
+    let mut path = OsString::from(clipboard::CLIP_BIN);
+    path.push(":");
+    path.push(path_env.unwrap_or(OsStr::new(DEFAULT_PATH)));
+    path
+}
+
 fn main() {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut all = std::env::args_os();
+    let arg0 = all.next().unwrap_or_default();
+    let args: Vec<OsString> = all.collect();
+    if let Some(tool) = clipboard::tool_name(&arg0) {
+        exit(clipboard::run(tool, &args));
+    }
     let mode = parse_args(&args)
         .unwrap_or_else(|e| fail(EXIT_USAGE, &format!("gmlx-entry: {e}\n{USAGE}")));
     let path_env = std::env::var_os("PATH");
@@ -199,7 +218,12 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     // startup, so give the client the default back.
     // SAFETY: setting a signal disposition has no memory-safety preconditions.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-    let err = Command::new(&program).arg0(&name).args(&rest).exec();
+    let mut command = Command::new(&program);
+    command.arg0(&name).args(&rest);
+    if spec.clipboard {
+        command.env("PATH", clipboard_path(path_env.as_deref()));
+    }
+    let err = command.exec();
     let code = if err.kind() == std::io::ErrorKind::NotFound { EXIT_NOT_FOUND } else { EXIT_CANNOT_RUN };
     fail(code, &format!("gmlx-entry: cannot run {}: {err}", program.display()))
 }
@@ -221,6 +245,7 @@ mod tests {
             tcp: vec![(8080, PathBuf::from("/s/api.sock"))],
             unix: vec![(PathBuf::from("/s/web.sock"), 3000)],
             shell: false,
+            clipboard: false,
             argv: os(&["claude", "--continue"]),
         }));
     }
@@ -232,6 +257,15 @@ mod tests {
         let Mode::Run(spec) = parse_args(&os(&["--shell", "--", "-c", "npm test"])).unwrap()
         else { panic!("not a run") };
         assert_eq!(spec.argv, os(&["-c", "npm test"]));
+    }
+
+    #[test]
+    fn clipboard_flag_and_path() {
+        let Mode::Run(spec) = parse_args(&os(&["--clipboard", "--", "claude"])).unwrap()
+        else { panic!("not a run") };
+        assert!(spec.clipboard);
+        assert_eq!(clipboard_path(Some(OsStr::new("/usr/bin"))), "/opt/gmlx/bin:/usr/bin");
+        assert_eq!(clipboard_path(None), format!("/opt/gmlx/bin:{DEFAULT_PATH}").as_str());
     }
 
     #[test]

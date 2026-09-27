@@ -30,6 +30,7 @@ from typing import Callable
 from gmlx.config import parse_size_bytes
 
 from . import cli, runtime
+from .clipboard import ClipboardServer
 from .relay import Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
 from .state import FileLock, LockHeld, cache_dir, data_dir
@@ -37,6 +38,7 @@ from .state import FileLock, LockHeld, cache_dir, data_dir
 HOST_SERVICES = "/var/host-services"
 API_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-api.sock"
 WEB_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-web.sock"
+CLIP_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-clip.sock"
 # macOS caps a socket path at 104 bytes.
 SOCKET_PATH_MAX = 100
 OPEN_TIMEOUT = 300.0
@@ -292,6 +294,8 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
         argv += ["-v", f"{s.sock('api.sock')}:{API_GUEST_SOCK}"]
     for port in plan.forward:
         argv += ["-v", f"{s.sock(f'fwd-{port}.sock')}:{fwd_guest_sock(port)}"]
+    if plan.clipboard == "images":
+        argv += ["-v", f"{s.sock('clip.sock')}:{CLIP_GUEST_SOCK}"]
     if spec.web_port is not None:
         argv += ["--publish-socket", f"{s.sock('web.sock')}:{WEB_GUEST_SOCK}"]
     argv.append(spec.image_ref)
@@ -301,6 +305,8 @@ def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
         argv += ["--tcp", f"{port}={fwd_guest_sock(port)}"]
     if spec.web_port is not None:
         argv += ["--unix", f"{WEB_GUEST_SOCK}={spec.web_port}"]
+    if plan.clipboard == "images":
+        argv.append("--clipboard")
     if spec.shell:
         argv.append("--shell")
     return [*argv, "--", *spec.command]
@@ -430,7 +436,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             pass
     loop = RelayLoop(log)
     loop.start()
-    relays: list[Relay] = []
+    relays: list[Relay | ClipboardServer] = []
     child: subprocess.Popen | None = None
     stop_open = threading.Event()
     try:
@@ -443,6 +449,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             if spec.web_port is not None:
                 relays.append(Relay(loop, ("127.0.0.1", spec.web_port),
                                     str(s.sock("web.sock")), name="web"))
+            if spec.plan.clipboard == "images":
+                relays.append(ClipboardServer(loop, str(s.sock("clip.sock"))))
         except OSError as e:
             raise SettingsError(f"cannot listen for the session ({e}). Is the port busy?") from None
         write_record(s.client, record)

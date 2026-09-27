@@ -102,6 +102,14 @@ def test_web_app_network_none_ssh_tty_and_shell(tmp_path):
                          "-c", "npm test"]
 
 
+def test_clipboard_socket_and_flag_only_under_images(tmp_path):
+    argv = session.compose_run_argv(_spec(tmp_path))
+    assert "--clipboard" not in argv and not any("clip.sock" in a for a in argv)
+    argv = session.compose_run_argv(_spec(tmp_path, plan=_plan(tmp_path, clipboard="images")))
+    assert f"{tmp_path / 'sess'}/clip.sock:/var/host-services/gmlx-clip.sock" in argv
+    assert argv[-4:] == ["--clipboard", "--", "pi", "--continue"]
+
+
 def test_forwarded_ports_work_under_network_none(tmp_path):
     spec = _spec(tmp_path, plan=_plan(tmp_path, network="none"))
     argv = session.compose_run_argv(spec)
@@ -222,6 +230,9 @@ def test_runtime_copy_and_cleanup(fake_container, tmp_path):
     folder, lock = runtime.acquire_runtime(_entry(tmp_path))
     assert folder.name == runtime.entry_digest(_entry(tmp_path))
     assert oct((folder / "gmlx-entry").stat().st_mode & 0o777) == "0o755"
+    for tool in ("xclip", "xsel", "wl-paste"):
+        assert os.readlink(folder / "bin" / tool) == "../gmlx-entry"
+        assert (folder / "bin" / tool).resolve() == (folder / "gmlx-entry").resolve()
     old, old_lock = runtime.acquire_runtime(_entry(tmp_path / "..", b"older"))
     old_lock.release()
     assert runtime.cleanup_runtime(keep=folder.name) == [old]
@@ -269,6 +280,15 @@ def test_runtime_retries_when_the_folder_goes_between_find_and_lock(fake_contain
     monkeypatch.setattr(runtime, "FileLock", racing)
     folder, lock = runtime.acquire_runtime(_entry(tmp_path))
     assert calls["n"] >= 2 and (folder / "gmlx-entry").is_file()
+    lock.release()
+
+
+def test_runtime_copies_again_when_a_link_is_missing(fake_container, tmp_path):
+    folder, lock = runtime.acquire_runtime(_entry(tmp_path))
+    lock.release()
+    (folder / "bin" / "xsel").unlink()
+    again, lock = runtime.acquire_runtime(_entry(tmp_path))
+    assert again == folder and os.readlink(folder / "bin" / "xsel") == "../gmlx-entry"
     lock.release()
 
 

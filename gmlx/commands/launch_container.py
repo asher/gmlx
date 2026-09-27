@@ -220,6 +220,9 @@ def _client_env(client: str, plan, ready, command_cfg, web_port: int | None) -> 
         env.update({"HOST": "127.0.0.1", "PORT": str(web_port)})
     if client == "open-webui" and command_cfg == "image":
         env["WEBUI_SECRET_KEY_FILE"] = str(plan.home / ".webui_secret_key")
+    if client == "omp" and plan.clipboard == "images":
+        # omp looks for a display before it runs a clipboard tool.
+        env["WAYLAND_DISPLAY"] = "wayland-0"
     return env
 
 
@@ -418,7 +421,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, first_run, held, exec_fn, say) -> i
     summary = _summary_lines(plan, ready, a.shell, client)
     if dry:
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
-    record = {"name": sess.name, "workdir": spec.workdir, "clipboard": False,
+    record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
                          for m in plan.shares]}
     if first_run:

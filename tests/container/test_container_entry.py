@@ -290,3 +290,124 @@ def test_shell_without_listeners_starts_no_relay(entry, short_dir):
 def test_bad_arguments_exit_2(entry):
     done = _run(entry, "--tcp", "notaport=/x", "--", "true")
     assert done.returncode == 2 and "usage:" in done.stderr
+
+
+# The PATH under --clipboard
+
+def test_clipboard_puts_the_stand_ins_first_after_resolving(entry, tmp_path):
+    own = tmp_path / "bin"
+    own.mkdir()
+    tool = own / "xclip"
+    tool.write_text('#!/bin/sh\necho "own xclip $PATH"\n')
+    tool.chmod(0o755)
+    env = dict(os.environ, PATH=f"{own}:/usr/bin:/bin")
+    done = _run(entry, "--clipboard", "--", "xclip", env=env)
+    # The command resolved on the image's own PATH, and the client sees the
+    # stand-ins first.
+    assert done.stdout.strip() == f"own xclip /opt/gmlx/bin:{own}:/usr/bin:/bin"
+    shell = _run(entry, "--clipboard", "--shell", "--", "-c", 'echo "$PATH"', env=env)
+    assert shell.stdout.strip() == f"/opt/gmlx/bin:{own}:/usr/bin:/bin"
+
+
+def test_without_clipboard_the_image_path_stays(entry, tmp_path):
+    env = dict(os.environ, PATH="/usr/bin:/bin")
+    done = _run(entry, "--", "sh", "-c", 'echo "$PATH"', env=env)
+    assert done.stdout.strip() == "/usr/bin:/bin"
+
+
+# The clipboard stand-ins
+
+def _stand_in(entry, folder: Path, name: str) -> str:
+    link = folder / name
+    link.symlink_to(entry)
+    return str(link)
+
+
+def _clip_server(path: Path, answer: bytes, requests: list):
+    """A one-thread fake of the Mac clipboard socket."""
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(str(path))
+    srv.listen(8)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                line = b""
+                while not line.endswith(b"\n"):
+                    chunk = conn.recv(1)
+                    if not chunk:
+                        break
+                    line += chunk
+                requests.append(line.decode())
+                conn.sendall(answer)
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def _clip_run(link, *args, sock):
+    return subprocess.run([link, *args], capture_output=True, timeout=30,
+                          env=dict(os.environ, GMLX_CLIP_SOCK=str(sock)))
+
+
+def test_stand_ins_read_an_image_through_their_links(entry, short_dir):
+    sock = short_dir / "clip.sock"
+    requests: list = []
+    srv = _clip_server(sock, b"OK 8\n\x89PNG\r\n\x1a\n", requests)
+    try:
+        xclip = _stand_in(entry, short_dir, "xclip")
+        wl = _stand_in(entry, short_dir, "wl-paste")
+        done = _clip_run(xclip, "-selection", "clipboard", "-t", "image/png", "-o", sock=sock)
+        assert done.returncode == 0 and done.stdout == b"\x89PNG\r\n\x1a\n"
+        done = _clip_run(wl, "--type", "image/png", sock=sock)
+        assert done.returncode == 0 and done.stdout == b"\x89PNG\r\n\x1a\n"
+        done = _clip_run(xclip, "-selection", "clipboard", "-t", "TARGETS", "-o", sock=sock)
+        assert done.returncode == 0
+        assert requests == ["IMAGE image/png\n", "IMAGE image/png\n", "TYPES\n"]
+    finally:
+        srv.close()
+
+
+def test_stand_ins_pass_the_access_denied_message_on(entry, short_dir):
+    sock = short_dir / "clip.sock"
+    srv = _clip_server(sock, b"ERR macOS denies this app access to the clipboard. Allow it in "
+                             b"System Settings, Privacy & Security, Paste from Other Apps.\n", [])
+    try:
+        done = _clip_run(_stand_in(entry, short_dir, "wl-paste"), "-t", "image/png", sock=sock)
+        assert done.returncode == 1
+        assert b"Paste from Other Apps" in done.stderr and done.stdout == b""
+    finally:
+        srv.close()
+
+
+def test_stand_ins_without_the_socket_name_the_config_key(entry, short_dir):
+    done = _clip_run(_stand_in(entry, short_dir, "xclip"), "-selection", "clipboard",
+                     "-t", "image/png", "-o", sock=short_dir / "missing.sock")
+    assert done.returncode == 1 and b"clipboard: images" in done.stderr
+
+
+def test_stand_ins_refuse_text_and_writes(entry, short_dir):
+    sock = short_dir / "clip.sock"
+    requests: list = []
+    srv = _clip_server(sock, b"OK 0\n", requests)
+    try:
+        xsel = _stand_in(entry, short_dir, "xsel")
+        xclip = _stand_in(entry, short_dir, "xclip")
+        for link, args, message in [
+            (xsel, ["--clipboard", "--output"], b"not text"),
+            (xclip, ["-selection", "clipboard", "-o"], b"not text"),
+            (xclip, ["-selection", "clipboard", "-i"], b"cannot write"),
+        ]:
+            done = _clip_run(link, *args, sock=sock)
+            assert done.returncode == 1 and message in done.stderr, args
+        done = subprocess.run([xclip, "-selection", "clipboard"], input=b"planted",
+                              capture_output=True, timeout=30,
+                              env=dict(os.environ, GMLX_CLIP_SOCK=str(sock)))
+        assert done.returncode == 1 and b"cannot write" in done.stderr
+        assert requests == []                  # nothing reached the Mac
+    finally:
+        srv.close()
