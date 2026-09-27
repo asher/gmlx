@@ -24,7 +24,7 @@ from each verb explain when to use a flag.
 | [`gmlx rm`](#gmlx-rm) | Delete a model's files and config entry. |
 | [`gmlx sync-models`](#gmlx-sync-models) | Reconcile a config with the files on disk. |
 | [`gmlx ps`](#gmlx-ps) | Show the models resident in a running server. |
-| [`gmlx systemone`](#gmlx-systemone) | Answer a structured-decision request with a DiffusionGemma model. |
+| [`gmlx systemone`](#gmlx-systemone) | Answer a structured-decision request. |
 | [`gmlx profiles`](#gmlx-profiles) | Show the family sampling defaults and intents. |
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
@@ -797,11 +797,14 @@ with an error or is not gmlx, and 3 when no server was reachable.
 `gmlx systemone` sends a JSON file holding a `/v1/systemone` request body
 to a running server and prints one line per question. The body is described in
 [Structured decisions](decisions.md). With `--model` the verb loads the GGUF
-itself and answers offline, with no server.
+itself and answers offline, with no server. A DiffusionGemma model reads its
+answer slots, and any other text model answers with the
+[letter readout](glossary.md#letter-readout).
 
 ```sh
 gmlx systemone ticket.json
 gmlx systemone ticket.json --model diffusiongemma-Q4_K_M.gguf
+gmlx systemone ticket.json --model OpenJev-Q4_K_M.gguf
 ```
 
 A yes or no answer prints as its probability, a choice as the chosen

@@ -135,10 +135,10 @@ The endpoints are documented in the [HTTP API](https://asher.github.io/gmlx/api.
 the file that configures them in
 [Configuration](https://asher.github.io/gmlx/config.html).
 
-A served DiffusionGemma model also answers the Jev decision API at
-`/v1/systemone`. A request asks a fixed set of yes or no, choice and score
-questions about a state, and each answer comes back as a probability for
-every option.
+The server also answers the Jev decision API at `/v1/systemone`, on
+DiffusionGemma, on OpenJev or on any other text model. A request asks a
+fixed set of yes or no, choice and score questions about a state, and each
+answer comes back as a probability for every option.
 [Structured decisions](https://asher.github.io/gmlx/decisions.html)
 shows how to write the questions and act on the answers.
 

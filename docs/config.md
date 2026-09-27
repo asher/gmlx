@@ -1053,9 +1053,11 @@ changes them. The default is the cache turned off.
 ### Structured decisions
 
 These keys set up `POST /v1/systemone`, which
-[Structured decisions](decisions.md) describes. An unknown key, or a
-`model` that is not a configured id or alias, fails the load. A reload
-applies new values to the next request.
+[Structured decisions](decisions.md) describes. `canvas`, `constrained`
+and the three think keys apply to DiffusionGemma, and the
+[letter readout](glossary.md#letter-readout) on other models ignores them.
+An unknown key, or a `model` that is not a configured id or alias, fails
+the load. A reload applies new values to the next request.
 
 #### `server.systemone.model`
 
@@ -1084,7 +1086,8 @@ gets a 422. The default is `64`.
 #### `server.systemone.max_samples`
 
 A request may ask for at most this many `samples` and `auto_max`, and a
-larger value is lowered to this one. The default is `32`.
+larger value is lowered to this one. On the letter readout, the limit
+applies to the option orders that `samples` sets. The default is `32`.
 
 #### `server.systemone.think`
 

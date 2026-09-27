@@ -2,7 +2,9 @@
 
 `POST /v1/systemone` turns a question set into answer distributions on a
 DiffusionGemma model. A server route, the decision logic and a read engine
-do the work. The request and response contract is in
+do the work. Other models answer with the
+[letter readout](letter-readout.md), and the route picks one by the
+model's kind. The request and response contract is in
 [Structured decisions](../decisions.md), and the timings are in
 [Structured read measurements](structured-read-measurements.md).
 
