@@ -15,6 +15,8 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   architecture, the cache layers and the reuse counters.
 - [Structured reads](structured-reads.md): How `/v1/systemone` answers
   questions from a denoise read, and its parity with the vLLM example.
+- [Letter readout](letter-readout.md): How `/v1/systemone` answers on
+  autoregressive models, and its parity with OpenJev's helper.
 - [Hadamard-folded GGUFs](hadamard-fold.md): Weights stored under a Hadamard
   rotation, and where gmlx undoes it.
 - [Distillation internals](distill.md): How the teacher pass and the
@@ -36,4 +38,5 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
 - [Streaming measurements](streaming-measurements.md): The data behind the
   lossless and lossy settings of streamed models.
 - [Structured read measurements](structured-read-measurements.md): Prefill,
-  read, sample, step and thought timings on DiffusionGemma.
+  read, sample, step and thought timings on DiffusionGemma, and the letter
+  readout's timings and accuracy on OpenJev.

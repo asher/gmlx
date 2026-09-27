@@ -99,8 +99,8 @@ class ThoughtEngine(FakeEngine):
         return super().read(prompt, req)
 
 
-THINK_AUTO_KEYS = {"threshold", "budget", "thought", "unsure", "confidence", "reads",
-                   "total_ms"}
+THINK_AUTO_KEYS = {"threshold", "budget", "thought", "unsure", "chosen_probability",
+                   "reads", "total_ms"}
 
 
 def test_think_auto_keeps_a_sure_first_pass():
@@ -111,7 +111,8 @@ def test_think_auto_keeps_a_sure_first_pass():
     assert set(auto) == THINK_AUTO_KEYS
     assert (auto["threshold"], auto["budget"], auto["thought"], auto["unsure"]) \
         == (0.8, 64, False, [])
-    assert auto["confidence"] == {"q1": r["out"]["answers"]["q1"]["confidence"]}
+    assert auto["chosen_probability"] == {
+        "q1": r["out"]["answers"]["q1"]["chosen_probability"]}
     assert auto["reads"] == d["timing"]["reads"]
     assert set(d) == DECISION_KEYS | {"think_auto"}
 
@@ -123,9 +124,9 @@ def test_think_auto_runs_again_with_a_thought_when_an_answer_is_unsure():
     auto = d["think_auto"]
     assert [t["budget"] for t in eng.thinks] == [48]
     assert (auto["budget"], auto["thought"], auto["unsure"]) == (48, True, ["q1", "q2"])
-    assert all(c < 0.8 for c in auto["confidence"].values())
+    assert all(c < 0.8 for c in auto["chosen_probability"].values())
     assert out["answers"]["q1"]["label"] == "yes"
-    assert out["answers"]["q1"]["confidence"] > 0.9
+    assert out["answers"]["q1"]["chosen_probability"] > 0.9
     assert d["thought"]["tokens"] == len(THOUGHT)
     # Four unsure reads, then one sure read on the thought. Timing covers
     # both runs, and think_auto holds the first.

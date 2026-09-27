@@ -299,12 +299,14 @@ class ServerDefaults:
 
 @dataclass(frozen=True)
 class SystemoneCfg:
-    """``server.systemone``: structured decisions on POST /v1/systemone."""
+    """``server.systemone``: structured decisions on POST /v1/systemone.
+    ``canvas``, ``constrained`` and the think keys apply to DiffusionGemma
+    only; the letter readout on other models ignores them."""
     model: str | None = None     # used when the request's model is absent or unknown
     canvas: int = 64             # served canvas rows; a positive multiple of 16
     constrained: bool = True     # read over the label ids only
     max_questions: int = 64      # per request
-    max_samples: int = 32        # per question, fixed or auto
+    max_samples: int = 32        # per question: samples, or letter orderings
     think: int | str = 0         # request default: a budget, or "auto"
     think_threshold: float = THINK_THRESHOLD  # request default for "auto"
     think_budget: int = THINK_BUDGET          # request default for "auto"
@@ -440,8 +442,7 @@ class ServerCfg:
     # - a causal Qwen3 LM scored by its yes/no logits, loaded by the runtime (no
     # extra). Resolved by rerank.resolve_rerank_model at serve time.
     rerank: str | None = None
-    # POST /v1/systemone settings (structured decisions on a DiffusionGemma
-    # model).
+    # POST /v1/systemone settings (structured decisions).
     systemone: SystemoneCfg = field(default_factory=SystemoneCfg)
     # Optional static API key: every endpoint except /health requires it
     # (Authorization: Bearer, or x-api-key). This config field is the sole

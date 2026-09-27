@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from .confidence import choice_confidence, score_confidence
 from .schema import SchemaError
 
 
@@ -22,6 +23,7 @@ def jev_state(body) -> str:
 
 
 def jev_answer(q, a):
+    """The Jev shape of an answer, with the official confidence."""
     if a is None:
         return None
     if q["type"] == "noul":
@@ -31,7 +33,7 @@ def jev_answer(q, a):
             "type": "choice",
             "choice": a["choice"],
             "probabilities": a["probabilities"],
-            "confidence": a["confidence"],
+            "confidence": choice_confidence(list(a["probabilities"].values())),
         }
     names = [c[0] for c in q["choices"]]
     probs = {str(i): a["probabilities"][n] for i, n in enumerate(names)}
@@ -40,7 +42,7 @@ def jev_answer(q, a):
         "score": sum(i * p for i, p in enumerate(probs.values())),
         "legend": {str(i): n for i, n in enumerate(names)},
         "probabilities": probs,
-        "confidence": a["confidence"],
+        "confidence": score_confidence(list(probs.values())),
     }
 
 

@@ -1,19 +1,17 @@
-llama.cpp / ggml - https://github.com/ggml-org/llama.cpp
+system-one-adapter-python - https://github.com/typesafe-ai/system-one-adapter-python
 
-The pre-tokenizer split regex patterns in gmlx/load/tokenizer.py are
-transcribed from llama.cpp's tokenizer (llama-vocab.cpp), and the GGUF
-metadata/quantization-type conventions follow ggml's reference
-implementation. The Muse Glimmer vision tower in
-gmlx/models/muse_glimmer/vlm_model.py is ported from llama.cpp's
-clip_graph_muse_glimmer and the host-side index math in tools/mtmd/clip.cpp,
-and its projector constants and tensor remap in gmlx/load/vlm.py follow
-clip.cpp. The Kimi-K3 chat-template fixture
-tests/fixtures/kimi_k3_template.jinja comes from llama.cpp PR #26185.
-llama.cpp is distributed under the MIT License:
+Structured decisions (POST /v1/systemone) port code from
+system-one-adapter-python at commit e1d4cc938204 (MIT), with modifications:
+
+- gmlx/systemone/confidence.py: choice_confidence and score_confidence, the
+  official Jev confidence of a choice or score answer, from
+  src/system_one_adapter/_utils/confidence_metrics.py.
+
+system-one-adapter-python is distributed under the MIT License:
 
 MIT License
 
-Copyright (c) 2023-2024 The ggml authors
+Copyright (c) 2026 TypeSafe AI
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

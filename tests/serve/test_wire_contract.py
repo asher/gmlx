@@ -853,12 +853,12 @@ def test_profile_sampling_reaches_generation_over_wire(wire):
 #     upstream reshape of the registry names itself here rather than as a
 #     500 deep inside a pooled request (found live: this file's fake loader
 #     called dict-.update() on a registry).
-def test_systemone_over_the_full_patch_set_refuses_a_non_diffusion_model(wire):
+def test_systemone_over_the_full_patch_set_checks_a_text_model_body_for_letters(wire):
     r = wire.client.post("/v1/systemone", json={
         "model": MODEL_ID, "state": "the server is down",
         "questions": {"urgent": {"type": "noul"}}})
-    assert r.status_code == 400, r.text
-    assert "diffusion" in r.json()["error"]["message"]
+    assert r.status_code == 422, r.text
+    assert "instructions is required" in r.json()["error"]["message"]
     assert wire.gen.calls == []
 
 

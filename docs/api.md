@@ -62,7 +62,8 @@ model.
 | `POST /v1/audio/speech` | It turns text into speech, with `tts` configured. |
 | `POST /v1/embeddings` | It returns text embeddings, with `embeddings` configured. |
 | `POST /v1/rerank` | It reranks documents, with `rerank` configured, also at `/rerank`. |
-| `POST /v1/systemone` | It answers a fixed question set about a state from a DiffusionGemma model, also at `/systemone`. See [Structured decisions](decisions.md). |
+| `POST /v1/systemone` | It answers a fixed question set about a state, also at `/systemone`. See [Structured decisions](decisions.md). |
+| `POST /v1/prewarm` | It reads a decision state ahead of its questions, also at `/prewarm`. See [Repeated states](decisions.md#repeated-states). |
 
 `GET /v1/models` lists configured and discovered ids plus alias presets,
 and never the Hugging Face cache. Each entry carries `resident`, `pinned`,
@@ -209,8 +210,9 @@ curl localhost:8080/v1/chat/completions -d '{
 The request schemas accept unknown fields, so nothing is rejected for being
 present. An honored parameter changes the response. An ignored one is
 accepted and skipped, and a request that sets any produces one warning line
-in the server log naming them all. `/v1/systemone` has its own fields,
-listed in [Samples, steps and thoughts](decisions.md#samples-steps-and-thoughts).
+in the server log naming them all. `/v1/systemone` has its own fields, and
+[Choosing a model](decisions.md#choosing-a-model) lists which of them each
+model reads.
 
 The generation routes honor the standard sampling parameters.
 They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,

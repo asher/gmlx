@@ -206,7 +206,7 @@ class _Decision:
             a = {
                 "type": q["type"],
                 "label": q["labels"][top],
-                "confidence": mean[top],
+                "chosen_probability": mean[top],
                 "probabilities": {c[0]: m for c, m in zip(q["choices"], mean)},
             }
             if q["type"] == "noul":

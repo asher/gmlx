@@ -1,6 +1,7 @@
 """The /v1/systemone route: model policy, status codes, body shapes,
-admission, logging and the engine-thread job. The reader is scripted and
-the engine is a ResponseGenerator shell, so no model loads."""
+admission, logging and the engine-thread job, on a diffusion model and on a
+text model that answers with the letter readout. The readers are scripted
+and the engine is a ResponseGenerator shell, so no model loads."""
 
 from __future__ import annotations
 
@@ -24,7 +25,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import gmlx.gen.diffusion as diffusion  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
+import gmlx.systemone.ar_reader as ar_reader  # noqa: E402
 import gmlx.systemone.engine as engine_mod  # noqa: E402
+from gmlx import lora_rows  # noqa: E402
 from gmlx.config import SystemoneCfg, build_config  # noqa: E402
 from gmlx.serve.engine_jobs import install_engine_jobs  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
@@ -70,11 +73,12 @@ class _Tok:
 def _render(msgs, tokenize=False, add_generation_prompt=True,
             enable_thinking=False):
     assert all(isinstance(m["content"], str) for m in msgs)
-    sys_text = msgs[0]["content"]
-    user = msgs[1]["content"]
     think = "<|think|>\n" if enable_thinking else ""
-    return (f"<bos><|turn>system\n{think}{sys_text}<turn|>\n"
-            f"<|turn>user\n{user}<turn|>\n<|turn>model\n")
+    out = "<bos>"
+    for m in msgs:
+        body = (think if m["role"] == "system" else "") + m["content"]
+        out += f"<|turn>{m['role']}\n{body}<turn|>\n"
+    return out + "<|turn>model\n"
 
 
 class _Cache:
@@ -127,6 +131,40 @@ class _Reader:
         return [3000, 3001], {"tokens": 2, "closed": True, "ms": 1.0}
 
 
+class _LetterReader:
+    """Scripted letter reader: each letter's score is a hash of the prompt
+    ids and the letter."""
+
+    built = []
+    mode = "ok"
+
+    def __init__(self, model, letter_ids):
+        self.forwards = 0
+        self.path = "rows"
+        self.scopes = []
+        _LetterReader.built.append(self)
+
+    def check(self, rows_scope=None):
+        return self.path
+
+    def bind(self, rows_scope=None):
+        self.scopes.append(rows_scope)
+        return self
+
+    def prefill(self, ids):
+        self.forwards += 1
+        yield
+        return list(ids)
+
+    def tails(self, prefix, prefix_ids, tails):
+        while _LetterReader.mode == "slow":
+            yield
+        self.forwards += 1
+        yield
+        return [[zlib.crc32(repr((prefix_ids + t, i)).encode()) / 2**32 * 6
+                 for i in range(52)] for t in tails]
+
+
 class _Metrics:
     def __init__(self):
         self.events = []
@@ -173,12 +211,15 @@ def app(monkeypatch):
     monkeypatch.setattr(cls, "_generate_diffusion", cls._generate_diffusion)
     install_engine_jobs()
     monkeypatch.setattr(engine_mod, "StructuredReader", _Reader)
+    monkeypatch.setattr(ar_reader, "LetterReader", _LetterReader)
     monkeypatch.setattr(engine_mod, "engine_scope",
                         lambda model, seed: contextlib.nullcontext())
     monkeypatch.setattr(diffusion, "is_diffusion_model",
                         lambda m: bool(getattr(m, "diffusion", False)))
     _Reader.built.clear()
     _Reader.mode = "ok"
+    _LetterReader.built.clear()
+    _LetterReader.mode = "ok"
     engines = []
     state = types.SimpleNamespace(loaded=[], engines=engines)
 
@@ -343,11 +384,11 @@ def test_images_are_refused_by_name(app):
     assert "text-only" in r.json()["error"]["message"]
 
 
-def test_a_non_diffusion_model_is_a_400(app):
-    client = app.use(diffusion_model=False)
-    r = client.post("/v1/systemone", json=_ticket())
-    assert r.status_code == 400
-    assert "diffusion" in r.text
+def _letter_ticket(**extra):
+    body = _ticket(**extra)
+    body["questions"]["team"]["instructions"] = "Which team should take it?"
+    body["questions"]["severity"]["instructions"] = "How severe is it?"
+    return body
 
 
 def test_a_decision_past_its_deadline_is_a_504(app, monkeypatch):
@@ -539,6 +580,7 @@ def test_the_route_registers_both_paths_idempotently(app):
     route.install_systemone_route(SystemoneCfg())
     paths = [getattr(r, "path", None) for r in _APP.app.router.routes]
     assert paths.count("/v1/systemone") == 1 and paths.count("/systemone") == 1
+    assert paths.count("/v1/prewarm") == 1 and paths.count("/prewarm") == 1
 
 
 def test_a_disconnect_sets_the_stop_event():
@@ -549,3 +591,161 @@ def test_a_disconnect_sets_the_stop_event():
     stop = threading.Event()
     asyncio.run(route._watch_disconnect(_Req(), stop))
     assert stop.is_set()
+
+
+# the letter readout on a text model
+
+def test_a_text_model_answers_with_the_letter_readout(app, caplog):
+    caplog.set_level(logging.INFO)
+    r = app.use(diffusion_model=False).post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    team, severity = body["answers"]["team"], body["answers"]["severity"]
+    assert set(body["answers"]["urgent"]) == {"type", "noul"}
+    assert set(team) == {"type", "choice", "probabilities", "confidence"}
+    assert abs(sum(severity["probabilities"].values()) - 1.0) < 1e-6
+    diagnostics = body["diagnostics"]
+    assert diagnostics["readout"] == "letters" and diagnostics["passes"] == 3
+    assert body["usage"] == {"input_tokens": diagnostics["prompt_tokens"],
+                             "output_tokens": 0}
+    assert _Reader.built == [] and len(_LetterReader.built) == 1
+    assert app.metrics.events[-1][1]["backend"] == "letters"
+    lines = [rec.getMessage() for rec in caplog.records
+             if rec.getMessage().startswith("systemone: ")]
+    assert len(lines) == 1 and "team=" in lines[0]
+
+
+def test_the_letter_reader_is_built_once_per_model(app):
+    client = app.use(diffusion_model=False)
+    a = client.post("/v1/systemone", json=_letter_ticket()).json()
+    b = client.post("/v1/systemone", json=_letter_ticket()).json()
+    assert a["answers"] == b["answers"] and len(_LetterReader.built) == 1
+
+
+def test_each_model_kind_parses_the_body_its_own_way(app):
+    many = _letter_ticket()
+    many["questions"]["team"]["criteria"] = {f"t{i}": None for i in range(60)}
+    client = app.use(diffusion_model=False)
+    r = client.post("/v1/systemone", json=many)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["answers"]["team"]["probabilities"]) == 60
+    r = client.post("/v1/systemone", json=_ticket())
+    assert r.status_code == 422 and "instructions is required" in r.text
+    assert app.metrics.events[-1][0] == "failure"
+    r = app.use().post("/v1/systemone", json=many)
+    assert r.status_code == 422 and "at most 26" in r.text
+
+
+def test_an_image_state_is_refused_on_a_text_model(app):
+    body = _letter_ticket(state={"screenshot": "data:image/png;base64,AAAA"})
+    r = app.use(diffusion_model=False).post("/v1/systemone", json=body)
+    assert r.status_code == 400 and "text-only" in r.text
+    assert _LetterReader.built == []
+
+
+def test_letter_reads_log_the_fields_they_ignore(app, caplog):
+    caplog.set_level(logging.WARNING)
+    body = _letter_ticket(steps=4, think="auto", seed=3)
+    body["questions"]["team"]["alone"] = True
+    r = app.use(diffusion_model=False).post("/v1/systemone", json=body)
+    assert r.status_code == 200, r.text
+    warned = [rec.getMessage() for rec in caplog.records if "ignoring" in rec.getMessage()]
+    assert len(warned) == 1 and "alone, seed, steps, think" in warned[0]
+
+
+def test_a_tokenizer_without_one_token_per_letter_is_a_400(app, monkeypatch):
+    client = app.use(diffusion_model=False)
+    monkeypatch.setattr(_Tok, "encode", lambda self, text, add_special_tokens=True: [5, 6])
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 400 and "letter" in r.text
+    assert _LetterReader.built == []
+
+
+def test_a_letter_decision_over_the_context_budget_is_refused_before_queueing(
+        app, monkeypatch):
+    client = app.use(diffusion_model=False)
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 200, r.text
+    forwards = _LetterReader.built[0].forwards
+    monkeypatch.setattr(_GEN, "get_configured_context_limit", lambda: 40)
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 400, r.text
+    assert _LetterReader.built[0].forwards == forwards
+
+
+def test_a_letter_decision_past_its_deadline_is_a_504(app, monkeypatch):
+    monkeypatch.setattr(_GEN, "get_token_queue_timeout", lambda: 0.1)
+    _LetterReader.mode = "slow"
+    r = app.use(diffusion_model=False).post("/v1/systemone", json=_letter_ticket())
+    assert r.status_code == 504
+
+
+def test_the_rows_scope_publishes_the_request_scales():
+    scope = route._rows_scope((1.0,))
+    with scope(3):
+        assert lora_rows.row_scales() is None
+    lora_rows.configure("rows", 2)
+    try:
+        with scope(3):
+            assert lora_rows.row_scales(0).tolist() == [1.0, 1.0, 1.0]
+            assert lora_rows.row_scales(1).tolist() == [0.0, 0.0, 0.0]
+        with pytest.raises(lora_rows.LoraRowsError):
+            lora_rows.row_scales(0)
+    finally:
+        lora_rows.configure("static")
+
+
+# prewarm
+
+class _Kept:
+    tier = "test"
+
+    def __init__(self):
+        self.kept = {}
+
+    def lookup(self, ids):
+        return self.kept.get(tuple(ids))
+
+    def store(self, ids, cache):
+        self.kept[tuple(ids)] = cache
+        return True
+
+
+def test_prewarm_keeps_the_prefix_for_the_next_decision(app, monkeypatch):
+    kept = _Kept()
+    monkeypatch.setattr(route, "_prefixes", lambda rg, reader, scales: kept)
+    client = app.use(diffusion_model=False)
+    state = _letter_ticket()["state"]
+    r = client.post("/v1/prewarm", json={"model": "jev-latest", "state": state})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["prompt_tokens"] > 0
+    assert body["prefix"] == {"reused": False, "stored": True, "tier": "test"}
+    r = client.post("/v1/systemone", json=_letter_ticket())
+    prefix = r.json()["diagnostics"]["prefix"]
+    assert prefix["reused"] is True and prefix["tokens"] == body["prompt_tokens"]
+    r = client.post("/v1/prewarm", json={"state": state})
+    assert r.json()["prefix"]["reused"] is True
+
+
+def test_prewarm_without_a_prefix_store_does_no_work(app):
+    r = app.use(diffusion_model=False).post("/v1/prewarm", json={"state": "s"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False and r.json()["prefix"]["tier"] == "off"
+    assert _LetterReader.built[0].forwards == 0
+
+
+@pytest.mark.parametrize("body,status", [
+    ({}, 422),
+    ({"state": {"screenshot": "data:image/png;base64,AAAA"}}, 400),
+    ({"state": "s", "images": ["data:image/png;base64,AA"]}, 400),
+])
+def test_prewarm_checks_its_body(app, body, status):
+    r = app.use(diffusion_model=False).post("/v1/prewarm", json=body)
+    assert r.status_code == status, r.text
+    assert _LetterReader.built == []
+
+
+def test_prewarm_on_a_diffusion_model_is_a_400(app):
+    r = app.use().post("/v1/prewarm", json={"state": "s"})
+    assert r.status_code == 400 and "letter readout" in r.text

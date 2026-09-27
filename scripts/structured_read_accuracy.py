@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 """Measure how question wording and request options change structured-read
-answers on a DiffusionGemma GGUF.
+answers on a DiffusionGemma GGUF, and the same sets on a text model that
+answers with the letter readout.
 
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf wording
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf labeled [--methods base,auto]
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf mixed
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf cases
     python scripts/structured_read_accuracy.py DIFFUSIONGEMMA.gguf thoughts
+    python scripts/structured_read_accuracy.py TEXT.gguf labeled [--methods base,s4]
 
 ``wording`` reads 16 facts, each asked as a yes or no question and as its
 negation, under seven prompt layouts. ``labeled`` answers 102 labeled items
@@ -15,6 +17,8 @@ question types, with ``think: 0`` and with ``think: "auto"``. ``cases``
 decides the single requests the decisions guide quotes and compares one
 read with mlx-vlm's own decoder step and generation. ``thoughts`` times a
 64-token thought and counts its denoise steps. Every read uses seed 42.
+On a text model, ``wording`` runs the route's layouts, ``labeled`` runs the
+default and four option orders, and ``mixed`` runs without thoughts.
 Loads the model in process, so run it on an idle machine.
 docs/internals/structured-read-measurements.md records the results.
 """
@@ -31,6 +35,7 @@ import time
 import mlx.core as mx
 
 from gmlx.systemone import (
+    Limits,
     ReadRequest,
     TemplateResolver,
     decide,
@@ -38,6 +43,8 @@ from gmlx.systemone import (
     jev_state,
     request_schema,
 )
+from gmlx.systemone import letters
+from gmlx.systemone.ar_reader import LetterReader, LetterTokens, decide_letters, run_to_end
 from gmlx.systemone.contract import jev_answers
 from gmlx.systemone.engine import BoundReader, ChatTokens, StructuredReader, engine_scope
 from gmlx.systemone.reads import Slot
@@ -283,21 +290,32 @@ class Probe:
     """The loaded model and the calls every mode shares."""
 
     def __init__(self, gguf: str):
+        from gmlx.gen.diffusion import is_diffusion_model
         from gmlx.load.loader import load_model
         from gmlx.serve.bridge_vlm import _make_text_processor
 
         self.model, _config, tokenizer = load_model(gguf, verbose=False)
         self.processor = _make_text_processor(tokenizer)
         self.tok = self.processor.tokenizer
-        self.reader = StructuredReader(self.model, prefill_step_size=512)
-        self.engine = BoundReader(self.reader, processor=self.processor,
-                                  backend=self.processor.tokenizer)
+        self.letters = not is_diffusion_model(self.model)
+        if self.letters:
+            self.tokens = LetterTokens(self.processor)
+            self.reader = LetterReader(self.model, self.tokens.letter_ids())
+        else:
+            self.reader = StructuredReader(self.model, prefill_step_size=512)
+            self.engine = BoundReader(self.reader, processor=self.processor,
+                                      backend=self.processor.tokenizer)
         self.priors = {}
         self.thoughts = 0
 
     def decide(self, body):
         """The route's decision on ``body``. A thought draws from the global
         random state, which the server seeds per request."""
+        if self.letters:
+            schema = letters.parse(body, Limits(max_samples=8))
+            self.tokens = LetterTokens(self.processor)
+            return schema, run_to_end(decide_letters(
+                self.reader, self.tokens, schema, letters.state_text(body)))
         schema = request_schema(body)
         tokens = ChatTokens(self.processor, jev_state(body))
         resolver = TemplateResolver(tokens.enc, CANVAS)
@@ -393,17 +411,38 @@ LAYOUTS = {
 }
 
 
+def _letter_yes(probe, state, question):
+    schema, result = probe.decide(
+        {"state": state, "questions": {"q": {"type": "noul", "instructions": question}}})
+    return jev_answers(schema, result)["q"]["noul"]
+
+
+LETTER_LAYOUTS = {
+    "the letter prompt, subject only in the state":
+        lambda p, k, s, about, named: _letter_yes(p, {k: s}, about),
+    "the same, with the state as plain text":
+        lambda p, k, s, about, named: _letter_yes(p, s, about),
+    "the letter prompt, subject named in the question":
+        lambda p, k, s, about, named: _letter_yes(p, {k: s}, named),
+}
+
+
 def run_wording(probe):
-    w = max(map(len, LAYOUTS))
+    layouts = LETTER_LAYOUTS if probe.letters else LAYOUTS
+    w = max(map(len, layouts))
     print(f"{'layout':{w}} {'right':>8} {'yes':>8}")
     rows = {}
-    for name, build in LAYOUTS.items():
+    for name, build in layouts.items():
         right = yes = 0
         wrong = []
         for key, subject, about, named, truth in FACTS:
             for negated in (False, True):
-                ids, template, slot = build(probe, key, subject, about[negated], named[negated])
-                p_yes = probe.label_probs(ids, template, slot)[0]
+                if probe.letters:
+                    p_yes = build(probe, key, subject, about[negated], named[negated])
+                else:
+                    ids, template, slot = build(probe, key, subject, about[negated],
+                                                named[negated])
+                    p_yes = probe.label_probs(ids, template, slot)[0]
                 says_yes = p_yes >= 0.5
                 yes += says_yes
                 if says_yes == (truth != negated):
@@ -412,8 +451,8 @@ def run_wording(probe):
                     wrong.append(f"{named[negated]} -> {p_yes:.2f}")
         n = 2 * len(FACTS)
         print(f"{name:{w}} {right:>3} of {n} {yes:>3} of {n}", flush=True)
-        for w in wrong:
-            print(f"    wrong: {w}")
+        for line in wrong:
+            print(f"    wrong: {line}")
         rows[name] = {"right": right, "yes": yes, "n": n, "wrong": wrong}
     return rows
 
@@ -479,6 +518,11 @@ METHODS = {
     "cal": ("4 samples divided by a read on a content-free state", _calibrated),
     "order": ("4 samples averaged with the label order reversed", _both_orders),
 }
+# On a text model: the letter readout with one option order, and with four.
+LETTER_METHODS = {
+    "base": ("the letter readout, one option order", lambda p, s, q: _decided(p, s, q)),
+    "s4": ("samples: 4, four option orders", lambda p, s, q: _decided(p, s, q, samples=4)),
+}
 
 
 def run_labeled(probe, methods):
@@ -488,7 +532,7 @@ def run_labeled(probe, methods):
           f"{'log loss':>9} {'s/item':>7}")
     rows = {}
     for key in methods:
-        label, fn = METHODS[key]
+        label, fn = (LETTER_METHODS if probe.letters else METHODS)[key]
         started = time.perf_counter()
         probe.thoughts = 0
         noul_right = yes = choice_right = 0
@@ -532,6 +576,8 @@ def _top(answer):
 
 def run_mixed(probe):
     def one(body, think):
+        if probe.letters and think:
+            return None, 0.0, {"thought": False, "unsure": []}
         started = time.perf_counter()
         schema, result = probe.decide(dict(body, think=think))
         ms = (time.perf_counter() - started) * 1e3
@@ -544,6 +590,7 @@ def run_mixed(probe):
     for name, body in REQUESTS.items():
         plain, plain_ms, _ = one(body, 0)
         auto, auto_ms, info = one(body, "auto")
+        auto = auto or plain
         changed = {q: [plain[q], auto[q]] for q in plain
                    if (plain[q] or [None])[0] != (auto[q] or [None])[0]}
         rows[name] = {"questions": len(body["questions"]), "think_0": plain, "auto": auto,
@@ -702,6 +749,13 @@ def main() -> int:
     if unknown:
         ap.error(f"unknown method(s): {', '.join(unknown)}")
     probe = Probe(a.gguf)
+    if probe.letters:
+        if a.mode in ("cases", "thoughts"):
+            ap.error(f"{a.mode} reads a DiffusionGemma model")
+        if a.methods == ",".join(METHODS):
+            methods = list(LETTER_METHODS)
+        elif any(m not in LETTER_METHODS for m in methods):
+            ap.error(f"a text model takes the methods {', '.join(LETTER_METHODS)}")
     with engine_scope(probe.model, SEED):
         if a.mode == "wording":
             rows = run_wording(probe)

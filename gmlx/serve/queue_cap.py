@@ -279,7 +279,8 @@ def install_queue_depth_cap() -> None:
     paths = _CHAT_PATHS + ("/responses", "/v1/responses",
                            "/messages", "/v1/messages",
                            "/completions", "/v1/completions",
-                           "/systemone", "/v1/systemone")
+                           "/systemone", "/v1/systemone",
+                           "/prewarm", "/v1/prewarm")
 
     def _make(original):
         async def endpoint(*args, **kwargs):

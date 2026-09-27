@@ -362,17 +362,19 @@ def test_jev_answer_shapes():
     score = {"id": "s", "type": "score",
              "choices": [("low", None), ("mid", None), ("high", None)]}
     assert jev_answer(noul, {"noul": 0.8, "label": "yes"}) == {"type": "noul", "noul": 0.8}
-    assert jev_answer(choice, {"choice": "blue", "confidence": 0.6,
+    # Confidence is the official Jev value, not the chosen probability.
+    assert jev_answer(choice, {"choice": "blue", "chosen_probability": 0.6,
                                "probabilities": {"red": 0.4, "blue": 0.6}}) == {
-        "type": "choice", "choice": "blue", "confidence": 0.6,
+        "type": "choice", "choice": "blue", "confidence": pytest.approx(0.2),
         "probabilities": {"red": 0.4, "blue": 0.6}}
-    got = jev_answer(score, {"confidence": 0.5, "score": 2.3,
+    got = jev_answer(score, {"chosen_probability": 0.5, "score": 2.3,
                              "probabilities": {"low": 0.2, "mid": 0.3, "high": 0.5}})
     # The Jev score is the 0-indexed expectation, not the 1-indexed internal one.
     assert got["score"] == pytest.approx(0 * 0.2 + 1 * 0.3 + 2 * 0.5)
     assert got["legend"] == {"0": "low", "1": "mid", "2": "high"}
     assert got["probabilities"] == {"0": 0.2, "1": 0.3, "2": 0.5}
-    assert got["confidence"] == 0.5 and got["type"] == "score"
+    # 1 - (0.2 * 2 + 0.3 * 1) / (2/3) is below 0: wider than uniform, so 0.
+    assert got["confidence"] == 0.0 and got["type"] == "score"
     assert jev_answer(noul, None) is None
 
 

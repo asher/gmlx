@@ -11,7 +11,7 @@ requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a l
 # MIT covers the files with an SPDX MIT header (LICENSE-MIT). MIT and
 # Apache-2.0 also cover the third-party files that licenses/ lists.
 license = "BUSL-1.1 AND MIT AND Apache-2.0"
-license-files = ["LICENSE", "LICENSE-MIT", "licenses/*"]
+license-files = ["LICENSE", "LICENSE-MIT", "licenses/*", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -200,9 +200,11 @@ include = [
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
     "gmlx/spec/mtp_load.py",
+    "gmlx/systemone/ar_reader.py",
     "gmlx/systemone/engine.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
+    "scripts/structured_read_bench.py",
 ]
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
@@ -290,7 +292,7 @@ backlog = [
 
 [tool.ruff]
 # Vendored third-party code is linted upstream, not here.
-extend-exclude = ["gmlx/_vendor"]
+extend-exclude = ["gmlx/_vendor", "tests/systemone/_openjev_helper_ref.py"]
 
 [tool.ruff.lint]
 # S110: a silent try-except-pass needs a reason on its except line

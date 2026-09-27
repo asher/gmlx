@@ -134,6 +134,7 @@ nav:
       - internals/upstream-upgrades.md
       - internals/streaming-measurements.md
       - internals/structured-reads.md
+      - internals/letter-readout.md
       - internals/structured-read-measurements.md
       - internals/hadamard-fold.md
       - internals/debug-switches.md

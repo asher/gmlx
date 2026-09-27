@@ -65,7 +65,7 @@ def _buffered_types() -> tuple:
         return ()
 
 
-def _clone_single_row(cache: Any) -> Any | None:
+def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | None:
     """Deep-copy an already-single-row cache, preserving its concrete kind.
 
     Rotating layers canonicalize: min(offset, W) tokens in temporal order
@@ -74,8 +74,11 @@ def _clone_single_row(cache: Any) -> Any | None:
     required form -- the chain key is content-addressed over the canonical
     window and a future request can never reproduce this stream's ring
     phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
+
+    With ``eval_targets``, the copies of a plain row go into that list and
+    the caller evaluates them, so a many-layer clone syncs once.
     """
-    return _clone_row(cache, rot_canonical=True)
+    return _clone_row(cache, rot_canonical=True, eval_targets=eval_targets)
 
 
 def _clone_row_faithful(cache: Any) -> Any | None:
@@ -90,7 +93,8 @@ def _clone_row_faithful(cache: Any) -> Any | None:
     return _clone_row(cache, rot_canonical=False)
 
 
-def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
+def _clone_row(cache: Any, *, rot_canonical: bool,
+               eval_targets: list | None = None) -> Any | None:
     from mlx_vlm import apc as _apc
     from .compat import cache_types
 
@@ -98,17 +102,17 @@ def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
         return _clone_buffered_window(cache)
     if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
-    eval_targets: list[Any] = []
+    targets: list[Any] = [] if eval_targets is None else eval_targets
     out = _apc._clone_cache_entry_for_apc(
-        cache, min_capacity_tokens=None, eval_targets=eval_targets)
+        cache, min_capacity_tokens=None, eval_targets=targets)
     if out is None:
         # Upstream isinstance-gates on the mlx_vlm cache classes; gmlx text
         # models carry the mlx_lm twins. Mirror the same per-kind copy for
         # any class cache_types recognizes.
-        out = _clone_lm_twin(cache, eval_targets)
-    if eval_targets:
+        out = _clone_lm_twin(cache, targets)
+    if eval_targets is None and targets:
         import mlx.core as mx
-        mx.eval(*eval_targets)
+        mx.eval(*targets)
     return out
 
 
@@ -722,6 +726,9 @@ _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
 # Strip-on-extend: newest N restorable checkpoints per chain, plus the
 # chain's anchor (see _record_insert).
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
+# Decision records a manager keeps, so a stream of decisions on new states
+# cannot push the chat records out.
+_CKPT_DECISION_ENTRIES = 8
 # Byte budget for record-owned payload (recurrent states + KV tails; chain
 # blocks are bounded by the manager pool). A GDN record can carry >100 MB
 # of state, so a count bound alone silently pins gigabytes.
@@ -874,13 +881,16 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
     return (p // block_size) * block_size
 
 
+_CKPT_KINDS = ("boundary", "anchor", "replay", "retire", "decision")
+
+
 class _CkptRecord:
-    # kind in {"boundary", "anchor", "replay", "retire"}: prefill-cursor
-    # boundaries, the chain's pinned early boundary (sibling fan-out
-    # reuse), the N-1 identical-replay record, and retirement stores.
-    # Retention differs only in _record_insert's strip-on-extend
-    # exemptions and eviction order; adoption gates only ever test for
-    # "replay".
+    # kind in _CKPT_KINDS: prefill-cursor boundaries, the chain's pinned
+    # early boundary (sibling fan-out reuse), the N-1 identical-replay
+    # record, retirement stores, and the state prefixes of letter
+    # decisions (gmlx/systemone/prefixes.py). Retention differs only in
+    # _record_insert's strip-on-extend rules and eviction order;
+    # adoption gates only ever test for "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
                  "tails", "qsa", "nbytes", "kind")
@@ -1204,6 +1214,12 @@ def _record_insert(manager, rec) -> None:
     boundary on a fresh chain is promoted instead. One anchor per
     chain: an anchor insert supersedes tagged anchors below it.
 
+    Decision records keep to themselves: one is never promoted to anchor,
+    a decision insert strips only decision records on its chain, and no
+    other insert strips a decision record. A decision insert past
+    _CKPT_DECISION_ENTRIES releases the least recently used decision
+    record. Eviction ranks them with the non-anchors.
+
     Against real memory pressure the exemptions pin little: the count
     and byte bounds evict anchors after non-anchors (LRU by last hit),
     and pool-pressure eviction (_evict_for_pool) gives anchors no
@@ -1230,10 +1246,14 @@ def _record_insert(manager, rec) -> None:
             for k in [k for k in chain if idx[k].kind == "anchor"]:
                 _release_record(manager, idx.pop(k))
         elif rec.kind == "boundary" and not any(
-                idx[k].kind != "replay" for k in chain if k in idx):
+                idx[k].kind not in ("replay", "decision")
+                for k in chain if k in idx):
             rec.kind = "anchor"         # first restorable boundary
-        chain = [k for k in chain
-                 if k in idx and idx[k].kind not in ("replay", "anchor")]
+        if rec.kind == "decision":
+            chain = [k for k in chain if k in idx and idx[k].kind == "decision"]
+        else:
+            chain = [k for k in chain if k in idx
+                     and idx[k].kind not in ("replay", "anchor", "decision")]
         # Strip-on-extend frees superseded records' main chains for the
         # pool; sub-prefix adoption survives it because those chains are
         # content-deduped and skeleton re-index re-cuts them. A record
@@ -1251,6 +1271,10 @@ def _record_insert(manager, rec) -> None:
             _release_record(manager, idx.pop(k))
         idx[key] = rec
         idx.move_to_end(key)
+        if rec.kind == "decision":
+            decisions = [k for k, r in idx.items() if r.kind == "decision"]
+            for k in decisions[:-_CKPT_DECISION_ENTRIES]:
+                _release_record(manager, idx.pop(k))
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
         total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
@@ -1278,8 +1302,8 @@ def ckpt_store(
     best-effort. ``skeleton_disk=False`` skips the skeleton write (the
     skeleton inlines recurrent state, >100 MB per GDN checkpoint --
     interval boundaries superseded minutes later do not earn that).
-    ``kind`` stamps the record's retention class (see _CkptRecord).
-    ``grid_truncate`` turns the below-window off-grid rotating decline
+    ``kind`` stamps the record's retention class (see _CkptRecord); an
+    unknown kind stores nothing. ``grid_truncate`` turns the below-window off-grid rotating decline
     into a terminal store at the largest block-aligned prefix: pre-wrap
     the buffer is a temporal prefix, so a slice is a faithful shorter
     run. Non-recurrent layouts only (state cannot rewind), memory-only
@@ -1300,6 +1324,9 @@ def ckpt_store(
         ids = [int(t) for t in token_ids]
         p = len(ids)
         bs = int(manager.block_size)
+        if kind not in _CKPT_KINDS:
+            _ckpt_decline(manager, "kind")
+            return 0
         layout = ckpt_layout(prompt_cache, bs)
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")
@@ -1503,7 +1530,9 @@ def ckpt_store(
                 return 0
             bounded_blocks = got_win
 
-        states = [_clone_single_row(c) for c in inline_caches]
+        # The clones sync once, before the record takes them.
+        pending: list[Any] = []
+        states = [_clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
@@ -1542,13 +1571,18 @@ def ckpt_store(
                 t = runtime_cache_module().KVCache()
                 t.state = (c.keys[..., b_full:p, :],
                            c.values[..., b_full:p, :])
-                t = _clone_single_row(t)
+                t = _clone_single_row(t, pending)
                 if t is None:
                     _ckpt_decline(manager, "clone")
                     manager.release(main_blocks)
                     manager.release(bounded_blocks)
                     return 0
                 tails.append(t)
+        if pending:
+            # Owned survivors, as on the main chain: the clones read the
+            # live prompt cache and its pending graph.
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="ckpt-store-clones", owner="owned")
 
         rec = _CkptRecord(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
@@ -1719,6 +1753,8 @@ def _assemble_from_record(manager, rec, geometry_check=None):
                 return None
             layer_rot.append(rc)
     warm: list[Any] = []
+    # The array clones join the one eval below.
+    targets: list[Any] = []
     kv_i = rot_i = arr_i = qsa_i = 0
     for tag in rec.layout:
         if tag == "kv":
@@ -1740,12 +1776,11 @@ def _assemble_from_record(manager, rec, geometry_check=None):
             warm.append(layer_rot[rot_i])
             rot_i += 1
         else:
-            clone = _clone_single_row(rec.states[arr_i])
+            clone = _clone_single_row(rec.states[arr_i], targets)
             if clone is None:
                 return None
             warm.append(clone)
             arr_i += 1
-    targets: list[Any] = []
     for c in warm:
         if getattr(c, "keys", None) is not None:
             targets.extend([c.keys, c.values])

@@ -33,6 +33,7 @@ _ALLOWED = {
     "tests/load/test_tokenizer.py",        # U+FFFD control-token / byte-level fixtures
     "tests/models/test_deepseek_v41_chat.py",  # asserts DSML and DeepSeek role tokens
     "tests/serve/test_tts.py",             # multi-script sanitizer fixtures
+    "tests/systemone/_openjev_helper_ref.py",  # OpenJev helper, vendored byte for byte
     "tests/talk/test_talk_audio.py",       # asserts VU-meter block output
 }
 

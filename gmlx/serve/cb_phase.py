@@ -32,6 +32,11 @@ def _kq():
     return _state["kq"]
 
 
+def phase() -> str | None:
+    """The phase whose caps are set, None before the first flip."""
+    return _state["phase"]
+
+
 def flip(phase: str) -> None:
     """Set the caps for ``phase`` (decode or prefill). Dedupes repeats."""
     if _state["phase"] == phase:

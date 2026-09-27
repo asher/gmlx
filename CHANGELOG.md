@@ -15,9 +15,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as those in the `MTP` folder of the unsloth repo.
 - The loader looks for a companion drafter in an `MTP` folder inside or
   beside the model's folder, as well as beside the model.
+- `/v1/systemone` and `gmlx systemone` answer on OpenJev and any other text
+  model with OpenJev's letter readout, and `POST /v1/prewarm` reads a
+  decision state ahead of its questions.
 
 ### Changed
 
+- The prompt cache stores and restores checkpoints of models with
+  recurrent layers faster.
+- `/v1/systemone` reports the official Jev confidence for choice and score
+  answers in place of the chosen probability. `think_threshold` still
+  compares the chosen probability, which `diagnostics.think_auto` now names
+  `chosen_probability`.
 - The README links each page to the docs site instead of the Markdown file
   on GitHub, and the Homebrew formula names the site as its homepage.
 - `gmlx run` and `gmlx chat` turn speculation on by themselves when they
