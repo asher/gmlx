@@ -289,13 +289,22 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # can change: the .git file, and a commondir file in a .git folder. So
     # an outside git folder is shared only when it names this project back,
     # from a file outside the share.
-    guest_roots = [m.source for m in shares] + [_real(data_path())]
-    what = _git_back_reference(toplevel, git_dir, common, guest_roots)
-    if what is None:
+    back = _git_back_reference(toplevel, git_dir, common)
+    if back is None:
         return None, [f"[launch] git in the container cannot use the git folder "
                       f"{_tilde(common, home)}, because it does not name "
                       f"{_tilde(toplevel, home)} as one of its worktrees or submodules. "
                       f"Share it with --mount {_tilde(common, home)} if you intend to."]
+    what, exact = back
+    if not exact:
+        fix = ("run git worktree repair there" if what == "worktree" else
+               f"set core.worktree in {_tilde(os.path.join(git_dir, 'config'), home)} "
+               "to its real path")
+        return None, [f"[launch] git in the container cannot use the git folder "
+                      f"{_tilde(common, home)}, because it names "
+                      f"{_tilde(toplevel, home)} only through a symbolic link, so launch "
+                      f"does not share it. If {_tilde(toplevel, home)} is a {what} of that "
+                      f"repository, {fix}, and the next launch shares the git folder."]
     # Its hooks and config run on the Mac the next time you use git there,
     # so it gets the same checks as the current folder, and so does the main
     # worktree above a .git folder, such as a dotfiles repository at $HOME.
@@ -326,19 +335,24 @@ def _read_small(path: str) -> str | None:
         os.close(fd)
 
 
-def _git_back_reference(toplevel: str, git_dir: str, common: str,
-                        guest_roots: list[str]) -> str | None:
-    """``"worktree"`` or ``"submodule"`` when the git folder outside the
-    share names ``toplevel`` back, else None.
+def _git_back_reference(toplevel: str, git_dir: str, common: str
+                        ) -> tuple[str, bool] | None:
+    """How the git folder outside the share names ``toplevel`` back:
+    ``"worktree"`` or ``"submodule"``, and whether the recorded path names
+    it with no symbolic link followed. None when it does not name it.
 
     - A linked worktree's ``<common>/worktrees/<id>/gitdir`` names the
       project's ``.git`` file, as an absolute path or relative to that
-      entry. No symbolic link on the way may lie in a share or a private
-      home, since the guest could put it there to point the name at this
-      project.
-    - A submodule's ``core.worktree`` names the project folder.
+      entry.
+    - A submodule's ``core.worktree`` names the project folder, as an
+      absolute path or relative to the submodule's git folder.
     - A ``.git`` folder inside the share never counts, because its
-      ``commondir`` file can name any repository."""
+      ``commondir`` file can name any repository.
+
+    Only the recorded path as written counts. A link on the way can lie in
+    a folder the guest writes, in this launch or an earlier one, so a match
+    through a link is reported and never shared. git records real paths, so
+    every layout it creates matches as written."""
     dotgit = os.path.join(toplevel, ".git")
     if os.path.islink(dotgit) or not os.path.isfile(dotgit):
         return None
@@ -346,35 +360,20 @@ def _git_back_reference(toplevel: str, git_dir: str, common: str,
         if not _same(os.path.dirname(git_dir), os.path.join(common, "worktrees")):
             return None
         named = (_read_small(os.path.join(git_dir, "gitdir")) or "").strip()
-        if not named:
-            return None
-        resolved = _resolve_outside(os.path.join(git_dir, named), guest_roots)
-        return "worktree" if resolved and _same(resolved, _real(dotgit)) else None
-    out = _git(toplevel, "config", "--file", os.path.join(git_dir, "config"),
-               "--get", "core.worktree")
-    if not out:
+        what, want = "worktree", dotgit
+    else:
+        out = _git(toplevel, "config", "--file", os.path.join(git_dir, "config"),
+                   "--get", "core.worktree")
+        named = out[0].strip() if out else ""
+        what, want = "submodule", toplevel
+    if not named:
         return None
-    resolved = _resolve_outside(os.path.join(git_dir, out[0].strip()), guest_roots)
-    return "submodule" if resolved and _same(resolved, toplevel) else None
-
-
-def _resolve_outside(path: str, guest_roots: list[str]) -> str | None:
-    """``path`` with its links resolved one component at a time, or None
-    when a link on the way lies in one of ``guest_roots``."""
-    cur = "/"
-    for part in path.split("/"):
-        if part in ("", "."):
-            continue
-        if part == "..":
-            cur = os.path.dirname(cur)
-            continue
-        nxt = os.path.join(cur, part)
-        if os.path.islink(nxt):
-            if any(_inside(cur, root) for root in guest_roots):
-                return None
-            nxt = _real(nxt)
-        cur = nxt
-    return cur
+    recorded = os.path.normpath(os.path.join(git_dir, named))
+    if _same(recorded, want):
+        return what, True
+    if _same(_real(recorded), _real(want)):
+        return what, False
+    return None
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:

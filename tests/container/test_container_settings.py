@@ -4,8 +4,10 @@ warnings, the private home, and the server-config checks."""
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -333,7 +335,6 @@ def test_a_link_in_the_share_never_claims_another_worktree(home, link):
     _git("worktree", "add", "-q", str(wt), cwd=other)
     entry = other / ".git" / "worktrees" / "wt"
     if link == "folder":
-        import shutil
         shutil.rmtree(wt)
         wt.symlink_to(proj, target_is_directory=True)
     else:
@@ -344,14 +345,97 @@ def test_a_link_in_the_share_never_claims_another_worktree(home, link):
     assert git == []
 
 
-def test_a_submodule_whose_worktree_names_another_folder_mounts_nothing(home):
+def test_a_submodule_whose_worktree_holds_no_git_file_mounts_nothing(home):
+    """git takes core.worktree as the repository root, so the root is in the
+    share, but no .git file there names the git folder."""
     lib = _private_repo(home)
     proj = home / "src" / "proj"
+    (proj / "inner").mkdir()
     subprocess.run(["git", "config", "--file", str(lib / ".git" / "config"),
-                    "core.worktree", str(home / "elsewhere")], check=True)
+                    "core.worktree", str(proj / "inner")], check=True)
     (proj / ".git").write_text(f"gitdir: {lib / '.git'}\n")
     git, notes = _proj_git_mounts(home, proj)
     assert git == []
+    assert any("does not name ~/src/proj/inner" in n for n in notes)
+
+
+def _victim_worktree(home, at, *, relative=False):
+    """A worktree of a repository outside every share, added at ``at``."""
+    victim = _private_repo(home)
+    at.parent.mkdir(parents=True, exist_ok=True)
+    flags = ["--relative-paths"] if relative else []
+    _git("worktree", "add", "-q", *flags, str(at), cwd=victim)
+    return victim, next((victim / ".git" / "worktrees").iterdir())
+
+
+@pytest.mark.parametrize("case", ["absolute", "relative", "parent"])
+def test_a_link_left_by_an_earlier_launch_never_claims_another_worktree(home, case):
+    """An earlier launch shared ~/area, which holds a worktree of another
+    repository. The guest replaced that worktree with a link and points a
+    new project's .git at the worktree entry. This launch shares only the
+    new project, so the link lies outside its shares."""
+    area = home / "area"
+    if case == "parent":
+        # The link names the parent of the folder this launch shares.
+        victim, entry = _victim_worktree(home, area / "wt" / "p2")
+        shutil.rmtree(area / "wt")
+        (area / "x" / "p2").mkdir(parents=True)
+        (area / "wt").symlink_to(area / "x", target_is_directory=True)
+        proj = area / "x" / "p2"
+    else:
+        victim, entry = _victim_worktree(home, area / "wt", relative=case == "relative")
+        shutil.rmtree(area / "wt")
+        proj = area / "p2"
+        proj.mkdir()
+        (area / "wt").symlink_to(proj, target_is_directory=True)
+    (proj / ".git").write_text(f"gitdir: {entry}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    tp = "~/" + str(proj.relative_to(home))
+    assert any("cannot use the git folder ~/work/private/.git" in n
+               and f"names {tp} only through a symbolic link" in n
+               and "git worktree repair" in n for n in notes)
+
+
+def test_a_link_in_the_private_home_never_claims_another_worktree(home):
+    other = _private_repo(home)
+    proj = home / "src" / "proj"
+    wt = settings.private_home("pi") / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=other)
+    entry = other / ".git" / "worktrees" / "wt"
+    shutil.rmtree(wt)
+    wt.symlink_to(proj, target_is_directory=True)
+    (proj / ".git").write_text(f"gitdir: {entry}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("only through a symbolic link" in n for n in notes)
+
+
+def test_a_submodule_named_through_a_link_mounts_nothing(home):
+    lib = _private_repo(home)
+    proj = home / "src" / "proj"
+    (proj / "sub").symlink_to(proj, target_is_directory=True)
+    subprocess.run(["git", "config", "--file", str(lib / ".git" / "config"),
+                    "core.worktree", str(proj / "sub")], check=True)
+    (proj / ".git").write_text(f"gitdir: {lib / '.git'}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+    assert any("only through a symbolic link" in n and "set core.worktree in" in n
+               for n in notes)
+
+
+def test_a_worktree_moved_by_hand_is_shared_after_git_worktree_repair(home):
+    repo = _private_repo(home)
+    old = home / "src" / "old-wt"
+    _git("worktree", "add", "-q", str(old), cwd=repo)
+    new = home / "src" / "new-wt"
+    old.rename(new)
+    old.symlink_to(new, target_is_directory=True)
+    git, notes = _proj_git_mounts(home, new)
+    assert git == [] and any("run git worktree repair there" in n for n in notes)
+    _git("worktree", "repair", cwd=new)
+    git, notes = _proj_git_mounts(home, new)
+    assert [m.source for m in git] == [os.path.realpath(repo / ".git")]
 
 
 def test_git_runs_with_fsmonitor_off(home, monkeypatch):
@@ -368,7 +452,7 @@ def test_git_runs_with_fsmonitor_off(home, monkeypatch):
 
 
 def test_a_mount_in_another_case_still_covers_a_worktree_git_folder(home):
-    if not settings.path_inside("/A", "/a"):
+    if not (home / "SRC").exists():                   # probe the volume, not the code
         pytest.skip("this volume compares names with case")
     repo = home / "src" / "R"
     repo.mkdir()
@@ -513,6 +597,21 @@ def test_confine_refuses_a_private_home_outside_confined(home):
             call()
     confine.write_text(home / "ok.txt", "fine")          # the Mac's own files still work
     assert (home / "ok.txt").read_text() == "fine"
+
+
+def test_confine_ignores_case_on_a_volume_that_ignores_it(home):
+    from gmlx.container import confine
+    if not (home.parent / "HOME").exists():            # probe the volume, not the code
+        pytest.skip("this volume compares names with case")
+    private = settings.private_home("pi")
+    other_data = Path(str(private).replace("/.local/share/", "/.LOCAL/share/"))
+    for path in (other_data / "x", private.parent / "HOME" / "x"):
+        with pytest.raises(confine.ConfinedError, match="private home"):
+            confine.exists(path)
+    (home / "dots").mkdir()                              # a dotfiles link, spelled in
+    (home / ".rc").symlink_to(home.parent / "HOME" / "dots" / "rc")   # another case
+    confine.write_text(home / ".rc", "x")
+    assert (home / "dots" / "rc").read_text() == "x"
 
 
 def test_seed_refuses_the_launch_data_folder(home):
