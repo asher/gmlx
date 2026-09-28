@@ -31,7 +31,8 @@ def engine(monkeypatch):
     cls = _GEN.ResponseGenerator
     calls = []
 
-    def original(self, uid, rqueue, raw_inputs, args, cancelled, log_state=None):
+    def original(self, uid, rqueue, raw_inputs, args, cancelled, log_state=None,
+                 apc_semantic_hash=None):
         calls.append(raw_inputs)
         rqueue.put("generated")
 

@@ -124,11 +124,11 @@ def _install_diffusion_jobs() -> None:
         return
 
     def _generate_diffusion(self, uid, rqueue, raw_inputs, args, cancelled,
-                            log_state=None):
+                            log_state=None, apc_semantic_hash=None):
         entry = raw_inputs.get(_JOB_KEY) if isinstance(raw_inputs, dict) else None
         if entry is None:
             return original(self, uid, rqueue, raw_inputs, args, cancelled,
-                            log_state)
+                            log_state, apc_semantic_hash=apc_semantic_hash)
         job, stop = entry
 
         def should_stop() -> bool:
