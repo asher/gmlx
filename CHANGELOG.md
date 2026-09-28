@@ -8,9 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Concurrent requests on a qwen3.5 model with MTP could decode wrong tokens
-  after a round in which they accepted different numbers of drafts, where
-  the same request sent alone decoded right.
+- Concurrent MTP requests on a Qwen3.5, 3.6 or 3.8 model could decode wrong
+  tokens after a round in which they accepted different numbers of drafts.
 - A Muse Glimmer model loaded with its mmproj ran the vision tower without
   its weights, so answers about an image did not describe it.
 

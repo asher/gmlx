@@ -7,14 +7,16 @@ with ``+=``, which updates the array in place. The rotating cache takes the
 tail from ``prepare(lengths=...)``, the others from ``right_padding``.
 
 The host-side pad memos key on the identity of ``cache.left_padding``: the
-qwen3.5 pad and decode memos (vendored and owned), verify_fold, cascade and
-sparse SDPA, and gemma4 batched SDPA. After the trim they keep serving the
-old pads, so a row's rolled-in rejected keys stay attended. A batched speculative rollback with
-different accept counts per row runs this trim every round; the next
+qwen3.5 pad and decode memos, verify_fold, cascade and sparse SDPA, and
+gemma4 batched SDPA. After the trim they keep serving the old pads, so a
+row's rolled-in rejected keys stay attended. A batched speculative rollback
+with different accept counts per row runs this trim every round; the next
 decode of the row that accepted less then diverged from single-stream.
 
-The fix rebinds ``left_padding`` to a new array after a finalize that
-carried a tail, so each memo misses once and rereads the values.
+The fix rebinds ``left_padding`` to a copy before a finalize that carries a
+tail, so the stock ``+=`` lands on the copy. Each memo misses once and
+rereads the values, and an earlier holder of the old array, such as a
+snapshot, keeps the old values.
 """
 
 from __future__ import annotations
@@ -45,12 +47,12 @@ def install_batch_finalize_fix() -> bool:
                 continue
 
             def finalize(self, _orig=orig):
+                lp = getattr(self, "left_padding", None)
                 padded = (getattr(self, "_right_padding", None) is not None
                           or getattr(self, "_lengths", None) is not None)
-                _orig(self)
-                lp = getattr(self, "left_padding", None)
                 if padded and isinstance(lp, mx.array):
                     self.left_padding = mx.array(lp)
+                _orig(self)
 
             finalize.__dict__[_PATCH_FLAG] = True
             cls.finalize = finalize

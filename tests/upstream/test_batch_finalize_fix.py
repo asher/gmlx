@@ -2,9 +2,9 @@
 
 Stock finalize adds the rolled tail to ``left_padding`` in place, so the
 identity-keyed pad memos keep the pads from before the trim. CPU checks per
-class origin through the memo readers, and a GPU model check: a B=2
-qwen3.5 speculative rollback with accept counts 2 and 0, then one decode,
-matches single-stream on both rows.
+class origin through the memo readers and through the vendored qwen3.5
+rollback, and a GPU model check: a B=2 qwen3.5 speculative rollback with
+accept counts 2 and 0, then one decode, matches single-stream on both rows.
 """
 
 from __future__ import annotations
@@ -41,10 +41,11 @@ def _read_memos(c):
 
 def _check_trim(c, pads):
     before = c.left_padding
+    old = before.tolist()
     c.finalize()
-    assert c.left_padding is not before
-    assert c.left_padding.tolist() == pads
     assert _read_memos(c) == ((tuple(pads), max(pads)), pads)
+    assert c.left_padding.tolist() == pads
+    assert before.tolist() == old
 
 
 @pytest.mark.parametrize("cls", cache_types("BatchKVCache"),
@@ -74,6 +75,29 @@ def test_quantized_right_padding_trim_refreshes_the_pad_memos():
     _read_memos(c)
     c.prepare(right_padding=[0, 2])
     _check_trim(c, [0, 2])
+
+
+@pytest.mark.parametrize("cls", cache_types("BatchKVCache"),
+                         ids=lambda c: c.__module__)
+def test_stock_ragged_rollback_refreshes_every_pad_reader(cls):
+    from gmlx.models.gemma4.batched_sdpa import _pads as gemma4_pads
+    from gmlx.models.qwen35.language import LanguageModel
+    from gmlx.upstream.cascade_sdpa import _pads as cascade_pads
+
+    c = cls(left_padding=[0, 5])
+    c.update_and_fetch(_kv(12), _kv(12))
+
+    def readers():
+        return (_qwen3_5_left_padding_info(c)[0], _pads_list(c),
+                cascade_pads(c), gemma4_pads(c))
+
+    assert readers() == ((0, 5), [0, 5], [0, 5], [0, 5])
+    # Row 1 accepted two fewer drafts, so the rollback right-trims it through
+    # prepare and finalize. Called unbound: with KV-only caches the stock
+    # body never reads self.
+    LanguageModel.rollback_speculative_cache(None, [c], [], [2, 0], 3)
+    assert readers() == ((0, 7), [0, 7], [0, 7], [0, 7])
+    assert c.left_padding.tolist() == [0, 7]
 
 
 def test_finalize_without_a_tail_keeps_the_array():
