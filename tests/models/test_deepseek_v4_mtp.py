@@ -352,6 +352,65 @@ def test_rotating_undo_replay_3wide():
         assert mx.array_equal(control.keys, test_cache.keys)
 
 
+@pytest.fixture
+def rotating_undo(monkeypatch):
+    """The undo log on every origin's rotating cache classes, for this test
+    only when an earlier test has not attached it already."""
+    from gmlx.cache.compat import cache_types
+    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
+
+    for cls in (*cache_types("RotatingKVCache"),
+                *cache_types("BatchRotatingKVCache")):
+        for name in ("update_and_fetch", "is_trimmable", "trim"):
+            monkeypatch.setattr(cls, name, vars(cls)[name])
+        for name in ("_mtp_undo", "_gmlx_mtp_undo_attached"):
+            monkeypatch.setattr(cls, name, vars(cls).get(name), raising=False)
+    ensure_rollback_attached()
+
+
+@pytest.mark.parametrize("n_trim", [1, 2, 3])
+def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
+    # A batch whose sliding window is full: the stock update changes the
+    # offset and left_padding arrays in place, so trim must restore their
+    # values from before the verify write, then replay the confirmed prefix.
+    from gmlx.cache.compat import cache_types
+    from gmlx.models.deepseek_v4.cache import set_undo_armed
+
+    mx.random.seed(29)
+    stream = [mx.random.normal((2, 1, 1, 4)) for _ in range(12)]
+    block = mx.random.normal((2, 1, 3, 4))
+    k = 3 - n_trim
+
+    def feed(cache, arrs):
+        for a in arrs:
+            cache.update_and_fetch(a, a)
+
+    for cls in cache_types("BatchRotatingKVCache"):
+        test_cache = cls(max_size=8, left_padding=[2, 0])
+        feed(test_cache, stream)
+        set_undo_armed(True)
+        try:
+            test_cache.update_and_fetch(block, block)
+        finally:
+            set_undo_armed(False)
+        assert test_cache.is_trimmable()
+        assert test_cache.trim(n_trim) == n_trim
+
+        control = cls(max_size=8, left_padding=[2, 0])
+        feed(control, stream)
+        if k:
+            feed(control, [block[..., :k, :]])
+
+        where = f"{cls.__module__} trim({n_trim})"
+        assert test_cache.offset.tolist() == control.offset.tolist(), where
+        assert (test_cache.left_padding.tolist()
+                == control.left_padding.tolist()), where
+        assert test_cache._offset == control._offset, where
+        assert test_cache._idx == control._idx, where
+        assert test_cache.rotated == control.rotated, where
+        assert mx.array_equal(test_cache.keys, control.keys), where
+
+
 def _pool_px(r_kv, ratio):
     """Deterministic stand-in for the compressor: mean over each window."""
     B, usable, D = r_kv.shape

@@ -1281,7 +1281,9 @@ class BatchPoolingCache(_BaseCache):
 # always take the ``_update_concat`` path, which only rebinds
 # ``keys``/``values`` (no in-place setitem), so stashing the pre-update
 # attribute references plus the update's inputs gives an exact undo;
-# ``trim(n)`` then replays the confirmed prefix as a normal update.
+# ``trim(n)`` then replays the confirmed prefix as a normal update. The
+# batch class's ``offset`` and ``left_padding`` are arrays that the stock
+# update changes in place (``+=``, ``-=``), so the stash copies them.
 # Stashing is armed ONLY around the V4 MTP verify forward
 # (DeepseekV4SpecLM.speculative_verify_hidden) so non-MTP flows keep stock
 # trim semantics (protects prefix-cache trim paths from phantom
@@ -1309,6 +1311,14 @@ def _is_undo_armed() -> bool:
     return getattr(armed, "value", False)
 
 
+def _stash_value(field, value):
+    """A stashed field that the stock update cannot change: a copy of an
+    array other than the rebound keys and values buffers."""
+    if field in ("keys", "values") or not isinstance(value, mx.array):
+        return value
+    return mx.array(value)
+
+
 def _wrap_rotating(cls, fields) -> None:
     """Wrap update_and_fetch / is_trimmable / trim with the MTP undo log."""
     if getattr(cls, "_gmlx_mtp_undo_attached", False):
@@ -1328,7 +1338,9 @@ def _wrap_rotating(cls, fields) -> None:
         # pre-update value -- no detach copy (a full-ring copy per field
         # per layer, ~200 MB/round across 43 caches).
         if 2 <= keys.shape[2] <= 6 and _is_undo_armed():
-            self._mtp_undo = ({f: getattr(self, f) for f in fields}, keys, values)
+            self._mtp_undo = (
+                {f: _stash_value(f, getattr(self, f)) for f in fields},
+                keys, values)
         else:
             self._mtp_undo = None
         return orig_update(self, keys, values)
