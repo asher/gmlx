@@ -14,12 +14,17 @@ import mlx.nn as nn
 import atexit
 import sys
 from functools import lru_cache
-from typing import NamedTuple
+from typing import Callable, NamedTuple, cast
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
 from gmlx.load.hadamard_modules import is_folded, shared_linears
 from .patching import ClassPatch
+
+
+def _metal_kernel(**kwargs) -> Callable[..., list[mx.array]]:
+    """``mx.fast.metal_kernel``, typed: the mlx stub returns ``object``."""
+    return cast(Callable[..., list[mx.array]], mx.fast.metal_kernel(**kwargs))
 
 
 def gpu_active() -> bool:
@@ -121,9 +126,9 @@ def _describe_blocking_mask_once(which, S, B, mask):
         return
     _mask_described.add(key)
     if mask.dtype == mx.bool_:
-        blocked = int((~mask).sum().item())
+        blocked = int((~mask).sum())
     else:
-        blocked = int((mask < 0).sum().item())
+        blocked = int((mask < 0).sum())
     print(f"[gdn] blocking mask {which}: S={S} B={B} shape={tuple(mask.shape)} "
           f"dtype={mask.dtype} excluded_entries={blocked} of {mask.size} "
           f"({'NO-OP -> fused path lost for nothing' if blocked == 0 else 'real'})",
@@ -418,7 +423,7 @@ _GDN_FUSED_DECODE_REPLAY_SRC = _GDN_FUSED_DECODE_TEMPLATE.replace(
     "/*REPLAY*/\n", _GDN_DECODE_REPLAY)
 
 _gdn_fused_decode_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_fused_decode",
         input_names=[
             "conv_input",
@@ -439,7 +444,7 @@ _gdn_fused_decode_kernel = (
 )
 
 _gdn_fused_decode_replay_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_fused_decode_replay",
         input_names=[
             "conv_input",
@@ -965,7 +970,7 @@ _GDN_VERIFY_GATE_SRC = r"""
 """
 
 _gdn_fused_verify_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_scan",
         input_names=[
             "conv_input",
@@ -984,7 +989,7 @@ _gdn_fused_verify_kernel = (
 )
 
 _gdn_verify_rec_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_scan_rec",
         input_names=[
             "conv_input",
@@ -1007,7 +1012,7 @@ _gdn_verify_rec_kernel = (
 )
 
 _gdn_replay_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_replay",
         input_names=["state_in", "rd", "rk", "rg", "R"],
         output_names=["state_out"],
@@ -1018,7 +1023,7 @@ _gdn_replay_kernel = (
 )
 
 _gdn_verify_gate_kernel = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_gated_delta_verify_gate",
         input_names=["pre", "z", "norm_weight", "nrows"],
         output_names=["y"],
@@ -1097,7 +1102,7 @@ def take_gdn_replay(cache):
 # weight read -- holds ~95% of peak flat across M=2..8, like the quantized
 # mv_ext the K-quant linears use. GMLX_F16_HEAD_KERNEL=0 falls back to matmul.
 _F16_HEAD_GEMV = (
-    mx.fast.metal_kernel(
+    _metal_kernel(
         name="gmlx_f16_head_gemv_ext",
         input_names=["x", "w"],
         output_names=["y"],
@@ -1274,7 +1279,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             and wb.dtype == wa.dtype
         )
         wba = None
-        if fuse_ok:
+        if fuse_ok and wb is not None and wa is not None:
             wba = mx.concatenate([wb, wa], axis=0)
             mx.eval(wba)
         cba = (ba_key, wba)
@@ -1495,7 +1500,9 @@ def _patch_batched_verify_sdpa() -> None:
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
         pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
-        padded = pads is not None and len(pads) > 0 and max(pads) > 0
+        if pads is None:
+            pads = []
+        padded = len(pads) > 0 and max(pads) > 0
         L = queries.shape[-2]
         if padded and (
             L <= 1
@@ -1584,7 +1591,7 @@ def _patch_qwen35_empty_sequence_guard() -> None:
             return self.norm(inputs_embeds)
         return _orig_model_call(self, inputs, inputs_embeds=inputs_embeds, **kw)
 
-    Qwen3_5Model.__call__ = _s0_guarded_call
+    Qwen3_5Model.__call__ = _s0_guarded_call  # pyright: ignore[reportAttributeAccessIssue]
     _S0_MODEL_GUARD_INSTALLED = True
 
 
@@ -1648,7 +1655,7 @@ def _patch_dense_head_verify(model) -> None:
     if getattr(type(head), "_f16_gemv_kernel", False):
         return  # already subclassed in this process
 
-    base = type(head)
+    base = cast(type[nn.Module], type(head))
 
     class _HeadWithGemvVerify(base):
         _f16_gemv_kernel = True
@@ -1687,7 +1694,8 @@ def _patch_gated_delta_tiled_v():
     """
     from mlx_lm.models import gated_delta as gd
 
-    gd._gmlx_tiled_v_patched = True  # read back by _tiled_v_patch_applied
+    # Read back by _tiled_v_patch_applied.
+    gd._gmlx_tiled_v_patched = True  # pyright: ignore[reportAttributeAccessIssue]
 
     # Metal kernels: hv_idx / (Hv / Hk)  ->  hv_idx % Hk
     def _make_tiled_kernel(has_mask=False, vectorized=False):
@@ -1782,7 +1790,7 @@ def _patch_gated_delta_tiled_v():
             suffix += "_vec"
         if has_mask:
             suffix += "_mask"
-        return mx.fast.metal_kernel(
+        return _metal_kernel(
             name=f"gated_delta_step_tiled{suffix}",
             input_names=inputs,
             output_names=["y", "state_out"],
@@ -2029,7 +2037,7 @@ def _make_gdn_prefill_kernel(has_mask):
     inputs = ["q", "k", "v", "g", "beta", "state_in", "T"]
     if has_mask:
         inputs.append("mask")
-    return mx.fast.metal_kernel(
+    return _metal_kernel(
         name="gmlx_gated_delta_prefill" + ("_mask" if has_mask else ""),
         input_names=inputs,
         output_names=["y", "state_out"],

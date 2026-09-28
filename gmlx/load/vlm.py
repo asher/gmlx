@@ -20,6 +20,7 @@ only through :func:`load_vlm_model` (CLI ``--mmproj``).
 from __future__ import annotations
 
 import re
+from typing import Any, ClassVar
 
 import mlx.core as mx
 from transformers import BaseVideoProcessor as _BaseVideoProcessor
@@ -1858,7 +1859,7 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
     # default - the GGUF's clip.audio.embedding_length is the *output* (text)
     # dim, not the projection input - so emit a minimal config and let the
     # default output_proj_dims=640 stand.
-    audio_config = None
+    audio_config: dict[str, Any] | None = None
     if mm_meta.get("clip.has_audio_encoder"):
         audio_config = {"model_type": "gemma4_unified_audio"}
         a_eps = _mm(mm_meta, "clip.audio.attention.layer_norm_epsilon")
@@ -2533,7 +2534,10 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         image_start_token = "<|image_start|>"
         image_end_token = "<|image_end|>"
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -2747,7 +2751,10 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
 
         image_token = "<|image|>"
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -2931,10 +2938,13 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
         tokenizer_class = "AutoTokenizer"
 
         image_token = DEEPSEEK4V_IMAGE_TOKEN
-        image_token_id = None       # set below
-        vocab_size = None
+        image_token_id: ClassVar[int]       # set below
+        vocab_size: ClassVar[int]
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):
@@ -3132,10 +3142,13 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
         tokenizer_class = "AutoTokenizer"
 
         image_token = DEEPSEEK41V_IMAGE_TOKEN
-        image_token_id = None       # set below
-        vocab_size = None
+        image_token_id: ClassVar[int]       # set below
+        vocab_size: ClassVar[int]
 
-        def __call__(self, images=None, text=None, **kwargs):
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
             if text is None and images is None:
                 raise ValueError("You must provide either text or images.")
             if isinstance(text, str):

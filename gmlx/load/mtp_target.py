@@ -8,6 +8,8 @@ The hook tables the mlx-vlm MTP engine probes on a target's
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -123,7 +125,9 @@ class MTPTextTarget(nn.Module):
         return out
 
 
-def _mtp_target_classes(model_type: str):
+def _mtp_target_classes(
+    model_type: str,
+) -> tuple[Any, Callable[[dict], nn.Module]]:
     """Capability-resolver row ``(arch, speculative) -> (LanguageModel, build)``.
 
     ``build(config_dict) -> language_model`` encapsulates the per-arch
@@ -157,7 +161,7 @@ def _mtp_target_classes(model_type: str):
 
             language_model_cls = qwen35_owned.language_model_class(sub)
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             text_config = text_cfg.TextConfig.from_dict(config)
             model_config = cfg.ModelConfig.from_dict(
                 {
@@ -185,7 +189,7 @@ def _mtp_target_classes(model_type: str):
 
             language_model_cls = gemma4_owned.OwnedGemma4LanguageModel
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return language_model_cls(cfg.TextConfig.from_dict(config))
 
         return language_model_cls, build
@@ -197,7 +201,7 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return deepseek_v4_mtp.DeepseekV4SpecLM(ModelArgs.from_dict(config))
 
         return deepseek_v4_mtp.DeepseekV4SpecLM, build
@@ -209,7 +213,7 @@ def _mtp_target_classes(model_type: str):
         ensure_registered()
         hy_v3_tools.ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
@@ -219,7 +223,7 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return qwen4_exp_mtp.Qwen4ExpSpecLM(ModelArgs.from_dict(config))
 
         return qwen4_exp_mtp.Qwen4ExpSpecLM, build
@@ -231,7 +235,7 @@ def _mtp_target_classes(model_type: str):
         ensure_registered()
         muse_glimmer_tools.ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
 
         return muse_glimmer_mtp.MuseGlimmerSpecLM, build
@@ -241,7 +245,7 @@ def _mtp_target_classes(model_type: str):
 
         ensure_registered()
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
 
         return glm5_next_mtp.Glm5NextSpecLM, build
@@ -249,7 +253,7 @@ def _mtp_target_classes(model_type: str):
         import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
         from mlx_lm.models.nemotron_h import ModelArgs
 
-        def build(config):
+        def build(config: dict) -> nn.Module:
             return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))
 
         return nemotron_h_mtp.NemotronHSpecLM, build
