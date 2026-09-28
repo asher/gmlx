@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
 - In `gmlx run` and `gmlx chat`, a Gemma-4 12B or DeepSeek-V4-Flash-Vision-Exp
   image prompt prefills in chunks that keep each image whole, not in one pass.
+- In `gmlx serve`, a Gemma-4 12B image prompt prefills in chunks that keep each
+  image whole, not in one pass.
 - On a Gemma-4 model other than E2B and E4B, the prefix cache reuses a cached
   prefix that ends before an image, when the request holds the same images.
 
@@ -51,9 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   short request batched with one longer than the sliding window.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
-- A Gemma-4 image request on a model other than E2B, E4B and 12B, such as
-  26B-A4B or 31B, could answer wrongly, because each image token saw only
-  the image tokens before it.
+- A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
+  image token saw only the image tokens before it.
 - On a request without tools, a reply holding tool-call text left less of the
   conversation in the prefix cache for the next turn.
 - A model whose load failed after its weights were read, as when its
