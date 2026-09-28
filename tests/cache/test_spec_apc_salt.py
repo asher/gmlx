@@ -263,6 +263,30 @@ def test_l0_keeps_adapted_and_bare_rows_apart(ar):
         lora_rows.configure("static", 1)
 
 
+def test_l0_keeps_tenants_apart_without_a_manager(ar, monkeypatch):
+    """Without an APC manager the server hands each row its tenant as a
+    prompt kwarg, and the batch merge drops it. Insert records the tenant
+    for each row, and the L0 key carries it."""
+    uids = iter([21, 22, 23, 24])
+    monkeypatch.setattr(ar.BatchGenerator, "insert",
+                        lambda self, prompts, *a, **k: [next(uids)
+                                                        for _ in prompts])
+    mtp_prefill._install_l0_tenant_rows()
+    ar.BatchGenerator.insert(
+        None, [[1], [1], [1]], [4, 4, 4],
+        [{"_apc_tenant": "acme"}, {"_apc_tenant": "globex"},
+         {"_apc_tenant": "acme"}])
+    ar.BatchGenerator.insert(None, [[1]], max_tokens=[4], prompt_kwargs=[{}])
+
+    model = _Model()
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    text1 = [1, 5, 6, 7, 2, 3]
+    assert _prefill(ar, model, text1, uid=21) == 0
+    assert _prefill(ar, model, text1 + [4, 5], uid=22) == 0
+    assert _prefill(ar, model, text1 + [4, 5], uid=23) == 6
+    assert _prefill(ar, model, text1 + [4, 5], uid=24) == 0
+
+
 def _l1_batch(model, ids, salt, **extra):
     return SimpleNamespace(
         model=model, _input_ids=mx.array([ids]),

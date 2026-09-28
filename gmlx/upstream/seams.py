@@ -88,7 +88,8 @@ SEAMS: tuple[Seam, ...] = (
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind); "
          "lora_rows (per-row prompt_kwargs carry the APC salt, positional "
          "order prompts, max_tokens, prompt_kwargs); seed_rows (returned "
-         "uids)"),
+         "uids); mtp_prefill._install_l0_tenant_rows (each row's "
+         "_apc_tenant kwarg, by returned uid)"),
     # --- qwen3_5 vendored text model (gmlx.models.qwen35) ---
     # gmlx runs mlx-vlm 0.6.15's qwen3.5 text code from vendored copies
     # (language, gated_delta, config, moe_language, moe_config) and
