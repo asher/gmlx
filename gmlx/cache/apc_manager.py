@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 from mlx_vlm import apc as _apc
@@ -654,16 +655,43 @@ def _auto_block_size(model_path):
         return None
 
 
+# Seconds a cached stock free-RAM read stays valid when the mach read is
+# unavailable.
+_FREE_RAM_TTL_S = 1.0
+
+
+def _cached_free_ram(read, ttl=_FREE_RAM_TTL_S, clock=time.monotonic):
+    """``read`` called at most once per ``ttl`` seconds; the value in
+    between is the last reading."""
+    last: list = [None, None]
+
+    def free_ram_bytes():
+        now = clock()
+        if last[0] is None or now - last[0] >= ttl:
+            last[0], last[1] = now, read()
+        return last[1]
+
+    free_ram_bytes.__dict__["_gmlx_cached"] = True
+    return free_ram_bytes
+
+
 def _install_fork_free_free_ram() -> None:
-    """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
-    the in-process mach read. Stock shells out to ``vm_stat`` without
-    psutil, and a fork beside a Metal-mapped decode arena copies the
-    arena before the exec."""
+    """Rebind ``apc._free_ram_bytes`` to the in-process mach read. Stock
+    reads it at the exact disk-restore gates and for the memory headroom
+    in every ``_make_room``, and shells out to ``vm_stat`` without psutil.
+    A fork beside a Metal-mapped decode arena copies the arena before the
+    exec. Without the mach read the stock read stays bound behind a cache
+    that forks at most once per ``_FREE_RAM_TTL_S``."""
     from gmlx.serve import kernel_vm
 
-    if kernel_vm.snapshot() is None or not hasattr(_apc, "_free_ram_bytes"):
+    stock = getattr(_apc, "_free_ram_bytes", None)
+    if (stock is None or stock is kernel_vm.available_bytes
+            or getattr(stock, "_gmlx_cached", False)):
         return
-    _apc._free_ram_bytes = kernel_vm.available_bytes
+    if kernel_vm.snapshot() is not None:
+        _apc._free_ram_bytes = kernel_vm.available_bytes
+    else:
+        _apc._free_ram_bytes = _cached_free_ram(stock)
 
 
 def build_apc_manager(model_namespace=None):

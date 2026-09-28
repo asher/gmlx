@@ -86,6 +86,51 @@ def test_build_rebinds_the_free_ram_read_in_process(monkeypatch):
     assert kernel_vm.available_bytes() > 0
 
 
+def test_free_ram_read_without_mach_counters_forks_once_per_interval(
+        monkeypatch):
+    """mlx-vlm 0.7.3 also reads free RAM for the memory headroom in every
+    _make_room. Without the mach counters the stock vm_stat read stays
+    bound, so the build puts it behind a cache."""
+    from gmlx.serve import kernel_vm
+
+    calls = []
+
+    def stock_read():
+        calls.append(1)
+        return 40 * GB
+
+    monkeypatch.setattr(kernel_vm, "_disabled", "test")
+    monkeypatch.setattr(apc, "_free_ram_bytes", stock_read)
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
+        monkeypatch.delenv(k, raising=False)
+    m = build_apc_manager()
+    m.prepare_prefill(0)
+    for _ in range(8):
+        m._make_room(2 << 20)
+    assert len(calls) == 1
+    assert apc._free_ram_bytes() == 40 * GB
+    bound = apc._free_ram_bytes
+    build_apc_manager()
+    assert apc._free_ram_bytes is bound
+
+
+def test_cached_free_ram_rereads_after_the_interval():
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    now = [100.0]
+    reads = []
+
+    def read():
+        reads.append(1)
+        return len(reads)
+
+    cached = _cached_free_ram(read, ttl=1.0, clock=lambda: now[0])
+    assert cached() == 1 and cached() == 1
+    now[0] += 1.0
+    assert cached() == 2
+
+
 def test_from_env_is_dead_under_the_pin(monkeypatch):
     monkeypatch.setenv("APC_ENABLED", "0")
     assert apc.from_env(model_namespace="/m/a.gguf") is None

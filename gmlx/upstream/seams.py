@@ -409,8 +409,9 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.GmlxAPCManager._prefill_reserve_bytes (disk flush "
          "stays stock; the reserve it sets reads 0 after autosize)"),
     Seam("mlx_vlm.apc", "_free_ram_bytes",
-         "apc_manager._install_fork_free_free_ram (exact disk-restore gate "
-         "rebound to the in-process mach read; stock forks vm_stat)"),
+         "apc_manager._install_fork_free_free_ram (disk-restore gates and "
+         "the _make_room headroom read, rebound to the in-process mach "
+         "read, else cached; stock forks vm_stat)"),
     # The prefix-cache plan and the clone and merge arms live in
     # apc_adapters; the apc functions below import them per call.
     Seam("mlx_vlm.apc_adapters", "register_capability",
