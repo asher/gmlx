@@ -3,11 +3,13 @@
 Exact snapshots keep a quantized row in its packed form
 (snapshot_prompt_cache_row), and the warm merge re-quantizes a float
 row to the live policy when kv_quant_config is passed. With no live
-config the owned L1 merge recovers packed rows to float. These tests pin
-the seams gmlx rides so the owned L1 merge stays aligned.
+config both MTP warm paths, the owned L1 merge and stock admission,
+recover packed rows to float. These tests pin the seams gmlx rides so
+both paths stay aligned.
 """
 
 import mlx.core as mx
+import pytest
 
 import gmlx.spec.engine as engine
 
@@ -151,6 +153,117 @@ def test_owned_l1_recovers_packed_rows_when_mtp_batches_run_fp16():
     q = mx.random.normal((2, 2, 1, 64))
     host.update_and_fetch(q, q)
     assert host.offset.tolist() == [25, len(prefix) + 1]
+
+
+@pytest.mark.parametrize("strategy", ["block", "checkpoint"])
+def test_stock_admission_recovers_packed_rows_when_mtp_batches_run_fp16(
+        strategy):
+    # Stock admission merges a warm hit to the generator's kv_bits layer
+    # types. Under uniform KV_BITS with MTP, live batches run fp16, so a
+    # packed warm row could neither join a decoding batch nor take a
+    # cold row once it decodes itself.
+    from types import SimpleNamespace
+
+    from mlx_vlm import apc
+    from mlx_vlm.apc_coordinator import APCCoordinator
+    from mlx_vlm.generate import ar
+    from mlx_vlm.models.cache import (ArraysCache, BatchKVCache, KVCache,
+                                      QuantizedKVCache)
+
+    import gmlx.spec.mtp_prefill as mtp_prefill
+    from gmlx.cache.kv_policy import dropped_policy, resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import ServeKvPolicy
+    from gmlx.spec.speculative import _lift_injected_cache
+
+    class _Generator(ar.BatchGenerator):
+        # The stock builder on a bare generator: only its fields are set.
+        def __init__(self):
+            pass
+
+        def close(self):
+            pass
+
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    shape = (1, 2, 32, 64)
+    if strategy == "block":
+        # dense layers page through the block pool as float blocks
+        def make_cache():
+            return [KVCache() for _ in range(3)]
+    else:
+        # a recurrent layer makes a checkpoint model, whose exact entries
+        # the B=1 round stores packed
+        def make_cache():
+            return [KVCache(), KVCache(), ArraysCache(size=2)]
+    single = resolve_kv_quant_policy([KVCache()], kv_bits=4,
+                                     kv_group_size=64, mode="single")
+    model = SimpleNamespace(
+        config=SimpleNamespace(), make_cache=make_cache,
+        _gmlx_kv_policy=ServeKvPolicy(
+            single, dropped_policy("mtp fp16 when batched", 4, 64,
+                                   "batched")))
+    man = apc.APCManager(num_blocks=64, block_size=16)
+    gen = _Generator()
+    gen.model, gen.apc_manager = model, man
+    gen.apc = APCCoordinator(man, model)
+    assert gen.apc.strategy == strategy
+    gen.apc_mode = gen.apc.legacy_mode
+    gen.kv_bits, gen.kv_quant_scheme, gen.kv_group_size = 4, "uniform", 64
+    gen.prefill_step_size = 32
+    gen.draft_model, gen.draft_kind = object(), "mtp"
+
+    prefix = list(range(100, 132))
+    ks = [mx.random.normal(shape) for _ in range(2)]
+    if strategy == "block":
+        man.release(man.store_kv_blocks(prefix, ks + ks[:1], ks + ks[:1]))
+        want = [mx.dequantize(*mx.quantize(k, group_size=64, bits=4),
+                              group_size=64, bits=4) for k in ks]
+    else:
+        row = []
+        for k in ks:
+            c = QuantizedKVCache(group_size=64, bits=4)
+            c.update_and_fetch(k, k)
+            row.append(c)
+        state = ArraysCache(size=2)
+        state[0], state[1] = mx.zeros((1, 3, 8)), mx.zeros((1, 2, 4, 4))
+        assert man.store_exact_cache(prefix, row + [state])
+        want = [mx.dequantize(*(t[..., :32, :] for t in c.keys),
+                              group_size=64, bits=4) for c in row]
+
+    def seq(uid, ids):
+        kw = {"inputs_embeds": mx.zeros((1, len(ids), 8)),
+              "_apc_semantic_hash": 0}
+        return (uid, ids, 4, kw, None, None)
+
+    batch = gen._build_mixed_prompt_batch(
+        [seq(0, prefix + [7, 8, 9]), seq(1, list(range(40, 50)))])
+    assert batch._apc_meta[0]["prefix_len"] == len(prefix)
+    kv = batch.prompt_cache[:2]
+    assert [type(c) for c in kv] == [BatchKVCache] * 2
+    for c, w in zip(kv, want):
+        assert mx.array_equal(c.keys[:1, :, :32, :], w.astype(c.keys.dtype))
+
+    # the suffix prefill: right-padded rows, rolled into left padding
+    for c in kv:
+        k = mx.random.normal((2, 2, 10, 64))
+        c.update_and_fetch(k, k)
+        c.finalize()
+    assert kv[0].offset.tolist() == [35, 10]
+
+    # the warm batch joins an fp16 batch that is already decoding
+    host = BatchKVCache([0])
+    k = mx.random.normal((1, 2, 24, 64))
+    host.update_and_fetch(k, k)
+    host.extend(_lift_injected_cache(host, kv[0]))
+    # and, decoding itself, takes a cold row the B=1 round packed
+    cold = QuantizedKVCache(group_size=64, bits=4)
+    k = mx.random.normal((1, 2, 12, 64))
+    cold.update_and_fetch(k, k)
+    kv[1].extend(_lift_injected_cache(kv[1], cold))
+    for c in (host, kv[1]):
+        q = mx.random.normal((c.offset.shape[0], 2, 1, 64))
+        c.update_and_fetch(q, q)
+    assert host.offset.tolist() == [25, 36, 11]
+    assert kv[1].offset.tolist() == [36, 11, 13]
 
 
 def test_exact_row_recovery_reaches_cache_list_members():

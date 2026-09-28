@@ -35,6 +35,7 @@ from gmlx.spec.engine import (
     _debug_note,
     _get_spec_prefix_cache,
     _install_apc_manager_stash,
+    _live_kv_quant_config,
     _resolve_l1,
     _trim_prompt_columns,
 )
@@ -402,6 +403,17 @@ def install_full_prompt_mtp_prefill() -> None:
         return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
     def _mtp_init(self, *args, **kwargs) -> None:
+        warm = kwargs.get("warm_cache")
+        if warm is not None and kwargs.get("draft_kind") == "mtp":
+            # Stock admission merges a warm hit to the generator's kv_bits
+            # layer types and keeps a packed exact entry packed. MTP
+            # batches run fp16 KV under uniform KV bits, so a packed row
+            # cannot join them. Recover it to float before the stock init
+            # prepares its padding, as the owned L1 merge does.
+            model = kwargs.get("model", args[0] if args else None)
+            if _live_kv_quant_config(model) is None:
+                from gmlx.spec.kv_quant import dequantize_exact_row
+                kwargs["warm_cache"] = dequantize_exact_row(warm)
         _orig_init(self, *args, **kwargs)
         # Re-enable chunked prefill.  Stock mlx-vlm nulls prefill_step_size
         # for speculative models because intermediate chunks discard hidden;

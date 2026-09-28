@@ -204,7 +204,8 @@ SEAMS: tuple[Seam, ...] = (
          "the stock store)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
          "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
-         "restore + stock-path ckpt arming)", critical=True),
+         "restore + stock-path ckpt arming + packed warm_cache kwarg "
+         "recovered to fp16 before init)", critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
          "ckpt._install_plain_ckpt_decode (token accounting + "
          "decode-time snapshots)", critical=True),

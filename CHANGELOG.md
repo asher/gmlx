@@ -35,6 +35,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text when the template had no developer role.
 - A Gemma-4 12B image request with the prefix cache on could answer wrongly
   when it reused a cached prefix that ended inside the image.
+- With `--kv-bits`, MTP and the prefix cache on, a request that reused a
+  cached prefix could fail when it joined a batch that was already decoding.
 
 ## [0.4.19] - 2026-09-27
 

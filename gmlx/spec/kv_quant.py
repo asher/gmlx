@@ -36,9 +36,10 @@ def dequantize_lift_cache(c):
     return lifted
 
 
-def _dequantized_kv(c):
-    """Float keys and values of a non-empty B=1 QuantizedKVCache."""
-    L = c.offset
+def _dequantized_kv(c, length=None):
+    """Float keys and values of a non-empty affine cache: a B=1
+    QuantizedKVCache up to its offset, or a batch one up to ``length``."""
+    L = c.offset if length is None else length
     keys = mx.dequantize(
         *(mx.contiguous(t[..., :L, :]) for t in c.keys),
         group_size=c.group_size, bits=c.bits)
@@ -48,18 +49,40 @@ def _dequantized_kv(c):
     return keys, values
 
 
-def dequantize_exact_row(row):
-    """A single-row exact entry with its affine layers as float KVCache.
+def _dequantized_batch(c):
+    """A BatchQuantizedKVCache as a BatchKVCache with the same rows,
+    padding and write index."""
+    from mlx_vlm.models.cache import BatchKVCache
 
-    CacheList members recover too, and other layers pass through. The
-    stock warm merge keeps a packed row packed, so the owned L1 merge
-    runs this when live batches keep float KV (MTP under uniform
-    KV_BITS), whose B=1 round stores packed rows."""
+    out = BatchKVCache([0] * int(c.left_padding.shape[0]))
+    out.left_padding = c.left_padding
+    out.offset = c.offset
+    out._right_padding = getattr(c, "_right_padding", None)
+    if c.keys is not None and c._idx:
+        out.keys, out.values = _dequantized_kv(c, c._idx)
+        out._idx = c._idx
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        setattr(out, "_gmlx_cascade", stamp)
+    return out
+
+
+def dequantize_exact_row(row):
+    """A warm cache stack with its affine layers as float caches.
+
+    A single-row exact entry recovers QuantizedKVCache to KVCache, and a
+    merged warm batch recovers BatchQuantizedKVCache to BatchKVCache.
+    CacheList members recover too, and other layers, kvarn ones
+    included, pass through. The stock warm merge keeps a packed row
+    packed, and stock admission packs to the generator's kv_bits, so
+    both MTP warm paths run this when live batches keep float KV (MTP
+    under uniform KV_BITS), whose B=1 round stores packed rows."""
     from mlx_vlm.models.cache import KVCache
 
     from gmlx.cache.compat import cache_types
 
     quant = cache_types("QuantizedKVCache")
+    batch_quant = cache_types("BatchQuantizedKVCache")
     lists = cache_types("CacheList")
 
     def recover(c):
@@ -68,6 +91,8 @@ def dequantize_exact_row(row):
             if c.offset:
                 out.update_and_fetch(*_dequantized_kv(c))
             return out
+        if isinstance(c, batch_quant):
+            return _dequantized_batch(c)
         if isinstance(c, lists):
             members = tuple(recover(m) for m in c.caches)
             if any(m is not o for m, o in zip(members, c.caches)):
