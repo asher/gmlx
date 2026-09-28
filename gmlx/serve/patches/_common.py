@@ -8,6 +8,10 @@ import sys
 
 
 _PATCH_FLAG = "_kq_gguf_server_patches"
+# The ASGI scope key that marks a request on a launch session socket. Only
+# the session socket app sets it. uvicorn builds every TCP scope itself, so
+# no client can set it.
+SESSION_SCOPE_KEY = "gmlx.session"
 
 
 def _install_gen_args_transform(flag: str, transform) -> None:

@@ -8,6 +8,7 @@ import os
 
 
 from ._common import (
+    SESSION_SCOPE_KEY,
     _error_content,
     _remove_routes,
 )
@@ -26,7 +27,10 @@ def install_api_key_auth(api_key: str | None) -> None:
 
     This is HTTP middleware, and Starlette HTTP middleware never sees a
     WebSocket connection. The media gate therefore removes the stock
-    WebSocket routes, such as mlx-vlm's ``/v1/realtime``."""
+    WebSocket routes, such as mlx-vlm's ``/v1/realtime``.
+
+    A request on a launch session socket needs no key. The scope of its
+    socket limits it instead (:mod:`.session_sockets`)."""
     if not api_key:
         return
     import hmac
@@ -41,7 +45,8 @@ def install_api_key_auth(api_key: str | None) -> None:
     async def _auth_middleware(request, call_next):
         # OPTIONS = CORS preflight, which browsers send credential-less by spec
         # (CORSMiddleware answers it); the actual request still authenticates.
-        if request.method == "OPTIONS" or request.url.path == "/health":
+        if request.method == "OPTIONS" or request.url.path == "/health" \
+                or request.scope.get(SESSION_SCOPE_KEY) is not None:
             return await call_next(request)
         auth = request.headers.get("authorization", "")
         provided = (auth[7:] if auth[:7].lower() == "bearer "

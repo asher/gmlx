@@ -2,12 +2,12 @@
 
 A request that names an image, audio or video by a file path makes the
 server open that file on the Mac, and one that names it by URL makes the
-server fetch it. The server's API key is also handed to clients that run
-with less access than the server has, such as a client in a launch
-container, so neither may happen by default. The gate reads every request
-body before its route runs and answers 400 for any media reference that is
-not a ``data:`` URI of the right kind. It never stats, opens or fetches the
-reference. ``server.media_urls`` lets http(s) URLs through; a file path is
+server fetch it. A client can run with less access than the server has,
+such as a client in a launch container, which gets a placeholder key and
+reaches the server through a scoped session socket. So neither may happen
+by default. The gate reads every request body before its route runs and
+answers 400 for any media reference that is not a ``data:`` URI of the
+right kind. It never stats, opens or fetches the reference. ``server.media_urls`` lets http(s) URLs through; a file path is
 never accepted.
 
 A route reads its body with ``json.loads`` whatever the Content-Type says,

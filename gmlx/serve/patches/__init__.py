@@ -58,6 +58,9 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 * **Hardening** - optional API-key auth (every route but ``/health``), a
   DNS-rebinding Host guard on loopback binds, credential-less CORS, and a
   ``/health`` body trimmed to liveness (no filesystem paths).
+* **Launch session sockets** - ``/v1/launch/sessions`` opens a Unix socket
+  for one launch container session, where only the inference routes and
+  the session's own assistant aliases answer.
 
 The numerics, batching, and protocol handlers stay stock.
 """
@@ -329,6 +332,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_role_normalization()
     install_keep_route()
     install_reload_route(reload_fn)
+    from .session_sockets import install_session_sockets
+    install_session_sockets(cfg)
     install_audio_transcription_route(getattr(cfg, "stt", None))
     install_audio_translation_route(getattr(cfg, "stt", None))
     install_audio_speech_route(getattr(cfg, "tts", None))

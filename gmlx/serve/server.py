@@ -2154,6 +2154,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if low:
         print(f"[server] warning: {low}", file=sys.stderr)
 
+    # Session sockets of an earlier run have no listener. This removes them now,
+    # and this run's sockets when the server stops.
+    from .patches.session_sockets import prepare_session_sockets
+    prepare_session_sockets(host, port)
+
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,
