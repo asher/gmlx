@@ -9,9 +9,11 @@ shape error at MoE prefill). This module makes the contract explicit:
 
 - ``SEAMS`` declares each (module, attr) we touch, why, and whether a missing
   seam must abort install (``critical``) or only costs an acceleration.
-- ``upstream_seams.json`` pins a source fingerprint for each seam, captured
-  at the qualified upstream versions. ``tests/upstream/test_upstream_seams.py`` fails
-  with the symbol's name when upstream drifts under the pin.
+- ``seams.json`` pins a fingerprint for each seam, captured at the
+  qualified upstream versions: the symbol's source, or its value where it
+  has none, and for a forwarding lambda the implementation it calls too.
+  ``tests/upstream/test_upstream_seams.py`` fails with the symbol's name
+  when upstream drifts under the pin.
 - ``check_upstream_versions()`` is the runtime gate: below-floor upstream
   versions raise with an actionable message (stale venvs resolve pyproject
   constraints exactly once - a floor pin alone cannot catch them); versions
@@ -30,6 +32,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 _JSON_PATH = os.path.join(os.path.dirname(__file__), "seams.json")
 
@@ -50,6 +53,7 @@ class Seam:
     critical: bool = False  # True: a missing seam must abort, not degrade
     module_optional: bool = False  # module absent on some qualified versions
     attr_optional: bool = False    # attr absent on some qualified versions
+    impl: str = ""  # "module:attr" a forwarding lambda calls; pinned with it
 
 
 SEAMS: tuple[Seam, ...] = (
@@ -61,7 +65,10 @@ SEAMS: tuple[Seam, ...] = (
          "via the pending-list stash); serve_memtrace (tick bracket)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
-         "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
+         "batch_sched arrival-merge (_unprocessed_sequences append/rebind); "
+         "lora_rows (per-row prompt_kwargs carry the APC salt, positional "
+         "order prompts, max_tokens, prompt_kwargs); seed_rows (returned "
+         "uids)"),
     # --- qwen3_5 vendored text model (gmlx.models.qwen35) ---
     # gmlx runs mlx-vlm 0.6.15's qwen3.5 text code from vendored copies
     # (language, gated_delta, config, moe_language, moe_config) and
@@ -95,6 +102,19 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
          "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices); "
          "gemma4_owned._sdpa_dispatch calls the claim directly"),
+    # The stock exact verifier bypasses the language module's SDPA, which
+    # the gemma4 batched, cascade and sparse rebinds cover. It runs only
+    # when the config sets exact_speculative_verify (default False, never
+    # set by gmlx).
+    Seam("mlx_vlm.models.gemma4.config", "TextConfig",
+         "gemma4 verifier gate (exact_speculative_verify default)"),
+    Seam("mlx_vlm.models.gemma4.language", "LanguageModel.__call__",
+         "gemma4 verifier gate (speculative_verify routing); gemma4_owned "
+         "inherits it"),
+    Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel.__call__",
+         "gemma4_owned inherits it (owned masks and attention take the "
+         "per-layer mask, shared KV and offset it passes, including the "
+         "logits_to_keep trim before the KV-shared layers)"),
     # --- quantized-KV SDPA batch-mask fix (both base modules) ---
     Seam("mlx_lm.models.base", "quantized_scaled_dot_product_attention",
          "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
@@ -205,6 +225,20 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine._bind_l1_view (L1 APC helpers)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_extra_hash",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_media_token_ids",
+         "spec_engine._bind_l1_view (L1 APC helpers)"),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_safe_prefix_lookup_min",
+         "spec_engine._bind_l1_view (L1 APC helpers) + ckpt restore floors"),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_suffix_is_text_only",
+         "spec_engine._bind_l1_view (L1 APC helpers) + ckpt restore gates"),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_prefix_has_media_tokens",
+         "spec_engine._bind_l1_view (L1 APC helpers)"),
+    Seam("mlx_vlm.apc", "apc_lookup_plan",
+         "spec_engine._L1View (_apc_pick_for takes the legacy branch: the "
+         "view has no coordinator)"),
+    Seam("mlx_vlm.generate.ar", "_slice_sequence_aligned_prompt_kwarg",
+         "spec_engine._trim_prompt_columns (mrope position ids slice on "
+         "their own sequence axis)", critical=True),
     # --- server engine ---
     Seam("mlx_vlm.server.generation", "load_model_resources",
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
@@ -245,10 +279,13 @@ SEAMS: tuple[Seam, ...] = (
          "DiffusionGemma prompt that opens with BOS gets no second one)"),
     Seam("mlx_vlm.server.generation", "prepare_inputs",
          "chat_behavior.install_diffusion_single_bos (module attr)"),
+    # The route modules' render, parser and tool-module bindings are
+    # _protocol_deps lambdas that look the mlx_vlm.server attribute up per
+    # call; impl pins that attribute with the binding.
     Seam("mlx_vlm.server.openai", "apply_chat_template",
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
-         "key-merge wrap)"),
+         "key-merge wrap)", impl="mlx_vlm.server:apply_chat_template"),
     Seam("mlx_vlm.server.openai", "_normalize_instruction_messages",
          "server_patches.install_role_normalization (wrapped: a call with "
          "the messages alone, the chat completions one, keeps developer "
@@ -263,10 +300,12 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
          "history, retire capture, thinking seed, and developer-role "
-         "normalization wrap every captured render binding)"),
+         "normalization wrap every captured render binding)",
+         impl="mlx_vlm.server:apply_chat_template"),
     Seam("mlx_vlm.server.app", "_protocol_deps",
-         "server_patches._common._render_target_modules (deps captures "
-         "the openai function object at namespace construction)"),
+         "server_patches._common._render_target_modules (the route "
+         "modules copy their bindings from these members at route "
+         "registration; gmlx wraps the member beside both copies)"),
     Seam("mlx_vlm.prompt_utils", "apply_chat_template",
          "server_patches.render.install_faithful_history "
          "(return_messages contract: one rebuilt message per readable "
@@ -282,13 +321,15 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.openai", "process_tool_calls",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "_infer_tool_parser_from_processor",
-         "retire_key.build_assistant_message (response-shape mirror)"),
+         "retire_key.build_assistant_message (response-shape mirror)",
+         impl="mlx_vlm.server:_infer_tool_parser_from_processor"),
     Seam("mlx_vlm.server", "_infer_tool_parser_from_processor",
          "server_patches.apc.install_retire_render_capture (wrapped: "
          "records the request's tool_parser override for retire_key; the "
          "_protocol_deps lambda looks the package attribute up per call)"),
     Seam("mlx_vlm.server.openai", "load_tool_module",
-         "retire_key.build_assistant_message (response-shape mirror)"),
+         "retire_key.build_assistant_message (response-shape mirror)",
+         impl="mlx_vlm.server:load_tool_module"),
     Seam("mlx_vlm.server.responses_state",
          "ThinkingStreamState._build_open_close_markers",
          "retire_key._thinking_markers (splitter default marker pairs "
@@ -308,12 +349,26 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (HF download gate)", critical=True),
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
-    # --- tool-parser registry (hy_v3_tools / muse_glimmer_tools) ---
-    Seam("mlx_vlm.tool_parsers", "_TEMPLATE_MARKERS",
-         "hy_v3_tools / muse_glimmer_tools ensure_registered (marker prepend)"),
-    Seam("mlx_vlm.tool_parsers", "load_tool_module",
-         "hy_v3_tools / muse_glimmer_tools (sys.modules graft resolves "
-         "through it)"),
+    # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
+    # used by the hy_v3, hy_v4, deepseek_v41 and muse_glimmer tools) ---
+    Seam("mlx_vlm.tools.registry", "ParserSpec",
+         "tool_parsers.register_tool_parser (spec built from name, marker "
+         "groups and priority)", critical=True),
+    Seam("mlx_vlm.tools.registry", "SPECS",
+         "tool_parsers.register_tool_parser (priority-200 spec prepended; "
+         "module global rebound)", critical=True),
+    Seam("mlx_vlm.tools.registry", "_BY_NAME",
+         "tool_parsers.register_tool_parser (name lookup; an upstream spec "
+         "of the same name keeps its markers)", critical=True),
+    Seam("mlx_vlm.tools.registry", "_infer_tool_parser",
+         "tool_parsers.register_tool_parser (reads the SPECS module global "
+         "per call, highest priority first)"),
+    Seam("mlx_vlm.tools.registry", "load_tool_module",
+         "tool_parsers.register_tool_parser (resolves "
+         "mlx_vlm.tools.parsers.<name> through the sys.modules graft)"),
+    Seam("mlx_vlm.tools", "SPECS",
+         "tool_parsers.register_tool_parser (the request schemas validate "
+         "a tool_parser override against this re-export)"),
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
@@ -337,18 +392,48 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
     Seam("mlx_vlm.apc", "DiskBlockStore",
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
+    Seam("mlx_vlm.apc", "from_env",
+         "apc_manager.build_apc_manager (mirror: env knobs and their "
+         "parsing; disk tier stays opt-in)"),
+    Seam("mlx_vlm.apc", "APCManager.store_kv_blocks",
+         "apc_manager.GmlxAPCManager.store_kv_blocks (mirror: re-sync the "
+         "copy on change)", critical=True),
+    Seam("mlx_vlm.apc", "_cache_nbytes",
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
+    Seam("mlx_vlm.apc", "APCBlock",
+         "apc_manager.GmlxAPCManager._grow_pool", critical=True),
     Seam("mlx_vlm.apc", "_free_ram_bytes",
          "apc_manager._install_fork_free_free_ram (exact disk-restore gate "
          "rebound to the in-process mach read; stock forks vm_stat)"),
-    Seam("mlx_vlm.apc", "_cache_entry_supports_exact_apc",
-         "apc_pooling (PoolingCache exact-APC predicate) + kvarn_apc",
+    # The prefix-cache plan and the clone and merge arms live in
+    # apc_adapters; the apc functions below import them per call.
+    Seam("mlx_vlm.apc_adapters", "register_capability",
+         "apc_pooling + kvarn_apc (CHECKPOINT rows for the pooling and "
+         "kvarn cache classes and their batch classes)", critical=True),
+    Seam("mlx_vlm.apc_adapters", "Capability",
+         "apc_pooling + kvarn_apc (CHECKPOINT member)", critical=True),
+    Seam("mlx_vlm.apc_adapters", "clone_cache_entry",
+         "apc_pooling + kvarn_apc (wrapped: pooling and kvarn clone arms; "
+         "CacheList members recurse through the module global)",
          critical=True),
+    Seam("mlx_vlm.apc_adapters", "merge_cache_entries",
+         "apc_pooling + kvarn_apc (wrapped: pooling and kvarn merge arms)",
+         critical=True),
+    Seam("mlx_vlm.apc_adapters", "build_prefix_cache_plan",
+         "kvarn_apc plan wrap (a stamped kvarn model pages nothing, so its "
+         "strategy is checkpoint)", critical=True),
+    Seam("mlx_vlm.apc_coordinator", "build_prefix_cache_plan",
+         "kvarn_apc plan wrap (the coordinator's own binding, rebound "
+         "beside the adapter's)", critical=True),
     Seam("mlx_vlm.apc", "_merge_exact_cache_entries",
-         "apc_pooling (PoolingCache merge arm) + kvarn_apc", critical=True),
+         "apc_pooling + kvarn_apc merge arms (imports "
+         "apc_adapters.merge_cache_entries per call)", critical=True),
     Seam("mlx_vlm.apc", "_read_safetensors_tensor",
-         "apc_pooling (disk-tier zero-width spill)", critical=True),
+         "apc_pooling (disk-tier zero-width spill; wrapped reader)",
+         critical=True),
     Seam("mlx_vlm.apc", "_clone_cache_entry_for_apc",
-         "apc_pooling + kvarn_apc", critical=True),
+         "apc_pooling + kvarn_apc clone arms (imports "
+         "apc_adapters.clone_cache_entry per call)", critical=True),
     Seam("mlx_vlm.apc", "multimodal_token_ids_from_config",
          "apc_media.install_media_token_ids (config media_token_ids fold "
          "for expanded image blocks)", critical=True),
@@ -361,10 +446,11 @@ SEAMS: tuple[Seam, ...] = (
          "looks through CacheList so an already-batched one is not merged "
          "twice)", critical=True),
     Seam("mlx_vlm.apc", "_safetensors_dtype_info",
-         "apc_pooling + kvarn_apc (uint32 codes)", critical=True),
+         "apc_pooling + kvarn_apc + apc_qsa shard readers (the stock "
+         "decoder reads the packed uint32 and uint8 planes)", critical=True),
     Seam("mlx_vlm.apc", "model_apc_mode",
-         "kvarn_apc (stamped kvarn models resolve exact; the stock probe "
-         "sees pre-conversion fp16 caches)", critical=True),
+         "residency + spec_engine L1 probe (legacy mode of the plan, which "
+         "the kvarn_apc plan wrap stamps)", critical=True),
     # <= 0.6.3 the wrapper delegates to this mlx-lm alias; 0.6.4 inlined it.
     Seam("mlx_vlm.generate.common", "mlx_maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement, <=0.6.3 arm)",
@@ -415,7 +501,14 @@ SEAMS: tuple[Seam, ...] = (
          "modules.switch_layer_types (dual-origin leaf swap)",
          critical=True, module_optional=True),
     Seam("mlx_vlm.models.switch_layers", "SwitchGLU.__call__",
-         "modules.switch_layer_types (dual-origin fused GLU)",
+         "modules.switch_layer_types (dual-origin fused GLU); "
+         "modules.install_switch_glu_block_routing (a block of 2 to "
+         "DECODE_BLOCK_SIZE positions loops per token when the exact "
+         "kernels decline)",
+         critical=True, module_optional=True),
+    Seam("mlx_vlm.models.switch_layers", "SwitchGLU._combine",
+         "modules._BlockRoutedSwitchGLU (block call, then the stock "
+         "weights, shared and residual combine)",
          critical=True, module_optional=True),
     # --- structured reads on DiffusionGemma (systemone) ---
     # The read presents a batch-N prompt K/V to the stock decoder through
@@ -530,7 +623,7 @@ SEAMS: tuple[Seam, ...] = (
 )
 
 
-def _resolve(seam: Seam):
+def _resolve_path(module: str, attr: str):
     """('ok', obj) | ('missing-module', None) | ('missing-attr', None).
 
     Modules resolve through import; ``sys.modules`` wins for already-loaded
@@ -538,12 +631,11 @@ def _resolve(seam: Seam):
     __init__ shadows the submodule attribute with the runtime instance).
     """
     try:
-        mod = sys.modules.get(seam.module) or importlib.import_module(
-            seam.module)
+        mod = sys.modules.get(module) or importlib.import_module(module)
     except ImportError:
         return "missing-module", None
     obj = mod
-    for part in seam.attr.split(".") if seam.attr else ():
+    for part in attr.split(".") if attr else ():
         try:
             obj = getattr(obj, part)
         except AttributeError:
@@ -551,14 +643,65 @@ def _resolve(seam: Seam):
     return "ok", obj
 
 
-def _fingerprint(obj) -> str | None:
-    """sha256 of the object's source, or None when unhashable (constants,
-    kernel objects, module-level values)."""
+def _resolve(seam: Seam):
+    return _resolve_path(seam.module, seam.attr)
+
+
+def _resolve_impl(seam: Seam):
+    module, _, attr = seam.impl.partition(":")
+    return _resolve_path(module, attr)
+
+
+_UPSTREAM_ROOTS = ("mlx_vlm", "mlx_lm")
+
+
+def _source(obj) -> str | None:
     try:
-        src = inspect.getsource(obj)
+        return inspect.getsource(obj)
     except (TypeError, OSError):
         return None
-    return hashlib.sha256(src.encode()).hexdigest()
+
+
+def _type_name(obj) -> str:
+    cls = type(obj)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _pin_text(obj) -> str:
+    """The text a seam pins: the source of a function, class or module; the
+    accessor sources of a property; the repr of a plain constant; the member
+    names and types of a namespace (gmlx rebinds members in place); the
+    class source of an instance of an upstream class; else the qualified
+    name of the object or its type."""
+    if isinstance(obj, property):
+        return "\n".join(
+            _source(f) or "" for f in (obj.fget, obj.fset, obj.fdel)
+            if f is not None)
+    if obj is None or isinstance(obj, (bool, int, float, str, bytes)):
+        return repr(obj)
+    if isinstance(obj, SimpleNamespace):
+        return "\n".join(f"{name}: {_type_name(value)}"
+                         for name, value in sorted(vars(obj).items()))
+    src = _source(obj)
+    if src is not None:
+        return src
+    name = getattr(obj, "__qualname__", None)
+    if isinstance(name, str):
+        return f"{getattr(obj, '__module__', '')}.{name}"
+    if type(obj).__module__.split(".")[0] in _UPSTREAM_ROOTS:
+        src = _source(type(obj))
+        if src is not None:
+            return src
+    return _type_name(obj)
+
+
+def _fingerprint(obj) -> str:
+    """sha256 of what the seam pins for ``obj`` (see ``_pin_text``)."""
+    return hashlib.sha256(_pin_text(obj).encode()).hexdigest()
+
+
+def _is_lambda(obj) -> bool:
+    return getattr(obj, "__name__", None) == "<lambda>"
 
 
 def _rebound(seam: Seam, obj) -> bool:
@@ -577,16 +720,45 @@ def _key(seam: Seam) -> str:
     return f"{seam.module}:{seam.attr}"
 
 
-def collect_fingerprints() -> dict[str, str | None]:
-    out: dict[str, str | None] = {}
+def _row_fingerprint(seam: Seam, obj, impl) -> str:
+    """The seam's fingerprint. A forwarding seam pins the binding and the
+    implementation it calls together, so a change to either shows."""
+    if not seam.impl:
+        return _fingerprint(obj)
+    text = _pin_text(obj) + "\0" + _pin_text(impl)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _unforwarded_lambda(seam: Seam, obj) -> str | None:
+    """A problem line when the seam resolves to a lambda and names no
+    implementation: the lambda's own source does not change when the
+    function it forwards to moves or changes."""
+    if seam.impl or not _is_lambda(obj):
+        return None
+    return (f"{_key(seam)}: resolves to a forwarding lambda - set impl to "
+            f"the module:attr it calls (used by {seam.used_by})")
+
+
+def collect_fingerprints() -> dict[str, str]:
+    out: dict[str, str] = {}
     for seam in SEAMS:
         status, obj = _resolve(seam)
         if status == "ok":
-            if _rebound(seam, obj):
+            impl = None
+            if seam.impl:
+                istatus, impl = _resolve_impl(seam)
+                if istatus != "ok":
+                    raise RuntimeError(
+                        f"cannot fingerprint {_key(seam)}: implementation "
+                        f"{seam.impl} {istatus} (used by {seam.used_by})")
+            if _rebound(seam, obj) or (seam.impl and _rebound(seam, impl)):
                 raise RuntimeError(
                     f"{_key(seam)} already holds a gmlx patch - "
                     f"regenerate fingerprints in a fresh interpreter")
-            out[_key(seam)] = _fingerprint(obj)
+            lam = _unforwarded_lambda(seam, obj)
+            if lam:
+                raise RuntimeError(lam)
+            out[_key(seam)] = _row_fingerprint(seam, obj, impl)
         elif ((status == "missing-module" and seam.module_optional)
               or (status == "missing-attr" and seam.attr_optional)):
             continue  # not present on this qualified version
@@ -622,8 +794,22 @@ def check_seams() -> list[str]:
             continue
         if _rebound(seam, obj):
             continue  # our installer already replaced it in this process
+        lam = _unforwarded_lambda(seam, obj)
+        if lam:
+            problems.append(lam)
+            continue
+        impl = None
+        if seam.impl:
+            istatus, impl = _resolve_impl(seam)
+            if istatus != "ok":
+                problems.append(
+                    f"{_key(seam)}: implementation {seam.impl} missing - "
+                    f"upstream moved or removed it (used by {seam.used_by})")
+                continue
+            if _rebound(seam, impl):
+                continue
         want = fps.get(_key(seam), "<unpinned>")
-        got = _fingerprint(obj)
+        got = _row_fingerprint(seam, obj, impl)
         if want == "<unpinned>":
             problems.append(
                 f"{_key(seam)}: no pinned fingerprint - run "

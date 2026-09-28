@@ -21,7 +21,7 @@ those bounds:
 
 | Check | Where | What it does |
 |-------|-------|--------------|
-| Seam contract | `tests/upstream/test_upstream_seams.py` | It pins every patched symbol to a source fingerprint. Drift fails CI and names the seam. |
+| Seam contract | `tests/upstream/test_upstream_seams.py` | It pins every seam to a fingerprint of its source, or of its value where it has none. Drift fails CI and names the seam. |
 | Runtime gate | `check_upstream_versions`, at CLI entry | It refuses to run below a floor and warns once above the qualified set. `gmlx doctor` is exempt. |
 | Static imports | `pyright`, in the macOS CI job | It checks the files in `[tool.pyright].include` against the installed upstream source. |
 
@@ -75,6 +75,13 @@ feature needs sets `critical=True`, and its installer raises when the
 seam is missing. An optional acceleration warns once and falls back.
 Either way, a patch is idempotent and never silently does nothing when the
 upstream surface it expects has changed.
+
+Some upstream bindings are lambdas that look another function up at call
+time, such as the render and tool-parser bindings of the mlx-vlm route
+modules. A lambda's source stays the same when the function it calls
+changes or moves, so such a seam names that function in `impl`, and the
+check pins both. The check and the regeneration both reject a seam that
+resolves to a lambda without one.
 
 KV-cache classes come from both mlx-lm and mlx-vlm. The rules for
 isinstance checks and construction are in the docstring of
