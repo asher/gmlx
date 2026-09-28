@@ -28,19 +28,53 @@ def dequantize_lift_cache(c):
     from mlx_vlm.models.cache import BatchKVCache
 
     lifted = BatchKVCache([0])
-    L = c.offset
-    if L:
-        keys = mx.dequantize(
-            *(mx.contiguous(t[..., :L, :]) for t in c.keys),
-            group_size=c.group_size, bits=c.bits)
-        values = mx.dequantize(
-            *(mx.contiguous(t[..., :L, :]) for t in c.values),
-            group_size=c.group_size, bits=c.bits)
-        lifted.update_and_fetch(keys, values)
+    if c.offset:
+        lifted.update_and_fetch(*_dequantized_kv(c))
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
         setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
+
+
+def _dequantized_kv(c):
+    """Float keys and values of a non-empty B=1 QuantizedKVCache."""
+    L = c.offset
+    keys = mx.dequantize(
+        *(mx.contiguous(t[..., :L, :]) for t in c.keys),
+        group_size=c.group_size, bits=c.bits)
+    values = mx.dequantize(
+        *(mx.contiguous(t[..., :L, :]) for t in c.values),
+        group_size=c.group_size, bits=c.bits)
+    return keys, values
+
+
+def dequantize_exact_row(row):
+    """A single-row exact entry with its affine layers as float KVCache.
+
+    CacheList members recover too, and other layers pass through. The
+    stock warm merge keeps a packed row packed, so the owned L1 merge
+    runs this when live batches keep float KV (MTP under uniform
+    KV_BITS), whose B=1 round stores packed rows."""
+    from mlx_vlm.models.cache import KVCache
+
+    from gmlx.cache.compat import cache_types
+
+    quant = cache_types("QuantizedKVCache")
+    lists = cache_types("CacheList")
+
+    def recover(c):
+        if isinstance(c, quant):
+            out = KVCache()
+            if c.offset:
+                out.update_and_fetch(*_dequantized_kv(c))
+            return out
+        if isinstance(c, lists):
+            members = tuple(recover(m) for m in c.caches)
+            if any(m is not o for m, o in zip(members, c.caches)):
+                return type(c)(*members)
+        return c
+
+    return [recover(c) for c in row]
 
 
 def kvarn_lift_cache(c):

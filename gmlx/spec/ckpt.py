@@ -132,14 +132,19 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # exact/anchor clones carry single-row leaves (left_padding
             # None, scalar offsets) and crash the batch cache classes'
             # update path (mx.depends on a None) when the suffix forwards.
-            # kv_quant_config re-quantizes the float snapshot to the live
-            # _make_cache layer types under serve kv_bits (stored exact
-            # entries stay float; a float row joining a quantized batch
-            # breaks the update path).
+            # The merged row must also carry the live batch layer types, or
+            # it cannot join a batch. The merge keeps a packed row packed,
+            # and kv_quant_config converts a float row to the live packed
+            # types. With no live config (MTP batches run float KV under
+            # uniform KV_BITS), packed rows from the B=1 round recover to
+            # float first.
             from mlx_vlm import apc as _apc
+            cfg = _live_kv_quant_config(batch.model)
+            if cfg is None:
+                from gmlx.spec.kv_quant import dequantize_exact_row
+                warm = dequantize_exact_row(warm)
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
-                [warm], prefix_lens=[prefix_len],
-                kv_quant_config=_live_kv_quant_config(batch.model))
+                [warm], prefix_lens=[prefix_len], kv_quant_config=cfg)
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
