@@ -37,6 +37,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether or not it reused a cached prefix.
 - A Gemma-4 12B image request served with MTP (`--draft-gguf`) could answer
   wrongly when the prompt was longer than one prefill step.
+- A Gemma-4 12B request holding both an image and audio could answer wrongly,
+  and answered differently with MTP than without it.
 - With `--kv-bits`, MTP and the prefix cache on, a request that reused a
   cached prefix could fail when it joined a batch that was already decoding.
 

@@ -42,6 +42,12 @@ copies of the pinned upstream implementations (seam-fingerprinted in
 upstream_seams.json); module-level collaborators (create_attention_mask,
 scaled_dot_product_attention, ...) are resolved through the upstream module
 at call time so other patches compose.
+
+The same install also wraps the gemma4 chunking policies, a correctness
+fix that GMLX_G4_NOSYNC=0 leaves in place. Under bidirectional image
+attention the image overlay applies with or without audio, as in
+transformers, so a prompt holding image or video tokens prefills in one
+pass. Stock allows chunking once audio is present.
 """
 from __future__ import annotations
 
@@ -64,11 +70,75 @@ def _cache_has_prefix(c) -> bool:
         return True
 
 
+def _visual_tokens(token_types) -> bool:
+    return (token_types is not None
+            and int(mx.sum((token_types == 1) | (token_types == 2)).item()) > 0)
+
+
+def _token_types(kwargs: dict):
+    types = kwargs.get("mm_token_type_ids", None)
+    return kwargs.get("token_type_ids", None) if types is None else types
+
+
+def _visual_request(config, input_ids, kwargs: dict) -> bool:
+    """Image or video tokens in the request, from its token types, else
+    from its ids."""
+    types = _token_types(kwargs)
+    if types is not None:
+        return _visual_tokens(types)
+    if input_ids is None:
+        return False
+    ids = [getattr(config, k, None) for k in ("image_token_id", "video_token_id")]
+    return any(i is not None and int(mx.sum(input_ids == i).item()) > 0
+               for i in ids)
+
+
+def _install_image_chunking_policy() -> None:
+    """Decline chunked prefill for a prompt holding image or video tokens
+    under bidirectional image attention, whether or not it holds audio.
+    Stock allows chunking once audio is present, while the image overlay
+    still needs the whole prompt in one pass from column 0. Idempotent."""
+    try:
+        from mlx_vlm.models.gemma4 import language as g4
+    except ImportError:
+        return
+    policy = getattr(g4.LanguageModel, "chunked_prefill_policy", None)
+    if policy is not None and getattr(policy, "_gmlx_orig", None) is None:
+        def chunked_prefill_policy(self, **kwargs):
+            if (getattr(self.config, "use_bidirectional_attention", None)
+                    == "vision"
+                    and _visual_tokens(
+                        _token_types(kwargs.get("prefill_kwargs") or {}))):
+                return False
+            return policy(self, **kwargs)
+
+        chunked_prefill_policy.__dict__["_gmlx_orig"] = policy
+        g4.LanguageModel.chunked_prefill_policy = chunked_prefill_policy
+
+    try:
+        from mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
+    except ImportError:
+        return
+    decline = getattr(g4u.Model, "_should_disable_chunked_prefill", None)
+    if decline is not None and getattr(decline, "_gmlx_orig", None) is None:
+        def _should_disable_chunked_prefill(self, input_ids=None, **kwargs):
+            if (getattr(self, "_base_no_chunked_prefill", False)
+                    and _visual_request(self.config, input_ids, kwargs)):
+                return True
+            return decline(self, input_ids, **kwargs)
+
+        _should_disable_chunked_prefill.__dict__["_gmlx_orig"] = decline
+        g4u.Model._should_disable_chunked_prefill = (
+            _should_disable_chunked_prefill)
+
+
 def install_gemma4_nosync() -> bool:
     """Replace the two host-syncing gemma4 call sites. Idempotent; no-op when
     GMLX_G4_NOSYNC=0 or the gemma4 module is unavailable. Returns True if the
-    patch is active."""
+    patch is active. The image chunking policy installs first, whatever
+    GMLX_G4_NOSYNC says."""
     global _installed
+    _install_image_chunking_policy()
     if not env_bool("GMLX_G4_NOSYNC", True):
         return False
     if _installed:
@@ -88,10 +158,6 @@ def install_gemma4_nosync() -> bool:
         # _cache_has_prefix (no .item()). Everything else verbatim.
         mask = {}
         masks = []
-        has_audio_tokens = (
-            mm_token_type_ids is not None
-            and int(mx.sum(mm_token_type_ids == 3).item()) > 0
-        )
         has_visual_tokens = (
             mm_token_type_ids is not None
             and int(mx.sum(
@@ -101,7 +167,6 @@ def install_gemma4_nosync() -> bool:
             getattr(self.config, "use_bidirectional_attention", None) == "vision"
             and mm_token_type_ids is not None
             and has_visual_tokens
-            and not has_audio_tokens
             and h.shape[1] > 1
         )
         for lyr, c in zip(self.layers, cache):

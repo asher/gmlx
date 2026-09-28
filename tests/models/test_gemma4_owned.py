@@ -373,6 +373,30 @@ def test_make_masks_mirror():
     )
 
 
+def test_nosync_make_masks_mirror():
+    """gemma4_sync carries its own copy of the same body for stock-built
+    trees."""
+    assert gemma4_sync.install_gemma4_nosync()
+    carried = _G.Gemma4TextModel._make_masks
+    assert getattr(carried, "_gmlx_orig", None) is not None
+    _assert_mirror(
+        carried,
+        _upstream(carried),
+        [
+            ("mm_token_type_ids: Optional[mx.array]=None)",
+             "mm_token_type_ids=None)", 1),
+            ("for l, c in zip(self.layers, cache)",
+             "for lyr, c in zip(self.layers, cache)", 1),
+            ("l.layer_type", "lyr.layer_type", 11),
+            ("(int(mx.max(mx.array(c.offset)).item()) > 0)",
+             "_cache_has_prefix(c)", 1),
+            ("create_attention_mask(", "g4.create_attention_mask(", 2),
+            ("create_causal_mask(", "g4.create_causal_mask(", 1),
+        ],
+        "Gemma4TextModel._make_masks (gemma4_sync)",
+    )
+
+
 def test_attention_call_mirror():
     _assert_mirror(
         gemma4_owned._owned_attention_call,

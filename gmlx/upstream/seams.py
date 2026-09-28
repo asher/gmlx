@@ -119,8 +119,18 @@ SEAMS: tuple[Seam, ...] = (
     # subclass override and mirror the same bodies; the pins stay live for
     # stock-built trees (multimodal construction, GMLX_GEMMA_OWNED=0). ---
     Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
-         "gemma4_sync.install_gemma4_nosync (body carried, offset probe); "
-         "gemma4_owned._owned_make_masks (mirror)"),
+         "gemma4_sync.install_gemma4_nosync (body carried and mirror-tested, "
+         "offset probe); gemma4_owned._owned_make_masks (mirror)"),
+    # A correctness fix installed by the same call, ahead of its kill switch.
+    Seam("mlx_vlm.models.gemma4.language", "LanguageModel.chunked_prefill_policy",
+         "gemma4_sync._install_image_chunking_policy (wrap: declines for any "
+         "image or video token under bidirectional image attention, audio "
+         "or not; the owned MTP target inherits it)", critical=True),
+    Seam("mlx_vlm.models.gemma4_unified.gemma4_unified",
+         "Model._should_disable_chunked_prefill",
+         "gemma4_sync._install_image_chunking_policy (wrap: the per-request "
+         "stamp declines for any image or video token, audio or not)",
+         critical=True),
     Seam("mlx_vlm.models.gemma4.language", "Attention.__call__",
          "gemma4_sync.install_gemma4_nosync (body carried, offset wrap); "
          "gemma4_owned._owned_attention_call (mirror)"),
