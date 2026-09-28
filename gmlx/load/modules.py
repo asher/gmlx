@@ -52,8 +52,8 @@ _SWITCH_TYPES = None
 def switch_layer_types() -> tuple[tuple[type, ...], tuple[type, ...]]:
     """(SwitchLinear origins, SwitchGLU origins) for identity checks.
 
-    mlx-vlm 0.6.4 vendored mlx-lm's switch_layers module, so models built
-    from mlx-vlm instantiate its copies of these classes - functionally
+    mlx-vlm vendors mlx-lm's switch_layers module, so models built from
+    mlx-vlm instantiate its copies of these classes - functionally
     identical but distinct types. Every isinstance/type check on MoE expert
     layers must accept either origin. Lazy: importing mlx_vlm here would pull
     the whole VLM stack into plain text-model loads.
@@ -61,14 +61,10 @@ def switch_layer_types() -> tuple[tuple[type, ...], tuple[type, ...]]:
     global _SWITCH_TYPES
     if _SWITCH_TYPES is None:
         from mlx_lm.models.switch_layers import SwitchGLU
-        lin, glu = (SwitchLinear,), (SwitchGLU,)
-        try:
-            from mlx_vlm.models import switch_layers as _vlm_sl
-            lin += (_vlm_sl.SwitchLinear,)
-            glu += (_vlm_sl.SwitchGLU,)
-        except ImportError:  # mlx-vlm <= 0.6.3 (uses mlx-lm's) or absent
-            pass
-        _SWITCH_TYPES = (lin, glu)
+        from mlx_vlm.models import switch_layers as _vlm_sl
+
+        _SWITCH_TYPES = ((SwitchLinear, _vlm_sl.SwitchLinear),
+                         (SwitchGLU, _vlm_sl.SwitchGLU))
     return _SWITCH_TYPES
 
 

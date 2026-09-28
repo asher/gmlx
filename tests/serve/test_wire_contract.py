@@ -133,9 +133,9 @@ def _fake_get_cached_model(model_path, adapter_path=None, *, model_kind="auto"):
     entry = {"model_path": load_path, "processor": _PROCESSOR,
              "config": _CONFIG}
     mc = _RUNTIME.model_cache
-    if hasattr(mc, "ensure_kind"):  # ModelCacheRegistry (mlx-vlm >= 0.6.4)
+    if hasattr(mc, "ensure_kind"):  # ModelCacheRegistry
         mc.ensure_kind().update(entry)
-    else:  # plain dict (<= 0.6.3)
+    else:  # the fixture's plain dict, before stock converts it on first read
         mc.update(entry)
     return object(), _PROCESSOR, _CONFIG
 
@@ -909,10 +909,10 @@ def test_profile_sampling_reaches_generation_over_wire(wire):
     assert r.status_code == 400, r.text
 
 
-# 13. runtime.model_cache shape contract. mlx-vlm >= 0.6.4 replaces the
-#     runtime's model_cache dict with a ModelCacheRegistry; residency reads
-#     pooled entries duck-typed (entry.model_cache["model"], .get(...)), and
-#     upstream's _model_cache_registry() converts a plain dict in place. Pin
+# 13. runtime.model_cache shape contract. mlx-vlm keeps the runtime's
+#     model_cache in a ModelCacheRegistry; residency reads pooled entries
+#     duck-typed (entry.model_cache["model"], .get(...)), and upstream's
+#     _model_cache_registry() converts a plain dict in place. Pin
 #     the two operations residency performs against the registry so an
 #     upstream reshape of the registry names itself here rather than as a
 #     500 deep inside a pooled request (found live: this file's fake loader
@@ -928,9 +928,7 @@ def test_systemone_over_the_full_patch_set_checks_a_text_model_body_for_letters(
 
 def test_model_cache_registry_supports_residency_reads():
     runtime_mod = importlib.import_module("mlx_vlm.server.runtime")
-    registry_cls = getattr(runtime_mod, "ModelCacheRegistry", None)
-    if registry_cls is None:
-        pytest.skip("mlx-vlm <= 0.6.3: runtime.model_cache is a plain dict")
+    registry_cls = runtime_mod.ModelCacheRegistry
     model, proc, cfg = object(), object(), object()
     reg = registry_cls()
     # empty registry reads like an empty cache (the scratch-load contract)

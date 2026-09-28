@@ -18,8 +18,7 @@ from gmlx.cache.snapshot import (
 )
 
 # Runtime-origin cache classes: these fixtures stand in for caches the
-# mlx-vlm generate stack builds, which since 0.6.4 are vlm-origin (on 0.6.3
-# the vlm module re-exports mlx-lm's, so the classes are the same there).
+# mlx-vlm generate stack builds, which are vlm-origin.
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 BatchKVCache = _cache.BatchKVCache

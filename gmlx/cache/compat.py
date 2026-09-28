@@ -1,9 +1,8 @@
 """Dual-origin KV-cache class compatibility.
 
-mlx-vlm <= 0.6.3 re-exported mlx-lm's cache classes, so a cache kind had one
-class identity everywhere. 0.6.4 vendored models/cache.py: the same kind now
-has two identities, and which one a live cache carries depends on who built
-it (mlx-vlm's models/generate stack vs mlx-lm's). Shared code paths must not
+mlx-vlm vendors mlx-lm's models/cache.py, so a cache kind has two class
+identities, and which one a live cache carries depends on who built it
+(mlx-vlm's models/generate stack vs mlx-lm's). Shared code paths must not
 assume either origin:
 
 - ``cache_types(name)`` returns every loaded origin's class for isinstance
@@ -13,8 +12,7 @@ assume either origin:
   stack.
 - ``runtime_cache_module()`` returns the cache module whose classes the
   mlx-vlm runtime (apc.py isinstance gates, ar.py batch machinery) expects;
-  use it to construct caches that will be handed to that machinery. On
-  <= 0.6.3 it resolves to the same classes as mlx-lm's.
+  use it to construct caches that will be handed to that machinery.
 """
 from __future__ import annotations
 
@@ -82,8 +80,8 @@ def _rebind_entry(c, vlm) -> None:
 
 def ensure_runtime_origin_make_cache(model):
     """Wrap ``model.make_cache`` so served caches carry the mlx-vlm
-    runtime's class identities. Since 0.6.4 apc/ar isinstance-gate on
-    those; an mlx-lm-arch model served through the vlm engine otherwise
+    runtime's class identities. apc/ar isinstance-gate on those; an
+    mlx-lm-arch model served through the vlm engine otherwise
     resolves ``model_apc_mode`` to None and silently loses APC entirely.
     Idempotent; no-op for models without ``make_cache``.
     """

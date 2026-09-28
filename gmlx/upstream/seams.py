@@ -520,9 +520,7 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.generate", "maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement)", critical=True),
-    # --- cache classes (dual-origin via gmlx.cache.compat; on <= 0.6.3
-    # the vlm module re-exports mlx-lm's classes, so these fingerprint the
-    # same source) ---
+    # --- cache classes (dual-origin via gmlx.cache.compat) ---
     Seam("mlx_vlm.models.cache", "KVCache",
          "cache_compat (ckpt sidecar tails, snapshots)", critical=True),
     Seam("mlx_vlm.models.cache", "RotatingKVCache",
@@ -554,25 +552,22 @@ SEAMS: tuple[Seam, ...] = (
          "spec_helpers rollback-slack wrap", critical=True),
     Seam("mlx_vlm.models.cache", "make_prompt_cache",
          "chat MTP cache construction", critical=True),
-    # 0.6.4 replaced the runtime's model_cache dict with a registry;
-    # residency and the wire tests speak both shapes.
     Seam("mlx_vlm.server.runtime", "ModelCacheRegistry",
-         "residency pool / test_wire_contract fake loader",
-         attr_optional=True),
-    # --- vendored switch_layers (exists only on mlx-vlm >= 0.6.4) ---
+         "residency pool / test_wire_contract fake loader"),
+    # --- vendored switch_layers ---
     Seam("mlx_vlm.models.switch_layers", "SwitchLinear.__call__",
          "modules.switch_layer_types (dual-origin leaf swap)",
-         critical=True, module_optional=True),
+         critical=True),
     Seam("mlx_vlm.models.switch_layers", "SwitchGLU.__call__",
          "modules.switch_layer_types (dual-origin fused GLU); "
          "modules.install_switch_glu_block_routing (a block of 2 to "
          "DECODE_BLOCK_SIZE positions loops per token when the exact "
          "kernels decline)",
-         critical=True, module_optional=True),
+         critical=True),
     Seam("mlx_vlm.models.switch_layers", "SwitchGLU._combine",
          "modules._BlockRoutedSwitchGLU (block call, then the stock "
          "weights, shared and residual combine)",
-         critical=True, module_optional=True),
+         critical=True),
     # --- structured reads on DiffusionGemma (systemone) ---
     # The read presents a batch-N prompt K/V to the stock decoder through
     # per-layer views that carry keys, offset and decoder_state.

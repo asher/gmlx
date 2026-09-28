@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Dual-origin switch-layer recognition. mlx-vlm 0.6.4 vendored mlx-lm's
+"""Dual-origin switch-layer recognition. mlx-vlm vendors mlx-lm's
 switch_layers module, so MoE models built from it instantiate functionally
 identical but distinct SwitchLinear/SwitchGLU classes; the leaf swap and the
 fused-GLU installer must accept either origin, and a codec'd leaf nobody
 recognizes must fail loud instead of loading wire bytes into a stock float
 module (which surfaces later as an opaque gather_mm shape error)."""
 from __future__ import annotations
-
-import sys
-import types
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -21,29 +18,9 @@ import gmlx.load.modules as modules
 
 @pytest.fixture
 def vlm_switch_module(monkeypatch):
-    """The mlx_vlm switch_layers module: the real one when installed
-    (mlx-vlm >= 0.6.4), else a stand-in registered at its import path so the
-    dual-origin mechanism is exercised on 0.6.3 too."""
-    try:
-        from mlx_vlm.models import switch_layers as vlm_sl
-    except ImportError:
-        vlm_sl = types.ModuleType("mlx_vlm.models.switch_layers")
+    """The mlx_vlm switch_layers module."""
+    from mlx_vlm.models import switch_layers as vlm_sl
 
-        class SwitchLinear(lm_sl.SwitchLinear):
-            pass
-
-        class SwitchGLU(lm_sl.SwitchGLU):
-            pass
-
-        SwitchLinear.__module__ = vlm_sl.__name__
-        SwitchGLU.__module__ = vlm_sl.__name__
-        vlm_sl.SwitchLinear = SwitchLinear
-        vlm_sl.SwitchGLU = SwitchGLU
-        monkeypatch.setitem(
-            sys.modules, "mlx_vlm.models.switch_layers", vlm_sl)
-        import mlx_vlm.models as vlm_models
-        monkeypatch.setattr(
-            vlm_models, "switch_layers", vlm_sl, raising=False)
     monkeypatch.setattr(modules, "_SWITCH_TYPES", None)
     yield vlm_sl
     modules._SWITCH_TYPES = None
