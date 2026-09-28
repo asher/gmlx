@@ -46,6 +46,7 @@ from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_sta
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
 from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
 from gmlx.upstream.batch_finalize_fix import install_batch_finalize_fix
+from gmlx.upstream.batch_rotating_mask_fix import install_batch_rotating_mask_fix
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.quantized_cache_pack_fix import (
@@ -1197,6 +1198,7 @@ def _install_and_load(
     install_rotating_cache_fix()
     install_arrays_cache_fix()
     install_batch_finalize_fix()
+    install_batch_rotating_mask_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -1698,6 +1700,7 @@ def load_model(
     install_rotating_cache_fix()
     install_arrays_cache_fix()
     install_batch_finalize_fix()
+    install_batch_rotating_mask_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")

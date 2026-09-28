@@ -47,6 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cached prefix could fail when it joined a batch that was already decoding.
 - Concurrent requests on a Gemma-4 model that shared a prompt prefix of 1024
   or more tokens could decode wrong tokens.
+- Concurrent MTP requests on a Gemma-4 model could decode wrong tokens in a
+  short request batched with one longer than the sliding window.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
 - A Gemma-4 image request on a model other than E2B, E4B and 12B, such as

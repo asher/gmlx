@@ -8,7 +8,8 @@ fixed-step loop behind run and chat. A block longer than the step
 prefills whole in one chunk. Each chunk's sliding mask carries the block
 overlay on its own columns, so the logits match transformers run on the
 whole prompt, and the sliding caches stay within the window plus one
-chunk. Runs on the CPU stream.
+chunk. A left-padded row keeps its first real key when a one-column chunk
+past a full window comes before a block's chunk. Runs on the CPU stream.
 """
 
 import mlx.core as mx
@@ -22,6 +23,9 @@ import gmlx.load.vlm as gvlm
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.gen import media_spans
+from gmlx.upstream.batch_rotating_mask_fix import (
+    install_batch_rotating_mask_fix,
+)
 
 from test_gemma4_image_masks import (
     _N,
@@ -53,6 +57,8 @@ def chunked(monkeypatch):
     # Serve's order: the span wrapper goes outside the MTP body.
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()
+    # The loader installs the stock mask fix with every model.
+    assert install_batch_rotating_mask_fix()
 
 
 def _serve(m, rows, embeds, types, mtp, on_chunk=None):
@@ -167,6 +173,37 @@ def test_a_left_padded_image_batch_chunks_and_matches_each_row(
     assert chunks == [6, 28, 5]
     shifted = (short_block[0] + pad, short_block[1] + pad)
     assert _cuts(chunks, _BLOCKS + [shifted]) == []
+    for row, (e, t) in enumerate(((long_e, long_t), (short_e, short_t))):
+        ref = _reference(hf_mod, tc, hf, e, t)[-1]
+        assert np.abs(got[row] - ref).max() <= _TOL, row
+
+
+@pytest.mark.parametrize("path", ["plain", "mtp"])
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
+def test_a_block_one_column_past_a_chunk_edge_keeps_the_padded_row(
+        model_type, path, chunked):
+    """The longer row's block starts one column past a chunk edge after
+    the sliding window has filled, so a one-column chunk runs and the
+    block's chunk follows it. The left-padded row's first real key is
+    still inside the window, and each row matches transformers run on
+    that row alone."""
+    hf_mod, tc, hf, lm, target = _models(model_type, _W)
+    m = lm if path == "plain" else target
+    long_block, short, short_block = (17, 30), 25, (3, 8)
+    pad = _N - short
+    long_e, short_e = _embeds(), _embeds(short, seed=8)
+    long_t, short_t = _types([long_block]), _types([short_block], short)
+    embeds = np.concatenate([long_e, np.concatenate(
+        [np.zeros((1, pad, long_e.shape[2]), np.float32), short_e], 1)], 0)
+    types = np.concatenate([long_t, np.concatenate(
+        [np.zeros((1, pad), np.int64), short_t], 1)], 0).astype(np.int32)
+    rows = [list(range(1, _N + 1)), list(range(1, short + 1))]
+    with mx.stream(mx.cpu):
+        chunks, got = _serve(m, rows, mx.array(embeds), mx.array(types),
+                             path == "mtp")
+        got = np.array(got)
+    assert chunks == ([8, 8, 1, 13, 8, 1] if path == "plain"
+                      else [16, 1, 13, 8, 1])
     for row, (e, t) in enumerate(((long_e, long_t), (short_e, short_t))):
         ref = _reference(hf_mod, tc, hf, e, t)[-1]
         assert np.abs(got[row] - ref).max() <= _TOL, row

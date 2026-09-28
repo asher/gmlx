@@ -175,6 +175,21 @@ SEAMS: tuple[Seam, ...] = (
          "batch_finalize_fix (mlx-lm origin)"),
     Seam("mlx_lm.models.cache", "BatchRotatingKVCache.finalize",
          "batch_finalize_fix (mlx-lm origin)"),
+    # --- rotated batch rotating cache: the mask takes the concat trim ---
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.make_mask",
+         "batch_rotating_mask_fix (wrap: trim read from _idx, which a "
+         "rotated buffer holds as the ring position)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._update_concat",
+         "batch_rotating_mask_fix (the trim the mask must match, taken "
+         "after _temporal_order sets _idx to the buffer length)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._temporal_order",
+         "batch_rotating_mask_fix (sets _idx to the buffer length)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.make_mask",
+         "batch_rotating_mask_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._update_concat",
+         "batch_rotating_mask_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._temporal_order",
+         "batch_rotating_mask_fix (mlx-lm origin)"),
     # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
     Seam("mlx_lm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
