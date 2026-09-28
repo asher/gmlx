@@ -58,6 +58,7 @@ from gmlx.models.deepseek_v41.engram_codec import (
     row_width,
 )
 from gmlx.models.deepseek_v41.engram_codec import tables as engram_tables
+from gmlx.upstream.graft import graft_module
 
 DeepseekV4RoPE = _v4.DeepseekV4RoPE
 class DeepseekV41MoE(_v4.DeepseekV4MoE):
@@ -1893,9 +1894,4 @@ def ensure_registered() -> None:
     import sys
 
     _v4.ensure_registered()
-    import mlx_lm.models as _models
-
-    mod = sys.modules[__name__]
-    sys.modules.setdefault("mlx_lm.models.deepseek_v41", mod)
-    if not hasattr(_models, "deepseek_v41"):
-        _models.deepseek_v41 = mod
+    graft_module("mlx_lm.models.deepseek_v41", sys.modules[__name__])

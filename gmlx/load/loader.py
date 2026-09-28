@@ -174,7 +174,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mt == "minimax_m3":
         # mlx-lm ships no minimax_m3 module yet (PR #1401 unmerged); register
         # the vendored copy into the mlx_lm.models namespace so _get_classes
-        # (and every other importer) resolves it. Upstream wins if present.
+        # (and every other importer) resolves it, ahead of any upstream one.
         import gmlx.models.minimax_m3 as minimax_m3_model
 
         minimax_m3_model.ensure_registered()

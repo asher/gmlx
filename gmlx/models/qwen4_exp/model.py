@@ -54,26 +54,24 @@ from mlx_lm.models.gated_delta import gated_delta_update
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
+from gmlx.upstream.graft import graft_module
 from mlx_lm.models.switch_layers import SwitchGLU
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.qwen4_exp`` resolve, preferring upstream,
-    and expose ``QSAKVCache`` on the cache modules (prompt-cache save/load
-    resolves cache classes by name there; mlx-vlm >= 0.6.4 vendors its own
+    """Make ``import mlx_lm.models.qwen4_exp`` resolve to this module, ahead
+    of any upstream module of that name, and bind this module's
+    ``QSAKVCache`` on the cache modules ahead of any upstream class of that
+    name (prompt-cache save/load resolves cache classes by name there, and
+    the APC QSA arms check for this class; mlx-vlm >= 0.6.4 vendors its own
     models/cache.py, so register on both when it is loaded)."""
     import mlx_lm.models.cache as _mlx_cache
 
     vlm_cache = sys.modules.get("mlx_vlm.models.cache")
     for mod in (_mlx_cache, vlm_cache):
-        if mod is not None and not hasattr(mod, "QSAKVCache"):
+        if mod is not None:
             mod.QSAKVCache = QSAKVCache
-    if "mlx_lm.models.qwen4_exp" in sys.modules:
-        return
-    try:
-        importlib.import_module("mlx_lm.models.qwen4_exp")  # upstream wins
-    except ImportError:
-        sys.modules["mlx_lm.models.qwen4_exp"] = sys.modules[__name__]
+    graft_module("mlx_lm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

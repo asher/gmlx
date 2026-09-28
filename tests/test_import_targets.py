@@ -56,33 +56,33 @@ def test_every_upstream_graft_is_a_registered_vendored_module():
     matching registry in gmlx.upstream.seams.
 
     The registries drive the collision check that says when upstream has
-    shipped its own version and the vendored copy can go. A graft missing
-    from one is invisible to that check, so the copy shadows upstream for
-    good. Scanned on the filesystem, so a graft inside a function counts.
+    shipped its own version, for review against the vendored copy. A graft
+    missing from one is invisible to that check, so an upstream arrival
+    under its name goes unreviewed. Scanned on the filesystem, so a graft
+    inside a function counts.
     """
     import re
 
     from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
-    from gmlx.upstream.seams import (
-        UNREGISTERED_GRAFTS, VENDORED_MLX_VLM_MODULES,
-    )
+    from gmlx.upstream.seams import VENDORED_MLX_VLM_MODULES
 
     lm_modules = set(_VENDORED_MLX_LM_MODULES.values())
 
     graft = re.compile(
-        r'sys\.modules\[\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
+        r'(?:sys\.modules\[\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
+        r'|graft_module\(\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*,\s*)'
         r'sys\.modules\[__name__\]')
-    missing = []
+    missing, seen = [], set()
     for py in sorted(_ROOT.rglob("*.py")):
-        for target in graft.findall(py.read_text()):
+        for groups in graft.findall(py.read_text()):
+            target = groups[0] or groups[1]
             mod = "gmlx." + str(
                 py.relative_to(_ROOT).with_suffix("")).replace("/", ".")
             mod = mod.removesuffix(".__init__")
+            seen.add(mod)
             # The two registries key differently: mlx-vlm maps the gmlx
             # module to its upstream target, mlx-lm maps a model_type to the
             # gmlx module. Both answer "is this graft declared".
-            if mod in UNREGISTERED_GRAFTS:
-                continue
             declared = (VENDORED_MLX_VLM_MODULES.get(mod) == target
                         if target.startswith("mlx_vlm")
                         else mod in lm_modules)
@@ -90,3 +90,9 @@ def test_every_upstream_graft_is_a_registered_vendored_module():
                 missing.append(f"{mod} -> {target}")
     assert not missing, "grafts absent from the vendored registries: " + \
         ", ".join(missing)
+    # The scan must see every model graft the registries declare, or a
+    # new graft spelling would pass it unchecked.
+    declared_models = lm_modules | {
+        mod for mod, target in VENDORED_MLX_VLM_MODULES.items()
+        if target.startswith("mlx_vlm.models.")}
+    assert declared_models <= seen, sorted(declared_models - seen)

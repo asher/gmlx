@@ -10,22 +10,20 @@ from __future__ import annotations
 import importlib
 import sys
 
+from gmlx.upstream.graft import graft_module
+
 # Stock format specs sit at priority 100 and the json_tools fallback at 0.
 # A gmlx format outranks any stock spec whose markers overlap its own.
 _GMLX_PRIORITY = 200
 
 
 def register_tool_parser(name: str, module, markers) -> None:
-    """Make ``mlx_vlm.tools.parsers.<name>`` resolve to ``module`` unless
-    upstream ships one, and route templates carrying ``markers`` (an OR of
-    AND-groups of strings) to it. A spec upstream already registers under
-    ``name`` wins. Idempotent."""
-    full = f"mlx_vlm.tools.parsers.{name}"
-    if full not in sys.modules:
-        try:
-            importlib.import_module(full)  # upstream wins
-        except ImportError:
-            sys.modules[full] = module
+    """Make ``mlx_vlm.tools.parsers.<name>`` resolve to ``module``, ahead of
+    any upstream parser of that name, and route templates carrying
+    ``markers`` (an OR of AND-groups of strings) to it. A spec upstream
+    already registers under ``name`` keeps its markers and routes to
+    ``module``. Idempotent."""
+    graft_module(f"mlx_vlm.tools.parsers.{name}", module)
     try:
         registry = importlib.import_module("mlx_vlm.tools.registry")
     except ImportError:

@@ -35,7 +35,6 @@ The model has no MTP block: the converter drops the nextn layers, so this
 family cannot drive speculative decoding.
 """
 
-import importlib
 import os
 import sys
 from dataclasses import dataclass, field
@@ -60,17 +59,15 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models.hy_v4 import idx_kernels, ihc_kernels
+from gmlx.upstream.graft import graft_module
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.hy_v4`` resolve, preferring upstream, and
-    register the deepseek_v4 companions this module borrows from."""
+    """Make ``import mlx_lm.models.hy_v4`` resolve to this module, ahead of
+    any upstream module of that name, and register the deepseek_v4
+    companions this module borrows from."""
     _ds4_ensure_registered()
-    if "mlx_lm.models.hy_v4" not in sys.modules:
-        try:
-            importlib.import_module("mlx_lm.models.hy_v4")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_lm.models.hy_v4"] = sys.modules[__name__]
+    graft_module("mlx_lm.models.hy_v4", sys.modules[__name__])
 
 
 @dataclass

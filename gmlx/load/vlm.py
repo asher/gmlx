@@ -19,6 +19,7 @@ only through :func:`load_vlm_model` (CLI ``--mmproj``).
 
 from __future__ import annotations
 
+import importlib
 import re
 from typing import Any, ClassVar
 
@@ -1877,15 +1878,37 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
 
 # Build the mlx-vlm Model (bypassing mlx-vlm's nn.quantize)
 
+# VLM model types gmlx vendors, with the modules whose ensure_registered
+# grafts the gmlx model (and its tool parser) into mlx_vlm ahead of any
+# upstream package of that name.
+_VENDORED_VLM_REGISTRARS = {
+    "muse_glimmer": ("gmlx.models.muse_glimmer.vlm_model",
+                     "gmlx.models.muse_glimmer.tools"),
+    "qwen4_exp": ("gmlx.models.qwen4_exp.vlm_model",),
+    "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
+    "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
+    "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
+}
+
+
+def register_vendored_vlm_model(model_type: str) -> None:
+    """Make ``get_model_and_args`` resolve ``model_type`` to the gmlx model
+    when gmlx vendors it. Other model types resolve as upstream ships them."""
+    for name in _VENDORED_VLM_REGISTRARS.get(model_type, ()):
+        importlib.import_module(name).ensure_registered()
+
+
 def build_vlm_model(config_dict: dict):
     """Instantiate the mlx-vlm ``Model`` for ``config_dict['model_type']``.
 
     Mirrors mlx-vlm's own ``utils.load_model`` (``get_model_and_args`` +
     ``ModelConfig.from_dict`` + ``update_module_configs``) but stops before its
-    ``nn.quantize`` - exactly as the text path bypasses mlx-lm's.
+    ``nn.quantize`` - exactly as the text path bypasses mlx-lm's. A model
+    type gmlx vendors builds the gmlx class.
     """
     from mlx_vlm.utils import get_model_and_args, update_module_configs
 
+    register_vendored_vlm_model(config_dict["model_type"])
     module, _model_type = get_model_and_args(config_dict)
     cfg = module.ModelConfig.from_dict(config_dict)
     cfg = update_module_configs(
@@ -3239,9 +3262,7 @@ def _swap_qwen35_base_language_model(model, model_type: str, *, log) -> None:
     identical to the installed one."""
     if model_type not in ("qwen3_5", "qwen3_5_moe"):
         return
-    import importlib
-
-    stem = "moe_" if model_type == "qwen3_5_moe" else ""
+    stem ="moe_" if model_type == "qwen3_5_moe" else ""
     lang = importlib.import_module(f"gmlx.models.qwen35.{stem}language")
     if isinstance(model.language_model, lang.LanguageModel):
         return
@@ -3341,30 +3362,6 @@ def load_vlm_model(
     mm_arrays, mm_codecs, _mm_arch, mm_meta, mm_shapes = load_gguf_wire_bytes(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
     model_type = resolve_vlm_model_type(llm_arch, mm_meta)
-    if model_type == "muse_glimmer":
-        # mlx-vlm ships no muse_glimmer package; graft the vendored model +
-        # tool parser in before get_model_and_args resolves the model_type.
-        import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
-        import gmlx.models.muse_glimmer.vlm_model as muse_glimmer_vlm_model
-        muse_glimmer_vlm_model.ensure_registered()
-        muse_glimmer_tools.ensure_registered()
-    elif model_type == "qwen4_exp":
-        # Likewise vendored (text + wrapper; the vision tower is mlx-vlm's
-        # qwen3_5 Qwen3-VL class).
-        import gmlx.models.qwen4_exp.vlm_model as qwen4_exp_vlm_model
-        qwen4_exp_vlm_model.ensure_registered()
-    elif model_type == "glm5_next":
-        # Likewise vendored (text tower, ViT and wrapper all in-repo).
-        import gmlx.models.glm5_next.vlm_model as glm5_next_vlm_model
-        glm5_next_vlm_model.ensure_registered()
-    elif model_type == "deepseek_v4_vl":
-        # Likewise vendored; registers past mlx-vlm's text-only deepseek_v4.
-        import gmlx.models.deepseek_v4.vlm_model as deepseek_v4_vlm_model
-        deepseek_v4_vlm_model.ensure_registered()
-    elif model_type == "deepseek_v41_vl":
-        # Likewise vendored; registers past mlx-vlm's text-only deepseek_v4.
-        import gmlx.models.deepseek_v41.vlm_model as deepseek_v41_vlm_model
-        deepseek_v41_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
     if model_type in ("qwen3_5", "qwen3_5_moe"):

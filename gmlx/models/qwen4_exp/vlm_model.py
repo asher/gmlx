@@ -28,7 +28,6 @@ resolves mrope positions so verify after an image turn matches plain decode.
 
 from __future__ import annotations
 
-import importlib
 import sys
 from dataclasses import dataclass
 from typing import List, Optional, Union
@@ -46,6 +45,7 @@ from mlx_vlm.models.qwen3_5.vision import VisionModel
 from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
 from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
+from gmlx.upstream.graft import graft_module
 
 from . import model as q4
 from .model import ModelArgs as TextConfig
@@ -53,13 +53,10 @@ from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.qwen4_exp`` resolve, preferring upstream."""
+    """Make ``mlx_vlm.models.qwen4_exp`` resolve to this module, ahead of any
+    upstream module of that name."""
     q4.ensure_registered()
-    if "mlx_vlm.models.qwen4_exp" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.models.qwen4_exp")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.models.qwen4_exp"] = sys.modules[__name__]
+    graft_module("mlx_vlm.models.qwen4_exp", sys.modules[__name__])
 
 
 @dataclass

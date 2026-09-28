@@ -16,8 +16,8 @@ mlx-vlm's parser registry knows none of this: its template-marker inference
 (``mlx_vlm.tools.registry.SPECS``) matches bare ``<arg_key>`` etc., and the
 HY4 template defines its tags via ``'<arg_key{}>'.format(HYTK)`` so no stock
 marker fires. ``ensure_registered()`` grafts this module in as
-``mlx_vlm.tools.parsers.hy_v4`` (upstream-first, same pattern as
-``hy_v4_model``) and registers the HY4 markers so
+``mlx_vlm.tools.parsers.hy_v4`` (ahead of any upstream parser of that name,
+as ``hy_v4_model`` does for its model) and registers the HY4 markers so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
 Parser contract (see ``mlx_vlm.tools.base.ToolParser``):
@@ -123,8 +123,9 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tools.parsers.hy_v4`` resolve (upstream wins) and route
-    templates carrying the HY4 spellings to it. Idempotent."""
+    """Make ``mlx_vlm.tools.parsers.hy_v4`` resolve to this module, ahead of
+    any upstream parser of that name, and route templates carrying the HY4
+    spellings to it. Idempotent."""
     from gmlx.upstream.tool_parsers import register_tool_parser
 
     register_tool_parser("hy_v4", sys.modules[__name__], _TEMPLATE_MARKERS)

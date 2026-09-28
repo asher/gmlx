@@ -4,9 +4,9 @@
 # (Blaizzy/mlx-lm branch pc/add-deepseekv4flash-model, head 5c10538) by way
 # of omlx's patches/deepseek_v4/deepseek_v4_model.py port, pending upstream
 # merge. Registered into the mlx_lm.models namespace at load time by
-# ensure_registered() below (upstream wins if a real
-# mlx_lm.models.deepseek_v4 exists). Delete this file once the installed
-# mlx-lm ships models/deepseek_v4.py.
+# ensure_registered() below, ahead of any upstream mlx_lm.models.deepseek_v4.
+# Once the installed mlx-lm ships models/deepseek_v4.py, the seams collision
+# check flags it for review against this copy.
 #
 # Deviations from PR 1192:
 #  - omlx custom-kernel dispatch (glm_moe_dsa sparse-attention/indexer
@@ -25,7 +25,6 @@
 #    Without these the lightning indexer's top-k selection diverges from
 #    the model's training-time graph.
 
-import importlib
 import math
 import os
 import sys
@@ -60,6 +59,7 @@ from gmlx.models.deepseek_v4.hyper_connection import (
     hc_expand_collapse,
     hc_expand_m1,
 )
+from gmlx.upstream.graft import graft_module
 
 
 # Native DSA kernels (mlx-kquant builds that ship dsa_sparse_attention /
@@ -288,12 +288,13 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 
 
 def ensure_registered() -> None:
-    """Make ``import mlx_lm.models.deepseek_v4`` resolve, preferring
-    upstream, and expose the pooling caches on ``mlx_lm.models.cache``
-    (name-based cache-class resolution and isinstance checks in shared
-    code paths look them up there; since mlx-vlm 0.6.4 vendored its own
-    models/cache.py, its shared paths resolve there instead, so register
-    on both when it is loaded)."""
+    """Make ``import mlx_lm.models.deepseek_v4`` resolve to this module,
+    ahead of any upstream module of that name, and expose the pooling
+    caches on the cache modules that lack them (name-based cache-class
+    resolution and isinstance checks in shared code paths look them up
+    there). mlx-vlm's models/cache.py ships its own PoolingCache, which
+    stays: gmlx.cache.apc_pooling registers this module's classes with
+    APC directly."""
     import mlx_lm.models.cache as _mlx_cache
 
     vlm_cache = sys.modules.get("mlx_vlm.models.cache")
@@ -301,12 +302,7 @@ def ensure_registered() -> None:
         if mod is not None and not hasattr(mod, "PoolingCache"):  # upstream wins
             mod.PoolingCache = PoolingCache
             mod.BatchPoolingCache = BatchPoolingCache
-    if "mlx_lm.models.deepseek_v4" in sys.modules:
-        return
-    try:
-        importlib.import_module("mlx_lm.models.deepseek_v4")  # upstream wins
-    except ImportError:
-        sys.modules["mlx_lm.models.deepseek_v4"] = sys.modules[__name__]
+    graft_module("mlx_lm.models.deepseek_v4", sys.modules[__name__])
 
 
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))

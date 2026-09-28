@@ -628,23 +628,27 @@ def check_seams() -> list[str]:
 
 
 def vendored_upstream_collisions() -> list[str]:
-    """Vendored mlx-lm model modules that upstream now ships natively.
+    """Vendored modules whose name upstream now ships, not yet recorded in
+    ``KNOWN_UPSTREAM_ARRIVALS``.
 
-    Our vendored modules register themselves into ``sys.modules`` under the
-    mlx_lm.models namespace, so an upstream module of the same name would be
-    silently shadowed; flag it so the vendored copy gets reconciled/dropped.
+    Each vendored module grafts itself into the upstream namespace ahead of
+    an upstream module of the same name, so an arrival changes nothing at
+    run time. Flagging it gets the upstream version reviewed as a candidate
+    to A/B against the vendored one.
     """
     from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
     import mlx_lm.models as lm_models
     root = os.path.dirname(lm_models.__file__)
     hits = []
-    for mod_name in _VENDORED_MLX_LM_MODULES:
+    for mod_name, gmlx_mod in _VENDORED_MLX_LM_MODULES.items():
+        if gmlx_mod in KNOWN_UPSTREAM_ARRIVALS:
+            continue
         leaf = mod_name.rsplit(".", 1)[-1]
         if os.path.exists(os.path.join(root, f"{leaf}.py")):
             hits.append(
-                f"{mod_name}: upstream mlx-lm now ships this module; the "
-                f"vendored copy shadows it - reconcile and drop the vendor "
-                f"entry (arch_table._VENDORED_MLX_LM_MODULES)")
+                f"{mod_name}: upstream mlx-lm now ships this module and "
+                f"{gmlx_mod} stays registered ahead of it. Review upstream's "
+                f"version and record the release in KNOWN_UPSTREAM_ARRIVALS")
     hits += _vendored_vlm_collisions()
     return hits
 
@@ -653,34 +657,34 @@ def vendored_upstream_collisions() -> list[str]:
 # Each is a package directory upstream, so a native arrival shows up as either
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {
-    # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
-    # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
-    # pin. Delete the module at the vendoring review.
-    "gmlx.models.deepseek_v41.tools": "mlx_vlm.tool_parsers.deepseek_v41",
-    "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
-    "gmlx.models.hy_v4.tools": "mlx_vlm.tool_parsers.hy_v4",
-    "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",
-    "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
+    "gmlx.models.deepseek_v41.tools": "mlx_vlm.tools.parsers.deepseek_v41",
+    "gmlx.models.hy_v3.tools": "mlx_vlm.tools.parsers.hy_v3",
+    "gmlx.models.hy_v4.tools": "mlx_vlm.tools.parsers.hy_v4",
+    "gmlx.models.muse_glimmer.tools": "mlx_vlm.tools.parsers.muse_glimmer",
+    "gmlx.models.deepseek_v4.vlm_model": "mlx_vlm.models.deepseek_v4_vl",
+    "gmlx.models.deepseek_v41.vlm_model": "mlx_vlm.models.deepseek_v41_vl",
     "gmlx.models.glm5_next.vlm_model": "mlx_vlm.models.glm5_next",
+    "gmlx.models.muse_glimmer.vlm_model": "mlx_vlm.models.muse_glimmer",
+    "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
 }
 
-# Grafts deliberately left out of the registry above, with the reason. Only
-# the vendoring review clears an entry from here.
-UNREGISTERED_GRAFTS = {
-    # Upstream ships mlx_vlm.models.muse_glimmer as of 0.6.15, so registering
-    # this would report a collision that is already known and already
-    # answered: the graft is upstream-first, the vendored copy is dead under
-    # this pin, and it goes at the vendoring review with the module.
-    "gmlx.models.muse_glimmer.vlm_model",
+# Vendored modules whose name upstream also ships, with the upstream release
+# in which the arrival was recorded. The gmlx module still resolves first;
+# the upstream one is a candidate to A/B against it. The collision checks
+# skip these entries and flag any other arrival.
+KNOWN_UPSTREAM_ARRIVALS = {
+    "gmlx.models.muse_glimmer.vlm_model": "mlx-vlm 0.6.15",
+    "gmlx.models.glm5_next.vlm_model": "mlx-vlm 0.7.3",
+    "gmlx.models.qwen4_exp.vlm_model": "mlx-vlm 0.7.3",
 }
 
 
 def _vendored_vlm_collisions() -> list[str]:
-    """Same check on the mlx-vlm side: our grafts are upstream-first at import
-    time, but a native module arriving under a name we also register is the
-    signal to drop the vendored copy rather than keep shadowing it."""
+    """Same check on the mlx-vlm side."""
     hits = []
     for mod_name, target in VENDORED_MLX_VLM_MODULES.items():
+        if mod_name in KNOWN_UPSTREAM_ARRIVALS:
+            continue
         pkg, _, leaf = target.rpartition(".")
         try:
             parent = importlib.import_module(pkg)
@@ -692,9 +696,10 @@ def _vendored_vlm_collisions() -> list[str]:
         if (os.path.exists(os.path.join(root, f"{leaf}.py"))
                 or os.path.isdir(os.path.join(root, leaf))):
             hits.append(
-                f"{mod_name}: upstream mlx-vlm now ships {target}; the "
-                f"vendored copy is only a fallback - reconcile and drop the "
-                f"vendor entry (upstream_seams.VENDORED_MLX_VLM_MODULES)")
+                f"{mod_name}: upstream mlx-vlm now ships {target} and the "
+                f"gmlx module stays registered ahead of it. Review "
+                f"upstream's version and record the release in "
+                f"KNOWN_UPSTREAM_ARRIVALS")
     return hits
 
 

@@ -6,8 +6,8 @@ Pairs the vendored V4 text tower (:mod:`gmlx.models.deepseek_v4.model`)
 with the DeepSeek ViT + aligner (:mod:`gmlx.models.deepseek_v4.vision`) in
 the ``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack
 expects. The container registers under its own model_type
-(``deepseek_v4_vl``): mlx-vlm ships a text-only ``deepseek_v4`` shim that
-would otherwise win the upstream-first registration.
+(``deepseek_v4_vl``), which leaves mlx-vlm's text-only ``deepseek_v4``
+package in place.
 
 Image turns (reference ``inference/model.py``): the processor expands each
 ``<|deepseek_image|>`` placeholder into a block of sentinel ids past the
@@ -23,7 +23,6 @@ decode tokens and text chunks run the unchanged text paths.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -33,6 +32,8 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures
+
+from gmlx.upstream.graft import graft_module
 
 from .image_block import (
     IMAGE,
@@ -66,14 +67,10 @@ __all__ = [
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve, preferring upstream."""
+    """Make ``mlx_vlm.models.deepseek_v4_vl`` resolve to this module, ahead
+    of any upstream module of that name."""
     _text_ensure_registered()
-    name = f"mlx_vlm.models.{MODEL_TYPE}"
-    if name not in sys.modules:
-        try:
-            importlib.import_module(name)  # upstream wins
-        except ImportError:
-            sys.modules[name] = sys.modules[__name__]
+    graft_module("mlx_vlm.models.deepseek_v4_vl", sys.modules[__name__])
 
 
 @dataclass
