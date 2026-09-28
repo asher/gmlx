@@ -55,6 +55,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image token saw only the image tokens before it.
 - On a request without tools, a reply holding tool-call text left less of the
   conversation in the prefix cache for the next turn.
+- A model whose load failed after its weights were read, as when its
+  `--kv-bits` setting was refused, stayed in memory.
 
 ## [0.4.19] - 2026-09-27
 

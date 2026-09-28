@@ -244,9 +244,13 @@ def test_channel_pop_returns_and_clears():
 
 # -- residency wiring --
 
-def make_pool(*, enabled_windows=True, fail=False):
+def make_pool(*, enabled_windows=True, fail=False, registry=False):
     """Pool whose fake stock load plays the bridge's part: records the APC env
-    it sees and publishes a manager on the channel when the gmlx gate is on."""
+    it sees and publishes a manager on the channel when the gmlx gate is on.
+    ``registry`` leaves the model cache as the ModelCacheRegistry stock
+    load turns the dict into."""
+    from mlx_vlm.server.runtime import ModelCacheRegistry
+
     proxy = _RuntimeProxy(SimpleNamespace(metrics=None))
     seen = []
     built = []
@@ -254,7 +258,13 @@ def make_pool(*, enabled_windows=True, fail=False):
     def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
         seen.append({k: os.environ.get(k)
                      for k in ("APC_ENABLED", "GMLX_APC_ENABLED")})
-        proxy.model_cache = {"model_path": model_path, "apc_manager": None}
+        cache = {"model_path": model_path, "apc_manager": None}
+        if registry:
+            reg = ModelCacheRegistry()
+            reg.set("text_generation", cache)
+            proxy.model_cache = reg
+        else:
+            proxy.model_cache = cache
         proxy.response_generator = SimpleNamespace(apc_manager=None)
         proxy.apc_manager = None                    # stock: from_env returned None
         if os.environ.get("GMLX_APC_ENABLED") == "1":
@@ -276,14 +286,15 @@ def _acq(pool, path, **kw):
     return e
 
 
-def test_manager_wired_into_entry_cache_and_rg(monkeypatch):
+@pytest.mark.parametrize("registry", [False, True], ids=["dict", "registry"])
+def test_manager_wired_into_entry_cache_and_rg(monkeypatch, registry):
     monkeypatch.delenv("APC_ENABLED", raising=False)
     monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
-    _proxy, pool, seen, built = make_pool()
+    _proxy, pool, seen, built = make_pool(registry=registry)
     e = _acq(pool, "/m/a.gguf", env={"APC_ENABLED": "1"})
     assert built == ["GMLX-APC:/m/a.gguf"]
     assert e.apc_manager == built[0]                       # proxy target
-    assert e.model_cache["apc_manager"] == built[0]        # unload/reuse dict
+    assert e.model_cache["apc_manager"] == built[0]        # unload/reuse cache
     assert e.response_generator.apc_manager == built[0]    # lazy BatchGenerator read
     assert serving.pop_built_apc_manager() is None         # channel drained
     assert os.environ.get("APC_ENABLED") is None           # window restored

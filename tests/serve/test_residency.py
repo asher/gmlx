@@ -955,3 +955,29 @@ def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
         names.append(tb.tb_frame.f_code.co_name)
         tb = tb.tb_next
     assert "failing_stock_get" not in names
+
+
+def test_failed_build_of_a_registry_cache_is_torn_down(monkeypatch):
+    """Stock load turns the model cache into mlx-vlm's ModelCacheRegistry.
+    A build that fails after it still tears the model down."""
+    import pytest
+    from mlx_vlm.server.runtime import ModelCacheRegistry
+
+    from gmlx.serve import residency as R
+
+    proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
+    stock_get = pool._stock_get
+
+    def failing_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        stock_get(model_path, adapter_path, model_kind=model_kind)
+        registry = ModelCacheRegistry()
+        registry.set("text_generation", proxy.model_cache)
+        proxy.model_cache = registry
+        raise RuntimeError("kv refused")
+
+    pool._stock_get = failing_stock_get
+    monkeypatch.setattr(R, "_collect_failed_build", lambda: None)
+    with pytest.raises(RuntimeError, match="kv refused"):
+        acquire(pool, "/m.gguf")
+    assert teardowns == ["/m.gguf"]
+    assert not pool._entries

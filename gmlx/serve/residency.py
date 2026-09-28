@@ -41,6 +41,7 @@ import time
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 
 import gmlx.load.loadlog as loadlog
@@ -149,9 +150,10 @@ class _Scratch:
     __slots__ = ("response_generator", "model_cache", "apc_manager")
 
     def __init__(self):
-        self.response_generator = None
-        self.model_cache = {}
-        self.apc_manager = None
+        self.response_generator: Any = None
+        # A dict, or the ModelCacheRegistry stock load turns it into.
+        self.model_cache: Any = {}
+        self.apc_manager: Any = None
 
 
 class ModelBusyError(RuntimeError):
@@ -200,9 +202,9 @@ def profile_label(cache_key: tuple) -> str:
 class _Entry:
     cache_key: tuple
     model_path: str
-    model_cache: dict
-    response_generator: object
-    apc_manager: object
+    model_cache: Any            # dict or ModelCacheRegistry (see _Scratch)
+    response_generator: Any
+    apc_manager: Any
     pinned: bool = False
     seq: int = 0
     footprint: int = 0          # resident weight bytes (file size; a streaming
@@ -212,7 +214,7 @@ class _Entry:
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
     retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
     loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
-    kv_policy: object = None    # ServeKvPolicy (None when kv-bits is off)
+    kv_policy: Any = None       # ServeKvPolicy (None when kv-bits is off)
 
 
 class _BusyHold:
@@ -979,8 +981,11 @@ class _ResidencyPool:
                     model = mc.get("model") if hasattr(mc, "get") else None
                 apply_kvarn_salt(manager, model)
                 scratch.apc_manager = manager
-                if isinstance(scratch.model_cache, dict):
-                    scratch.model_cache["apc_manager"] = manager
+                mc = scratch.model_cache
+                if hasattr(mc, "ensure_kind"):
+                    mc.ensure_kind()["apc_manager"] = manager
+                elif isinstance(mc, dict):
+                    mc["apc_manager"] = manager
                 if rg is not None:
                     rg.apc_manager = manager
                     _stamp_apc_mode(rg)
@@ -1043,7 +1048,7 @@ class _ResidencyPool:
         stock load (a kv policy refusal) otherwise leaves a whole model
         resident behind the exception. Best-effort."""
         mc = scratch.model_cache
-        if not isinstance(mc, dict) or mc.get("model") is None:
+        if not hasattr(mc, "get") or mc.get("model") is None:
             return
         entry = _Entry(cache_key=cache_key, model_path=model_path,
                        model_cache=scratch.model_cache,
@@ -1245,12 +1250,17 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     try:
         from gmlx.stream.plan import plan_path
 
-        model, box = plan_path(str(model_path))
-        if box is not None:
-            if arena is None:
-                arena = int(box.arena_bytes)
-            if box.ring_fits:
-                ring = int(model.ring_bytes)
+        plan = plan_path(str(model_path))
+        if plan is None:
+            _log.warning("streaming footprint: no plan for %s; arena and "
+                         "ring priced at zero", model_path)
+        else:
+            model, box = plan
+            if box is not None:
+                if arena is None:
+                    arena = int(box.arena_bytes)
+                if box.ring_fits:
+                    ring = int(model.ring_bytes)
     except Exception:
         _log.warning("streaming footprint: plan for %s failed; arena and "
                      "ring priced at zero", model_path, exc_info=True)
@@ -1415,7 +1425,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
                     profile_field=_serving.get_request_profile())
             except (_serving.ModelNotFound, _serving.ModelFileMissing,
                     _serving.UnknownProfile, _serving.NoModelSpecified) as e:
-                raise _http_from_resolver_error(e) from e
+                raise (_http_from_resolver_error(e) or e) from e
             _serving.set_active_spec(spec)
             ttl = spec.ttl_s
             cache_key_extra = spec.load_signature()
@@ -1441,7 +1451,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
             # relative/hf shapes get instead of a raw 500 errno.
             if _serving.server_config() is not None:
                 miss = _serving.ModelFileMissing(str(model_path), str(e))
-                raise _http_from_resolver_error(miss) from e
+                raise (_http_from_resolver_error(miss) or miss) from e
             raise
         _active_entry.set(entry)
         # The acquire's in-flight hold: the generate seam (_GenerationGuard)
