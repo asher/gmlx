@@ -130,3 +130,78 @@ def install_faithful_history() -> None:
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, "_kq_faithful_history", False):
             target.apply_chat_template = _wrap(fn)
+
+
+# Content part types, as mlx-vlm's text extraction reads them.
+_IMAGE_PARTS = ("image_url", "input_image")
+_TEXT_PARTS = ("text", "input_text", "output_text")
+_PLACEMENT_FLAG = "_kq_chat_image_placement"
+
+
+class _PlacedImages(list):
+    """A chat completions user message's content whose images render in
+    that message."""
+
+
+def _placed_content(content) -> list:
+    """Text parts and one ``{"type": "image"}`` marker per image, in
+    content order, as the Responses route builds a message. The stock
+    text extraction reads the same text from it."""
+    out = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind in _IMAGE_PARTS:
+            out.append({"type": "image"})
+        elif kind in _TEXT_PARTS:
+            text = item.get("text", "") or item.get("content", "")
+            if text:
+                out.append({"type": "text", "text": text})
+    return out
+
+
+def install_chat_image_placement() -> None:
+    """Render each image of a chat completions request in the user message
+    that sent it, as the Responses and Messages routes do.
+
+    The stock route reduces every message to its text
+    (``extract_text_from_content``) and passes only the image count, so
+    ``apply_chat_template`` places every image in the last user message.
+    A turn's prompt then does not start with the previous turn's, and the
+    model reads earlier images beside the latest question. A route wrap
+    marks each user message whose content holds an image, and the chat
+    route's text extraction returns the marked content as text parts and
+    image markers, which the render counts per message. Text-only content
+    takes the stock extraction. Idempotent.
+    """
+    openai = importlib.import_module("mlx_vlm.server.openai")
+    stock = openai.extract_text_from_content
+    if not getattr(stock, _PLACEMENT_FLAG, False):
+        def extract_text_from_content(content):
+            if isinstance(content, _PlacedImages):
+                return _placed_content(content)
+            return stock(content)
+
+        extract_text_from_content.__wrapped__ = stock  # type: ignore[attr-defined]
+        setattr(extract_text_from_content, _PLACEMENT_FLAG, True)
+        openai.extract_text_from_content = extract_text_from_content
+
+    from ._common import _CHAT_PATHS, _wrap_post_routes
+
+    app = importlib.import_module("mlx_vlm.server.app").app
+
+    def _make(original):
+        async def endpoint(request, http_request):
+            for message in getattr(request, "messages", None) or ():
+                content = getattr(message, "content", None)
+                if (getattr(message, "role", None) == "user"
+                        and isinstance(content, list)
+                        and any(isinstance(item, dict)
+                                and item.get("type") in _IMAGE_PARTS
+                                for item in content)):
+                    message.content = _PlacedImages(content)
+            return await original(request, http_request)
+        return endpoint
+
+    _wrap_post_routes(app, _CHAT_PATHS, _PLACEMENT_FLAG, _make)

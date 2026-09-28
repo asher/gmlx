@@ -187,6 +187,8 @@
   "mlx_vlm.server.openai:_normalize_instruction_messages": "d81d7b728d319302e8caea64574ef6d65f9704e2dbaa48f5450d5e526913ae18",
   "mlx_vlm.server.openai:_split_thinking": "617d388132f43c7d9a31a80966606f2fb1b7777750dd7bc5424d6fb89abffa72",
   "mlx_vlm.server.openai:apply_chat_template": "515846b5b9c4871cee32f6c3766a34fe47eef2c99dcc9d8985869cf27c10e580",
+  "mlx_vlm.server.openai:chat_completions_endpoint": "2dbdad24e2a68aea315031cb2ac86f7465c77214dcb93822ec11948ba878272f",
+  "mlx_vlm.server.openai:extract_text_from_content": "2ce375435b378388e35cc975066868e33b81b41ede7d636f9b46b0e4b4463861",
   "mlx_vlm.server.openai:load_tool_module": "731bbc1034af3d0bfc354e6f234218c7ffc71a45722b6fd783fa15b6b22754ad",
   "mlx_vlm.server.openai:process_tool_calls": "06ba570c20dcd121f986f480218353b6d6390459d570ca19a8c6486f773519f7",
   "mlx_vlm.server.responses_state:ThinkingStreamState._build_open_close_markers": "30fce43f3938d8bb0c5ed063382544486d7c9d39089dc449e5904790e68686cb",

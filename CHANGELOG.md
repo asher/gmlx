@@ -35,6 +35,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had the same tokens but another image or LoRA adapter, and answer for that one.
 - A Gemma-4 request whose images differ in size could reuse the cached prefix of
   a request with other images of the same sizes, and answer about those images.
+- On `/v1/chat/completions`, an image sent in an earlier turn reached the model
+  in the latest user message, and a new turn could not reuse the earlier turns.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a
   prefill batch with a much longer one could start its reply with a wrong token.
 - A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system

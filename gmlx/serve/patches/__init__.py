@@ -101,7 +101,7 @@ from .hardening import (
 )
 from .mtp_thinking import install_mtp_thinking_budget
 from .observability import install_request_timing_log, uvicorn_log_config
-from .render import install_faithful_history
+from .render import install_chat_image_placement, install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
     install_optional_request_model,
@@ -146,6 +146,7 @@ __all__ = [
     "install_audio_translation_route",
     "install_audio_voices_route",
     "install_auto_docs_removal",
+    "install_chat_image_placement",
     "install_chat_load_offload",
     "install_chat_template_kwargs",
     "install_completions_route",
@@ -324,6 +325,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # must exclude the stash so off-request predictions never write the
     # request contextvar the thinking splitters read.
     install_faithful_history()
+    # Chat completions renders each image in the message that sent it.
+    install_chat_image_placement()
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_stream_thinking_seed()

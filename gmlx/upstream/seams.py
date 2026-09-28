@@ -365,6 +365,14 @@ SEAMS: tuple[Seam, ...] = (
          "the messages alone, the chat completions one, keeps developer "
          "messages in place) + estimate._estimate_bound (follows the "
          "chat route's merge)"),
+    Seam("mlx_vlm.server.openai", "chat_completions_endpoint",
+         "render.install_chat_image_placement (route wrap: a user "
+         "message's content with an image part passes through the route's "
+         "text extraction call, which keeps it)"),
+    Seam("mlx_vlm.server.openai", "extract_text_from_content",
+         "render.install_chat_image_placement (wrapped: marked content "
+         "returns its text parts and one image marker per image, which "
+         "apply_chat_template counts per message)"),
     Seam("mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
          "server_patches.install_context_overflow_wording (wrapped: the "
          "overflow 400 is recorded for the endpoint wrapper)"),
