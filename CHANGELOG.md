@@ -31,8 +31,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prefill batch with a much longer one could start its reply with a wrong token.
 - A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system
   message, or read the system prompt and earlier replies as raw lists.
-- `POST /v1/estimate` and `"dry_run": true` rendered a developer message as
-  sent, so on a template without that role the estimate failed to render.
+- `POST /v1/estimate` and `"dry_run": true` failed or left out the developer
+  text when the template had no developer role.
 
 ## [0.4.19] - 2026-09-27
 
