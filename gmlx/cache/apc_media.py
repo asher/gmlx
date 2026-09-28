@@ -18,9 +18,11 @@ refuses.
 
 The engine reads the config off the model it was built with (the server
 hands it ``model.language_model``), so a container mirrors the field onto
-its text config as well. The VLM loader does the same for containers that
-name their image id on the container config only (gemma-4, GLM-5.3-Flash,
-Muse Glimmer).
+its text config as well. The VLM loader mirrors a gemma-4 container's
+image and video ids the same way when the text config turns on
+bidirectional image attention. Only then does a restored prefix that ends
+inside an image change the logits, so causal models keep reusing such
+prefixes.
 """
 
 from __future__ import annotations

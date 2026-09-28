@@ -116,26 +116,44 @@ def _guard(lm):
     return gen
 
 
-@pytest.mark.parametrize("model_type", [
-    "gemma4", "gemma4_unified", "glm5_next", "muse_glimmer"])
-def test_language_model_guard_sees_the_container_media_ids(model_type):
-    """These archs name their image id on the container config only. The
-    server builds the batch engine on the language model, so the loader
-    mirrors the container's ids onto the text config, where the spec
-    target the MTP path swaps in reads them too."""
-    install_media_token_ids()
-    config = (_gemma4_config(model_type) if model_type.startswith("gemma4")
+def _model(model_type: str, text: dict | None):
+    config = (_gemma4_config(model_type, **(text or {}))
+              if model_type.startswith("gemma4")
               else _synth_config(model_type))
-    model, _ = gvlm.build_vlm_model(config)
+    return gvlm.build_vlm_model(config)[0]
+
+
+@pytest.mark.parametrize("model_type,text,mirrored", [
+    ("gemma4", {"use_bidirectional_attention": "vision"}, True),
+    ("gemma4_unified", {}, True),
+    ("gemma4", {}, False),
+    ("gemma4_unified", {"use_bidirectional_attention": None}, False),
+    ("glm5_next", None, False),
+    ("muse_glimmer", None, False),
+])
+def test_language_model_guard_sees_the_container_ids_with_bidirectional_attention(
+        model_type, text, mirrored):
+    """These archs name their image id on the container config only, and
+    the server builds the batch engine on the language model. The loader
+    mirrors the ids onto the text config when that config turns on
+    bidirectional image attention, and the spec target the MTP path swaps
+    in reads them too. Causal models keep a guard that sees no image id."""
+    install_media_token_ids()
+    model = _model(model_type, text)
     container = _apc.multimodal_token_ids_from_config(model.config)
-    assert int(model.config.image_token_id) in container
+    image = int(model.config.image_token_id)
+    assert image in container
     lms = [model.language_model]
     if model_type.startswith("gemma4"):
         gvlm._swap_spec_language_model(model, model_type, log=lambda _m: None)
         assert model.language_model is not lms[0]
         lms.append(model.language_model)
     for lm in lms:
-        assert _guard(lm)._apc_media_token_ids() >= container
+        seen = _guard(lm)._apc_media_token_ids()
+        if mirrored:
+            assert seen >= container
+        else:
+            assert image not in seen
 
 
 class _Store:
@@ -219,3 +237,25 @@ def test_restored_image_prompt_matches_a_cold_prefill(
     diff = mx.max(mx.abs(served - cold)).item()
     assert diff <= 1e-4, (prefix, diff)
     assert prefix == (cached if cached >= hi else 0)
+
+
+@pytest.mark.parametrize("model_type,text", [
+    ("gemma4", {}), ("glm5_next", None), ("muse_glimmer", None)])
+def test_causal_models_reuse_a_block_prefix_inside_an_image(model_type, text):
+    """With causal attention an image column sees only earlier columns in
+    a one-pass prefill too, so a block prefix that ends inside the image
+    restores, and on gemma-4 the logits match a cold prefill."""
+    install_media_token_ids()
+    model = _model(model_type, text)
+    lm = model.language_model
+    image = int(model.config.image_token_id)
+    n, lo, hi = 40, 10, 26
+    ids = [image if lo <= i < hi else 1 + i for i in range(n)]
+    assert _restored_len(lm, ids, _Store("block", 16)) == 16
+    if model_type == "gemma4":
+        mx.eval(lm.parameters())
+        types = mx.array([[int(lo <= i < hi) for i in range(n)]])
+        embeds = mx.random.normal((1, n, _HIDDEN), key=mx.random.key(0)) * 0.5
+        cold = _last_logits(lm, embeds, types, 0, "block")
+        served = _last_logits(lm, embeds, types, 16, "block")
+        assert mx.max(mx.abs(served - cold)).item() <= 1e-4
