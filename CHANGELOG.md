@@ -12,6 +12,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tokens after a round in which they accepted different numbers of drafts.
 - A Muse Glimmer model loaded with its mmproj ran the vision tower without
   its weights, so answers about an image did not describe it.
+- An image request on a Qwen3.5, 3.6, 3.8 or Qwen4 experimental model failed
+  when it reused a cached prefix, or with MTP when prefill took several chunks.
+- With a decode batch wider than 8 and the prefix cache on, a request sharing a
+  prefill batch with a much longer one could start its reply with a wrong token.
 
 ## [0.4.19] - 2026-09-27
 

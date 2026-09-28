@@ -36,6 +36,7 @@ from gmlx.spec.engine import (
     _get_spec_prefix_cache,
     _install_apc_manager_stash,
     _resolve_l1,
+    _trim_prompt_columns,
 )
 
 _log = logging.getLogger(__name__)
@@ -157,11 +158,8 @@ def _mtp_prefill_init(batch) -> None:
         }
 
     if restored > 0:
-        batch._input_ids = batch._input_ids[:, restored:]
-        batch._inputs_embeds = batch._inputs_embeds[:, restored:]
+        _trim_prompt_columns(batch, restored)
         batch._processed_prompt_columns = restored
-        for k in batch._prompt_length_aware_keys:
-            batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, restored:, ...]
         batch._mtp_apc_prefix_len = restored
 
 
@@ -199,7 +197,7 @@ def _mtp_seed_stream_init(batch) -> None:
     ):
         return
     lp = getattr(batch.prompt_cache[0], "left_padding", None)
-    if isinstance(lp, mx.array) and lp.size and int(lp.max().item()) > 0:
+    if isinstance(lp, mx.array) and lp.size and int(lp.max()) > 0:
         return
     try:
         drafter.bind(batch.model)
@@ -381,7 +379,7 @@ def install_full_prompt_mtp_prefill() -> None:
             for c in self.prompt_cache:
                 lp = getattr(c, "left_padding", None)
                 if isinstance(lp, mx.array) and lp.ndim > 0 and lp.size > 1:
-                    max_lp = int(lp.max().item())
+                    max_lp = int(lp.max())
                     if max_lp >= n:
                         n = min(max_lp + 1, self._inputs_embeds.shape[1] - 1)
                     break
@@ -405,6 +403,14 @@ def install_full_prompt_mtp_prefill() -> None:
             tail = rem1 - n
             if 0 < tail < min_tail:
                 n = rem1        # absorb: overshoot bounded by min_tail-1
+        # A right-padded batch (APC warm and cold rows together) ends a
+        # chunk at each shorter row's last real column and keeps that row's
+        # logits, since later chunks feed it only pad (stock prompt_step).
+        start = self._processed_prompt_columns
+        if self._right_pad_per_row is not None:
+            ends = [e for e in self._suffix_lens if e > start]
+            if ends:
+                n = min(n, min(ends) - start)
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
@@ -419,6 +425,14 @@ def install_full_prompt_mtp_prefill() -> None:
                 **prompt_kwargs,
             )
         chunk_hidden = out.hidden_states[-1]
+        finished = []
+        if self._right_pad_per_row is not None:
+            finished = [i for i, e in enumerate(self._suffix_lens)
+                        if e == start + n]
+            logits = out.logits if hasattr(out, "logits") else out
+            for i in finished:
+                self._finished_prompt_logits[i] = mx.contiguous(
+                    mx.array(logits[i, -1]))
         # Seed streaming: teacher-force this chunk into the request-scoped
         # head KV at the head's running offset. The shifted span for
         # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range
@@ -476,15 +490,22 @@ def install_full_prompt_mtp_prefill() -> None:
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
         mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                + [self._finished_prompt_logits[i] for i in finished]
                 + ([c.state for c in seed_ctx["kv"]] if streamed else []))
         self._processed_prompt_columns += n
+        # Stock prompt_step reports the cache after each chunk to the APC
+        # memory plan, which evicts idle entries ahead of the growth.
+        coordinator = getattr(self, "_apc_coordinator", None)
+        if coordinator is not None:
+            coordinator.observe_cache(
+                self.prompt_cache,
+                max(self._cached_tokens_per_row)
+                + self._processed_prompt_columns,
+                batch_size=len(self.uids))
         # The ckpt cursor rides the wrapped stock store (see
         # _install_ckpt_checkpoint_store).
         self._store_apc_exact_checkpoints()
-        self._inputs_embeds = self._inputs_embeds[:, n:]
-        self._input_ids = self._input_ids[:, n:]
-        for k in self._prompt_length_aware_keys:
-            self._prompt_kwargs[k] = self._prompt_kwargs[k][:, n:, ...]
+        _trim_prompt_columns(self, n)
         mx.clear_cache()
         return n
 

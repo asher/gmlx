@@ -84,6 +84,24 @@ def test_plain_init_restores_and_trims():
     assert b._apc_meta[0]["checkpoint_len"] > 32
 
 
+def test_plain_init_trims_mrope_position_ids_on_their_sequence_axis():
+    """An image turn carries (3, B, L) position ids. The restore trims
+    them on the last axis, as the stock trims do."""
+    engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(500, 596))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=7))
+    pos = mx.stack([mx.arange(96) + 1000 * k for k in (1, 2, 3)])[:, None]
+    mask = mx.ones((1, 96), dtype=mx.int32)
+    b = _plain_batch(man, ids)
+    b._prompt_kwargs = {"position_ids": pos, "attention_mask": mask}
+    b._prompt_length_aware_keys = ["position_ids", "attention_mask"]
+    ckpt._plain_ckpt_init(b)
+    assert b._processed_prompt_columns == 32
+    assert b._prompt_kwargs["position_ids"].tolist() == pos[:, :, 32:].tolist()
+    assert b._prompt_kwargs["attention_mask"].shape == (1, 64)
+
+
 def test_plain_init_leaves_batched_rows_stock():
     engine._bind_l1_view()
     man = APCManager(num_blocks=64, block_size=16)

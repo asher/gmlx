@@ -20,6 +20,7 @@ from gmlx.spec.engine import (
     _ckpt_layout_for,
     _ckpt_layout_live,
     _live_kv_quant_config,
+    _trim_prompt_columns,
 )
 
 _log = logging.getLogger(__name__)
@@ -658,11 +659,8 @@ def _plain_ckpt_init(batch) -> None:
         and view._apc_suffix_is_text_only(ids_list, cp)
     ):
         batch.prompt_cache = warm
-        batch._input_ids = batch._input_ids[:, cp:]
-        batch._inputs_embeds = batch._inputs_embeds[:, cp:]
+        _trim_prompt_columns(batch, cp)
         batch._processed_prompt_columns = cp
-        for k in batch._prompt_length_aware_keys:
-            batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, cp:, ...]
         restored = cp
         batch._kq_apc_restored = (int(cp), "ckpt")     # live request view
         _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",

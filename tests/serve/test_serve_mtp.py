@@ -757,6 +757,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
             self._inputs_embeds = mx.zeros((1, TOTAL, D))
             self._mtp_chunk_hiddens = []
             self._processed_prompt_columns = 0
+            self._right_pad_per_row = None
             self._prompt_kwargs = {}
             self._prompt_length_aware_keys = []
 

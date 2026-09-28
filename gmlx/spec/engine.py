@@ -116,21 +116,31 @@ def _bind_l1_view() -> None:
     _L1_BOUND[0] = True
 
 
+def _trim_prompt_columns(batch, n: int) -> None:
+    """Drop a prompt batch's first ``n`` columns from its ids, embeddings
+    and sequence-aligned prompt kwargs. mrope position ids are (3, B, L),
+    so the stock helper slices each kwarg on its own sequence axis."""
+    from mlx_vlm.generate.ar import _slice_sequence_aligned_prompt_kwarg
+
+    batch._input_ids = batch._input_ids[:, n:]
+    batch._inputs_embeds = batch._inputs_embeds[:, n:]
+    for k in batch._prompt_length_aware_keys:
+        batch._prompt_kwargs[k] = _slice_sequence_aligned_prompt_kwarg(
+            k, batch._prompt_kwargs[k], start=n)
+
+
 _APC_STASH_FLAG = "_kq_gguf_apc_manager_stash"
 
 
 def _install_apc_manager_stash() -> None:
     """Stash the serve-time APCManager on the model object for the owned path.
 
-    Upstream ``BatchGenerator.__init__`` nulls its ``apc_manager`` whenever a
-    draft model is configured (the stock prefill APC machinery assumes the
-    non-speculative generate flow). The owned MTP engine integrates on its
-    own terms, so capture the manager before that gate: in the construction
-    call itself, where the true manager and the model are both in scope on
-    the generation worker thread (residency's build-scratch ContextVar does
-    not cross into that thread, so ``runtime.apc_manager`` cannot be read
-    reliably from here). Assigns on every construction -- including None --
-    so a BatchGenerator built without APC clears a stale stash instead of
+    The owned MTP engine reads the manager from the model. The construction
+    call is where the manager and the model are both in scope on the
+    generation worker thread: residency's build-scratch ContextVar does not
+    cross into that thread, so ``runtime.apc_manager`` cannot be read
+    reliably from here. Assigns on every construction, None included, so a
+    BatchGenerator built without APC clears a stale stash instead of
     inheriting one. Idempotent.
     """
     from mlx_vlm.generate.ar import BatchGenerator
@@ -170,13 +180,12 @@ def _install_apc_manager_stash() -> None:
         cbs = getattr(self, "completion_batch_size", None)
         if pbs is not None and cbs is not None and pbs >= cbs:
             self.prefill_batch_size = 1
-        # APC arrived armed but upstream's quantized-KV opt-out dropped it
-        # (ar.py nulls the manager whenever kv_bits is set; no tier serves
-        # quantized caches). The mode probe still reads "block" for these
-        # models, so without this line the server boots silent and every
-        # request prefills cold. Draft-model batches are excluded: upstream
-        # nulls their manager by design and the owned ladder resolves (and
-        # warns) through _resolve_l1.
+        # A manager passed with kv_bits and dropped by the constructor means
+        # every request prefills cold. mlx-vlm 0.6.4 dropped it whenever
+        # kv_bits was set. From 0.6.15 the constructor keeps it and drops it
+        # only when no APC tier serves the cache stack, which _resolve_l1
+        # also reports. Draft-model batches resolve and warn through
+        # _resolve_l1.
         if (kwargs.get("apc_manager") is not None
                 and kwargs.get("kv_bits") is not None
                 and kwargs.get("draft_model") is None
