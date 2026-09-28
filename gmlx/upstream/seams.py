@@ -106,6 +106,18 @@ SEAMS: tuple[Seam, ...] = (
          "mx.quantize packs dim*bits//32)"),
     Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.update_and_fetch",
          "quantized_cache_pack_fix (same formula in _init)"),
+    # --- ragged right-trim rebinds left_padding (both cache origins) ---
+    Seam("mlx_vlm.models.cache", "BatchKVCache.finalize",
+         "batch_finalize_fix (roll adds the tail to left_padding in place; "
+         "identity-keyed pad memos)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.finalize",
+         "batch_finalize_fix (same, tail from prepare lengths)"),
+    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.finalize",
+         "batch_finalize_fix (same, packed key tuples)"),
+    Seam("mlx_lm.models.cache", "BatchKVCache.finalize",
+         "batch_finalize_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.finalize",
+         "batch_finalize_fix (mlx-lm origin)"),
     # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
     Seam("mlx_lm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
@@ -673,6 +685,8 @@ def _vendored_vlm_collisions() -> list[str]:
         try:
             parent = importlib.import_module(pkg)
         except ImportError:
+            continue
+        if parent.__file__ is None:
             continue
         root = os.path.dirname(parent.__file__)
         if (os.path.exists(os.path.join(root, f"{leaf}.py"))

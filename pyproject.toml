@@ -194,6 +194,7 @@ include = [
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
     "gmlx/load/hadamard_modules.py",
+    "gmlx/load/loader.py",
     "gmlx/load/modules.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
@@ -210,6 +211,7 @@ include = [
     "gmlx/systemone/engine.py",
     "gmlx/tune/gdn.py",
     "gmlx/tune/lora.py",
+    "gmlx/upstream/seams.py",
     "scripts/structured_read_bench.py",
 ]
 typeCheckingMode = "standard"
@@ -249,7 +251,6 @@ backlog = [
     "gmlx/gen/generation.py",
     "gmlx/gen/media_spans.py",
     "gmlx/gen/thinking_budget.py",
-    "gmlx/load/loader.py",
     "gmlx/load/mtp_target.py",
     "gmlx/load/vlm.py",
     "gmlx/lora_rows.py",
@@ -283,7 +284,6 @@ backlog = [
     "gmlx/upstream/quantized_cache_pack_fix.py",
     "gmlx/upstream/quantized_sdpa_fix.py",
     "gmlx/upstream/rotating_cache_fix.py",
-    "gmlx/upstream/seams.py",
     "gmlx/upstream/softcap_f32.py",
     "scripts/check-coverage.py",
     "scripts/kld_harness.py",

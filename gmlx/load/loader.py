@@ -17,6 +17,7 @@ from __future__ import annotations
 import gc
 import os
 import time
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -40,6 +41,7 @@ from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
 from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
 from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
+from gmlx.upstream.batch_finalize_fix import install_batch_finalize_fix
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.quantized_cache_pack_fix import (
@@ -380,7 +382,7 @@ def _kq_expert_gpu_ok(module) -> bool:
 # First token after any non-decode call is skipped (prefill contamination);
 # its buckets still land in the sums, a <=1/N skew.
 _PHASE_KEYS = ("ev", "la", "stage_wait", "stage_book", "prestage", "build")
-_PHASE = (
+_PHASE: dict[str, Any] | None = (
     {k: 0.0 for k in _PHASE_KEYS}
     | {"tokens": 0, "wall": 0.0, "last": None, "first_li": None, "dirty": True}
     if env_bool("GMLX_DECODE_PHASE_STATS", False)
@@ -771,7 +773,7 @@ def _warm_mmap_residency(
     the page-cache populate runs. GMLX_RESIDENCY_WARM=0 disables
     everything, =1 forces the GPU touch regardless of size.
     """
-    pairs = tree_flatten(model.parameters())
+    pairs = cast(list[tuple[str, mx.array]], tree_flatten(model.parameters()))
     total = sum(a.nbytes for _, a in pairs)
     # Streamable-table exclusion: a table the selection ladder will stream
     # must not be GPU-touched here - the touch would wire the whole buffer
@@ -780,7 +782,7 @@ def _warm_mmap_residency(
     # below stays whole-model.
     try:
         _tbudget = int(
-            0.9 * mx.device_info()["max_recommended_working_set_size"])
+            0.9 * cast(int, mx.device_info()["max_recommended_working_set_size"]))
     except Exception:
         _tbudget = None
     from gmlx.stream.table_stream import warm_touch_exclusions
@@ -826,7 +828,8 @@ def _warm_touch_pass(
     if threshold_bytes is None:
         threshold_bytes = _warm_touch_threshold_bytes()
     try:
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(
+            0.9 * cast(int, mx.device_info()["max_recommended_working_set_size"]))
     except Exception:
         budget = None
     if mode != "1" and budget is not None and total > budget:
@@ -1175,6 +1178,7 @@ def _install_and_load(
             f"{n_occ} modules")
     install_rotating_cache_fix()
     install_arrays_cache_fix()
+    install_batch_finalize_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -1668,6 +1672,7 @@ def load_model(
              f"{n_occ} modules")
     install_rotating_cache_fix()
     install_arrays_cache_fix()
+    install_batch_finalize_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")
@@ -1687,7 +1692,7 @@ def load_model(
     # avoiding float32 kernel promotion (and mixed-width dtype mismatches) in
     # quantized/regular matmul.
     # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32.
-    fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type"), ())
+    fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type") or "", ())
     act_dtype = activation_dtype()
     act_name = activation_dtype_name()
     n_cast = 0

@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent requests on a qwen3.5 model with MTP could decode wrong tokens
+  after a round in which they accepted different numbers of drafts, where
+  the same request sent alone decoded right.
+
 ## [0.4.19] - 2026-09-27
 
 ### Added
