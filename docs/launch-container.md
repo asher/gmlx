@@ -49,10 +49,11 @@ Launch reads its container settings only from the config file in your
 home folder, as [Launch](config.md#launch) explains.
 
 The first container launch takes a few minutes. Launch numbers the steps
-it runs, so that a slow download does not look like a hang. Every refusal
-that needs neither the service nor the image, such as a folder launch will
-not share, comes before these steps, so such a mistake never waits behind a
-download.
+it runs, so that a slow download does not look like a hang. Launch checks
+the shares and the image settings before these steps, so a mistake in them
+never waits behind a download. A busy web port, a problem in the image
+itself and a link in the client's private home stop the launch only after
+these steps.
 
 1. The container service starts. Its first start asks to install a Linux
    kernel and downloads about 700 MB. When the service is stopped and the
@@ -92,7 +93,8 @@ from a project folder instead:
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
 
 On a volume that ignores the case of names, as APFS does by default, launch
-compares these paths the same way, so `~/.SSH` counts as `~/.ssh`.
+also ignores case when it compares these paths, so `~/.SSH` counts as
+`~/.ssh`.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
@@ -155,11 +157,19 @@ worktree, the repository's entry for it names the project's `.git` file,
 by an absolute path or by one relative to the entry. For a submodule, its
 `core.worktree` names the project folder. The client can edit the `.git`
 file in the share, but not the repository outside it, so it cannot use
-this to reach another repository. Launch refuses the git folder when the
-recorded path passes through a symbolic link in a share or a private home,
-because the client can place such a link. After you delete a worktree by
-hand, run `git worktree prune`, because its stale entry still names the old
-path, and a new folder there would count as that worktree.
+this to reach another repository.
+
+Launch compares the recorded path as git wrote it and follows no symbolic
+link in it, because the client can place a link in any folder it could
+write, in this launch or an earlier one. git records real paths, so every
+worktree and submodule that git creates passes. A worktree that was moved
+by hand and is reached through a link does not, and launch then does not
+share its git folder and prints a note. Run `git worktree repair` in the
+worktree to record its real path.
+
+After you delete a worktree by hand, run `git worktree prune`. Its stale
+entry still names the old path, and a `.git` file placed there later would
+count as that worktree.
 
 The refusals for the current folder also apply to that git folder, and to
 the repository that holds it. A worktree of a dotfiles repository in your
@@ -487,8 +497,8 @@ than on a volume.
 Launch closes a relayed connection, such as one to a forwarded port, when
 no data moves in either direction for 30 seconds after it opens. A
 connection from the container to the server must instead send a whole
-request head in those 30 seconds. Once data flows, the connection has no
-time limit, so a streamed answer is never cut. Idle connections therefore
+request head in those 30 seconds. After that first data, or that request
+head, the connection has no time limit, so a streamed answer is never cut. Idle connections therefore
 cannot use up the file handles of the server that other clients share.
 
 ## Removing container data
