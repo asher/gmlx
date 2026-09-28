@@ -18,7 +18,9 @@ refuses.
 
 The engine reads the config off the model it was built with (the server
 hands it ``model.language_model``), so a container mirrors the field onto
-its text config as well.
+its text config as well. The VLM loader does the same for containers that
+name their image id on the container config only (gemma-4, GLM-5.3-Flash,
+Muse Glimmer).
 """
 
 from __future__ import annotations

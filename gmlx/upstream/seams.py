@@ -247,7 +247,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_extra_hash",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_media_token_ids",
-         "spec_engine._bind_l1_view (L1 APC helpers)"),
+         "spec_engine._bind_l1_view (L1 APC helpers) + "
+         "load.vlm._mirror_media_token_ids (the guard reads self.model's "
+         "config, the language model under serve)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_safe_prefix_lookup_min",
          "spec_engine._bind_l1_view (L1 APC helpers) + ckpt restore floors"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_suffix_is_text_only",
@@ -472,7 +474,8 @@ SEAMS: tuple[Seam, ...] = (
          "apc_adapters.clone_cache_entry per call)", critical=True),
     Seam("mlx_vlm.apc", "multimodal_token_ids_from_config",
          "apc_media.install_media_token_ids (config media_token_ids fold "
-         "for expanded image blocks)", critical=True),
+         "for expanded image blocks) + load.vlm._mirror_media_token_ids "
+         "(container ids onto the text config)", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "

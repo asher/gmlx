@@ -1900,6 +1900,32 @@ def register_vendored_vlm_model(model_type: str) -> None:
         importlib.import_module(name).ensure_registered()
 
 
+# VLM model types whose image and video ids sit on the container config
+# only. The server builds the batch engine on the language model, so
+# mlx-vlm's APC media guard reads the text config, finds no media ids, and
+# can restore a cached prefix that ends inside an image. On gemma-4 with
+# bidirectional image attention the rest of that image then prefills
+# against a causal mask, and the logits differ from a cold prefill.
+_MEDIA_IDS_ON_CONTAINER = frozenset(
+    {"gemma4", "gemma4_unified", "glm5_next", "muse_glimmer"})
+
+
+def _mirror_media_token_ids(model, model_type: str) -> None:
+    """Copy the container's media ids onto the text config as
+    ``media_token_ids``, which ``gmlx.cache.apc_media`` folds into the
+    guard. The spec target swapped in later is built from the same text
+    config, so it reads them too."""
+    if model_type not in _MEDIA_IDS_ON_CONTAINER:
+        return
+    from mlx_vlm.apc import multimodal_token_ids_from_config
+
+    ids = sorted(multimodal_token_ids_from_config(model.config))
+    configs = {id(c): c for c in (model.config.text_config,
+                                  model.language_model.config)}
+    for config in configs.values():
+        config.media_token_ids = list(ids)
+
+
 def build_vlm_model(config_dict: dict):
     """Instantiate the mlx-vlm ``Model`` for ``config_dict['model_type']``.
 
@@ -1916,6 +1942,7 @@ def build_vlm_model(config_dict: dict):
     cfg = update_module_configs(
         cfg, module, config_dict, ["text", "vision", "projector", "audio"])
     model = module.Model(cfg)
+    _mirror_media_token_ids(model, config_dict["model_type"])
     return model, config_dict
 
 
