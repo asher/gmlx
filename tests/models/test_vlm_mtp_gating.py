@@ -16,9 +16,9 @@ import pytest
 
 pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35 import language as _L
+from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.upstream.gdn_patches as gp
 import gmlx.models.qwen35.attn as qwen35_attn

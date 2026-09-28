@@ -274,7 +274,6 @@ backlog = [
     "gmlx/serve/tick_guard.py",
     "gmlx/spec/admission.py",
     "gmlx/spec/mtp_prefill.py",
-    "gmlx/spec/ragged_decode.py",
     "gmlx/tui/chat.py",
     "gmlx/upstream/cascade_sdpa.py",
     "gmlx/upstream/dsv32_patches.py",
@@ -305,5 +304,6 @@ extend-select = ["S110"]
 "tests/**" = ["E731", "S110"]
 # Verbatim upstream copies (source-equality-tested); a noqa comment would
 # break the byte fidelity the equality tests certify.
+"gmlx/models/qwen35/language.py" = ["E741"]
 "gmlx/models/qwen35/verify_linear.py" = ["E741"]
 "gmlx/models/gemma4/owned.py" = ["E741"]

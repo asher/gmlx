@@ -3217,6 +3217,26 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+def _swap_qwen35_base_language_model(model, model_type: str, *, log) -> None:
+    """Give a qwen3.5/3.6 VLM the vendored mlx-vlm 0.6.15 text model
+    (``gmlx.models.qwen35.language``), the base the owned MTP classes
+    subclass and the gmlx patch set (tiled-V, ragged guard) targets. The
+    vision tower and the multimodal container stay mlx-vlm's. Runs before
+    weight install, like the spec swap: the vendored tree is parameter-
+    identical to the installed one."""
+    if model_type not in ("qwen3_5", "qwen3_5_moe"):
+        return
+    import importlib
+
+    stem = "moe_" if model_type == "qwen3_5_moe" else ""
+    lang = importlib.import_module(f"gmlx.models.qwen35.{stem}language")
+    if isinstance(model.language_model, lang.LanguageModel):
+        return
+    model.language_model = lang.LanguageModel(
+        model.config.text_config, model.config)
+    log(f"[vlm] language_model -> vendored {model_type} base")
+
+
 def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     """Replace ``model.language_model`` with the spec-capable class the text
     MTP path builds (``_vlm_spec_language_model``), constructed from the
@@ -3335,12 +3355,12 @@ def load_vlm_model(
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
     if model_type in ("qwen3_5", "qwen3_5_moe"):
-        # Pre-M3 launch-ceiling guard for the stock ragged decode (ungated
-        # 1024-thread kernels) on batched mixed-depth streams. Unconditional:
-        # plain VLM builds and the spec_target stock fallback both run the
-        # stock kernels, the owned tree dispatches in-tree, and the installer
-        # is idempotent (identity check) - the call costs nothing where the
-        # MTP patch set later covers it.
+        # Pre-M3 launch-ceiling guard for the vendored base ragged decode
+        # (ungated 1024-thread kernels) on batched mixed-depth streams.
+        # Unconditional: plain VLM builds and the spec_target base fallback
+        # both run the base kernels, the owned tree dispatches in-tree, and
+        # the installer is idempotent (identity check) - the call costs
+        # nothing where the MTP patch set later covers it.
         from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
         install_pre_m3_ragged_guard()
 
@@ -3382,17 +3402,19 @@ def load_vlm_model(
     # 4a. spec-target seam: give the VLM the same hook-bearing language model
     #     the text MTP path builds. Runs before weight install, so the swap
     #     needs no weight transfer - and the discarded tower's random init
-    #     arrays are never evaluated.
+    #     arrays are never evaluated. qwen3.5/3.6 first take the vendored
+    #     base text model, which the spec swap then replaces with the owned
+    #     classes (or keeps, under GMLX_QWEN_OWNED=0).
+    _swap_qwen35_base_language_model(model, model_type, log=_log)
     if spec_target:
         _swap_spec_language_model(model, model_type, log=_log)
 
     # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
     #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. Since mlx-vlm 0.6.15 the qwen3_5 text tower
-    #     runs its own vendored copies of the gated_delta functions (0.6.4
-    #     from-imported mlx-lm's, which the mlx-lm patch reached), so both
-    #     modules need the rebind. Without it the recurrent state is built
+    #     grouped K->V indexing. The vendored qwen3.5 text model runs its own
+    #     copies of the gated_delta functions (gmlx.models.qwen35.gated_delta),
+    #     so both it and mlx-lm's module need the rebind. Without it the recurrent state is built
     #     against the wrong K heads and decode degrades to repetitive garbage
     #     even though the no-cache forward (and dense towers) look fine.
     if _needs_tiled_v_patch(text_config):

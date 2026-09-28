@@ -64,7 +64,7 @@ def test_plain_load_arms_tiled_v_on_both_modules(plain_vlm_load):
 
     import gmlx.upstream.gdn_patches as gp
 
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
     assert gp._tiled_v_patch_applied()
     # Qualname/module, not identity against gd: a later load can re-close
     # the mlx-lm patch, leaving vgd on an older (equally tiled) instance.

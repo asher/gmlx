@@ -63,7 +63,7 @@ _SEAM3_SYMS = (
 
 
 def test_mlxvlm_gated_delta_has_seam3_symbols():
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
     missing = [s for s in _SEAM3_SYMS if not hasattr(vgd, s)]
     assert not missing, f"mlx-vlm gated_delta missing seam-3 symbols {missing}"
 
@@ -71,7 +71,7 @@ def test_mlxvlm_gated_delta_has_seam3_symbols():
 def test_seam3_patch_routes_state_paths_to_tiled_ops():
     """The patch must disable the grouped state kernels and swap in tiled ops,
     so the small-T MTP state-capture paths take the corrected fallback."""
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
     saved = {s: getattr(vgd, s) for s in _SEAM3_SYMS}
     try:
         # the mlx-vlm patch depends on the mlx-lm one having run first.

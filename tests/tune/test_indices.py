@@ -44,7 +44,7 @@ def _stock(name):
         from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
         return Qwen3NextSparseMoeBlock(a)
     if name == "qwen3_5_moe":
-        from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeSparseMoeBlock
+        from gmlx.models.qwen35.moe_language import Qwen3_5MoeSparseMoeBlock
         return Qwen3_5MoeSparseMoeBlock(a)
     if name == "minimax":
         from mlx_lm.models.minimax import MiniMaxSparseMoeBlock

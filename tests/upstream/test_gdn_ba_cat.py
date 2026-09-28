@@ -143,7 +143,7 @@ def test_zba_merge_wins_over_cat(monkeypatch):
 
 
 def test_verify_patcher_cats_vlm_instances(monkeypatch):
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     if patches._gdn_fused_verify_kernel is None:
         pytest.skip("fused gdn verify kernel unavailable")

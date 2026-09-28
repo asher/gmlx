@@ -35,8 +35,8 @@ pytest.importorskip("mlx_vlm.models.gemma4.language")
 
 from mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
 from mlx_vlm.models.gemma4.language import LanguageModel as G4LanguageModel
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 ATOL = 2e-3  # f32 path-divergence floor (block SDPA / chunked GDN vs step)
 

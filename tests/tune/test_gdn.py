@@ -179,7 +179,7 @@ def test_switch_and_vector_gating_route_to_the_loop(monkeypatch):
 
 def test_owned_qwen35_training_forward_routes_to_the_chunked_scan(monkeypatch):
     pytest.importorskip("mlx_vlm.models.qwen3_5.language")
-    from mlx_vlm.models.qwen3_5.config import TextConfig
+    from gmlx.models.qwen35.config import TextConfig
 
     import gmlx.models.qwen35.gdn as qgdn
 

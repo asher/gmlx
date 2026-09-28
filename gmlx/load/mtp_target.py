@@ -140,14 +140,17 @@ def _mtp_target_classes(model_type: str):
 
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         sub = model_type
-        lang = importlib.import_module(f"mlx_vlm.models.{sub}.language")
+        # The text model is gmlx's vendored mlx-vlm 0.6.15 copy; the
+        # multimodal ModelConfig stays mlx-vlm's.
+        stem = "moe_" if sub == "qwen3_5_moe" else ""
+        lang = importlib.import_module(f"gmlx.models.qwen35.{stem}language")
+        text_cfg = importlib.import_module(f"gmlx.models.qwen35.{stem}config")
         cfg = importlib.import_module(f"mlx_vlm.models.{sub}.config")
 
         # Owned model-level forward by default: the model-level control
         # flow (masks, left-padding walk, batched-padded prefill, capture)
-        # runs from gmlx code on a subclass; layers stay stock so the
-        # fused-kernel seams keep engaging. GMLX_QWEN_OWNED=0 reverts to
-        # the stock class wholesale.
+        # and the layers run from gmlx subclasses of the vendored base.
+        # GMLX_QWEN_OWNED=0 reverts to the vendored base class wholesale.
         language_model_cls = lang.LanguageModel
         if env_bool("GMLX_QWEN_OWNED", True):
             import gmlx.models.qwen35.owned as qwen35_owned
@@ -155,7 +158,7 @@ def _mtp_target_classes(model_type: str):
             language_model_cls = qwen35_owned.language_model_class(sub)
 
         def build(config):
-            text_config = cfg.TextConfig.from_dict(config)
+            text_config = text_cfg.TextConfig.from_dict(config)
             model_config = cfg.ModelConfig.from_dict(
                 {
                     "model_type": sub,

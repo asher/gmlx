@@ -6,7 +6,7 @@ import mlx.core as mx
 import pytest
 
 pytest.importorskip("mlx_vlm.generate.ar")
-q35l = pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+q35l = pytest.importorskip("gmlx.models.qwen35.language")
 
 from mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
 from mlx_vlm.generate import ar  # noqa: E402

@@ -19,9 +19,9 @@ import pytest
 pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
 from mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35 import language as _L
+from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 import gmlx.models.qwen35.owned as qwen35_owned
 from gmlx.upstream.gdn_patches import (
@@ -191,7 +191,7 @@ def test_loader_env_reverts_to_stock(monkeypatch):
 
 def test_owned_moe_class_shape():
     cls = qwen35_owned.language_model_class("qwen3_5_moe")
-    from mlx_vlm.models.qwen3_5_moe.language import (
+    from gmlx.models.qwen35.moe_language import (
         LanguageModel as MoeLanguageModel,
     )
 

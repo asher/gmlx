@@ -133,7 +133,7 @@ def test_vlm_hook_rows_resolve_per_arch():
 
 
 def _tiny_q35(owned: bool):
-    from mlx_vlm.models.qwen3_5.config import TextConfig
+    from gmlx.models.qwen35.config import TextConfig
 
     cfg = TextConfig(
         model_type="qwen3_5",
@@ -166,7 +166,7 @@ def _tiny_q35(owned: bool):
     if owned:
         lm = qwen35_owned.language_model_class("qwen3_5")(cfg, top)
     else:
-        from mlx_vlm.models.qwen3_5.language import LanguageModel
+        from gmlx.models.qwen35.language import LanguageModel
 
         lm = LanguageModel(cfg, top)
     mx.eval(lm.parameters())

@@ -17,9 +17,9 @@ import pytest
 pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
 from mlx_vlm.models.cache import ArraysCache, BatchKVCache
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
-from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
+from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
 import gmlx.upstream.gdn_patches as gdn_patches
 import gmlx.models.qwen35.gdn as qwen35_gdn

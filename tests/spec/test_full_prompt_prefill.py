@@ -253,7 +253,7 @@ def _snapshot_q35_seams():
     # AttributeError guard: a renamed upstream seam must not break collection
     # of this file (the tests themselves skip without the env var).
     try:
-        from mlx_vlm.models.qwen3_5 import language as q35
+        from gmlx.models.qwen35 import language as q35
         import gmlx.upstream.gdn_patches as gdn_patches
         import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
         return (
@@ -274,7 +274,7 @@ _q35_seams = _snapshot_q35_seams()
 def teardown_module(module):
     if _q35_seams is None:
         return
-    from mlx_vlm.models.qwen3_5 import language as q35
+    from gmlx.models.qwen35 import language as q35
     import gmlx.upstream.gdn_patches as gdn_patches
     import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
     (q35._target_verify_left_padded_attention,

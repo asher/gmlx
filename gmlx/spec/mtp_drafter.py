@@ -4,8 +4,9 @@ Drop-in replacement for mlx-vlm's ``Qwen3_5MTPDraftModel`` in the owned
 speculative engine. Same weight tree (``fc`` / ``pre_fc_norm_embedding`` /
 ``pre_fc_norm_hidden`` / ``layers.{i}`` / ``norm``) so the GGUF MTP-block remap
 (loader ``remap_mtp_arrays`` + ``_install_and_load(..., sanitize=False)``) loads
-onto it unchanged, and the transformer block itself is reused from mlx-vlm -- we
-own the *draft algorithm*, not the numerics.
+onto it unchanged, and the transformer block itself is the vendored mlx-vlm
+0.6.15 decoder layer (``gmlx.models.qwen35.language``) -- we own the *draft
+algorithm*, not the numerics.
 
 Why own it: a place to own the draft algorithm (the rollout feed, the block
 schedule, the batched round for M2) without forking mlx-vlm's transformer
@@ -50,8 +51,8 @@ from mlx_vlm.models.cache import BatchKVCache, KVCache
 import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
 from gmlx.envflags import env_bool, env_int
-from mlx_vlm.models.qwen3_5.language import Qwen3_5DecoderLayer
-from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeDecoderLayer
+from gmlx.models.qwen35.language import Qwen3_5DecoderLayer
+from gmlx.models.qwen35.moe_language import Qwen3_5MoeDecoderLayer
 
 # The rollout has no target hidden for a drafted token, so it feeds the MTP head's
 # own previous-step output as the next "hidden". The head's pre_fc_norm_hidden

@@ -1,9 +1,18 @@
 mlx-vlm - https://github.com/Blaizzy/mlx-vlm
 
 gmlx primarily uses mlx-vlm as an installed dependency, patched at runtime
-(see gmlx/upstream/seams.py), but three modules carry code copied or
+(see gmlx/upstream/seams.py), but the modules below carry code copied or
 ported from it, with modifications:
 
+- gmlx/models/qwen35/language.py, gated_delta.py, config.py,
+  moe_language.py and moe_config.py: the qwen3_5 and qwen3_5_moe text
+  models of mlx-vlm 0.6.15 (mlx_vlm/models/qwen3_5/language.py,
+  gated_delta.py, config.py and mlx_vlm/models/qwen3_5_moe/language.py,
+  config.py), written by scripts/vendor_qwen35.py. Each file lists its
+  edits in its docstring: absolute imports, the text configs only, a
+  gmlx cache class in make_cache, one renamed kernel, evals under an
+  except routed through gmlx.eval_guard, ASCII comments, and mlx-lm's
+  SwitchGLU in the MoE block.
 - gmlx/cache/apc_manager.py: the store_kv_blocks override is a copy of
   mlx_vlm.apc.APCManager.store_kv_blocks with the per-block mx.eval
   hoisted into chunked batches and gmlx's checkpoint-store policy added.

@@ -1,13 +1,14 @@
 """Owned layer assembly for qwen3.5/3.6 MTP targets.
 
 The dense MLP, the MoE sparse block, and both decoder layers, as
-subclasses whose ``__init__`` mirrors the stock body but constructs
+subclasses of the vendored mlx-vlm 0.6.15 classes (``language``,
+``moe_language``) whose ``__init__`` mirrors the base body but constructs
 the owned attention/GDN/MLP classes. Dispatch-only ``__call__`` bodies
 are verbatim upstream copies, source-equality-tested against the
-pinned mlx-vlm release; the MLP and sparse-block forwards route
-projections through the owned verify-linear family. The mirrored
-constructors draw parameters in the stock order, so a seeded owned
-build is weight-identical to a seeded stock build (certified by the
+vendored base; the MLP and sparse-block forwards route projections
+through the owned verify-linear family. The mirrored constructors draw
+parameters in the base order, so a seeded owned build is
+weight-identical to a seeded base build (certified by the
 construction-pair tests).
 """
 
@@ -16,11 +17,11 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.switch_layers import SwitchGLU
+from mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.load.hadamard_modules import fold_of, glu_rotate
 
+from . import language as _L
 from .attn import OwnedQwen3_5Attention
 from .gdn import OwnedQwen3_5GatedDeltaNet
 from .verify_linear import verify_linear, verify_linears
@@ -121,7 +122,7 @@ class OwnedQwen3_5DecoderLayer(_L.Qwen3_5DecoderLayer):
 def _moe_layer_classes():
     """MoE layer classes, lazily bound (the MoE language module imports
     the dense one; keep the import cost off dense loads)."""
-    from mlx_vlm.models.qwen3_5_moe import language as _ML
+    from . import moe_language as _ML
 
     class OwnedQwen3_5MoeSparseMoeBlock(_ML.Qwen3_5MoeSparseMoeBlock):
         """__init__ mirrors the stock body (shared expert built owned);

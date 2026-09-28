@@ -1,16 +1,17 @@
 """Owned GatedDeltaNet forward for qwen3.5/3.6 MTP targets.
 
-Subclasses mlx-vlm's ``Qwen3_5GatedDeltaNet``; the owned constructors
-build it directly and ``prepare_gdn`` arms the fused routes after
-weights load (``rebind_gdn`` arms stock-built trees in tests). Three
-routes: fused decode (S=1, no sink), fused verify (sink set, S>1), and
-an owned unfused chain for the rest, which sends the scan through
-mlx-lm's gated_delta (tiled under the GGUF K->V fixup) and projections
-through ``qwen35_verify_linear``.
+Subclasses the vendored mlx-vlm 0.6.15 ``Qwen3_5GatedDeltaNet``
+(``language``); the owned constructors build it directly and
+``prepare_gdn`` arms the fused routes after weights load (``rebind_gdn``
+arms base-built trees in tests). Three routes: fused decode (S=1, no
+sink), fused verify (sink set, S>1), and an owned unfused chain for the
+rest, which sends the scan through mlx-lm's gated_delta (tiled under the
+GGUF K->V fixup) and projections through ``qwen35_verify_linear``.
 
-Owned loads never touch ``mlx_vlm.models.qwen3_5.gated_delta``; the
-rebind and class patches install only for the ``GMLX_QWEN_OWNED=0``
-fallback. ``GMLX_FUSED_GDN=0`` disables the fused routes.
+The owned forward never calls the vendored ``gated_delta`` scan (the
+inherited rollback uses its state ops); the rebind and class patches
+install only for the ``GMLX_QWEN_OWNED=0`` fallback. ``GMLX_FUSED_GDN=0``
+disables the fused routes.
 """
 
 from typing import Any, Optional
@@ -18,13 +19,12 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.qwen3_5 import language as _L
-
 import gmlx.upstream.gdn_patches as _gp
 from gmlx.envflags import env_bool
 from gmlx.load.loadlog import verbose_print
 from gmlx.tune.gdn import training_gated_delta_update
 
+from . import language as _L
 from .owned import (
     GdnReplayRollback,
     _qwen3_5_advance_left_padding_info,

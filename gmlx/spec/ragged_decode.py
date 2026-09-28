@@ -1,8 +1,10 @@
-"""Mixed-depth batched ragged decode for the stock qwen3.5 fallback.
+"""Mixed-depth batched ragged decode for the base qwen3.5 fallback.
 
-Stock ``_qwen3_5_ragged_decode_attention`` requires every row of a batch to
-land in the same sdpa-vector plan bucket (``len(set(plans)) != 1 -> None``,
-buckets flip at effective lengths 8k/32k/64k). Streams at different session
+The base ``_qwen3_5_ragged_decode_attention`` (the vendored mlx-vlm
+0.6.15 text model in ``gmlx.models.qwen35.language``) requires every row
+of a batch to land in the same sdpa-vector plan bucket
+(``len(set(plans)) != 1 -> None``, buckets flip at effective lengths
+8k/32k/64k). Streams at different session
 depths -- the normal continuous-batching case -- then fall back to a per-row
 python loop in ``_target_verify_left_padded_attention``: full-depth
 ``mx.take`` gather + slice + separate SDPA + concat, EVERY decode step.
@@ -45,7 +47,7 @@ def install_unified_ragged_plan() -> None:
     if (os.environ.get("GMLX_RAGGED_UNIFIED_PLAN", "1") == "0"
             and _wide_threadgroups_ok()):
         return
-    from mlx_vlm.models.qwen3_5 import language as _lang
+    from gmlx.models.qwen35 import language as _lang
 
     # Identity check instead of a latch: no attribute stamped onto the
     # owned function, and a test that restores the upstream global gets

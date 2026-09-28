@@ -1,6 +1,7 @@
 """Spec-target seam: the VLM path builds the same hook-bearing language
 model the text MTP path uses (owned qwen3.5/gemma4 classes), constructed
 from the VLM's real ModelConfig so mrope on image turns stays correct.
+Plain qwen3.5 VLM builds first take the vendored base text model.
 No GGUFs: tiny synthetic configs, real mlx-vlm wrapper classes.
 """
 
@@ -14,16 +15,20 @@ pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
 from mlx_vlm.models.gemma4 import language as _G
 from mlx_vlm.models.gemma4.config import TextConfig as G4TextConfig
+from mlx_vlm.models.qwen3_5 import language as _StockL
 from mlx_vlm.models.qwen3_5.config import ModelConfig as Q35ModelConfig
-from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.config import VisionConfig as Q35VisionConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 from mlx_vlm.models.qwen3_5.qwen3_5 import Model as Q35Model
 
 import gmlx.models.gemma4.owned as gemma4_owned
 import gmlx.models.qwen35.owned as qwen35_owned
 from gmlx.load.mtp_target import _spec_hook_key, _vlm_spec_language_model
-from gmlx.load.vlm import _swap_spec_language_model
+from gmlx.load.vlm import (
+    _swap_qwen35_base_language_model,
+    _swap_spec_language_model,
+)
+from gmlx.models.qwen35.config import TextConfig as Q35TextConfig
+from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 
 
 def _q35_text_cfg():
@@ -54,7 +59,7 @@ def _q35_text_cfg():
     )
 
 
-def _q35_vlm():
+def _q35_stock_vlm():
     cfg = Q35ModelConfig(
         text_config=_q35_text_cfg(),
         vision_config=Q35VisionConfig(
@@ -69,6 +74,14 @@ def _q35_vlm():
         vision_end_token_id=127,
     )
     return Q35Model(cfg)
+
+
+def _q35_vlm():
+    """The tree load_vlm_model hands the spec swap: the container build,
+    then the vendored base text model."""
+    model = _q35_stock_vlm()
+    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
+    return model
 
 
 def _g4_cfg():
@@ -94,6 +107,29 @@ def _g4_cfg():
 
 def _log(*_a, **_k):
     pass
+
+
+def test_plain_qwen35_build_takes_the_vendored_base_with_identical_tree():
+    model = _q35_stock_vlm()
+    assert type(model.language_model) is _StockL.LanguageModel
+    before = {k for k, _ in nn.utils.tree_flatten(
+        model.language_model.parameters())}
+    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
+    assert type(model.language_model) is Q35LanguageModel
+    assert model.language_model.config is model.config
+    after = {k for k, _ in nn.utils.tree_flatten(
+        model.language_model.parameters())}
+    assert before == after
+    lm = model.language_model
+    _swap_qwen35_base_language_model(model, "qwen3_5", log=_log)
+    assert model.language_model is lm
+
+
+def test_base_swap_leaves_other_model_types_alone():
+    model = SimpleNamespace(language_model=object(), config=None)
+    lm = model.language_model
+    _swap_qwen35_base_language_model(model, "gemma4", log=_log)
+    assert model.language_model is lm
 
 
 def test_qwen35_swap_yields_owned_class_with_identical_tree():

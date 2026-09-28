@@ -773,8 +773,8 @@ class DFlash2Drafter(DFlashDrafter):
 
 if TYPE_CHECKING:
     # The hooks are mixed in ahead of this class; giving pyright the real
-    # base resolves the super() calls against upstream's method set.
-    from mlx_vlm.models.qwen3_5.language import LanguageModel as _CaptureBase
+    # base resolves the super() calls against the vendored method set.
+    from gmlx.models.qwen35.language import LanguageModel as _CaptureBase
 else:
     _CaptureBase = object
 

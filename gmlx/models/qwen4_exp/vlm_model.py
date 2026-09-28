@@ -10,8 +10,9 @@ vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` s
 mlx-vlm's generate stack expects.
 
 Positions: text-only rows keep the scalar-offset fast rope; when images are
-present, ``get_rope_index`` (borrowed unbound from mlx-vlm's qwen3_5
-``LanguageModel``, identical interleaved-mrope semantics) produces the
+present, ``get_rope_index`` (borrowed unbound from the vendored qwen3.5
+``LanguageModel`` in :mod:`gmlx.models.qwen35.language`, identical
+interleaved-mrope semantics) produces the
 ``[3, B, L]`` t/h/w ids and the wrapper threads them into the vendored
 attention + QSA indexer (which cache per-token positions for block-key rope).
 Decode positions continue at ``cache_offset + rope_delta`` on all three
@@ -41,9 +42,10 @@ from mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 from mlx_vlm.models.qwen3_5.config import VisionConfig
-from mlx_vlm.models.qwen3_5.language import LanguageModel as _Q35LanguageModel
 from mlx_vlm.models.qwen3_5.vision import VisionModel
 from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
+
+from gmlx.models.qwen35.language import LanguageModel as _Q35LanguageModel
 
 from . import model as q4
 from .model import ModelArgs as TextConfig

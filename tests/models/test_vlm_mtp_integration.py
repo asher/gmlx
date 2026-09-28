@@ -54,7 +54,7 @@ def vlm_mtp_load(request, gguf_dir):
     """(model, drafter, owned_arm) loaded through load_vlm_mtp_model under
     GMLX_QWEN_OWNED={1,0}, with the process-global patch state restored at
     teardown so later tests in the same run see clean globals."""
-    from mlx_vlm.models.qwen3_5 import language as _L
+    from gmlx.models.qwen35 import language as _L
 
     import gmlx.upstream.gdn_patches as gp
     import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
@@ -106,7 +106,7 @@ def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
     import importlib
 
     from mlx_lm.models import gated_delta as gd
-    from mlx_vlm.models.qwen3_5 import language as _L
+    from gmlx.models.qwen35 import language as _L
 
     import gmlx.models.qwen35.attn as qwen35_attn
     import gmlx.models.qwen35.owned as qwen35_owned
@@ -119,7 +119,7 @@ def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
     # VLM load rebinds the vendored module, owned or stock. Not an identity
     # check against gd: a later load can re-close the mlx-lm patch, leaving
     # vgd on an older (equally tiled) instance.
-    vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
+    vgd = importlib.import_module("gmlx.models.qwen35.gated_delta")
     assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
     assert "_tiled_gated_delta_ops" in gd.gated_delta_ops.__qualname__
 

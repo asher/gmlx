@@ -1473,7 +1473,7 @@ def _patch_batched_verify_sdpa() -> None:
 
     import os
 
-    import mlx_vlm.models.qwen3_5.language as _L
+    import gmlx.models.qwen35.language as _L
 
     _orig_left_padded = _L._target_verify_left_padded_attention
     _STOCK_VERIFY_LEFT_PADDED = _orig_left_padded
@@ -1538,12 +1538,13 @@ def _patch_bf16_verify_linear() -> None:
     MLX's bf16 matmul at small M (2..8) dispatches through a general GEMM path
     that runs at ~65-70% of peak BW. The GEMV-ext kernel (same weight read,
     M register accumulators) holds ~95% flat across M=2..8. This patches
-    _target_verify_linear in mlx-vlm so every bf16 projection at verify width
-    (MLP gate/up/down, attention q/k/v/o in UD-protected layers) benefits."""
+    _target_verify_linear in the vendored qwen3.5 base so every bf16
+    projection at verify width (MLP gate/up/down, attention q/k/v/o in
+    UD-protected layers) benefits."""
     global _BF16_VERIFY_LINEAR_PATCHED
     if _BF16_VERIFY_LINEAR_PATCHED or _F16_HEAD_GEMV is None:
         return
-    import mlx_vlm.models.qwen3_5.language as _L
+    import gmlx.models.qwen35.language as _L
 
     _stock_tvl = _L._target_verify_linear
 
@@ -1574,7 +1575,7 @@ def _patch_qwen35_empty_sequence_guard() -> None:
     global _S0_MODEL_GUARD_INSTALLED
     if _S0_MODEL_GUARD_INSTALLED:
         return
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5Model
+    from gmlx.models.qwen35.language import Qwen3_5Model
 
     _orig_model_call = Qwen3_5Model.__call__
 
@@ -1592,7 +1593,7 @@ def _patch_gated_delta_fused_verify(model) -> None:
     the MTP target. Installs the class-level dispatch once (a no-op for instances
     without the per-instance ``_gdn_fused_verify`` flag) and flags this model's
     instances."""
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     _patch_qwen35_empty_sequence_guard()
 
@@ -1876,15 +1877,15 @@ def _tiled_gd_state_ops(k, v, g, beta, state, steps, mask=None):
 
 
 def _patch_mlxvlm_gated_delta_tiled_v() -> None:
-    """Extend the tiled-V fixup to mlx-vlm's qwen3_5 gated_delta (seam 3).
+    """Extend the tiled-V fixup to the vendored qwen3.5 gated_delta.
 
-    mlx-vlm's ``models/qwen3_5/gated_delta.py`` has its own grouped K->V mapping
-    that ``_patch_gated_delta_tiled_v`` (which only touches mlx-lm) never reaches:
+    ``gmlx.models.qwen35.gated_delta`` (mlx-vlm 0.6.15's copy) has its own
+    grouped K->V mapping that ``_patch_gated_delta_tiled_v`` (which only
+    touches mlx-lm) never reaches:
 
-    * the regular prefill path (``gated_delta_update``) calls the names it
-      ``from``-imported from mlx-lm at module load - so the patched mlx-lm
-      attribute is shadowed for the *ops* fallback (the *kernel* function reads
-      its module global at call time and is already tiled). Rebind both copies.
+    * the regular prefill path (``gated_delta_update``) calls the module's
+      own ``gated_delta_kernel`` / ``gated_delta_ops`` copies of the mlx-lm
+      functions. Rebind both to the tiled mlx-lm ones.
     * the MTP state-capturing paths (``gated_delta_update_with_states`` /
       ``gated_delta_state_update``) ship their own grouped Metal kernels + ops.
       They run only over the tiny draft block (small T), so we route them to the
@@ -1894,22 +1895,9 @@ def _patch_mlxvlm_gated_delta_tiled_v() -> None:
     Must run after ``_patch_gated_delta_tiled_v`` (depends on its tiled mlx-lm
     ``gated_delta_ops`` / ``_gated_delta_kernel``).
     """
-    import importlib
     from mlx_lm.models import gated_delta as gd
 
-    try:
-        vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
-    except ImportError:
-        return
-
-    # The rebind is blind assignment; verify the seams still exist first so
-    # an upstream rename fails here, not as unvalidated grouped-kernel output.
-    for _name in ("gated_delta_ops", "gated_delta_kernel",
-                  "_gated_delta_with_states_ops", "_gated_delta_state_ops"):
-        if not hasattr(vgd, _name):
-            raise RuntimeError(
-                f"mlx-vlm gated_delta seam {_name!r} is gone - re-audit "
-                f"against the pinned seams (gmlx.upstream.seams)")
+    import gmlx.models.qwen35.gated_delta as vgd
 
     # Regular prefill: rebind the import-time copies to the tiled mlx-lm ones.
     vgd.gated_delta_ops = gd.gated_delta_ops

@@ -246,7 +246,7 @@ def test_fused_gdn_kill_switch_verify(monkeypatch):
     patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_verify_kernel is None:
         pytest.skip("fused gdn verify kernel unavailable")
-    from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
 
     saved_call = Qwen3_5GatedDeltaNet.__call__
     saved_installed = patches._FUSED_VERIFY_PATCH.installed
