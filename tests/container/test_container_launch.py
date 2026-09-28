@@ -213,7 +213,7 @@ def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monk
     calls = []
     assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     assert calls and not env.runs                      # host mode
-    assert "ignoring the launch block" in capsys.readouterr().err
+    assert "gmlx no longer reads ./gmlx.yaml" in capsys.readouterr().err
     _user_config(env.home, "launch:\n  container:\n    enabled: true\n")
     assert _run(["pi"]) == 0 and env.runs
 
@@ -405,6 +405,26 @@ def test_dsh_web_profile_gets_no_open_and_a_port(env):
     assert spec.env_values["HOST"] == "127.0.0.1"
 
 
+def _dsh_manifest(profile, bundles):
+    from gmlx.container import settings
+    d = settings.private_home("dsh") / ".dsh" / "profiles" / profile
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "package.json").write_text(json.dumps({"dsh": {"profile": {"bundles": bundles}}}))
+
+
+def test_a_guest_manifest_never_makes_a_dsh_profile_a_web_session(env):
+    """The profile manifests lie in the private home, which the guest
+    writes, so the profile name alone decides whether the Mac binds a web
+    port and opens a browser."""
+    _dsh_manifest("mycli", [launch._DSH_WEB_BUNDLE])
+    assert _run(["dsh", "--container", "--dsh-profile", "mycli"]) == 0
+    assert env.runs[-1]["spec"].web_port is None
+    assert env.runs[-1].get("opener") is None
+    _dsh_manifest("gmlx", ["@deepseek-ai/dsh-cli"])
+    assert _run(["dsh", "--container"]) == 0
+    assert env.runs[-1]["spec"].web_port == 3080
+
+
 def test_dsh_stdio_profiles_are_refused(env, capsys):
     assert _run(["dsh", "--container", "--config-only", "--dsh-profile", "acp"]) == 1
     assert "--no-container" in capsys.readouterr().err
@@ -465,6 +485,17 @@ def test_second_session_is_refused_with_the_shell_hint(running_session, capsys):
     assert _run(["pi", "--container"]) == 1
     err = capsys.readouterr().err
     assert "gmlx-pi-abc123" in err and "gmlx launch pi --shell" in err
+
+
+@pytest.mark.parametrize("record", [{"name": "gmlx-pi-abc123"},
+                                    {"name": "gmlx-pi-abc123", "workdir": "/w",
+                                     "shares": [{"guest": "/w"}]}])
+def test_shell_with_a_damaged_record_is_a_clean_error(running_session, capsys, record):
+    session.record_path("pi").write_text(json.dumps(record))
+    assert _run(["pi", "--shell"], exec_fn=lambda *a: pytest.fail("exec")) == 1
+    assert "is damaged, so --shell cannot attach" in capsys.readouterr().err
+    assert _run(["pi", "--container"]) == 1              # the refusal still names the way
+    assert "gmlx launch pi --shell" in capsys.readouterr().err
 
 
 def test_shell_attaches_to_the_running_session(running_session, capsys):
@@ -867,3 +898,26 @@ def test_step_7_stops_an_owed_builder_before_a_pull(env, monkeypatch):
                            "        image: docker.io/me/pi:1\n")
     assert _run(["pi", "--container"]) == 0
     assert env.calls("image", "pull") and seen == [True]
+
+
+# Terminal output
+
+def test_a_guest_named_git_folder_prints_no_terminal_controls(env, capsys, monkeypatch):
+    """The guest names a git folder in its private home whose name holds an
+    OSC 52 clipboard write and CSI cursor moves. Launch prints a note that
+    names the folder, with every control shown as an escape."""
+    import subprocess
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    evil = "G\x1b]52;c;ZWNobyBwd25lZAo=\x07\x1b[2K\x1b[1A\x9b"
+    from gmlx.container import settings
+    gitdir = settings.private_home("pi") / evil
+    repo = env.home / "tmprepo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
+    os.rename(repo / ".git", gitdir)
+    (env.proj / ".git").write_text(f"gitdir: {gitdir}\n")
+    assert _run(["pi", "--container"]) == 0
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "\\x1b]52;c;ZWNobyBwd25lZAo=\\x07\\x1b[2K\\x1b[1A\\x9b" in text
+    assert not any(ch in text for ch in "\x1b\x07\x9b")

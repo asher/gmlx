@@ -20,6 +20,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -36,6 +37,7 @@ from .clipboard import ClipboardServer
 from .relay import Address, Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
 from .state import FileLock, LockHeld, cache_dir, data_dir
+from .text import printable
 
 HOST_SERVICES = "/var/host-services"
 API_GUEST_SOCK = f"{HOST_SERVICES}/gmlx-api.sock"
@@ -50,12 +52,18 @@ LOG_MAX = 1 << 20
 PENDING_SIGNAL_WAIT = 60.0
 # Each query of the session cleanup waits at most this long.
 TEARDOWN_QUERY_TIMEOUT = 5.0
+# ``container delete --force`` stops the VM first, which takes longer.
+TEARDOWN_DELETE_TIMEOUT = 30.0
+# The dsh output reader copies at most this much at a time, and looks for
+# the URL in the last this many bytes.
+TEE_CHUNK = 1 << 16
+TEE_WINDOW = 4096
 
 Say = Callable[[str], None]
 
 
 def _say(line: str) -> None:
-    print(line, flush=True)
+    print(printable(line), flush=True)
 
 
 def fwd_guest_sock(port: int) -> str:
@@ -84,21 +92,55 @@ def record_path(client: str) -> Path:
 
 def write_record(client: str, record: dict) -> None:
     path = record_path(client)
-    tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(record, indent=1))
-        os.replace(tmp, path)
+        write_private(path, json.dumps(record, indent=1).encode())
     except OSError as e:
         raise SettingsError(f"cannot write the session record {path} "
                             f"({e.strerror or e}).") from None
 
 
-def read_record(client: str) -> dict | None:
+def write_private(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data``, readable only by you. The temporary
+    file is new, with a name no other writer uses, and never a link."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
     try:
-        record = json.loads(record_path(client).read_text())
-    except (OSError, ValueError):
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def read_record(client: str) -> dict | None:
+    """The running session's record, or None when there is none. A record
+    that is not the shape the supervisor writes is a SettingsError."""
+    path = record_path(client)
+    try:
+        record = json.loads(path.read_text())
+    except FileNotFoundError:
         return None
-    return record if isinstance(record, dict) else None
+    except (OSError, ValueError, RecursionError):
+        record = None
+    if not _record_ok(record):
+        raise SettingsError(f"the session record {path} is damaged, so --shell cannot "
+                            "attach to the running session.")
+    return record
+
+
+def _record_ok(record) -> bool:
+    if not isinstance(record, dict):
+        return False
+    shares = record.get("shares")
+    return (isinstance(record.get("name"), str) and isinstance(record.get("workdir"), str)
+            and isinstance(record.get("clipboard", False), bool)
+            and isinstance(shares, list)
+            and all(isinstance(m, dict) and isinstance(m.get("host"), str)
+                    and isinstance(m.get("guest"), str)
+                    and isinstance(m.get("readonly", False), bool) for m in shares))
 
 
 def remove_record(client: str) -> None:
@@ -606,6 +648,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 with cli.query_timeout(TEARDOWN_QUERY_TIMEOUT):
                     _step(log, "remove the container", _remove_container, s.name,
                           stop=signals is None or signals.count < 3, log=log)
+                    _step(log, "check the container is gone", _report_leftover, s.name,
+                          log=log)
         except TeardownAbandoned:
             log("cleanup: abandoned after a third signal")
         finally:
@@ -648,13 +692,10 @@ class _SessionLog:
         self.size = 0
         self.full = False
         self._lock = threading.Lock()
-        try:
-            self._file = open(path, "w", buffering=1)
-        except OSError:
-            self._file = None
+        self._file = _open_log(path)
 
     def __call__(self, line: str) -> None:
-        text = f"{time.strftime('%H:%M:%S')} {line}\n"
+        text = f"{time.strftime('%H:%M:%S')} {printable(line)}\n"
         with self._lock:
             if self._file is None or self.full:
                 return
@@ -677,6 +718,25 @@ class _SessionLog:
                 self._file = None
 
 
+def _open_log(path: Path):
+    """The session log, emptied, readable only by you. A link or anything
+    other than a regular file at the path is not opened."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        return os.fdopen(fd, "w", buffering=1)
+    except OSError:
+        os.close(fd)
+        return None
+
+
 def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> None:
     """Stop and delete the session's container when it is still listed. After
     a third signal the runtime did not answer ``container stop``, so the
@@ -687,9 +747,20 @@ def _remove_container(name: str, *, stop: bool, log: Callable[[str], None]) -> N
             return
         if stop:
             cli.stop(name, timeout=5)
-        cli.delete(name)
+        with cli.query_timeout(TEARDOWN_DELETE_TIMEOUT):
+            cli.delete(name)
     except (cli.ContainerError, OSError) as e:
         log(f"cleanup: {e}")
+
+
+def _report_leftover(name: str, *, log: Callable[[str], None]) -> None:
+    """Print one line when the session's container is still listed after the
+    cleanup, since it keeps its memory until it is removed."""
+    if any(c.name == name for c in _safe_containers()):
+        line = (f"[launch] the container {name} is still there after the session. Remove "
+                f"it with: container delete --force {name}")
+        log(line)
+        print(printable(line), file=sys.stderr, flush=True)
 
 
 def _tee_for_url(stream, pattern: str, web_port: int | None,
@@ -702,21 +773,32 @@ def _tee_for_url(stream, pattern: str, web_port: int | None,
     regex = re.compile(pattern)
     opened = False
     out = sys.stdout.buffer
-    for raw in iter(stream.readline, b""):
+    tail = b""
+    # read1 returns what the pipe holds, up to the limit, so output with no
+    # newline never piles up in memory.
+    while chunk := stream.read1(TEE_CHUNK):
         try:
-            out.write(raw)
+            out.write(chunk)
             out.flush()
         except (OSError, ValueError):
             pass
         if opened or opener is None:
             continue
-        m = regex.search(raw.decode("utf-8", "replace"))
-        if m and m.group(1).startswith(f"http://127.0.0.1:{web_port}/"):
-            opened = True
-            try:
-                opener(m.group(1))
-            except Exception as e:  # noqa: BLE001 - see the docstring
-                log(f"cannot open the browser ({type(e).__name__}: {e})")
+        window = tail + chunk
+        tail = window[-TEE_WINDOW:]
+        text = window.decode("latin-1")
+        for m in regex.finditer(text):
+            # A match that runs to the end of the window may be cut short;
+            # the next window holds the rest of it.
+            if m.end() == len(text):
+                break
+            if m.group(1).startswith(f"http://127.0.0.1:{web_port}/"):
+                opened = True
+                try:
+                    opener(m.group(1))
+                except Exception as e:  # noqa: BLE001 - see the docstring
+                    log(f"cannot open the browser ({type(e).__name__}: {e})")
+                break
 
 
 def _safe_containers() -> list[cli.Container]:

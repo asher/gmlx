@@ -204,7 +204,10 @@ def _config_path_from(words: list[str]) -> str | None:
             return w.split("=", 1)[1]
     import gmlx.config as cfgmod
 
-    return next((str(p) for p in cfgmod.default_config_paths() if p.exists()), None)
+    # A completion never prints the ./gmlx.yaml line, which would land in
+    # the middle of the command line being typed.
+    return next((str(p) for p in cfgmod.default_config_paths(note_local=False)
+                 if p.exists()), None)
 
 
 def _model_candidates(words: list[str]) -> list[str]:
@@ -263,7 +266,7 @@ def _container_launch(words: list[str]) -> bool:
         return True
     from gmlx.config import load_launch_settings
 
-    return bool(load_launch_settings()[0].container.for_client("dsh").enabled)
+    return bool(load_launch_settings(note_local=False).container.for_client("dsh").enabled)
 
 
 def _dsh_profile_candidates(container: bool = False) -> list[str]:

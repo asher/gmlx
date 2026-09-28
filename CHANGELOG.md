@@ -38,6 +38,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx run` and `gmlx chat` turn speculation on by themselves when they
   find the companion drafter of a Qwen3.8-Flash-Next or Muse Glimmer model,
   as they already did for DeepSeek-V4.
+- gmlx no longer reads `./gmlx.yaml` from the current directory by itself,
+  since a file there can name commands the server runs. Pass
+  `--config ./gmlx.yaml` to use a project file.
+- The server takes images, audio and video in a request only as inline
+  `data:` URIs and refuses file paths and URLs without opening them.
+  `server.media_urls` lets it fetch http(s) URLs again.
 
 ### Fixed
 

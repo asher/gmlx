@@ -209,6 +209,13 @@ def _no_live_server(monkeypatch):
                         lambda base_url, api_key=None: False)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_local_config_note(monkeypatch):
+    # The ./gmlx.yaml line prints once per process; every test sees its own.
+    import gmlx.config as _config
+    monkeypatch.setattr(_config, "_local_config_noted", False)
+
+
 def pytest_runtest_setup(item):
     ops = item.get_closest_marker("needs_kvarn_ops") is not None
     row_ends = item.get_closest_marker("needs_kvarn_row_ends") is not None

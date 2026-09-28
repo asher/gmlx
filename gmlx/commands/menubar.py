@@ -1350,6 +1350,8 @@ class _MenuBarApp:
 
 def cmd_menubar(argv: list | None = None,
                 prog: str = "gmlx launch menubar") -> int:
+    from gmlx import config
+    config.note_local_config(config.SERVE_CONFIG_ADVICE)
     ap = argparse.ArgumentParser(
         prog=prog,
         description="macOS menu-bar monitor for a backgrounded gmlx server: shows "

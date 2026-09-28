@@ -1846,6 +1846,43 @@ def test_launch_dsh_profile_with_the_web_bundle_moves_off_3080(monkeypatch,
     assert calls["argv"][-2:] == ["--port", "3081"]
 
 
+def test_a_private_home_manifest_never_makes_a_web_session(tmp_path):
+    # In a private home the manifest is the guest's, so only the name counts.
+    from gmlx.container import confine
+    manifest = tmp_path / ".dsh" / "profiles" / "mycli" / "package.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"dsh": {"profile": {"bundles": [
+        "@deepseek-ai/dsh-web-app"]}}}))
+    assert launch._dsh_runs_web_app("mycli", manifest)          # on the Mac
+    with confine.confined(tmp_path):
+        assert not launch._dsh_runs_web_app("mycli", manifest)
+        assert launch._dsh_runs_web_app("gmlx", manifest)
+        assert launch._dsh_runs_web_app("web", manifest)
+
+
+@pytest.mark.parametrize("name, text", [
+    ("deep.json", "[" * 100_000 + "]" * 100_000),
+    ("deep.yaml", "[" * 100_000 + "]" * 100_000),
+])
+def test_a_deeply_nested_config_is_a_launch_error(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text)
+    load = launch._load_json if name.endswith(".json") else launch._load_yaml
+    with pytest.raises(launch.LaunchError, match="nests too deeply"):
+        load(path)
+
+
+def test_discover_config_returns_an_absolute_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    (home / ".config" / "gmlx" / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 9}\n")      # never read
+    cfg, path = launch._discover_config()
+    assert path == str(home / ".config" / "gmlx" / "gmlx.yaml") and cfg.port == 8123
+
+
 def test_launch_dsh_profile_refuses_a_missing_custom_profile(monkeypatch,
                                                              tmp_path):
     _fake_dsh(monkeypatch, tmp_path)

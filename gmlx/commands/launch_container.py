@@ -23,6 +23,7 @@ from gmlx.config import ConfigError, LaunchCfg, launch_block_enables, load_launc
 from gmlx.container import cli, confine, images, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
+from gmlx.container.text import printable
 
 # Flags that only mean something in container mode, by argparse dest.
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
@@ -38,7 +39,7 @@ _DSH_URL_LINE = r"dsh web: (\S+)"
 
 
 def _say(line: str) -> None:
-    print(line, flush=True)
+    print(printable(line), flush=True)
 
 
 def _flag_name(dest: str, value) -> str:
@@ -68,7 +69,7 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
         ap.error(f"{implied[0]} applies only in container mode, so it cannot go with "
                  "--no-container")
     try:
-        launch_cfg, notice = load_launch_settings()
+        launch_cfg = load_launch_settings()
     except ConfigError as e:
         if a.container or implied:
             raise
@@ -83,11 +84,9 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
                     f"{e}. {path} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "
                     "--no-container to run it on the Mac instead.") from None
-        print(f"[launch] ignoring the launch settings, so {a.harness} runs on the Mac: {e}",
-              file=sys.stderr)
+        print(printable(f"[launch] ignoring the launch settings, so {a.harness} runs on "
+                        f"the Mac: {e}"), file=sys.stderr)
         return False, LaunchCfg()
-    if notice:
-        print(f"[launch] {notice}", file=sys.stderr)
     if a.container is not None:
         return a.container, launch_cfg
     if implied:
@@ -348,13 +347,14 @@ def _split_env(entries: list[str]) -> tuple[list[str], dict[str, str]]:
     return names, values
 
 
-def _dsh_profile_is_web(a, home: Path) -> bool:
+def _dsh_profile_is_web(a) -> bool:
+    """Whether a dsh profile runs the web app in a container, by its name
+    only. The profile's manifest lies in the private home, which the guest
+    writes, so it never decides whether the Mac opens a port and a browser."""
     from gmlx.commands import launch as L
 
     profile = L._DSH_PROFILE if a.dsh_profile is None else a.dsh_profile
-    manifest = home / ".dsh" / "profiles" / profile / "package.json"
-    with confine.confined(home):
-        return L._dsh_runs_web_app(profile, manifest)
+    return profile in (L._DSH_PROFILE, L._DSH_TEMPLATE)
 
 
 def _image_state(image_plan, rebuild: bool, running: bool
@@ -430,7 +430,10 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
         if lock is None:
             if a.shell:                   # attaching refuses --config-only itself
                 return _attach(a, exec_fn, say)
-            record = session.read_record(client) or {}
+            try:
+                record = session.read_record(client) or {}
+            except SettingsError:
+                record = {}
             raise L.LaunchError(
                 f"a container session of {client} is already running"
                 + (f" ({record['name']})" if record.get("name") else "")
@@ -445,7 +448,7 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 item.release()
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
             confine.ConfinedError) as e:
-        print(f"[launch] {e}", file=sys.stderr)
+        print(printable(f"[launch] {e}"), file=sys.stderr)
         return 1
     except _Signalled as e:
         print(f"[launch] stopped by signal {e.signum} while the image was prepared",
@@ -472,8 +475,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                             "with --no-container.")
     host, port = _server_endpoint(a)
     _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
-    home = settings.private_home(client)
-    web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a, home))
+    web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a))
     web_port = L.web_port_for(client, port) if web else None
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
@@ -658,7 +660,8 @@ def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:
 def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say) -> int:
     say("[launch] container dry run: no image is built or pulled, and no container is "
         "started.")
-    say(image_line)
+    for line in image_line.split("\n"):
+        say(line)
     say(f"[launch] runtime folder {spec.runtime_dir}")
     if plan.volumes:
         existing = {v.name for v in cli.volume_list()} if running else None
@@ -676,5 +679,5 @@ def _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
     argv = session.compose_run_argv(spec)
     say("[launch] the command, which needs the API socket that only a running launch "
         "provides:")
-    print(shlex.join(argv))
+    print(printable(shlex.join(argv)))
     return 0

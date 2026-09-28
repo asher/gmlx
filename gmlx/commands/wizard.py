@@ -689,7 +689,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     where = io.choice(
         "\nWhere should the config live?",
         [(f"user config ({default_out}) - found by `gmlx serve`", "user"),
-         ("project-local (./gmlx.yaml)", "project")],
+         ("project-local (./gmlx.yaml) - pass it with --config", "project")],
         default=0)
     out = user_out if where == "user" else Path("gmlx.yaml").resolve()
     if out.exists() and not io.yesno(f"\n{out} exists - overwrite?",

@@ -82,6 +82,24 @@ def test_the_private_home_walk_is_capped(box, monkeypatch):
     assert "private homes at least" in doctor.check_container()["detail"]
 
 
+def test_the_private_home_walk_counts_folders(tmp_path, monkeypatch):
+    """A guest can make many empty folders, which hold no files to count."""
+    root = tmp_path / "home"
+    for n in range(50):
+        (root / f"d{n}").mkdir(parents=True)
+    visited = []
+    real = doctor.os.walk
+
+    def walk(top, *a, **k):
+        for entry in real(top, *a, **k):
+            visited.append(entry[0])
+            yield entry
+    monkeypatch.setattr(doctor.os, "walk", walk)
+    budget = [10]
+    assert doctor._folder_bytes(root, budget) == 0
+    assert budget == [0] and len(visited) <= 11
+
+
 def test_old_version_and_stopped_service_warn(box):
     _enable(box.home)
     box.update(version="1.3.0", running=False)

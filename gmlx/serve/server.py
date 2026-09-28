@@ -1645,7 +1645,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     import yaml
     d = dataclasses.asdict(cfg)
     server = {k: d.pop(k) for k in
-              ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
+              ("host", "port", "api_key", "no_auth", "media_urls", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
                "prefill_step_size", "dtype",
                "decode_prefill_ratio", "prefill_tick_ms",

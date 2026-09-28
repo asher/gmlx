@@ -156,6 +156,26 @@ def test_check_missing_command_exits_127_with_a_message(entry):
     assert done.stderr.count("\n") == 1                    # one line
 
 
+def test_messages_escape_terminal_controls_in_the_image_path(entry, tmp_path):
+    """The image's PATH and file names are the image's choice. An OSC 52
+    clipboard write or a CSI cursor move in them prints as text."""
+    evil = str(tmp_path / "b\x1b]52;c;ZXZpbA==\x07\x1b[2A")
+    env = {**os.environ, "PATH": evil}
+    done = _run(entry, "--check", "no-such-tool-xyz", env=env)
+    assert done.returncode == NOT_FOUND
+    assert "\x1b" not in done.stderr and "\x07" not in done.stderr
+    assert "\\u{1b}]52;c;ZXZpbA==\\u{7}\\u{1b}[2A" in done.stderr
+    os.makedirs(evil)
+    tool = Path(evil) / "tool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o644)
+    done = _run(entry, "--check", "tool", env=env)
+    assert "no execute bit" in done.stderr and "\x1b" not in done.stderr
+    tool.chmod(0o755)
+    done = _run(entry, "--check", "tool", env=env)
+    assert done.returncode == 0 and "\x1b" not in done.stdout
+
+
 def test_run_execs_the_command_with_its_arguments_and_exit_code(entry):
     done = _run(entry, "--", "sh", "-c", 'echo "$0 $1"; exit 7', "zero", "one")
     assert done.returncode == 7

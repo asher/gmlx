@@ -309,17 +309,20 @@ def _sysctl_int(name: str) -> int | None:
 # Seconds doctor waits for one container query.
 DOCTOR_QUERY_TIMEOUT = 5.0
 
-# The most files doctor measures in the private homes, so a home that holds
-# a large tree cannot make doctor slow.
+# The most files and folders doctor visits in the private homes, so a home
+# that holds a large tree cannot make doctor slow.
 _WALK_CAP = 100_000
 
 
 def _folder_bytes(root, budget: list[int]) -> int:
     """The disk space of the files under ``root``. ``budget`` holds the
-    number of files still to measure; at zero the walk stops, and the total
-    is then a lower bound."""
+    number of files and folders still to visit; at zero the walk stops, and
+    the total is then a lower bound."""
     total = 0
     for folder, _, files in os.walk(root):
+        if budget[0] <= 0:
+            return total
+        budget[0] -= 1
         for name in files:
             if budget[0] <= 0:
                 return total
@@ -342,7 +345,7 @@ def check_container():
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
     from gmlx.container import cli
     try:
-        box = load_launch_settings()[0].container
+        box = load_launch_settings(note_local=False).container
         enabled = any(box.for_client(c).enabled for c in LAUNCH_CLIENTS)
     except (ConfigError, OSError):
         enabled = False               # the config row reports a broken file

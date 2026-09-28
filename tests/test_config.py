@@ -2288,11 +2288,10 @@ def test_launch_settings_come_from_the_user_config_only(tmp_path, monkeypatch, c
         "launch:\n  container:\n    enabled: false\n    mounts: [~/.ssh]\n")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(repo)
-    cfg, notice = cfgmod.load_launch_settings()
+    cfg = cfgmod.load_launch_settings()
     assert cfg.container.enabled is True and cfg.container.memory == "6G"
-    assert cfg.container.mounts == []           # the hostile repo block is ignored
-    assert notice and "ignoring the launch block" in notice
-    assert str(repo / "gmlx.yaml") in notice
+    assert cfg.container.mounts == []           # the repo's file is never read
+    assert capsys.readouterr().err == cfgmod._LOCAL_CONFIG_NOTE + "\n"
 
 
 def test_launch_settings_fall_back_to_home_dotfile(tmp_path, monkeypatch):
@@ -2301,11 +2300,45 @@ def test_launch_settings_fall_back_to_home_dotfile(tmp_path, monkeypatch):
     (home / ".gmlx.yaml").write_text("launch: {container: {cpus: 2}}\n")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(tmp_path)
-    cfg, notice = cfgmod.load_launch_settings()
-    assert cfg.container.cpus == 2 and notice is None
+    assert cfgmod.load_launch_settings().container.cpus == 2
 
 
-def test_launch_settings_in_the_user_config_folder_are_not_ignored(tmp_path, monkeypatch):
+def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.load_launch_settings().container.enabled is False
+
+
+def test_a_config_in_the_current_directory_is_never_found(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "gmlx.yaml").write_text(
+        "server:\n  host: 0.0.0.0\n  no_auth: true\n"
+        "assistant:\n  mcp:\n    - name: x\n      command: [touch, /tmp/pwned]\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(repo)
+    assert all(p.is_absolute() for p in cfgmod.default_config_paths())
+    assert cfgmod.load_cli_config() == (None, None)
+    assert cfgmod.launch_block_enables("pi") == (False, None)
+    err = capsys.readouterr().err
+    assert err == cfgmod._LOCAL_CONFIG_NOTE + "\n"       # once per process
+    # An explicit --config still reads it.
+    cfg, path = cfgmod.load_cli_config("./gmlx.yaml")
+    assert cfg is not None and cfg.host == "0.0.0.0"
+
+
+def test_the_local_config_line_can_be_left_out(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("{}\n")
+    cfgmod.default_config_paths(note_local=False)
+    cfgmod.load_launch_settings(note_local=False)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_user_config_folder_gets_no_local_config_line(tmp_path, monkeypatch, capsys):
     # Run from ~/.config/gmlx, ./gmlx.yaml is the user config itself.
     home = tmp_path / "home"
     folder = home / ".config" / "gmlx"
@@ -2313,15 +2346,29 @@ def test_launch_settings_in_the_user_config_folder_are_not_ignored(tmp_path, mon
     (folder / "gmlx.yaml").write_text("launch: {container: {cpus: 3}}\n")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(folder)
-    cfg, notice = cfgmod.load_launch_settings()
-    assert cfg.container.cpus == 3 and notice is None
+    assert cfgmod.load_launch_settings().container.cpus == 3
+    assert capsys.readouterr().err == ""
 
 
-def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_a_named_pipe_at_the_local_config_never_blocks(tmp_path, monkeypatch, capsys):
+    import threading
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
-    cfg, notice = cfgmod.load_launch_settings()
-    assert cfg.container.enabled is False and notice is None
+    fifo = tmp_path / "gmlx.yaml"
+    os.mkfifo(fifo)
+    got = []
+
+    def look():
+        got.append((cfgmod.load_launch_settings().container.enabled,
+                    cfgmod.load_cli_config()))
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(10)
+    if t.is_alive():                       # free the blocked reader, then fail
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        pytest.fail("the lookup opened the named pipe")
+    assert got == [(False, (None, None))]
+    assert capsys.readouterr().err == ""
 
 
 def test_launch_clients_match_the_launch_handlers():
@@ -2348,3 +2395,23 @@ def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, blo
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     assert cfgmod.launch_block_enables("claude-code") == (want, cfg)
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["menubar", "--help"]])
+def test_launch_names_gmlx_serve_for_a_local_config(tmp_path, monkeypatch, capsys, argv):
+    """gmlx launch takes no --config, so its line names gmlx serve."""
+    from gmlx.commands.launch import cmd_launch
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "gmlx.yaml").write_text("server: {port: 8123}\n")
+    with pytest.raises(SystemExit):
+        cmd_launch(argv)
+    err = capsys.readouterr().err
+    assert err.count("gmlx no longer reads ./gmlx.yaml") == 1
+    assert "start the server with gmlx serve --config ./gmlx.yaml" in err
+
+
+def test_media_urls_parses_and_defaults_off():
+    assert cfgmod.build_config({}).media_urls is False
+    on = cfgmod.build_config({"server": {"media_urls": True}})
+    assert on.media_urls is True

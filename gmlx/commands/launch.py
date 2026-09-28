@@ -9,8 +9,8 @@ namespace, never mutating the user's harness files - and exec the harness pointe
 at our ``/v1`` endpoint.
 
 By default, if no server is reachable, ``launch`` auto-starts one in the background
-from a default-location config (``./gmlx.yaml``, ``~/.config/gmlx/gmlx.yaml``,
-``~/.gmlx.yaml``), polling with a spinner until it answers - when the config
+from a default-location config (``~/.config/gmlx/gmlx.yaml``, ``~/.gmlx.yaml``),
+polling with a spinner until it answers - when the config
 preloads a model the wait spans that model's load. With no config anywhere it points
 the user at ``gmlx init``. ``--no-start`` opts out; an explicit ``--base-url`` is
 never auto-started.
@@ -399,6 +399,8 @@ def _load_json(path: Path) -> dict:
         doc = json.loads(text)
     except json.JSONDecodeError as e:
         raise LaunchError(f"{path} is not valid JSON ({e}); refusing to overwrite it")
+    except RecursionError:
+        raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
     if not isinstance(doc, dict):
         raise LaunchError(f"{path} is not a JSON object; refusing to overwrite it")
     return doc
@@ -520,6 +522,8 @@ def _load_yaml(path: Path) -> dict:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise LaunchError(f"{path} is not valid YAML ({e}); refusing to overwrite it")
+    except RecursionError:
+        raise LaunchError(f"{path} nests too deeply to read; refusing to overwrite it")
     if doc is None:
         return {}
     if not isinstance(doc, dict):
@@ -1235,7 +1239,11 @@ def _check_dsh_version(version: str | None) -> None:
 
 def _dsh_runs_web_app(name: str, manifest: Path) -> bool:
     """Whether a dsh profile boots the web app: its manifest lists the web
-    bundle. A profile without a readable manifest is judged by name."""
+    bundle. A profile without a readable manifest is judged by name. In a
+    private home the manifest is the guest's, and a web profile gets a Mac
+    port and a browser tab, so there only the name counts."""
+    if confine.active():
+        return name in (_DSH_PROFILE, _DSH_TEMPLATE)
     try:
         return _DSH_WEB_BUNDLE in json.loads(
             confine.read_text(manifest) or "")["dsh"]["profile"]["bundles"]
@@ -1415,7 +1423,8 @@ def _discover_config():
     import gmlx.config as config
     for p in config.default_config_paths():
         if p.exists():
-            cfg_path = str(p)
+            # Absolute, so the runfile names the file wherever it is read.
+            cfg_path = os.path.abspath(p)
             try:
                 return config.load_config(p), cfg_path
             except config.ConfigError:
@@ -1488,7 +1497,7 @@ def _guide_to_init(harness: str | None,
     tag = f"[{rerun or 'launch'}]"
     print(
         f"{tag} no gmlx server is running, and no config was found in a default\n"
-        "  location (./gmlx.yaml, ~/.config/gmlx/gmlx.yaml, ~/.gmlx.yaml).\n"
+        "  location (~/.config/gmlx/gmlx.yaml, ~/.gmlx.yaml).\n"
         "  Set one up first:\n"
         "    gmlx init --models-dir <DIR>     # scaffold ~/.config/gmlx/gmlx.yaml from your GGUFs\n"
         "    gmlx init --from-hf-cache        # ...or from models already in your HF cache\n"
@@ -1649,6 +1658,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if argv and argv[0] == "menubar":
         from .menubar import cmd_menubar
         return cmd_menubar(argv[1:], prog=f"{prog} menubar")
+    import gmlx.config as config
+    config.note_local_config(config.SERVE_CONFIG_ADVICE)
     # Everything after the first `--` goes to the client untouched; argparse
     # would reject the client's own flags.
     argv_given = list(argv)

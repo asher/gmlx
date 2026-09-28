@@ -421,6 +421,17 @@ def test_spawn_refuses_live_but_unhealthy_server(monkeypatch):
                               host="127.0.0.1", port=8080) is None
 
 
+def test_spawn_records_the_config_as_an_absolute_path(monkeypatch, tmp_path):
+    # A relative path in the runfile would name another file when a later
+    # command reads it from another folder.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(lc.procname, "named_python", lambda: None)
+    monkeypatch.setattr(lc.subprocess, "Popen", lambda argv, **kw: _FakeProc(pid=4243))
+    lc._spawn_detached(["--config", "gmlx.yaml"], host="127.0.0.1", port=8080,
+                       config_abspath="gmlx.yaml")
+    assert lc.read_run("127.0.0.1", 8080)["config_abspath"] == str(tmp_path / "gmlx.yaml")
+
+
 def test_spawn_detached_serializes_and_refuses_second(monkeypatch):
     # Two sequential spawns on the same bind: the first writes the runfile inside
     # the lock; the second reads it and refuses (the serialized check->write that a

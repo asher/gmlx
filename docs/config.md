@@ -56,15 +56,22 @@ its own.
 
 A command that needs the file uses the first one it finds:
 
-1. It looks for `./gmlx.yaml` in the current directory first.
-2. It then looks for `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
-3. It looks for `~/.gmlx.yaml` last.
+1. `~/.config/gmlx/gmlx.yaml`, where `gmlx init` writes.
+2. `~/.gmlx.yaml`.
 
-The file in the current directory comes first, so a project can carry its
-own models and settings. The [`launch`](#launch) block is the exception,
-and gmlx never reads it from the current directory. Pass `--config FILE` to
-read a different file. Without any file, `gmlx serve` scans the current
-directory for GGUFs and prints a hint to run `init`.
+gmlx never reads a `gmlx.yaml` in the current directory by itself. A config
+file can name commands that the server runs on your Mac, and a cloned
+repository, or a [container](launch-container.md) client that writes the
+folder, can put a file there. When `./gmlx.yaml` exists, a command that
+searches for the config prints this line:
+
+```text
+gmlx no longer reads ./gmlx.yaml; pass --config ./gmlx.yaml
+```
+
+Pass `--config FILE` to read a project file or any other file. Without any
+file, `gmlx serve` scans the current directory for GGUFs and prints a hint
+to run `init`.
 
 A command reads only the first file it finds and takes nothing from the
 others. A new `~/.config/gmlx/gmlx.yaml` that holds only a `launch` block
@@ -853,6 +860,15 @@ With `true`, the server accepts an address other than loopback without a
 key. Use it when a proxy in front of the server handles authentication.
 The default is `false`.
 
+#### `server.media_urls`
+
+With `true`, a request may name an image, audio or video by an `http(s)://`
+URL, and the server fetches it. The fetch runs on the Mac, so any client
+that holds the API key can then reach loopback services and the local
+network through it. A file path is refused whatever this key says. The
+default is `false`, which takes media only as inline `data:` URIs, as
+[Vision messages](api.md#vision-messages) describes.
+
 ### Model folders
 
 #### `server.model_dirs`
@@ -1369,9 +1385,8 @@ The `launch` block sets how [`gmlx launch`](launch.md) runs clients in
 `~/.config/gmlx/gmlx.yaml` and `~/.gmlx.yaml` that exists, the same file the
 server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
 
-A `launch` block in `./gmlx.yaml` is ignored with a notice, because a
-cloned repository could otherwise share `~/.ssh` with the client or turn
-the container off. The server takes no setting from the block.
+A `launch` block in a file that `--config` names is never read by launch,
+and the server takes no setting from the block.
 
 A malformed block never stops the server, which prints one warning and
 loads the rest of the file. `gmlx launch` then runs a client on the Mac,
@@ -1611,6 +1626,7 @@ server:
   port: 8080
   api_key: null
   no_auth: false
+  media_urls: false
   model_dirs: [~/models]
   budget_gb: 96
   max_models: null

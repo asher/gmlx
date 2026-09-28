@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, media_urls, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -37,6 +37,7 @@ import fnmatch
 import functools
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -123,7 +124,7 @@ CACHE_DISK_ENV = {
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
                        "discover", "talk", "assistant", "theme", "themes",
                        "launch"})
-_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
+_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "systemone", "menubar", "token_queue_timeout_s", "prefill_step_size",
@@ -194,20 +195,25 @@ LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
 # without the fastapi extra).
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
-# Bare-start config search order (first existing wins). Every location uses the
-# same ``gmlx.yaml`` basename: project-local ``./gmlx.yaml`` is searched
-# first so a repo can override the user-level config; the XDG-style ``~/.config``
-# location (where ``gmlx init`` writes and which fits alongside other local AI
-# services) is the default; the legacy ``~/.gmlx.yaml`` dotfile is a fallback.
+# Bare-start config search order (first existing wins). The XDG-style
+# ``~/.config`` location, where ``gmlx init`` writes, is the default, and the
+# legacy ``~/.gmlx.yaml`` dotfile is a fallback. A ``./gmlx.yaml`` is never
+# searched: a file in the folder you work in can name commands the server
+# runs, and a container client can write that folder.
 _DEFAULT_CONFIG_PATHS = (
-    "./gmlx.yaml",
     "~/.config/gmlx/gmlx.yaml",
     "~/.gmlx.yaml",
 )
 
+# The name a project-local config had while gmlx still searched for it.
+_LOCAL_CONFIG = "gmlx.yaml"
+_LOCAL_CONFIG_NOTE = "gmlx no longer reads ./gmlx.yaml; pass --config ./gmlx.yaml"
+# For the verbs that take no --config and start a server from the user config.
+SERVE_CONFIG_ADVICE = "start the server with gmlx serve --config ./gmlx.yaml"
+_local_config_noted = False
+
 # Where ``gmlx init`` writes by default - the XDG-style location bare
-# ``gmlx serve`` then finds via the search order above (after a project-local
-# ``./gmlx.yaml``, if one exists).
+# ``gmlx serve`` then finds via the search order above.
 DEFAULT_CONFIG_WRITE = "~/.config/gmlx/gmlx.yaml"
 
 
@@ -547,6 +553,9 @@ class ServerCfg:
     # (for auth handled in front: mTLS, reverse proxy).
     api_key: str | None = None
     no_auth: bool = False
+    # A request may name media by an http(s) URL, which the server then
+    # fetches. File paths are refused either way (patches/media_gate.py).
+    media_urls: bool = False
     # macOS menu-bar companion: a background `serve` auto-starts it (GUI session
     # only) unless this is set false. No effect off macOS / headless.
     menubar: bool = True
@@ -811,9 +820,36 @@ def _resolve_hf_cache_path(ref: str, model_dirs: list | None = None) -> str:
         f"remove the entry.")
 
 
-def default_config_paths() -> list[Path]:
-    """Bare-start config search order (first existing wins)."""
-    return [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+def default_config_paths(*, note_local: bool = True) -> list[Path]:
+    """Bare-start config search order (first existing wins). With
+    ``note_local``, a ``./gmlx.yaml`` that this search skips gets one line
+    on stderr per process."""
+    paths = [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+    if note_local:
+        note_local_config(paths=paths)
+    return paths
+
+
+def note_local_config(advice: str | None = None, *, paths: list[Path] | None = None
+                      ) -> None:
+    """Say once that ``./gmlx.yaml`` is not read, unless it is one of the
+    search ``paths``, as when you work in ``~/.config/gmlx``. A verb with
+    no ``--config`` of its own passes its own ``advice``."""
+    global _local_config_noted
+    if _local_config_noted:
+        return
+    if paths is None:
+        paths = [Path(os.path.expanduser(p)) for p in _DEFAULT_CONFIG_PATHS]
+    try:
+        local = Path(_LOCAL_CONFIG)
+        # is_file never opens the file, so a named pipe cannot block here.
+        if not local.is_file() or local.resolve() in {p.resolve() for p in paths}:
+            return
+    except (OSError, RuntimeError):
+        return
+    _local_config_noted = True
+    note = _LOCAL_CONFIG_NOTE if advice is None else f"gmlx no longer reads ./gmlx.yaml; {advice}"
+    print(note, file=sys.stderr)
 
 
 def _launch_block(path: Path):
@@ -851,7 +887,7 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     any other value or shape, and for an unknown top-level key that holds a
     ``container`` block, since the block may have meant to turn container
     mode on. The keys of other clients' blocks are not checked."""
-    found = next((q for q in default_config_paths()[1:] if q.is_file()), None)
+    found = next((q for q in default_config_paths() if q.is_file()), None)
     if found is None:
         return False, None
     try:
@@ -882,26 +918,14 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     return (False if all(v is missing or v is False for v in values) else None), found
 
 
-def load_launch_settings() -> tuple[LaunchCfg, str | None]:
+def load_launch_settings(*, note_local: bool = True) -> LaunchCfg:
     """The ``launch`` block of the user-level config: the first of
-    ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. A
-    ``./gmlx.yaml`` never counts, because a cloned repository could otherwise
-    share ``~/.ssh`` or turn the container off. Returns the settings and, when
-    ``./gmlx.yaml`` has a ``launch`` block of its own, a notice saying that it
-    is ignored. Only the ``launch`` block is parsed."""
-    local, *user_paths = default_config_paths()
-    found = next((q for q in user_paths if q.is_file()), None)
-    cfg = _parse_launch(_launch_block(found)) if found else LaunchCfg()
-    notice = None
-    try:
-        is_user = local.resolve() in {q.resolve() for q in user_paths}
-        if local.is_file() and not is_user and _launch_block(local) is not None:
-            notice = (f"ignoring the launch block in {local.resolve()}: launch "
-                      f"settings come only from ~/.config/gmlx/gmlx.yaml or "
-                      f"~/.gmlx.yaml")
-    except (OSError, ConfigError):
-        pass                  # the server reports a broken ./gmlx.yaml itself
-    return cfg, notice
+    ``~/.config/gmlx/gmlx.yaml`` and ``~/.gmlx.yaml`` that exists. Only the
+    ``launch`` block is parsed. ``note_local`` as in
+    :func:`default_config_paths`."""
+    found = next((q for q in default_config_paths(note_local=note_local)
+                  if q.is_file()), None)
+    return _parse_launch(_launch_block(found)) if found else LaunchCfg()
 
 
 def default_config_write_path() -> Path:
@@ -2223,6 +2247,7 @@ def build_config(doc: dict) -> ServerCfg:
         systemone=_parse_systemone(srv.get("systemone")),
         api_key=str(srv["api_key"]) if srv.get("api_key") else None,
         no_auth=bool(srv.get("no_auth", False)),
+        media_urls=bool(srv.get("media_urls", False)),
         menubar=bool(srv.get("menubar", True)),
         token_queue_timeout_s=_coerce_num(
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),

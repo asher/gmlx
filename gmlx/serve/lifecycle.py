@@ -498,6 +498,8 @@ def _spawn_detached(child: list, *, host: str, port: int,
     wait - :func:`launch_detached` blocks on it; ``launch`` polls with a spinner."""
     host = host or "127.0.0.1"
     port = int(port or 8080)
+    # Absolute, so a reader in another folder finds the same file.
+    config_abspath = os.path.abspath(config_abspath) if config_abspath else None
     # Hold the lock across the whole check->spawn->write window: a concurrent serve
     # blocks here, then re-reads the runfile we just wrote and refuses below.
     with _spawn_guard_lock(host, port, on_wait=lambda: print(

@@ -178,7 +178,7 @@ pub fn resolve(cmd: &OsStr, path_env: Option<&OsStr>) -> Option<PathBuf> {
 
 fn no_execute_bit_message(path: &Path) -> String {
     format!("gmlx-entry: {} has no execute bit. Run chmod 755 on it in the Containerfile.",
-            path.display())
+            shown(path.as_os_str()))
 }
 
 /// Exits 126 or 127 with the message for a lookup that found no executable.
@@ -373,12 +373,12 @@ fn check_interpreter(file: &Path, path_env: Option<&OsStr>) {
 }
 
 fn not_found_message(cmd: &OsStr, path_env: Option<&OsStr>) -> String {
-    let name = cmd.to_string_lossy();
+    let name = shown(cmd);
     if cmd.as_bytes().contains(&b'/') {
         format!("gmlx-entry: {name} is not an executable file in this image. \
                  The image needs the command it runs.")
     } else {
-        let search = path_env.map(|p| p.to_string_lossy()).unwrap_or(DEFAULT_PATH.into());
+        let search = shown(path_env.unwrap_or(OsStr::new(DEFAULT_PATH)));
         format!("gmlx-entry: {name} is not on the image's PATH ({search}). Install it \
                  in the image, or set command: in the launch config.")
     }
@@ -429,7 +429,7 @@ fn main() {
         Mode::Check(cmd) => match resolve_full(&cmd, path_env.as_deref()) {
             Resolved::Found(found) => {
                 check_interpreter(&found, path_env.as_deref());
-                println!("{}", found.display())
+                println!("{}", shown(found.as_os_str()))
             }
             other => fail_unresolved(other, &cmd, path_env.as_deref()),
         },
@@ -485,9 +485,10 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
         }
         fail(EXIT_CANNOT_RUN, &format!(
             "gmlx-entry: cannot run {}: its #! interpreter or its program loader is not in \
-             the image.", program.display()));
+             the image.", shown(program.as_os_str())));
     }
-    fail(EXIT_CANNOT_RUN, &format!("gmlx-entry: cannot run {}: {err}", program.display()))
+    fail(EXIT_CANNOT_RUN, &format!("gmlx-entry: cannot run {}: {err}",
+                                   shown(program.as_os_str())))
 }
 
 #[cfg(test)]
@@ -720,5 +721,19 @@ mod tests {
         make(&denied.join("sh"), 0o644);
         assert_eq!(resolve_shell(Some(denied.as_os_str())),
                    Resolved::NotExecutable(denied.join("bash")));
+    }
+
+    #[test]
+    fn messages_escape_terminal_controls() {
+        let evil = "/x\u{1b}]52;c;ZXZpbA==\u{7}\u{1b}[2A\u{9b}";
+        let messages = [
+            not_found_message(OsStr::new("tool"), Some(OsStr::new(evil))),
+            not_found_message(OsStr::new(evil), None),
+            no_execute_bit_message(Path::new(evil)),
+        ];
+        for m in &messages {
+            assert!(!m.chars().any(|c| c.is_control()), "{m:?}");
+            assert!(m.contains("\\u{1b}]52;c;ZXZpbA==\\u{7}\\u{1b}[2A\\u{9b}"), "{m:?}");
+        }
     }
 }

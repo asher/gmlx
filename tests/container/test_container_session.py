@@ -4,9 +4,11 @@ and volume locks, cleanup, the runtime folder and the supervisor."""
 from __future__ import annotations
 
 import http.server
+import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import textwrap
@@ -174,10 +176,45 @@ def test_lock_is_free_after_kill_9_while_the_child_runs(tmp_path):
 
 
 def test_record_round_trip(fake_container):
-    session.write_record("pi", {"name": "gmlx-pi-1"})
-    assert session.read_record("pi") == {"name": "gmlx-pi-1"}
+    record = {"name": "gmlx-pi-1", "workdir": "/w", "clipboard": False,
+              "shares": [{"host": "/h", "guest": "/g", "readonly": True}]}
+    session.write_record("pi", record)
+    assert session.read_record("pi") == record
+    assert stat.S_IMODE(session.record_path("pi").stat().st_mode) == 0o600
+    assert [p.name for p in session.client_dir("pi").iterdir()
+            if p.name.endswith(".tmp")] == []
     session.remove_record("pi")
     assert session.read_record("pi") is None
+
+
+@pytest.mark.parametrize("record", [
+    {"name": "gmlx-pi-1"},
+    {"name": "gmlx-pi-1", "workdir": "/w", "shares": [{"host": "/h"}]},
+    {"name": "gmlx-pi-1", "workdir": "/w", "shares": "/h"},
+    ["gmlx-pi-1"],
+])
+def test_a_damaged_record_is_a_clean_error(fake_container, record):
+    session.record_path("pi").write_text(json.dumps(record))
+    with pytest.raises(SettingsError, match="session record .* is damaged"):
+        session.read_record("pi")
+
+
+def test_a_deeply_nested_record_is_a_clean_error(fake_container):
+    session.record_path("pi").write_text("[" * 100_000 + "]" * 100_000)
+    with pytest.raises(SettingsError, match="is damaged"):
+        session.read_record("pi")
+
+
+def test_the_record_is_never_written_through_a_planted_temporary_link(fake_container,
+                                                                      tmp_path, monkeypatch):
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    monkeypatch.setattr(session.secrets, "token_hex", lambda n: "fixed")
+    tmp = session.client_dir("pi") / f".session.json.{os.getpid()}.fixed.tmp"
+    tmp.symlink_to(target)
+    with pytest.raises(SettingsError, match="cannot write the session record"):
+        session.write_record("pi", {"name": "x"})
+    assert target.read_text() == "keep"
 
 
 # Cleanup
@@ -690,6 +727,107 @@ def test_the_tee_keeps_copying_when_the_opener_fails(monkeypatch):
     assert logged == ["cannot open the browser (RuntimeError: no browser)"]
 
 
+class _Chunks:
+    """A pipe that hands out the given chunks, and fails on readline."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.asked = []
+
+    def read1(self, n):
+        self.asked.append(n)
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def readline(self):
+        raise AssertionError("the reader must not wait for a newline")
+
+
+def test_the_dsh_reader_copies_bounded_chunks_without_a_newline(monkeypatch):
+    import io
+    out = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": out})())
+    blob = b"A" * (session.TEE_CHUNK * 3)
+    stream = _Chunks([blob[i:i + session.TEE_CHUNK]
+                      for i in range(0, len(blob), session.TEE_CHUNK)])
+    session._tee_for_url(stream, r"dsh web: (\S+)", 3080, lambda url: None)
+    assert out.getvalue() == blob
+    assert set(stream.asked) == {session.TEE_CHUNK}
+
+
+def test_the_dsh_url_split_across_reads_opens_whole(monkeypatch):
+    import io
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": io.BytesIO()})())
+    opened = []
+    stream = _Chunks([b"x" * 5000 + b"dsh web: http://127.0.0.1:3080/?tok",
+                      b"en=abc\n"])
+    session._tee_for_url(stream, r"dsh web: (\S+)", 3080, opened.append)
+    assert opened == ["http://127.0.0.1:3080/?token=abc"]
+
+
+def test_a_dsh_url_cut_off_by_the_end_of_output_never_opens(monkeypatch):
+    import io
+    monkeypatch.setattr(sys, "stdout", type("S", (), {"buffer": io.BytesIO()})())
+    opened = []
+    session._tee_for_url(_Chunks([b"dsh web: http://127.0.0.1:3080/?tok"]),
+                         r"dsh web: (\S+)", 3080, opened.append)
+    assert opened == []
+
+
+def test_the_session_log_is_private_and_never_follows_a_link(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    link = tmp_path / "last-pi.log"
+    link.symlink_to(target)
+    log = session._SessionLog(link)
+    log("hello")
+    log.close()
+    assert target.read_text() == "keep"
+    link.unlink()
+    old = os.umask(0o002)
+    try:
+        log = session._SessionLog(link)
+    finally:
+        os.umask(old)
+    log("hello")
+    log.close()
+    assert stat.S_IMODE(link.stat().st_mode) == 0o600 and "hello" in link.read_text()
+    log = session._SessionLog(link)
+    log("cannot open \x1b]52;c;ZXZpbA==\x07")
+    log.close()
+    assert "\x1b" not in link.read_text() and "\\x1b]52" in link.read_text()
+
+
+def test_the_container_delete_gets_its_own_timeout(monkeypatch):
+    from gmlx.container import cli
+    seen = []
+    monkeypatch.setattr(session, "_safe_containers", lambda: [_listed("gmlx-pi-1")])
+    monkeypatch.setattr(cli, "stop", lambda name, timeout: None)
+    monkeypatch.setattr(cli, "delete", lambda name: seen.append(cli._query_timeout))
+    with cli.query_timeout(session.TEARDOWN_QUERY_TIMEOUT):
+        session._remove_container("gmlx-pi-1", stop=True, log=lambda line: None)
+    assert seen == [session.TEARDOWN_DELETE_TIMEOUT] == [30.0]
+
+
+def test_a_container_left_after_the_cleanup_is_named(monkeypatch, capsys):
+    logged = []
+    monkeypatch.setattr(session, "_safe_containers", lambda: [_listed("gmlx-pi-1")])
+    session._report_leftover("gmlx-pi-1", log=logged.append)
+    err = capsys.readouterr().err
+    assert "gmlx-pi-1 is still there" in err and "container delete --force gmlx-pi-1" in err
+    assert logged
+    monkeypatch.setattr(session, "_safe_containers", lambda: [])
+    session._report_leftover("gmlx-pi-1", log=logged.append)
+    assert capsys.readouterr().err == ""
+
+
+def test_say_escapes_terminal_controls(capsys):
+    session._say("[launch] sharing /x/\x1b]52;c;ZXZpbA==\x07\x1b[2A\x9b\x7fdone\r\n")
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out and "\x9b" not in out and "\x7f" not in out
+    assert out == ("[launch] sharing /x/\\x1b]52;c;ZXZpbA==\\x07\\x1b[2A\\x9b\\x7fdone"
+                   "\\x0d\\x0a\n")
+
+
 def test_the_session_log_stops_at_its_limit(tmp_path):
     log = session._SessionLog(tmp_path / "last-pi.log", limit=200)
     for i in range(100):
@@ -790,6 +928,16 @@ def test_teardown_queries_use_a_short_timeout(fake_container, tmp_path, monkeypa
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     assert seen == [session.TEARDOWN_QUERY_TIMEOUT] == [5.0]
     assert cli._query_timeout is None
+
+
+def test_the_session_names_a_container_the_cleanup_left(fake_container, tmp_path,
+                                                        monkeypatch, capsys):
+    sess = session.new_session("pi", [])
+    monkeypatch.setattr(session, "_remove_container", lambda name, *, stop, log: None)
+    monkeypatch.setattr(session, "_safe_containers", lambda: [_listed(sess.name)])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert f"container delete --force {sess.name}" in capsys.readouterr().err
 
 
 def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path, monkeypatch):
