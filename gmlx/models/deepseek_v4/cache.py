@@ -1288,6 +1288,12 @@ class BatchPoolingCache(_BaseCache):
 # (DeepseekV4SpecLM.speculative_verify_hidden) so non-MTP flows keep stock
 # trim semantics (protects prefix-cache trim paths from phantom
 # trimmability).
+#
+# The wrap is on the classes, for the whole process, because V4's batch
+# caches come from the stock merge and extract, which drop any instance
+# mark. The stash is the per-instance arming: a cache without one (every
+# other model's cache, and a V4 cache outside a verify round) passes each
+# call through to the stock method, so its trim trims as stock does.
 
 # Thread-local so concurrent engine steps of other models never see the
 # flag armed by an MTP verify forward running on a different thread.
@@ -1341,23 +1347,22 @@ def _wrap_rotating(cls, fields) -> None:
             self._mtp_undo = (
                 {f: _stash_value(f, getattr(self, f)) for f in fields},
                 keys, values)
-        else:
+        elif getattr(self, "_mtp_undo", None) is not None:
             self._mtp_undo = None
         return orig_update(self, keys, values)
 
     def is_trimmable(self):
-        if orig_is_trimmable(self):
-            return True
-        return getattr(self, "_mtp_undo", None) is not None
+        if getattr(self, "_mtp_undo", None) is None:
+            return orig_is_trimmable(self)
+        return True
 
     def trim(self, n):
-        if orig_is_trimmable(self):
-            self._mtp_undo = None
-            return orig_trim(self, n)
         undo = getattr(self, "_mtp_undo", None)
-        self._mtp_undo = None
         if undo is None:
-            return 0
+            return orig_trim(self, n)
+        self._mtp_undo = None
+        if orig_is_trimmable(self):
+            return orig_trim(self, n)
         snap, keys, values = undo
         k = keys.shape[2] - n
         if k < 0:

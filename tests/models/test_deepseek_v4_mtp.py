@@ -242,10 +242,12 @@ def test_rotating_undo_unarmed_update_not_trimmable():
     cache = RotatingKVCache(max_size=4)
     for _ in range(6):
         cache.update_and_fetch(mx.zeros((1, 1, 1, 4)), mx.zeros((1, 1, 1, 0)))
-    # Rotated + unarmed S=2 update: stock semantics -- no phantom trimmability.
+    # Rotated + unarmed S=2 update: stock semantics -- no phantom
+    # trimmability, and trim is the stock trim.
     cache.update_and_fetch(mx.zeros((1, 1, 2, 4)), mx.zeros((1, 1, 2, 0)))
     assert not cache.is_trimmable()
-    assert cache.trim(1) == 0
+    assert cache.trim(1) == 1
+    assert cache.offset == 7
 
 
 def test_pooling_cache_trim_through_completed_window():
