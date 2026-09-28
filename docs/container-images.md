@@ -61,8 +61,10 @@ launch:
         build: ~/containers/claude-code
 ```
 
-`build` names the Containerfile, or a folder that holds a file named
-`Containerfile` or `Dockerfile` and is also the build context. Write the
+`build` names a folder that holds a file named `Containerfile` or
+`Dockerfile`, and that folder is the build context. It can also name the
+Containerfile itself, and then the folder that holds the file is the build
+context. Write the
 `gmlx.invalid/launch-<client>:base` reference literally, since launch finds
 it by reading the file. Any client's `:base` works, and launch refuses any
 other `gmlx.invalid` reference, because those tags are deleted when a newer
@@ -84,13 +86,19 @@ rebuilds that base with fresh downloads, and it does not pull the other
 registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own that holds about
-4 GB of memory while it runs. A launch that finds the builder stopped
-stops it again after its build, unless another launch is building or
-another `container build` runs. A failed stop prints one warning. When the
-builder already runs, launch builds with its CPU, memory and SSH settings,
-so the build does not replace it. The next launch and `gmlx doctor` report
-a builder left running, such as by a killed launch, with its
-`container builder stop` command.
+4 GB of memory while it runs. When a launch's build starts the builder,
+launch records the builder's start date and stops that builder once no
+launch is building and no other `container build` runs. A later launch
+stops it when an overlapping build kept it running, and only while its
+start date still matches, so a builder you start yourself later is never
+stopped. A failed stop prints one warning. When the builder already runs,
+launch builds with its CPU, memory, SSH and color settings, so the build
+does not replace it.
+
+A launch prints one line, once for each start of the builder, when the
+builder runs with no build using it, and the line gives the
+`container builder stop` command. `gmlx doctor` reports such a builder too,
+and it warns only when launch started that builder and has not stopped it.
 
 ## A ready-made image
 

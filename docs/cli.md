@@ -641,8 +641,9 @@ interrupted during the start wait.
 
 In container mode, launch supervises the client instead of replacing
 itself and passes the client's exit status through. It exits 1 when it
-refuses the session or when a container launch finds a malformed `launch`
-block, and 125, 126 or 127 when the container cannot start the client, as
+refuses the session or finds a malformed `launch` block, as
+[Launch](config.md#launch) describes, and 125, 126 or 127 when the
+container cannot start the client, as
 [Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
 describes.
 

@@ -1371,9 +1371,15 @@ server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
 
 A `launch` block in `./gmlx.yaml` is ignored with a notice, because a
 cloned repository could otherwise share `~/.ssh` with the client or turn
-the container off. The server takes no setting from the block. When the
-block is malformed, the server prints one warning and still loads the
-rest of the file, and only a container launch refuses it.
+the container off. The server takes no setting from the block.
+
+A malformed block never stops the server, which prints one warning and
+loads the rest of the file. `gmlx launch` refuses a client that the block
+runs in a container, and it refuses every client when the file cannot be
+read as YAML. The message names the file, and `--no-container` runs the
+client on the Mac instead. A client that the block does not turn on runs
+on the Mac with one notice. A launch with `--container` or another
+container flag always refuses a malformed block.
 
 ```yaml
 # doctest: build

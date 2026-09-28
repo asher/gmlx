@@ -40,16 +40,18 @@ gmlx launch pi --container -- --continue
 To make it the default, set
 [`launch.container.enabled`](config.md#launchcontainerenabled) for every
 client or for one client. `--no-container` then runs a client on the Mac for
-one launch. The flags that only make sense in a container turn on container
-mode by themselves: `--mount`, `--mount-cwd` and `--no-mount-cwd`,
-`--image`, `--rebuild`, `--network` and `--shell`. The
-[CLI reference](cli.md#gmlx-launch) describes each one.
+one launch. Each flag that only makes sense in a container turns on
+container mode by itself. These flags are `--mount`, `--mount-cwd`,
+`--no-mount-cwd`, `--image`, `--rebuild`, `--network` and `--shell`, and
+the [CLI reference](cli.md#gmlx-launch) describes each one.
 
 Launch reads its container settings only from the config file in your
 home folder, as [Launch](config.md#launch) explains.
 
 The first container launch takes a few minutes. Launch numbers the steps
-it runs, so that a slow download does not look like a hang:
+it runs, so that a slow download does not look like a hang. Every refusal,
+such as a folder launch will not share, comes before these steps, so a
+mistake never waits behind a download.
 
 1. The container service starts. Its first start asks to install a Linux
    kernel and downloads about 700 MB. When the service is stopped and the
@@ -120,6 +122,12 @@ so they survive from one launch to the next. Your own `~/.claude`, `~/.pi`
 and other client folders are never shared, and launch writes the client's
 configuration into the private home instead.
 
+The client can change anything in its private home, so launch never
+follows a symbolic link there when it reads or writes the configuration.
+It stops the launch instead, as
+[the troubleshooting entry](troubleshooting.md#launch-will-not-follow-a-file-in-the-private-home)
+describes.
+
 A fresh private home starts empty, so a client such as Claude Code shows
 its first-run steps once. [`seed`](config.md#launchcontainerclientsseed)
 copies chosen files from your home into it. Launch also copies your git
@@ -136,11 +144,18 @@ commands, fails in the container. Seed a copy without those settings.
 Git in the container works when you launch from the root of a repository.
 A linked worktree or a submodule keeps its git folder outside its own
 folder, so launch also shares that git folder, read-write, and prints a
-line saying so. Launch applies the same refusals to that folder, and to
-the repository that holds it, as to the current folder. A worktree of a
-dotfiles repository in your home folder therefore gets no git folder, and
-launch prints a note instead. Launched from a subfolder of a repository,
-the client sees only that subfolder, and launch notes that git needs the
+line saying so. Launch shares it only when that folder names the project
+back. For a worktree, the repository's entry for it names the project's
+`.git` file, and for a submodule, its `core.worktree` names the project
+folder. The client can edit the `.git` file in the share, but not the
+repository outside it, so it cannot use this to reach another repository.
+
+Launch applies the same refusals to that git folder, and to the repository
+that holds it, as to the current folder. A worktree of a dotfiles
+repository in your home folder therefore gets no git folder. In each case
+that shares nothing, launch prints a note, and `--mount` shares the
+folder when you intend it. Launched from a subfolder of a repository, the
+client sees only that subfolder, and launch notes that git needs the
 repository root.
 
 ## Security model
@@ -202,8 +217,12 @@ suggests `--rebuild` when the image is older than 30 days.
 your own Containerfile and ready-made images. Any image works when it is
 for Linux on arm64 and contains the command that runs. Launch refuses an
 image for another architecture. It also checks an image of your own once
-for each command, so a command that is missing or cannot run fails before
-the session starts. Under `--shell`, that check only prints a warning.
+for each command. The check finds the command on the image's `PATH`,
+confirms its execute bit, and confirms that the interpreter in its `#!`
+line is in the image. A command that fails the check stops the launch
+with exit 1 before the session starts, and under `--shell` it only prints
+a warning. A program built for another system passes the check and fails
+when the session starts.
 
 ### The command that runs
 
@@ -376,8 +395,8 @@ a paste in the client fails or finds the image's own clipboard tools. To
 hand over one image, save it into the shared folder instead.
 
 macOS can deny an app access to the clipboard. The replacement commands
-then fail with a message that names the setting to change: System
-Settings, Privacy & Security, Paste from Other Apps.
+then fail with a message that names the setting to change, Paste from
+Other Apps under Privacy & Security in System Settings.
 
 ## Sessions, signals and exit codes
 
@@ -402,7 +421,7 @@ the cause:
 | Code | Meaning |
 |------|---------|
 | 125 | The relay inside the container could not start, for example because a port it needs is in use. |
-| 126 | The command is in the image but cannot run, such as a file without its execute bit or a program for another architecture. |
+| 126 | The command is in the image but cannot run, such as a file without its execute bit, a script whose `#!` interpreter is missing, or a program for another system. |
 | 127 | The command, or a shell for `--shell`, is not in the image. |
 
 Launch exits 1 when it refuses a session, such as for a folder it will not
@@ -455,6 +474,12 @@ when you give the container more than a quarter of the Mac's memory.
 Work with many small files, such as `npm install`, runs slower in a share
 than on a volume.
 
+Launch closes a relayed connection, such as one from the container to the
+server or to a forwarded port, when no data moves in either direction for
+30 seconds after it opens. Once data flows the connection has no time
+limit, so a streamed answer is never cut. Idle connections therefore
+cannot use up the file handles of the server that other clients share.
+
 ## Removing container data
 
 Uninstalling gmlx leaves container data in place, and each kind is removed
@@ -466,7 +491,7 @@ the space that volumes, private homes and images take:
 |------|------------------|
 | A private home | Delete `~/.local/share/gmlx/launch/<client>/home` to reset that client. |
 | Volumes | Run `container volume delete NAME` for each volume, which deletes its data. |
-| Images | Run `container image delete` on the `gmlx.invalid/launch-*` and `<repository>@sha256:` entries of `container image list`, then `container image prune`. |
+| Images | Run `container image delete` on the `gmlx.invalid/launch-*` entries and the `@sha256:` entries of your `image` references, then `container image prune`. |
 | The guest program | Delete `~/.local/share/gmlx/launch/runtime`. |
 | Apple container from Homebrew | Run `container system stop` and `brew uninstall container`, then delete that folder. |
 | Apple container from Apple's installer | Run `container system stop`, then `uninstall-container.sh -d`, which also deletes that folder. |

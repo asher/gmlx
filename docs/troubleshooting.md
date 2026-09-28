@@ -292,14 +292,20 @@ A launch that stops with `is not on the image's PATH` names the command
 and the search path it used. The image lacks the client or the command in
 [`command`](config.md#launchcontainerclientscommand). Install it in the
 image, as [Custom container images](container-images.md) shows, or fix the
-`command` list. A session that exits 127 on its own has the same cause.
+`command` list.
 
-A launch or session that stops with `has no execute bit` found the file
-but cannot run it, and exits 126. Add `RUN chmod 755` for that file to the
-Containerfile, as the
+A launch that stops with `has no execute bit` found the file but cannot
+run it. Add `RUN chmod 755` for that file to the Containerfile, as the
 [start script example](container-images.md#starting-services-with-the-client)
-does. Exit 126 without that message means the file is no program for Linux
-on arm64, such as a script without a `#!` line.
+does. A launch that stops with `names X in its #! line, which is not in the
+image` found a script whose interpreter, such as `python3`, is missing.
+Install the interpreter in the image, or change the script's `#!` line.
+
+The check before a session stops the launch with exit 1. A session that
+exits 127 or 126 on its own prints the same messages. Exit 126 with
+`its #! interpreter or its program loader is not in the image` means the
+file is a program for another system, such as a build for glibc in a
+musl image.
 
 ### A container command gave no answer
 
@@ -314,12 +320,26 @@ Launch names the platforms the image has, and
 Use an arm64 or multi-platform tag of the image, or build one with
 [`build`](config.md#launchcontainerclientsbuild).
 
-### Launch asks whether the port is busy
+### Another program answers on the web port
 
-Another program holds the Mac port of a
+A launch that stops with `cannot listen on 127.0.0.1:P` and
+`another program answers on` found a Mac program on the port of a
 [browser app](launch-container.md#browser-apps), often the same app
-running outside the container. Stop that program, or stop the leftover
-session that holds the port.
+running outside the container. The message names the address that
+answered. Stop that program, or stop the leftover session that holds the
+port.
+
+### Launch will not follow a file in the private home
+
+A launch that stops with `in the private home is a symbolic link or not a
+folder`, `cannot be used` or `is not UTF-8 text` found a file in the
+[private home](launch-container.md#the-private-home) that launch will not
+read or replace. The client in the container owns that folder and can put
+links there, so launch never follows one. Delete the path the message
+names, or reset the client by deleting
+`~/.local/share/gmlx/launch/<client>/home`, and launch again. A file that
+only the git identity needs, such as `.gitconfig`, gives a warning instead
+and the launch goes on.
 
 ### A leftover container of another client keeps running
 

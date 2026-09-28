@@ -48,6 +48,13 @@ The three styles differ in which files they touch:
   that it cannot parse.
 - Environment passes every setting in environment variables, with no file.
 
+Each file `launch` writes replaces the old one in a single step, so a
+failed launch never leaves it half written. The new file keeps the old
+file's mode, so a file that holds a key and only you can read stays that
+way. A file that is a symbolic link is written through when the link
+stays inside your home folder, which keeps a link into a dotfiles
+repository working, and `launch` refuses a link that points elsewhere.
+
 Each client uses one or two of these styles:
 
 | Client | What it is | Style | Where the configuration goes |
@@ -180,12 +187,7 @@ Before it changes the file, `launch` copies it to a new
 `config.yaml.gmlx-<date>-<time>` beside it, with `-<n>` added when that
 name is taken, and prints the copy's path. It keeps the three newest copies
 and deletes only older files named that way. The rewritten file keeps its
-settings and its file mode, but not its comments or layout, which the copy
-keeps.
-
-A `config.yaml` that is a symbolic link is written through when the link
-stays inside your home folder. Launch refuses a link that points
-elsewhere.
+settings, but not its comments or layout, which the copy keeps.
 
 hermes refuses a model with less than 64K tokens of context, so give it a
 model trained for at least that length.

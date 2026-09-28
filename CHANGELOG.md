@@ -44,6 +44,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx launch hermes` works with hermes 0.19, which reads only its own
   `config.yaml`. Launch merges the gmlx provider into that file after a
   backup, and refuses `--config-path` for hermes.
+- `gmlx launch` keeps the mode of each configuration file it rewrites, so a
+  file that holds a key stays private, and writes through a symbolic link
+  that stays inside your home folder instead of replacing it.
 - `--kv-bits` keeps an fp16 cache on Kimi K3, whose attention cannot read a
   quantized one. The server quantized its attention layers and failed at the
   first token, and `run` and `chat` did the same on Kimi K2 and K3.
