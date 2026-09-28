@@ -41,6 +41,18 @@ LANG_EDITS = [
     ("            mx.eval(outputs)\n",
      '            guard.eval(outputs, site="qwen3_5_try_launch", owner="scratch")\n'),
     ("(N, n, H, D) \u2014 one kernel", "(N, n, H, D), one kernel"),
+    # Bug fix from mlx-vlm 0.7.3: one grid row per vision block.
+    ("        mrope_position_deltas = []\n        if input_ids is not None and (\n",
+     "        mrope_position_deltas = []\n"
+     "        # The processor emits one vision block per temporal patch group, so\n"
+     "        # expand each video grid (t, h, w) into t rows of (1, h, w), the same\n"
+     "        # split the reference implementation performs before indexing.\n"
+     "        if video_grid_thw is not None:\n"
+     "            rows = []\n"
+     "            for thw in video_grid_thw.tolist():\n"
+     "                rows.extend([[1, thw[1], thw[2]]] * int(thw[0]))\n"
+     "            video_grid_thw = mx.array(rows, dtype=mx.int32)\n"
+     "        if input_ids is not None and (\n"),
 ]
 GD_EDITS = [
     ('name=f"qwen3_5_gated_delta_with_states{suffix}"',
@@ -109,7 +121,9 @@ def build(models):
 Edits to the upstream file: imports are absolute, ``TextConfig`` comes from
 the vendored ``config``, ``make_cache`` builds ``Qwen35ArraysCache`` for the
 linear-attention layers, the launch probe in ``_qwen3_5_try_launch`` evals
-through ``gmlx.eval_guard``, and comments are ASCII.
+through ``gmlx.eval_guard``, and comments are ASCII. Bug fixes ported from
+mlx-vlm 0.7.3: ``get_rope_index`` splits each video grid into one row per
+temporal patch group.
 """, lang)
 
     gd = (models / "qwen3_5/gated_delta.py").read_text()
