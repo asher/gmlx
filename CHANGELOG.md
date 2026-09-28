@@ -41,6 +41,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and answered differently with MTP than without it.
 - With `--kv-bits`, MTP and the prefix cache on, a request that reused a
   cached prefix could fail when it joined a batch that was already decoding.
+- Concurrent requests on a gemma-4 model that shared a prompt prefix of 1024
+  or more tokens could decode wrong tokens.
 
 ## [0.4.19] - 2026-09-27
 

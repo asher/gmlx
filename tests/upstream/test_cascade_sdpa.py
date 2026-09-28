@@ -343,6 +343,61 @@ def test_install_idempotent_and_killable(monkeypatch):
     assert not cs.install_cascade_sdpa()
 
 
+@pytest.mark.parametrize("origin", ["mlx_lm.models.cache",
+                                    "mlx_vlm.models.cache"])
+def test_rotating_cache_declined_past_window(monkeypatch, origin):
+    """A stamped BatchRotatingKVCache past its window holds a trimmed,
+    rotated buffer with negative pads that its updates move in place.
+    Claiming it attends the wrong slots and other rows' keys, so the
+    route declines it; a BatchKVCache with the same stamp still claims.
+    Host-only: a spy stands in for the fused op."""
+    import mlx_kquant
+
+    cm = pytest.importorskip(origin)
+    _install()
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "16")
+    calls = []
+
+    def spy(q, *a, **kw):
+        calls.append(q.shape)
+        return mx.zeros(q.shape, q.dtype)
+
+    monkeypatch.setattr(mlx_kquant, "sdpa_decode_gqa_cascade", spy,
+                        raising=False)
+    route = llama_mod.scaled_dot_product_attention
+    W, P, suf, hq, hkv, d = 64, 96, [10, 7], 4, 2, 64
+    L = P + max(suf)
+    pads = [L - P - s for s in suf]
+    rows = [_rb(list(range(P)) + [1000 + 100 * b + j for j in range(s)])
+            for b, s in enumerate(suf)]
+    mx.random.seed(5)
+    kv = mx.random.normal((2, hkv, L, d)).astype(mx.float16)
+
+    def decode(cache, **mask_kw):
+        assert cs._stamp_caches([cache], rows)
+        for s in range(0, L, 32):
+            cache.update_and_fetch(kv[:, :, s:s + 32], kv[:, :, s:s + 32])
+        for _ in range(4):
+            mask = cache.make_mask(1, **mask_kw)  # models mask first
+            nk = mx.random.normal((2, hkv, 1, d)).astype(mx.float16)
+            k, v = cache.update_and_fetch(nk, nk)
+            q = mx.random.normal((2, hq, 1, d)).astype(mx.float16)
+            got = route(q, k, v, cache=cache, scale=0.125, mask=mask)
+            ref = route._gmlx_orig(q, k, v, cache=cache, scale=0.125,
+                                   mask=mask)
+            yield got, ref
+
+    rot = cm.BatchRotatingKVCache(max_size=W, left_padding=pads)
+    for got, ref in decode(rot, window_size=W):
+        assert mx.array_equal(got, ref)
+    assert rot.rotated and min(rot.left_padding.tolist()) < 0
+    assert calls == []
+
+    for _ in decode(cm.BatchKVCache(left_padding=pads)):
+        pass
+    assert len(calls) == 4
+
+
 # ---------------------------------------------------------------------------
 # Stamp v3: token-prefix currency (host-only)
 # ---------------------------------------------------------------------------

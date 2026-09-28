@@ -144,6 +144,12 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         # address; the kvarn SDPA route owns these calls.
         _debug_decline("kvarn", cache=type(cache).__name__)
         return None
+    if hasattr(cache, "max_size"):
+        # Sliding-window caches trim and rotate the prefix out of the buffer
+        # and move left_padding in place, which the slab geometry and the
+        # identity-keyed pad memo cannot follow.
+        _debug_decline("rotating", cache=type(cache).__name__)
+        return None
     info = getattr(cache, "_gmlx_cascade", None)
     if info is None:
         _debug_decline("no-stamp", B=queries.shape[0],
