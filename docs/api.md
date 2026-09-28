@@ -312,6 +312,13 @@ http(s) URLs. The image routes refuse `output_path`, `output_dir`,
 `response_format: "path"` and `prompt_expansion_model`, which name files and
 folders on the Mac.
 
+The server checks every request body as JSON, whatever its Content-Type
+says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
+form body, and their text fields get the same check. Every other route
+answers a form body with a 400. An image edit takes each reference image
+as a `data:` URI of a PNG, JPEG, WebP or GIF image of at most 32 MiB and
+67,108,864 pixels. The server serves no WebSocket routes.
+
 ## Limits and back-pressure
 
 A model's context window comes from its GGUF metadata. A request cannot

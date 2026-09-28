@@ -152,14 +152,19 @@ there, so commits made in the container carry your name.
 folders from your home into the private home. Launch copies each seed once
 and records it outside the private home, so a client that deletes its copy
 does not get a new one. `--reseed` copies every seed again and replaces the
-copies. Launch refuses a seed whose real path lies outside your home
-folder, in a credential folder or in gmlx's own data. It never follows a
-symbolic link while it copies, skips named pipes, sockets and devices, and
-stops at 64 MiB, 10,000 files and folders, or 64 folders deep in one seed.
+copies. Launch checks a seed only when it copies it. It refuses a seed
+whose real path lies outside your home folder, in a credential folder or in
+gmlx's own data. It also refuses a seed in a folder that a session shares
+or once shared read-write, when its real path leads out of that folder,
+since a client may have replaced it with a link. A seed copied through a
+link you made yourself prints a line with the path the link leads to.
 
-The client reads every seeded file, so never seed a sign-in token. Launch
-warns when a seed holds one, such as `~/.claude.json`,
-`~/.local/share/opencode/auth.json` or `~/.config/goose/secrets.yaml`.
+Launch never follows a symbolic link while it copies, skips named pipes,
+sockets and devices, and stops at 64 MiB, 10,000 files and folders, or 64
+folders deep in one seed. The client reads every seeded file, so never seed
+a sign-in token. Launch warns when it copies a file that can hold one, such
+as `~/.claude.json`, `~/.gitconfig`, `~/.local/share/opencode/auth.json` or
+`~/.config/goose/secrets.yaml`.
 
 A seeded settings file can hold settings that only work on the Mac. A
 `.gitconfig` with `credential.helper = osxkeychain` or commit signing, or a
@@ -170,18 +175,24 @@ commands, fails in the container. Seed a copy without those settings.
 
 Git in the container works when you launch from the root of a repository.
 A linked worktree or a submodule keeps its git folder outside its own
-folder, so launch also shares that git folder and prints a line saying so.
-The git folder is read-write, or read-only when the share that holds the
-repository root is read-only, as with `--mount .:ro`.
+folder, so launch also shares that git folder and prints a line that names
+its repository. The git folder is read-write, or read-only when the share
+that holds the repository root is read-only, as with `--mount .:ro`.
 
 Launch shares that git folder only when it names the project back. For a
 worktree, the repository's entry for it names the project's `.git` file,
 by an absolute path or by one relative to the entry. For a submodule, its
 `core.worktree` names the project folder. The git folder must also be
-named like one: `.git`, a name that ends in `.git`, or a folder inside a
-`.git/modules` folder, and it must not hold the project. The client can
-edit the `.git` file in the share, but not the repository outside it, so
-it cannot use this to reach another repository.
+named like one: `.git`, a name that ends in `.git`, `.bare`, or a folder
+inside a `.git/modules` folder, and it must not hold the project. For a git
+folder with any other name, such as a bare clone without the `.git`
+suffix, share it with `--mount`.
+
+The client can edit the `.git` file in the share, but not the repository
+outside it, so it cannot use this to reach another repository. That holds
+unless an earlier session shared that repository read-write, because a
+client can then add a worktree entry to it that looks like one git made.
+Run `git worktree list` in such a repository to see its worktrees.
 
 Launch compares the recorded path as git wrote it and follows no symbolic
 link in it, because the client can place a link in any folder it could
@@ -221,13 +232,19 @@ the Mac in these ways:
   through the API. When that configuration, a model folder the server
   scans, or a model file it lists is inside a read-write share, the client
   can make the server load files of its choosing. Launch prints a warning
-  when it finds any of these in a share.
+  when it finds any of these in a share. It prints a line instead when the
+  running server has no config file, or one from an older gmlx that it
+  cannot locate, since it cannot check that server. Start the server with
+  `--config`, or run `gmlx restart`.
 - A [`build`](config.md#launchcontainerclientsbuild) folder that the client
   could write at any time runs the client's code at the next build, with
-  internet access even under `network: none`. Launch refuses a build folder
-  inside a read-write share of the session, and it names the files that
-  changed when it builds again. It never gives a build your SSH agent, and
-  it refuses to build while the image builder forwards the agent.
+  internet access even under `network: none`. Launch refuses to share any
+  client's build folder read-write, and it names the files that changed
+  when it builds again. It never gives a build your SSH agent, and it
+  refuses to build while the image builder forwards the agent.
+- A `gmlx` package the client writes in a share never runs on the Mac,
+  because gmlx starts its own processes with Python's `-P`, which leaves
+  the current folder off the import path.
 - The client reads every file you [seed](#the-private-home), so a seeded
   token is the client's token.
 
@@ -554,8 +571,11 @@ no data moves in either direction for 30 seconds after it opens. A
 connection from the container to the server must instead send a whole
 request head in those 30 seconds. After that first data, or that request
 head, the connection has no time limit, so a streamed answer is never cut.
-Once one side ends its half, the connection closes after 30 seconds with
-no data. Each listener also accepts at most 200 new connections a second.
+When the client ends its half, the connection waits up to one hour with
+no data for the answer, so a slow answer that does not stream still
+arrives. Once the other end has ended its half, the connection closes after
+30 seconds with no data. Each listener also accepts at most 200 new
+connections a second.
 Idle connections and bursts of connections therefore cannot use up the
 file handles of the server that other clients share.
 

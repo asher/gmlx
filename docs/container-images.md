@@ -71,9 +71,9 @@ deleted when a newer build replaces them.
 
 Keep the build folder out of every folder a session shares read-write.
 The client could change it there, and its change would run at the next
-build with internet access. Launch refuses a build folder or Containerfile
-inside a read-write share of the session, and a read-write share inside
-the build folder.
+build with internet access. Launch refuses a read-write share that holds or
+lies in any client's build folder, and it refuses to build from a folder
+or Containerfile inside a read-write share of the session.
 
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. The line
@@ -86,9 +86,11 @@ out of that check, but the build still receives it, so list `.git` in the
 ignore file to keep it out of the image.
 
 Launch reads the ignore file only when it is a regular file of at most
-1 MiB with at most 1000 patterns, and not a symbolic link. A pattern with a
-character class may hold at most two `*`. Otherwise launch prints a line
-saying that every context file counts, and any change rebuilds the image. A
+1 MiB with at most 200 patterns, and not a symbolic link. A pattern with a
+character class may hold at most two `*`. When the file breaks one of these
+rules, or its patterns take too long to match against the context, launch
+prints a line saying that every context file counts, and any change
+rebuilds the image. A
 Containerfile must be a regular file under 16 KiB, which
 `container build` requires.
 

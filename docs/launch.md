@@ -45,7 +45,8 @@ The three styles differ in which files they touch:
   reads. The tool's own configuration file is never written.
 - Merge adds a provider for the server to the tool's own configuration
   file and keeps the providers already there. It refuses to change a file
-  that it cannot parse.
+  that it cannot parse, a file larger than 256 KiB, or a file whose
+  providers entry is not a mapping.
 - Environment passes every setting in environment variables, with no file.
 
 Each file `launch` writes replaces the old one in a single step, so a
