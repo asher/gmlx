@@ -72,6 +72,18 @@ def switch_layer_types() -> tuple[tuple[type, ...], tuple[type, ...]]:
     return _SWITCH_TYPES
 
 
+def _glu_block_call(glu, x, indices):
+    """``SwitchGLU`` forward through the mlx-lm body, which is also the
+    mlx-vlm 0.6 body: a block of positions takes one gather per projection.
+    The mlx-vlm 0.7 body sends 1 < T <= 8 positions through a per-position
+    loop when its exact kernels decline, and they decline on every gmlx
+    switch linear. The fused subclasses fall back here, never to
+    ``super().__call__``."""
+    from mlx_lm.models.switch_layers import SwitchGLU
+
+    return SwitchGLU.__call__(glu, x, indices)
+
+
 class NativeFPSwitchLinear(nn.Module):
     """MoE expert linear backed by an MLX native-fp codec (mxfp4 / nvfp4).
 
@@ -426,7 +438,7 @@ def _make_fused_nativefp(base_cls, caps):
                 y = kq.gather_qmv_bias(
                     h, down.weight, down.scales, down.bias, idx)
                 return y.reshape(*indices.shape, y.shape[-1])
-            return super().__call__(x, indices)
+            return _glu_block_call(self, x, indices)
 
     _FusedNativeFPSwitchGLU.__name__ = "_FusedNativeFPSwitchGLU"
     return _FusedNativeFPSwitchGLU
@@ -720,7 +732,7 @@ def _make_fused_kquant(base_cls, caps):
                 if y is None:
                     y = self._kq_prefill_sorted(x, indices, scores)
                 if y is None:
-                    y = super().__call__(x, indices)
+                    y = _glu_block_call(self, x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
                 if getattr(self, "_kq_shexp_mod", None) is not None:
                     return y  # unmixed: caller mixes + adds its shexp
@@ -1743,6 +1755,49 @@ def install_fused_moe_glu(model) -> int:
         + _install_kq_block_fusion(model, caps)
         + _install_gemma_fusion(model, caps)
     )
+
+
+_BLOCK_ROUTED_CLASSES: dict = {}
+
+
+def install_switch_glu_block_routing(model) -> int:
+    """Class-swap each mlx-vlm ``SwitchGLU`` whose gate or up projection is
+    not an mlx-vlm ``QuantizedSwitchLinear`` onto a subclass that runs
+    ``_glu_block_call``, then applies the mlx-vlm weight, shared-expert and
+    residual combine as the stock call does.
+
+    Those are the SwitchGLUs on which the mlx-vlm 0.7 exact kernels always
+    decline: every stack over gmlx's K-quant, native-fp or plain switch
+    linears. Their stock call runs 1 < T <= 8 positions (the MoE verify
+    block) one position at a time; the swap restores the mlx-vlm 0.6
+    routing, one gather over the block. Other widths route as before.
+
+    Call after ``install_fused_moe_glu``: the fused classes already fall
+    back to ``_glu_block_call``, and the fused eligibility checks match the
+    stock classes by exact type. No-op when mlx-vlm's switch_layers is not
+    loaded. Returns the number of instances swapped."""
+    import sys
+
+    vsl = sys.modules.get("mlx_vlm.models.switch_layers")
+    if vsl is None:
+        return 0
+    base, qsl = vsl.SwitchGLU, vsl.QuantizedSwitchLinear
+    routed = _BLOCK_ROUTED_CLASSES.get(base)
+    if routed is None:
+        class _BlockRoutedSwitchGLU(base):
+            def __call__(self, x, indices, weights=None, shared=None,
+                         residual=None):
+                return self._combine(_glu_block_call(self, x, indices),
+                                     weights, shared, residual)
+
+        routed = _BLOCK_ROUTED_CLASSES[base] = _BlockRoutedSwitchGLU
+    n = 0
+    for _, m in model.named_modules():
+        if type(m) is base and not (isinstance(m.up_proj, qsl)
+                                    and isinstance(m.gate_proj, qsl)):
+            m.__class__ = routed
+            n += 1
+    return n
 
 
 class LoRAKQuantLinear(nn.Module):
