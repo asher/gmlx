@@ -1418,12 +1418,13 @@ launch:
       open-webui:
         image: ghcr.io/open-webui/open-webui:main
         command: image
+        assistants: [home]
 ```
 
 The keys under `launch.container` apply to every client. Each of them also
 goes under `launch.container.clients.<client>` for one client, where the
 client's value wins over the global one and the lists of the two levels add
-up. Five more keys exist only for one client, and they follow the shared
+up. Six more keys exist only for one client, and they follow the shared
 keys.
 
 ### `launch.container.enabled`
@@ -1540,6 +1541,17 @@ same relative path, once, and `--reseed` copies it again. Its real path
 must lie inside your home folder and outside credential folders, as
 [The private home](launch-container.md#the-private-home) describes with
 the copy's limits. The default is no files.
+
+### `launch.container.clients.*.assistants`
+
+Each name in this list is a [served assistant](#served-assistants) that
+the client can use. The server answers the client as if the other served
+assistants did not exist. Their MCP tools run on the Mac, outside the
+container, so list assistants only for a chat client such as `open-webui`,
+`aichat` or `elia`. A coding agent reads files and web pages that could
+steer those tools, so give it none. The
+[security model](launch-container.md#security-model) describes what a
+client can reach. The default is no assistants.
 
 ## Chat themes
 

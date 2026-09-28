@@ -24,6 +24,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that sees only the folders you share, with a private home, named volumes,
   forwarded Mac ports and optional clipboard images. `gmlx doctor` reports
   the container service and the disk space container mode uses.
+- A client in container mode reaches a local server through a socket of its
+  own, which serves only the API routes and the served assistants that
+  `launch.container.clients.<client>.assistants` lists. The client's
+  configuration never holds the server's API key.
 
 ### Changed
 

@@ -68,12 +68,12 @@ Later launches start the virtual machine in about a second.
 ## What the client sees
 
 The client sees the folders you share, its
-[private home](glossary.md#private-home), its volumes, the
-gmlx server, the forwarded ports and, when you turn it on, images from the
-Mac clipboard. It does not see the rest of your files. Your keychain, SSH
-keys, other projects and `gmlx.yaml` stay out of reach unless you share
-them. The [security model](#security-model) lists the ways a session can
-still reach the Mac.
+[private home](glossary.md#private-home), its volumes, the inference routes
+of the gmlx server, the forwarded ports and, when you turn it on, images
+from the Mac clipboard. It does not see the rest of your files. Your
+keychain, SSH keys, other projects and `gmlx.yaml` stay out of reach unless
+you share them. The [security model](#security-model) lists the ways a
+session can still reach the Mac.
 
 ### Shares
 
@@ -228,10 +228,11 @@ the Mac in these ways:
   it with `--config`. It can then change where the server listens, turn off
   its key, or add a tool server command that the server runs on the Mac, so
   read it before you use it.
-- The client can make the running server read its configuration again
-  through the API. When that configuration, a model folder the server
+- The server reads its configuration and scans its model folders again
+  when it reloads or restarts, and it reads a model file each time it
+  loads that model. When that configuration, a model folder the server
   scans, or a model file it lists is inside a read-write share, the client
-  can make the server load files of its choosing. Launch prints a warning
+  can change what the server loads. Launch prints a warning
   when it finds any of these in a share. It prints a line instead when the
   running server has no config file, or one from an older gmlx that it
   cannot locate, since it cannot check that server. Start the server with
@@ -247,20 +248,6 @@ the Mac in these ways:
   the current folder off the import path.
 - The client reads every file you [seed](#the-private-home), so a seeded
   token is the client's token.
-
-The client gets the server's API key, which also unloads models and
-reloads the server's configuration, not only chat. It can therefore
-unload models that other clients are using. The server takes an image,
-audio or video in a request only as inline data, so the key does not let
-the client make the server read a Mac file or fetch a URL. With
-[`server.media_urls`](config.md#servermedia_urls) on, the server fetches
-http(s) URLs, and the client can then reach the Mac's loopback services and
-your local network through it, even under `network: none`.
-
-A [browser app](#browser-apps) gives the client a page in your browser at a
-localhost origin, with whatever that origin can reach. The gmlx server
-allows requests from any origin, so that page can also call the server with
-the key the client holds.
 
 Other access is opt-in:
 
@@ -285,6 +272,62 @@ prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
 Launch shows every control character in a name or message it prints as a
 `\xNN` escape, so a name the client chose cannot move the cursor, rewrite
 earlier lines or set your terminal's clipboard.
+
+### What the client reaches on the server
+
+A client reaches a gmlx server on the Mac through a socket that the server
+opens for its session, not through the server's port. The socket needs no
+key, so the client's configuration holds the placeholder key
+`gmlx-container-session` and never the server's key. The socket serves only
+the routes that clients use for inference: the model list, chat, text
+completions, responses, messages, embeddings, rerank, speech, transcription,
+images and `systemone`, plus `/health`. Every other route answers 404, so
+the client cannot unload or keep models, reload the server's configuration
+or open another socket.
+
+Served assistants stay hidden from the client unless its
+[`assistants`](config.md#launchcontainerclientsassistants) key lists them.
+A request that names any other assistant gets the answer for an unknown
+model, and the model list leaves it out. Launch prints one line for each
+assistant the client can use, with the tool servers it calls:
+
+```text
+[launch] open-webui can use assistant home, whose tools run on the Mac: web, files
+```
+
+An assistant's tools run on the Mac with your rights, outside the
+container, and the messages the client sends decide which tools it calls.
+In a chat app such as Open WebUI, you write those messages, so the risk is
+modest. A coding agent also sends text from the files, command output and
+web pages it reads, and any of them can carry instructions for the tools.
+Give a coding agent no assistants.
+
+The server takes an image, audio or video in a request only as inline data,
+so the client cannot make it read a Mac file or fetch a URL. With
+[`server.media_urls`](config.md#servermedia_urls) on, the server fetches
+http(s) URLs, and the client can then reach the Mac's loopback services and
+your local network through it, even under `network: none`.
+
+A [browser app](#browser-apps) gives the client a page in your browser at a
+localhost origin, with whatever that origin can reach. That page runs on
+the Mac and can call the server's own port, where the socket's limits do
+not apply, and the server allows requests from any origin. On a server with no
+[`server.api_key`](config.md#serverapi_key), the page can call every route,
+so set a key before you run a browser app in a container.
+
+These limits apply only to a plain http server on this Mac, named by a
+loopback address, `localhost` or an address that means all interfaces.
+With `--base-url` naming any other address or an https URL, launch opens
+no socket. The client then gets the key you pass with `--api-key`, and it
+can do all that key allows on that server. A local server that offers no
+session sockets refuses container mode, since launch cannot limit it. When
+that server is gmlx, the message says to run `gmlx restart` so that it runs
+the installed version.
+
+The socket ends with the session, and the server removes every session
+socket when it starts and when it stops. When the server restarts during a
+session, launch asks it for a new socket, with the same assistants, at the
+client's next request.
 
 ## The image
 
@@ -528,11 +571,11 @@ the private home and prints the `container run` command that a session
 would use. The variables launch sets itself, such as `HOME`, `TERM`, `LANG`
 and `IS_SANDBOX`, appear with their values. The client's own settings and
 your [`env`](config.md#launchcontainerenv) entries appear by name only,
-because they can hold keys. The dry run builds nothing, pulls
-nothing and starts no container, and it reports whether the image and
-volumes exist yet. Use it to inspect a session. The printed command cannot
-run by itself, because the connection to the server exists only while
-launch supervises the session.
+because they can hold keys. The dry run builds nothing, pulls nothing and
+starts no container. It reports whether the image and volumes exist yet,
+and whether the server offers session sockets. Use it to inspect a
+session. The printed command cannot run by itself, because the connection
+to the server exists only while launch supervises the session.
 
 ## What does not work in a container
 
