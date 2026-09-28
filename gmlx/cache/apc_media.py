@@ -30,6 +30,12 @@ video run: the server embeds the whole prompt and slices each row's
 suffix from it, and the prefill loops keep each block inside one chunk
 (``gmlx.gen.media_spans``). The container config keeps the stock rule,
 since run and chat drop the pixel values when they reuse a prefix.
+
+On the serve engine a Qwen3.5 model reads ``CausalMedia``
+(``install_causal_serve_media``), and the guard helpers accept any
+prefix: its attention is causal, and the server slices each row's
+suffix embeddings and mrope position ids from the whole prompt, so a
+suffix may hold images.
 """
 
 from __future__ import annotations
@@ -38,12 +44,19 @@ import importlib
 from collections.abc import Callable, Iterable, Sequence
 
 _FLAG = "_kq_media_token_ids"
+_CAUSAL_FLAG = "_kq_causal_serve_media"
 _WHOLE_BLOCK_TYPES = ("gemma4_text", "gemma4_unified_text")
+_CAUSAL_SERVE_TYPES = ("qwen3_5", "qwen3_5_moe")
 
 
 class WholeMediaBlocks(set):
     """Media ids whose runs a restored prefix must not end inside. A prefix
     before, between or after the runs is safe."""
+
+
+class CausalMedia(set):
+    """Media ids of a causal model on the serve engine. Every prefix is
+    safe, and the suffix may hold images."""
 
 
 def _whole_blocks(config) -> bool:
@@ -57,6 +70,8 @@ def safe_prefix(token_ids: Sequence[int],
     prompt scanned once: outside every run for ``WholeMediaBlocks``, else
     at or past the end of the last run."""
     apc = importlib.import_module("mlx_vlm.apc")
+    if isinstance(media_token_ids, CausalMedia):
+        return lambda p: True
     if isinstance(media_token_ids, WholeMediaBlocks):
         spans = apc.media_token_spans(token_ids, media_token_ids)
         return lambda p: not any(a < int(p) < b for a, b in spans)
@@ -100,11 +115,13 @@ def install_media_token_ids() -> bool:
         return WholeMediaBlocks(ids) if _whole_blocks(config) else ids
 
     def media_safe_prefix_min(token_ids, media_token_ids):
-        if isinstance(media_token_ids, WholeMediaBlocks):
+        if isinstance(media_token_ids, (WholeMediaBlocks, CausalMedia)):
             return 0
         return stock_min(token_ids, media_token_ids)
 
     def prefix_leaves_text_only_suffix(token_ids, prefix_len, media_token_ids):
+        if isinstance(media_token_ids, CausalMedia):
+            return True
         if isinstance(media_token_ids, WholeMediaBlocks):
             return _run_end(token_ids, prefix_len, media_token_ids) is None
         return stock_leaves(token_ids, prefix_len, media_token_ids)
@@ -112,7 +129,7 @@ def install_media_token_ids() -> bool:
     def adjust_prefix_to_text_suffix_boundary(token_ids, desired_prefix_len,
                                               media_token_ids, *,
                                               max_prefix_tokens=None):
-        if not isinstance(media_token_ids, WholeMediaBlocks):
+        if not isinstance(media_token_ids, (WholeMediaBlocks, CausalMedia)):
             return stock_adjust(token_ids, desired_prefix_len,
                                 media_token_ids,
                                 max_prefix_tokens=max_prefix_tokens)
@@ -121,7 +138,8 @@ def install_media_token_ids() -> bool:
         desired = int(desired_prefix_len)
         if max_len <= 0 or desired <= 0:
             return 0
-        end = _run_end(token_ids, desired, media_token_ids)
+        end = (None if isinstance(media_token_ids, CausalMedia)
+               else _run_end(token_ids, desired, media_token_ids))
         prefix_len = desired if end is None else end
         return 0 if prefix_len > max_len else prefix_len
 
@@ -131,4 +149,36 @@ def install_media_token_ids() -> bool:
     apc.adjust_prefix_to_text_suffix_boundary = (
         adjust_prefix_to_text_suffix_boundary)
     setattr(apc, _FLAG, True)
+    return True
+
+
+def install_causal_serve_media() -> bool:
+    """Give the serve engine's media guard ``CausalMedia`` for a Qwen3.5
+    model (``_CAUSAL_SERVE_TYPES``), so a turn that adds an image restores
+    the earlier turns. Wraps ``BatchGenerator._apc_media_token_ids``,
+    which the owned MTP path reads through ``_L1View``. Run and chat read
+    the config directly and keep the stock floor. Idempotent."""
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+    stock = ar.BatchGenerator._apc_media_token_ids
+    if getattr(stock, _CAUSAL_FLAG, False):
+        return True
+
+    def _apc_media_token_ids(self):
+        ids = stock(self)
+        config = getattr(getattr(self, "model", None), "config", None)
+        if (ids and not isinstance(ids, WholeMediaBlocks)
+                and getattr(config, "model_type", None)
+                in _CAUSAL_SERVE_TYPES):
+            return CausalMedia(ids)
+        return ids
+
+    setattr(_apc_media_token_ids, _CAUSAL_FLAG, True)
+    _apc_media_token_ids.__wrapped__ = stock  # type: ignore[attr-defined]
+    ar.BatchGenerator._apc_media_token_ids = _apc_media_token_ids
+    # The owned MTP view grafts the engine's helpers once; a graft taken
+    # before this install gets the wrapper too.
+    from gmlx.spec import engine
+
+    if engine._L1_BOUND[0]:
+        engine._L1View._apc_media_token_ids = _apc_media_token_ids  # type: ignore[attr-defined]
     return True

@@ -253,6 +253,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # APC keys a prefix by the images inside it.
     from gmlx.cache.media_salt import install_media_salt
     install_media_salt()
+    # Qwen3.5 restores a prefix whose suffix holds images.
+    from gmlx.cache.apc_media import install_causal_serve_media
+    install_causal_serve_media()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()

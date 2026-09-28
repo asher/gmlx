@@ -299,7 +299,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_media_token_ids",
          "spec_engine._bind_l1_view (L1 APC helpers) + "
          "load.vlm._mirror_media_token_ids (the guard reads self.model's "
-         "config, the language model under serve)"),
+         "config, the language model under serve) + "
+         "apc_media.install_causal_serve_media (CausalMedia for qwen3.5)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_safe_prefix_lookup_min",
          "spec_engine._bind_l1_view (L1 APC helpers) + ckpt restore floors"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_suffix_is_text_only",

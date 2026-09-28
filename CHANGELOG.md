@@ -20,8 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image prompt prefills in chunks that keep each image whole, not in one pass.
 - In `gmlx serve`, a Gemma-4 12B image prompt prefills in chunks that keep each
   image whole, not in one pass.
-- On a Gemma-4 model, the prefix cache reuses a cached prefix whose images match
-  the request's, so a turn that adds an image does not prefill earlier turns.
+- A turn that adds an image reuses the cached earlier turns on Gemma-4, and in
+  `gmlx serve` on the qwen35 and qwen35moe architectures.
 
 ### Fixed
 
