@@ -30,6 +30,7 @@ import gmlx.serve.bridge_vlm as serving  # noqa: E402
 import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
+from gmlx.serve.patches import media_gate  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 from gmlx.serve.residency import _http_from_resolver_error  # noqa: E402
 
@@ -201,6 +202,9 @@ def wire_app():
         "rt_mc": _RUNTIME.model_cache,
         "rt_metrics": _RUNTIME.metrics,
         "pool": getattr(_PKG, "_kq_residency_pool", None),
+        "openai_gen_image": openai_mod.generate_image,
+        "openai_edit_image": openai_mod.edit_image,
+        "openai_guarded": getattr(openai_mod, "_kq_media_guarded", False),
         "model_defaults": {
             name: getattr(_SCHEMAS, name).model_fields["model"].default
             for name in ("VLMRequest", "GenerationRequest", "ChatRequest",
@@ -276,6 +280,9 @@ def wire_app():
     anthropic_mod._build_gen_args = saved["anthropic_bga"]
     openai_mod.apply_chat_template = saved["openai_act"]
     anthropic_mod.apply_chat_template = saved["anthropic_act"]
+    openai_mod.generate_image = saved["openai_gen_image"]
+    openai_mod.edit_image = saved["openai_edit_image"]
+    openai_mod._kq_media_guarded = saved["openai_guarded"]
     for name, default in saved["model_defaults"].items():
         cls = getattr(_SCHEMAS, name)
         cls.model_fields["model"].default = default
@@ -289,7 +296,8 @@ def wire_app():
             m.kwargs.clear()
             m.kwargs.update(kw)
     fastapi_app.middleware_stack = None
-    for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG, sp_hardening._JSON_CT_FLAG):
+    for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG, sp_hardening._JSON_CT_FLAG,
+                 media_gate._FLAG):
         if hasattr(fastapi_app.state, flag):
             delattr(fastapi_app.state, flag)
     if saved["pool"] is None:
@@ -907,3 +915,76 @@ def test_a_media_path_or_url_never_reaches_the_real_handlers(wire, monkeypatch, 
     r = wire.client.post(path, json=body)
     assert r.status_code == 400, r.text
     assert touched == [] and wire.gen.calls == []
+
+
+@pytest.mark.parametrize("ctype", ["multipart/form-data; boundary=x", "text/plain", None])
+def test_a_file_write_never_reaches_the_real_image_route(wire, ctype):
+    """The real route reads its body as JSON whatever the Content-Type says,
+    so the gate must too."""
+    import json
+    raw = json.dumps({"model": MODEL_ID, "prompt": "p",
+                      "output_path": "/Users/me/written-by-guest.png"}).encode()
+    headers = {} if ctype is None else {"content-type": ctype}
+    r = wire.client.post("/v1/images/generations", content=raw, headers=headers)
+    assert r.status_code == 400, r.text
+
+
+def test_the_real_image_route_refuses_a_file_write_without_the_gate(wire, monkeypatch):
+    """Past the middleware, the wrapped generate_image refuses it too."""
+    import asyncio
+    import json
+
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    monkeypatch.setattr(openai_mod, "get_cached_model",
+                        lambda *a, **k: (object(), None, None))
+    raw = json.dumps({"model": MODEL_ID, "prompt": "p",
+                      "output_path": "/Users/me/written-by-guest.png"}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": raw, "more_body": False}
+    scope = {"type": "http", "method": "POST", "path": "/v1/images/generations",
+             "headers": [(b"content-type", b"multipart/form-data")], "query_string": b""}
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(openai_mod.images_generations_endpoint(Request(scope, receive)))
+    assert e.value.status_code == 400 and "output_path" in str(e.value.detail)
+
+
+def test_the_real_edit_route_hands_an_inline_image_over_as_a_file(wire, monkeypatch):
+    """The edit loaders open a reference image by file name, so the wrapped
+    edit_image passes a private temporary file and removes it afterwards."""
+    import base64
+    import io
+    import os
+    import types
+
+    from PIL import Image
+
+    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    seen = []
+
+    def edit_image(model, request, **kw):
+        for path in request.image_paths:
+            with Image.open(path) as image:
+                seen.append((path, image.size))
+        return types.SimpleNamespace(width=2, height=2, seed=request.seed, path=None,
+                                     prompt_tokens=0, peak_memory=0.0,
+                                     to_b64_json=lambda: "")
+    monkeypatch.setattr(openai_mod, "edit_image", edit_image)
+    monkeypatch.setattr(openai_mod, "_kq_media_guarded", False)
+    media_gate._refuse_image_writes(openai_mod)
+    monkeypatch.setattr(openai_mod, "get_cached_model",
+                        lambda *a, **k: (object(), None, None))
+    png = io.BytesIO()
+    Image.new("RGB", (2, 2)).save(png, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()
+    r = wire.client.post("/v1/images/edits",
+                         json={"model": MODEL_ID, "prompt": "p", "image": uri})
+    assert r.status_code == 200, r.text
+    assert [size for _, size in seen] == [(2, 2)]
+    assert not os.path.exists(os.path.dirname(seen[0][0]))
+    r = wire.client.post("/v1/images/edits",
+                         json={"model": MODEL_ID, "prompt": "p", "image": "/Users/me/a.png"})
+    assert r.status_code == 400 and len(seen) == 1

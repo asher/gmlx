@@ -24,9 +24,9 @@ def install_api_key_auth(api_key: str | None) -> None:
     ``x-api-key: <key>`` (Anthropic-style clients); compares in constant time.
     No-op without a key; idempotent.
 
-    Note: this is HTTP middleware - a future websocket route would bypass it
-    (Starlette ``http``-type middleware never sees websocket scopes); none
-    exists today."""
+    This is HTTP middleware, and Starlette HTTP middleware never sees a
+    WebSocket connection. The media gate therefore removes the stock
+    WebSocket routes, such as mlx-vlm's ``/v1/realtime``."""
     if not api_key:
         return
     import hmac

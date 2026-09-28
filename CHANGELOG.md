@@ -54,6 +54,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file that holds a key stays private, and writes through a symbolic link
   that stays inside your home folder instead of replacing it. It refuses a
   link that leads outside your home folder.
+- The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
+  which skipped the API key check.
 - A server, menu bar or extra install that gmlx starts no longer imports a
   `gmlx` or `pip` package from the current folder in place of the installed
   one. A server started from a source checkout therefore runs the installed
