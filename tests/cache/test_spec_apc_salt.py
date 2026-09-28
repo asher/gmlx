@@ -127,6 +127,124 @@ def test_l0_skips_media_prompts_without_a_stock_salt(ar):
     assert _prefill(ar, model, text1 + [4, 5]) == 6
 
 
+def _gemma4_spec_config(model_type):
+    """The config of the spec target the VLMxMTP loader builds for a gemma4
+    VLM, from the real container config. It names no media ids."""
+    import importlib
+
+    from mlx_vlm.utils import update_module_configs
+
+    from gmlx.load.mtp_target import _vlm_spec_language_model
+
+    module = importlib.import_module(f"mlx_vlm.models.{model_type}")
+    text = ("gemma4_unified_text" if model_type == "gemma4_unified"
+            else "gemma4_text")
+    raw = {"model_type": model_type,
+           "text_config": {"model_type": text, "hidden_size": 16,
+                           "num_hidden_layers": 2, "intermediate_size": 32,
+                           "num_attention_heads": 2, "head_dim": 8,
+                           "global_head_dim": 8, "num_key_value_heads": 1,
+                           "num_kv_shared_layers": 0,
+                           "hidden_size_per_layer_input": 0,
+                           "sliding_window": 16, "sliding_window_pattern": 2},
+           "vision_config": {}}
+    config = update_module_configs(
+        module.ModelConfig.from_dict(raw), module, raw,
+        ["text", "vision", "projector", "audio"])
+    _cls, build = _vlm_spec_language_model(model_type)
+    return build(config).config, int(config.image_token_id)
+
+
+def _muse_glimmer_config():
+    """The muse_glimmer language model's config: the text config, which
+    names no image id."""
+    from gmlx.models.muse_glimmer.vlm_model import ModelConfig, TextConfig
+
+    config = ModelConfig(text_config=TextConfig(vocab_size=32),
+                         image_token_id=_IMG)
+    return config.text_config, config.image_token_id
+
+
+_IMAGE_KWARGS = {
+    # What the server forwards for an image turn once it strips the pixels.
+    "gemma4": ("mm_token_type_ids",),
+    "gemma4_unified": ("mm_token_type_ids", "image_position_ids"),
+    "muse_glimmer": ("image_sizes",),
+}
+
+
+@pytest.mark.parametrize("arch,keys", [
+    ("gemma4", _IMAGE_KWARGS["gemma4"]),
+    ("gemma4_unified", _IMAGE_KWARGS["gemma4_unified"]),
+    ("gemma4_unified", ("image_position_ids",)),
+    ("muse_glimmer", _IMAGE_KWARGS["muse_glimmer"]),
+])
+def test_l0_skips_image_turns_whose_config_names_no_image_id(ar, arch, keys):
+    """Without a cold meta an image turn skips L0 on these archs too: the
+    language model's config names no image id, so the forwarded kwargs
+    mark the turn. A gemma4 text turn carries token types too, all zero,
+    and keeps its reuse."""
+    from mlx_vlm import apc
+
+    if arch == "muse_glimmer":
+        config, img = _muse_glimmer_config()
+    else:
+        config, img = _gemma4_spec_config(arch)
+    assert img not in apc.multimodal_token_ids_from_config(config)
+    model = _Model(config=config)
+    cache = SpecPrefixCache(min_prefix=2)
+    model._spec_prefix_cache = cache
+
+    def kwargs(ids):
+        out = {}
+        if "mm_token_type_ids" in keys:
+            out["mm_token_type_ids"] = mx.array(
+                [[1 if t == img else 0 for t in ids]])
+        if img in ids:
+            if "image_position_ids" in keys:
+                out["image_position_ids"] = mx.zeros((1, 4, 2), mx.int32)
+            if "image_sizes" in keys:
+                out["image_sizes"] = mx.array([[28, 28]])
+        return out
+
+    turn1 = [1, img, img, img, 2, 3]
+    turn2 = turn1 + [4, 5]
+    assert _prefill(ar, model, turn1, kwargs=kwargs(turn1)) == 0
+    assert _prefill(ar, model, turn2, kwargs=kwargs(turn2)) == 0
+    assert len(cache) == 0
+
+    text1 = [1, 5, 6, 7, 2, 3]
+    text2 = text1 + [4, 5]
+    assert _prefill(ar, model, text1, kwargs=kwargs(text1)) == 0
+    assert _prefill(ar, model, text2, kwargs=kwargs(text2)) == 6
+
+
+def test_expanded_media_ids_mark_a_turn_without_the_fold(monkeypatch):
+    """DeepSeek-V4 VL expands an image into ids past the vocab and forwards
+    only its image layout. Its text config lists those ids as
+    media_token_ids, which mark the turn even when the serve fold has not
+    taught the stock reader about them."""
+    from mlx_vlm import apc
+
+    from gmlx.models.deepseek_v4.model import ModelArgs
+    from gmlx.models.deepseek_v4.vlm_model import ModelConfig
+
+    text = ModelArgs(model_type="deepseek_v4", vocab_size=32, hidden_size=8,
+                     intermediate_size=8, num_hidden_layers=1,
+                     num_attention_heads=1)
+    ModelConfig(text_config=text, vocab_size=32)
+    monkeypatch.setattr(apc, "multimodal_token_ids_from_config",
+                        lambda config: set())
+    ids = [1, 2, 32, 33, 33, 34, 36, 3]
+    batch = SimpleNamespace(
+        model=SimpleNamespace(config=text), _input_ids=mx.array([ids]),
+        _prompt_kwargs={"image_meta": mx.array([[2, 2, 0, 0]])})
+    assert mtp_prefill._carries_media(batch)
+    batch._input_ids = mx.array([[1, 2, 3]])
+    batch._prompt_kwargs = {}
+    assert not mtp_prefill._carries_media(batch)
+
+
 def test_l0_keeps_adapted_and_bare_rows_apart(ar):
     """Without an APC manager lora_rows salts nothing, so the L0 key
     carries the row's adapter scales itself."""

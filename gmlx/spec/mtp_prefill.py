@@ -41,25 +41,36 @@ from gmlx.spec.engine import (
 
 _log = logging.getLogger(__name__)
 
-# Prompt kwargs that carry media payloads (the stock APC salt hashes the
-# first three; the grids come with them).
+# Prompt kwargs that carry media payloads or their layout (the stock APC
+# salt hashes the first three). The server strips pixel_values, so on
+# archs whose language model config names no image id, the layout marks
+# an image turn: image_position_ids (gemma4 unified), image_sizes
+# (muse_glimmer).
 _MEDIA_PROMPT_KWARGS = ("pixel_values", "pixel_values_videos", "input_features",
-                        "image_grid_thw", "video_grid_thw")
+                        "image_grid_thw", "video_grid_thw",
+                        "image_position_ids", "image_sizes")
 
 
 def _carries_media(batch) -> bool:
     kwargs = batch._prompt_kwargs or {}
     if any(kwargs.get(k) is not None for k in _MEDIA_PROMPT_KWARGS):
         return True
+    # gemma4 token types: 0 text, 1 image, 2 video, 3 audio.
+    types = kwargs.get("mm_token_type_ids")
+    if types is not None and bool(mx.any(mx.array(types) != 0).item()):
+        return True
     config = getattr(batch.model, "config", None)
     if config is None:
         return False
     from mlx_vlm import apc as _apc
 
-    # The stock reader names image and video placeholders only.
+    # The stock reader names image and video placeholders only. Audio ids
+    # and a config's media_token_ids (expanded image blocks) are read here,
+    # so the check does not depend on the serve fold.
     media_ids = _apc.multimodal_token_ids_from_config(config) | {
         int(getattr(config, a)) for a in ("audio_token_id", "audio_token_index")
-        if getattr(config, a, None) is not None}
+        if getattr(config, a, None) is not None} | {
+        int(t) for t in getattr(config, "media_token_ids", None) or ()}
     return bool(media_ids) and any(
         int(t) in media_ids for t in batch._input_ids[0].tolist())
 
