@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Any, cast
 
 
 def _prog() -> str:
@@ -72,7 +73,7 @@ class _DtypeAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         from gmlx.load.dtypes import ENV_VAR  # local: keeps mlx off the --help path
 
-        os.environ[ENV_VAR] = values
+        os.environ[ENV_VAR] = cast(str, values)
         setattr(namespace, self.dest, values)
 
 
@@ -209,7 +210,7 @@ def add_speculative_args(ap: argparse.ArgumentParser) -> None:
     ``speculative: true`` was silently dropped on ``chat`` (``_apply_resolved_to_args``
     skips a setting whose dest the verb's parser never defined). Composing both
     parsers from one builder keeps the surface - and the config plumbing - in sync."""
-    ap = ap.add_argument_group("speculative decoding (MTP)")
+    ap = cast(argparse.ArgumentParser, ap.add_argument_group("speculative decoding (MTP)"))
     ap.add_argument(
         "--speculative",
         "--mtp",
@@ -351,7 +352,7 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
 def add_sampling_args(ap: argparse.ArgumentParser) -> None:
     """Add the sampler flags. Shared by ``run`` and ``chat`` (chat also adjusts
     them live via the matching /commands)."""
-    ap = ap.add_argument_group("sampling")
+    ap = cast(argparse.ArgumentParser, ap.add_argument_group("sampling"))
     ap.add_argument(
         "--temp",
         type=float,
@@ -444,7 +445,7 @@ def add_sampling_args(ap: argparse.ArgumentParser) -> None:
 
 def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
     """Add the KV-cache + prefill memory knobs. Shared by ``run`` and ``chat``."""
-    ap = ap.add_argument_group("KV cache & prefill memory")
+    ap = cast(argparse.ArgumentParser, ap.add_argument_group("KV cache & prefill memory"))
     ap.add_argument(
         "--max-kv-size",
         type=int,
@@ -1453,7 +1454,7 @@ def _apply_placement(args, model) -> None:
     fast_disk = getattr(args, "stream_fast_disk", None)
     if fast_disk:
         os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
-    feeders = dict(
+    feeders: dict[str, Any] = dict(
         feeder_prefill=getattr(args, "prefill_feeder", None),
         feeder_decode=getattr(args, "decode_feeder", None),
     )
@@ -1712,14 +1713,14 @@ def _run_vlm(args) -> int:
     import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
-        model, config, processor = load_vlm_model(
+        model, config, processor = cast(tuple[Any, Any, Any], load_vlm_model(
             args.gguf,
             args.mmproj,
             hf_source=args.hf_source,
             arch=args.arch,
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
-        )
+        ))
     # The streaming placement applies only to the text tower. The vision
     # tower is small, and it stays resident. An over-RAM VLM is over-RAM in
     # its experts.
@@ -1742,14 +1743,14 @@ def _run_vlm(args) -> int:
             else []
         )
         messages.append({"role": "user", "content": prompt})
-        prompt = apply_chat_template(
+        prompt = cast(str, apply_chat_template(
             processor,
             config,
             messages,
             num_images=len(images),
             num_audios=len(audios),
             **template_kwargs,
-        )
+        ))
 
     from gmlx.tui.chat import parse_resize_shape
 
@@ -2510,8 +2511,25 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
-    from gmlx._exitfix import guarded
-    return guarded(_umbrella_impl, argv)
+    return _exit_code(_umbrella_impl, argv)
+
+
+def _exit_code(fn, *args) -> int:
+    """Run an entry point and return its process exit code. A SystemExit
+    gives its code (a message is printed and gives 1), Ctrl-C gives 130,
+    None gives 0, and a bool or any other value that is not an int gives 1."""
+    try:
+        rc = fn(*args)
+    except SystemExit as e:
+        rc = e.code
+        if rc is not None and not isinstance(rc, int):
+            print(rc, file=sys.stderr)
+            rc = 1
+    except KeyboardInterrupt:
+        rc = 130
+    if isinstance(rc, bool) or not isinstance(rc, int):
+        return 0 if rc is None else 1
+    return rc
 
 
 def _umbrella_impl(argv: list[str] | None = None) -> int:
@@ -2688,5 +2706,4 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    from gmlx._exitfix import guarded
-    sys.exit(guarded(main))
+    sys.exit(_exit_code(main))

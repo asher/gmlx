@@ -46,15 +46,6 @@ def pytest_configure(config):
 
         mx.set_default_device(mx.cpu)
 
-    # mlx 0.32.1 segfaults at interpreter exit when a compiled wrapper is
-    # still referenced at shutdown (see gmlx/_exitfix.py), turning a green
-    # suite into rc 139. Arm here so the guard's atexit registration
-    # precedes any hook a test registers; sessionfinish records the real
-    # exit code and the guard preserves it by skipping finalization.
-    from gmlx._exitfix import arm
-
-    arm()
-
     # Track every daemon read pool so the autouse fixture below can shut
     # down the ones a test leaks. Leaked pools park their workers in
     # queue.get forever; past ~100 live threads faulthandler truncates
@@ -85,12 +76,6 @@ def _shutdown_read_pools():
     # takes its poison pill; joining it would hang the suite.
     while len(_read_pools) > n:
         _read_pools.pop().shutdown(wait=False)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    from gmlx._exitfix import set_code
-
-    set_code(int(exitstatus))
 
 
 @pytest.fixture(scope="session")
