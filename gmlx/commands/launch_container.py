@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shlex
+import signal
 import sys
 import urllib.parse
 import webbrowser
@@ -132,6 +133,34 @@ def _server_endpoint(a) -> tuple[str, int]:
         return a.host or "127.0.0.1", int(a.port or 8080)
     host, port = lifecycle.auto_target(None, None)
     return host, int(port)
+
+
+class _Signalled(Exception):
+    """A SIGTERM or SIGHUP arrived during step 8."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def _signals_raise():
+    """Turn SIGTERM and SIGHUP into an exception while the block runs, so
+    every ``finally`` in it runs. The exit code is 128 plus the signal."""
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        yield                          # only the main thread can set handlers
+        return
+
+    def raise_it(signum, _frame):
+        raise _Signalled(signum)
+    saved = {sig: signal.signal(sig, raise_it) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
 
 
 def _cwd() -> str:
@@ -416,6 +445,10 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
             confine.ConfinedError) as e:
         print(f"[launch] {e}", file=sys.stderr)
         return 1
+    except _Signalled as e:
+        print(f"[launch] stopped by signal {e.signum} while the image was prepared",
+              file=sys.stderr)
+        return 128 + e.signum
 
 
 def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
@@ -468,31 +501,38 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         containers = cli.containers()
         for line in session.orphan_notices(client, containers):
             say(line)
-        notice = images.builder_notice(say=say)
+        pending = images.pending_work(image_plan, a.rebuild)
+        # A build is about to use the builder, so an owed stop waits for it.
+        notice = images.builder_notice(say=say, settle=pending is None)
         if notice:
             say(notice)
-        # Step 8
-        runtime_dir, runtime_lock = runtime.acquire_runtime()
-        held.append(runtime_lock)
-        held.extend(session.lock_volumes(plan.volumes))
-        session.check_volumes_free(plan.volumes, containers)
-        session.ensure_volumes(plan.volumes, say)
-        # The steps are numbered when this launch starts the service or
-        # builds or pulls an image, and only the steps that run get a number.
-        if images.pending_work(image_plan, a.rebuild):
-            steps += 1
-        ready = images.ensure_image(image_plan, rebuild=a.rebuild, say=say,
-                                    step=f"step {steps}" if steps > int(first_run) else None)
-        try:
-            word = (cfg.command[0] if isinstance(cfg.command, list)
-                    else images.image_command(ready, "image", [], a.passthrough)[0][0]
-                    if cfg.command == "image" else images.CLIENT_BINARY[client])
-        except images.ImageError as e:
-            if not a.shell:                # a shell is how you look into such an image
-                raise
-            say(f"[launch] warning: {e}")
-        else:
-            images.check_command(ready, word, str(runtime_dir), shell=a.shell, say=say)
+        # Step 8. A closed terminal tab during a long first build must still
+        # run the build's clean-up, which records the builder's owed stop.
+        with _signals_raise():
+            runtime_dir, runtime_lock = runtime.acquire_runtime()
+            held.append(runtime_lock)
+            held.extend(session.lock_volumes(plan.volumes))
+            session.check_volumes_free(plan.volumes, containers)
+            session.ensure_volumes(plan.volumes, say)
+            # The steps are numbered when this launch starts the service or
+            # builds or pulls an image, and only the steps that run get a
+            # number.
+            if pending:
+                steps += 1
+            ready = images.ensure_image(
+                image_plan, rebuild=a.rebuild, say=say,
+                step=f"step {steps}" if steps > int(first_run) else None)
+            try:
+                word = (cfg.command[0] if isinstance(cfg.command, list)
+                        else images.image_command(ready, "image", [], a.passthrough)[0][0]
+                        if cfg.command == "image" else images.CLIENT_BINARY[client])
+            except images.ImageError as e:
+                if not a.shell:            # a shell is how you look into such an image
+                    raise
+                say(f"[launch] warning: {e}")
+            else:
+                images.check_command(ready, word, str(runtime_dir), shell=a.shell,
+                                     say=say)
     # Step 9
     rc = L._ensure_server(a)
     if rc is not None:

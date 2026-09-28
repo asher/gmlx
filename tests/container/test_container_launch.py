@@ -778,3 +778,41 @@ def test_an_explicit_port_with_no_server_and_no_config_stops_early(env, monkeypa
     monkeypatch.setattr(launch, "_guide_to_init", lambda *a: None)
     assert _run(["pi", "--container", "--port", "9999"]) == 2
     assert not env.calls("system", "start") and not env.calls("build")
+
+
+def test_attach_from_a_deleted_folder_is_a_clean_error(running_session, capsys, monkeypatch):
+    gone = running_session.home / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert _run(["pi", "--shell"]) == 1
+    assert "the current folder no longer exists" in capsys.readouterr().err
+
+
+def test_a_term_signal_during_the_build_runs_its_clean_up(env, capsys, monkeypatch):
+    import signal as _signal
+    from gmlx.container import images
+    cleaned = []
+
+    def build(*a, **k):
+        try:
+            os.kill(os.getpid(), _signal.SIGTERM)
+            for _ in range(1000):              # the handler runs between bytecodes
+                pass
+        finally:
+            cleaned.append(True)
+    monkeypatch.setattr(images, "ensure_image", build)
+    before = _signal.getsignal(_signal.SIGTERM)
+    assert _run(["pi", "--container"]) == 128 + _signal.SIGTERM
+    assert cleaned and "stopped by signal" in capsys.readouterr().err
+    assert _signal.getsignal(_signal.SIGTERM) is before
+
+
+def test_step_7_leaves_an_owed_builder_for_a_build_about_to_run(env, monkeypatch):
+    from gmlx.container import images
+    seen = []
+    monkeypatch.setattr(images, "builder_notice",
+                        lambda say=None, settle=True: seen.append(settle))
+    assert _run(["pi", "--container"]) == 0             # builds the image
+    assert _run(["pi", "--container"]) == 0             # the image is ready
+    assert seen == [False, True]

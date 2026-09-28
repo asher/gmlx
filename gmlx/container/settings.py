@@ -537,18 +537,25 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
             # The copy goes to a new name first and is renamed into place
             # only when it is whole, so a failed copy is never taken for a
             # finished one at the next launch.
-            tmp = dst.with_name(f".{dst.name}.gmlx-seed-{secrets.token_hex(4)}")
+            prefix = f".{dst.name}.gmlx-seed-"
+            tmp = dst.with_name(prefix + secrets.token_hex(4))
             try:
                 if confine.exists(dst):
                     continue
+                # A copy that a killed launch left half done is removed first.
+                for name in confine.listdir(dst.parent):
+                    if name.startswith(prefix):
+                        confine.remove_tree(dst.parent / name)
                 _copy_confined(src, tmp)
                 confine.rename(tmp, dst.name)
-            except (confine.ConfinedError, OSError) as e:
+            except BaseException as e:
                 with contextlib.suppress(confine.ConfinedError, OSError):
                     confine.remove_tree(tmp)
                 if isinstance(e, confine.ConfinedError):
                     raise SettingsError(f"seed: {e}") from None
-                raise SettingsError(f"seed: cannot copy {seed} ({e}).") from None
+                if isinstance(e, OSError):
+                    raise SettingsError(f"seed: cannot copy {seed} ({e}).") from None
+                raise
         try:
             _seed_git_identity(home)
         except confine.ConfinedError as e:

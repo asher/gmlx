@@ -548,6 +548,31 @@ def test_a_failed_seed_copy_leaves_nothing_behind(home):
     assert sorted(p.name for p in (private / "tools").iterdir()) == ["a.txt", "z.txt"]
 
 
+def test_a_seed_copy_left_by_a_killed_launch_is_removed(home):
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+    for n in range(2):
+        left = private / f".notes.md.gmlx-seed-dead{n}"
+        left.mkdir()
+        (left / "part").write_text("x")
+    settings.seed_home(private, ["~/notes.md"])
+    assert sorted(p.name for p in private.iterdir()) == ["notes.md"]
+
+
+def test_an_interrupted_seed_copy_leaves_nothing(home, monkeypatch):
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+
+    def interrupted(src, dst):
+        from gmlx.container import confine
+        confine.write_text(dst, "half")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(settings, "_copy_confined", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        settings.seed_home(private, ["~/notes.md"])
+    assert list(private.iterdir()) == []
+
+
 def test_a_missing_seed_is_reported_and_skipped(home):
     private = settings.private_home("pi")
     assert settings.seed_home(private, ["~/nope.md"]) == [
