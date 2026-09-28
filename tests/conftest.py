@@ -46,6 +46,11 @@ def pytest_configure(config):
 
         mx.set_default_device(mx.cpu)
 
+    # Every test hands the process back as it found it (process_state.py).
+    import process_state
+
+    process_state.start_session()
+
     # Track every daemon read pool so the autouse fixture below can shut
     # down the ones a test leaks. Leaked pools park their workers in
     # queue.get forever; past ~100 live threads faulthandler truncates
@@ -63,6 +68,30 @@ def pytest_configure(config):
 
 
 _read_pools: list = []
+
+
+@pytest.fixture(autouse=True)
+def _hand_back_process_state():
+    # pytest sets up a conftest's autouse fixtures in name order, so this
+    # one sets up before the others and before monkeypatch, and tears down
+    # after them: the environment, MLX's global settings and the warning
+    # format return to what the test started with, whatever the test or
+    # its fixtures left behind.
+    import process_state
+
+    state = process_state.capture()
+    yield
+    process_state.restore(state)
+
+
+_END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
+
+
+def pytest_collection_modifyitems(session, config, items):
+    # The production-numerics check reads the state the whole run left.
+    last = [i for i in items if i.nodeid.endswith(_END_OF_RUN)]
+    if last:
+        items[:] = [i for i in items if i not in last] + last
 
 
 @pytest.fixture(autouse=True)
