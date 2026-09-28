@@ -109,19 +109,37 @@ class GmlxAPCManager(_apc.APCManager):
         self.__dict__["_gmlx_prefill_reserve"] = (
             0 if self.__dict__.get("_gmlx_no_prefill_reserve") else int(value))
 
-    # Evictions and MLX cache size at the last headroom read.
+    # Evictions and MLX cache size at the last headroom read inside the
+    # running `_make_room`.
     _gmlx_headroom_mark: tuple[int, int] | None = None
+    _gmlx_making_room = False
+
+    def _make_room(self, allocation_bytes: int = 0, *,
+                   retain_bytes: int = 0) -> bool:
+        """Stock `_make_room`, with the headroom marks scoped to the call.
+        prompt_step clears the MLX cache after every chunk, so only this
+        call's own eviction or cache clear drops the cached free-RAM
+        reading."""
+        self._gmlx_making_room, self._gmlx_headroom_mark = True, None
+        try:
+            return super()._make_room(allocation_bytes,
+                                      retain_bytes=retain_bytes)
+        finally:
+            self._gmlx_making_room, self._gmlx_headroom_mark = False, None
 
     def _memory_headroom(self) -> int:
         """Stock headroom, with a cached free-RAM reading dropped once
-        memory went back to the system since the last call: `_make_room`
-        evicts, clears the MLX cache, then reads the headroom again."""
-        import mlx.core as mx
+        memory went back to the system since the last read in the same
+        `_make_room`: it evicts, clears the MLX cache, then reads the
+        headroom again."""
+        if self._gmlx_making_room:
+            import mlx.core as mx
 
-        mark = (self.stats.memory_evictions, mx.get_cache_memory())
-        last, self._gmlx_headroom_mark = self._gmlx_headroom_mark, mark
-        if last is not None and (mark[0] != last[0] or mark[1] < last[1]):
-            _invalidate_free_ram()
+            mark = (self.stats.memory_evictions, mx.get_cache_memory())
+            last, self._gmlx_headroom_mark = self._gmlx_headroom_mark, mark
+            if last is not None and (mark[0] != last[0]
+                                     or mark[1] < last[1]):
+                _invalidate_free_ram()
         return super()._memory_headroom()
 
     def autosize(self, model, budget_fraction: float | None = None) -> None:

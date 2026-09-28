@@ -171,10 +171,13 @@ def test_make_room_rereads_the_cached_free_ram_after_it_evicts(monkeypatch):
     assert results == [(True, 30, 2)] * 4
 
 
-def test_headroom_rereads_the_cached_free_ram_after_a_cache_clear(
+def test_only_a_make_room_cache_clear_rereads_the_cached_free_ram(
         monkeypatch):
-    """A cache clear returns the MLX cache to the system: the headroom
-    reads free RAM again once the cache has shrunk, and not before."""
+    """A cache clear returns the MLX cache to the system. prompt_step
+    clears it after every chunk, and a reread after each of those would
+    read free RAM once per chunk, so a clear between two `_make_room`
+    calls keeps the cached reading. The clear `_make_room` runs itself
+    drops it, so its last headroom read sees the freed bytes."""
     import mlx.core as mx
 
     from gmlx.cache.apc_manager import _cached_free_ram
@@ -190,13 +193,21 @@ def test_headroom_rereads_the_cached_free_ram_after_a_cache_clear(
                         _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0))
     cache = [1 * GB]
     monkeypatch.setattr(mx, "get_cache_memory", lambda: cache[0])
-    m._memory_headroom()
-    m._memory_headroom()
-    cache[0] = 2 * GB
-    m._memory_headroom()
+    monkeypatch.setattr(mx, "clear_cache", lambda: cache.__setitem__(0, 0))
+    assert m._make_room()
+    mx.clear_cache()
+    assert m._make_room()
     assert len(reads) == 1
-    cache[0] = 0
-    assert m._memory_headroom() == 4 * GB
+
+    # Nothing to evict and too little headroom: `_make_room` clears the
+    # cache and reads free RAM again, once.
+    empty = GmlxAPCManager(num_blocks=64, block_size=16)
+    empty.memory_reserve_bytes = 0
+    empty._working_set_bytes = 100 * GB
+    empty.memory_max_bytes = 10 * GB
+    cache[0] = 1 * GB
+    assert not empty._make_room(8 * GB)
+    assert cache[0] == 0
     assert len(reads) == 2
 
 
