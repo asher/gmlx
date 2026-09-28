@@ -33,7 +33,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/internals/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.15,<0.5",
+    "mlx-kquant>=0.5.0,<0.6",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
@@ -43,8 +43,9 @@ dependencies = [
     # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache/compat.py for the dual-origin cache-class rules).
-    # 0.7.3 requires mlx>=0.32.2, so the mlx-kquant build must be one that
-    # pins mlx 0.32.2; <0.5 guards the next kquant breaking change.
+    # 0.7.3 requires mlx>=0.32.2, so the mlx-kquant release must be one that
+    # pins mlx 0.32.2 (0.5.0 on; tests/test_ci_pins.py checks the CI pin);
+    # <0.6 guards the next kquant breaking change.
     "mlx-vlm==0.7.3",
     # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
     # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings

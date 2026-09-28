@@ -2,17 +2,21 @@
 """The CI workflow pre-installs some dependencies by exact version to get a
 wheel instead of an sdist build. A pin below the pyproject floor is worse than
 no pin: the editable install upgrades it, so the job tests a version nobody
-chose. This anchors the workflow pins against pyproject.
+chose. This anchors the workflow pins against pyproject, and the mlx-kquant
+pin against the mlx that the pinned mlx-vlm needs.
 """
 from __future__ import annotations
 
 import re
 import shlex
 import tomllib
+from importlib import metadata
 from pathlib import Path
 
 import pytest
 from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW = _ROOT / ".github" / "workflows" / "test.yml"
@@ -79,3 +83,51 @@ def test_ci_pin_satisfies_pyproject(name):
             f"CI pins {name} {pin.specifier}, which does not satisfy the "
             f"pyproject constraint {declared.specifier}. The editable "
             "install would silently upgrade it; bump the workflow pin.")
+
+
+def _exact(req: Requirement) -> str | None:
+    versions = [s.version for s in req.specifier if s.operator == "=="]
+    return versions[0] if len(versions) == 1 else None
+
+
+def _local_requirements(name: str, version: str | None):
+    """The installed distribution's requirements, or None when it is
+    missing or is not `version`."""
+    try:
+        if version is None or metadata.version(name) != version:
+            return None
+        reqs = metadata.requires(name) or []
+    except metadata.PackageNotFoundError:
+        return None
+    return [Requirement(r) for r in reqs]
+
+
+def _mlx_specifier(reqs) -> SpecifierSet:
+    """The mlx constraint a plain install (no extras) applies."""
+    spec = SpecifierSet()
+    for r in reqs:
+        if _canonical(r.name) != "mlx":
+            continue
+        if r.marker is None or r.marker.evaluate({"extra": ""}):
+            spec &= r.specifier
+    return spec
+
+
+def test_kquant_pin_admits_the_mlx_vlm_mlx_floor():
+    """An mlx-kquant release pins mlx exactly. The CI pin must name one whose
+    mlx satisfies the floor the pinned mlx-vlm sets, or pip cannot install
+    the two together. Read from the local install; skipped when the local
+    mlx-kquant or mlx-vlm is not the pinned version."""
+    kq = _local_requirements("mlx-kquant", _exact(_ci_pins()["mlx-kquant"]))
+    vlm = _local_requirements("mlx-vlm", _exact(_declared()["mlx-vlm"]))
+    if kq is None or vlm is None:
+        pytest.skip("the local mlx-kquant or mlx-vlm is not the pinned version")
+    floors = [s.version for s in _mlx_specifier(vlm)
+              if s.operator in (">=", "==", "~=")]
+    assert floors, f"mlx-vlm sets no mlx floor: {_mlx_specifier(vlm)}"
+    floor = max(floors, key=Version)
+    kq_mlx = _mlx_specifier(kq)
+    assert kq_mlx.contains(floor, prereleases=True), (
+        f"the pinned mlx-kquant requires mlx{kq_mlx}, which excludes mlx "
+        f"{floor}, the floor of the pinned mlx-vlm. Bump the mlx-kquant pin "
+        "to a release built against that mlx.")
