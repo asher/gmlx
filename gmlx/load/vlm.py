@@ -3405,6 +3405,9 @@ def load_vlm_model(
     # mlx-vlm renders the prompt (chat and run paths both call in here).
     from gmlx.tui.reasoning import install_template_default_thinking
     install_template_default_thinking()
+    # A text-only system message reaches the template as a string.
+    from gmlx.upstream.system_content_fix import install_system_content_fix
+    install_system_content_fix()
 
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")

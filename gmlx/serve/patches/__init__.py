@@ -281,6 +281,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
+    from gmlx.upstream.system_content_fix import install_system_content_fix
+    install_system_content_fix()
     install_diffusion_single_bos()
     install_stream_timings()
     install_openai_stop_sequences()

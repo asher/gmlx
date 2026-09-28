@@ -428,7 +428,8 @@ SEAMS: tuple[Seam, ...] = (
          "tail mirrors the stock function's) + "
          "reasoning.install_template_default_thinking (absent "
          "enable_thinking seeded as Jinja Undefined so the 0.6.15 False "
-         "injection stands down)"),
+         "injection stands down) + system_content_fix (a text-only system "
+         "or developer message reaches the template as a string)"),
     Seam("mlx_vlm.server.openai", "_split_thinking",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "process_tool_calls",
