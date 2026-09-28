@@ -2936,6 +2936,7 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
 
     from mlx_vlm.models.base import to_mlx
 
+    from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v4.image_block import build_image_block
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
@@ -2963,6 +2964,12 @@ def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
         image_token = DEEPSEEK4V_IMAGE_TOKEN
         image_token_id: ClassVar[int]       # set below
         vocab_size: ClassVar[int]
+
+        # The template reads list content only on user turns (see
+        # gmlx.models.deepseek_v4.chat).
+        def apply_chat_template(self, conversation, *args, **kwargs):
+            return super().apply_chat_template(
+                string_content(conversation), *args, **kwargs)
 
         # Images and text only; the base signature also names videos and
         # audio, which reach the tokenizer through kwargs here.
@@ -3144,6 +3151,7 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
 
     from mlx_vlm.models.base import to_mlx
 
+    from gmlx.models.deepseek_v4.chat import string_content
     from gmlx.models.deepseek_v41.image_block import build_image_block
 
     arch = "deepseek4-vision"
@@ -3167,6 +3175,12 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
         image_token = DEEPSEEK41V_IMAGE_TOKEN
         image_token_id: ClassVar[int]       # set below
         vocab_size: ClassVar[int]
+
+        # The template reads list content only on user turns (see
+        # gmlx.models.deepseek_v4.chat).
+        def apply_chat_template(self, conversation, *args, **kwargs):
+            return super().apply_chat_template(
+                string_content(conversation), *args, **kwargs)
 
         # Images and text only; the base signature also names videos and
         # audio, which reach the tokenizer through kwargs here.

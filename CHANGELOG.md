@@ -16,6 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it reused a cached prefix, or with MTP when prefill took several chunks.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a
   prefill batch with a much longer one could start its reply with a wrong token.
+- A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system
+  message, or read the system prompt and earlier replies as raw lists.
 
 ## [0.4.19] - 2026-09-27
 
