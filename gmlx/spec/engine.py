@@ -391,8 +391,8 @@ def _live_kv_quant_config(model=None):
 
     The batched verdict stamped on the model rules the warm merge:
     a warm hit joins a batch, and under uniform MTP batches run fp16 KV.
-    No stamp means None. The only caller is the MTP prefill init, where fp16
-    is the only correct merge. Key/value split overrides stay None."""
+    No stamp means None. The only caller is the MTP prefill init, where
+    affine rows merge to fp16. Key/value split overrides stay None."""
     stamped = getattr(model, "_gmlx_kv_policy", None)
     if stamped is None:
         return None
@@ -400,11 +400,11 @@ def _live_kv_quant_config(model=None):
     if batched is None or batched.verdict not in ("full", "partial"):
         return None
     if getattr(batched, "scheme", "uniform") != "uniform":
-        # Only affine has a merge config upstream understands. kvarn
-        # serves warm prefixes from the fp16 exact tier, so a float merge
-        # is the correct one -- but say so rather than describing kvarn
-        # records with an affine config.
-        _log.debug("warm merge stays float: %s KV has no affine config",
+        # Only affine has a merge config upstream understands. A kvarn
+        # exact entry stays a kvarn record, and with no config the kvarn
+        # merge arm makes it a kvarn batch row, the class the batched
+        # kvarn arm runs.
+        _log.debug("warm merge takes no config: %s KV has no affine config",
                    batched.scheme)
         return None
     bits = float(batched.bits)
