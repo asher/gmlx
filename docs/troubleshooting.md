@@ -302,17 +302,19 @@ does.
 A launch that stops with `names X in its #! line, which is not in the
 image` found a script whose interpreter, such as `python3`, is missing.
 Install the interpreter in the image, or change the script's `#!` line.
-Linux reads `#!/usr/bin/env tool --flag` as the one command name
-`tool --flag`, so write `#!/usr/bin/env -S tool --flag` instead. A message
-that the `#!` line ends in a carriage return means the script has Windows
-line endings. Convert it to Unix line endings, for example with `dos2unix`.
+Without `-S`, env receives everything after its name as one command name,
+so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
+The message `env receives it as one command name` reports this case.
+Write `#!/usr/bin/env -S tool --flag` instead. The message `ends in a
+carriage return` means the script has Windows line endings. Convert it to
+Unix line endings, for example with `dos2unix`.
 
-Exit 127 or 126 from a session that ends on its own comes with the same
-messages. Exit 126 with `its #! interpreter or its program loader is not
-in the image` means the file is a program for another system, such as a
-build for glibc in a musl image. Exit 126 with `Exec format error` means
-the file is an x86_64 build, which needs an arm64 one, or a script with no
-`#!` line, which needs one.
+When the session itself cannot start the command, it exits 127 or 126 with
+the same messages. Exit 126 with `its #! interpreter or its program loader
+is not in the image` means the file is a program for another system, such
+as a build for glibc in a musl image. Exit 126 with `Exec format error`
+means the file is an x86_64 build or a script with no `#!` line. Install an
+arm64 build, or add a `#!` line to the script.
 
 ### A container command gave no answer
 

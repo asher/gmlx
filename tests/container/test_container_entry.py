@@ -243,8 +243,9 @@ def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
     ("#!/nope/python3 -u", "/nope/python3"),
     ("#!/usr/bin/env missingtool", "missingtool"),
     ("#!/usr/bin/env -S -u HOME X=1 missingtool --flag", "missingtool"),
-    # Without -S, Linux gives env the rest of the line as one command name.
-    ("#!/usr/bin/env sh -e", "sh -e"),
+    # With no newline in the first 256 bytes, Linux runs the interpreter
+    # with the argument cut short.
+    ("#!/nope/x " + "a" * 300, "/nope/x"),
 ])
 def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing):
     script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
@@ -256,6 +257,26 @@ def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing)
         assert done.returncode == CANNOT_RUN, (args, done.stderr)
         assert done.stderr.strip() == message, args
         assert done.stdout == "", args
+
+
+def test_env_with_words_and_no_split_option_exits_126(entry, tmp_path):
+    script = _script(tmp_path / "bin" / "start", "#!/usr/bin/env sh -e\necho ran\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    message = (f'gmlx-entry: {script} has "sh -e" after env in its #! line, and env receives '
+               "it as one command name. Write #!/usr/bin/env -S sh -e to pass it as separate "
+               "words.")
+    for args in (("--", "start"), ("--check", "start")):
+        done = _run(entry, *args, env=env)
+        assert done.returncode == CANNOT_RUN, (args, done.stderr)
+        assert done.stderr.strip() == message, args
+
+
+def test_a_cut_off_interpreter_name_is_left_to_exec(entry, tmp_path):
+    # Linux refuses the file itself, so the check has nothing to add.
+    script = _script(tmp_path / "bin" / "start", "#!/" + "a" * 300 + "\necho ran\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    check = _run(entry, "--check", "start", env=env)
+    assert check.returncode == 0 and check.stdout.strip() == str(script), check.stderr
 
 
 @pytest.mark.parametrize("line", ["#!/bin/sh -e", "#! /usr/bin/env sh",

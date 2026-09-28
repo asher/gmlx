@@ -189,7 +189,7 @@ fn fail_unresolved(resolved: Resolved, cmd: &OsStr, path_env: Option<&OsStr>) ->
     }
 }
 
-/// The longest `#!` line the Linux kernel reads, `#!` and newline included.
+/// How many bytes of a file the Linux kernel reads for its `#!` line.
 const SHEBANG_MAX: usize = 256;
 
 /// The `env` options that take the next word as their value.
@@ -200,6 +200,9 @@ const ENV_VALUE_OPTIONS: [&str; 6] = ["-u", "--unset", "-C", "--chdir", "-P", "-
 pub enum Shebang {
     /// The interpreter, or the command `env` runs, is not in the image.
     Missing(OsString),
+    /// `env`, the interpreter, receives words with blanks between them
+    /// without `-S`, so it looks for one command with that whole name.
+    OneName { env: OsString, name: OsString },
     /// The line ends in a carriage return, from Windows line endings.
     CarriageReturn,
 }
@@ -208,10 +211,12 @@ pub enum Shebang {
 /// kernel reads it. An absolute or relative interpreter must be an
 /// executable file. For `env`, the command it runs is looked up on `PATH`
 /// as env would. A file with no `#!` line, one that cannot be read, and a
-/// line longer than the kernel reads give None, and exec reports those.
+/// line whose interpreter name the kernel cuts off give None, and exec
+/// reports those.
 pub fn shebang_problem(file: &Path, path_env: Option<&OsStr>) -> Option<Shebang> {
     use std::io::Read;
-    let mut head = [0u8; SHEBANG_MAX + 1];
+    // The kernel reads into a zeroed buffer, so a short file ends in NULs.
+    let mut head = [0u8; SHEBANG_MAX];
     let mut f = std::fs::File::open(file).ok()?;
     let mut len = 0;
     while len < head.len() {
@@ -221,17 +226,28 @@ pub fn shebang_problem(file: &Path, path_env: Option<&OsStr>) -> Option<Shebang>
             Err(_) => return None,
         }
     }
-    let seen = &head[..len.min(SHEBANG_MAX)];
-    let line = match seen.iter().position(|b| *b == b'\n') {
-        Some(end) => &seen[..end],
-        // Linux refuses a #! line that does not end within what it reads.
-        None if len > SHEBANG_MAX => return None,
-        None => seen,
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    // The kernel looks for the newline only before the first NUL.
+    let text = &head[..head.iter().position(|b| *b == 0).unwrap_or(SHEBANG_MAX)];
+    let line = match text.iter().position(|b| *b == b'\n') {
+        Some(end) => &head[..end],
+        None => {
+            // With no newline, Linux uses the first 255 bytes. It refuses
+            // the file only when no blank or NUL follows the interpreter
+            // name there, since the name may be cut off. Otherwise it runs
+            // the interpreter with the argument cut short.
+            let cut = &head[..SHEBANG_MAX - 1];
+            let body = cut.strip_prefix(b"#!")?;
+            let start = body.iter().position(|b| !blank(b))?;
+            if !body[start..].iter().any(|b| blank(b) || *b == 0) {
+                return None;
+            }
+            cut
+        }
     };
     let line = line.strip_prefix(b"#!")?;
     // Linux reads the line as a C string, so a NUL byte ends it.
     let line = &line[..line.iter().position(|b| *b == 0).unwrap_or(line.len())];
-    let blank = |b: &u8| *b == b' ' || *b == b'\t';
     let trimmed = trim(line, blank);
     if trimmed.last() == Some(&b'\r') {
         return Some(Shebang::CarriageReturn);
@@ -258,7 +274,13 @@ pub fn shebang_problem(file: &Path, path_env: Option<&OsStr>) -> Option<Shebang>
         return None;
     } else {
         // Without -S, env runs the whole argument as one command name.
-        vec![arg.to_vec()]
+        let cmd = OsStr::from_bytes(arg);
+        return match resolve_full(cmd, path_env) {
+            Resolved::Found(_) => None,
+            _ if arg.iter().any(blank) => Some(Shebang::OneName {
+                env: interpreter.to_os_string(), name: cmd.to_os_string() }),
+            _ => Some(Shebang::Missing(cmd.to_os_string())),
+        };
     };
     // The command is the first word that is not an option, an option's
     // value or a NAME=VALUE setting.
@@ -333,6 +355,10 @@ fn shebang_message(file: &Path, problem: &Shebang) -> String {
         Shebang::Missing(interpreter) => format!(
             "gmlx-entry: {} names {} in its #! line, which is not in the image.",
             shown(file.as_os_str()), shown(interpreter)),
+        Shebang::OneName { env, name } => format!(
+            "gmlx-entry: {} has \"{}\" after env in its #! line, and env receives it as one \
+             command name. Write #!{} -S {} to pass it as separate words.",
+            shown(file.as_os_str()), shown(name), shown(env), shown(name)),
         Shebang::CarriageReturn => format!(
             "gmlx-entry: {} has a #! line that ends in a carriage return, from Windows line \
              endings. Convert the file to Unix line endings.", shown(file.as_os_str())),
@@ -591,7 +617,8 @@ mod tests {
         assert_eq!(shebang_problem(&env_missing, p), missing("missingtool"));
         // Without -S, env gets "tool --flag" as one command name.
         let env_one_arg = script(&dir.join("d"), "#!/usr/bin/env tool --flag\n");
-        assert_eq!(shebang_problem(&env_one_arg, p), missing("tool --flag"));
+        assert_eq!(shebang_problem(&env_one_arg, p), Some(Shebang::OneName {
+            env: OsString::from("/usr/bin/env"), name: OsString::from("tool --flag") }));
         let env_found = script(&dir.join("d2"), "#!/usr/bin/env tool\n");
         assert_eq!(shebang_problem(&env_found, p), None);
         let env_split = script(&dir.join("e"), "#!/usr/bin/env -S -u HOME X=1 missingtool -x\n");
@@ -636,10 +663,16 @@ mod tests {
         // A NUL byte ends the line.
         let nul = script(&dir.join("nul"), "#!/nope/x\0/bin/sh\n");
         assert_eq!(shebang_problem(&nul, p), Some(Shebang::Missing(OsString::from("/nope/x"))));
-        // Past 256 bytes the kernel refuses the file itself, so exec reports it.
+        // With no newline in the first 256 bytes, the kernel runs the
+        // interpreter with the argument cut short.
         let long = format!("#!/nope/x {}\n", "a".repeat(300));
         let long = script(&dir.join("long"), &long);
-        assert_eq!(shebang_problem(&long, p), None);
+        assert_eq!(shebang_problem(&long, p), Some(Shebang::Missing(OsString::from("/nope/x"))));
+        // The kernel refuses the file when the interpreter name may be cut
+        // off, so exec reports it.
+        let long_name = format!("#!/{}\n", "a".repeat(300));
+        let long_name = script(&dir.join("long-name"), &long_name);
+        assert_eq!(shebang_problem(&long_name, p), None);
         let fits = format!("#!/nope/x {}\n", "a".repeat(200));
         let fits = script(&dir.join("fits"), &fits);
         assert_eq!(shebang_problem(&fits, p), Some(Shebang::Missing(OsString::from("/nope/x"))));
@@ -655,6 +688,12 @@ mod tests {
                                       &Shebang::Missing(OsString::from("tool\x1b[31m")));
         assert_eq!(message, "gmlx-entry: /s names tool\\u{1b}[31m in its #! line, which is not \
                              in the image.");
+        let one_name = Shebang::OneName { env: OsString::from("/usr/bin/env"),
+                                          name: OsString::from("sh -x") };
+        assert_eq!(shebang_message(Path::new("/s"), &one_name),
+                   "gmlx-entry: /s has \"sh -x\" after env in its #! line, and env receives it \
+                    as one command name. Write #!/usr/bin/env -S sh -x to pass it as separate \
+                    words.");
         assert!(shebang_message(Path::new("/s"), &Shebang::CarriageReturn)
             .contains("ends in a carriage return, from Windows line endings"));
     }
