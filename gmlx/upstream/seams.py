@@ -190,6 +190,34 @@ SEAMS: tuple[Seam, ...] = (
          "batch_rotating_mask_fix (mlx-lm origin)"),
     Seam("mlx_lm.models.cache", "BatchRotatingKVCache._temporal_order",
          "batch_rotating_mask_fix (mlx-lm origin)"),
+    # --- rotating trim keeps the trimmed columns (both cache origins) ---
+    Seam("mlx_vlm.models.cache", "RotatingKVCache.trim",
+         "rotating_trim_fix (wrap: trim moves _idx and offset back and "
+         "keeps the trimmed columns)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.trim",
+         "rotating_trim_fix (same, with _offset)"),
+    Seam("mlx_vlm.models.cache", "RotatingKVCache._update_in_place",
+         "rotating_trim_fix (trims keys.shape[2] - max_size of the oldest "
+         "keys and rotates; grows from offset below the window)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._update_in_place",
+         "rotating_trim_fix (same, grows from _offset)"),
+    Seam("mlx_vlm.models.cache", "RotatingKVCache._temporal_order",
+         "rotating_trim_fix (temporal order is _idx at the buffer length)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.extend",
+         "rotating_trim_fix (aligns the buffers at _idx and keeps the "
+         "columns past it, so trimmed columns ride along)"),
+    Seam("mlx_lm.models.cache", "RotatingKVCache.trim",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.trim",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "RotatingKVCache._update_in_place",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._update_in_place",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "RotatingKVCache._temporal_order",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.extend",
+         "rotating_trim_fix (mlx-lm origin)"),
     # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
     Seam("mlx_lm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "

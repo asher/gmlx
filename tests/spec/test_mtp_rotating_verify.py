@@ -7,11 +7,13 @@ states, so its first round is a one-column capture forward. With one row
 past the sliding window, that forward rotates each sliding layer's
 BatchRotatingKVCache, and the next round's verify block is wider. The
 shorter, left-padded row still has its first real key inside the window.
-The test stops after that verify block, before any rollback runs. A tiny
-random-weight owned target, with the prefill and the rounds on the CPU
+The first test stops after that verify block, before any rollback runs. The
+second runs on through a rollback, an admission and a one-token step. A
+tiny random-weight owned target, with the prefill and the rounds on the CPU
 stream, and a drafter that proposes two fixed offsets of the bonus token.
 """
 
+import functools
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -26,6 +28,7 @@ from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
 from gmlx.upstream.batch_rotating_mask_fix import (
     install_batch_rotating_mask_fix,
 )
+from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
 
 _W, _VOCAB = 16, 128
 
@@ -48,6 +51,9 @@ class _Drafter:
     def prefill_from_target_hidden(self, *args, **kwargs):
         pass
 
+    def inject_rows(self, *args, **kwargs):
+        pass
+
     def draft_block(self, b, hidden, kv, n, sampler, dtype, **kwargs):
         return mx.stack([(b + 61) % _VOCAB, (b + 83) % _VOCAB],
                         axis=1).astype(dtype)
@@ -63,8 +69,9 @@ def target(monkeypatch):
     # float32, so near-tie picks agree between the batch and each row.
     monkeypatch.setattr(spec, "generation_stream", mx.cpu)
     gemma4_sync.install_gemma4_nosync()
-    # The loader installs the stock mask fix with every model.
+    # The loader installs the stock mask and trim fixes with every model.
     assert install_batch_rotating_mask_fix()
+    install_rotating_trim_fix()
     cfg = TextConfig(
         model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,
         intermediate_size=128, num_attention_heads=4, head_dim=16,
@@ -146,3 +153,84 @@ def test_a_verify_block_after_a_capture_forward(target):
     # The batch and each row agree to about 2e-6 of the hidden scale; the
     # lost key moves the row by more than half of it.
     assert all(r <= 1e-4 for _k, _row, r in worst), worst
+
+
+def test_a_gated_round_after_an_admission_and_a_rejected_draft(
+        target, monkeypatch):
+    """Two rows speculate past the window and reject both drafts, and the
+    rollback trims them. A third row joins, the width gate trips, and the
+    next round is a one-token step for all three rows. Each row's logits in
+    that step must match a single-row forward over the row's history."""
+    lm, cls = target, type(target)
+    rng = np.random.default_rng(3)
+    rows = [rng.integers(1, _VOCAB, 30).tolist(),
+            rng.integers(1, _VOCAB, 6).tolist()]
+    joining = rng.integers(1, _VOCAB, 5).tolist()
+    call, trim = cls.__call__, vlm_cache.BatchRotatingKVCache.trim
+    gated, trims = [], []
+
+    def record_call(self, inputs, *args, **kwargs):
+        out = call(self, inputs, *args, **kwargs)
+        if inputs.ndim == 2 and inputs.shape == (3, 1):
+            gated.append((np.array(inputs)[:, 0].tolist(),
+                          np.array(out.logits[:, -1].astype(mx.float32))))
+        return out
+
+    @functools.wraps(trim)
+    def record_trim(self, n):
+        trims.append(n)
+        return trim(self, n)
+
+    def truth(history):
+        out = call(lm, mx.array([history]), cache=lm.make_cache())
+        return np.array(out.logits[0, -1].astype(mx.float32))
+
+    monkeypatch.setattr(cls, "__call__", record_call)
+    monkeypatch.setattr(vlm_cache.BatchRotatingKVCache, "trim", record_trim)
+    with mx.stream(mx.cpu):
+        singles, bonus = [], []
+        for row in rows + [joining]:
+            c = lm.make_cache()
+            out = call(lm, mx.array([row]), cache=c)
+            singles.append(c)
+            bonus.append(int(mx.argmax(out.logits[0, -1]).item()))
+        cache = [type(layer[0]).merge(list(layer))
+                 for layer in zip(*singles[:2])]
+        model = SimpleNamespace()
+        history = [rows[0] + [bonus[0]], rows[1] + [bonus[1]]]
+        gen = spec._owned_decode_rounds_batch(
+            model, _Drafter(), lm, cache, hidden=None, b=bonus[:2],
+            shared_kv=None, seed_tokens=None, emitted=[1, 1],
+            max_tokens=40, sampler=None, draft_block_size=None)
+        rounds, at_admission = 0, None
+        for tokens, meta in gen:
+            for j, t in enumerate(tokens[:2]):
+                if t is not None:
+                    history[j].append(int(t))
+            if meta["round_pos"] == meta["round_len"] - 1:
+                rounds += 1
+                if rounds == 2:
+                    at_admission = [list(h) for h in history]
+                    model._generator_injections = [{
+                        "uids": [None], "prompt_cache": singles[2],
+                        "prompt_tokens": mx.array([joining]), "hidden": None,
+                        "first_tokens": mx.array([bonus[2]]),
+                        "first_tokens_list": [bonus[2]], "max_tokens": [40]}]
+            if gated:
+                gen.close()
+                break
+        assert at_admission is not None and gated
+        # The drafts were rejected before the admission: the rollback trimmed
+        # them from the sliding caches.
+        assert any(n > 0 for n in trims), trims
+        histories = at_admission + [joining + [bonus[2]]]
+        inputs, logits = gated[0]
+        assert inputs == [h[-1] for h in histories]
+        worst = []
+        for j, h in enumerate(histories):
+            want = truth(h)
+            d = float(np.abs(logits[j] - want).max())
+            worst.append(d / float(np.abs(want).max()))
+    # Each row agrees with its own forward to about 2e-6 of the logit scale;
+    # the rejected drafts left in the ring move them by about the scale.
+    assert all(r <= 1e-4 for r in worst), worst
