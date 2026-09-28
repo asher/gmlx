@@ -16,6 +16,7 @@ import secrets
 import stat
 import subprocess
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -42,6 +43,11 @@ SENSITIVE = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
 # Client files that hold a sign-in token. Seeding one gives it to the client.
 TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
                ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
+# Files that can hold a token, such as git's url.<base>.insteadOf with a
+# token in the URL.
+TOKEN_MAYBE_FILES = (".gitconfig",)
+# How many read-write shares launch remembers for the seed check.
+SHARED_HISTORY_MAX = 500
 # The most a seed copies, so a planted or sparse file cannot fill the disk
 # or the memory.
 SEED_MAX_BYTES = 64 << 20
@@ -334,7 +340,7 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     if not _git_folder_shape(common) or _inside(toplevel, common):
         return None, [f"[launch] git in the container cannot use {_tilde(common, home)} as "
                       f"a git folder, because it is not named like one (.git, a name "
-                      f"ending in .git, or a folder in .git/modules) or it holds "
+                      f"ending in .git, .bare, or a folder in .git/modules) or it holds "
                       f"{_tilde(toplevel, home)}. Share it with --mount "
                       f"{_tilde(common, home)} if you intend to."]
     back = _git_back_reference(toplevel, git_dir, common)
@@ -366,15 +372,30 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # A read-only share of the repository keeps its git folder read-only.
     root_share = covering(toplevel)
     return Mount(common, common, readonly=bool(root_share and root_share.readonly),
-                 kind="git", note=f"the git folder of this {what}"), []
+                 kind="git", note=f"the git folder of this {what} of "
+                                  f"{_tilde(_git_repository(common), home)}"), []
+
+
+def _git_repository(common: str) -> str:
+    """The repository folder a git folder belongs to: the folder that holds
+    ``.git``, the folder that holds a ``.bare`` git folder, or a bare
+    repository itself."""
+    parts = common.split("/")
+    for i, part in enumerate(parts):
+        if part.casefold() == ".git" and i > 0:
+            return "/".join(parts[:i]) or "/"
+    if parts[-1].casefold() == ".bare":
+        return os.path.dirname(common)
+    return common
 
 
 def _git_folder_shape(path: str) -> bool:
     """Whether ``path`` is named like a git folder: ``.git``, a name ending
-    in ``.git`` such as a bare repository, or a submodule's folder under
+    in ``.git`` such as a bare repository, ``.bare`` as in a bare repository
+    with its worktrees beside it, or a submodule's folder under
     ``.git/modules``."""
     parts = [p for p in path.split("/") if p]
-    if parts and parts[-1].casefold().endswith(".git"):
+    if parts and (parts[-1].casefold().endswith(".git") or parts[-1].casefold() == ".bare"):
         return True
     return any(parts[i].casefold() == ".git" and parts[i + 1].casefold() == "modules"
                for i in range(len(parts) - 2))
@@ -491,9 +512,11 @@ def memory_warning(memory: str) -> str | None:
 def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
                  mount_cwd: bool | None = None, cli_mounts: list[str] = (),
                  network: str | None = None, api_port: int | None = None,
-                 web_port: int | None = None) -> ContainerPlan:
+                 web_port: int | None = None,
+                 build_folders: dict[str, str] | None = None) -> ContainerPlan:
     """The mounts, volumes and ports of one session, from the effective
-    client config and the flags."""
+    client config and the flags. ``build_folders`` maps each client to its
+    configured ``build:`` path, and no read-write share may overlap one."""
     home = _host_home()
     warns: list[str] = []
     notes: list[str] = []
@@ -522,6 +545,7 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
     mounts.append(Mount(str(guest_home), str(guest_home), kind="home"))
     mounts.extend(_volume_mount(v) for v in cfg.volumes)
     mounts = normalize_mounts(mounts)
+    _refuse_build_folder_shares(mounts, build_folders or {}, home)
     guest_cwd = guest_path(cwd_real, mounts)
     warns.extend(protected_folder_warnings(mounts, home))
     mem = memory_warning(cfg.memory or "4G")
@@ -535,6 +559,42 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         memory=cfg.memory or "4G", ssh_agent=bool(cfg.ssh_agent), env=list(cfg.env),
         open_browser=cfg.open_browser is not False, clipboard=cfg.clipboard or "off",
         seed=list(cfg.seed), warnings=warns, notes=notes)
+
+
+def build_folder(build: str) -> str | None:
+    """The build context a ``build:`` path names: the folder itself, or the
+    folder that holds a named Containerfile. None for a relative path,
+    which the image step refuses."""
+    path = os.path.expanduser(build)
+    if not os.path.isabs(path):
+        return None
+    # A named Containerfile builds from the folder that holds it. A path
+    # that does not exist is taken as the folder, and the image step
+    # reports it.
+    if os.path.lexists(path) and not os.path.isdir(path):
+        path = os.path.dirname(path)
+    return _real(path)
+
+
+def _refuse_build_folder_shares(mounts: list[Mount], build_folders: dict[str, str],
+                                home: str) -> None:
+    """A read-write share that holds or lies in a client's build folder
+    lets this client change what that image runs at its next build, which
+    has network access."""
+    for client, build in sorted(build_folders.items()):
+        folder = build_folder(build) if build else None
+        if folder is None:
+            continue
+        for m in mounts:
+            if m.readonly or m.kind not in ("share", "git"):
+                continue
+            if _inside(m.source, folder) or _inside(folder, m.source):
+                raise SettingsError(
+                    f"launch will not share {_tilde(m.source, home)} read-write, because it "
+                    f"overlaps {_tilde(folder, home)}, the build: folder of {client}. The "
+                    "client could change what that image runs at its next build. Share it "
+                    f"read-only with --mount {_tilde(m.source, home)}:ro, or move the build "
+                    "folder.")
 
 
 def recheck_sources(plan: ContainerPlan) -> None:
@@ -624,15 +684,81 @@ def _seed_source_refusal(real: str, host_home: str) -> str | None:
     return None
 
 
-def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str]:
+def shared_history_path() -> Path:
+    """Where launch records the folders it shared read-write. A client can
+    leave links in such a folder that outlive the session."""
+    return data_path() / "shared.json"
+
+
+def _read_shared_history() -> list[str]:
+    import json
+
+    try:
+        fd = os.open(shared_history_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return []
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
+            return []
+        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
+    except (OSError, ValueError, RecursionError):
+        return []
+    finally:
+        os.close(fd)
+    shared = doc.get("shared") if isinstance(doc, dict) else None
+    return [x for x in shared if isinstance(x, str)] if isinstance(shared, list) else []
+
+
+def record_shares(plan: ContainerPlan) -> None:
+    """Add this session's read-write shares to the history that the seed
+    check reads, keeping the newest :data:`SHARED_HISTORY_MAX`."""
+    import json
+
+    now = [m.source for m in plan.mounts if not m.readonly and m.kind in ("share", "git")]
+    old = _read_shared_history()
+    merged = list(dict.fromkeys([*now, *old]))[:SHARED_HISTORY_MAX]
+    if merged != old:
+        data_dir()
+        write_record(shared_history_path(), json.dumps({"shared": merged}).encode())
+
+
+def seed_writable(plan: ContainerPlan, cwd: str) -> list[str]:
+    """The folders a client of this session can write, for the seed check:
+    the read-write shares, and the current folder when a session could
+    share it."""
+    out = [m.source for m in plan.mounts if not m.readonly and m.kind in ("share", "git")]
+    cwd_real = _real(cwd)
+    if auto_share_refusal(cwd_real) is None:
+        out.append(cwd_real)
+    return list(dict.fromkeys(out))
+
+
+def _seed_link_refusal(src: str, real: str, writable: list[str], home: str) -> str | None:
+    """Why a seed whose path lies in a folder a client could write may not
+    be copied. A client can replace the seed there with a link to any file
+    of yours, so the real path must stay in that folder."""
+    parent_real = os.path.join(_real(os.path.dirname(src)), os.path.basename(src))
+    for folder in writable:
+        if (_inside(src, folder) or _inside(parent_real, folder)) and not _inside(real, folder):
+            return (f"{_tilde(src, home)} lies in {_tilde(folder, home)}, which a session "
+                    f"shared read-write, and it leads to {_tilde(real, home)} outside that "
+                    "folder, so a client may have replaced it with a symbolic link")
+    return None
+
+
+def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
+              writable: Sequence[str] = ()) -> list[str]:
     """Copy each seed into the private home once, at the same path relative
     to ``$HOME``, then add the host git identity where it is missing.
-    Returns the warnings to print. Every write is confined to the private
+    Returns the lines to print. Every write is confined to the private
     home, since the guest can plant links there.
 
     Launch records each seed it copied beside the private home, so a copy
     the client deletes is not made again. ``reseed`` copies every seed
-    again, replacing the copy in the private home."""
+    again, replacing the copy in the private home. ``writable`` holds the
+    folders this session shares read-write. With the folders earlier
+    sessions shared, a seed in one of them must not lead out of it."""
     import json
 
     from . import confine
@@ -644,6 +770,7 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str
     record = seed_record_path(home)
     done = _read_seed_record(record)
     copied = set(done)
+    guest_written = list(dict.fromkeys([*writable, *_read_shared_history()]))
     out = []
     with confine.confined(home):
         for seed in seeds:
@@ -652,21 +779,9 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str
             if not _inside(src, host_home) or src == host_home:
                 raise SettingsError(f"seed: {seed} is not inside your home folder.")
             shown = _tilde(src, host_home)
-            # A link in the way may have been left by a client in a folder
-            # an earlier launch shared, so the real path decides.
-            real = _real(src)
-            why = _seed_source_refusal(real, host_real)
-            if why is not None:
-                raise SettingsError(f"seed: launch will not copy {shown}, because {why}.")
             if not os.path.lexists(src):
                 out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
                 continue
-            tokens = [t for t in TOKEN_FILES
-                      if _inside(os.path.join(host_real, t), real)]
-            if tokens:
-                out.append(f"[launch] warning: seed {shown} copies "
-                           f"{', '.join('~/' + t for t in tokens)}, which holds a sign-in "
-                           "token. The client can read it.")
             if src in done and not reseed:
                 continue
             dst = home / os.path.relpath(src, host_home)
@@ -679,6 +794,19 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str
                 if confine.exists(dst) and not reseed:
                     copied.add(src)           # a copy made before the record
                     continue
+                # Only a copy is checked, so a link a client swapped in
+                # after the copy never stops a later launch. A link in the
+                # way may have been left by a client in a folder an earlier
+                # launch shared, so the real path decides.
+                real = _real(src)
+                why = (_seed_source_refusal(real, host_real)
+                       or _seed_link_refusal(src, real, guest_written, host_real))
+                if why is not None:
+                    raise SettingsError(f"seed: launch will not copy {shown}, because {why}.")
+                if not _same(real, src):
+                    out.append(f"[launch] seed: copying {shown} from "
+                               f"{_tilde(real, host_real)}, where its symbolic link leads.")
+                out.extend(_seed_token_warnings(shown, real, host_real))
                 # A copy that a killed launch left half done is removed first.
                 for name in confine.listdir(dst.parent):
                     if name.startswith(prefix):
@@ -703,6 +831,21 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str
             # The guest owns the file, so a file launch cannot read or
             # replace costs only the identity, never the launch.
             out.append(f"[launch] warning: {e} Launch did not add your git identity to it.")
+    return out
+
+
+def _seed_token_warnings(shown: str, real: str, host_real: str) -> list[str]:
+    out = []
+    tokens = [t for t in TOKEN_FILES if _inside(os.path.join(host_real, t), real)]
+    if tokens:
+        out.append(f"[launch] warning: seed {shown} copies "
+                   f"{', '.join('~/' + t for t in tokens)}, which holds a sign-in "
+                   "token. The client can read it.")
+    maybe = [t for t in TOKEN_MAYBE_FILES if _inside(os.path.join(host_real, t), real)]
+    if maybe:
+        out.append(f"[launch] warning: seed {shown} copies "
+                   f"{', '.join('~/' + t for t in maybe)}, which can hold a token, such as "
+                   "one in a url.<base>.insteadOf address. The client can read it.")
     return out
 
 
@@ -743,7 +886,10 @@ def _copy_confined(src: str, dst: Path) -> None:
     budget = _SeedBudget(src)
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        why = _seed_source_refusal(fd_path(fd), _real(os.path.expanduser("~")))
+        opened = fd_path(fd)
+        why = _seed_source_refusal(opened, _real(os.path.expanduser("~")))
+        if why is None and not _same(opened, src):
+            why = f"it changed to {_tilde(opened)} while launch copied it"
         if why is not None:
             raise SettingsError(f"seed: launch will not copy {_tilde(src)}, because {why}.")
         st = os.fstat(fd)
@@ -842,16 +988,27 @@ def _seed_git_identity(home: Path) -> None:
 
 # The server config the guest could change
 
-def server_config_path(host: str, port: int, *, autostart: bool = True) -> str | None:
+def server_config_path(host: str, port: int, *, autostart: bool = True,
+                       notes: list[str] | None = None) -> str | None:
     """The config file the target server runs with: the one in its runfile
     while it runs, else the one autostart would use. With ``autostart``
-    False, as for ``--base-url``, only a runfile counts."""
+    False, as for ``--base-url``, only a runfile counts. A runfile from an
+    older gmlx can hold a path relative to a folder launch cannot know, so
+    that path counts as unknown and ``notes`` gets a line about it."""
     from gmlx.config import default_config_paths
     from gmlx.serve import lifecycle
 
     run = lifecycle.read_run(host, port) or {}
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
-        return str(run["config_abspath"])
+        path = str(run["config_abspath"])
+        if os.path.isabs(path):
+            return path
+        if notes is not None:
+            notes.append(f"[launch] the server on port {port} records its config as {path}, "
+                         "relative to the folder it started from, so launch cannot check "
+                         "whether that config is in a share. Restart the server with "
+                         "gmlx restart to record the full path.")
+        return None
     if not autostart:
         return None
     for path in default_config_paths():

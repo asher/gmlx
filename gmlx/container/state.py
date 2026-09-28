@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import os
+import stat
 import unicodedata
 from pathlib import Path
 from typing import Callable
@@ -108,6 +109,16 @@ def _private_root(d: Path) -> Path:
         raise NotADirectoryError(f"{d} is not a folder.")
     if os.stat(d).st_mode & 0o777 != ROOT_MODE:
         os.chmod(d, ROOT_MODE)
+    # The gmlx folder above it can come from other gmlx commands, made with
+    # the umask, such as 0777 under umask 000. Keep it at 0700 too.
+    parent = d.parent
+    try:
+        st = os.lstat(parent)
+        if (parent.name == "gmlx" and stat.S_ISDIR(st.st_mode)
+                and st.st_uid == os.getuid() and st.st_mode & 0o777 != ROOT_MODE):
+            os.chmod(parent, ROOT_MODE)
+    except OSError:
+        pass
     return d
 
 

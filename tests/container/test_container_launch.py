@@ -79,7 +79,7 @@ def test_reseed_implies_container_and_reaches_the_seed_step(env, monkeypatch):
     from gmlx.container import settings
     seen = []
     monkeypatch.setattr(settings, "seed_home",
-                        lambda home, seeds, reseed=False: seen.append(reseed) or [])
+                        lambda home, seeds, reseed=False, writable=(): seen.append(reseed) or [])
     assert _run(["pi", "--reseed"]) == 0
     assert env.runs and seen == [True]
     with pytest.raises(SystemExit):
@@ -948,3 +948,26 @@ def test_a_guest_named_git_folder_prints_no_terminal_controls(env, capsys, monke
     text = captured.out + captured.err
     assert "\\x1b]52;c;ZWNobyBwd25lZAo=\\x07\\x1b[2K\\x1b[1A\\x9b" in text
     assert not any(ch in text for ch in "\x1b\x07\x9b")
+
+
+def test_a_share_of_another_clients_build_folder_is_refused(env, capsys):
+    box = env.proj / "box"
+    box.mkdir()
+    (box / "Containerfile").write_text("FROM x\n")
+    _user_config(env.home, f"launch:\n  container:\n    clients:\n      omp:\n"
+                           f"        build: {box}\n")
+    assert _run(["pi", "--container"]) == 1
+    err = capsys.readouterr().err
+    assert "the build: folder of omp" in err and not env.runs
+
+
+def test_a_launch_records_its_read_write_shares(env):
+    from gmlx.container import settings
+    assert _run(["pi", "--container"]) == 0
+    assert os.path.realpath(env.proj) in settings._read_shared_history()
+
+
+def test_the_dry_run_records_no_shares(env):
+    from gmlx.container import settings
+    assert _run(["pi", "--container", "--config-only"]) == 0
+    assert settings._read_shared_history() == []

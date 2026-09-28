@@ -19,7 +19,8 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-from gmlx.config import ConfigError, LaunchCfg, launch_block_enables, load_launch_settings
+from gmlx.config import (LAUNCH_CLIENTS, ConfigError, LaunchCfg, launch_block_enables,
+                         load_launch_settings)
 from gmlx.container import cli, confine, images, runtime, session, settings
 from gmlx.container.cli import ContainerError
 from gmlx.container.settings import Mount, SettingsError
@@ -479,9 +480,13 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     _, api_port, _ = guest_url(a.base_url or f"http://{host}:{port}/v1")
     web = client == "open-webui" or (client == "dsh" and _dsh_profile_is_web(a))
     web_port = L.web_port_for(client, port) if web else None
+    # A read-write share of any client's build: folder would let this
+    # client change what that image runs.
+    builds = {c: launch_cfg.container.for_client(c).build for c in LAUNCH_CLIENTS}
     plan = settings.resolve_plan(client, cfg, cwd=_cwd(), mount_cwd=a.mount_cwd,
                                  cli_mounts=a.mount, network=a.network, api_port=api_port,
-                                 web_port=web_port)
+                                 web_port=web_port,
+                                 build_folders={c: b for c, b in builds.items() if b})
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {a.base_url}, which is not a local "
                             "http server. Use the default network for this server.")
@@ -489,14 +494,18 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     writable = [m.source for m in plan.mounts if not m.readonly and m.kind != "volume"]
     image_plan = images.resolve_image(client, cfg, launch_cfg.container,
                                       image_override=a.image, writable=writable)
-    for line in [*plan.warnings, *plan.notes, *image_plan.notices,
-                 *settings.server_config_warnings(
-                     settings.server_config_path(host, port,
-                                                 autostart=not (a.base_url or a.no_start)),
-                     plan.shares)]:
+    config_notes: list[str] = []
+    config_path = settings.server_config_path(host, port,
+                                              autostart=not (a.base_url or a.no_start),
+                                              notes=config_notes)
+    for line in [*plan.warnings, *plan.notes, *image_plan.notices, *config_notes,
+                 *settings.server_config_warnings(config_path, plan.shares)]:
         say(line)
-    for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False)):
+    for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
+                                   writable=settings.seed_writable(plan, _cwd())):
         say(line)
+    if not dry:
+        settings.record_shares(plan)
     rc = _server_precheck(a)
     if rc is not None:
         return rc

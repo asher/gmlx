@@ -223,7 +223,7 @@ def test_linked_worktree_shares_its_git_folder(home):
     git = [m for m in plan.mounts if m.kind == "git"]
     assert [m.source for m in git] == [os.path.realpath(repo / ".git")]
     assert not git[0].readonly
-    assert git[0].note == "the git folder of this worktree"
+    assert git[0].note == "the git folder of this worktree of ~/src/repo"
     (wt / "sub").mkdir()
     below = _plan(home, cwd=str(wt / "sub"))
     assert not [m for m in below.mounts if m.kind == "git"]
@@ -265,7 +265,7 @@ def test_a_submodule_shares_its_git_folder(home):
     plan = _plan(home, cwd=str(top / "lib"))
     git = [m for m in plan.mounts if m.kind == "git"]
     assert [m.source for m in git] == [os.path.realpath(top / ".git" / "modules" / "lib")]
-    assert git[0].note == "the git folder of this submodule"
+    assert git[0].note == "the git folder of this submodule of ~/src/top"
 
 
 def _private_repo(home):
@@ -617,6 +617,7 @@ def test_confine_ignores_case_on_a_volume_that_ignores_it(home):
 
 def test_seed_refuses_the_launch_data_folder(home):
     private = settings.private_home("pi")
+    settings.private_home("omp")
     with pytest.raises(SettingsError, match="container-mode data"):
         settings.seed_home(private, ["~/.local"])
     with pytest.raises(SettingsError, match="container-mode data"):
@@ -814,8 +815,10 @@ def test_a_seeded_link_turned_to_a_credential_folder_is_refused(home):
     shutil.rmtree(home / "dotfiles" / "nvim")
     (home / "dotfiles" / "nvim").symlink_to(home / ".ssh")
     shutil.rmtree(private / ".config" / "nvim")
+    # The seed was copied once, so a later launch skips it without a check.
+    assert settings.seed_home(private, ["~/.config/nvim"]) == []
     with pytest.raises(SettingsError, match="credential folder"):
-        settings.seed_home(private, ["~/.config/nvim"])
+        settings.seed_home(private, ["~/.config/nvim"], reseed=True)
     assert not (private / ".config" / "nvim").exists()
 
 
@@ -1132,3 +1135,108 @@ def test_confine_refuses_a_private_home_when_the_data_folder_is_named_by_the_fir
     (private / "x").write_text("x")
     with pytest.raises(confine.ConfinedError, match="private home"):
         confine.exists(private / "x")
+
+
+# Round nine: seeds in folders a client can write, build folders, .bare
+
+def test_a_seed_in_a_share_swapped_for_a_link_is_refused_on_reseed(home):
+    """The seed lies in the shared project. The client replaces it with a
+    link to the shell history, and the user runs --reseed."""
+    proj = os.path.realpath(home / "src" / "proj")
+    (home / ".zsh_history").write_text(": 1700000000:0;export GITHUB_TOKEN=ghp_MAC\n")
+    (home / "src" / "proj" / "tool.conf").write_text("ok\n")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/src/proj/tool.conf"], writable=[proj])
+    (home / "src" / "proj" / "tool.conf").unlink()
+    (home / "src" / "proj" / "tool.conf").symlink_to(home / ".zsh_history")
+    with pytest.raises(SettingsError) as e:
+        settings.seed_home(private, ["~/src/proj/tool.conf"], reseed=True, writable=[proj])
+    assert "~/src/proj/tool.conf" in str(e.value) and "~/.zsh_history" in str(e.value)
+    assert (private / "src" / "proj" / "tool.conf").read_text() == "ok\n"
+
+
+def test_a_folder_an_earlier_session_shared_counts_for_a_new_seed(home):
+    """This launch shares nothing, but an earlier one shared the project,
+    and its client left a link there."""
+    (home / ".zsh_history").write_text("secret\n")
+    (home / "src" / "proj" / "tool.conf").symlink_to(home / ".zsh_history")
+    settings.record_shares(_plan(home))
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="which a session shared read-write"):
+        settings.seed_home(private, ["~/src/proj/tool.conf"])
+    assert not (private / "src" / "proj" / "tool.conf").exists()
+
+
+def test_seed_writable_holds_the_shares_and_the_current_folder(home):
+    plan = _plan(home, mount_cwd=False)
+    proj = os.path.realpath(home / "src" / "proj")
+    assert proj in settings.seed_writable(plan, str(home / "src" / "proj"))
+    assert settings.seed_writable(plan, str(home)) == []        # home is never shared
+
+
+def test_a_seed_through_your_own_link_names_its_real_path(home):
+    (home / "dotfiles" / "nvim").mkdir(parents=True)
+    (home / "dotfiles" / "nvim" / "init.lua").write_text("x")
+    (home / ".config").mkdir()
+    (home / ".config" / "nvim").symlink_to(home / "dotfiles" / "nvim")
+    private = settings.private_home("pi")
+    out = settings.seed_home(private, ["~/.config/nvim"])
+    assert any("copying ~/.config/nvim from ~/dotfiles/nvim" in line for line in out)
+    assert (private / ".config" / "nvim" / "init.lua").read_text() == "x"
+
+
+def test_seeding_gitconfig_warns_about_tokens(home):
+    (home / ".gitconfig").write_text('[url "https://tok@github.com/"]\n\tinsteadOf = gh:\n')
+    private = settings.private_home("pi")
+    out = settings.seed_home(private, ["~/.gitconfig"])
+    assert any("~/.gitconfig" in line and "insteadOf" in line for line in out)
+
+
+def test_a_share_of_a_build_folder_is_refused(home):
+    box = home / "src" / "proj" / "box"
+    box.mkdir()
+    (box / "Containerfile").write_text("FROM x\n")
+    with pytest.raises(SettingsError, match="the build: folder of omp"):
+        _plan(home, build_folders={"omp": str(box)})
+    with pytest.raises(SettingsError, match="the build: folder of omp"):
+        _plan(home, build_folders={"omp": str(box / "Containerfile")})
+    with pytest.raises(SettingsError, match="the build: folder of omp"):   # a share inside it
+        _plan(home, build_folders={"omp": str(home / "src")})
+    proj = str(home / "src" / "proj")
+    ro = _plan(home, build_folders={"omp": str(box)}, cli_mounts=[proj + ":ro"])
+    assert all(m.readonly for m in ro.mounts if m.kind == "share")
+    assert _plan(home, build_folders={"omp": str(home / "containers")}).mounts
+
+
+def test_a_bare_layout_with_worktrees_shares_its_git_folder(home):
+    src = _private_repo(home)
+    top = home / "src" / "bare-top"
+    top.mkdir()
+    _git("clone", "-q", "--bare", str(src), str(top / ".bare"), cwd=home)
+    (top / ".git").write_text("gitdir: ./.bare\n")
+    _git("worktree", "add", "-q", str(top / "main"), cwd=top)
+    git, notes = _proj_git_mounts(home, top / "main")
+    assert [m.source for m in git] == [os.path.realpath(top / ".bare")]
+    assert git[0].note == "the git folder of this worktree of ~/src/bare-top"
+
+
+def test_a_relative_runfile_config_counts_as_unknown(home, monkeypatch):
+    from gmlx.serve import lifecycle
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"config_abspath": "gmlx.yaml", "pid": os.getpid()})
+    monkeypatch.setattr(lifecycle, "pid_alive", lambda pid: True)
+    notes: list[str] = []
+    assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
+    assert notes and "gmlx restart" in notes[0]
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"config_abspath": "/abs/gmlx.yaml", "pid": os.getpid()})
+    assert settings.server_config_path("127.0.0.1", 8080, notes=[]) == "/abs/gmlx.yaml"
+
+
+def test_the_gmlx_folder_above_the_roots_is_kept_private(home, monkeypatch):
+    from gmlx.container import state
+    gmlx_cache = home / ".cache" / "gmlx"
+    gmlx_cache.mkdir(parents=True)
+    os.chmod(gmlx_cache, 0o777)              # made by another command under umask 000
+    state.cache_dir()
+    assert os.stat(gmlx_cache).st_mode & 0o777 == 0o700
