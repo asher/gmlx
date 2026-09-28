@@ -69,6 +69,17 @@ def test_b1_mtp_converts(restorable):
     assert su.make_speculative_prompt_cache is wrapped
 
 
+def test_b1_cache_install_under_the_kv_wrap_keeps_it(restorable):
+    # A later engine install must find its B=1 cache wrap under the kv
+    # wrap, not stack a second one that bypasses the conversion.
+    restorable.setenv("KV_BITS", "4")
+    kv_quant.install_spec_kv_quant()
+    wrapped = su.make_speculative_prompt_cache
+    engine.install_owned_b1_spec_cache()
+    assert su.make_speculative_prompt_cache is wrapped
+    assert isinstance(_mk()[0], QuantizedKVCache)
+
+
 def test_group_size_env(restorable):
     restorable.setenv("KV_BITS", "8")
     restorable.setenv("KV_GROUP_SIZE", "32")

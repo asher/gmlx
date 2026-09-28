@@ -11,7 +11,8 @@ from typing import Any
 
 import mlx.core as mx
 
-from gmlx.spec.engine import _debug_note, install_owned_b1_spec_cache
+from gmlx.spec.engine import (_debug_note, install_owned_b1_spec_cache,
+                              wrapped_by)
 
 _log = logging.getLogger(__name__)
 
@@ -339,7 +340,7 @@ def install_spec_kv_quant() -> None:
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.speculative import utils as _su
 
-    if getattr(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG, False):
+    if wrapped_by(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG):
         return
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return
