@@ -21,7 +21,7 @@ from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
-from .state import data_dir, data_path, path_inside
+from .state import canonical, data_dir, data_path, fd_path, path_inside, write_record
 
 # Clients whose built-in default shares no current folder.
 NO_CWD_CLIENTS = frozenset({"open-webui", "elia"})
@@ -29,12 +29,24 @@ DEFAULT_VOLUME_SIZE = "32G"
 # Folders launch never shares by default, whatever their contents.
 SYSTEM_FOLDERS = frozenset({
     "/", "/Users", "/Volumes", "/private", "/tmp", "/var", "/opt", "/usr",
-    "/Library", "/System", "/Applications", "/private/tmp", "/private/var"})
-# Paths under $HOME that hold credentials or gmlx's own data.
+    "/Library", "/System", "/Applications", "/private/tmp", "/private/var",
+    "/System/Volumes", "/System/Volumes/Data"})
+# Paths that hold credentials, gmlx's own data, or programs and settings the
+# Mac runs. Relative ones are under $HOME.
 SENSITIVE = (".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube",
              ".docker", ".password-store", "Library/Keychains", ".netrc",
              ".config/gh", ".npmrc", ".git-credentials", ".config/gmlx",
-             ".cache/gmlx", ".local/share/gmlx")
+             ".cache/gmlx", ".local/share/gmlx", "Library/LaunchAgents",
+             ".config/git", ".local/bin", "bin", "Library/Application Support",
+             ".cargo", ".cache/huggingface", ".codex", "/opt/homebrew", "/usr/local")
+# Client files that hold a sign-in token. Seeding one gives it to the client.
+TOKEN_FILES = (".claude.json", ".claude/.credentials.json",
+               ".local/share/opencode/auth.json", ".config/goose/secrets.yaml")
+# The most a seed copies, so a planted or sparse file cannot fill the disk
+# or the memory.
+SEED_MAX_BYTES = 64 << 20
+SEED_MAX_FILES = 10_000
+SEED_MAX_DEPTH = 64
 # Guest paths no mount may cover.
 RESERVED_TARGETS = ("/proc", "/sys", "/dev", "/opt/gmlx", "/var/host-services")
 # Folders macOS guards with a privacy prompt for the container runtime.
@@ -88,7 +100,9 @@ class ContainerPlan:
 
 
 def _real(path: str | os.PathLike) -> str:
-    return os.path.realpath(os.path.expanduser(str(path)))
+    """The path with its links resolved, in the form macOS gives it, so a
+    firmlink alias or another case never passes a check by path."""
+    return canonical(path)
 
 
 def _inside(path: str, folder: str) -> bool:
@@ -133,12 +147,22 @@ def auto_share_refusal(path: str, home: str | None = None) -> str | None:
         return f"{path} is a system folder"
     if _inside(home, path):
         return f"{_tilde(path, home)} is your home folder or holds it"
-    if _inside(path, _real(data_dir())):
-        return f"{_tilde(path, home)} holds container-mode data"
+    why = _data_refusal(path, home)
+    if why is not None:
+        return why
     hits = sensitive_hits(path, home)
     if hits:
         return (f"{_tilde(path, home)} holds or lies in a credential folder "
                 f"({', '.join(_tilde(h, home) for h in hits)})")
+    return None
+
+
+def _data_refusal(path: str, home: str) -> str | None:
+    """Why ``path`` never reaches a container: it holds or lies in the
+    folder with every private home and the guest entry."""
+    data = _real(data_path())
+    if _inside(path, data) or _inside(data, path):
+        return f"{_tilde(path, home)} holds or lies in container-mode data"
     return None
 
 
@@ -170,6 +194,16 @@ def _explicit_mount(spec: str, plan_warnings: list[str], home: str) -> Mount:
     if not os.path.isdir(real):
         raise SettingsError(f"mount {spec!r}: {source} is not a folder. Share the "
                             "folder that holds the file.")
+    # A folder a client could write in an earlier, wider share may now be a
+    # link to somewhere else, so a mount is taken only by its real path.
+    written = os.path.abspath(source)
+    if not _same(written, real):
+        raise SettingsError(f"mount {spec!r}: {source} is a symbolic link to "
+                            f"{_tilde(real, home)}, or passes through one. Write the "
+                            f"folder's real path, {_tilde(real, home)}, if you mean it.")
+    why = _data_refusal(real, home)
+    if why is not None:
+        raise SettingsError(f"launch will not share {source}: {why}.")
     hits = sensitive_hits(real, home)
     if hits:
         plan_warnings.append(
@@ -277,6 +311,10 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
 
     def covered(path):
         return any(_inside(path, m.source) for m in shares)
+
+    def covering(path):
+        return max((m for m in shares if _inside(path, m.source)),
+                   key=lambda m: len(m.source), default=None)
     if not covered(toplevel):
         if covered(cwd):
             return None, [f"[launch] git in the container needs the repository root, "
@@ -289,6 +327,16 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # can change: the .git file, and a commondir file in a .git folder. So
     # an outside git folder is shared only when it names this project back,
     # from a file outside the share.
+    # A folder the guest could write in an earlier, wider launch can be
+    # made to look like a git folder that names this project back. Only a
+    # folder with a git folder's own name counts, and never one that holds
+    # the project.
+    if not _git_folder_shape(common) or _inside(toplevel, common):
+        return None, [f"[launch] git in the container cannot use {_tilde(common, home)} as "
+                      f"a git folder, because it is not named like one (.git, a name "
+                      f"ending in .git, or a folder in .git/modules) or it holds "
+                      f"{_tilde(toplevel, home)}. Share it with --mount "
+                      f"{_tilde(common, home)} if you intend to."]
     back = _git_back_reference(toplevel, git_dir, common)
     if back is None:
         return None, [f"[launch] git in the container cannot use the git folder "
@@ -315,7 +363,21 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
             return None, [f"[launch] git in the container cannot reach this repository's "
                           f"git folder {_tilde(common, home)}, because {why}. Use git on "
                           "the Mac for this repository."]
-    return Mount(common, common, kind="git", note=f"the git folder of this {what}"), []
+    # A read-only share of the repository keeps its git folder read-only.
+    root_share = covering(toplevel)
+    return Mount(common, common, readonly=bool(root_share and root_share.readonly),
+                 kind="git", note=f"the git folder of this {what}"), []
+
+
+def _git_folder_shape(path: str) -> bool:
+    """Whether ``path`` is named like a git folder: ``.git``, a name ending
+    in ``.git`` such as a bare repository, or a submodule's folder under
+    ``.git/modules``."""
+    parts = [p for p in path.split("/") if p]
+    if parts and parts[-1].casefold().endswith(".git"):
+        return True
+    return any(parts[i].casefold() == ".git" and parts[i + 1].casefold() == "modules"
+               for i in range(len(parts) - 2))
 
 
 def _read_small(path: str) -> str | None:
@@ -475,6 +537,26 @@ def resolve_plan(client: str, cfg: LaunchClientCfg, *, cwd: str,
         seed=list(cfg.seed), warnings=warns, notes=notes)
 
 
+def recheck_sources(plan: ContainerPlan) -> None:
+    """Check each folder the plan mounts again, just before the run. A
+    client of another session can replace a shared folder with a link after
+    the plan was made, and ``container run`` would follow it. Raises
+    :class:`SettingsError` when a source is no longer the folder the plan
+    checked. A swap after this check still reaches the run, so this narrows
+    the window and cannot close it."""
+    for m in plan.mounts:
+        if m.kind == "volume":
+            continue
+        try:
+            st = os.lstat(m.source)
+        except OSError:
+            st = None
+        if st is None or not stat.S_ISDIR(st.st_mode) or not _same(_real(m.source), m.source):
+            raise SettingsError(f"{_label(m)} changed after launch checked it: it is no "
+                                "longer the same folder, or it is a symbolic link now. "
+                                "Launch again to check it.")
+
+
 # The guest environment and the private home
 
 def _host_tz() -> str | None:
@@ -502,17 +584,66 @@ def guest_env(home: Path) -> dict[str, str]:
     return env
 
 
-def seed_home(home: Path, seeds: list[str]) -> list[str]:
+def seed_record_path(home: Path) -> Path:
+    """Where launch records the seeds it copied into ``home``. It lies
+    beside the private home, never in it, so the client cannot change it."""
+    return Path(home).parent / "seeded.json"
+
+
+def _read_seed_record(path: Path) -> set[str]:
+    import json
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return set()
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > CONFIG_READ_MAX:
+            return set()
+        doc = json.loads(os.read(fd, CONFIG_READ_MAX).decode())
+    except (OSError, ValueError, RecursionError):
+        return set()
+    finally:
+        os.close(fd)
+    seeded = doc.get("seeded") if isinstance(doc, dict) else None
+    return {x for x in seeded if isinstance(x, str)} if isinstance(seeded, list) else set()
+
+
+def _seed_source_refusal(real: str, host_home: str) -> str | None:
+    """Why launch will not copy the file or folder at ``real``, or None."""
+    if not _inside(real, host_home) or _same(real, host_home):
+        return f"it is {_tilde(real, host_home)}, outside your home folder"
+    why = _data_refusal(real, host_home)
+    if why is not None:
+        return why
+    hits = sensitive_hits(real, host_home)
+    if hits:
+        return (f"{_tilde(real, host_home)} holds or lies in a credential folder "
+                f"({', '.join(_tilde(h, host_home) for h in hits)})")
+    return None
+
+
+def seed_home(home: Path, seeds: list[str], *, reseed: bool = False) -> list[str]:
     """Copy each seed into the private home once, at the same path relative
     to ``$HOME``, then add the host git identity where it is missing.
     Returns the warnings to print. Every write is confined to the private
-    home, since the guest can plant links there."""
+    home, since the guest can plant links there.
+
+    Launch records each seed it copied beside the private home, so a copy
+    the client deletes is not made again. ``reseed`` copies every seed
+    again, replacing the copy in the private home."""
+    import json
+
     from . import confine
 
     # Relative to $HOME as written, so a seed that is a link into a dotfiles
     # repository still lands at its own path.
     host_home = os.path.abspath(os.path.expanduser("~"))
-    launch_data = os.path.realpath(data_path())
+    host_real = _real(host_home)
+    record = seed_record_path(home)
+    done = _read_seed_record(record)
+    copied = set(done)
     out = []
     with confine.confined(home):
         for seed in seeds:
@@ -520,18 +651,24 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
             src = os.path.abspath(os.path.join(host_home, expanded))
             if not _inside(src, host_home) or src == host_home:
                 raise SettingsError(f"seed: {seed} is not inside your home folder.")
+            shown = _tilde(src, host_home)
+            # A link in the way may have been left by a client in a folder
+            # an earlier launch shared, so the real path decides.
             real = _real(src)
-            if _inside(real, launch_data) or _inside(launch_data, real):
-                raise SettingsError(f"seed: {seed} holds or lies in the launch data "
-                                    f"folder {_tilde(launch_data, host_home)}, which "
-                                    "holds the private homes.")
-            if not os.path.exists(src):
+            why = _seed_source_refusal(real, host_real)
+            if why is not None:
+                raise SettingsError(f"seed: launch will not copy {shown}, because {why}.")
+            if not os.path.lexists(src):
                 out.append(f"[launch] seed: {seed} does not exist, so nothing was copied.")
                 continue
-            hits = sensitive_hits(real)
-            if hits:
-                out.append(f"[launch] warning: seed {_tilde(src, host_home)} copies "
-                           f"{', '.join(_tilde(h) for h in hits)} into the private home.")
+            tokens = [t for t in TOKEN_FILES
+                      if _inside(os.path.join(host_real, t), real)]
+            if tokens:
+                out.append(f"[launch] warning: seed {shown} copies "
+                           f"{', '.join('~/' + t for t in tokens)}, which holds a sign-in "
+                           "token. The client can read it.")
+            if src in done and not reseed:
+                continue
             dst = home / os.path.relpath(src, host_home)
             # The copy goes to a new name first and is renamed into place
             # only when it is whole, so a failed copy is never taken for a
@@ -539,22 +676,27 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
             prefix = f".{dst.name}.gmlx-seed-"
             tmp = dst.with_name(prefix + secrets.token_hex(4))
             try:
-                if confine.exists(dst):
+                if confine.exists(dst) and not reseed:
+                    copied.add(src)           # a copy made before the record
                     continue
                 # A copy that a killed launch left half done is removed first.
                 for name in confine.listdir(dst.parent):
                     if name.startswith(prefix):
                         confine.remove_tree(dst.parent / name)
-                _copy_confined(src, tmp)
+                _copy_confined(real, tmp)
+                confine.remove_tree(dst)
                 confine.rename(tmp, dst.name)
+                copied.add(src)
             except BaseException as e:
                 with contextlib.suppress(confine.ConfinedError, OSError):
                     confine.remove_tree(tmp)
                 if isinstance(e, confine.ConfinedError):
                     raise SettingsError(f"seed: {e}") from None
                 if isinstance(e, OSError):
-                    raise SettingsError(f"seed: cannot copy {seed} ({e}).") from None
+                    raise SettingsError(f"seed: cannot copy {shown} ({e}).") from None
                 raise
+        if copied != done:
+            write_record(record, json.dumps({"seeded": sorted(copied)}).encode())
         try:
             _seed_git_identity(home)
         except confine.ConfinedError as e:
@@ -564,32 +706,106 @@ def seed_home(home: Path, seeds: list[str]) -> list[str]:
     return out
 
 
+class _SeedBudget:
+    """The bytes and entries one seed may still copy."""
+
+    def __init__(self, src: str):
+        self.src = src
+        self.bytes = SEED_MAX_BYTES
+        self.files = SEED_MAX_FILES
+
+    def entry(self) -> None:
+        self.files -= 1
+        if self.files < 0:
+            raise SettingsError(f"seed: {_tilde(self.src)} holds more than "
+                                f"{SEED_MAX_FILES} files and folders. Seed a smaller "
+                                "folder.")
+
+    def take(self, n: int) -> None:
+        self.bytes -= n
+        if self.bytes < 0:
+            raise SettingsError(f"seed: {_tilde(self.src)} is larger than "
+                                f"{SEED_MAX_BYTES >> 20} MiB. Seed a smaller file or "
+                                "folder.")
+
+
 def _copy_confined(src: str, dst: Path) -> None:
     """Copy a file, a folder or a link into the private home with its mode.
-    Links inside a folder are copied as links, never followed, and named
-    pipes and devices inside it are skipped."""
+
+    ``src`` is opened without following a link, and the path macOS gives
+    the open file is checked again, so a link swapped in after the check
+    cannot redirect the copy. Inside a folder, links are copied as links,
+    named pipes and devices are skipped, and every file is opened the same
+    way. The copy streams, and it stops at :data:`SEED_MAX_BYTES` and
+    :data:`SEED_MAX_FILES`, counting a sparse file at its full size."""
     from . import confine
 
-    if os.path.isdir(src):
-        confine.mkdirs(dst)
-        for root, dirs, files in os.walk(src):
-            rel = os.path.relpath(root, src)
-            here = dst if rel == "." else dst / rel
-            for name in dirs + files:
-                path = os.path.join(root, name)
-                st = os.lstat(path)
-                if stat.S_ISLNK(st.st_mode):
-                    confine.symlink(os.readlink(path), here / name)
-                elif stat.S_ISDIR(st.st_mode):
-                    confine.mkdirs(here / name)
-                elif stat.S_ISREG(st.st_mode):
-                    confine.write_bytes(here / name, Path(path).read_bytes(),
-                                        stat.S_IMODE(st.st_mode))
-        return
-    st = os.stat(src)
-    if not stat.S_ISREG(st.st_mode):
-        raise SettingsError(f"seed: {src} is not a file or a folder.")
-    confine.write_bytes(dst, Path(src).read_bytes(), stat.S_IMODE(st.st_mode))
+    budget = _SeedBudget(src)
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        why = _seed_source_refusal(fd_path(fd), _real(os.path.expanduser("~")))
+        if why is not None:
+            raise SettingsError(f"seed: launch will not copy {_tilde(src)}, because {why}.")
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            budget.entry()
+            _copy_file(fd, st, dst, budget)
+        elif stat.S_ISDIR(st.st_mode):
+            budget.entry()
+            confine.mkdirs(dst)
+            _copy_folder(fd, dst, budget, depth=0)
+        else:
+            raise SettingsError(f"seed: {_tilde(src)} is not a file or a folder.")
+    finally:
+        os.close(fd)
+
+
+def _copy_file(fd: int, st: os.stat_result, dst: Path, budget: _SeedBudget) -> None:
+    from . import confine
+
+    budget.take(st.st_size)             # before reading, so a sparse file counts whole
+
+    def fill(out_fd: int) -> None:
+        left = st.st_size
+        while True:
+            chunk = os.read(fd, min(1 << 20, max(left, 0) + 1))
+            if not chunk:
+                return
+            left -= len(chunk)
+            if left < 0:                # the file grew after the check
+                budget.take(-left)
+                left = 0
+            confine.write_all(out_fd, chunk)
+    confine.write_stream(dst, fill, stat.S_IMODE(st.st_mode))
+
+
+def _copy_folder(dir_fd: int, dst: Path, budget: _SeedBudget, *, depth: int) -> None:
+    from . import confine
+
+    if depth >= SEED_MAX_DEPTH:
+        raise SettingsError(f"seed: {_tilde(budget.src)} is nested more than "
+                            f"{SEED_MAX_DEPTH} folders deep.")
+    for name in sorted(os.listdir(dir_fd)):
+        budget.entry()
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            confine.symlink(os.readlink(name, dir_fd=dir_fd), dst / name)
+            continue
+        if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+            continue                    # named pipes, sockets and devices
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if stat.S_ISDIR(st.st_mode):
+            flags |= os.O_DIRECTORY
+        child = os.open(name, flags, dir_fd=dir_fd)
+        try:
+            cst = os.fstat(child)
+            if stat.S_ISDIR(cst.st_mode):
+                confine.mkdirs(dst / name)
+                _copy_folder(child, dst / name, budget, depth=depth + 1)
+            elif stat.S_ISREG(cst.st_mode):
+                _copy_file(child, cst, dst / name, budget)
+        finally:
+            os.close(child)
 
 
 def _seed_git_identity(home: Path) -> None:

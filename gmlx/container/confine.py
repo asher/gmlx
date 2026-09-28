@@ -119,7 +119,9 @@ def _lstat_in(dir_fd: int, name: str) -> os.stat_result | None:
 # Mac-side paths, outside confinement
 
 def _home_real() -> str:
-    return os.path.realpath(os.path.expanduser("~"))
+    from .state import canonical
+
+    return canonical(os.path.expanduser("~"))
 
 
 def _host_target(path: Path) -> Path:
@@ -128,9 +130,9 @@ def _host_target(path: Path) -> Path:
     link keeps working. Any other link is refused."""
     if not os.path.islink(path):
         return path
-    from .state import path_inside
+    from .state import canonical, path_inside
 
-    real = os.path.realpath(path)
+    real = canonical(path)
     home = _home_real()
     if real == home or not path_inside(real, home):
         raise ConfinedError(f"{path} is a symbolic link to {real}, outside your home "
@@ -142,12 +144,12 @@ def _refuse_unconfined(path) -> None:
     """Fail closed: a private home is read or written only inside
     :func:`confined`, so a new call site can never follow the guest's links
     by mistake."""
-    from .state import data_path, path_inside
+    from .state import canonical, data_path, path_inside
 
-    data = os.path.realpath(data_path())
+    data = canonical(data_path())
     depth = len(data.rstrip("/").split("/"))
     for p in {os.path.abspath(os.path.expanduser(str(path))),
-              os.path.realpath(os.path.expanduser(str(path)))}:
+              canonical(os.path.expanduser(str(path)))}:
         if p != data and path_inside(p, data):
             rest = p.split("/")[depth:]
             if len(rest) >= 2 and rest[1].casefold() == "home":
@@ -253,6 +255,13 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
     so a crash never leaves it half written. The file keeps its mode, so a
     0600 file that holds keys stays 0600. ``mode`` sets the mode of a new
     file."""
+    write_stream(path, lambda fd: write_all(fd, data), mode)
+
+
+def write_stream(path: Path, fill, mode: int | None = None) -> None:
+    """:func:`write_bytes` for data that ``fill(fd)`` writes to the new
+    file in pieces, so a large file never has to fit in memory. When
+    ``fill`` raises, the new file is removed and ``path`` is unchanged."""
     if _root is None:
         _refuse_unconfined(path)
         target = _host_target(Path(path))
@@ -265,11 +274,11 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      _new_mode(existing, mode))
         try:
-            os.fchmod(fd, _new_mode(existing, mode))
-            _write_all(fd, data)
-        finally:
-            os.close(fd)
-        try:
+            try:
+                os.fchmod(fd, _new_mode(existing, mode))
+                fill(fd)
+            finally:
+                os.close(fd)
             os.replace(tmp, target)
         except BaseException:
             tmp.unlink(missing_ok=True)
@@ -289,11 +298,11 @@ def write_bytes(path: Path, data: bytes, mode: int | None = None) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      _new_mode(existing, mode), dir_fd=dir_fd)
         try:
-            os.fchmod(fd, _new_mode(existing, mode))
-            _write_all(fd, data)
-        finally:
-            os.close(fd)
-        try:
+            try:
+                os.fchmod(fd, _new_mode(existing, mode))
+                fill(fd)
+            finally:
+                os.close(fd)
             os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -358,19 +367,46 @@ def remove_tree(path: Path) -> None:
 
 
 def _remove_in(dir_fd: int, name: str) -> None:
+    """Delete ``name`` in ``dir_fd`` and everything below it, never through
+    a link. It walks with a list rather than recursion, so a tree nested
+    deeper than Python's recursion limit is removed too."""
     st = _lstat_in(dir_fd, name)
     if st is None:
         return
     if not stat.S_ISDIR(st.st_mode):
         os.unlink(name, dir_fd=dir_fd)
         return
-    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    # Each entry is the parent folder's descriptor, the name, the folder's
+    # own descriptor and the names in it still to delete. Only the folders
+    # on the current path are open at a time.
+    def opened(parent: int, child: str) -> tuple[int, str, int, list[str]]:
+        fd = os.open(child, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            return parent, child, fd, os.listdir(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+
+    stack = [opened(dir_fd, name)]
     try:
-        for child in os.listdir(fd):
-            _remove_in(fd, child)
+        while stack:
+            parent, here, fd, left = stack[-1]
+            if not left:
+                stack.pop()
+                os.close(fd)
+                os.rmdir(here, dir_fd=parent)
+                continue
+            child = left.pop()
+            cst = _lstat_in(fd, child)
+            if cst is None:
+                continue
+            if stat.S_ISDIR(cst.st_mode):
+                stack.append(opened(fd, child))
+            else:
+                os.unlink(child, dir_fd=fd)
     finally:
-        os.close(fd)
-    os.rmdir(name, dir_fd=dir_fd)
+        for _, _, fd, _ in reversed(stack):
+            os.close(fd)
 
 
 def listdir(path: Path) -> list[str]:
@@ -392,7 +428,7 @@ def listdir(path: Path) -> list[str]:
         os.close(fd)
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def write_all(fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
         view = view[os.write(fd, view):]

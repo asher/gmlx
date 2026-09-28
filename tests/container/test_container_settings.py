@@ -527,13 +527,14 @@ def test_seeded_gitconfig_wins_over_the_host_identity(home):
     assert out == "Seeded"
 
 
-def test_seed_outside_home_is_refused_and_sensitive_warns(home, tmp_path):
+def test_seed_outside_home_or_sensitive_is_refused(home, tmp_path):
     private = settings.private_home("pi")
     with pytest.raises(SettingsError, match="not inside your home"):
         settings.seed_home(private, [str(tmp_path)])
     (home / ".npmrc").write_text("//registry/:_authToken=x")
-    warns = settings.seed_home(private, ["~/.npmrc"])
-    assert any("~/.npmrc" in w for w in warns)
+    with pytest.raises(SettingsError, match="will not copy ~/.npmrc.*credential folder"):
+        settings.seed_home(private, ["~/.npmrc"])
+    assert not (private / ".npmrc").exists()
 
 
 def test_seed_never_writes_through_a_link_the_guest_planted(home, tmp_path):
@@ -616,9 +617,9 @@ def test_confine_ignores_case_on_a_volume_that_ignores_it(home):
 
 def test_seed_refuses_the_launch_data_folder(home):
     private = settings.private_home("pi")
-    with pytest.raises(SettingsError, match="launch data folder"):
+    with pytest.raises(SettingsError, match="container-mode data"):
         settings.seed_home(private, ["~/.local"])
-    with pytest.raises(SettingsError, match="launch data folder"):
+    with pytest.raises(SettingsError, match="container-mode data"):
         settings.seed_home(private, ["~/.local/share/gmlx/launch/omp"])
 
 
@@ -787,3 +788,347 @@ def test_server_config_path_prefers_the_running_server(home, monkeypatch):
     assert settings.server_config_path("127.0.0.1", 8080) == user
     # --base-url never autostarts, so only a runfile names its config.
     assert settings.server_config_path("box.local", 8000, autostart=False) is None
+
+
+# Round-eight review: seeds, links from earlier launches, firmlinks
+
+def _alias(path) -> str:
+    """The firmlink form of ``path`` that ``os.path.realpath`` keeps."""
+    alias = "/System/Volumes/Data" + os.path.realpath(path)
+    if not os.path.isdir(os.path.dirname(alias)):
+        pytest.skip("no /System/Volumes/Data firmlink for this folder")
+    return alias
+
+
+def test_a_seeded_link_turned_to_a_credential_folder_is_refused(home):
+    """The user seeds ~/.config/nvim, a link into ~/dotfiles. A client in
+    an earlier launch of ~/dotfiles replaced ~/dotfiles/nvim with a link to
+    ~/.ssh and deleted its own copy."""
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_ed25519").write_text("PRIVATE KEY")
+    (home / "dotfiles" / "nvim").mkdir(parents=True)
+    (home / ".config").mkdir()
+    (home / ".config" / "nvim").symlink_to(home / "dotfiles" / "nvim")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/.config/nvim"])
+    shutil.rmtree(home / "dotfiles" / "nvim")
+    (home / "dotfiles" / "nvim").symlink_to(home / ".ssh")
+    shutil.rmtree(private / ".config" / "nvim")
+    with pytest.raises(SettingsError, match="credential folder"):
+        settings.seed_home(private, ["~/.config/nvim"])
+    assert not (private / ".config" / "nvim").exists()
+
+
+def test_a_seed_through_a_link_out_of_home_is_refused(home, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "secret").write_text("s")
+    (home / "notes").symlink_to(outside)
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="outside your home folder"):
+        settings.seed_home(private, ["~/notes"])
+    assert not (private / "notes").exists()
+
+
+def test_a_seed_the_client_deleted_is_copied_again_only_on_request(home):
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/notes.md"])
+    record = settings.seed_record_path(private)
+    assert not settings._inside(str(record), str(private))
+    (private / "notes.md").unlink()
+    (home / "notes.md").write_text("changed")
+    settings.seed_home(private, ["~/notes.md"])
+    assert not (private / "notes.md").exists()
+    settings.seed_home(private, ["~/notes.md"], reseed=True)
+    assert (private / "notes.md").read_text() == "changed"
+    (private / "notes.md").write_text("client edit")
+    settings.seed_home(private, ["~/notes.md"], reseed=True)       # replaces the copy
+    assert (private / "notes.md").read_text() == "changed"
+
+
+def test_a_sparse_seed_is_refused_before_it_is_read(home, monkeypatch):
+    big = home / "big.bin"
+    with open(big, "wb") as f:
+        f.truncate(1 << 30)
+    read = []
+    real_read = os.read
+    monkeypatch.setattr(settings.os, "read", lambda fd, n: read.append(n) or real_read(fd, n))
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="larger than 64 MiB"):
+        settings.seed_home(private, ["~/big.bin"])
+    assert read == [] and list(private.iterdir()) == []
+
+
+def test_a_seed_with_too_many_files_is_refused(home, monkeypatch):
+    monkeypatch.setattr(settings, "SEED_MAX_FILES", 5)
+    tools = home / "tools"
+    tools.mkdir()
+    for n in range(10):
+        (tools / f"f{n}").write_text("x")
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="more than 5 files"):
+        settings.seed_home(private, ["~/tools"])
+    assert list(private.iterdir()) == []
+
+
+def test_a_seed_copy_streams_the_file(home, monkeypatch):
+    (home / "data.bin").write_bytes(os.urandom(3 << 20))
+    sizes = []
+    real_read = os.read
+    monkeypatch.setattr(settings.os, "read",
+                        lambda fd, n: sizes.append(n) or real_read(fd, n))
+    private = settings.private_home("pi")
+    settings.seed_home(private, ["~/data.bin"])
+    assert (private / "data.bin").read_bytes() == (home / "data.bin").read_bytes()
+    assert max(sizes) <= 1 << 20
+
+
+def test_a_seed_swapped_after_the_check_is_refused(home, monkeypatch):
+    """The path macOS gives the open file is checked again, so a link
+    swapped in between the check and the open cannot redirect the copy."""
+    (home / ".ssh").mkdir()
+    (home / "notes.md").write_text("n")
+    monkeypatch.setattr(settings, "fd_path", lambda fd: str(home / ".ssh" / "id"))
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="credential folder"):
+        settings.seed_home(private, ["~/notes.md"])
+    assert not (private / "notes.md").exists()
+
+
+def test_seeding_a_token_file_warns(home):
+    (home / ".claude.json").write_text("{}")
+    private = settings.private_home("claude-code")
+    warns = settings.seed_home(private, ["~/.claude.json"])
+    assert any("sign-in token" in w and "~/.claude.json" in w for w in warns)
+
+
+def test_a_deep_seed_leftover_is_removed(home):
+    (home / "notes.md").write_text("n")
+    private = settings.private_home("pi")
+    fd = os.open(private, os.O_RDONLY | os.O_DIRECTORY)
+    os.mkdir(".notes.md.gmlx-seed-dead", dir_fd=fd)
+    for _ in range(1200):                      # deeper than the recursion limit
+        nxt = os.open(".notes.md.gmlx-seed-dead" if _ == 0 else "d",
+                      os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        os.close(fd)
+        fd = nxt
+        os.mkdir("d", dir_fd=fd)
+    os.close(fd)
+    settings.seed_home(private, ["~/notes.md"])
+    assert sorted(p.name for p in private.iterdir()) == ["notes.md"]
+
+
+@pytest.mark.parametrize("mode", [0o002, 0o000])
+def test_the_launch_roots_are_private_at_any_umask(home, mode):
+    from gmlx.container import state
+    old = os.umask(mode)
+    try:
+        data, cache = state.data_dir(), state.cache_dir()
+    finally:
+        os.umask(old)
+    for root in (data, cache):
+        assert root.stat().st_mode & 0o777 == 0o700
+    data.chmod(0o775)                                 # an older, looser folder
+    assert state.data_dir().stat().st_mode & 0o777 == 0o700
+
+
+def test_locks_and_records_never_follow_a_link(home, tmp_path):
+    from gmlx.container import state
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    lock = state.data_dir() / "x.lock"
+    lock.symlink_to(victim)
+    with pytest.raises(OSError):
+        state.FileLock(lock)
+    record = state.data_dir() / "r.json"
+    state.write_record(record, b"{}")
+    assert record.read_bytes() == b"{}" and victim.read_text() == "keep"
+    assert record.stat().st_mode & 0o777 == 0o600
+
+
+def test_new_sensitive_folders_are_refused_as_shares(home):
+    for rel in ("bin/tools", ".cargo/registry", ".cache/huggingface/hub", ".codex",
+                "Library/LaunchAgents", ".config/git", ".local/bin",
+                "Library/Application Support/Code"):
+        (home / rel).mkdir(parents=True, exist_ok=True)
+        with pytest.raises(SettingsError, match="credential folder"):
+            _plan(home, cwd=str(home / rel))
+    assert {"/opt/homebrew", "/usr/local"} <= set(settings.sensitive_paths(str(home)))
+
+
+def test_the_firmlink_form_of_home_is_refused_as_the_current_folder(home):
+    with pytest.raises(SettingsError, match="your home folder"):
+        _plan(home, cwd=_alias(home))
+
+
+def test_a_share_through_the_firmlink_uses_the_real_path(home):
+    plan = _plan(home, cwd=_alias(home / "src" / "proj"))
+    share = next(m for m in plan.mounts if m.note == "working folder")
+    assert share.source == os.path.realpath(home / "src" / "proj")
+    assert not share.source.startswith("/System/Volumes/Data")
+
+
+def test_a_gitfile_through_the_firmlink_never_mounts_a_home_git_folder(home):
+    """A dotfiles repository at $HOME and its worktree. The guest rewrites
+    the worktree's .git file to name the same entry through the firmlink."""
+    _git("init", "-q", "-b", "main", cwd=home)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=home)
+    wt = home / "src" / "dots"
+    _git("worktree", "add", "-q", str(wt), cwd=home)
+    entry = next((home / ".git" / "worktrees").iterdir())
+    (wt / ".git").write_text(f"gitdir: {_alias(entry)}\n")
+    plan = _plan(home, cwd=str(wt))
+    assert not [m for m in plan.mounts if m.kind == "git"]
+    assert any("your home folder" in n for n in plan.notes)
+
+
+@pytest.mark.parametrize("to", ["home", "ssh-alias", "data", "data-alias"])
+def test_an_explicit_mount_replaced_by_a_link_is_refused(home, to):
+    """A config mount of ~/work/data that a client of an earlier launch of
+    ~/work replaced with a link."""
+    (home / ".ssh").mkdir()
+    target = {"home": str(home), "ssh-alias": None, "data": str(settings.data_dir()),
+              "data-alias": None}[to]
+    if to == "ssh-alias":
+        target = _alias(home / ".ssh")
+    if to == "data-alias":
+        target = _alias(settings.data_dir())
+    (home / "work").mkdir()
+    (home / "work" / "data").symlink_to(target)
+    cfg = LaunchClientCfg(mounts=[f"{home}/work/data:/data:ro"])
+    with pytest.raises(SettingsError, match="symbolic link"):
+        _plan(home, cfg=cfg)
+
+
+def test_an_explicit_mount_of_the_launch_data_folder_is_refused(home):
+    settings.private_home("pi")
+    data = settings.data_dir()
+    for spec in (str(data), f"{data}/pi:/x", f"{home}/.local/share:/y"):
+        with pytest.raises(SettingsError, match="container-mode data"):
+            _plan(home, cli_mounts=[spec])
+
+
+def test_an_explicit_mount_written_through_the_firmlink_is_refused(home):
+    (home / "data").mkdir()
+    with pytest.raises(SettingsError, match="real path"):
+        _plan(home, cli_mounts=[_alias(home / "data") + ":/data"])
+
+
+def test_a_git_folder_a_guest_made_of_a_shared_folder_is_refused(home):
+    """An earlier launch shared ~/area. Its guest made ~/area itself a git
+    folder whose core.worktree names ~/area/p2 (submodule path), and made
+    the user folder ~/area/docs a git folder with a worktree entry for
+    ~/area/p3 (worktree path). These launches share only p2 or p3."""
+    area = home / "area"
+    (area / "p2").mkdir(parents=True)
+    (area / "HEAD").write_text("ref: refs/heads/main\n")
+    (area / "objects").mkdir()
+    (area / "refs").mkdir()
+    (area / "config").write_text(f"[core]\n\trepositoryformatversion = 0\n"
+                                 f"\tbare = false\n\tworktree = {area / 'p2'}\n")
+    (area / "p2" / ".git").write_text(f"gitdir: {area}\n")
+    git, notes = _proj_git_mounts(home, area / "p2")
+    assert git == [] and any("not named like one" in n for n in notes)
+
+    docs = area / "docs"
+    p3 = area / "p3"
+    p3.mkdir()
+    for d in ("objects", "refs/heads", "worktrees/p3"):
+        (docs / d).mkdir(parents=True, exist_ok=True)
+    (docs / "notes.txt").write_text("the user's notes")
+    (docs / "HEAD").write_text("ref: refs/heads/main\n")
+    (docs / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = true\n")
+    (docs / "worktrees/p3/HEAD").write_text("ref: refs/heads/main\n")
+    (docs / "worktrees/p3/commondir").write_text("../..\n")
+    (docs / "worktrees/p3/gitdir").write_text(str(p3 / ".git") + "\n")
+    (p3 / ".git").write_text(f"gitdir: {docs / 'worktrees' / 'p3'}\n")
+    git, notes = _proj_git_mounts(home, p3)
+    assert git == [] and any("not named like one" in n for n in notes)
+
+
+def test_a_worktree_of_a_bare_repository_shares_its_git_folder(home):
+    bare = home / "repos" / "lib.git"
+    bare.parent.mkdir()
+    _git("init", "-q", "--bare", "-b", "main", str(bare), cwd=home)
+    seed = home / "seedrepo"
+    seed.mkdir()
+    _git("init", "-q", "-b", "main", cwd=seed)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=seed)
+    _git("push", "-q", str(bare), "main", cwd=seed)
+    wt = home / "src" / "lib-wt"
+    _git("worktree", "add", "-q", str(wt), "main", cwd=bare)
+    git, notes = _proj_git_mounts(home, wt)
+    assert [m.source for m in git] == [os.path.realpath(bare)]
+
+
+def test_a_read_only_share_keeps_the_worktree_git_folder_read_only(home):
+    repo = home / "src" / "R"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    wt = home / "src" / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=repo)
+    plan = _plan(home, cwd=str(wt), cli_mounts=[f"{wt}:ro"])
+    git = [m for m in plan.mounts if m.kind == "git"]
+    assert len(git) == 1 and git[0].readonly
+    rw = _plan(home, cwd=str(wt))
+    assert not [m for m in rw.mounts if m.kind == "git"][0].readonly
+
+
+def test_recheck_refuses_a_share_swapped_for_a_link(home, tmp_path):
+    plan = _plan(home)
+    settings.recheck_sources(plan)
+    proj = home / "src" / "proj"
+    proj.rename(home / "src" / "proj-moved")
+    proj.symlink_to(home, target_is_directory=True)
+    with pytest.raises(SettingsError, match="changed after launch checked it"):
+        settings.recheck_sources(plan)
+
+
+def test_the_data_volume_itself_is_a_system_folder(home):
+    assert "system folder" in settings.auto_share_refusal("/System/Volumes/Data", str(home))
+
+
+def test_a_seed_nested_too_deep_is_refused(home, monkeypatch):
+    monkeypatch.setattr(settings, "SEED_MAX_DEPTH", 2)
+    (home / "tools" / "a" / "b" / "c").mkdir(parents=True)
+    private = settings.private_home("pi")
+    with pytest.raises(SettingsError, match="nested more than 2 folders deep"):
+        settings.seed_home(private, ["~/tools"])
+    assert list(private.iterdir()) == []
+
+
+def test_new_folders_above_a_launch_root_are_private(home):
+    from gmlx.container import state
+    old = os.umask(0o002)
+    try:
+        data = state.data_dir()
+    finally:
+        os.umask(old)
+    for folder in (data.parent, data.parent.parent):          # gmlx, share
+        assert folder.stat().st_mode & 0o777 == 0o700
+
+
+def test_confine_refuses_a_private_home_through_the_firmlink(home):
+    from gmlx.container import confine
+    private = settings.private_home("pi")
+    (private / "x").write_text("x")
+    with pytest.raises(confine.ConfinedError, match="private home"):
+        confine.exists(Path(_alias(private)) / "x")
+
+
+def test_confine_refuses_a_private_home_when_the_data_folder_is_named_by_the_firmlink(
+        home, monkeypatch):
+    from gmlx.container import confine
+    (home / ".local" / "share").mkdir(parents=True)
+    monkeypatch.setenv("XDG_DATA_HOME", _alias(home / ".local" / "share"))
+    from gmlx.container.state import canonical
+    private = Path(canonical(settings.private_home("pi")))
+    assert not str(private).startswith("/System/Volumes/Data")
+    (private / "x").write_text("x")
+    with pytest.raises(confine.ConfinedError, match="private home"):
+        confine.exists(private / "x")
