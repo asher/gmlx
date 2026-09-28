@@ -33,8 +33,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message, or read the system prompt and earlier replies as raw lists.
 - `POST /v1/estimate` and `"dry_run": true` failed or left out the developer
   text when the template had no developer role.
-- A Gemma-4 12B image request with the prefix cache on could answer wrongly
-  when it reused a cached prefix that ended inside the image.
+- A Gemma-4 12B image request with the prefix cache on could answer wrongly,
+  whether or not it reused a cached prefix.
 - With `--kv-bits`, MTP and the prefix cache on, a request that reused a
   cached prefix could fail when it joined a batch that was already decoding.
 

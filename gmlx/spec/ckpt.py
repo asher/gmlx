@@ -16,6 +16,7 @@ from gmlx.spec.engine import (
     _SPEC_APC_DISABLED,
     _SPEC_APC_RETIRE_DISABLED,
     _SPEC_APC_SIDECAR_DISABLED,
+    _bind_l1_view,
     _ckpt_active,
     _ckpt_layout_for,
     _ckpt_layout_live,
@@ -217,6 +218,20 @@ def _gcd(a: int, b: int) -> int:
     return a
 
 
+def _media_floor(batch, ids) -> int:
+    """End of the prompt's last media span under the APC guard's ids, or 0.
+
+    A store or cut below it is never safe: the suffix would carry media,
+    which no L1 lookup restores, and bidirectional image attention needs
+    the whole image in one pass from column 0.
+    """
+    from mlx_vlm import apc as _apc
+
+    _bind_l1_view()
+    view: Any = _L1View(getattr(batch, "model", None), None, None)
+    return _apc.media_safe_prefix_min(ids, view._apc_media_token_ids())
+
+
 def _ckpt_unit(batch, block_size: int) -> int:
     """The natural chunk grid: lcm(prefill_step_size, block_size)."""
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
@@ -380,7 +395,8 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     """Anchor position for an exact-tier (non-ckpt) model: the sibling
     divergence point, ungridded (exact clones restore at any position).
     Clamped to the stock guard column, so the prefill pauses at most
-    twice: once for the anchor, once for the stock guard store.
+    twice: once for the anchor, once for the stock guard store. None
+    below the media floor (``_media_floor``).
     GMLX_APC_CKPT_SYS=0 disables (one switch for both tiers);
     GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor shared
     prefix re-prefills in milliseconds and is not worth a clone).
@@ -402,6 +418,8 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     if guard > 0:
         pos = min(pos, guard)
     if pos < floor_min or pos <= max(0, restored):
+        return None
+    if pos < _media_floor(batch, ids):
         return None
     return pos
 
@@ -497,6 +515,15 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
         # Colliding with the anchor keeps the anchor (default no-upgrade):
         # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
+    # No boundary below the media floor, the terminal included: a prompt
+    # whose only grid point falls inside its last image stores no
+    # terminal record.
+    floor = _media_floor(batch, meta.get("full_input_ids") or ())
+    if floor:
+        bounds = [b for b in bounds if b[0] >= floor]
+        turn = [p for p in turn if p >= floor]
+        if sysb is not None and sysb < floor:
+            meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
     meta.pop("checkpoint_lengths", None)
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
