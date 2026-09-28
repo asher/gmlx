@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from typing import Any
 
 from gmlx.envflags import env_int
@@ -218,18 +219,18 @@ def _gcd(a: int, b: int) -> int:
     return a
 
 
-def _media_floor(batch, ids) -> int:
-    """End of the prompt's last media span under the APC guard's ids, or 0.
-
-    A store or cut below it is never safe: the suffix would carry media,
-    which no L1 lookup restores, and bidirectional image attention needs
-    the whole image in one pass from column 0.
+def _media_safe(batch, ids) -> Callable[[int], bool]:
+    """Whether a store or cut at a position passes the APC media guard:
+    at or past the end of the prompt's last media span, or, for ids the
+    guard reads as whole blocks, outside every span
+    (``gmlx.cache.apc_media``). Any other position leaves a suffix no L1
+    lookup restores.
     """
-    from mlx_vlm import apc as _apc
+    from gmlx.cache.apc_media import safe_prefix
 
     _bind_l1_view()
     view: Any = _L1View(getattr(batch, "model", None), None, None)
-    return _apc.media_safe_prefix_min(ids, view._apc_media_token_ids())
+    return safe_prefix(ids, view._apc_media_token_ids())
 
 
 def _ckpt_unit(batch, block_size: int) -> int:
@@ -396,7 +397,7 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     divergence point, ungridded (exact clones restore at any position).
     Clamped to the stock guard column, so the prefill pauses at most
     twice: once for the anchor, once for the stock guard store. None
-    below the media floor (``_media_floor``).
+    where the media guard refuses a store (``_media_safe``).
     GMLX_APC_CKPT_SYS=0 disables (one switch for both tiers);
     GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor shared
     prefix re-prefills in milliseconds and is not worth a clone).
@@ -419,7 +420,7 @@ def _exact_anchor_boundary(batch, meta, guard: int,
         pos = min(pos, guard)
     if pos < floor_min or pos <= max(0, restored):
         return None
-    if pos < _media_floor(batch, ids):
+    if not _media_safe(batch, ids)(pos):
         return None
     return pos
 
@@ -515,15 +516,14 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
         # Colliding with the anchor keeps the anchor (default no-upgrade):
         # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
-    # No boundary below the media floor, the terminal included: a prompt
-    # whose only grid point falls inside its last image stores no
+    # No boundary the media guard refuses, the terminal included: a
+    # prompt whose only grid point falls inside an image stores no
     # terminal record.
-    floor = _media_floor(batch, meta.get("full_input_ids") or ())
-    if floor:
-        bounds = [b for b in bounds if b[0] >= floor]
-        turn = [p for p in turn if p >= floor]
-        if sysb is not None and sysb < floor:
-            meta.pop("ckpt_sys_bound", None)
+    safe = _media_safe(batch, meta.get("full_input_ids") or ())
+    bounds = [b for b in bounds if safe(b[0])]
+    turn = [p for p in turn if safe(p)]
+    if sysb is not None and not safe(sysb):
+        meta.pop("ckpt_sys_bound", None)
     meta["ckpt_boundaries"] = bounds
     meta.pop("checkpoint_lengths", None)
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0

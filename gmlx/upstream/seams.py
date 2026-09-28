@@ -505,6 +505,15 @@ SEAMS: tuple[Seam, ...] = (
          "for expanded image blocks) + load.vlm._mirror_media_token_ids "
          "(gemma-4 container ids onto a bidirectional text config)",
          critical=True),
+    Seam("mlx_vlm.apc", "media_safe_prefix_min",
+         "apc_media.install_media_token_ids (zero floor for "
+         "WholeMediaBlocks)", critical=True),
+    Seam("mlx_vlm.apc", "prefix_leaves_text_only_suffix",
+         "apc_media.install_media_token_ids (a WholeMediaBlocks prefix "
+         "ends outside every run)", critical=True),
+    Seam("mlx_vlm.apc", "adjust_prefix_to_text_suffix_boundary",
+         "apc_media.install_media_token_ids (a WholeMediaBlocks column "
+         "inside a run moves to its end)", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "

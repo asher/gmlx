@@ -9,7 +9,15 @@ from mlx_vlm import apc as _apc
 from mlx_vlm.generate import ar
 
 import gmlx.load.vlm as gvlm
-from gmlx.cache.apc_media import install_media_token_ids
+import gmlx.models.gemma4.sync as gemma4_sync
+import gmlx.spec.engine as engine
+import gmlx.spec.mtp_prefill as mtp_prefill
+from gmlx.cache.apc_media import (
+    WholeMediaBlocks,
+    install_media_token_ids,
+    safe_prefix,
+)
+from gmlx.gen import media_spans
 from gmlx.load.config_synth import synthesize_config
 
 from test_config_synth import (
@@ -259,3 +267,119 @@ def test_causal_models_reuse_a_block_prefix_inside_an_image(model_type, text):
         cold = _last_logits(lm, embeds, types, 0, "block")
         served = _last_logits(lm, embeds, types, 16, "block")
         assert mx.max(mx.abs(served - cold)).item() <= 1e-4
+
+
+def test_whole_block_guard_accepts_a_prefix_outside_every_image():
+    """A gemma-4 text config under bidirectional image attention gives the
+    guard whole-block ids: a prefix may end before, between or after the
+    images, and a column inside one moves to its end. The container
+    config, a causal text config and other models keep the stock rule."""
+    install_media_token_ids()
+    vision = SimpleNamespace(model_type="gemma4_text", image_token_id=7,
+                             use_bidirectional_attention="vision")
+    media = _apc.multimodal_token_ids_from_config(vision)
+    assert isinstance(media, WholeMediaBlocks) and media == {7}
+    for config in (SimpleNamespace(model_type="gemma4", image_token_id=7),
+                   SimpleNamespace(model_type="gemma4_text", image_token_id=7),
+                   SimpleNamespace(model_type="diffusion_gemma_text",
+                                   image_token_id=7,
+                                   use_bidirectional_attention="vision")):
+        assert not isinstance(
+            _apc.multimodal_token_ids_from_config(config), WholeMediaBlocks)
+    ids = [1] * 4 + [7] * 6 + [2] * 4 + [7] * 6 + [3] * 4
+    stock = {7}
+    assert _apc.media_safe_prefix_min(ids, media) == 0
+    assert _apc.media_safe_prefix_min(ids, stock) == 20
+    leaves = [p for p in range(len(ids))
+              if _apc.prefix_leaves_text_only_suffix(ids, p, media)]
+    assert leaves == [0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20, 21, 22, 23]
+    assert not _apc.prefix_leaves_text_only_suffix(ids, 12, stock)
+    adjust = _apc.adjust_prefix_to_text_suffix_boundary
+    assert adjust(ids, 12, media) == 12
+    assert adjust(ids, 6, media) == 10
+    assert adjust(ids, 16, media) == 20
+    assert adjust(ids, 16, media, max_prefix_tokens=18) == 0
+    assert adjust(ids, 0, media) == 0
+    assert adjust(ids, 6, stock) == 20
+    assert [p(4) for p in (safe_prefix(ids, media), safe_prefix(ids, stock))
+            ] == [True, False]
+
+
+@pytest.fixture
+def serve_chunks(monkeypatch):
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "8")
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", True)
+    # The loader's installs: the gemma-4 chunking policy and masks, then
+    # the span wrapper outside the MTP body.
+    gemma4_sync.install_gemma4_nosync()
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    assert media_spans.install_span_aware_prompt_step()
+
+
+def _served_after_restore(lm, ids, embeds, types, prefix: int, tier: str):
+    """The chunk widths and last logits of a served prompt whose first
+    ``prefix`` columns were restored, the KV built as ``_last_logits``
+    builds it."""
+    n = embeds.shape[1]
+    row = lm.make_cache()
+    cols = slice(None) if tier == "block" else slice(0, prefix)
+    lm(None, inputs_embeds=embeds[:, cols], cache=row,
+       mm_token_type_ids=types[:, cols])
+    if tier == "block":
+        for c in row:
+            c.trim(n - prefix)
+    mx.eval([c.state for c in row])
+    warm, _ = _apc.make_warm_batch_exact_cache_multi([row], [prefix])
+    batch = ar.PromptProcessingBatch(
+        model=lm, uids=[0], input_ids=[ids[prefix:]], max_tokens=[4],
+        inputs_embeds=embeds[:, prefix:],
+        prompt_kwargs={"mm_token_type_ids": types[:, prefix:]},
+        warm_cache=warm, prefill_step_size=8)
+    chunks = []
+    while batch.needs_processing():
+        k = batch.prompt_step()
+        if k <= 0:
+            break
+        chunks.append(k)
+    out = lm(None, inputs_embeds=batch._inputs_embeds, cache=batch.prompt_cache,
+             mm_token_type_ids=batch._prompt_kwargs["mm_token_type_ids"])
+    return chunks, out.logits[:, -1, :].astype(mx.float32)
+
+
+@pytest.mark.parametrize("model_type,text", [
+    ("gemma4", {"use_bidirectional_attention": "vision"}),
+    ("gemma4_unified", {}),
+])
+@pytest.mark.parametrize("tier,cached,chunks", [
+    ("block", 8, [2, 16, 8, 5]),
+    ("exact", 8, [2, 16, 8, 5]),
+    ("exact", 10, [16, 8, 5]),
+])
+def test_a_restore_cut_before_an_image_reuses_the_prefix(
+        model_type, text, tier, cached, chunks, serve_chunks):
+    """Under bidirectional image attention a prefix that ends before the
+    image restores. The server embeds the whole prompt, and the suffix
+    prefill keeps the image in one chunk, so the logits match a cold
+    prefill. A prefix that ends inside the image still does not restore."""
+    install_media_token_ids()
+    model, _ = gvlm.build_vlm_model(_gemma4_config(model_type, **text))
+    lm = model.language_model
+    mx.eval(lm.parameters())
+    image = int(model.config.image_token_id)
+    n, lo, hi = 40, 10, 26
+    ids = [image if lo <= i < hi else 1 + i for i in range(n)]
+    types = mx.array([[int(lo <= i < hi) for i in range(n)]])
+    embeds = mx.random.normal((1, n, _HIDDEN), key=mx.random.key(0)) * 0.5
+
+    assert _restored_len(lm, ids, _Store(tier, cached)) == cached
+    assert _restored_len(lm, ids, _Store(tier, 16)) == 0
+    with mx.stream(mx.cpu):
+        got, served = _served_after_restore(lm, ids, embeds, types, cached,
+                                            tier)
+        cold = _last_logits(lm, embeds, types, 0, tier)
+    assert got == chunks
+    assert mx.max(mx.abs(served - cold)).item() <= 1e-4

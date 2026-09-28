@@ -1,10 +1,12 @@
-"""The checkpoint tier never cuts a prompt below its last media span.
+"""The checkpoint tier never cuts a prompt where the APC media guard
+refuses a prefix.
 
-The floor is the end of the last span the APC media guard sees. A gemma-4
-model with bidirectional image attention needs the image in one pass from
-column 0, so a cut anywhere below the floor changes its logits. For any
-guard that sees media ids, a record below the floor is one no lookup can
-restore. Guards that see no ids keep their full schedule.
+A guard that sees media ids refuses a prefix below the end of the last
+media span, and a record there is one no lookup can restore. The guard of
+a gemma-4 text config under bidirectional image attention reads its ids
+as whole blocks and refuses only a prefix that ends inside an image: the
+prefill keeps each image in one chunk, so a cut before or after it leaves
+the logits unchanged. Guards that see no ids keep their full schedule.
 """
 
 from types import SimpleNamespace
@@ -33,9 +35,10 @@ from test_apc_schedule_invariant import _make_from_tags
 def test_checkpoint_tier_leaves_a_cold_image_prefill_unchanged(
         model_type, text, monkeypatch):
     """A cold image request on a checkpoint-tier model: the guard column
-    sits past the image, but its grid point falls inside it. Stock runs
-    the image in one pass, and the checkpoint tier must not cut it, so
-    the last logits match the same batch served without the prefix cache."""
+    sits past the image, but its grid point falls inside it. The prefill
+    keeps the image in one chunk, and the checkpoint tier must not cut it,
+    so the last logits match the same batch served without the prefix
+    cache."""
     monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", False)
     install_media_token_ids()
     mtp_prefill.install_full_prompt_mtp_prefill()
@@ -75,7 +78,7 @@ def test_checkpoint_tier_leaves_a_cold_image_prefill_unchanged(
         apc_manager=APCManager(num_blocks=64, block_size=16))
     assert "ckpt_boundaries" in meta
     assert mx.max(mx.abs(with_apc - plain)).item() <= 1e-4, armed
-    assert all(p >= hi for p in armed)
+    assert not any(lo < p < hi for p in armed)
 
 
 # A 9000-token prompt on a sliding-window layout (block grid, no prefill
@@ -181,3 +184,46 @@ def test_boundaries_below_the_image_are_ones_no_lookup_restores(monkeypatch):
             warm, got_p = ckpt_lookup(man, query, extra_hash=salt,
                                       layout=_TAGS)
             assert (warm, got_p) == (None, 0), (p, salt)
+
+
+# A gemma-4 text config under bidirectional image attention: its guard
+# reads the image id as a whole block.
+_WHOLE = SimpleNamespace(model_type="gemma4_text", image_token_id=_IMG,
+                         use_bidirectional_attention="vision")
+
+
+@pytest.mark.parametrize("lcp,want", [(280, 280), (4000, None), (5200, 5200)])
+def test_exact_anchor_stays_outside_the_image_under_a_whole_block_guard(
+        lcp, want, monkeypatch):
+    install_media_token_ids()
+    monkeypatch.setattr(retire_key, "lookup_render_ctx",
+                        lambda i: {"stub": True})
+    monkeypatch.setattr(retire_key, "system_prefix_lcp",
+                        lambda ctx, i: lcp)
+    batch = SimpleNamespace(model=SimpleNamespace(config=_WHOLE))
+    meta = {"full_input_ids": _image_prompt(_IMG)}
+    assert ckpt._exact_anchor_boundary(batch, meta, _N - 1, 0) == want
+
+
+def test_a_whole_block_guard_drops_only_the_boundaries_inside_the_image(
+        monkeypatch):
+    """The boundary at 4096 falls inside the image and goes. The anchor at
+    272 sits before it, and a lookup with the same image restores it with
+    the image left to the suffix. The APC salt hashes the request's
+    images, so a request with another image or none misses it."""
+    install_media_token_ids()
+    ids = _image_prompt(_IMG)
+    got = _schedule(_WHOLE, ids, monkeypatch)
+    assert got == [e for e in _FULL if not _LO < e[0] < _HI]
+    assert [p for p, _kind in _FULL if _LO < p < _HI] == [4096]
+
+    gen = _guard(SimpleNamespace(config=_WHOLE))
+    assert gen._apc_suffix_is_text_only(ids, 272)
+    assert not gen._apc_suffix_is_text_only(ids, 4096)
+    red, blue = (_apc.semantic_extra_hash(image_hash=_apc.hash_image_payload(
+        pixel_values=mx.full((1, 3, 4, 4), v))) for v in (1.0, 2.0))
+    man = APCManager(num_blocks=1024, block_size=16)
+    assert ckpt_store(man, ids[:272], _make_from_tags(_TAGS, 272),
+                      extra_hash=red) == 272
+    assert ckpt_lookup(man, ids, extra_hash=red, layout=_TAGS)[1] == 272
+    assert ckpt_lookup(man, ids, extra_hash=blue, layout=_TAGS) == (None, 0)

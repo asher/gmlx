@@ -20,6 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parked, since mlx 0.32.2 fixes the crash at thread exit.
 - `gmlx run` and `gmlx chat` prefill a DeepSeek-V4-Flash-Vision-Exp image
   prompt in chunks that keep each image whole, instead of in one pass.
+- On a Gemma-4 26B-A4B, 31B or 12B model, the prefix cache reuses a cached
+  prefix that ends before an image, when the request holds the same images.
 
 ### Fixed
 
