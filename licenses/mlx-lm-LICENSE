@@ -6,6 +6,9 @@ gmlx/models/deepseek_v4/hyper_connection.py from PR #1192 (DeepSeek V4 Flash),
 gmlx/models/minimax_m3.py from PR #1401 (MiniMax M3),
 gmlx/models/hy_v3/model.py from PR #1485 (Tencent Hy3), and
 gmlx/models/deepseek_v4/cache.py (PoolingCache/BatchPoolingCache) from PR #1192.
+gmlx/models/function_gemma.py carries the FunctionGemma tool parser of mlx-lm
+0.31.3 (mlx_lm/tool_parsers/function_gemma.py), by way of mlx-vlm 0.6.15,
+which shipped it as mlx_vlm/tool_parsers/function_gemma.py.
 mlx-lm is distributed under the MIT License:
 
 MIT License

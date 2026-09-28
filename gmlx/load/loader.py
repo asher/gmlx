@@ -242,6 +242,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         hy_v4_model.ensure_registered()
         hy_v4_tools.ensure_registered()
+    if mt == "gemma3_text":
+        # FunctionGemma is a gemma3 text model, and mlx-vlm 0.7.3 no longer
+        # ships its tool parser. The vendored one registers with the model
+        # so a later serve template-inference resolves it.
+        import gmlx.models.function_gemma as function_gemma_tools
+
+        function_gemma_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)

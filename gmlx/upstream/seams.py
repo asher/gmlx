@@ -370,7 +370,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
     # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
-    # used by the hy_v3, hy_v4, deepseek_v41 and muse_glimmer tools) ---
+    # used by the hy_v3, hy_v4, deepseek_v41, muse_glimmer and
+    # function_gemma tools) ---
     Seam("mlx_vlm.tools.registry", "ParserSpec",
          "tool_parsers.register_tool_parser (spec built from name, marker "
          "groups and priority)", critical=True),
@@ -880,6 +881,7 @@ def vendored_upstream_collisions() -> list[str]:
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {
     "gmlx.models.deepseek_v41.tools": "mlx_vlm.tools.parsers.deepseek_v41",
+    "gmlx.models.function_gemma": "mlx_vlm.tools.parsers.function_gemma",
     "gmlx.models.hy_v3.tools": "mlx_vlm.tools.parsers.hy_v3",
     "gmlx.models.hy_v4.tools": "mlx_vlm.tools.parsers.hy_v4",
     "gmlx.models.muse_glimmer.tools": "mlx_vlm.tools.parsers.muse_glimmer",
