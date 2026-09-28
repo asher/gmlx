@@ -20,7 +20,8 @@ speculative verify block.
 
 The wrap runs the stock body with ``_idx`` at the buffer length whenever
 the buffer is rotated and the update takes the concat path, which is the
-value ``_temporal_order`` sets before the trim.
+value ``_temporal_order`` sets before the trim. The body reads that value
+from a view of the cache, so the cache itself is never written.
 """
 
 from __future__ import annotations
@@ -38,20 +39,30 @@ def _takes_concat(cache, n: int) -> bool:
     return n > 1 or getattr(cache, "_lengths", None) is not None
 
 
+class _ConcatView:
+    """The cache as ``_update_concat`` sees it after ``_temporal_order``:
+    ``_idx`` is ``idx``, and every other attribute reads through to the
+    cache. The stock body only reads attributes."""
+
+    __slots__ = ("_cache", "_idx")
+
+    def __init__(self, cache, idx: int):
+        self._cache = cache
+        self._idx = idx
+
+    def __getattr__(self, name: str):
+        return getattr(self._cache, name)
+
+
 def _wrap(orig: Callable) -> Callable:
     def make_mask(self, N, window_size=None, return_array=False):
         keys = getattr(self, "keys", None)
-        if not (getattr(self, "rotated", False) and keys is not None
+        cache = self
+        if (getattr(self, "rotated", False) and keys is not None
                 and _takes_concat(self, N)):
-            return orig(self, N, window_size=window_size,
-                        return_array=return_array)
-        idx = self._idx
-        self._idx = int(keys.shape[2])
-        try:
-            return orig(self, N, window_size=window_size,
-                        return_array=return_array)
-        finally:
-            self._idx = idx
+            cache = _ConcatView(self, int(keys.shape[2]))
+        return orig(cache, N, window_size=window_size,
+                    return_array=return_array)
 
     make_mask.__dict__[_PATCH_FLAG] = True
     make_mask.__dict__["_gmlx_orig"] = orig

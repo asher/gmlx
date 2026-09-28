@@ -91,13 +91,22 @@ def test_decode_steps_then_a_verify_block(cls):
 
 @pytest.mark.parametrize("cls", cache_types("BatchRotatingKVCache"),
                          ids=lambda c: c.__module__)
-def test_the_wrap_restores_the_ring_position(cls):
-    c = cls(max_size=_W, left_padding=[0, 7])
+def test_the_wrap_never_writes_the_cache(cls):
+    writes = []
+
+    class Spy(cls):
+        def __setattr__(self, name, value):
+            if getattr(self, "_watch", False):
+                writes.append(name)
+            super().__setattr__(name, value)
+
+    c = Spy(max_size=_W, left_padding=[0, 7])
     c.update_and_fetch(_keys(0, 12, 2), _keys(0, 12, 2))
     c.update_and_fetch(_keys(12, 1, 2), _keys(12, 1, 2))
     assert c.rotated and c._idx == 1
+    object.__setattr__(c, "_watch", True)
     c.make_mask(3)
-    assert c.rotated and c._idx == 1
+    assert writes == [] and c.rotated and c._idx == 1
 
 
 def test_install_is_idempotent():
