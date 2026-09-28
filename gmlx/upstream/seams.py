@@ -402,6 +402,12 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "APCBlock",
          "apc_manager.GmlxAPCManager._grow_pool", critical=True),
+    Seam("mlx_vlm.apc", "APCManager._make_room",
+         "apc_manager.GmlxAPCManager._prefill_reserve_bytes (reads 0 after "
+         "autosize; a renamed reserve field would escape the property)"),
+    Seam("mlx_vlm.apc", "APCManager.prepare_prefill",
+         "apc_manager.GmlxAPCManager._prefill_reserve_bytes (disk flush "
+         "stays stock; the reserve it sets reads 0 after autosize)"),
     Seam("mlx_vlm.apc", "_free_ram_bytes",
          "apc_manager._install_fork_free_free_ram (exact disk-restore gate "
          "rebound to the in-process mach read; stock forks vm_stat)"),

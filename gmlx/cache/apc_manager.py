@@ -93,6 +93,21 @@ class GmlxAPCManager(_apc.APCManager):
         if not os.environ.get("APC_CHECKPOINT_INTERVAL_TOKENS"):
             self.checkpoint_interval_tokens = 0
 
+    # The stock manager sizes a reserve for the prefill in flight at every
+    # prepare, observe, lookup and store, and `_make_room` evicts idle
+    # blocks and exact entries until the reserve fits the headroom. After
+    # autosize the governor owns memory pressure, so the reserve reads 0
+    # unless APC_MEMORY_RESERVE_GB asks for the stock reserves. The disk
+    # flush in `prepare_prefill` is unaffected.
+    @property
+    def _prefill_reserve_bytes(self) -> int:
+        return self.__dict__.get("_gmlx_prefill_reserve", 0)
+
+    @_prefill_reserve_bytes.setter
+    def _prefill_reserve_bytes(self, value: int) -> None:
+        self.__dict__["_gmlx_prefill_reserve"] = (
+            0 if self.__dict__.get("_gmlx_no_prefill_reserve") else int(value))
+
     def autosize(self, model, budget_fraction: float | None = None) -> None:
         """Size the caches to the box post-load. Pool: raise the block
         cap to a working-budget share when APC_NUM_BLOCKS is unset
@@ -102,8 +117,9 @@ class GmlxAPCManager(_apc.APCManager):
         2-entry count cap with a byte budget (entries are full KV
         snapshots; counting them says nothing about their cost).
         Byte cap: the stock manager evicts to its own memory cap and
-        reserve, sized from the Metal working set; both follow the gmlx
-        working budget instead, since the governor owns pressure."""
+        reserves, sized from the Metal working set; the cap follows the
+        gmlx working budget instead and both reserves read 0, since the
+        governor owns pressure."""
         if model is None:
             return
         if budget_fraction is None:
@@ -140,6 +156,8 @@ class GmlxAPCManager(_apc.APCManager):
             self.memory_max_bytes = max(self.memory_max_bytes, int(cap))
         if not os.environ.get("APC_MEMORY_RESERVE_GB"):
             self.memory_reserve_bytes = 0
+            self._gmlx_no_prefill_reserve = True
+            self._prefill_reserve_bytes = 0
 
     def _grow_pool(self, pool_bytes: float, per_tok: float,
                    n_layers: int) -> None:

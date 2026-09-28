@@ -261,6 +261,56 @@ def test_autosize_byte_cap_follows_the_budgets(monkeypatch):
     assert m.memory_reserve_bytes == 3 * (1 << 30)
 
 
+def _long_prompt_admission(monkeypatch):
+    """Autosize a manager holding 32 idle blocks, then admit a 100k-token
+    prompt whose predicted prefill (64 KB per token, twice) exceeds the
+    10 GB left under the 100 GB budget. Returns (manager, disk flushes)."""
+    import mlx.core as mx
+    from mlx_vlm.models import cache as vc
+
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    m.autosize(_fake_model())
+    k = mx.zeros((1, 2, 512, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    flushes = []
+    m.disk = SimpleNamespace(flush=lambda: flushes.append(1))
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 90 * GB)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 40 * GB)
+
+    class _LM:
+        def make_cache(self):
+            return [vc.KVCache(), vc.KVCache()]
+
+    kk = mx.zeros((1, 8, 1024, 128), mx.float16)
+    m.memory_plan.observe_kv([kk] * 16, [kk] * 16, live_bytes=0)
+    m.coordinator(_LM()).prepare_prefill([100_000], prefill_step_size=2048)
+    return m, flushes
+
+
+def test_autosize_drops_the_stock_prefill_reserve(monkeypatch):
+    # The stock prefill reserve evicts idle blocks and exact entries until
+    # the predicted prefill fits; autosize leaves pressure to the governor,
+    # so only APC_MEMORY_RESERVE_GB brings it back. The disk queue still
+    # flushes at every prepare.
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES",
+              "APC_MEMORY_MAX_GB", "APC_MEMORY_RESERVE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    m, flushes = _long_prompt_admission(monkeypatch)
+    assert len(m.hash_table) == 32
+    assert m.stats.memory_evictions == 0
+    assert m._prefill_reserve_bytes == 0
+    assert flushes == [1]
+
+    monkeypatch.setenv("APC_MEMORY_RESERVE_GB", "0")
+    m, flushes = _long_prompt_admission(monkeypatch)
+    assert m._prefill_reserve_bytes > 10 * GB
+    assert m.stats.memory_evictions == 32
+    assert len(m.hash_table) == 0
+    assert flushes == [1]
+
+
 def test_checkpoint_defaults_keep_the_guard_and_no_interval(monkeypatch):
     for k in ("APC_CHECKPOINT_GUARD_TOKENS", "APC_EXACT_PREFIX_GUARD_TOKENS",
               "APC_CHECKPOINT_INTERVAL_TOKENS"):
