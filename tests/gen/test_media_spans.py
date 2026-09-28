@@ -3,6 +3,7 @@
 import logging
 
 import mlx.core as mx
+import numpy as np
 
 from gmlx.gen import media_spans as ms
 from gmlx.gen import prefill_decay
@@ -196,15 +197,112 @@ def test_span_aware_prompt_n_reads_token_types_on_bidirectional_models():
 
 def test_run_checkpoints_start_blocks_and_drop_caller_checkpoints_inside():
     spans = [(6, 20), (24, 34)]
-    step, lengths, kept = ms.run_checkpoints(spans, 40, 8, [10, 22, 36])
+    step, lengths, kept, tail = ms.run_checkpoints(spans, 40, 8, [10, 22, 36])
     assert step == 14  # grows to the longest block
     assert lengths == [6, 22, 24, 36]
     assert kept == {22, 36}
+    assert tail is None
     assert ms.run_checkpoints(spans, 40, 2048, [])[0] == 2048
     # a None step (the caller declined chunking) stays None
     assert ms.run_checkpoints(spans, 40, None, [])[0] is None
     # a block at column 0 needs no checkpoint
     assert ms.run_checkpoints([(0, 5)], 40, 8, [])[1] == []
+
+
+def test_run_checkpoints_a_block_ending_on_the_last_token():
+    # step 50 and 64 around two blocks that end before the last token
+    assert ms.run_checkpoints(SPANS, 140, 50, []) == (50, [40, 100], set(),
+                                                      None)
+    assert ms.run_checkpoints(SPANS, 140, 64, []) == (64, [40, 100], set(),
+                                                      None)
+    # the final-token reserve: the loop's final forward takes the block
+    assert ms.run_checkpoints([(100, 140)], 140, 64, []) == (
+        64, [100], set(), 100)
+    # a prompt that fits one step still splits before its last token
+    assert ms.run_checkpoints(SPANS, 140, 200, [])[3] is None
+    assert ms.run_checkpoints([(100, 140)], 140, 200, [])[3] == 100
+    # a caller checkpoint on the last token falls inside the block
+    assert ms.run_checkpoints([(100, 140)], 140, 64, [139, 80]) == (
+        64, [80, 100], {80}, 100)
+    # a one-token block on the last token runs alone, as the loop runs it
+    assert ms.run_checkpoints([(139, 140)], 140, 50, [])[3] is None
+    # a block that is the whole prompt: one pass over the block
+    assert ms.run_checkpoints([(0, 140)], 140, 50, []) == (None, [], set(),
+                                                           None)
+    # a one-token prompt is never chunked
+    assert ms.run_checkpoints([(0, 1)], 1, 200, []) == (200, [], set(), None)
+    assert ms.run_checkpoints([], 140, 50, []) == (50, [], set(), None)
+    # a None step never chunks, so there is no tail to take
+    assert ms.run_checkpoints([(100, 140)], 140, None, [])[3] is None
+
+
+class _TailLM:
+    """Records each call; outputs carry per-column hidden states."""
+
+    def __init__(self):
+        self.calls = []
+        self.config = "cfg"
+
+    def __call__(self, *args, **kwargs):
+        from types import SimpleNamespace as NS
+
+        ids = args[0] if args else kwargs["inputs"]
+        self.calls.append((np.array(ids).tolist(), kwargs))
+        cols = mx.array(np.array(ids), dtype=mx.float32)[..., None]
+        return NS(logits=cols, hidden_states=[cols, cols * 2])
+
+
+def test_tail_forward_runs_the_held_chunk_with_the_last_token():
+    import threading
+    from types import SimpleNamespace as NS
+
+    lm = _TailLM()
+    model = NS(language_model=lm)
+    fwd = ms._TailForward(model, 3)
+    fwd.arm()
+    assert model.language_model is fwd and fwd.config == "cfg"
+    ids = mx.array([[5, 6, 7, 8]])
+    emb = mx.zeros((1, 4, 2))
+    # another thread reaches the real model
+    other = []
+    t = threading.Thread(target=lambda: other.append(
+        model.language_model(ids[:, :1], inputs_embeds=emb[:, :1])))
+    t.start()
+    t.join()
+    assert len(lm.calls) == 1 and other[0].logits.shape == (1, 1, 1)
+    held = model.language_model(inputs=ids[:, :3], inputs_embeds=emb[:, :3],
+                                cache="c", n_to_process=3, logits_to_keep=1)
+    assert held.logits is None and held.hidden_states == []
+    assert len(lm.calls) == 1
+    out = model.language_model(ids[:, 3:], inputs_embeds=emb[:, 3:],
+                               cache="c", logits_to_keep=1, capture=True)
+    assert model.language_model is lm
+    call_ids, kw = lm.calls[1]
+    assert call_ids == [[5, 6, 7, 8]]
+    assert kw["inputs_embeds"].shape == (1, 4, 2)
+    assert kw["cache"] == "c" and kw["capture"] and "n_to_process" not in kw
+    assert np.array(out.logits).ravel().tolist() == [5, 6, 7, 8]
+    # the held columns fill the chunk's list, the output keeps the last
+    assert [np.array(h).ravel().tolist() for h in held.hidden_states] == [
+        [5, 6, 7], [10, 12, 14]]
+    assert [np.array(h).ravel().tolist() for h in out.hidden_states] == [
+        [8], [16]]
+
+
+def test_tail_forward_disarms_on_a_chunk_it_does_not_expect():
+    from types import SimpleNamespace as NS
+
+    lm = _TailLM()
+    model = NS(language_model=lm)
+    fwd = ms._TailForward(model, 3)
+    fwd.arm()
+    ids = mx.array([[5, 6]])
+    out = model.language_model(inputs=ids, inputs_embeds=mx.zeros((1, 2, 2)),
+                               n_to_process=2)
+    assert model.language_model is lm and out.logits.shape == (1, 2, 1)
+    fwd.arm()
+    list(ms._disarm_after(iter([1, 2]), fwd))
+    assert model.language_model is lm
 
 
 def test_run_spans_start_after_the_cached_prefix():

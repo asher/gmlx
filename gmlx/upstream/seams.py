@@ -252,7 +252,16 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "generate_step",
          "media_spans.install_block_aware_generate_step (block starts "
          "ride prompt_cache_checkpoint_lengths through a pass-through "
-         "prompt_cache_checkpoint)", critical=True),
+         "prompt_cache_checkpoint; _TailForward reads the chunk call's "
+         "inputs, inputs_embeds and n_to_process keywords, and the final "
+         "_step call's positional ids, from model.language_model)",
+         critical=True),
+    Seam("mlx_vlm.speculative.utils", "SpeculativePrefill.append",
+         "media_spans._TailForward (keeps the held chunk's hidden-state "
+         "list by reference; the final forward fills it)"),
+    Seam("mlx_vlm.speculative.utils", "SpeculativePrefill.finish",
+         "media_spans._TailForward (joins the kept lists with the final "
+         "output's hidden states, which keep the last column)"),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
          "mtp_prefill.install_full_prompt_mtp_prefill; "
          "seed_rows.install_per_request_seed (row-uid publish); "

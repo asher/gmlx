@@ -417,6 +417,57 @@ def test_run_prefill_chunks_at_block_edges(monkeypatch):
     assert np.abs(chunked - whole).max() <= 1e-4
 
 
+def test_run_prefills_a_block_ending_on_the_last_token_whole(monkeypatch):
+    """A prompt whose image block ends on its last token, as run with
+    ``--no-chat-template`` sends it: generate_step prefills the text before
+    the block in one chunk and the whole block, last token included, in
+    one forward, and the first token's log-probabilities are those one
+    pass gives."""
+    from mlx_vlm.generate import ar, dispatch
+
+    from gmlx.gen import media_spans
+
+    assert media_spans.install_block_aware_generate_step()
+    monkeypatch.setattr(ar, "generation_stream", mx.cpu)
+    model, tc = _container()
+    ids, spans = _prompt(tc.vocab_size, [40], total=140)
+    (a, b), = spans
+    ids = ids[:b]
+    assert b - a <= 50 and a + 50 > b > 50
+    pv = mx.random.normal((6 * 24, 3 * 2 * 2), key=mx.random.key(0))
+    meta = [[6, 24, 2, 8]]
+    widths = []
+    call = type(model.language_model).__call__
+
+    def spy(self, *args, **kwargs):
+        x = kwargs.get("inputs", args[0] if args else None)
+        widths.append(int(x.shape[1]))
+        return call(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(model.language_model), "__call__", spy)
+    lm = model.language_model
+
+    def first(step):
+        widths.clear()
+        gen = dispatch.generate_step(
+            mx.array([ids]), model, pv, None, max_tokens=1,
+            prefill_step_size=step, image_meta=meta, image_spans=spans)
+        _tok, logprobs = next(gen)
+        gen.close()
+        assert model.language_model is lm
+        prefill = []
+        while sum(prefill) < len(ids):
+            prefill.append(widths[len(prefill)])
+        return np.array(logprobs.astype(mx.float32)), prefill
+
+    with mx.stream(mx.cpu):
+        chunked, chunk_widths = first(50)
+        whole, whole_widths = first(None)
+    assert whole_widths == [b]
+    assert chunk_widths == [a, b - a]
+    assert np.abs(chunked - whole).max() <= 1e-4
+
+
 def test_block_length_and_lead_pads():
     for start in range(8):
         for n_h, n_w in ((1, 1), (2, 5), (3, 7), (16, 24)):

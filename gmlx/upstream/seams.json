@@ -187,6 +187,8 @@
   "mlx_vlm.server.runtime:runtime": "47115b7d815f70604a4bcf356142268fe88293fe42a9378d6482762b1a788f66",
   "mlx_vlm.server:_infer_tool_parser_from_processor": "172bcb91d2cb9a13f0833a9edeea01435fdb75d9e6a988b1fe804526ed67e759",
   "mlx_vlm.speculative.drafters:load_drafter": "0c0a5200fa7bbf342e2126150e17b960a0fb086bf1802322e158ef0e654a3d3b",
+  "mlx_vlm.speculative.utils:SpeculativePrefill.append": "b9dbe72a2fa85f365b1937be3b1c93e91fa00f74e9c397ab702162a257dc0230",
+  "mlx_vlm.speculative.utils:SpeculativePrefill.finish": "d3989db942cafd995d6d354c961828be01fe0b7ae84a53a665594961509f8658",
   "mlx_vlm.speculative.utils:make_speculative_prompt_cache": "7166313722254f2eeeb93f324c04a3b5c1cd56c358d71d5aba8c6d6fa5339974",
   "mlx_vlm.tools.registry:ParserSpec": "f161a536a062e4ac72b9be030667fde5556a04449aff58bdee04a84eab73e59e",
   "mlx_vlm.tools.registry:SPECS": "fdcf9f54d7b8eedb65578af867a7132848916f154fa4411fde684e8274f296b5",
