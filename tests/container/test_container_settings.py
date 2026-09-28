@@ -791,6 +791,19 @@ def test_server_config_path_prefers_the_running_server(home, monkeypatch):
     assert settings.server_config_path("box.local", 8000, autostart=False) is None
 
 
+def test_a_running_server_without_a_config_file_is_reported(home, monkeypatch):
+    """Such a server scans the folder it started from, which may be shared,
+    so launch says it cannot check it rather than checking the wrong file."""
+    from gmlx.serve import lifecycle
+    (home / ".config" / "gmlx").mkdir(parents=True)
+    _config(home / ".config" / "gmlx" / "gmlx.yaml", "server: {}\n")
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"config_abspath": None, "pid": os.getpid()})
+    notes: list[str] = []
+    assert settings.server_config_path("127.0.0.1", 8080, notes=notes) is None
+    assert any("runs without a config file" in n for n in notes)
+
+
 # Round-eight review: seeds, links from earlier launches, firmlinks
 
 def _alias(path) -> str:

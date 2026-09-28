@@ -999,6 +999,15 @@ def server_config_path(host: str, port: int, *, autostart: bool = True,
     from gmlx.serve import lifecycle
 
     run = lifecycle.read_run(host, port) or {}
+    if run and not run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
+        # Such a server scans the folder it started from, or --models-dir,
+        # which the runfile does not record.
+        if notes is not None:
+            notes.append(f"[launch] the server on port {port} runs without a config file, "
+                         "so launch cannot check whether the folders it scans for models "
+                         "are shared. A client could add a model file to a shared folder "
+                         "it scans. Start the server with --config to have it checked.")
+        return None
     if run.get("config_abspath") and lifecycle.pid_alive(run.get("pid")):
         path = str(run["config_abspath"])
         if os.path.isabs(path):
