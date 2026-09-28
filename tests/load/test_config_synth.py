@@ -321,13 +321,17 @@ def test_gemma4_image_attention_follows_the_hf_config(layers, hidden,
     assert c.get("use_bidirectional_attention") == want
 
 
-def test_diffusion_gemma_image_attention_stays_causal():
-    # DiffusionGemma shares the Gemma-4 synth; the 26B-A4B shape alone does
-    # not make it a vision checkpoint.
+def test_diffusion_gemma_image_attention_is_its_text_config_default():
+    # DiffusionGemma shares the Gemma-4 synth but never gets the key, the
+    # 26B-A4B shape included. The TextConfig it loads defaults to "vision".
+    from mlx_vlm.models.diffusion_gemma.config import TextConfig
+
     m = _meta_gemma4_size("diffusion-gemma", layers=30, hidden=2816,
                           experts=128)
     c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
     assert "use_bidirectional_attention" not in c["text_config"]
+    built = TextConfig.from_dict(c["text_config"])
+    assert built.use_bidirectional_attention == "vision"
 
 
 def test_glm4_partial_rotary_and_attention_bias():
