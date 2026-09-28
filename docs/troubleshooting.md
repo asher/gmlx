@@ -128,6 +128,15 @@ started it from, which may hold no GGUFs. Run
 config, or pass `--models-dir DIR`. `gmlx sync-models` has no such fallback
 and stops with `no config found in the default locations`.
 
+### gmlx no longer reads ./gmlx.yaml
+
+A command run from a folder that holds a `gmlx.yaml` prints
+`gmlx no longer reads ./gmlx.yaml` and uses the config in your home folder
+instead. A file in a project folder can name commands the server runs, and
+a client in a container can write one, so gmlx reads it only when you name
+it. Pass `--config ./gmlx.yaml`, or for `gmlx launch` start the server first
+with `gmlx serve --config ./gmlx.yaml`.
+
 ### `gmlx status` reports 0 models served
 
 The server is up, but every request gets a 404. Either the config lists no
@@ -350,6 +359,23 @@ names, or reset the client by deleting
 only the git identity needs, such as `.gitconfig`, gives a warning instead
 and the launch goes on.
 
+### Launch refuses a mount or a seed through a symbolic link
+
+A `--mount`, a [`mounts`](config.md#launchcontainermounts) entry or a
+[`seed`](config.md#launchcontainerclientsseed) whose path is a symbolic
+link, or passes through one, stops the launch. A client in an earlier
+session could have left that link in a folder it shared. When you made the
+link yourself, write the real path that the message gives, such as
+`/private/tmp/x` for `/tmp/x`. A seed must also lie inside your home folder
+and outside credential folders.
+
+### Launch refuses to build while the builder forwards your SSH agent
+
+The image builder was started with SSH forwarding, so any Containerfile it
+builds could use every key in your Mac's SSH agent. Launch never builds on
+such a builder. Run `container builder stop`, and the next launch starts a
+builder without the agent.
+
 ### A leftover container of another client keeps running
 
 A killed launch of another client left its container behind, and launch
@@ -431,7 +457,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 
 | Path | Contents |
 |------|----------|
-| `./gmlx.yaml`, `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
+| `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | `gmlx launch` writes injected clients' configs here. |
 | `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. To remove gmlx, delete those settings and keep the files. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |

@@ -42,8 +42,8 @@ To make it the default, set
 client or for one client. `--no-container` then runs a client on the Mac for
 one launch. Each flag that only makes sense in a container turns on
 container mode by itself. These flags are `--mount`, `--mount-cwd`,
-`--no-mount-cwd`, `--image`, `--rebuild`, `--network` and `--shell`, and
-the [CLI reference](cli.md#gmlx-launch) describes each one.
+`--no-mount-cwd`, `--image`, `--rebuild`, `--reseed`, `--network` and
+`--shell`, and the [CLI reference](cli.md#gmlx-launch) describes each one.
 
 Launch reads its container settings only from the config file in your
 home folder, as [Launch](config.md#launch) explains.
@@ -89,20 +89,29 @@ from a project folder instead:
 - Your home folder, any folder that holds it, and system folders such as
   `/`, `/Users`, `/Volumes`, `/tmp` and `/Applications`.
 - Credential folders such as `~/.ssh`, `~/.aws`, `~/.config/gh` and
-  `~/.config/gmlx`, and any folder that holds one or lies inside one.
+  `~/.config/gmlx`, folders whose files the Mac runs, such as
+  `~/Library/LaunchAgents`, `~/.local/bin` and `/opt/homebrew`, and any
+  folder that holds one of these or lies inside one.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
 
-On a volume that ignores the case of names, as APFS does by default, launch
-also ignores case when it compares these paths, so `~/.SSH` counts as
-`~/.ssh`.
+Launch compares these paths in the form macOS itself gives a folder, so
+`/System/Volumes/Data/Users/you` counts as `/Users/you`. On a volume that
+ignores the case of names, as APFS does by default, launch also ignores
+case, so `~/.SSH` counts as `~/.ssh`.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
-folders. A mount can name any folder. A mount of a credential folder is
-honored, and launch prints a warning that names it. Only folders can be
-shared, not single files, and a path that contains `,` or `=` is refused.
-A mount of the current folder at its own path replaces the default share,
-so `--mount .:ro` shares the project read-only.
+folders. A mount of a credential folder is honored, and launch prints a
+warning that names it. A mount of gmlx's own data is always refused. Only
+folders can be shared, not single files, and a path that contains `,` or
+`=` is refused. A mount of the current folder at its own path replaces the
+default share, so `--mount .:ro` shares the project read-only.
+
+A mount path that is a symbolic link, or that passes through one, is
+refused, and the message gives the real path to write instead. A client in
+an earlier, wider share could have replaced a folder with a link, so launch
+never follows one in a mount. This also refuses a path such as `/tmp/x`,
+which you write as `/private/tmp/x`.
 
 Files the client writes in a share appear on the Mac with your user as
 their owner, and modes and symbolic links are kept. Inside the container
@@ -135,10 +144,22 @@ It stops the launch instead, as
 describes.
 
 A fresh private home starts empty, so a client such as Claude Code shows
-its first-run steps once. [`seed`](config.md#launchcontainerclientsseed)
-copies chosen files from your home into it. Launch also copies your git
-`user.name` and `user.email` into the private home's `.gitconfig` when they
-are missing there, so commits made in the container carry your name.
+its first-run steps once. Launch copies your git `user.name` and
+`user.email` into the private home's `.gitconfig` when they are missing
+there, so commits made in the container carry your name.
+
+[`seed`](config.md#launchcontainerclientsseed) copies chosen files or
+folders from your home into the private home. Launch copies each seed once
+and records it outside the private home, so a client that deletes its copy
+does not get a new one. `--reseed` copies every seed again and replaces the
+copies. Launch refuses a seed whose real path lies outside your home
+folder, in a credential folder or in gmlx's own data. It never follows a
+symbolic link while it copies, skips named pipes, sockets and devices, and
+stops at 64 MiB, 10,000 files and folders, or 64 folders deep in one seed.
+
+The client reads every seeded file, so never seed a sign-in token. Launch
+warns when a seed holds one, such as `~/.claude.json`,
+`~/.local/share/opencode/auth.json` or `~/.config/goose/secrets.yaml`.
 
 A seeded settings file can hold settings that only work on the Mac. A
 `.gitconfig` with `credential.helper = osxkeychain` or commit signing, or a
@@ -149,15 +170,18 @@ commands, fails in the container. Seed a copy without those settings.
 
 Git in the container works when you launch from the root of a repository.
 A linked worktree or a submodule keeps its git folder outside its own
-folder, so launch also shares that git folder, read-write, and prints a
-line saying so.
+folder, so launch also shares that git folder and prints a line saying so.
+The git folder is read-write, or read-only when the share that holds the
+repository root is read-only, as with `--mount .:ro`.
 
 Launch shares that git folder only when it names the project back. For a
 worktree, the repository's entry for it names the project's `.git` file,
 by an absolute path or by one relative to the entry. For a submodule, its
-`core.worktree` names the project folder. The client can edit the `.git`
-file in the share, but not the repository outside it, so it cannot use
-this to reach another repository.
+`core.worktree` names the project folder. The git folder must also be
+named like one: `.git`, a name that ends in `.git`, or a folder inside a
+`.git/modules` folder, and it must not hold the project. The client can
+edit the `.git` file in the share, but not the repository outside it, so
+it cannot use this to reach another repository.
 
 Launch compares the recorded path as git wrote it and follows no symbolic
 link in it, because the client can place a link in any folder it could
@@ -188,19 +212,38 @@ the Mac in these ways:
 - Files the client writes in a read-write share run on the Mac when you
   use them. Examples are `.git/hooks`, `.git/config`, `.envrc` and the
   scripts in `package.json`.
-- A `./gmlx.yaml` the client writes in a share is read by the next
-  `gmlx serve` from that folder. It can change where the server listens,
-  turn off its key, or add a tool server command that the server runs on
-  the Mac.
+- gmlx never reads a `gmlx.yaml` from the current folder by itself. A
+  `gmlx.yaml` the client writes in a share takes effect only when you pass
+  it with `--config`. It can then change where the server listens, turn off
+  its key, or add a tool server command that the server runs on the Mac, so
+  read it before you use it.
 - The client can make the running server read its configuration again
   through the API. When that configuration, a model folder the server
   scans, or a model file it lists is inside a read-write share, the client
   can make the server load files of its choosing. Launch prints a warning
   when it finds any of these in a share.
+- A [`build`](config.md#launchcontainerclientsbuild) folder that the client
+  could write at any time runs the client's code at the next build, with
+  internet access even under `network: none`. Launch refuses a build folder
+  inside a read-write share of the session, and it names the files that
+  changed when it builds again. It never gives a build your SSH agent, and
+  it refuses to build while the image builder forwards the agent.
+- The client reads every file you [seed](#the-private-home), so a seeded
+  token is the client's token.
 
 The client gets the server's API key, which also unloads models and
 reloads the server's configuration, not only chat. It can therefore
-unload models that other clients are using.
+unload models that other clients are using. The server takes an image,
+audio or video in a request only as inline data, so the key does not let
+the client make the server read a Mac file or fetch a URL. With
+[`server.media_urls`](config.md#servermedia_urls) on, the server fetches
+http(s) URLs, and the client can then reach the Mac's loopback services and
+your local network through it, even under `network: none`.
+
+A [browser app](#browser-apps) gives the client a page in your browser at a
+localhost origin, with whatever that origin can reach. The gmlx server
+allows requests from any origin, so that page can also call the server with
+the key the client holds.
 
 Other access is opt-in:
 
@@ -215,23 +258,29 @@ Other access is opt-in:
   forward one. Never forward a browser's remote debugging port, such as
   9222, because that gives the client your logged-in browser.
 
-The container has internet access unless you set
+The container reaches the internet and your local network unless you set
 [`network: none`](config.md#launchcontainernetwork). On the default
 network, a Mac service that listens on all addresses is reachable from the
-container. The connection to the server needs no sudo, changes no network
-setting and raises no firewall prompt, and the server sees
-`Host: 127.0.0.1:<port>` on every request.
+container, and so is any device on your network. The connection to the
+server needs no sudo, changes no network setting and raises no firewall
+prompt, and the server sees `Host: 127.0.0.1:<port>` on every request.
+
+Launch shows every control character in a name or message it prints as a
+`\xNN` escape, so a name the client chose cannot move the cursor, rewrite
+earlier lines or set your terminal's clipboard.
 
 ## The image
 
 With no settings, launch builds one image per client from a recipe that
 ships with gmlx. The image starts from Debian with Node.js and adds git,
 ripgrep, curl, an SSH client and the client itself, installed from its
-official source. It is built once, and built again when a gmlx upgrade
-changes the recipe or when its `packages` change.
+official source. The recipe pins the base image by digest and each client
+at one version, with a checksum on each download. The image is built once,
+and built again when a gmlx upgrade changes the recipe or when its
+`packages` change, so a newer client arrives with a gmlx release.
 
-`--rebuild` builds the image again with fresh downloads, which also
-updates the client. Launch prints the image's age at each start, and it
+`--rebuild` builds the image again without its cache, which picks up new
+Debian packages. Launch prints the image's age at each start, and it
 suggests `--rebuild` when the image is older than 30 days.
 
 [Custom container images](container-images.md) covers adding packages,
@@ -266,7 +315,7 @@ further in a container:
 | Client | In a container |
 |--------|----------------|
 | `claude-code` | Launch sets `IS_SANDBOX=1`, so `-- --dangerously-skip-permissions` works as root, and turns off its auto-updater. |
-| `dsh` | A `--dsh-profile` must exist in the private home. The stdio profiles `acp`, `sdk` and `sdk-minimal` run only with `--no-container`. |
+| `dsh` | A `--dsh-profile` must exist in the private home. Only `gmlx` and `web` run as web apps. `acp`, `sdk` and `sdk-minimal` need `--no-container`. |
 
 Under `network: none`, Claude Code also gets
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so it stops trying to reach
@@ -379,8 +428,10 @@ the Mac loses power. Launch never deletes a volume, and
 [`forward`](config.md#launchcontainerforward) gives the client a service
 that runs on the Mac, such as a database. Each port P in the list appears
 on the container's own `127.0.0.1:P`, the same address as on the Mac, and
-it works under `network: none` too. When the Mac service is down, the
-connection closes at once and launch logs one line.
+it works under `network: none` too. Launch connects to the Mac's
+`127.0.0.1:P` only, never to `::1`, so a service that listens only on `::1`
+cannot be forwarded. When the Mac service is down, the connection closes
+at once and launch logs one line.
 
 A forward of the gmlx server's port is refused, since the container already
 reaches the server, and so is a forward of a browser app's web port. A
@@ -406,9 +457,11 @@ Paste with the client's own key for images, such as Ctrl-V in Claude Code.
 Cmd-V pastes only text into a terminal.
 
 The container gets images only. It cannot read clipboard text, and it
-cannot write the Mac clipboard at all. An image arrives as PNG, and an
-image of more than 20 MB is refused. Each image read adds a line to the
-session log.
+cannot write the Mac clipboard at all. An image arrives as PNG. A PNG over
+20 MB is refused, and so is an image in another type over 64 MB, before
+launch converts it. Each image read adds a line to the session log, and so
+do the first request for the clipboard's image types and every hundredth
+one after it.
 
 The setting is off by default, because the client can read the clipboard
 image at any time during the session, not only when you paste. With it off,
@@ -430,10 +483,11 @@ forwarded ports when it starts, and then prints nothing of its own.
 Ctrl-C reaches the client as it does on the Mac. When launch itself is
 stopped, it stops the container, and a second stop ends it at once. After
 the client exits, launch removes the container and its session files. A
-session whose launch was killed is cleaned up by the next launch of that
-client, and a launch of any other client prints a line with its
-`container stop` command, since the leftover virtual machine holds memory
-until it stops.
+container that is still there afterwards gets a line with its
+`container delete --force` command. A session whose launch was killed is
+cleaned up by the next launch of that client, and a launch of any other
+client prints a line with its `container stop` command, since the leftover
+virtual machine holds memory until it stops.
 
 The exit code is the client's own. Three codes come from the container
 before the client starts, and each prints a one-line message that names
@@ -500,8 +554,15 @@ no data moves in either direction for 30 seconds after it opens. A
 connection from the container to the server must instead send a whole
 request head in those 30 seconds. After that first data, or that request
 head, the connection has no time limit, so a streamed answer is never cut.
-Idle connections therefore cannot use up the file handles of the server
-that other clients share.
+Once one side ends its half, the connection closes after 30 seconds with
+no data. Each listener also accepts at most 200 new connections a second.
+Idle connections and bursts of connections therefore cannot use up the
+file handles of the server that other clients share.
+
+Launch checks every shared folder again just before the container starts,
+and it stops when one has changed, such as a folder that another session's
+client replaced with a link. A change after that check still reaches the
+container, so share only folders that no other session can write.
 
 ## Removing container data
 

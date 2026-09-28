@@ -1535,9 +1535,11 @@ no packages.
 
 ### `launch.container.clients.*.seed`
 
-Each file named here, which must be inside your home folder, is copied
-into the private home at the same relative path. A copy is made once, while
-it is missing. The default is no files.
+Each file or folder named here is copied into the private home at the
+same relative path, once, and `--reseed` copies it again. Its real path
+must lie inside your home folder and outside credential folders, as
+[The private home](launch-container.md#the-private-home) describes with
+the copy's limits. The default is no files.
 
 ## Chat themes
 

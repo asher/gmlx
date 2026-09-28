@@ -69,19 +69,33 @@ since launch finds it by reading the file. Any client's `:base` works, and
 launch refuses any other `gmlx.invalid` reference, because those tags are
 deleted when a newer build replaces them.
 
+Keep the build folder out of every folder a session shares read-write.
+The client could change it there, and its change would run at the next
+build with internet access. Launch refuses a build folder or Containerfile
+inside a read-write share of the session, and a read-write share inside
+the build folder.
+
 Launch builds your image again when the Containerfile or a file in the
-build context changes, and when a gmlx upgrade changes the base. A
-`.dockerignore` in the context keeps folders such as `node_modules` out of
-both the build and that check. A `<Containerfile>.dockerignore` beside the
-Containerfile takes its place when it exists. Launch leaves the `.git`
-folder at the root of the context out of that check, but the build still
-receives it, so list `.git` in the ignore file to keep it out of the image.
-A Containerfile must stay under 16 KiB, which `container build` requires.
+build context changes, and when a gmlx upgrade changes the base. The line
+`rebuilding because <files> changed` names up to three of the changed
+files. A `.dockerignore` in the context keeps folders such as
+`node_modules` out of both the build and that check. A
+`<Containerfile>.dockerignore` beside the Containerfile takes its place
+when it exists. Launch leaves the `.git` folder at the root of the context
+out of that check, but the build still receives it, so list `.git` in the
+ignore file to keep it out of the image.
+
+Launch reads the ignore file only when it is a regular file of at most
+1 MiB with at most 1000 patterns, and not a symbolic link. A pattern with a
+character class may hold at most two `*`. Otherwise launch prints a line
+saying that every context file counts, and any change rebuilds the image. A
+Containerfile must be a regular file under 16 KiB, which
+`container build` requires.
 
 `--rebuild` builds your image again without its cache. When the
 Containerfile names no `:base`, it also pulls the registry images the
 Containerfile starts from again. When it names a `:base`, launch first
-rebuilds that base with fresh downloads, and it does not pull the other
+rebuilds that base without its cache, and it does not pull the other
 registry images your Containerfile names.
 
 Apple's image builder is a virtual machine of its own that holds about
@@ -91,8 +105,10 @@ launch is building and no other `container build` runs. A later launch
 stops it when an overlapping build kept it running, and only while its
 start date still matches, so a builder you start yourself later is never
 stopped. A failed stop prints one warning. When the builder already runs,
-launch builds with its CPU, memory, SSH and color settings, so the build
-does not replace it.
+launch builds with its CPU, memory and color settings, so the build does
+not replace it. A build never gets your SSH agent, and launch refuses to
+build while the builder forwards the agent, since any Containerfile could
+then use every key in it. Stop that builder with `container builder stop`.
 
 A launch prints one line, once for each start of the builder, when the
 builder runs with no build using it, and the line gives the
