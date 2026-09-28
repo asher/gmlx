@@ -427,7 +427,12 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.GmlxAPCManager._grow_pool", critical=True),
     Seam("mlx_vlm.apc", "APCManager._make_room",
          "apc_manager.GmlxAPCManager._prefill_reserve_bytes (reads 0 after "
-         "autosize; a renamed reserve field would escape the property)"),
+         "autosize; a renamed reserve field would escape the property) and "
+         "GmlxAPCManager._memory_headroom (the memory_evictions count and "
+         "the evict, clear, read-again order)"),
+    Seam("mlx_vlm.apc", "APCManager._memory_headroom",
+         "apc_manager.GmlxAPCManager._memory_headroom (drops a cached "
+         "free-RAM reading after an eviction or a cache clear)"),
     Seam("mlx_vlm.apc", "APCManager.prepare_prefill",
          "apc_manager.GmlxAPCManager._prefill_reserve_bytes (disk flush "
          "stays stock; the reserve it sets reads 0 after autosize)"),

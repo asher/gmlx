@@ -109,6 +109,21 @@ class GmlxAPCManager(_apc.APCManager):
         self.__dict__["_gmlx_prefill_reserve"] = (
             0 if self.__dict__.get("_gmlx_no_prefill_reserve") else int(value))
 
+    # Evictions and MLX cache size at the last headroom read.
+    _gmlx_headroom_mark: tuple[int, int] | None = None
+
+    def _memory_headroom(self) -> int:
+        """Stock headroom, with a cached free-RAM reading dropped once
+        memory went back to the system since the last call: `_make_room`
+        evicts, clears the MLX cache, then reads the headroom again."""
+        import mlx.core as mx
+
+        mark = (self.stats.memory_evictions, mx.get_cache_memory())
+        last, self._gmlx_headroom_mark = self._gmlx_headroom_mark, mark
+        if last is not None and (mark[0] != last[0] or mark[1] < last[1]):
+            _invalidate_free_ram()
+        return super()._memory_headroom()
+
     def autosize(self, model, budget_fraction: float | None = None) -> None:
         """Size the caches to the box post-load. Pool: raise the block
         cap to a working-budget share when APC_NUM_BLOCKS is unset
@@ -317,6 +332,8 @@ class GmlxAPCManager(_apc.APCManager):
                 if had_slabs:
                     freed += nb
                     evicted += 1
+        if freed:
+            _invalidate_free_ram()
         return freed
 
     # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
@@ -662,7 +679,7 @@ _FREE_RAM_TTL_S = 1.0
 
 def _cached_free_ram(read, ttl=_FREE_RAM_TTL_S, clock=time.monotonic):
     """``read`` called at most once per ``ttl`` seconds; the value in
-    between is the last reading."""
+    between is the last reading. ``invalidate()`` drops the reading."""
     last: list = [None, None]
 
     def free_ram_bytes():
@@ -671,8 +688,19 @@ def _cached_free_ram(read, ttl=_FREE_RAM_TTL_S, clock=time.monotonic):
             last[0], last[1] = now, read()
         return last[1]
 
+    def invalidate():
+        last[0] = None
+
     free_ram_bytes.__dict__["_gmlx_cached"] = True
+    free_ram_bytes.__dict__["invalidate"] = invalidate
     return free_ram_bytes
+
+
+def _invalidate_free_ram() -> None:
+    """Drop the cached free-RAM reading, if the bound read is cached."""
+    invalidate = getattr(_apc._free_ram_bytes, "invalidate", None)
+    if callable(invalidate):
+        invalidate()
 
 
 def _install_fork_free_free_ram() -> None:

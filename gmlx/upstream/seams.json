@@ -26,6 +26,7 @@
   "mlx_vlm.apc:APCBlock": "11ffc117376de1f7bce517c1d9b838e17e3782f5c75705d5861b65a7aa9886cc",
   "mlx_vlm.apc:APCExactCacheEntry": "7f65c135f99bdd0f3cf56da3ac1926a1c9fe2b933888b29a8d27f6922cc8f163",
   "mlx_vlm.apc:APCManager._make_room": "96a809c9f521c54a85d3b54bc0a125b312647965baf2ec248126c5250dba5d74",
+  "mlx_vlm.apc:APCManager._memory_headroom": "daabab5471b5c91585e32c6bd5c7324593afbb10b21d78ec959aa1385256b21e",
   "mlx_vlm.apc:APCManager.prepare_prefill": "9ce2782d87b309ca8ca3cd0d0b4b2d2af0a1a37bb0c3f0a8583a2939230768fc",
   "mlx_vlm.apc:APCManager.store_kv_blocks": "fce5dacbe9d39c066f1d6cf18ddc46504a422a673583780f6ef7b3ca4ed3c3a9",
   "mlx_vlm.apc:DEFAULT_BLOCK_SIZE": "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9",

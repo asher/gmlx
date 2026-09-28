@@ -131,6 +131,93 @@ def test_cached_free_ram_rereads_after_the_interval():
     assert cached() == 2
 
 
+def _full_manager(monkeypatch):
+    """A manager holding 32 idle blocks, with the working-set term never
+    the limit, so the free-RAM reading decides the headroom."""
+    import mlx.core as mx
+
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 * GB)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    k = mx.zeros((1, 2, 512, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    block = next(b.resident_bytes() for b in m.pool if b.block_hash is not None)
+    m.memory_reserve_bytes = 0
+    m._working_set_bytes = 100 * GB
+    m.memory_max_bytes = 10 * GB
+    return m, block
+
+
+def test_make_room_rereads_the_cached_free_ram_after_it_evicts(monkeypatch):
+    """Each eviction hands its bytes back to the system once _make_room
+    clears the MLX cache. The cached reading predates that, so _make_room
+    reads again: one store evicts the two blocks it needs and reports room,
+    and the stores after it evict nothing."""
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, block = _full_manager(monkeypatch)
+    base = 4 * block
+
+    def live():
+        return base + m.stats.memory_evictions * block
+
+    read = _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0)
+    monkeypatch.setattr(apc, "_free_ram_bytes", read)
+    read()
+    results = [(m._make_room(6 * block), len(m.hash_table),
+                m.stats.memory_evictions) for _ in range(4)]
+    assert results == [(True, 30, 2)] * 4
+
+
+def test_headroom_rereads_the_cached_free_ram_after_a_cache_clear(
+        monkeypatch):
+    """A cache clear returns the MLX cache to the system: the headroom
+    reads free RAM again once the cache has shrunk, and not before."""
+    import mlx.core as mx
+
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, _ = _full_manager(monkeypatch)
+    reads = []
+
+    def live():
+        reads.append(1)
+        return 4 * GB
+
+    monkeypatch.setattr(apc, "_free_ram_bytes",
+                        _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0))
+    cache = [1 * GB]
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: cache[0])
+    m._memory_headroom()
+    m._memory_headroom()
+    cache[0] = 2 * GB
+    m._memory_headroom()
+    assert len(reads) == 1
+    cache[0] = 0
+    assert m._memory_headroom() == 4 * GB
+    assert len(reads) == 2
+
+
+def test_governor_eviction_drops_the_cached_free_ram(monkeypatch):
+    from gmlx.cache.apc_manager import _cached_free_ram
+
+    m, _ = _full_manager(monkeypatch)
+    reads = []
+
+    def live():
+        reads.append(1)
+        return 4 * GB
+
+    read = _cached_free_ram(live, ttl=1.0, clock=lambda: 0.0)
+    monkeypatch.setattr(apc, "_free_ram_bytes", read)
+    read()
+    assert m.governor_evict(0.5) > 0
+    read()
+    assert len(reads) == 2
+
+
 def test_from_env_is_dead_under_the_pin(monkeypatch):
     monkeypatch.setenv("APC_ENABLED", "0")
     assert apc.from_env(model_namespace="/m/a.gguf") is None
