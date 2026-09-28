@@ -32,15 +32,23 @@ _CHUNK = 64 * 1024
 # Accept errors that last until something else frees a resource.
 LASTING_ACCEPT_ERRORS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
 ACCEPT_PAUSE = 0.1
+# Each listener accepts at most this many connections a second, after a
+# first burst, so a guest that opens and closes connections in a loop cannot
+# keep the relay thread busy. Connections over the rate stay in the listen
+# queue until the listener accepts again.
+ACCEPT_RATE = 200.0
+ACCEPT_BURST = 256
 BUFFER_CAP = 256 * 1024
-# The most connections one listener holds open at a time. More wait in the
-# listen queue until one closes, so a guest cannot use up the supervisor's
-# file descriptors.
+# The most connections one listener holds open at a time, so a guest cannot
+# use up the supervisor's file descriptors. More stay in the listen queue
+# until one closes, and once that queue is full the system refuses them.
 CONNECTIONS_MAX = 256
 # A relayed connection that moves no byte in either direction in this many
 # seconds closes. Each one holds a connection to the target too, such as the
 # gmlx server, so idle guest connections cannot use up its descriptors. Once
-# bytes flow there is no deadline, so a quiet stream stays open.
+# bytes flow there is no deadline, so a quiet stream stays open, until one
+# side ends its half: from then on the connection closes once no byte moves
+# for this long, since the other side may never end its own.
 IDLE_DEADLINE = 30.0
 PROBE_TIMEOUT = 1.0
 
@@ -256,16 +264,49 @@ class RelayLoop:
 
 
 class AcceptPause:
-    """Handles accept errors for one listener. An error that lasts, such as
-    running out of file descriptors, is logged once per run of failures and
-    stops watching the listener for 100 ms, so the loop does not spin on it
-    and the log does not grow with one line per attempt."""
+    """Handles accept errors and the accept rate for one listener. An error
+    that lasts, such as running out of file descriptors, is logged once per
+    run of failures and stops watching the listener for 100 ms, so the loop
+    does not spin on it and the log does not grow with one line per attempt.
+    Past :data:`ACCEPT_RATE` accepts a second the listener also stops being
+    watched until the next accept is due."""
+
+    # Seconds between two notices that the accept rate was reached.
+    RATE_NOTICE_GAP = 60.0
 
     def __init__(self, loop: RelayLoop, sock: socket.socket,
-                 callback: Callable[[int], None], name: str):
+                 callback: Callable[[int], None], name: str, *,
+                 rate: float = ACCEPT_RATE, burst: int = ACCEPT_BURST):
         self.loop, self.sock, self.callback, self.name = loop, sock, callback, name
         self.logged = False
         self.closed = False
+        self.rate, self.burst = rate, burst
+        self.now: Callable[[], float] = time.monotonic       # tests replace it
+        self.tokens = float(burst)
+        self.stamp = self.now()
+        self.rate_noticed: float | None = None
+
+    def take(self) -> bool:
+        """Whether the listener may accept one more connection now. When it
+        may not, it stops being watched until it may, and False returns."""
+        now = self.now()
+        self.tokens = min(float(self.burst), self.tokens + (now - self.stamp) * self.rate)
+        self.stamp = now
+        if self.tokens >= 1.0:
+            self.tokens -= 1.0
+            return True
+        if self.rate_noticed is None or now - self.rate_noticed >= self.RATE_NOTICE_GAP:
+            self.rate_noticed = now
+            self.loop.log(f"{self.name}: more than {self.rate:.0f} new connections a "
+                          "second, so new ones wait")
+        self.loop.unwatch(self.sock)
+        self.loop.call_later((1.0 - self.tokens) / self.rate, self._resume)
+        return False
+
+    def refund(self) -> None:
+        """Give back the accept :meth:`take` allowed when no connection was
+        waiting after all. The next :meth:`take` caps the count at the burst."""
+        self.tokens += 1.0
 
     def ok(self) -> None:
         self.logged = False
@@ -310,6 +351,9 @@ class _Pair:
         # A byte went one way or the other, or with ``idle_until_head`` a
         # whole request head came from the client.
         self.moved = False
+        self.idle_deadline = idle_deadline
+        self.last = time.monotonic()      # when a byte last moved
+        self.ended = False                # one side ended its half
         self.until_head = idle_until_head
         self.head_tail = b""
         down.setblocking(False)
@@ -328,6 +372,24 @@ class _Pair:
     def _expire(self) -> None:
         if not self.closed and not self.moved:
             self.close()
+
+    def _one_side_ended(self) -> None:
+        """Start the quiet deadline once, when the first side ends its half."""
+        if self.ended or self.idle_deadline is None:
+            return
+        self.ended = True
+        self.loop.call_later(self.idle_deadline, self._expire_quiet)
+
+    def _expire_quiet(self) -> None:
+        """Close the pair when no byte moved for the idle time, else wait
+        until that time has passed since the last byte."""
+        if self.closed or self.idle_deadline is None:
+            return
+        quiet = time.monotonic() - self.last
+        if quiet >= self.idle_deadline:
+            self.close()
+        else:
+            self.loop.call_later(self.idle_deadline - quiet, self._expire_quiet)
 
     def _note_down(self, data: bytes) -> None:
         """Mark the pair as moving: at the first byte from the client, or
@@ -431,8 +493,10 @@ class _Pair:
                 data = self._recv(self.down)
                 if data == b"":
                     self.down_eof = True
+                    self._one_side_ended()
                 elif data:
                     self.to_up += data
+                    self.last = time.monotonic()
                     self._note_down(data)
             if mask & _WRITE and self.to_down:
                 sent = self.down.send(self.to_down)
@@ -462,8 +526,10 @@ class _Pair:
                 data = self._recv(self.up)
                 if data == b"":
                     self.up_eof = True
+                    self._one_side_ended()
                 elif data:
                     self.to_down += data
+                    self.last = time.monotonic()
                     if not self.until_head:
                         self.moved = True
             if mask & _WRITE and self.to_up:
@@ -501,13 +567,16 @@ class Relay:
 
     A connection that moves no byte within ``idle_deadline`` seconds is
     closed. With ``idle_until_head`` it must instead send a whole HTTP
-    request head, ending in an empty line, in that time."""
+    request head, ending in an empty line, in that time. At most
+    ``accept_rate`` connections a second are accepted, after a first
+    ``accept_burst``."""
 
     def __init__(self, loop: RelayLoop, listen: Address,
                  connect: Address | list, *, name: str | None = None,
                  max_connections: int = CONNECTIONS_MAX,
                  idle_deadline: float | None = IDLE_DEADLINE,
-                 idle_until_head: bool = False):
+                 idle_until_head: bool = False,
+                 accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST):
         self.loop = loop
         self.idle_until_head = idle_until_head
         self.listen = listen
@@ -520,7 +589,8 @@ class Relay:
         self.cap_logged = False
         self.failing = False
         self.sock = listen_socket(listen)
-        self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name)
+        self.pause = AcceptPause(loop, self.sock, self._on_accept, self.name,
+                                 rate=accept_rate, burst=accept_burst)
         loop.call_soon(self._register)
 
     def _register(self) -> None:
@@ -536,9 +606,12 @@ class Relay:
                 self.cap_logged = self.full = True
                 self.loop.unwatch(self.sock)
                 return
+            if not self.pause.take():
+                return
             try:
                 conn, _ = self.sock.accept()
             except (BlockingIOError, InterruptedError):
+                self.pause.refund()
                 return
             except OSError as e:
                 self.pause.failed(e)
@@ -592,8 +665,10 @@ class Relay:
 
 
 def loopback_targets(port: int) -> list:
-    """``127.0.0.1`` then ``::1``, for Mac services that listen on only one."""
-    return [("127.0.0.1", port), ("::1", port)]
+    """The Mac address a forwarded port reaches: ``127.0.0.1`` only. Launch
+    never falls back to ``::1``, because another program can listen on the
+    same port there."""
+    return [("127.0.0.1", port)]
 
 
 def resolve_targets(host: str, port: int) -> list:

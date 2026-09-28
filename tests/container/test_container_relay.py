@@ -193,7 +193,9 @@ def test_backpressure_bounds_the_buffer(loop, tmp_path):
     assert got == total
 
 
-def test_forward_tries_ipv6_loopback_when_ipv4_refuses(loop, tmp_path):
+def test_forward_never_falls_back_to_ipv6_loopback(loop, tmp_path):
+    """A program on ::1 at the forwarded port can be another one than the
+    Mac service the user named, so the forward reaches 127.0.0.1 only."""
     if not socket.has_ipv6:
         pytest.skip("no IPv6")
     srv = socket.socket(socket.AF_INET6)
@@ -208,17 +210,14 @@ def test_forward_tries_ipv6_loopback_when_ipv4_refuses(loop, tmp_path):
         pytest.skip("the port is also open on 127.0.0.1")
     probe.close()
 
-    def answer():
-        conn, _ = srv.accept()
-        with conn:
-            conn.sendall(b"v6")
-
-    threading.Thread(target=answer, daemon=True).start()
+    assert relay.loopback_targets(port) == [("127.0.0.1", port)]
     path = str(tmp_path / "fwd.sock")
-    relay.Relay(loop, path, relay.loopback_targets(port))
+    relay.Relay(loop, path, relay.loopback_targets(port), name=f"forward {port}")
     with _unix_client(path) as c:
-        assert c.recv(10) == b"v6"
+        assert c.recv(10) == b""                       # closed, never relayed to ::1
     srv.close()
+    assert _in_loop(loop, lambda: list(loop.logged)) == [
+        f"forward {port}: cannot reach 127.0.0.1:{port} (Connection refused)"]
 
 
 def test_unreachable_target_closes_the_client_and_logs_once(loop, tmp_path):
@@ -309,6 +308,65 @@ def test_a_lasting_accept_error_pauses_the_listener_and_logs_once():
     lp.watching = False
     lp.later[-1][1]()
     assert not lp.watching                            # never resumes after close
+
+
+def test_the_accept_rate_pauses_the_listener_and_logs_once_a_minute():
+    lp = _FakeLoop()
+    pause = relay.AcceptPause(lp, object(), lambda mask: None, "forward 5432",
+                              rate=10.0, burst=3)
+    clock = [100.0]
+    pause.now = lambda: clock[0]
+    pause.tokens, pause.stamp = 3.0, clock[0]
+    assert [pause.take() for _ in range(3)] == [True, True, True]
+    assert lp.watching and lp.logged == []
+    assert not pause.take()                            # over the rate
+    assert not lp.watching and lp.later[-1][0] == pytest.approx(0.1)
+    assert lp.logged == ["forward 5432: more than 10 new connections a second, so new "
+                         "ones wait"]
+    lp.later[-1][1]()
+    assert lp.watching                                 # resumed when one is due
+    clock[0] += 0.11
+    assert pause.take() and not pause.take()
+    assert len(lp.logged) == 1                         # at most one line a minute
+    clock[0] += relay.AcceptPause.RATE_NOTICE_GAP
+    pause.tokens = 0.0
+    pause.stamp = clock[0]
+    assert not pause.take() and len(lp.logged) == 2
+    pause.refund()
+    pause.refund()
+    assert pause.tokens == pytest.approx(2.0)
+    clock[0] += 60.0
+    assert pause.take() and pause.tokens == pytest.approx(2.0)     # capped at the burst
+
+
+def test_connections_over_the_accept_rate_wait_in_the_listen_queue(loop, tmp_path):
+    port, stop = _echo_server()
+    path = str(tmp_path / "rate.sock")
+    r = relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api",
+                    accept_rate=4.0, accept_burst=2)
+    first, second = _unix_client(path), _unix_client(path)
+    assert _echoes(first, 5) and _echoes(second, 5)
+    third = _unix_client(path)                        # connects into the queue
+    third.sendall(b"ping")
+    assert third.recv(4) == b"ping"                   # accepted once one is due
+    assert "gmlx api: more than 4 new connections a second, so new ones wait" in \
+        _in_loop(loop, lambda: list(loop.logged))
+    assert _in_loop(loop, lambda: r.open) == 3
+    for c in (first, second, third):
+        c.close()
+    stop()
+
+
+def test_the_clipboard_listener_keeps_the_accept_rate(loop, tmp_path):
+    server, path = _server(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}))
+
+    def spent():
+        server.pause.tokens, server.pause.stamp = 0.0, server.pause.now()
+        server.pause.rate = 5.0
+    _in_loop(loop, spent)
+    assert _ask(path, b"TYPES\n") == b"OK 10\nimage/png\n"   # answered once one is due
+    assert "clipboard: more than 5 new connections a second, so new ones wait" in \
+        _in_loop(loop, lambda: list(loop.logged))
 
 
 def test_a_relay_with_no_target_closes_the_connection(loop, tmp_path):
@@ -530,6 +588,68 @@ def test_a_server_that_speaks_first_keeps_the_connection(loop, tmp_path):
     c.close()
     conn.close()
     srv.close()
+
+
+def _mute_server():
+    """A server that accepts and then never reads, writes or closes."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    kept = []
+
+    def serve():
+        while True:
+            try:
+                kept.append(srv.accept()[0])
+            except OSError:
+                return
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, kept
+
+
+def _released_to_zero(r):
+    """An event set when the relay's last open connection is released."""
+    gone = threading.Event()
+    real = r.released
+
+    def released():
+        real()
+        if r.open == 0:
+            gone.set()
+    r.released = released
+    return gone
+
+
+@pytest.mark.parametrize("sent", [b"", b"x"])
+def test_a_pair_the_client_ended_closes_once_quiet(loop, tmp_path, sent):
+    """The client ends its half and the target never answers or closes. The
+    pair must not linger, whether or not a byte moved before."""
+    srv, kept = _mute_server()
+    path = str(tmp_path / "linger.sock")
+    r = relay.Relay(loop, path, srv.getsockname(), name="forward 5432", idle_deadline=0.3)
+    gone = _released_to_zero(r)
+    c = _unix_client(path)
+    if sent:
+        c.sendall(sent)
+    c.close()
+    assert gone.wait(5)
+    srv.close()
+    for k in kept:
+        k.close()
+
+
+def test_the_quiet_deadline_waits_for_the_last_byte():
+    pair = relay._Pair.__new__(relay._Pair)
+    lp = _FakeLoop()
+    closed = []
+    pair.loop, pair.closed, pair.idle_deadline = lp, False, 30.0
+    pair.close = lambda: closed.append(True)
+    pair.last = time.monotonic() - 10.0                # a byte moved 10 s ago
+    pair._expire_quiet()
+    assert not closed and lp.later[-1][0] == pytest.approx(20.0, abs=1.0)
+    pair.last = time.monotonic() - 31.0
+    pair._expire_quiet()
+    assert closed == [True]
 
 
 def test_no_socket_for_the_target_frees_the_slot(loop, tmp_path, monkeypatch):
@@ -767,7 +887,18 @@ def test_types_read_no_data_and_images_read_only_on_request(loop, tmp_path):
     assert pb.reads == []
     assert _ask(path, b"IMAGE image/png\n") == b"OK %d\n" % len(PNG_BYTES) + PNG_BYTES
     assert pb.reads == ["public.png"]
-    assert loop.logged == ["clipboard: sent an image of 108 bytes"]  # one per image read
+    assert loop.logged == [
+        "clipboard: the guest asked which image types the Mac clipboard holds "
+        "(1 times this session)",
+        "clipboard: sent an image of 108 bytes"]                      # one per image read
+
+
+def test_types_requests_are_logged_once_per_hundred(loop, tmp_path):
+    server, _ = _server(loop, tmp_path, StubPasteboard({"public.png": PNG_BYTES}))
+    for _ in range(2 * clipboard.TYPES_LOG_EVERY + 1):
+        assert server.answer("TYPES") == b"OK 10\nimage/png\n"
+    assert [line.split("(")[1] for line in loop.logged] == [
+        "1 times this session)", "101 times this session)", "201 times this session)"]
 
 
 def test_tiff_comes_back_as_png(loop, tmp_path):
@@ -786,6 +917,41 @@ def test_image_over_the_limit_is_refused(loop, tmp_path):
     pb = StubPasteboard({"public.png": b"\x89PNG" + b"x" * (clipboard.IMAGE_MAX + 1)})
     _, path = _server(loop, tmp_path, pb)
     reply = _ask(path, b"IMAGE image/png\n")
+    assert reply.startswith(b"ERR ") and b"over the 20 MB limit" in reply
+
+
+class _HugeData:
+    """Pasteboard data that reports its length and must never be copied."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def length(self):
+        return self.size
+
+    def __bytes__(self):
+        raise AssertionError("the data was copied before the size check")
+
+
+@pytest.mark.parametrize("kind, size, words", [
+    ("public.png", clipboard.IMAGE_MAX + 1, b"over the 20 MB limit"),
+    ("public.tiff", clipboard.CONVERT_MAX + 1, b"over the 64 MB the Mac converts"),
+])
+def test_a_large_image_is_refused_before_it_is_copied_or_converted(loop, tmp_path,
+                                                                   monkeypatch, kind,
+                                                                   size, words):
+    def no_convert(data):
+        raise AssertionError("converted before the size check")
+    monkeypatch.setattr(clipboard, "to_png", no_convert)
+    server, _ = _server(loop, tmp_path, StubPasteboard({kind: _HugeData(size)}))
+    reply = server.answer("IMAGE image/png")
+    assert reply.startswith(b"ERR ") and words in reply
+
+
+def test_a_converted_image_over_the_limit_is_refused(loop, tmp_path, monkeypatch):
+    monkeypatch.setattr(clipboard, "to_png", lambda data: b"x" * (clipboard.IMAGE_MAX + 1))
+    server, _ = _server(loop, tmp_path, StubPasteboard({"public.tiff": b"small"}))
+    reply = server.answer("IMAGE image/png")
     assert reply.startswith(b"ERR ") and b"over the 20 MB limit" in reply
 
 

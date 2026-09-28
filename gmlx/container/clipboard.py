@@ -30,6 +30,11 @@ from .relay import AcceptPause, RelayLoop, listen_socket
 
 REQUEST_MAX = 256
 IMAGE_MAX = 20 * 1024 * 1024
+# The largest image in another type that the Mac converts to PNG. It covers
+# an uncompressed 5K screenshot. Larger data is refused before conversion.
+CONVERT_MAX = 64 * 1024 * 1024
+# A TYPES request is logged the first time and then once per this many.
+TYPES_LOG_EVERY = 100
 SEND_TIMEOUT = 30.0
 READ_DEADLINE = 5.0
 CONNECTIONS_MAX = 32
@@ -75,9 +80,19 @@ def to_png(data: bytes) -> bytes | None:
     return bytes(png) if png is not None else None
 
 
+class TooLarge(Exception):
+    """The clipboard image is over a size limit before any conversion."""
+
+
+def _length(data) -> int:
+    length = getattr(data, "length", None)
+    return int(length()) if callable(length) else len(data)
+
+
 def read_image_png(pasteboard) -> bytes | None:
     """The clipboard image as PNG, converting other image types, or None when
-    the clipboard holds no image."""
+    the clipboard holds no image. Raises :class:`TooLarge` from the size of
+    the pasteboard data alone, before it is copied or converted."""
     types = pasteboard.types() or []
     for kind in IMAGE_TYPES:
         if kind not in types:
@@ -85,6 +100,13 @@ def read_image_png(pasteboard) -> bytes | None:
         data = pasteboard.dataForType_(kind)
         if data is None:
             continue
+        size = _length(data)
+        if kind == "public.png" and size > IMAGE_MAX:
+            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MB as PNG, over the "
+                           "20 MB limit")
+        if kind != "public.png" and size > CONVERT_MAX:
+            raise TooLarge(f"the image is {size / (1024 * 1024):.0f} MB, over the "
+                           f"{CONVERT_MAX // (1024 * 1024)} MB the Mac converts to PNG")
         raw = bytes(data)
         return raw if kind == "public.png" else to_png(raw)
     return None
@@ -114,6 +136,7 @@ class ClipboardServer:
         self.read_deadline = read_deadline
         self.max_connections = max_connections
         self.open = 0                     # loop thread only
+        self.types_asked = 0              # worker thread only
         self.full = False
         self.cap_logged = False
         self._closing = False
@@ -140,9 +163,12 @@ class ClipboardServer:
                 self.cap_logged = self.full = True
                 self.loop.unwatch(self.sock)
                 return
+            if not self.pause.take():
+                return
             try:
                 conn, _ = self.sock.accept()
             except (BlockingIOError, InterruptedError):
+                self.pause.refund()
                 return
             except OSError as e:
                 self.pause.failed(e)
@@ -244,6 +270,10 @@ class ClipboardServer:
         """The reply to one request line."""
         try:
             if line == "TYPES":
+                self.types_asked += 1
+                if self.types_asked % TYPES_LOG_EVERY == 1 or TYPES_LOG_EVERY == 1:
+                    self.loop.log(f"clipboard: the guest asked which image types the Mac "
+                                  f"clipboard holds ({self.types_asked} times this session)")
                 return _ok("".join(f"{t}\n" for t in image_types(self.pasteboard())).encode())
             if line.startswith("IMAGE "):
                 return self._image(line[len("IMAGE "):])
@@ -258,7 +288,11 @@ class ClipboardServer:
         pasteboard = self.pasteboard()
         if access_denied(pasteboard):
             return _err(DENIED)
-        png = read_image_png(pasteboard)
+        try:
+            png = read_image_png(pasteboard)
+        except TooLarge as e:
+            self.loop.log(f"clipboard: refused an image ({e})")
+            return _err(str(e))
         if png is None:
             return _err("there is no image on the Mac clipboard")
         if len(png) > IMAGE_MAX:
