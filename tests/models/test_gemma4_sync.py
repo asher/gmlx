@@ -13,6 +13,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm.models.gemma4.language")
 from mlx_vlm.models.gemma4 import language as g4
+from mlx_vlm.models.gemma4_unified import gemma4_unified as g4u
 
 import gmlx.models.gemma4.sync as gemma4_sync
 
@@ -50,10 +51,21 @@ def test_install_idempotent_and_killable(monkeypatch):
     g4.Gemma4TextModel._make_masks = _orig[0]
     g4.Attention.__call__ = _orig[1]
     gemma4_sync._installed = False
+    # Start the chunking policies from stock: the kill switch must still
+    # install their wraps.
+    policies = [(g4.LanguageModel, "chunked_prefill_policy"),
+                (g4u.Model, "_should_disable_chunked_prefill")]
+    stock = []
+    for cls, name in policies:
+        f = getattr(cls, name)
+        stock.append(getattr(f, "_gmlx_orig", f))
+        monkeypatch.setattr(cls, name, stock[-1])
 
     monkeypatch.setenv("GMLX_G4_NOSYNC", "0")
     assert gemma4_sync.install_gemma4_nosync() is False
     assert g4.Gemma4TextModel._make_masks is _orig[0]
+    for (cls, name), f in zip(policies, stock):
+        assert getattr(cls, name)._gmlx_orig is f
 
     monkeypatch.delenv("GMLX_G4_NOSYNC", raising=False)
     _install()

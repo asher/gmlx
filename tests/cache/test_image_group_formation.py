@@ -55,6 +55,9 @@ def _language_model(model_type, text):
     ("glm5_next", None, 8),
     ("muse_glimmer", None, 8),
     ("qwen3_5", None, 8),
+    # DSv4 VL attends bidirectionally inside an image block, and its
+    # pooled caches get groups of one from the apc_pooling gate
+    # (model_has_pools). The probe generator skips that gate, so it shows 8.
     ("deepseek_v4_vl", None, 8),
 ])
 def test_prefix_cache_groups_follow_the_image_chunking_policy(
