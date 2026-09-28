@@ -1,9 +1,10 @@
 """Owned speculative-decoding engine seams for the serve path.
 
 Routes all MTP batch sizes through the owned engine: B=1 through the scalar
-single-stream round (``owned_server_rounds``), B>1 through the vectorized
-batched round (``owned_server_rounds_batch``). Non-MTP draft kinds delegate
-to stock ``run_speculative_server_rounds`` unchanged.
+single-stream round (``owned_server_rounds``) on single-stream prompt caches
+(``install_owned_b1_spec_cache``), B>1 through the vectorized batched round
+(``owned_server_rounds_batch``). Non-MTP draft kinds delegate to stock
+``run_speculative_server_rounds`` unchanged.
 
 Installation is a late-bound monkeypatch (same no-fork pattern as
 `server_patches` / `server_bridge_vlm`): `mlx_vlm.generate.ar` binds
@@ -530,8 +531,41 @@ def install_owned_spec_engine() -> None:
         )
 
     _owned_server_rounds.__dict__[_OWNED_MTP_ROUND_FLAG] = True
+    # generate.ar is the only caller; the server module no longer binds it.
     _ar.run_speculative_server_rounds = _owned_server_rounds
-    from mlx_vlm.server import generation as _gen
-
-    _gen.run_speculative_server_rounds = _owned_server_rounds
     _debug_note("[mtp] serve round: owned engine installed (B=1 + B>1)")
+    install_owned_b1_spec_cache()
+
+
+_OWNED_B1_CACHE_FLAG = "_kq_gguf_owned_b1_spec_cache"
+
+
+def install_owned_b1_spec_cache() -> None:
+    """Build the B=1 MTP prompt cache as single-stream caches.
+
+    The owned B=1 round runs on ``make_prompt_cache`` caches (trim is an
+    offset move, and the KV quant arm converts them to ``QuantizedKVCache``
+    or ``KVarNKVCache``). Stock ``make_speculative_prompt_cache`` builds
+    batch caches through ``make_cache`` at every batch size, so this
+    restores the single-stream build for ``draft_kind == "mtp"`` at B=1.
+    Other draft kinds and B>1 take the stock builder. Idempotent.
+    """
+    from mlx_vlm.generate import ar as _ar
+    from mlx_vlm.models import cache as _cache
+    from mlx_vlm.speculative import utils as _su
+
+    _orig = _su.make_speculative_prompt_cache
+    if getattr(_orig, _OWNED_B1_CACHE_FLAG, False):
+        return
+
+    def _owned_spec_cache(lm, *, draft_kind, batch_size, left_padding,
+                          make_cache):
+        if draft_kind == "mtp" and batch_size == 1:
+            return _cache.make_prompt_cache(lm)
+        return _orig(lm, draft_kind=draft_kind, batch_size=batch_size,
+                     left_padding=left_padding, make_cache=make_cache)
+
+    _owned_spec_cache.__dict__[_OWNED_B1_CACHE_FLAG] = True
+    _owned_spec_cache.__dict__["_gmlx_orig"] = _orig
+    _su.make_speculative_prompt_cache = _owned_spec_cache
+    _ar.make_speculative_prompt_cache = _owned_spec_cache

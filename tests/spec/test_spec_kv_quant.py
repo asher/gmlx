@@ -10,7 +10,6 @@ q35l = pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
 from mlx_lm.models.cache import KVCache, QuantizedKVCache  # noqa: E402
 from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
 import gmlx.models.qwen35.verify_fold as qwen35_verify_fold  # noqa: E402
@@ -35,7 +34,7 @@ def restorable(monkeypatch):
     # Start from the stock function even when an earlier module installed
     # the wrap (it is once per process, with the boot env it saw), and
     # undo this test's install at teardown.
-    for mod in (su, ar, gen):
+    for mod in (su, ar):
         fn = mod.make_speculative_prompt_cache
         monkeypatch.setattr(mod, "make_speculative_prompt_cache",
                             getattr(fn, "_gmlx_orig", fn))

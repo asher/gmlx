@@ -215,7 +215,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
-         "kv_quant.install_spec_kv_quant (B=1 KV_BITS/kvarn)",
+         "spec_engine.install_owned_b1_spec_cache (B=1 MTP single-stream "
+         "caches) + kv_quant.install_spec_kv_quant (B=1 KV_BITS/kvarn)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_pick_for",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
@@ -224,8 +225,6 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_extra_hash",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
     # --- server engine ---
-    Seam("mlx_vlm.server.generation", "run_speculative_server_rounds",
-         "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.server.generation", "load_model_resources",
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",

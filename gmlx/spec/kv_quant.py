@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 import mlx.core as mx
 
-from gmlx.spec.engine import _debug_note
+from gmlx.spec.engine import _debug_note, install_owned_b1_spec_cache
 
 _log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def dequantize_lift_cache(c):
         lifted.update_and_fetch(keys, values)
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
 
 
@@ -58,7 +59,7 @@ def kvarn_lift_cache(c):
         lifted.update_and_fetch(keys, values)
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
 
 
@@ -118,12 +119,12 @@ def lift_single_cache(c):
         lifted = BatchKVarNKVCache.merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
-            lifted._gmlx_cascade = stamp
+            setattr(lifted, "_gmlx_cascade", stamp)
         return lifted
     lifted = type(c).merge([c])
     stamp = getattr(c, "_gmlx_cascade", None)
     if stamp is not None:
-        lifted._gmlx_cascade = stamp
+        setattr(lifted, "_gmlx_cascade", stamp)
     return lifted
 
 
@@ -151,7 +152,7 @@ _SPEC_KV_QUANT_FLAG = "_kq_gguf_spec_kv_quant"
 _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
-def _spec_kv_quant_params():
+def _spec_kv_quant_params() -> dict[str, Any] | None:
     """resolve_kv_quant_policy kwargs for the KV quantization serve's env
     asks the trimmable B=1 single-stream cache to honor, else None.
     Fractional widths and unknown schemes have no such cache; kvarn
@@ -199,7 +200,7 @@ def _spec_kv_quant_params():
                 kv_group_size=int(os.environ.get("KV_GROUP_SIZE", "64")))
 
 
-def _stamped_spec_params(lm):
+def _stamped_spec_params(lm) -> dict[str, Any] | None:
     """resolve_kv_quant_policy kwargs from the KV policy residency stamped
     on this model at load, None when nothing is stamped. Per-model env
     windows are closed by request time, so the stamp rules the boot env;
@@ -315,10 +316,10 @@ def _kvarn_batch_spec_cache(lm, caches, left_padding, params):
 def install_spec_kv_quant() -> None:
     """Honor KV_BITS on the B=1 MTP serve path.
 
-    Stock ``make_speculative_prompt_cache`` returns plain fp16 caches for
-    ``draft_kind == "mtp", batch_size == 1``, discarding the engine's
-    kv_bits: ``BatchQuantizedKVCache`` cannot trim, and MTP rollback must
-    trim the target. The single-stream ``QuantizedKVCache`` can trim --
+    The owned B=1 MTP prompt cache (``install_owned_b1_spec_cache``) is
+    plain fp16 single-stream caches for ``draft_kind == "mtp",
+    batch_size == 1``, with no kv_bits: ``BatchQuantizedKVCache`` cannot
+    trim, and MTP rollback must trim the target. The single-stream ``QuantizedKVCache`` can trim --
     packing is per-token along head_dim, so trim is an offset move -- and
     the model rollback already goes through ``is_trimmable()``/``trim()``.
     The shared KV policy picks the layers: growing KV converts at
@@ -336,13 +337,15 @@ def install_spec_kv_quant() -> None:
     env is the fallback for unstamped models. Kill switch:
     GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.server import generation as _gen
     from mlx_vlm.speculative import utils as _su
 
     if getattr(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG, False):
         return
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return
+    # The conversion wraps the owned single-stream build, whatever the
+    # caller installed first.
+    install_owned_b1_spec_cache()
     boot_params = _spec_kv_quant_params()
 
     from gmlx.cache.compat import cache_types
@@ -351,7 +354,7 @@ def install_spec_kv_quant() -> None:
 
     _orig = _su.make_speculative_prompt_cache
 
-    def _decline_kvarn(lm, reason: str):
+    def _decline_kvarn(lm, reason: str | None):
         if note_once(lm, "spec-kv-kvarn"):
             _log.warning(
                 "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
@@ -458,5 +461,4 @@ def install_spec_kv_quant() -> None:
     _quantizing_spec_cache.__dict__["_gmlx_orig"] = _orig
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
-    _gen.make_speculative_prompt_cache = _quantizing_spec_cache
     _debug_note(f"[mtp] spec cache wrap armed (B=1); boot env {boot_params}")

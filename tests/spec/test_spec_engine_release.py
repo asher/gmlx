@@ -186,7 +186,6 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
     # suspended at its yield-from for the life of the abandoned generator;
     # its argument bindings must not re-pin what the inner loop released.
     from mlx_vlm.generate import ar
-    from mlx_vlm.server import generation as gen_mod
     import gmlx.spec.speculative as spec
 
     def fake_inner(model, drafter, prompt_cache, hidden, **kw):
@@ -199,7 +198,6 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
 
     monkeypatch.setattr(spec, "owned_server_rounds", fake_inner)
     monkeypatch.setattr(ar, "run_speculative_server_rounds", stock)
-    monkeypatch.setattr(gen_mod, "run_speculative_server_rounds", stock)
     install_owned_spec_engine()
     wrapper = ar.run_speculative_server_rounds
     assert wrapper.__dict__.get(_OWNED_MTP_ROUND_FLAG)

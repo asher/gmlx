@@ -16,7 +16,6 @@ pytest.importorskip("mlx_vlm.generate.ar")
 
 from mlx_lm.models.cache import KVCache, RotatingKVCache  # noqa: E402
 from mlx_vlm.generate import ar  # noqa: E402
-from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
 import mlx_kquant as kq  # noqa: E402
@@ -58,7 +57,7 @@ def restorable(monkeypatch):
     # Start from the stock function even when an earlier module installed
     # the wrap (once per process, with the boot env it saw), and undo this
     # test's install at teardown.
-    for mod in (su, ar, gen):
+    for mod in (su, ar):
         fn = mod.make_speculative_prompt_cache
         monkeypatch.setattr(
             mod, "make_speculative_prompt_cache", getattr(fn, "_gmlx_orig", fn)
