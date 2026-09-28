@@ -45,6 +45,7 @@ fp16/bf16 only today.
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import mlx.core as mx
 
@@ -89,9 +90,8 @@ def _pads(cache):
     cached = getattr(cache, "_gmlx_casc_pads", None)
     if cached is not None and cached[0] is lp:
         return cached[1]
-    pads = [int(x) for x in lp.tolist()] if isinstance(lp, mx.array) else [
-        int(x) for x in lp
-    ]
+    pads = ([int(x) for x in cast(list, lp.tolist())]
+            if isinstance(lp, mx.array) else [int(x) for x in lp])
     cache._gmlx_casc_pads = (lp, pads)
     return pads
 
@@ -175,8 +175,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         _debug_decline("quant-config", bits=getattr(cache, "bits", None),
                        gs=getattr(cache, "group_size", None), hd=hd)
         return None
-    ka = keys[0] if quant else keys
-    va = values[0] if quant else values
+    ka = cast(mx.array, keys[0] if quant else keys)
+    va = cast(mx.array, values[0] if quant else values)
     kv_last = hd // 4 if quant else hd
     dt_ok = (
         (ka.dtype == mx.uint32 and keys[1].dtype == queries.dtype)
@@ -254,10 +254,10 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         else:
             out = sdpa_decode_gqa_cascade(
                 queries,
-                keys[0:1, :, l0:l0 + P],
-                values[0:1, :, l0:l0 + P],
-                keys[:, :, c0:],
-                values[:, :, c0:],
+                ka[0:1, :, l0:l0 + P],
+                va[0:1, :, l0:l0 + P],
+                ka[:, :, c0:],
+                va[:, :, c0:],
                 scale,
                 starts=starts,
             )
@@ -284,8 +284,8 @@ def _make_route(orig):
         return orig(queries, keys, values, cache=cache, scale=scale,
                     mask=mask, sinks=sinks)
 
-    _cascade_sdpa._gmlx_orig = orig
-    _cascade_sdpa._gmlx_cascade_route = True
+    setattr(_cascade_sdpa, "_gmlx_orig", orig)
+    setattr(_cascade_sdpa, "_gmlx_cascade_route", True)
     return _cascade_sdpa
 
 
@@ -312,7 +312,7 @@ def install_cascade_sdpa() -> bool:
         if getattr(cur, "_gmlx_cascade_route", False):
             patched += 1
             continue
-        mod.scaled_dot_product_attention = _make_route(cur)
+        setattr(mod, "scaled_dot_product_attention", _make_route(cur))
         patched += 1
     if not patched:
         return False
@@ -381,7 +381,7 @@ def _merge_stamp_on_extend(cache):
             _c._gmlx_cascade = merged
         return out
 
-    _extend._gmlx_cascade_merge = True
+    setattr(_extend, "_gmlx_cascade_merge", True)
     cache.extend = _extend
 
 
@@ -405,7 +405,7 @@ def _mask_stamp_on_filter(cache):
                 _c.__dict__.pop("_gmlx_cascade", None)
         return out
 
-    _filter._gmlx_cascade_filter = True
+    setattr(_filter, "_gmlx_cascade_filter", True)
     cache.filter = _filter
 
 
@@ -508,8 +508,8 @@ def _make_stamped_ppb_init(orig):
 
                 traceback.print_exc()
 
-    _init._gmlx_orig = orig
-    _init._gmlx_cascade_stamp = True
+    setattr(_init, "_gmlx_orig", orig)
+    setattr(_init, "_gmlx_cascade_stamp", True)
     return _init
 
 
@@ -534,8 +534,8 @@ def _make_stamped_extend_cache(orig):
                 _mask_stamp_on_filter(oc)
         return out
 
-    _extend_cache._gmlx_orig = orig
-    _extend_cache._gmlx_cascade_stamp = True
+    setattr(_extend_cache, "_gmlx_orig", orig)
+    setattr(_extend_cache, "_gmlx_cascade_stamp", True)
     return _extend_cache
 
 
