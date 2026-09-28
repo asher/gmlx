@@ -155,3 +155,16 @@ def test_ensure_registered_idempotent():
     assert registry.SPECS == before
     assert sum(spec.name == "hy_v3" for spec in registry.SPECS) == 1
     assert sys.modules["mlx_vlm.tools.parsers.hy_v3"] is not None
+
+
+def test_ensure_registered_name_is_a_valid_request_override():
+    # The request schemas validate tool_parser against the mlx_vlm.tools
+    # re-export, a separate binding from registry.SPECS.
+    from mlx_vlm.server.schemas import ChatRequest
+
+    registry = _registry()
+    hy_v3_tools.ensure_registered()
+    request = ChatRequest(model="m", messages=[], tool_parser="hy_v3")
+    assert request.tool_parser == "hy_v3"
+    assert registry._infer_tool_parser_from_processor(
+        None, override="hy_v3") == "hy_v3"

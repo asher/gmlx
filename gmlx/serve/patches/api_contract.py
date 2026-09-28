@@ -69,11 +69,13 @@ _GMLX_CONSUMED = frozenset({
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
 # filter). ``tool_choice`` is consumed here: "none" is enforced below, other
 # values are documented as template-dependent. ``timings_per_token`` is the
-# per-chunk stream-timings switch (install_stream_timings).
+# per-chunk stream-timings switch (install_stream_timings). ``tool_parser``
+# is the parser override each of the three stock handlers passes to
+# ``_infer_tool_parser_from_processor``.
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
-    "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
-    "timings_per_token",
+    "resize_shape", "tools", "tool_choice", "tool_parser", "top_logprobs",
+    "stop", "timings_per_token",
     # OpenAI's chat spelling of the output cap (sampling.py alias transform)
     "max_completion_tokens",
 })
@@ -85,7 +87,7 @@ CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
 RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
     | frozenset({
         "model", "input", "instructions", "previous_response_id", "tools",
-        "tool_choice", "store", "stream", "adapter_path",
+        "tool_choice", "tool_parser", "store", "stream", "adapter_path",
     })
 
 # /v1/messages (anthropic.py). ``output_config`` is consumed (its
@@ -95,7 +97,8 @@ RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
 ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
     | frozenset({
         "model", "messages", "system", "stream", "stop_sequences", "tools",
-        "tool_choice", "thinking", "output_config", "adapter_path",
+        "tool_choice", "tool_parser", "thinking", "output_config",
+        "adapter_path",
     })
 
 # /v1/completions (gmlx's own route, server_patches/completions.py).

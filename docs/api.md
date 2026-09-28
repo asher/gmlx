@@ -178,7 +178,8 @@ upstream request features work on GGUF models, and it adds the
 and `/v1/messages` takes Anthropic `tools` and answers with `tool_use`
 blocks. The parser is inferred from the model's chat template, so a model
 whose template defines a tool-call syntax gets parsing with nothing to
-configure. Streaming works too, and a parsed call ends the stream with
+configure. A request can name the parser with `tool_parser` instead.
+Streaming works too, and a parsed call ends the stream with
 `finish_reason: "tool_calls"`.
 
 `tool_choice` is enforced where it can be:
@@ -229,6 +230,7 @@ route:
 | `user` | Ignored | Ignored | Ignored | The server keeps no per-user accounting. |
 | `parallel_tool_calls` | Ignored | Ignored | Ignored | The template decides how many calls to emit. |
 | `tool_choice` | None/auto enforced | None/auto enforced | None/auto enforced | `required` and named forms depend on the template, as [Tool calling](#tool-calling) describes. |
+| `tool_parser` | Honored | Honored | Honored | It names the tool-call parser in place of template inference. An unknown name fails the request. |
 | `metadata` | Ignored | Ignored | Ignored | The server accepts it for Anthropic compatibility and never reads it. |
 | `output_config` | Ignored | Ignored | Honored | Anthropic `json_schema` format maps onto structured output. |
 | `logit_bias` | Honored | Honored | Honored | Its keys are token ids. |

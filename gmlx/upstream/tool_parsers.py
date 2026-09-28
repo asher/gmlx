@@ -34,6 +34,11 @@ def register_tool_parser(name: str, module, markers) -> None:
         return
     spec = registry.ParserSpec(
         name, tuple(tuple(group) for group in markers), priority=_GMLX_PRIORITY)
-    # _infer_tool_parser reads the module global at call time.
+    # _infer_tool_parser reads the module global at call time. The request
+    # schemas validate a tool_parser override against the package
+    # re-export, a separate binding.
     registry.SPECS = (spec, *registry.SPECS)
     registry._BY_NAME[name] = spec
+    package = sys.modules.get("mlx_vlm.tools")
+    if package is not None and hasattr(package, "SPECS"):
+        package.SPECS = registry.SPECS
