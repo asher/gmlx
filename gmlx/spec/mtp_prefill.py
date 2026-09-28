@@ -7,6 +7,7 @@ which the stays band also reads.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 
@@ -100,7 +101,8 @@ def _l0_salt(batch):
     tenant and the gmlx LoRA salt). Without a cold meta the server hashed
     no image, so a prompt that carries media skips L0. The row's adapter
     scales and tenant join the key either way, since lora_rows salts and
-    the server hashes the tenant only when an APC manager is set.
+    the server hashes the tenant only when an APC manager is set. A row
+    its generator's tenant rows no longer hold skips L0.
     """
     meta = (getattr(batch, "_apc_meta", None) or [None])[0]
     if isinstance(meta, dict) and "extra_hash" in meta:
@@ -111,48 +113,77 @@ def _l0_salt(batch):
         stock = 0
     uids = getattr(batch, "uids", None) or ()
     scales = lora_rows.scales_for(uids[0]) if uids else None
-    tenant = _row_tenants.get(uids[0]) if uids else None
+    rows = _step_tenants.get()
+    tenant = None
+    if rows is not None and uids:
+        if uids[0] not in rows:
+            return None
+        tenant = rows[uids[0]]
     return (stock, tuple(scales) if scales and any(scales) else None, tenant)
 
 
 # Each row's tenant, for the L0 key. Without an APC manager the server
 # passes the tenant as the `_apc_tenant` prompt kwarg, and the batch merge
-# drops it before the prompt batch exists, so insert records it per uid.
+# drops it before the prompt batch exists, so insert records every row's
+# tenant, None included, on its generator by uid. Uids count from 0 in each
+# generator. The prompt batch holds no reference to its generator, and
+# the generator builds it and runs its first prompt step inside `_next`,
+# so `_next` publishes the generator's rows for the length of the step.
 _TENANT_ROWS_FLAG = "_gmlx_l0_tenant_rows"
+_TENANT_STEP_FLAG = "_gmlx_l0_tenant_step"
+_TENANT_ROWS_ATTR = "_gmlx_row_tenants"
 _MAX_TENANT_ROWS = 4096
-_row_tenants: dict = {}
+_step_tenants: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "gmlx_step_tenants", default=None)
 
 
 def _install_l0_tenant_rows() -> None:
-    """Record each inserted row's `_apc_tenant` by uid. Idempotent."""
+    """Record each inserted row's `_apc_tenant` on its generator, and
+    publish the generator's rows while it steps. Idempotent."""
     from mlx_vlm.generate import ar as _ar
 
     from gmlx.spec.engine import wrapped_by
 
-    if wrapped_by(_ar.BatchGenerator.insert, _TENANT_ROWS_FLAG):
-        return
-    _orig = _ar.BatchGenerator.insert
+    if not wrapped_by(_ar.BatchGenerator.insert, _TENANT_ROWS_FLAG):
+        _orig = _ar.BatchGenerator.insert
 
-    def insert(self, prompts, *args, **kwargs):
-        uids = _orig(self, prompts, *args, **kwargs)
-        # Positional order: prompts, max_tokens, prompt_kwargs.
-        rows = kwargs.get("prompt_kwargs")
-        if rows is None and len(args) >= 2:
-            rows = args[1]
-        for uid, kw in zip(uids, rows or [None] * len(uids)):
-            tenant = (kw or {}).get("_apc_tenant")
-            if tenant is not None:
-                _row_tenants[uid] = tenant
-        while len(_row_tenants) > _MAX_TENANT_ROWS:
-            _row_tenants.pop(next(iter(_row_tenants)))
-        return uids
+        def insert(self, prompts, *args, **kwargs):
+            uids = _orig(self, prompts, *args, **kwargs)
+            # Positional order: prompts, max_tokens, prompt_kwargs.
+            rows = kwargs.get("prompt_kwargs")
+            if rows is None and len(args) >= 2:
+                rows = args[1]
+            tenants = getattr(self, _TENANT_ROWS_ATTR, None)
+            if tenants is None:
+                tenants = {}
+                setattr(self, _TENANT_ROWS_ATTR, tenants)
+            for uid, kw in zip(uids, rows or [None] * len(uids)):
+                tenants[uid] = (kw or {}).get("_apc_tenant")
+            while len(tenants) > _MAX_TENANT_ROWS:
+                tenants.pop(next(iter(tenants)))
+            return uids
 
-    # Carry the wrapped method's flags, so an earlier installer's guard
-    # still sees its own flag through this wrap.
-    insert.__dict__.update(getattr(_orig, "__dict__", {}))
-    insert.__dict__[_TENANT_ROWS_FLAG] = True
-    insert.__dict__["_gmlx_orig"] = _orig
-    _ar.BatchGenerator.insert = insert
+        # Carry the wrapped method's flags, so an earlier installer's guard
+        # still sees its own flag through this wrap.
+        insert.__dict__.update(getattr(_orig, "__dict__", {}))
+        insert.__dict__[_TENANT_ROWS_FLAG] = True
+        insert.__dict__["_gmlx_orig"] = _orig
+        _ar.BatchGenerator.insert = insert
+
+    if not wrapped_by(_ar.BatchGenerator._next, _TENANT_STEP_FLAG):
+        _orig_next = _ar.BatchGenerator._next
+
+        def _next(self, **kwargs):
+            token = _step_tenants.set(getattr(self, _TENANT_ROWS_ATTR, None))
+            try:
+                return _orig_next(self, **kwargs)
+            finally:
+                _step_tenants.reset(token)
+
+        _next.__dict__.update(getattr(_orig_next, "__dict__", {}))
+        _next.__dict__[_TENANT_STEP_FLAG] = True
+        _next.__dict__["_gmlx_orig"] = _orig_next
+        _ar.BatchGenerator._next = _next
 
 
 def _mtp_prefill_init(batch) -> None:

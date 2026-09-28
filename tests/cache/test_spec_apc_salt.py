@@ -263,28 +263,79 @@ def test_l0_keeps_adapted_and_bare_rows_apart(ar):
         lora_rows.configure("static", 1)
 
 
+def _generator_steps(ar, monkeypatch, insert):
+    """Stub generators through the real tenant wraps: ``insert`` hands out
+    the uids, and ``_next`` runs the prefill it is given, as the stock
+    step builds a prompt batch and runs its first prompt step."""
+    monkeypatch.setattr(ar.BatchGenerator, "insert", insert)
+    monkeypatch.setattr(ar.BatchGenerator, "_next",
+                        lambda self, **k: k["run"]())
+    mtp_prefill._install_l0_tenant_rows()
+
+    def step(gen, model, ids, uid):
+        return ar.BatchGenerator._next(
+            gen, run=lambda: _prefill(ar, model, ids, uid=uid))
+
+    return step
+
+
 def test_l0_keeps_tenants_apart_without_a_manager(ar, monkeypatch):
     """Without an APC manager the server hands each row its tenant as a
     prompt kwarg, and the batch merge drops it. Insert records the tenant
     for each row, and the L0 key carries it."""
     uids = iter([21, 22, 23, 24])
-    monkeypatch.setattr(ar.BatchGenerator, "insert",
-                        lambda self, prompts, *a, **k: [next(uids)
-                                                        for _ in prompts])
-    mtp_prefill._install_l0_tenant_rows()
+    step = _generator_steps(ar, monkeypatch, lambda self, prompts, *a, **k:
+                            [next(uids) for _ in prompts])
+    gen = SimpleNamespace()
     ar.BatchGenerator.insert(
-        None, [[1], [1], [1]], [4, 4, 4],
+        gen, [[1], [1], [1]], [4, 4, 4],
         [{"_apc_tenant": "acme"}, {"_apc_tenant": "globex"},
          {"_apc_tenant": "acme"}])
-    ar.BatchGenerator.insert(None, [[1]], max_tokens=[4], prompt_kwargs=[{}])
+    ar.BatchGenerator.insert(gen, [[1]], max_tokens=[4], prompt_kwargs=[{}])
 
     model = _Model()
     model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
     text1 = [1, 5, 6, 7, 2, 3]
-    assert _prefill(ar, model, text1, uid=21) == 0
-    assert _prefill(ar, model, text1 + [4, 5], uid=22) == 0
-    assert _prefill(ar, model, text1 + [4, 5], uid=23) == 6
-    assert _prefill(ar, model, text1 + [4, 5], uid=24) == 0
+    assert step(gen, model, text1, 21) == 0
+    assert step(gen, model, text1 + [4, 5], 22) == 0
+    assert step(gen, model, text1 + [4, 5], 23) == 6
+    assert step(gen, model, text1 + [4, 5], 24) == 0
+
+
+def test_l0_tenant_rows_belong_to_their_generator(ar, monkeypatch):
+    """Each generator numbers its rows from 0, so a uid names a row only
+    within its generator. A row inserted without a tenant reads none, even
+    when another generator's row with the same uid had one."""
+    step = _generator_steps(ar, monkeypatch, lambda self, prompts, *a, **k:
+                            list(range(len(prompts))))
+    acme, bare = SimpleNamespace(), SimpleNamespace()
+    ar.BatchGenerator.insert(acme, [[1]], [4], [{"_apc_tenant": "acme"}])
+    ar.BatchGenerator.insert(bare, [[1]], [4], [{}])
+
+    model = _Model()
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    text1 = [1, 5, 6, 7, 2, 3]
+    assert step(acme, model, text1, 0) == 0
+    assert step(bare, model, text1 + [4, 5], 0) == 0
+    assert step(acme, model, text1 + [4, 5], 0) == 6
+
+
+def test_l0_skips_a_row_its_generator_no_longer_holds(ar, monkeypatch):
+    """The tenant rows are bounded. A row they dropped has no known tenant,
+    so L0 neither restores nor stores it."""
+    monkeypatch.setattr(mtp_prefill, "_MAX_TENANT_ROWS", 2)
+    uids = iter(range(100, 110))
+    step = _generator_steps(ar, monkeypatch, lambda self, prompts, *a, **k:
+                            [next(uids) for _ in prompts])
+    gen = SimpleNamespace()
+    ar.BatchGenerator.insert(gen, [[1], [1], [1]], [4, 4, 4], [{}, {}, {}])
+
+    model = _Model()
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    text1 = [1, 5, 6, 7, 2, 3]
+    assert step(gen, model, text1, 101) == 0
+    assert step(gen, model, text1 + [4, 5], 100) == 0
+    assert step(gen, model, text1 + [4, 5], 102) == 6
 
 
 def _l1_batch(model, ids, salt, **extra):

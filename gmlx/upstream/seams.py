@@ -82,14 +82,18 @@ SEAMS: tuple[Seam, ...] = (
          "batch_sched.install_decode_priority_sched (decode-first tick, "
          "prompt-arm structure, _prompt_time_counter contract); "
          "admit_gate.install_admit_headroom_gate (admission-arm gating "
-         "via the pending-list stash); serve_memtrace (tick bracket)",
+         "via the pending-list stash); serve_memtrace (tick bracket); "
+         "mtp_prefill._install_l0_tenant_rows (publishes the generator's "
+         "tenant rows for the step; the prompt batch is built and first "
+         "stepped inside _next)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind); "
          "lora_rows (per-row prompt_kwargs carry the APC salt, positional "
          "order prompts, max_tokens, prompt_kwargs); seed_rows (returned "
          "uids); mtp_prefill._install_l0_tenant_rows (each row's "
-         "_apc_tenant kwarg, by returned uid)"),
+         "_apc_tenant kwarg, None included, on the generator by returned "
+         "uid)"),
     # --- qwen3_5 vendored text model (gmlx.models.qwen35) ---
     # gmlx runs mlx-vlm 0.6.15's qwen3.5 text code from vendored copies
     # (language, gated_delta, config, moe_language, moe_config) and
