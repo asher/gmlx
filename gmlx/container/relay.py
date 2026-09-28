@@ -57,6 +57,10 @@ IDLE_DEADLINE = 30.0
 # and a target that never answers or ends cannot hold it for ever.
 ANSWER_DEADLINE = 3600.0
 PROBE_TIMEOUT = 1.0
+# A connect failure that means nothing listens at a Unix socket path, such
+# as after the server that made it restarted. A relay with a renew hook asks
+# for a new path once for each connection.
+RENEW_ERRORS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 
 
 def _describe(addr: Address) -> str:
@@ -347,6 +351,8 @@ class _Pair:
         self.loop, self.down, self.name, self.owner = loop, down, name, owner
         self.targets = list(targets)
         self.tried: list = []
+        self.last_errno: int | None = None
+        self.renewed = False
         self.up: socket.socket | None = None
         self.connecting = False
         self.to_up = bytearray()
@@ -435,6 +441,7 @@ class _Pair:
                 # Such as no free file descriptor. The pair closes below
                 # when no address is left, which frees its slot.
                 self.last_error = e.strerror or str(e)
+                self.last_errno = None
                 continue
             sock.setblocking(False)
             try:
@@ -450,6 +457,14 @@ class _Pair:
                 return
             sock.close()
             self.last_error = os.strerror(rc)
+            self.last_errno = rc
+        if (self.owner is not None and self.owner.renew is not None and not self.renewed
+                and self.last_errno in RENEW_ERRORS):
+            # The pair waits, with its client's bytes in the kernel buffer,
+            # until the relay has a new path.
+            self.renewed = True
+            self.owner.renew_for(self, self.tried[-1])
+            return
         where = " or ".join(_describe(a) for a in self.tried)
         message = f"{self.name}: cannot reach {where} ({self.last_error})"
         if self.owner is not None:
@@ -538,6 +553,7 @@ class _Pair:
                 self.up.close()
                 self.up, self.connecting = None, False
                 self.last_error = os.strerror(err)
+                self.last_errno = err
                 self._connect_next()
                 return
             self.connecting = False
@@ -593,7 +609,12 @@ class Relay:
     ``answer_deadline`` seconds, and after the target ends its half, for
     ``idle_deadline`` seconds. At most
     ``accept_rate`` connections a second are accepted, after a first
-    ``accept_burst``."""
+    ``accept_burst``.
+
+    ``renew``, when given, returns a new target address or None, and may
+    block. When a connection finds nothing listening at the target, it runs
+    in a thread of its own, and the connection tries the new address once.
+    Connections that fail while it runs wait for the same answer."""
 
     def __init__(self, loop: RelayLoop, listen: Address,
                  connect: Address | list, *, name: str | None = None,
@@ -601,8 +622,12 @@ class Relay:
                  idle_deadline: float | None = IDLE_DEADLINE,
                  idle_until_head: bool = False,
                  answer_deadline: float = ANSWER_DEADLINE,
-                 accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST):
+                 accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST,
+                 renew: Callable[[], Address | None] | None = None):
         self.loop = loop
+        self.renew = renew
+        self.renewing = False
+        self.waiting: list[_Pair] = []
         self.idle_until_head = idle_until_head
         self.answer_deadline = answer_deadline
         self.listen = listen
@@ -667,6 +692,41 @@ class Relay:
         if self.full and self.open < self.max_connections and not self.pause.closed:
             self.full = False
             self.loop.watch(self.sock, _READ, self._on_accept)
+
+    def renew_for(self, pair: _Pair, failed: Address) -> None:
+        """Get ``pair`` a new target after ``failed`` did not answer."""
+        if self.targets != [failed]:
+            # Another connection already got a new target.
+            pair.targets = list(self.targets)
+            pair._connect_next()
+            return
+        self.waiting.append(pair)
+        if self.renewing:
+            return
+        self.renewing = True
+        renew = self.renew
+        assert renew is not None
+
+        def work() -> None:
+            try:
+                target = renew()
+            except Exception as e:  # noqa: BLE001 - the waiting connections close instead
+                self.loop.log(f"{self.name}: cannot get a new address ({type(e).__name__}: "
+                              f"{e})")
+                target = None
+            self.loop.call_soon(lambda: self._renewed(target))
+
+        threading.Thread(target=work, name=f"{self.name} renew", daemon=True).start()
+
+    def _renewed(self, target: Address | None) -> None:
+        self.renewing = False
+        waiting, self.waiting = self.waiting, []
+        if target is not None:
+            self.targets = [target]
+        for pair in waiting:
+            if not pair.closed:
+                pair.targets = [target] if target is not None else []
+                pair._connect_next()
 
     def unreachable(self, message: str) -> None:
         if not self.failing:

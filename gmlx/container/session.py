@@ -573,8 +573,11 @@ class _Signals:
 
 def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               say: Say = _say, opener: Callable[[str], object] | None = None,
-              summary: list[str] = ()) -> int:
-    """Run the session and return the client's exit code."""
+              summary: list[str] = (), server_session=None) -> int:
+    """Run the session and return the client's exit code. With a
+    ``server_session``, the API relay goes to the session socket it opens
+    instead of ``api_targets``, and asks it for a new socket when that one
+    stops answering, such as after a server restart."""
     s = spec.session
     nofile = raise_nofile_limit()
     log = _SessionLog(cache_dir() / f"last-{s.client}.log")
@@ -589,11 +592,14 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     reader: threading.Thread | None = None
     stop_open = threading.Event()
     try:
+        renew = None
+        if server_session is not None:
+            api_targets, renew = [server_session.open()], server_session.renew
         if spec.api_port is not None and api_targets:
             # Each API connection holds one of the shared server's
             # descriptors, so it must send a whole request head in time.
             relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
-                                                  idle_until_head=True),
+                                                  idle_until_head=True, renew=renew),
                                   str(s.sock("api.sock")), "the gmlx API"))
         for port in spec.plan.forward:
             relays.append(_listen(lambda a, p=port: Relay(loop, a, loopback_targets(p),
@@ -606,7 +612,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             relays.append(_listen(lambda a: ClipboardServer(loop, a),
                                   str(s.sock("clip.sock")), "the clipboard"))
         write_record(s.client, record)
-        for line in summary:
+        for line in [*summary, *(server_session.lines() if server_session else [])]:
             say(line)
         if spec.web_port is not None and spec.shell:
             say(f"[launch] the web app answers at http://127.0.0.1:{spec.web_port}/ "
@@ -660,6 +666,8 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
             for relay in relays:
                 _step(log, "close a relay", relay.close)
             _step(log, "stop the relay loop", loop.stop)
+            if server_session is not None:
+                _step(log, "end the server session", server_session.close)
             if child is not None:
                 with cli.query_timeout(TEARDOWN_QUERY_TIMEOUT):
                     _step(log, "remove the container", _remove_container, s.name,

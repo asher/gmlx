@@ -2162,6 +2162,22 @@ def test_a_broken_launch_block_never_stops_a_server_start(tmp_path):
     assert "m" in cfg.models
 
 
+def test_launch_assistants_are_per_client_and_empty_by_default():
+    box = _launch({"clients": {"aichat": {"assistants": ["home", " web ", "home"]}}})
+    assert box.for_client("aichat").assistants == ["home", "web"]
+    assert box.for_client("pi").assistants == []
+    with pytest.raises(ConfigError, match="unrecognized"):
+        _launch({"assistants": ["home"]})               # never for every client
+    with pytest.raises(ConfigError, match="unrecognized"):
+        _launch({"clients": {"aichat": {"assistant": ["home"]}}})
+
+
+@pytest.mark.parametrize("value", ["home", [1], [""], {"home": True}, [["home"]]])
+def test_launch_assistants_bad_shapes(value):
+    with pytest.raises(ConfigError, match="assistants: expected a list of strings"):
+        _launch({"clients": {"aichat": {"assistants": value}}})
+
+
 def test_launch_env_values_keep_their_spaces():
     box = _launch({"env": [" GH_TOKEN ", "GREETING= hello there "]})
     assert box.env == ["GH_TOKEN", "GREETING= hello there "]

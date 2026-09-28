@@ -1249,3 +1249,118 @@ def test_private_pasteboard_tiff_converts_to_png(loop, tmp_path):
         assert clipboard.access_denied(pb) is (pb.accessBehavior() == 3)
     finally:
         pb.releaseGlobally()
+
+
+# The API relay after a server restart
+
+def _unix_echo_server(path):
+    srv = relay.listen_socket(path)
+    srv.setblocking(True)
+
+    def handle(conn):
+        with conn:
+            while data := conn.recv(4096):
+                conn.sendall(data)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_a_relay_asks_once_for_a_new_target_when_nothing_listens(loop, tmp_path):
+    gone, fresh = str(tmp_path / "old.sock"), str(tmp_path / "new.sock")
+    srv = _unix_echo_server(fresh)
+    asked = []
+
+    def renew():
+        asked.append(1)
+        return fresh
+    path = str(tmp_path / "api.sock")
+    r = relay.Relay(loop, path, [gone], name="gmlx api", renew=renew)
+    for _ in range(2):
+        with _unix_client(path) as c:
+            assert _echoes(c, 10)
+    assert asked == [1] and r.targets == [fresh]
+    srv.close()
+
+
+def test_a_renewal_that_fails_closes_the_connection(loop, tmp_path):
+    gone, also_gone = str(tmp_path / "old.sock"), str(tmp_path / "new.sock")
+    asked = []
+
+    def renew():
+        asked.append(1)
+        return also_gone
+    path = str(tmp_path / "api.sock")
+    relay.Relay(loop, path, [gone], name="gmlx api", renew=renew)
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""
+    assert asked == [1]                   # one new target for each connection
+    deadline = time.monotonic() + 5
+    while not loop.logged and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert loop.logged[0].startswith(f"gmlx api: cannot reach {gone} or {also_gone} (")
+
+
+def test_a_renewal_with_no_answer_closes_the_connection(loop, tmp_path):
+    def renew():
+        raise OSError("server down")
+    path = str(tmp_path / "api.sock")
+    relay.Relay(loop, path, [str(tmp_path / "old.sock")], name="gmlx api", renew=renew)
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""
+
+
+def test_connections_that_fail_during_a_renewal_wait_for_it(loop, tmp_path):
+    fresh = str(tmp_path / "new.sock")
+    srv = _unix_echo_server(fresh)
+    release, asked = threading.Event(), []
+
+    def renew():
+        asked.append(1)
+        release.wait(10)
+        return fresh
+    path = str(tmp_path / "api.sock")
+    relay.Relay(loop, path, [str(tmp_path / "old.sock")], name="gmlx api", renew=renew)
+    clients = [_unix_client(path) for _ in range(3)]
+    for c in clients:
+        c.sendall(b"ping")
+    release.set()
+    for c in clients:
+        with c:
+            assert c.recv(4) == b"ping"
+    assert asked == [1]
+    srv.close()
+
+
+def test_a_relay_without_renew_keeps_its_target(loop, tmp_path):
+    gone = str(tmp_path / "old.sock")
+    path = str(tmp_path / "api.sock")
+    r = relay.Relay(loop, path, [gone], name="gmlx api")
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""
+    assert r.targets == [gone]
+
+
+def test_a_connection_that_failed_on_an_old_target_takes_the_new_one(loop, tmp_path):
+    asked = []
+    r = relay.Relay(loop, str(tmp_path / "api.sock"), [str(tmp_path / "old.sock")],
+                    name="gmlx api", renew=lambda: asked.append(1))
+    r.targets = [str(tmp_path / "new.sock")]
+
+    class Pair:
+        targets = None
+        connected = False
+
+        def _connect_next(self):
+            self.connected = True
+    pair = Pair()
+    r.renew_for(pair, str(tmp_path / "old.sock"))  # type: ignore[arg-type]
+    assert pair.targets == [str(tmp_path / "new.sock")] and pair.connected
+    assert not asked and not r.waiting

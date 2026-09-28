@@ -1043,3 +1043,55 @@ def test_supervise_checks_the_sources_before_the_run(fake_container, tmp_path, m
         session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
                           say=lambda line: None)
     assert not fake_container.load().get("runs")
+
+
+# The server session
+
+class _ServerSession:
+    def __init__(self, fail=None):
+        self.fail, self.calls = fail, []
+
+    def open(self):
+        self.calls.append("open")
+        if self.fail:
+            raise self.fail
+        return "/tmp/gmlx-s/1.sock"
+
+    def renew(self):
+        return "/tmp/gmlx-s/2.sock"
+
+    def close(self):
+        self.calls.append("close")
+
+    def lines(self):
+        return ["[launch] pi can use assistant home, whose tools run on the Mac: web"]
+
+
+def test_supervise_relays_the_api_to_the_session_socket(fake_container, tmp_path, monkeypatch):
+    made = []
+    real = session.Relay
+
+    def spy(loop, listen, connect, **k):
+        made.append((k["name"], connect, k.get("renew")))
+        return real(loop, listen, connect, **k)
+    monkeypatch.setattr(session, "Relay", spy)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    server, said = _ServerSession(), []
+    session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
+                      summary=["[launch] summary"], server_session=server)
+    assert made == [("gmlx api", ["/tmp/gmlx-s/1.sock"], server.renew)]
+    assert said == ["[launch] summary", *server.lines()]
+    assert server.calls == ["open", "close"]
+
+
+def test_a_refused_server_session_starts_no_container(fake_container, tmp_path):
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    server = _ServerSession(fail=SettingsError("refused"))
+    with pytest.raises(SettingsError, match="refused"):
+        session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={},
+                          say=lambda line: None, server_session=server)
+    assert fake_container.load().get("runs", []) == []
+    assert server.calls == ["open", "close"]
+    assert not sess.dir.exists() and session.read_record("pi") is None

@@ -11,10 +11,13 @@ and runs the supervisor in ``gmlx.container.session``.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shlex
 import signal
 import sys
+import threading
+import urllib.error
 import urllib.parse
 import webbrowser
 from pathlib import Path
@@ -226,6 +229,226 @@ def guest_url(base_url: str) -> tuple[str, int | None, list]:
     url = urllib.parse.urlunsplit(("http", f"127.0.0.1:{port}", split.path, split.query,
                                    split.fragment))
     return url, port, targets
+
+
+# The session socket of the server
+
+# The key a client config gets when the client reaches the server through a
+# session socket, which needs no key.
+SESSION_KEY = "gmlx-container-session"
+_SESSIONS_PATH = "/launch/sessions"
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"})
+_SESSION_TIMEOUT = 5.0
+
+
+def uses_session(base_url: str) -> bool:
+    """Whether the client reaches the server through a session socket: only
+    a plain http server on this Mac gives one."""
+    split = urllib.parse.urlsplit(base_url)
+    return split.scheme == "http" and split.hostname in _LOCAL_HOSTS
+
+
+def _sessions_url(base_url: str) -> str:
+    return base_url.rstrip("/") + _SESSIONS_PATH
+
+
+def _old_server(base_url: str) -> Exception:
+    from gmlx.commands import launch as L
+
+    return L.LaunchError(
+        f"the server at {base_url} does not offer session sockets, which container "
+        "mode needs to limit what the client can reach. When it is a gmlx server, "
+        "restart it with gmlx restart so that it runs the installed version.")
+
+
+# A server from before session sockets has no such route.
+_NO_ROUTE = (404, 405)
+
+
+def _refusal(base_url: str, e: urllib.error.HTTPError) -> Exception:
+    from gmlx.commands import launch as L
+
+    if e.code in (401, 403):
+        return L.LaunchError(f"the server at {base_url} refused the API key ({e.code}). "
+                             "Pass the server's key with --api-key.")
+    if e.code in _NO_ROUTE:
+        return _old_server(base_url)
+    return L.LaunchError(f"the server at {base_url} could not open a session socket "
+                         f"({e.code}): {_error_message(e)}")
+
+
+def _error_message(e: urllib.error.HTTPError) -> str:
+    """The message in an error reply, else the HTTP reason."""
+    try:
+        body = json.loads(e.read(64 * 1024) or b"null")
+        message = body["error"]["message"]
+        if isinstance(message, str) and message:
+            return message[:500]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return str(e.reason)
+
+
+def _unreachable(base_url: str, e: Exception) -> Exception:
+    from gmlx.commands import launch as L
+
+    reason = getattr(e, "reason", None) or e
+    return L.LaunchError(f"cannot reach the server at {base_url} ({reason}).")
+
+
+def sessions_offered(base_url: str, api_key: str | None) -> bool:
+    """Whether the server offers session sockets. The request has a body the
+    endpoint refuses with 400, so it creates no session. Only a server with
+    no such route answers 404 or 405. Any other refusal raises, since every
+    later request would fail the same way."""
+    from gmlx.commands import launch as L
+
+    try:
+        L._http_post_json(_sessions_url(base_url), {"probe": True}, api_key=api_key,
+                          timeout=_SESSION_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            return True
+        if e.code in _NO_ROUTE:
+            return False
+        raise _refusal(base_url, e) from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise _unreachable(base_url, e) from None
+    return True
+
+
+class ServerSession:
+    """One session socket of the gmlx server for one container session. The
+    server serves the client's requests on it with a limited set of routes
+    and only the assistants listed in ``assistants``. :meth:`open` and
+    :meth:`close` run in the supervisor's thread, and :meth:`renew` in a
+    thread of the API relay, so the session id is kept under a lock."""
+
+    def __init__(self, base_url: str, api_key: str | None, client: str,
+                 assistants: list[str]):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.client = client
+        self.assistants = list(assistants)
+        self.id: str | None = None
+        self.socket: str | None = None
+        self.allowed: dict[str, list[str]] = {}
+        self.unknown: list[str] = []
+        self.closed = False
+        self._lock = threading.Lock()
+
+    def _post(self) -> dict:
+        from gmlx.commands import launch as L
+
+        reply = L._http_post_json(_sessions_url(self.base_url),
+                                  {"client": self.client, "assistants": self.assistants},
+                                  api_key=self.api_key, timeout=_SESSION_TIMEOUT)
+        return _session_reply(reply)
+
+    def open(self) -> str:
+        """Ask the server for a session socket and return its path."""
+        from gmlx.commands import launch as L
+
+        try:
+            reply = self._post()
+        except urllib.error.HTTPError as e:
+            raise _refusal(self.base_url, e) from None
+        except _BadReply as e:
+            raise L.LaunchError(str(e)) from None
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise _unreachable(self.base_url, e) from None
+        with self._lock:
+            self.id, self.socket = reply["id"], reply["socket"]
+            self.allowed, self.unknown = reply["assistants"], reply["unknown"]
+            if self.closed:
+                stale, self.id = self.id, None
+            else:
+                stale = None
+        if stale:
+            self._delete(stale)
+        return reply["socket"]
+
+    def renew(self) -> str | None:
+        """Ask again after the socket stopped answering, such as after a
+        server restart, with the same list. Returns the new path, or None."""
+        try:
+            reply = self._post()
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        with self._lock:
+            if self.closed:
+                old, path = reply["id"], None
+            else:
+                old, self.id = self.id, reply["id"]
+                path = self.socket = reply["socket"]
+        if old:
+            self._delete_later(old)
+        return path
+
+    def close(self) -> None:
+        """End the session on the server. The server also removes its
+        sockets when it starts and stops, so a failure here is only logged."""
+        with self._lock:
+            self.closed = True
+            old, self.id = self.id, None
+        if old:
+            self._delete(old)
+
+    def _delete_later(self, session_id: str) -> None:
+        # The connections that wait for the new path need not wait for the
+        # end of the old session too.
+        threading.Thread(target=self._delete, args=(session_id,), daemon=True).start()
+
+    def _delete(self, session_id: str) -> None:
+        from gmlx.commands import launch as L
+
+        url = f"{_sessions_url(self.base_url)}/{urllib.parse.quote(session_id, safe='')}"
+        try:
+            L._http_delete(url, api_key=self.api_key, timeout=_SESSION_TIMEOUT)
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+
+    def lines(self) -> list[str]:
+        """One line for each assistant the client can use, and a warning for
+        each listed one the server does not have."""
+        out = []
+        for alias, tools in self.allowed.items():
+            if tools:
+                out.append(f"[launch] {self.client} can use assistant {alias}, whose tools "
+                           f"run on the Mac: {', '.join(tools)}")
+            else:
+                out.append(f"[launch] {self.client} can use assistant {alias}, which has "
+                           "no tools")
+        for alias in self.unknown:
+            out.append(f"[launch] warning: the server has no assistant {alias}, which "
+                       f"launch.container.clients.{self.client}.assistants lists")
+        return out
+
+
+class _BadReply(ValueError):
+    pass
+
+
+def _session_reply(reply) -> dict:
+    """The parts of a session reply launch uses, checked for shape."""
+    try:
+        sid, path = reply["id"], reply["socket"]
+        allowed, unknown = reply.get("assistants", {}), reply.get("unknown", [])
+        if not (isinstance(sid, str) and sid and isinstance(path, str)
+                and os.path.isabs(path) and isinstance(allowed, dict)
+                and isinstance(unknown, list)):
+            raise TypeError
+        tools = {}
+        for alias, entry in allowed.items():
+            names = entry.get("tools", [])
+            if not isinstance(names, list):
+                raise TypeError
+            tools[str(alias)] = [str(t) for t in names]
+    except (KeyError, TypeError, AttributeError):
+        raise _BadReply(f"the server's session reply has an unexpected form: "
+                        f"{str(reply)[:200]}") from None
+    return {"id": sid, "socket": path, "assistants": tools,
+            "unknown": [str(u) for u in unknown]}
 
 
 # Step 3: the container command, the service and the guest entry
@@ -564,6 +787,18 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {base}, which is not a local http "
                             "server. Use the default network for this server.")
+    server_session, session_line = None, None
+    if api_port is not None and uses_session(base):
+        offered = sessions_offered(base, a.api_key)
+        if not offered and not dry:
+            raise _old_server(base)
+        if dry:
+            session_line = (f"[launch] the server at {base} offers session sockets"
+                            if offered else f"[launch] warning: {_old_server(base)}")
+        # The probe and the session request use the server's key, and the
+        # client only the socket.
+        a.client_api_key = SESSION_KEY
+        server_session = ServerSession(base, a.api_key, client, cfg.assistants)
     if int(a.port) != port:
         # The server check found the server on another port than step 6
         # assumed, so the ports that depend on it are worked out again.
@@ -632,6 +867,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         labels={"gmlx.launch.runtime": runtime_dir.name})
     summary = _summary_lines(plan, None if dry else ready, a.shell, client)
     if dry:
+        if session_line:
+            summary.append(session_line)
         return _print_dry_run(spec, plan, image_line, summary, cfg, captured, running, say)
     record = {"name": sess.name, "workdir": spec.workdir, "clipboard": plan.clipboard == "images",
               "shares": [{"host": m.source, "guest": m.target, "readonly": m.readonly}
@@ -641,7 +878,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     # Under --shell the app is not running yet, so there is nothing to open.
     opener = webbrowser.open if (web_port and plan.open_browser and not a.shell) else None
     return session.supervise(spec, api_targets=api_targets, record=record, say=say,
-                             opener=opener, summary=summary)
+                             opener=opener, summary=summary, server_session=server_session)
 
 
 def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:

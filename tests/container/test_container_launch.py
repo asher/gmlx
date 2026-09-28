@@ -41,6 +41,9 @@ def env(fake_container, tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: None)
     monkeypatch.setattr(session, "stdin_is_tty", lambda: False)
+    server = _SessionServer()
+    monkeypatch.setattr(launch, "_http_post_json", server.post)
+    monkeypatch.setattr(launch, "_http_delete", server.delete)
     runs = []
 
     def supervise(spec, **kw):
@@ -48,9 +51,47 @@ def env(fake_container, tmp_path, monkeypatch):
         return 0
     monkeypatch.setattr(session, "supervise", supervise)
     fake_container.runs = runs
+    fake_container.server = server
     fake_container.home = home
     fake_container.proj = proj
     return fake_container
+
+
+class _SessionServer:
+    """The session endpoint of a gmlx server, as the contract describes it.
+    ``status`` set to a number answers every session request with it."""
+
+    def __init__(self):
+        self.status: int | None = None
+        self.body: bytes | None = None
+        self.tools = {"home": ["web", "files"], "quiet": []}
+        self.posts: list[tuple[str, dict, str | None]] = []
+        self.deletes: list[tuple[str, str | None]] = []
+        self.count = 0
+
+    def _error(self, url, code):
+        import io
+        import urllib.error
+        fp = io.BytesIO(self.body) if self.body is not None else None
+        return urllib.error.HTTPError(url, code, "refused", None, fp)  # type: ignore[arg-type]
+
+    def post(self, url, body, *, api_key=None, timeout=3.0):
+        if not url.endswith("/launch/sessions"):
+            return {}
+        self.posts.append((url, dict(body), api_key))
+        if self.status is not None:
+            raise self._error(url, self.status)
+        if set(body) != {"client", "assistants"}:
+            raise self._error(url, 400)
+        self.count += 1
+        listed = body["assistants"]
+        return {"id": f"s{self.count}", "socket": f"/tmp/gmlx-s/{self.count}.sock",
+                "assistants": {a: {"tools": self.tools[a]} for a in listed if a in self.tools},
+                "unknown": [a for a in listed if a not in self.tools]}
+
+    def delete(self, url, *, api_key=None, timeout=3.0):
+        self.deletes.append((url, api_key))
+        return 204
 
 
 def _user_config(home, text):
@@ -492,6 +533,177 @@ def test_network_none_refuses_an_https_server(env, capsys):
     assert _run(["pi", "--container", "--network", "none", "--base-url",
                  "https://api.example.com/v1"]) == 1
     assert "network: none cannot reach" in capsys.readouterr().err
+
+
+# The session socket of the server
+
+def _files_holding(root, text):
+    return [f for f in Path(root).rglob("*") if f.is_file() and text in f.read_text("latin-1")]
+
+
+@pytest.mark.parametrize("client", ["opencode", "claude-code", "aichat", "open-webui"])
+def test_client_configs_get_the_placeholder_and_never_the_key(env, client):
+    assert _run([client, "--container", "--api-key", "sekrit"]) == 0
+    spec = env.runs[0]["spec"]
+    assert not _files_holding(spec.plan.home, "sekrit")
+    assert "sekrit" not in json.dumps(spec.child_env)
+    assert (_files_holding(spec.plan.home, lc.SESSION_KEY)
+            or lc.SESSION_KEY in spec.child_env.values())
+    # The probe runs with the server's key, and so will the session request.
+    assert env.server.posts == [("http://127.0.0.1:8080/v1/launch/sessions",
+                                 {"probe": True}, "sekrit")]
+    server = env.runs[0]["server_session"]
+    assert (server.base_url, server.api_key, server.client) == (
+        "http://127.0.0.1:8080/v1", "sekrit", client)
+
+
+def test_the_supervisor_gets_the_configured_assistants(env):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      aichat:\n"
+                           "        assistants: [home, nope]\n")
+    assert _run(["aichat", "--container"]) == 0
+    server = env.runs[0]["server_session"]
+    assert server.assistants == ["home", "nope"] and server.id is None
+    assert server.open() == "/tmp/gmlx-s/1.sock"
+    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home", "nope"]}
+    assert server.lines() == [
+        "[launch] aichat can use assistant home, whose tools run on the Mac: web, files",
+        "[launch] warning: the server has no assistant nope, which "
+        "launch.container.clients.aichat.assistants lists"]
+
+
+def test_other_clients_get_no_assistants(env):
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      aichat:\n"
+                           "        assistants: [home]\n")
+    assert _run(["pi", "--container"]) == 0
+    assert env.runs[0]["server_session"].assistants == []
+
+
+@pytest.mark.parametrize("status", [404, 405])
+def test_a_server_without_session_sockets_is_refused(env, capsys, status):
+    env.server.status = status
+    assert _run(["pi", "--container"]) == 1
+    err = capsys.readouterr().err
+    assert "does not offer session sockets" in err and "gmlx restart" in err
+    assert not env.runs
+
+
+@pytest.mark.parametrize("body, shown", [
+    (b'{"error": {"type": "server_error", "message": "cannot open a launch session '
+     b'socket: 32 sessions are in use"}}',
+     "(503): cannot open a launch session socket: 32 sessions are in use"),
+    (b"<html>", "(503): refused"), (None, "(503): refused")])
+def test_a_server_that_cannot_open_a_socket_shows_its_message(env, capsys, body, shown):
+    env.server.status, env.server.body = 503, body
+    assert _run(["pi", "--container"]) == 1
+    err = capsys.readouterr().err
+    assert "could not open a session socket " + shown in err
+    assert "gmlx restart" not in err and not env.runs
+
+
+def test_a_session_request_the_server_cannot_serve_shows_its_message(env):
+    server = _session(env)
+    env.server.status = 503
+    env.server.body = b'{"error": {"message": "no folder gives a short enough path"}}'
+    with pytest.raises(launch.LaunchError) as e:
+        server.open()
+    assert "(503): no folder gives a short enough path" in str(e.value)
+    assert "gmlx restart" not in str(e.value)
+    env.server.status = 404
+    with pytest.raises(launch.LaunchError, match="gmlx restart"):
+        server.open()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_names_the_key(env, capsys, status):
+    env.server.status = status
+    assert _run(["pi", "--container", "--api-key", "wrong"]) == 1
+    err = capsys.readouterr().err
+    assert "refused the API key" in err and "wrong" not in err
+    assert not env.runs
+
+
+def test_a_server_that_cannot_be_reached_is_a_clean_error(env, capsys, monkeypatch):
+    def down(url, body, **k):
+        raise OSError(61, "Connection refused")
+    monkeypatch.setattr(launch, "_http_post_json", down)
+    assert _run(["pi", "--container"]) == 1
+    assert "cannot reach the server at http://127.0.0.1:8080/v1" in capsys.readouterr().err
+
+
+def test_a_remote_server_keeps_the_key_and_gets_no_session(env):
+    assert _run(["claude-code", "--container", "--base-url", "http://10.0.0.5:8080/v1",
+                 "--api-key", "sekrit"]) == 0
+    run = env.runs[0]
+    assert run["server_session"] is None and not env.server.posts
+    assert run["api_targets"] == [("10.0.0.5", 8080)]
+    assert run["spec"].child_env["ANTHROPIC_AUTH_TOKEN"] == "sekrit"
+
+
+def test_a_local_base_url_gets_a_session(env):
+    assert _run(["pi", "--container", "--base-url", "http://localhost:8080/v1"]) == 0
+    assert env.runs[0]["server_session"] is not None
+
+
+@pytest.mark.parametrize("status, line", [
+    (None, "the server at http://127.0.0.1:8080/v1 offers session sockets"),
+    (404, "warning: the server at http://127.0.0.1:8080/v1 does not offer session sockets")])
+def test_dry_run_reports_session_sockets_and_opens_none(env, capsys, status, line):
+    env.server.status = status
+    assert _run(["claude-code", "--container", "--config-only", "--api-key", "sekrit"]) == 0
+    out = capsys.readouterr()
+    assert line in out.out and "sekrit" not in out.out + out.err
+    assert [body for _, body, _ in env.server.posts] == [{"probe": True}]
+    assert not env.server.deletes and not env.runs
+
+
+def _session(env, assistants=()):
+    return lc.ServerSession("http://127.0.0.1:8080/v1", "sekrit", "aichat", list(assistants))
+
+
+def test_a_renewed_session_ends_the_old_one(env):
+    server = _session(env, ["home"])
+    server._delete_later = server._delete        # type: ignore[method-assign]
+    assert server.open() == "/tmp/gmlx-s/1.sock"
+    assert server.renew() == "/tmp/gmlx-s/2.sock"
+    assert env.server.posts[-1][1] == {"client": "aichat", "assistants": ["home"]}
+    server.close()
+    assert sorted(env.server.deletes) == [
+        ("http://127.0.0.1:8080/v1/launch/sessions/s1", "sekrit"),
+        ("http://127.0.0.1:8080/v1/launch/sessions/s2", "sekrit")]
+    assert server.renew() is None               # a closed session gets no new socket
+    assert ("http://127.0.0.1:8080/v1/launch/sessions/s3", "sekrit") in env.server.deletes
+
+
+def test_a_renewal_the_server_refuses_gives_no_path(env):
+    server = _session(env)
+    server.open()
+    env.server.status = 404
+    assert server.renew() is None
+    server.close()
+    assert env.server.deletes == [("http://127.0.0.1:8080/v1/launch/sessions/s1", "sekrit")]
+
+
+def test_close_before_open_sends_nothing(env):
+    _session(env).close()
+    assert not env.server.deletes
+
+
+@pytest.mark.parametrize("reply", [
+    {}, {"id": "s1"}, {"id": "", "socket": "/tmp/a.sock"}, {"id": "s1", "socket": "a.sock"},
+    {"id": "s1", "socket": "/tmp/a.sock", "assistants": []},
+    {"id": "s1", "socket": "/tmp/a.sock", "unknown": "home"}, ["not", "a", "mapping"],
+    {"id": "s1", "socket": "/tmp/a.sock", "assistants": {"home": {"tools": "web"}}},
+    {"id": "s1", "socket": "/tmp/a.sock", "assistants": {"home": ["web"]}}])
+def test_a_malformed_session_reply_is_a_clean_error(env, monkeypatch, reply):
+    monkeypatch.setattr(launch, "_http_post_json", lambda *a, **k: reply)
+    with pytest.raises(launch.LaunchError, match="unexpected form"):
+        _session(env).open()
+
+
+def test_a_session_line_for_an_alias_with_no_tools(env):
+    server = _session(env, ["quiet"])
+    server.open()
+    assert server.lines() == ["[launch] aichat can use assistant quiet, which has no tools"]
 
 
 # The session lock and --shell attach

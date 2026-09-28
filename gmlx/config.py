@@ -184,7 +184,7 @@ _LAUNCH_SHARED_KEYS = frozenset({"enabled", "mount_cwd", "mounts", "volumes",
                                  "clipboard"})
 _LAUNCH_CONTAINER_KEYS = _LAUNCH_SHARED_KEYS | {"clients"}
 _LAUNCH_CLIENT_KEYS = _LAUNCH_SHARED_KEYS | {"image", "build", "command",
-                                             "packages", "seed"}
+                                             "packages", "seed", "assistants"}
 # Launch sets these guest variables itself. A second HOME would name a Mac
 # path that is not shared.
 LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
@@ -461,6 +461,7 @@ class LaunchClientCfg:
     clipboard: str | None = None
     packages: list[str] = field(default_factory=list)   # Debian package names
     seed: list[str] = field(default_factory=list)       # files under $HOME
+    assistants: list[str] = field(default_factory=list)  # server assistant alias ids
 
 
 @dataclass
@@ -502,7 +503,8 @@ class LaunchContainerCfg:
             forward=join("forward"), network=pick("network"), cpus=pick("cpus"),
             memory=pick("memory"), ssh_agent=pick("ssh_agent"), env=join("env"),
             open_browser=pick("open_browser"), clipboard=pick("clipboard"),
-            packages=list(own.packages), seed=list(own.seed))
+            packages=list(own.packages), seed=list(own.seed),
+            assistants=list(own.assistants))
 
 
 @dataclass
@@ -2120,7 +2122,7 @@ def _parse_launch_level(where: str, raw: dict, keys) -> dict:
     for key in ("enabled", "mount_cwd", "ssh_agent", "open_browser"):
         if key in raw:
             out[key] = flag(key)
-    for key in ("mounts", "volumes", "env", "packages", "seed"):
+    for key in ("mounts", "volumes", "env", "packages", "seed", "assistants"):
         if key in raw:
             out[key] = list(dict.fromkeys(strings(key)))
     if "network" in raw:

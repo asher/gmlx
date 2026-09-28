@@ -132,6 +132,13 @@ def _probe_target(a, *, require_default: str | None = None):
     return getattr(a, "guest_base_url", None) or base_url, models, default_model
 
 
+def _client_key(a) -> str | None:
+    """The key a client config gets. In container mode the client reaches a
+    local server through a session socket, which needs no key, so the config
+    gets a placeholder and never the server's key."""
+    return getattr(a, "client_api_key", None) or a.api_key
+
+
 def _summary(name: str, base_url: str, models: list,
              default_model: str | None, extra: str = "") -> str:
     """The first ``[launch]`` status line every harness prints."""
@@ -176,6 +183,14 @@ def _http_post_json(url: str, body: dict, *, api_key: str | None = None,
     from gmlx.serve.lifecycle import post_json
 
     return post_json(url, body, api_key=api_key, timeout=timeout)
+
+
+def _http_delete(url: str, *, api_key: str | None = None, timeout: float = 3.0) -> int:
+    """DELETE ``url`` and return the status. Seam: monkeypatched in tests."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    req = urllib.request.Request(url, headers=headers, method="DELETE")
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (local server)
+        return r.status
 
 
 def _keep_model(a) -> None:
@@ -325,7 +340,7 @@ def _launch_opencode(a, *, exec_fn) -> int:
         "`curl -fsSL https://opencode.ai/install | bash`).")
     base_url, models, default_model = _probe_target(a)
     cfg = build_opencode_config(base_url, models, provider_id=a.provider_id,
-                                default_model=default_model, api_key=a.api_key)
+                                default_model=default_model, api_key=_client_key(a))
 
     out = Path(os.path.expanduser(a.config_path or f"{_CONFIG_HOME}/opencode.json"))
     _write_text_atomic(out, json.dumps(cfg, indent=2) + "\n")
@@ -517,7 +532,7 @@ def _launch_pi(a, *, exec_fn) -> int:
     settings_path = agent_dir / "settings.json"
     models_doc, settings_doc = build_pi_configs(
         base_url, models, provider_id=a.provider_id, default_model=default_model,
-        api_key=a.api_key,
+        api_key=_client_key(a),
         existing_models=_load_json(models_path),
         existing_settings=_load_json(settings_path))
 
@@ -588,7 +603,7 @@ def build_omp_configs(base_url: str, models: list, *,
 
 
 def _launch_omp(a, *, exec_fn) -> int:
-    if a.api_key:
+    if a.api_key and _client_key(a) == a.api_key:
         print("[launch] note: omp's provider registry has no API-key slot we "
               "know to write; if the server requires a key, configure omp's "
               "auth manually", file=sys.stderr)
@@ -714,7 +729,7 @@ def _launch_hermes(a, *, exec_fn) -> int:
     path = _hermes_config_path()
     existing = _load_yaml(path)
     cfg = build_hermes_config(base_url, default_model=default_model,
-                              api_key=a.api_key, existing=existing)
+                              api_key=_client_key(a), existing=existing)
     print(_summary("hermes", base_url, models, default_model))
     if cfg == existing:
         print(f"[launch] {path} already points hermes at the server")
@@ -768,7 +783,7 @@ def _launch_goose(a, *, exec_fn) -> int:
     base_url, models, default_model = _probe_target(
         a, require_default="GOOSE_MODEL")
     pairs = build_goose_env(base_url, default_model=default_model,
-                            api_key=a.api_key)
+                            api_key=_client_key(a))
 
     cfg_path = Path(os.path.expanduser(a.config_path or _GOOSE_CONFIG))
     cfg = _load_yaml(cfg_path)
@@ -812,7 +827,7 @@ def _launch_claude_code(a, *, exec_fn) -> int:
     base_url, models, default_model = _probe_target(
         a, require_default="ANTHROPIC_MODEL")
     pairs = build_claude_code_env(base_url, default_model=default_model,
-                                  api_key=a.api_key)
+                                  api_key=_client_key(a))
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))
@@ -867,7 +882,7 @@ def _launch_aichat(a, *, exec_fn) -> int:
         "(e.g. `brew install aichat` or `cargo install aichat`).")
     base_url, models, default_model = _probe_target(a)
     cfg = build_aichat_config(base_url, models, provider_id=a.provider_id,
-                              default_model=default_model, api_key=a.api_key)
+                              default_model=default_model, api_key=_client_key(a))
 
     cfg_dir = Path(os.path.expanduser(a.config_path or _AICHAT_CONFIG_HOME))
     _mkdirs(cfg_dir)
@@ -937,7 +952,7 @@ def _launch_elia(a, *, exec_fn) -> int:
         "(e.g. `pipx install elia-chat` or `uv tool install elia-chat`).")
     base_url, models, default_model = _probe_target(a)
     toml_text = build_elia_config(base_url, models, provider_id=a.provider_id,
-                                  default_model=default_model, api_key=a.api_key)
+                                  default_model=default_model, api_key=_client_key(a))
 
     xdg_home = Path(os.path.expanduser(a.config_path or _ELIA_CONFIG_HOME))
     out = xdg_home / "elia" / "config.toml"
@@ -1056,7 +1071,7 @@ def _launch_open_webui(a, *, exec_fn) -> int:
     data_dir = os.path.abspath(
         os.path.expanduser(a.config_path or _OPEN_WEBUI_DATA_HOME))
     pairs = build_open_webui_env(base_url, default_model=default_model,
-                                 api_key=a.api_key, port=webui_port, data_dir=data_dir,
+                                 api_key=_client_key(a), port=webui_port, data_dir=data_dir,
                                  stt=stt, tts=tts, rerank=rerank)
     if tts and os.environ.get("AUDIO_TTS_VOICE"):
         # A voice the user exported wins over the Kokoro default.
@@ -1344,7 +1359,7 @@ def _launch_dsh(a, *, exec_fn) -> int:
         argv += ["--no-open", "--port", str(web_port_for("dsh", a.port or _DEFAULT_PORT))]
     elif web and (a.port or _DEFAULT_PORT) == _DSH_WEB_PORT:
         argv += ["--port", str(_DSH_WEB_PORT + 1)]
-    key = a.api_key or _PROVIDER_ID                  # placeholder: no auth
+    key = _client_key(a) or _PROVIDER_ID             # placeholder: no auth
 
     print(_summary("dsh", base_url, models, default_model)
           + f"\n[launch] wrote {out}")
