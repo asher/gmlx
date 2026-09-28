@@ -22,6 +22,7 @@ from gmlx.spec.ckpt import (
     _install_exact_anchor_pick,
     _install_plain_ckpt_decode,
     _l1_lookup_and_arm_store,
+    _media_safe,
     _plain_anchor_init,
     _plain_ckpt_init,
     _snap_fields,
@@ -233,7 +234,11 @@ def _mtp_prefill_init(batch) -> None:
     restored = 0
     spec_cache = _get_spec_prefix_cache(batch.model)
     if spec_cache is not None and batch._mtp_l0_salt is not None:
-        hit = spec_cache.lookup(batch._input_ids, salt=batch._mtp_l0_salt)
+        # The media guard the L1 tiers apply: a turn that adds an image
+        # finds the last turn's entry under its per-prefix salt.
+        hit = spec_cache.lookup(
+            batch._input_ids, salt=batch._mtp_l0_salt,
+            accept=_media_safe(batch, batch._input_ids[0].tolist()))
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)

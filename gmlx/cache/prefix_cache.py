@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import Any
 
 import mlx.core as mx
@@ -340,13 +341,15 @@ class SpecPrefixCache:
         _LIVE_CACHES.add(self)
 
     def lookup(
-        self, token_ids: mx.array, salt: Any = 0
+        self, token_ids: mx.array, salt: Any = 0,
+        accept: Callable[[int], bool] | None = None,
     ) -> tuple[int, _PrefixEntry] | None:
         """Find the longest cached prefix matching token_ids under ``salt``.
 
         Returns (prefix_len, entry) on hit, None on miss.  Requires at least
         one suffix token (``prefix_len < len(query)``) so the caller always
         has tokens to forward through the model for logits + shared_kv.
+        ``accept`` refuses a prefix length, as the APC media guard does.
         Moves the matched entry to the head of the LRU on access.
         """
         ids = _ids_tuple(token_ids)
@@ -358,7 +361,7 @@ class SpecPrefixCache:
             if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
                     salt, n):
                 continue
-            if ids[:n] == entry.token_ids:
+            if ids[:n] == entry.token_ids and (accept is None or accept(n)):
                 best = (n, entry)
                 best_len = n
 

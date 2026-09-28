@@ -20,6 +20,7 @@ import gmlx.lora_rows as lora_rows
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as se
 import gmlx.spec.mtp_prefill as mtp_prefill
+from gmlx.cache.media_salt import MediaSalt
 from gmlx.cache.prefix_cache import SpecPrefixCache
 
 from test_ckpt_tier import make_hybrid_cache
@@ -125,6 +126,27 @@ def test_l0_skips_media_prompts_without_a_stock_salt(ar):
     text1 = [1, 5, 6, 7, 2, 3]
     assert _prefill(ar, model, text1) == 0
     assert _prefill(ar, model, text1 + [4, 5]) == 6
+
+
+def test_l0_restores_only_where_the_media_guard_allows(ar):
+    """A turn that adds an image finds the last turn's entry under its
+    per-prefix salt. On a model whose guard wants every image inside the
+    restored prefix, L0 refuses it as the L1 tiers do, and a later turn
+    whose suffix is text restores."""
+    model = _Model(config=SimpleNamespace(image_token_id=_IMG))
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    turn2 = _TURN2 + [_IMG, _IMG, 6]
+    turn3 = turn2 + [7, 8]
+    spans = [(1, 11), (8, 22)]
+
+    def meta(ids):
+        return [{"full_input_ids": list(ids), "prefix_len": 0,
+                 "extra_hash": MediaSalt(0, spans[:1 + (len(ids) > 8)]),
+                 "apc_blocks": [], "checkpoint_len": 0}]
+
+    assert _prefill(ar, model, _TURN2, meta=meta(_TURN2)) == 0
+    assert _prefill(ar, model, turn2, meta=meta(turn2)) == 0
+    assert _prefill(ar, model, turn3, meta=meta(turn3)) == len(turn2)
 
 
 def _gemma4_spec_config(model_type):
