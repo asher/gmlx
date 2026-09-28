@@ -387,7 +387,9 @@ def _merge_stamp_on_extend(cache):
 
 def _mask_stamp_on_filter(cache):
     """Instance-level filter wrapper: retired rows leave the stamp; the
-    shared prefix stays valid for every surviving row."""
+    shared prefix stays valid for every surviving row. ``keep`` holds the
+    surviving rows' indices, as the stock batch loop and the spec engine
+    pass it; a stamp whose rows do not cover them is dropped."""
     fn = getattr(cache, "filter", None)
     if fn is None or getattr(fn, "_gmlx_cascade_filter", False):
         return
@@ -398,7 +400,10 @@ def _mask_stamp_on_filter(cache):
         out = _orig(keep, *a, **kw)
         if info is not None:
             ks = keep.tolist() if hasattr(keep, "tolist") else list(keep)
-            tok = tuple(t for t, k in zip(info["tok"], ks) if k)
+            rows = info["tok"]
+            tok = ()
+            if all(0 <= int(k) < len(rows) for k in ks):
+                tok = tuple(rows[int(k)] for k in ks)
             if tok:
                 _c._gmlx_cascade = {"P": info["P"], "tok": tok}
             else:

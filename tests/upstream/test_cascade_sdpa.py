@@ -515,16 +515,30 @@ class _FilterCache(_FakeBatchCache):
         return "filtered"
 
 
-def test_stamp_filter_masks_rows():
+@pytest.mark.parametrize("keep", [[0], [1], [0, 2], [1, 2]])
+def test_stamp_filter_keeps_the_indexed_rows(keep):
+    # The stock batch loop and the spec engine pass the surviving rows as
+    # int32 indices.
     pre = list(range(32))
     rows = [_rb(pre + [i]) for i in range(3)]
     cache = _FilterCache([0, 0, 0])
     cs._stamp_caches([cache], rows)
-    assert cache.filter([True, False, True]) == "filtered"
-    info = cache._gmlx_cascade
-    assert info["P"] == 32 and len(info["tok"]) == 2
-    assert cache.filter([False, False]) == "filtered"
+    assert cache.filter(mx.array(keep, mx.int32)) == "filtered"
+    assert cache._gmlx_cascade == {
+        "P": 32, "tok": tuple(rows[k] for k in keep)}
+    assert cache.filter(mx.array([], mx.int32)) == "filtered"
     assert not hasattr(cache, "_gmlx_cascade")
+
+
+def test_stamp_filter_to_row_zero_keeps_cascading_after_admission():
+    pre = list(range(32))
+    cache = _FilterCache([0, 0])
+    cs._stamp_caches([cache], [_rb(pre + [1]), _rb(pre + [2])])
+    cache.filter(mx.array([0], mx.int32))
+    other = _FakeBatchCache([0])
+    cs._stamp_caches([other], [_rb(pre + [3])])
+    cache.extend(other)
+    assert cache._gmlx_cascade["P"] == 32
 
 
 class _FakePromptBatch:
