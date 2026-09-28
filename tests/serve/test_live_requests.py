@@ -308,59 +308,17 @@ def test_tier_memo_keyed_per_engine():
     assert (id(a), 7) in lr._TIER
 
 
-def test_speculative_hooks_track_a_batch(monkeypatch):
-    common = importlib.import_module("mlx_vlm.speculative.common")
-    monkeypatch.setattr(common, "speculative_stats_snapshot", lambda d: (1, 1.0, 1))
-    monkeypatch.setattr(common, "speculative_stats_since", lambda d, s: (3, 5.0, 9))
-    clock = [10.0]
-    monkeypatch.setattr(lr.time, "perf_counter", lambda: clock[0])
-    rg = _Engine(draft=object())
-    _PKG._kq_residency_pool = _Pool(rg)
-    serving._PATH_TO_IDS["/abs/q.gguf"] = ["q8"]
-    q1, q2 = object(), object()
-    r1 = SimpleNamespace(rqueue=q1, prompt_tokens=40, args=SimpleNamespace(max_tokens=64))
-    r2 = SimpleNamespace(rqueue=q2, prompt_tokens=20, args=SimpleNamespace(max_tokens=32))
-    s1 = {"request_id": "s1", "queued_at": 0.0, "decode_started_at": None, "generated_tokens": 0}
-    s2 = {"request_id": "s2", "queued_at": 0.0, "decode_started_at": None, "generated_tokens": 0}
-    lr.spec_prefill_started(rg, r1, s1)
-    lr.spec_prefill_started(rg, r2, s2)
-    rows = {r["id"]: r for r in lr.live_requests_view()}
-    assert rows["s1"]["state"] == "prefill" and rows["s1"]["model"] == "q8"
-    assert rows["s1"]["prompt_tokens"] == 40 and rows["s1"]["max_tokens"] == 64
-    assert rows["s1"]["speculative"]["rounds"] == 3 and rows["s1"]["cache"]["tier"] is None
-
-    s1["generated_tokens"], s1["decode_started_at"] = 5, 0.5
-    clock[0] += lr._MIN_INTERVAL_S + 0.01           # a token past the rate limit
-    lr.spec_decode_progress(id(q1), s1, None)
-    rows = {r["id"]: r for r in lr.live_requests_view()}
-    assert rows["s1"]["state"] == "decode" and rows["s1"]["generated"] == 5
-    assert rows["s2"]["state"] == "prefill"
-
-    lr.spec_decode_progress(id(q1), s1, "stop")
-    lr.spec_decode_progress(id(q2), s2, "length")
-    assert lr.live_requests_view() == []
-    # untracked uid (an AR engine's token) is a no-op
-    lr.spec_decode_progress(12345, {}, None)
-    assert lr.live_requests_view() == []
-
-
-def test_speculative_hook_install_passthrough_and_idempotent():
+def test_install_leaves_the_logging_hooks_stock(monkeypatch):
+    # Every request steps the batch generator, so the step wrap alone
+    # publishes; the per-request logging hooks stay mlx-vlm's own.
     gen_mod = importlib.import_module("mlx_vlm.server.generation")
     cls = gen_mod.ResponseGenerator
-    saved_prefill = cls.__dict__["_log_prefill_started"]
-    saved_progress = cls.__dict__["_log_decode_progress"]
-    try:
-        lr._install_speculative_hooks(gen_mod)
-        wrapped = cls.__dict__["_log_decode_progress"]
-        lr._install_speculative_hooks(gen_mod)
-        assert cls.__dict__["_log_decode_progress"] is wrapped
-        assert isinstance(wrapped, staticmethod)
-        info = {"generated_tokens": 0}
-        at = cls._log_decode_progress(1, info, token=0, text="", finish_reason=None)
-        assert isinstance(at, float) and info["generated_tokens"] == 1
-    finally:
-        cls._log_prefill_started = saved_prefill
-        cls._log_decode_progress = saved_progress
+    monkeypatch.setattr(cls, "_step", lambda self, *a, **k: None)
+    lr.install_live_requests()
+    assert getattr(cls._step, lr._STEP_FLAG, False)
+    for name in ("_log_prefill_started", "_log_decode_progress"):
+        fn = cls.__dict__[name]
+        assert getattr(fn, "__func__", fn).__module__ == gen_mod.__name__, name
 
 
 def test_spec_of_falls_back_to_drafter_round_lists(monkeypatch):
