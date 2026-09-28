@@ -37,6 +37,6 @@ def low_limit_warning(limit: int | None, who: str) -> str | None:
     """One line when ``limit`` stays below :data:`NOFILE_LOW`, else None."""
     if limit is None or limit == resource.RLIM_INFINITY or limit >= NOFILE_LOW:
         return None
-    return (f"{who} can open only {limit} files at a time (the hard limit), so many "
-            "idle client connections can use them up. Raise the limit with "
-            "`ulimit -n` or launchctl limit maxfiles.")
+    return (f"{who} can open only {limit} files at a time, so many idle client "
+            "connections can use them up. Raise the limit with `ulimit -n` or "
+            "`launchctl limit maxfiles`.")

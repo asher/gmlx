@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,8 @@ def test_a_broken_block_that_enables_container_mode_never_runs_on_the_mac(env, c
     "- launch\n",
     "launch:\n  container:\n    enabled: true\n    clients:\n      pi:\n"
     "        enabled: false\n        bogus: 1\n",
+    "launch:\n  container:\n    clients:\n      pi:\n        enable: true\n",
+    "launch:\n  container:\n    clients:\n      pie:\n        enabled: true\n",
 ])
 def test_every_unclear_enabled_shape_refuses(env, capsys, monkeypatch, block):
     which = launch.shutil.which
@@ -179,7 +182,7 @@ def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env
 def test_unreadable_yaml_never_runs_on_the_mac(env, capsys):
     _user_config(env.home, "launch: [unclosed\n")
     assert _run(["pi"]) == 1
-    assert "may run pi" in capsys.readouterr().err
+    assert "may turn container mode on for pi" in capsys.readouterr().err
 
 
 def test_config_enables_container_mode_only_from_the_user_file(env, capsys, monkeypatch):
@@ -789,23 +792,39 @@ def test_attach_from_a_deleted_folder_is_a_clean_error(running_session, capsys, 
     assert "the current folder no longer exists" in capsys.readouterr().err
 
 
-def test_a_term_signal_during_the_build_runs_its_clean_up(env, capsys, monkeypatch):
-    import signal as _signal
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_during_the_build_runs_its_clean_up(env, capsys, monkeypatch, signum):
     from gmlx.container import images
     cleaned = []
+    got = []
 
     def build(*a, **k):
         try:
-            os.kill(os.getpid(), _signal.SIGTERM)
+            os.kill(os.getpid(), signum)
             for _ in range(1000):              # the handler runs between bytecodes
                 pass
         finally:
             cleaned.append(True)
     monkeypatch.setattr(images, "ensure_image", build)
-    before = _signal.getsignal(_signal.SIGTERM)
-    assert _run(["pi", "--container"]) == 128 + _signal.SIGTERM
+
+    def record(sig, _frame):
+        got.append(sig)
+    # A recording handler stands in for the default one, which would end
+    # pytest when launch fails to take the signal over.
+    before = signal.signal(signum, record)
+    try:
+        rc = _run(["pi", "--container"])
+        after = signal.getsignal(signum)
+    finally:
+        signal.signal(signum, before)
+    assert rc == 128 + signum and got == []
     assert cleaned and "stopped by signal" in capsys.readouterr().err
-    assert _signal.getsignal(_signal.SIGTERM) is before
+    assert after is record                     # restored
+
+
+def test_the_signal_exception_is_not_an_exception():
+    """An ``except Exception`` in step 8 must never swallow a SIGTERM."""
+    assert not issubclass(lc._Signalled, Exception)
 
 
 def test_step_7_leaves_an_owed_builder_for_a_build_about_to_run(env, monkeypatch):
@@ -816,3 +835,16 @@ def test_step_7_leaves_an_owed_builder_for_a_build_about_to_run(env, monkeypatch
     assert _run(["pi", "--container"]) == 0             # builds the image
     assert _run(["pi", "--container"]) == 0             # the image is ready
     assert seen == [False, True]
+
+
+def test_step_7_stops_an_owed_builder_before_a_pull(env, monkeypatch):
+    """Only a build uses the builder, and nothing stops it after a pull."""
+    from gmlx.container import images
+    seen = []
+    monkeypatch.setattr(images, "builder_notice",
+                        lambda say=None, settle=True: seen.append(settle))
+    env.update(registry={"docker.io/me/pi:1": {"digest": "sha256:" + "6" * 64}})
+    _user_config(env.home, "launch:\n  container:\n    clients:\n      pi:\n"
+                           "        image: docker.io/me/pi:1\n")
+    assert _run(["pi", "--container"]) == 0
+    assert env.calls("image", "pull") and seen == [True]

@@ -78,8 +78,9 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
             # never run the client on the Mac without the sandbox.
             on, path = launch_block_enables(a.harness)
             if on is not False:
+                verb = "turns" if on else "may turn"
                 raise ConfigError(
-                    f"{e}. {path} {'turns container mode on for' if on else 'may run'} "
+                    f"{e}. {path} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "
                     "--no-container to run it on the Mac instead.") from None
         print(f"[launch] ignoring the launch settings, so {a.harness} runs on the Mac: {e}",
@@ -135,8 +136,9 @@ def _server_endpoint(a) -> tuple[str, int]:
     return host, int(port)
 
 
-class _Signalled(Exception):
-    """A SIGTERM or SIGHUP arrived during step 8."""
+class _Signalled(BaseException):
+    """A SIGTERM or SIGHUP arrived during step 8. It is not an Exception, so
+    no ``except Exception`` on the way can stop the launch from exiting."""
 
     def __init__(self, signum: int):
         super().__init__(signum)
@@ -459,8 +461,11 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     # Step 5
     session.remove_record(client)
     # Step 6
-    # Every refusal that needs no build or download comes first, so a
-    # mistake never waits behind the kernel download or an image build.
+    # The shares and the image settings are checked here, before the image
+    # steps, so a mistake in them never waits behind a download or a build.
+    # A busy web port (when the supervisor binds it), a problem in the image
+    # itself and a link in the private home (step 11) stop the launch only
+    # after the image steps.
     if client == "dsh" and a.dsh_profile in L._DSH_STDIO:
         raise L.LaunchError(f"the {a.dsh_profile} profile serves another program over stdio, "
                             "which a container session cannot hand over. Use it on the Mac "
@@ -503,7 +508,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
             say(line)
         pending = images.pending_work(image_plan, a.rebuild)
         # A build is about to use the builder, so an owed stop waits for it.
-        notice = images.builder_notice(say=say, settle=pending is None)
+        # A pull does not use the builder, and nothing stops it after a pull.
+        notice = images.builder_notice(say=say, settle=pending != "build")
         if notice:
             say(notice)
         # Step 8. A closed terminal tab during a long first build must still

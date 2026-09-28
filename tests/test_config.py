@@ -2327,3 +2327,20 @@ def test_launch_settings_default_without_a_user_config(tmp_path, monkeypatch):
 def test_launch_clients_match_the_launch_handlers():
     from gmlx.commands.launch import _HARNESSES
     assert set(_HARNESSES) == set(cfgmod.LAUNCH_CLIENTS)
+
+
+@pytest.mark.parametrize("block, want", [
+    ("launch:\n  container:\n    clients:\n      claude-code:\n        enable: true\n", None),
+    ("launch:\n  container:\n    clients:\n      claude-cod:\n        enabled: true\n", None),
+    ("launch:\n  container:\n    clients:\n      claude-code:\n        enabled: false\n"
+     "        memory: 4G\n", False),
+    # Another client's block is not checked.
+    ("launch:\n  container:\n    clients:\n      pi:\n        bogus: 1\n", False),
+])
+def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, block, want):
+    cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(block)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cfgmod.launch_block_enables("claude-code") == (want, cfg)

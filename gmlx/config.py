@@ -836,10 +836,13 @@ def _launch_block(path: Path):
 def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     """Whether the raw ``launch`` block of the user-level config turns
     container mode on for ``client``, read without the full checks, and the
-    file. False only when every level on the way is absent or a mapping of
-    known keys, and every ``enabled`` there is exactly ``false``. None, which
-    stops the launch, for any other value or shape, since the block may
-    have meant to turn container mode on."""
+    file. Three levels are checked: ``launch``, ``launch.container`` and
+    ``launch.container.clients.<client>``, each against its own key set.
+    Every key under ``clients`` must name a known client. False only when
+    each of the three levels is absent or a mapping of known keys, and every
+    ``enabled`` there is exactly ``false``. None, which stops the launch, for
+    any other value or shape, since the block may have meant to turn
+    container mode on. The keys of other clients' blocks are not checked."""
     found = next((q for q in default_config_paths()[1:] if q.is_file()), None)
     if found is None:
         return False, None
@@ -863,9 +866,10 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
         return False, found
     if not isinstance(box, dict) or set(box) - _LAUNCH_CONTAINER_KEYS:
         return None, found
-    if clients is not None and not isinstance(clients, dict):
+    if clients is not None and (not isinstance(clients, dict)
+                                or set(clients) - set(LAUNCH_CLIENTS)):
         return None, found
-    if own is not None and not isinstance(own, dict):
+    if own is not None and (not isinstance(own, dict) or set(own) - _LAUNCH_CLIENT_KEYS):
         return None, found
     return (False if all(v is missing or v is False for v in values) else None), found
 

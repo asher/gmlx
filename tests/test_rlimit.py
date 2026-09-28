@@ -54,3 +54,19 @@ def test_the_server_warns_when_its_limit_stays_low():
     from gmlx.serve import server
     src = inspect.getsource(server._serve)
     assert "low_limit_warning(raise_nofile_limit()" in src
+    # The warning is printed to stderr when there is one.
+    tree = ast.parse(src.lstrip() if src.startswith(" ") else src)
+    blocks = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+              and isinstance(n.test, ast.Name) and n.test.id == "low"]
+    assert any(isinstance(c, ast.Call) and ast.unparse(c.func) == "print"
+               and "sys.stderr" in ast.unparse(c) and "low" in ast.unparse(c.args)
+               for n in blocks for stmt in n.body for c in ast.walk(stmt))
+
+
+def test_the_low_limit_warning_names_no_hard_limit_and_quotes_the_commands():
+    """A failed raise leaves the soft limit low while the hard limit may be
+    unlimited, so the line never calls the limit the hard one."""
+    line = rlimit.low_limit_warning(256, "the server")
+    assert line is not None
+    assert "hard" not in line
+    assert "`ulimit -n`" in line and "`launchctl limit maxfiles`" in line
