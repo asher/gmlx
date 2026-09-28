@@ -23,7 +23,6 @@ decode tokens and text chunks run the unchanged text paths.
 
 from __future__ import annotations
 
-import logging
 import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -53,7 +52,6 @@ from .vision import DeepseekV4VisionModel, VisionConfig
 TextConfig = ModelArgs
 
 MODEL_TYPE = "deepseek_v4_vl"
-_log = logging.getLogger(__name__)
 
 __all__ = [
     "LanguageModel",
@@ -133,31 +131,6 @@ class LanguageModel(DeepseekV4SpecHooks, nn.Module):
         # cast, wo_a 2D->3D, MTP-block drop), on language_model-relative
         # names.
         return _TextModel.sanitize(self, weights)
-
-    def chunked_prefill_policy(self, **kwargs):
-        # mlx-vlm's run/chat prefill loop walks fixed-size chunks it never
-        # re-plans, so a boundary inside an image block is only avoidable
-        # by not chunking: one forward keeps every block whole (the
-        # attention transient is bounded by the span rows, not the chunk).
-        # Serve chunkers steer per chunk instead (gmlx.gen.media_spans).
-        from gmlx.gen.media_spans import (
-            chunk_boundaries_cut,
-            prefill_step_stamp,
-        )
-
-        spans = (kwargs.get("prefill_kwargs") or {}).get("image_spans")
-        step = prefill_step_stamp(self)
-        if spans and step:
-            embeds = kwargs.get("inputs_embeds")
-            ids = kwargs.get("input_ids")
-            length = (embeds.shape[1] if embeds is not None
-                      else ids.shape[-1] if ids is not None else 0)
-            if chunk_boundaries_cut(spans, step, length):
-                _log.info(
-                    "prefill step %d would cut an image block in a "
-                    "%d-token prompt: prefilling in one chunk", step, length)
-                return False
-        return super().chunked_prefill_policy(**kwargs)
 
 
 class Model(nn.Module):

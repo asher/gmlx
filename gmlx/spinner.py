@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from typing import Literal
 
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -63,7 +64,7 @@ class Spinner:
         self._thread.start()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         self._stop.set()
         if self._thread is not None:
             self._thread.join()

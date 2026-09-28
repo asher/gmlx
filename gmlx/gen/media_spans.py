@@ -29,11 +29,9 @@ real column.
 Three prefill loops consult this: the stock serve ``prompt_step``
 (wrapped by ``install_span_aware_prompt_step``), the owned MTP prefill
 (calls ``span_aware_prompt_n``), and the fixed-step loop of mlx-vlm's
-``generate_step`` behind run and chat. For token-type blocks
-``install_block_aware_generate_step`` steers that loop by passing each
-block start as a checkpoint length. For ``image_spans`` the language
-model's ``chunked_prefill_policy`` reads the step ``stamp_prefill_step``
-recorded and declines chunking when a boundary would cut a block.
+``generate_step`` behind run and chat, which
+``install_block_aware_generate_step`` steers by passing each block start
+as a checkpoint length.
 """
 
 from __future__ import annotations
@@ -48,7 +46,6 @@ _log = logging.getLogger(__name__)
 
 _FLAG = "_gmlx_span_aware_prompt_step"
 _GEN_FLAG = "_gmlx_block_aware_generate_step"
-STEP_STAMP = "_gmlx_prefill_step"
 PINNED_STEP = "_gmlx_pinned_step"
 
 
@@ -123,38 +120,6 @@ def span_aware_chunk(image_spans, offset: int, n: int, max_n: int) -> int:
             # a < off: the chunk already starts inside the block; an earlier
             # boundary cut it and the tower reports that.
     return n
-
-
-def chunk_boundaries_cut(image_spans, step: int, length: int) -> bool:
-    """True when mlx-vlm's fixed-step loop over ``length`` prompt tokens
-    (chunks of ``step``, the final token reserved for the first decode
-    forward) would put a boundary strictly inside a block. The loop chunks
-    every prompt longer than one token, one that fits a step included."""
-    spans = normalize_spans(image_spans)
-    step, length = int(step), int(length)
-    if not spans or step <= 0 or length <= 1:
-        return False
-    bounds = list(range(step, length - 1, step)) + [length - 1]
-    return any(a < p < b for p in bounds for a, b in spans)
-
-
-def prefill_step_stamp(language_model):
-    return getattr(language_model, STEP_STAMP, None)
-
-
-def stamp_prefill_step(model, step) -> None:
-    """Record the run/chat prefill chunk width on the language model
-    (``None`` = mlx-vlm's default) for ``chunked_prefill_policy``."""
-    if step is None:
-        try:
-            from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE as step
-        except ImportError:
-            step = 2048
-    lm = getattr(model, "language_model", model)
-    try:
-        setattr(lm, STEP_STAMP, int(step))
-    except (AttributeError, TypeError):
-        pass
 
 
 def _absolute_offset(batch) -> int:
@@ -347,18 +312,41 @@ def run_checkpoints(spans, length: int, step, checkpoints) -> tuple[Any, list[in
     return step, sorted(starts | kept), kept
 
 
+def _cache_offset(prompt_cache) -> int | None:
+    """Tokens already in ``prompt_cache``: 0 for none, None when its first
+    layer reports no single offset."""
+    if not prompt_cache:
+        return 0
+    c = prompt_cache[0]
+    if hasattr(c, "caches"):
+        c = c.caches[0]
+    off = getattr(c, "offset", None)
+    if hasattr(off, "size"):
+        off = int(off.item()) if off.size == 1 else None
+    return off if isinstance(off, int) else None
+
+
 def _run_spans(input_ids, model, kwargs: dict) -> list[tuple[int, int]]:
     """Block spans of the prompt ``generate_step`` prefills, in its own
-    columns. The token types cover the whole prompt, the cached prefix
+    columns. ``image_spans`` are absolute, so they shift by the cached
+    prefix. The token types cover the whole prompt, the cached prefix
     included, so the columns start where the prefix ends."""
-    types = token_types(kwargs)
-    if types is None or input_ids is None or not vision_blocks(model):
+    if input_ids is None:
         return []
-    prefix = int(types.shape[-1]) - int(input_ids.shape[-1])
-    if prefix < 0:
+    image_spans = kwargs.get("image_spans")
+    if image_spans:
+        prefix = _cache_offset(kwargs.get("prompt_cache"))
+        blocks = normalize_spans(image_spans)
+    else:
+        types = token_types(kwargs)
+        if types is None or not vision_blocks(model):
+            return []
+        prefix = int(types.shape[-1]) - int(input_ids.shape[-1])
+        blocks = vision_spans(types)
+    if prefix is None or prefix < 0:
         return []
     spans = []
-    for a, b in vision_spans(types):
+    for a, b in blocks:
         if b > prefix:
             spans.append((max(a - prefix, 0), b - prefix))
     return spans

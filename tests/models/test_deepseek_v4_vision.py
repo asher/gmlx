@@ -370,21 +370,51 @@ def test_container_forward_with_image():
     assert plain.shape == (1, 6, tc.hidden_size)
 
 
-def test_chunked_prefill_policy_declines_when_a_block_would_be_cut():
-    from gmlx.gen.media_spans import stamp_prefill_step
+def test_run_prefill_chunks_at_block_edges(monkeypatch):
+    """mlx-vlm's generate_step, which run and chat drive, cuts a step-50
+    prefill of a 140-token image prompt at the block start, keeps the
+    block in one chunk, and gives the first token's log-probabilities
+    that one pass gives."""
+    from mlx_vlm.generate import ar, dispatch
 
+    from gmlx.gen import media_spans
+
+    assert media_spans.install_block_aware_generate_step()
+    monkeypatch.setattr(ar, "generation_stream", mx.cpu)
     model, tc = _container()
-    lm = model.language_model
     ids, spans = _prompt(tc.vocab_size, [40], total=140)
-    embeds = mx.zeros((1, len(ids), tc.hidden_size))
-    stamp_prefill_step(model, 50)
-    assert lm.chunked_prefill_policy(
-        inputs_embeds=embeds, prefill_kwargs={"image_spans": spans}) is False
-    stamp_prefill_step(model, 200)
-    assert lm.chunked_prefill_policy(
-        inputs_embeds=embeds, prefill_kwargs={"image_spans": spans}) is True
-    stamp_prefill_step(model, 50)
-    assert lm.chunked_prefill_policy(inputs_embeds=embeds) is True
+    (a, b), = spans
+    assert b - a <= 50 and a + 50 > b > 50
+    pv = mx.random.normal((6 * 24, 3 * 2 * 2), key=mx.random.key(0))
+    meta = [[6, 24, 2, 8]]
+    widths = []
+    call = type(model.language_model).__call__
+
+    def spy(self, *args, **kwargs):
+        x = kwargs.get("inputs", args[0] if args else None)
+        widths.append(int(x.shape[1]))
+        return call(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(model.language_model), "__call__", spy)
+
+    def first(step):
+        widths.clear()
+        gen = dispatch.generate_step(
+            mx.array([ids]), model, pv, None, max_tokens=1,
+            prefill_step_size=step, image_meta=meta, image_spans=spans)
+        _tok, logprobs = next(gen)
+        gen.close()
+        prefill = []
+        while sum(prefill) < len(ids):
+            prefill.append(widths[len(prefill)])
+        return np.array(logprobs.astype(mx.float32)), prefill
+
+    with mx.stream(mx.cpu):
+        chunked, chunk_widths = first(50)
+        whole, whole_widths = first(None)
+    assert whole_widths == [140]
+    assert chunk_widths == [40, 50, 49, 1]
+    assert np.abs(chunked - whole).max() <= 1e-4
 
 
 def test_block_length_and_lead_pads():

@@ -18,6 +18,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
 - The server's engine thread for an unloaded model now exits instead of staying
   parked, since mlx 0.32.2 fixes the crash at thread exit.
+- `gmlx run` and `gmlx chat` prefill a DeepSeek-V4-Flash-Vision-Exp image
+  prompt in chunks that keep each image whole, instead of in one pass.
 
 ### Fixed
 

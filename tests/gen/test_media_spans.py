@@ -45,44 +45,6 @@ def test_normalize_spans_sorts_and_drops_empty():
     assert ms.normalize_spans(None) == []
 
 
-def test_chunk_boundaries_cut_matches_fixed_step_loop():
-    # 140-token prompt, step 50: boundaries 50, 100, 139 -> 50 cuts block 1
-    assert ms.chunk_boundaries_cut(SPANS, 50, 140)
-    # step 40: boundaries 40, 80, 120, 139 -> 120 cuts block 2
-    assert ms.chunk_boundaries_cut(SPANS, 40, 140)
-    # step 64: boundaries 64, 128, 139 -> clean
-    assert not ms.chunk_boundaries_cut(SPANS, 64, 140)
-    # the final-token reserve: a block ending on the last token is cut
-    assert ms.chunk_boundaries_cut([[100, 140]], 64, 140)
-    # a prompt that fits one step still splits before its last token
-    assert not ms.chunk_boundaries_cut(SPANS, 200, 140)
-    assert ms.chunk_boundaries_cut([[100, 140]], 200, 140)
-    # a one-token prompt is never chunked
-    assert not ms.chunk_boundaries_cut([[0, 1]], 200, 1)
-    assert not ms.chunk_boundaries_cut(None, 50, 140)
-
-
-class _LM:
-    pass
-
-
-class _Container:
-    def __init__(self):
-        self.language_model = _LM()
-
-
-def test_stamp_prefill_step_lands_on_language_model():
-    m = _Container()
-    ms.stamp_prefill_step(m, 512)
-    assert ms.prefill_step_stamp(m.language_model) == 512
-    ms.stamp_prefill_step(m, None)
-    from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
-    assert ms.prefill_step_stamp(m.language_model) == DEFAULT_PREFILL_STEP_SIZE
-    bare = _LM()
-    ms.stamp_prefill_step(bare, 7)
-    assert ms.prefill_step_stamp(bare) == 7
-
-
 class _Batch:
     """The PromptProcessingBatch surface span_aware_prompt_n reads."""
 
@@ -258,3 +220,17 @@ def test_run_spans_start_after_the_cached_prefix():
         (4, 14)]
     assert ms._run_spans(ids, NS(config=NS()), {"mm_token_type_ids": types}) == []
     assert ms._run_spans(ids, model, {}) == []
+
+
+def test_run_spans_shift_image_spans_by_the_cache_offset():
+    from types import SimpleNamespace as NS
+
+    ids = mx.zeros((1, 100), dtype=mx.int32)
+    kw = {"image_spans": [[100, 124], [40, 64]]}
+    assert ms._run_spans(ids, NS(), kw) == [(40, 64), (100, 124)]
+    # a 64-token cached prefix, the first layer a cache list
+    cache = [NS(caches=[NS(offset=64)])]
+    assert ms._run_spans(ids, NS(), {**kw, "prompt_cache": cache}) == [
+        (36, 60)]
+    # an offset the wrapper cannot read leaves the loop unsteered
+    assert ms._run_spans(ids, NS(), {**kw, "prompt_cache": [NS()]}) == []
