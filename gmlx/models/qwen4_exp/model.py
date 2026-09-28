@@ -3,11 +3,13 @@
 # Portions copyright (c) 2024 Apple Inc. (mlx-lm qwen3_next/qwen3_5 skeleton, MIT)
 """Vendored mlx-lm-style model for Qwen3.8-Flash-Next (GGUF arch ``qwen4exp``).
 
-Neither pinned mlx-lm nor pinned mlx-vlm ships a qwen4_exp class; this module
-is the runtime for llama.cpp's ``LLM_ARCH_QWEN4EXP`` conversions. It is the
-qwen3.5 hybrid (gated DeltaNet on three of every four layers, gated full
-attention on the fourth, a 512-expert top-10 MoE with a sigmoid-gated shared
-expert on every layer) plus three mechanisms of its own:
+mlx-lm ships no qwen4_exp class. mlx-vlm ships a qwen4_exp package from
+0.7.3, and the vendored vision model (:mod:`gmlx.models.qwen4_exp.vlm_model`)
+loads ahead of it. This module is the runtime for llama.cpp's
+``LLM_ARCH_QWEN4EXP`` conversions. It is the qwen3.5 hybrid (gated DeltaNet
+on three of every four layers, gated full attention on the fourth, a
+512-expert top-10 MoE with a sigmoid-gated shared expert on every layer)
+plus three mechanisms of its own:
 
   1. Hyper-connections. The residual is four parallel streams ``[T, 4, D]``
      initialised from the token embedding. Each sub-layer reads one mixed

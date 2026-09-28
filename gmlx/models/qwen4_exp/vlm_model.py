@@ -3,10 +3,11 @@
 """Vendored mlx-vlm model for Qwen3.8-Flash-Next VLM (mmproj ``qwen3vl_merger``
 on LLM arch ``qwen4exp``).
 
-mlx-vlm ships no qwen4_exp package. The vision half is the same Qwen3-VL ViT
-the qwen3.5/3.6 pair uses (mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF
-disables deepstack), so this module reuses it wholesale; the text half is the
-vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
+This module loads ahead of the qwen4_exp package mlx-vlm ships from 0.7.3.
+The vision half is the same Qwen3-VL ViT the qwen3.5/3.6 pair uses
+(mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF disables deepstack), so
+this module reuses it wholesale; the text half is the vendored
+:mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
 mlx-vlm's generate stack expects.
 
 Positions: text-only rows keep the scalar-offset fast rope; when images are

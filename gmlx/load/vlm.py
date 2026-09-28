@@ -86,13 +86,15 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
-        # (gmlx.models.muse_glimmer.vlm_model); mlx-vlm ships no class for either.
+        # (gmlx.models.muse_glimmer.vlm_model), which loads ahead of the
+        # muse_glimmer package mlx-vlm ships from 0.6.15.
         return "muse_glimmer"
     if proj == "glm5next":
         # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
         # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
         # projector onto the glm5next hybrid text tower. Both halves are
-        # vendored (gmlx.models.glm5_next.vlm_model); mlx-vlm has no class.
+        # vendored (gmlx.models.glm5_next.vlm_model), which loads ahead of the
+        # glm5_next package mlx-vlm ships from 0.7.3.
         return "glm5_next"
     if proj == "deepseek4v":
         # DeepSeek-V4-Flash-Vision-Exp: a native-resolution DeepSeek ViT

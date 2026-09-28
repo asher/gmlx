@@ -220,8 +220,8 @@ def has_synth(gguf_arch: str) -> bool:
 _VENDORED_MLX_LM_MODULES = {
     # mlx-lm PR #1401 (MiniMax-M3 text backbone).
     "minimax_m3": "gmlx.models.minimax_m3",
-    # llama.cpp PR #27742 (Qwen3.8-Flash-Next); mlx-vlm main carries a
-    # qwen4_exp package but the pinned release does not, and mlx-lm has none.
+    # llama.cpp PR #27742 (Qwen3.8-Flash-Next). mlx-vlm ships a qwen4_exp
+    # package from 0.7.3, and mlx-lm has none.
     "qwen4_exp": "gmlx.models.qwen4_exp.model",
     # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
     # PoolingCache/BatchPoolingCache companions injected by ensure_registered.

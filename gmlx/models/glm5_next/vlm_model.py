@@ -2,10 +2,10 @@
 # Copyright (c) 2026 Asher Feldman
 """Vendored mlx-vlm model for GLM-5.3-Flash vision (mmproj ``glm5next``).
 
-mlx-vlm has no glm5_next package; this container pairs the vendored text
-tower (:mod:`gmlx.models.glm5_next.model`) with the GLM-OCR ViT + projector
-(:mod:`gmlx.models.glm5_next.vision`) in the ``language_model`` /
-``vision_tower`` shape mlx-vlm's generate stack expects.
+This container loads ahead of the glm5_next package mlx-vlm ships from 0.7.3.
+It pairs the vendored text tower (:mod:`gmlx.models.glm5_next.model`) with
+the GLM-OCR ViT + projector (:mod:`gmlx.models.glm5_next.vision`) in the
+``language_model`` / ``vision_tower`` shape mlx-vlm's generate stack expects.
 
 The text tower is NoPE, so unlike the qwen2vl-family containers there is no
 position/M-RoPE machinery: image features splice into the embedding stream

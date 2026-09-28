@@ -216,9 +216,9 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
-        # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
-        # #27742); same vendored-registration pattern as deepseek_v4, plus
-        # QSAKVCache injection into the cache modules.
+        # mlx-lm ships no qwen4_exp module (llama.cpp PR #27742). Same
+        # vendored-registration pattern as deepseek_v4, plus QSAKVCache
+        # injection into the cache modules.
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
