@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from gmlx.config import parse_size_bytes
-from gmlx.rlimit import raise_nofile_limit
+from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 
 from . import cli, runtime
 from .clipboard import ClipboardServer
@@ -519,8 +519,11 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
               summary: list[str] = ()) -> int:
     """Run the session and return the client's exit code."""
     s = spec.session
-    raise_nofile_limit()
+    nofile = raise_nofile_limit()
     log = _SessionLog(cache_dir() / f"last-{s.client}.log")
+    low = low_limit_warning(nofile, "the launch supervisor")
+    if low:
+        log(f"warning: {low}")
     loop = RelayLoop(log)
     loop.start()
     relays: list[Relay | ClipboardServer] = []
@@ -530,7 +533,10 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
     stop_open = threading.Event()
     try:
         if spec.api_port is not None and api_targets:
-            relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api"),
+            # Each API connection holds one of the shared server's
+            # descriptors, so it must send a whole request head in time.
+            relays.append(_listen(lambda a: Relay(loop, a, api_targets, name="gmlx api",
+                                                  idle_until_head=True),
                                   str(s.sock("api.sock")), "the gmlx API"))
         for port in spec.plan.forward:
             relays.append(_listen(lambda a, p=port: Relay(loop, a, loopback_targets(p),
@@ -603,11 +609,13 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         except TeardownAbandoned:
             log("cleanup: abandoned after a third signal")
         finally:
+            # A third signal from here on no longer abandons anything.
+            if signals is not None:
+                signals.tearing_down = False
             try:
                 shutil.rmtree(s.dir, ignore_errors=True)
             finally:
                 if signals is not None:
-                    signals.tearing_down = False
                     signals.restore()
                 log.close()
 

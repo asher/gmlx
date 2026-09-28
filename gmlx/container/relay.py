@@ -294,7 +294,8 @@ class _Pair:
 
     def __init__(self, loop: RelayLoop, down: socket.socket, targets: list,
                  name: str, owner: "Relay | None" = None,
-                 idle_deadline: float | None = IDLE_DEADLINE):
+                 idle_deadline: float | None = IDLE_DEADLINE,
+                 idle_until_head: bool = False):
         self.loop, self.down, self.name, self.owner = loop, down, name, owner
         self.targets = list(targets)
         self.tried: list = []
@@ -306,16 +307,40 @@ class _Pair:
         self.up_shut = self.down_shut = False
         self.closed = False
         self.last_error = "no address to connect to"
-        self.moved = False                # a byte went one way or the other
+        # A byte went one way or the other, or with ``idle_until_head`` a
+        # whole request head came from the client.
+        self.moved = False
+        self.until_head = idle_until_head
+        self.head_tail = b""
         down.setblocking(False)
         loop.own(down)
-        if idle_deadline is not None:
+        try:
+            self._connect_next()
+        except OSError as e:
+            # The pair closes here, which frees its slot once.
+            self.loop.log(f"{self.name}: cannot relay a connection ({e})")
+            self.close()
+        # The deadline starts only once the connect ran, so a pair that
+        # closed above is never released a second time.
+        if idle_deadline is not None and not self.closed:
             loop.call_later(idle_deadline, self._expire)
-        self._connect_next()
 
     def _expire(self) -> None:
         if not self.closed and not self.moved:
             self.close()
+
+    def _note_down(self, data: bytes) -> None:
+        """Mark the pair as moving: at the first byte from the client, or
+        with ``until_head`` once the client sent a whole request head."""
+        if self.moved:
+            return
+        if not self.until_head:
+            self.moved = True
+            return
+        seen = self.head_tail + data
+        if b"\r\n\r\n" in seen:
+            self.moved = True
+        self.head_tail = seen[-3:]
 
     def _connect_next(self) -> None:
         while self.targets:
@@ -408,7 +433,7 @@ class _Pair:
                     self.down_eof = True
                 elif data:
                     self.to_up += data
-                    self.moved = True
+                    self._note_down(data)
             if mask & _WRITE and self.to_down:
                 sent = self.down.send(self.to_down)
                 del self.to_down[:sent]
@@ -439,7 +464,8 @@ class _Pair:
                     self.up_eof = True
                 elif data:
                     self.to_down += data
-                    self.moved = True
+                    if not self.until_head:
+                        self.moved = True
             if mask & _WRITE and self.to_up:
                 sent = self.up.send(self.to_up)
                 del self.to_up[:sent]
@@ -471,13 +497,19 @@ class Relay:
     target address or a list of them tried in order until one accepts. The
     listener binds here, so a busy port fails before the container starts.
     At most ``max_connections`` connections are open at a time, and a run of
-    failures to reach the target is logged once."""
+    failures to reach the target is logged once.
+
+    A connection that moves no byte within ``idle_deadline`` seconds is
+    closed. With ``idle_until_head`` it must instead send a whole HTTP
+    request head, ending in an empty line, in that time."""
 
     def __init__(self, loop: RelayLoop, listen: Address,
                  connect: Address | list, *, name: str | None = None,
                  max_connections: int = CONNECTIONS_MAX,
-                 idle_deadline: float | None = IDLE_DEADLINE):
+                 idle_deadline: float | None = IDLE_DEADLINE,
+                 idle_until_head: bool = False):
         self.loop = loop
+        self.idle_until_head = idle_until_head
         self.listen = listen
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
@@ -515,7 +547,8 @@ class Relay:
             self.open += 1
             try:
                 _Pair(self.loop, conn, self.targets, self.name, owner=self,
-                      idle_deadline=self.idle_deadline)
+                      idle_deadline=self.idle_deadline,
+                      idle_until_head=self.idle_until_head)
             except OSError as e:
                 # A socket for the upstream side could not be made.
                 self.loop.log(f"{self.name}: cannot relay a connection ({e})")

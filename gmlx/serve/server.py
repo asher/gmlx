@@ -2149,8 +2149,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # Each client connection holds a descriptor, and the soft limit of 256
     # that Terminal gives would let a few hundred idle connections reset
     # every other client.
-    from gmlx.rlimit import raise_nofile_limit
-    raise_nofile_limit()
+    from gmlx.rlimit import low_limit_warning, raise_nofile_limit
+    low = low_limit_warning(raise_nofile_limit(), "the server")
+    if low:
+        print(f"[server] warning: {low}", file=sys.stderr)
 
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,

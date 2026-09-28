@@ -372,32 +372,40 @@ def test_volume_lines_use_allocated_blocks(fake_container, tmp_path, monkeypatch
 # open_when_ready
 
 def test_open_when_ready_waits_for_an_http_response():
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen()
-    port = listener.getsockname()[1]
-    opened = []
-    stop = threading.Event()
-    t = threading.Thread(target=session.open_when_ready,
-                         args=(port, opened.append, stop), kwargs={"timeout": 20})
-    t.start()
-    conn, _ = listener.accept()                        # a relay accepts at once
-    conn.close()                                       # and gives EOF: not ready
-    time.sleep(0.2)
-    assert opened == []
-    listener.close()
+    """The relay accepts at once, so the first connections only get an end
+    of file. The browser opens at the first HTTP answer."""
+    answered = threading.Event()
+    requests = []
 
-    class Ok(http.server.BaseHTTPRequestHandler):
+    class Late(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            requests.append(1)
+            if not answered.is_set():
+                self.close_connection = True       # an end of file: not ready
+                return
             self.send_response(200)
             self.end_headers()
 
         def log_message(self, *a):
             pass
-    server = http.server.HTTPServer(("127.0.0.1", port), Ok)
+    server = http.server.HTTPServer(("127.0.0.1", 0), Late)
+    port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    opened = []
+    stop = threading.Event()
+    t = threading.Thread(target=session.open_when_ready,
+                         args=(port, opened.append, stop), kwargs={"timeout": 20})
+    t.start()
+    deadline = time.monotonic() + 10
+    while not requests:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    time.sleep(0.2)
+    assert opened == []
+    answered.set()
     t.join(10)
     server.shutdown()
+    server.server_close()
     assert opened == [f"http://127.0.0.1:{port}/"]
 
 
@@ -677,16 +685,19 @@ def test_the_session_log_stops_at_its_limit(tmp_path):
     assert len(text) <= 200 + 60 and text.rstrip().endswith("the log reached its size limit")
 
 
-def test_the_open_file_limit_is_raised_toward_the_target():
-    import resource
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
-        session.raise_nofile_limit(1024)
-        want = 1024 if hard == resource.RLIM_INFINITY else min(1024, hard)
-        assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == want
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+def test_supervise_raises_the_open_file_limit_first():
+    """Each relayed connection holds a descriptor of the supervisor, so it
+    raises its limit before any listener opens. gmlx/rlimit.py has its own
+    tests."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(session.supervise))
+    lines: dict = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            lines.setdefault(ast.unparse(n.func), n.lineno)
+    assert "raise_nofile_limit" in lines
+    assert lines["raise_nofile_limit"] < lines["RelayLoop"]
 
 
 def test_cleanup_removes_only_stale_install_folders(fake_container, tmp_path):
@@ -784,3 +795,31 @@ def test_a_third_signal_abandons_a_teardown_that_waits(fake_container, tmp_path,
     assert not sess.dir.exists() and signal.getsignal(signal.SIGTERM) is before
     assert "abandoned after a third signal" in (
         session.cache_dir() / "last-pi.log").read_text()
+
+
+def test_signals_while_the_session_folder_is_removed_raise_nothing(fake_container, tmp_path,
+                                                                    monkeypatch):
+    fake_container.update(run_rc=3)
+    real = session.shutil.rmtree
+
+    sess = session.new_session("pi", [])
+
+    def noisy(path, **kw):
+        if Path(path) == sess.dir:
+            for _ in range(3):
+                os.kill(os.getpid(), signal.SIGTERM)
+        real(path, **kw)
+    monkeypatch.setattr(session.shutil, "rmtree", noisy)
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    rc = session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                           say=lambda line: None)
+    assert rc == 3 and not sess.dir.exists()
+
+
+def test_a_low_open_file_limit_is_logged(fake_container, tmp_path, monkeypatch):
+    monkeypatch.setattr(session, "raise_nofile_limit", lambda: 2048)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    text = (session.cache_dir() / "last-pi.log").read_text()
+    assert "can open only 2048 files at a time" in text

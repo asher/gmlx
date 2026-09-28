@@ -550,6 +550,88 @@ def test_no_socket_for_the_target_frees_the_slot(loop, tmp_path, monkeypatch):
     stop()
 
 
+def _refusing_port():
+    """A loopback port where nothing listens. A non-blocking connect to it
+    reports EINPROGRESS on macOS and fails afterwards with ECONNREFUSED."""
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def test_no_socket_after_a_failed_connect_frees_the_slot(loop, tmp_path, monkeypatch):
+    """The leaking path: the first target fails after the connect started,
+    and the socket for the next target cannot be made."""
+    port, stop = _echo_server()
+    path = str(tmp_path / "emfile2.sock")
+    r = relay.Relay(loop, path, [("127.0.0.1", _refusing_port()), ("127.0.0.1", port)],
+                    name="gmlx api")
+    real = relay._upstream_socket
+    made = []
+
+    def second_fails(family):
+        made.append(family)
+        if len(made) > 1:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real(family)
+    monkeypatch.setattr(relay, "_upstream_socket", second_fails)
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""                   # closed, not left open
+    assert len(made) == 2
+    assert _in_loop(loop, lambda: r.open) == 0
+    assert any("Too many open files" in line for line in loop.logged)
+    stop()
+
+
+def test_a_failed_connect_step_releases_the_slot_once(loop, tmp_path, monkeypatch):
+    """The idle deadline starts after the connect, so a pair that closed
+    while it connected is never released a second time."""
+    port, stop = _echo_server()
+    path = str(tmp_path / "once.sock")
+    r = relay.Relay(loop, path, ("127.0.0.1", port), name="gmlx api", idle_deadline=0.2)
+
+    def broken(self):
+        raise OSError(errno.EBADF, "Bad file descriptor")
+    monkeypatch.setattr(relay._Pair, "_connect_next", broken)
+    with _unix_client(path) as c:
+        assert c.recv(10) == b""
+    time.sleep(0.5)                                # past the deadline
+    assert _in_loop(loop, lambda: r.open) == 0
+    stop()
+
+
+def test_the_api_relay_needs_a_whole_request_head_before_the_deadline(loop, tmp_path):
+    srv, _closed = _silent_server()
+    path = str(tmp_path / "head.sock")
+    r = relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3,
+                    idle_until_head=True)
+    # The test server echoes, so bytes flow both ways, but a request line
+    # alone is not a whole head.
+    trickle = _unix_client(path)
+    start = time.monotonic()
+    trickle.sendall(b"GET /v1/models HTTP/1.1\r\n")
+    while trickle.recv(64):
+        pass                                        # the echo, then the close
+    assert 0.25 < time.monotonic() - start < 5
+    trickle.close()
+    whole = _unix_client(path)
+    head = b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n"
+    whole.sendall(head[:-3])
+    time.sleep(0.05)
+    whole.sendall(head[-3:])                        # the empty line spans two reads
+    got = b""
+    while len(got) < len(head):
+        got += whole.recv(64)
+    time.sleep(0.8)
+    whole.settimeout(0.2)
+    with pytest.raises(socket.timeout):             # still open past the deadline
+        whole.recv(10)
+    assert _in_loop(loop, lambda: r.open) == 1
+    whole.close()
+    srv.close()
+
+
 def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):
     def no_threads(*a, **k):
         raise RuntimeError("can't start new thread")
