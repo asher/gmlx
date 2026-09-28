@@ -3,7 +3,8 @@
 ``QuantizedKVCache`` and ``BatchQuantizedKVCache`` size their first code
 buffer as ``head_dim // (32 // bits)`` uint32 words, but ``mx.quantize``
 bit-packs ``head_dim * bits // 32``. The two agree only when bits divides
-32, so widths 3 and 6 allocate too wide and the very first append raises
+32 or the head is narrow, so at bits 3, 5 and 6 most head widths allocate
+too wide and the very first append raises
 ``broadcast_shapes ... cannot be broadcast``.
 
 It only fires when the cache is quantized while empty. The CLI converts
@@ -11,7 +12,7 @@ mid-stream, off a populated cache whose buffers came from the conversion,
 and growth reuses that width -- which is why ``--kv-bits 6`` runs there.
 Serve builds ``BatchQuantizedKVCache`` empty at construction, so on the
 server every head_dim whose two formulas disagree fails the first
-request at ``kv_bits`` 3 or 6.
+request at ``kv_bits`` 3, 5 or 6.
 
 The fix seeds the buffers at the packed width on the first call and lets
 the stock body run from there: its realloc branch is then skipped
