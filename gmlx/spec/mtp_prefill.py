@@ -45,9 +45,9 @@ _log = logging.getLogger(__name__)
 def _mtp_prefill_init(batch) -> None:
     """One-time APC lookup + prefix trim for an MTP prompt batch.
 
-    Runs on the first ``prompt_step`` call, or directly from ``generate()``
-    when the prompt is short enough that chunked prefill never fires.
-    Lookup ladder: L0 (SpecPrefixCache: whole-prompt KV + full-prompt
+    Runs on the first ``prompt_step`` call. ``generate()`` also calls it for
+    a one-column prompt, which never enters prompt_step (stock prefill runs
+    prompt_step while more than one column remains). Lookup ladder: L0 (SpecPrefixCache: whole-prompt KV + full-prompt
     hidden, the only tier the drafter can teacher-force from without a cold
     start) then L1 (shared APCManager: exact / block / disk KV, no hidden).
     Also arms the stock post-prefill store whenever a manager is reachable,
@@ -513,8 +513,8 @@ def install_full_prompt_mtp_prefill() -> None:
         self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
     ):
         if self.draft_kind == "mtp":
-            # Short prompts never enter prompt_step (chunked prefill is not
-            # needed), so the APC lookup/store arming runs here instead.
+            # A one-column prompt never enters prompt_step, so the APC
+            # lookup/store arming runs here instead. Idempotent otherwise.
             _mtp_prefill_init(self)
         result = _orig_generate(
             self,
@@ -564,17 +564,14 @@ def install_full_prompt_mtp_prefill() -> None:
         full_ids = getattr(self, "_mtp_full_input_ids", None)
         l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
         if not chunk_hiddens:
-            # No captured chunks: the whole (remaining) prompt went through
-            # the final generate forward, so stock prompt_tokens/hidden are
-            # already an aligned pair (suffix-only on an L1 hit) and
-            # result.hidden needs no rebuild; with seed streaming and no
-            # retention, result.hidden is already the residual unstreamed
-            # tail (retention accompanies an armed L0 store, so none can
-            # fire here). The L0 store below must still run for the
-            # single-shot case: arch prefill profiles can raise the step
-            # past typical prompt lengths (qwen4exp defaults to 8192), so
-            # sub-step prompts land here and still need their warm-start
-            # entry.
+            # No captured chunks: either prompt_step never ran (a one-column
+            # prompt, or a one-column suffix after an L1 hit) and stock
+            # prompt_tokens/hidden are already an aligned pair (suffix-only
+            # on an L1 hit), or seed streaming ran without retention and
+            # result.hidden is already the residual unstreamed tail
+            # (retention accompanies an armed L0 store, so none can fire
+            # then). result.hidden needs no rebuild. The L0 store below
+            # still runs for a one-column prompt.
             full_hidden = result.hidden
         else:
             parts = chunk_hiddens + [result.hidden]
@@ -631,8 +628,9 @@ def install_full_prompt_mtp_prefill() -> None:
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
-            # Window-limited heads only use the trailing capture window;
-            # chunked prefill already trimmed, single-shot must match (an
+            # Window-limited heads only use the trailing capture window.
+            # The chunk capture keeps only that window and the final
+            # generate column adds one past it, so trim to match (an
             # uncapped entry pins the whole prompt's hidden for nothing).
             limit = getattr(self.draft_model, "hidden_capture_limit", None)
             store_hidden = (full_hidden if not limit

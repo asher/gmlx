@@ -14,9 +14,9 @@ depth would push the transient past a cap:
 
 Shallow prefill keeps the full step; only the deep tail (where attention
 dominates the chunk anyway) pays the small-step tax. Applied to the serve
-prefill loop (prompt_step and needs_processing -- the loop hands its final
-<=step tail to generate(), which is exactly the cresting chunk), the MTP
-prefill override, and the MTP teacher-force head seed.
+prefill loop, the MTP prefill override, and the MTP teacher-force head
+seed. The loop runs prompt_step until one prompt column remains and hands
+that column to generate(), so the cresting chunk is a prompt_step chunk.
 
 The dense [heads, step, S] model is the conservative default. Archs whose
 prefill attention runs fused/streaming kernels never materialize it; their
@@ -665,9 +665,11 @@ def decayed_for_batch(batch) -> int | None:
 
 def install_prefill_decay() -> bool:
     """Wrap PromptProcessingBatch.prompt_step and needs_processing so both
-    consult the depth-decayed step. Idempotent; composes with the MTP
-    prompt_step override in either install order (decay is idempotent, and
-    the MTP body resolves its own step via decayed_for_batch)."""
+    run with the depth-decayed step. prompt_step sizes each chunk from it.
+    Stock needs_processing reads the step only to test it for None, so the
+    decayed value does not change its answer. Idempotent; composes with the
+    MTP prompt_step override in either install order (decay is idempotent,
+    and the MTP body resolves its own step via decayed_for_batch)."""
     if not _enabled():
         return False
     from mlx_vlm.generate.ar import PromptProcessingBatch

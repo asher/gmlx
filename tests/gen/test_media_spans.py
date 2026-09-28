@@ -54,8 +54,11 @@ def test_chunk_boundaries_cut_matches_fixed_step_loop():
     assert not ms.chunk_boundaries_cut(SPANS, 64, 140)
     # the final-token reserve: a block ending on the last token is cut
     assert ms.chunk_boundaries_cut([[100, 140]], 64, 140)
-    # no chunking at all when the prompt fits one step
+    # a prompt that fits one step still splits before its last token
     assert not ms.chunk_boundaries_cut(SPANS, 200, 140)
+    assert ms.chunk_boundaries_cut([[100, 140]], 200, 140)
+    # a one-token prompt is never chunked
+    assert not ms.chunk_boundaries_cut([[0, 1]], 200, 1)
     assert not ms.chunk_boundaries_cut(None, 50, 140)
 
 

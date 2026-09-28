@@ -35,6 +35,7 @@ a boundary would cut a block.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -78,10 +79,11 @@ def span_aware_chunk(image_spans, offset: int, n: int, max_n: int) -> int:
 def chunk_boundaries_cut(image_spans, step: int, length: int) -> bool:
     """True when mlx-vlm's fixed-step loop over ``length`` prompt tokens
     (chunks of ``step``, the final token reserved for the first decode
-    forward) would put a boundary strictly inside a block."""
+    forward) would put a boundary strictly inside a block. The loop chunks
+    every prompt longer than one token, one that fits a step included."""
     spans = normalize_spans(image_spans)
     step, length = int(step), int(length)
-    if not spans or step <= 0 or length <= step:
+    if not spans or step <= 0 or length <= 1:
         return False
     bounds = list(range(step, length - 1, step)) + [length - 1]
     return any(a < p < b for p in bounds for a, b in spans)
@@ -112,7 +114,8 @@ def _absolute_offset(batch) -> int:
     excluded) when APC metadata is present, else the processed columns."""
     meta = getattr(batch, "_apc_meta", None) or []
     if meta and meta[0] is not None:
-        real = getattr(batch, "_row_real_tokens_processed", None)
+        real: Callable[[int], int] | None = getattr(
+            batch, "_row_real_tokens_processed", None)
         if callable(real):
             try:
                 return int(real(0))
@@ -122,7 +125,8 @@ def _absolute_offset(batch) -> int:
 
 
 def _drop_checkpoint_inside(batch, n: int) -> None:
-    col_fn = getattr(batch, "_next_apc_checkpoint_column", None)
+    col_fn: Callable[[], int | None] | None = getattr(
+        batch, "_next_apc_checkpoint_column", None)
     col = col_fn() if callable(col_fn) else None
     if col is None:
         return
