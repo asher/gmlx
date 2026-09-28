@@ -45,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or more tokens could decode wrong tokens.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
+- A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
+  image token saw only the image tokens before it.
 
 ## [0.4.19] - 2026-09-27
 

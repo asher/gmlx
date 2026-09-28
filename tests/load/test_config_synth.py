@@ -288,6 +288,48 @@ def test_gemma_embedding_synth_builds_mlx_embeddings_encoder():
     assert len(model.dense) == 2                    # the 2-layer projection head
 
 
+def _meta_gemma4_size(arch: str, *, layers, hidden, experts) -> dict:
+    """Gemma-4 metadata at a published checkpoint's layer count, width and
+    expert count, over tiny attention dims. Layer 5 is the first full one."""
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = layers
+    m[f"{arch}.embedding_length"] = hidden
+    m[f"{arch}.attention.key_length_swa"] = 16
+    m[f"{arch}.attention.shared_kv_layers"] = 0
+    m[f"{arch}.attention.sliding_window"] = 512
+    m[f"{arch}.attention.sliding_window_pattern"] = [
+        i % 6 != 5 for i in range(layers)]
+    if experts is not None:
+        m[f"{arch}.expert_count"] = experts
+        m[f"{arch}.expert_used_count"] = 8
+        m[f"{arch}.expert_feed_forward_length"] = 64
+    return m
+
+
+@pytest.mark.parametrize("layers, hidden, experts, want", [
+    (30, 2816, 128, "vision"),   # 26B-A4B
+    (60, 5376, None, "vision"),  # 31B
+    (35, 1536, None, None),      # E2B
+    (42, 2560, None, None),      # E4B
+])
+def test_gemma4_image_attention_follows_the_hf_config(layers, hidden,
+                                                       experts, want):
+    # use_bidirectional_attention as each checkpoint's HF config.json sets it.
+    m = _meta_gemma4_size("gemma4", layers=layers, hidden=hidden,
+                          experts=experts)
+    c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
+    assert c.get("use_bidirectional_attention") == want
+
+
+def test_diffusion_gemma_image_attention_stays_causal():
+    # DiffusionGemma shares the Gemma-4 synth; the 26B-A4B shape alone does
+    # not make it a vision checkpoint.
+    m = _meta_gemma4_size("diffusion-gemma", layers=30, hidden=2816,
+                          experts=128)
+    c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
+    assert "use_bidirectional_attention" not in c["text_config"]
+
+
 def test_glm4_partial_rotary_and_attention_bias():
     m = _meta_for("glm4")
     # attention_bias is inferred from the presence of a q-proj bias tensor.

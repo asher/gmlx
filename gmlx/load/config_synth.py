@@ -399,6 +399,15 @@ def _add_universal_fields(meta, shapes, config: dict, arch: str) -> None:
 
 # gemma4
 
+# Gemma-4 checkpoints whose HF config.json sets use_bidirectional_attention
+# to "vision", by (block_count, embedding_length, expert_count): 26B-A4B and
+# 31B. The GGUF carries no key for the setting, and E2B (35, 1536) and E4B
+# (42, 2560) set it to null, so they and any other shape stay causal.
+# llama.cpp's mtmd also keys it on the text width. The 12B loads as
+# gemma4_unified, whose TextConfig defaults to "vision".
+_GEMMA4_BIDIRECTIONAL_IMAGE_SHAPES = {(30, 2816, 128), (60, 5376, None)}
+
+
 def _synth_gemma4(meta, shapes, config: dict, arch: str = "gemma4") -> None:
     # `arch` is the GGUF metadata-key prefix. It is "gemma4" for a plain Gemma-4
     # checkpoint, but DiffusionGemma reuses this same Gemma-4 MoE backbone synth
@@ -509,6 +518,10 @@ def _synth_gemma4(meta, shapes, config: dict, arch: str = "gemma4") -> None:
         config["moe_intermediate_size"] = _require(
             _read_int(meta, f"{arch}.expert_feed_forward_length"),
             arch=arch, gguf_field=f"{arch}.expert_feed_forward_length")
+
+    shape = (n_layers, config["hidden_size"], expert_count)
+    if arch == "gemma4" and shape in _GEMMA4_BIDIRECTIONAL_IMAGE_SHAPES:
+        config["use_bidirectional_attention"] = "vision"
 
 
 # DiffusionGemma (block-diffusion on the Gemma-4 MoE backbone)
