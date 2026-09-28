@@ -4,12 +4,19 @@ subclass (``gmlx.cache.apc_manager.GmlxAPCManager``), not as a method patch here
 
 from __future__ import annotations
 
+import contextvars
 import importlib
 import logging
 import weakref
 
 _log = logging.getLogger(__name__)
 _CAPTURE_WARNED: set[str] = set()
+
+# The request's ``tool_parser`` override (None: infer from the template),
+# recorded where each protocol handler resolves its parser, ahead of the
+# render the capture records.
+_REQUEST_TOOL_PARSER: contextvars.ContextVar[str | None] = \
+    contextvars.ContextVar("gmlx_request_tool_parser", default=None)
 
 
 def _warn_capture_once(site: str) -> None:
@@ -101,7 +108,9 @@ def install_retire_render_capture() -> None:
     spec engine later stashes as ``full_ids`` -- while capturing the
     generator's own text-to-ids path so the retirement render tokenizes
     identically. Media requests are not re-keyed (re-encoding text cannot
-    reproduce expanded media token ids). Consumed by speculative retirement
+    reproduce expanded media token ids). The recorded context also carries
+    the request's ``tool_parser`` override, so the retirement parses tool
+    calls with the handler's parser. Consumed by speculative retirement
     via ``retire_key.next_turn_lcp``. Kill: ``GMLX_APC_RETIRE_LCP=0``.
     """
     import os
@@ -125,6 +134,7 @@ def install_retire_render_capture() -> None:
                         "processor": processor,
                         "config": config,
                         "render": orig_render,
+                        "tool_parser": _REQUEST_TOOL_PARSER.get(),
                         "media": bool(kw.get("num_images")
                                       or kw.get("num_audios")
                                       or kw.get("video")),
@@ -142,6 +152,18 @@ def install_retire_render_capture() -> None:
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, "_kq_retire_capture", False):
             target.apply_chat_template = _make_capture(fn)
+
+    # The handlers resolve their parser through the package attribute
+    # (``_protocol_deps`` looks it up at call time), before they render.
+    pkg = importlib.import_module("mlx_vlm.server")
+    infer = getattr(pkg, "_infer_tool_parser_from_processor", None)
+    if infer is not None and not getattr(infer, "_kq_retire_capture", False):
+        def _infer_tool_parser_from_processor(processor, override=None):
+            _REQUEST_TOOL_PARSER.set(override)
+            return infer(processor, override=override)
+
+        _infer_tool_parser_from_processor._kq_retire_capture = True
+        pkg._infer_tool_parser_from_processor = _infer_tool_parser_from_processor
 
     cls = gen_mod.ResponseGenerator
     orig_pre = cls._preprocess_request

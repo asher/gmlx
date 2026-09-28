@@ -283,6 +283,10 @@ SEAMS: tuple[Seam, ...] = (
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "_infer_tool_parser_from_processor",
          "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server", "_infer_tool_parser_from_processor",
+         "server_patches.apc.install_retire_render_capture (wrapped: "
+         "records the request's tool_parser override for retire_key; the "
+         "_protocol_deps lambda looks the package attribute up per call)"),
     Seam("mlx_vlm.server.openai", "load_tool_module",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.responses_state",

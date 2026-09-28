@@ -194,8 +194,9 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
     Mirrors the server's response construction: thinking split via the
-    request's thinking tokens, tool calls parsed by the template-inferred
-    tool module with arguments normalized to dicts (the endpoint
+    request's thinking tokens, tool calls parsed by the request's tool
+    module (its ``tool_parser`` override, else the one inferred from the
+    template) with arguments normalized to dicts (the endpoint
     json-decodes them before templating), and post-tool text scrubbed of
     control tokens.
     """
@@ -215,7 +216,8 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
 
     tool_calls = None
     tools = kw.get("tools")
-    parser = srv._infer_tool_parser_from_processor(ctx["processor"])
+    parser = srv._infer_tool_parser_from_processor(
+        ctx["processor"], override=ctx.get("tool_parser"))
     tool_module = srv.load_tool_module(parser) if parser else None
     if tool_module is not None:
         tc = srv.process_tool_calls(

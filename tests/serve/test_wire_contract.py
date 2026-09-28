@@ -541,6 +541,33 @@ def test_chat_developer_messages_stay_in_place(wire, monkeypatch):
     assert _rendered_messages(wire) == [("system", "I\n\nD"), ("user", "hi")]
 
 
+# 4d. the retirement render capture (apc.install_retire_render_capture)
+#     records each request's tool_parser override beside its render.
+def test_retire_capture_records_the_tool_parser_override(wire):
+    import gmlx.cache.retire_key as rk
+
+    tools = [{"type": "function", "function": {
+        "name": "t", "parameters": {"type": "object"}}}]
+
+    def _captured():
+        with rk._LOCK:
+            return rk._TEXT_MEMO[wire.gen.calls[-1]["prompt"]]
+
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        tools=tools, tool_parser="json_tools"))
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] == "json_tools"
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(tools=tools))
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] is None
+    r = wire.client.post("/v1/messages", json={
+        "model": MODEL_ID, "max_tokens": 8, "tool_parser": "json_tools",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"name": "t", "input_schema": {"type": "object"}}]})
+    assert r.status_code == 200, r.text
+    assert _captured()["tool_parser"] == "json_tools"
+
+
 # 5. /v1/responses (README / getting-started promise the Responses API)
 def test_responses_route_shape(wire):
     r = wire.client.post("/v1/responses",
