@@ -46,11 +46,11 @@ def install_apc_lone_harvest() -> None:
     function by module attribute (``_apc.harvest_blocks_from_batch_cache``), so
     replacing it on the module is picked up at the call site without a fork.
 
-    Against the pinned mlx-vlm 0.6.15 the replacement's behavioral delta
+    Against the pinned mlx-vlm 0.7.3 the replacement's behavioral delta
     is the quantized (tuple ``keys``) decline: stock dequantizes and
     stores, this keeps the block tier out of quantized-KV serving.
 
-    Signature contract: matches the 0.6.15 harvest exactly --
+    Signature contract: matches the 0.7.3 harvest exactly --
     ``full_token_ids`` third positional, ``batch_idx`` keyword-only
     (None = lone request). All callers use that convention."""
     import mlx.core as mx

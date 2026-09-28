@@ -43,16 +43,16 @@ dependencies = [
     # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache/compat.py for the dual-origin cache-class rules).
-    # 0.6.15 requires mlx>=0.32.0; mlx-kquant 0.4.4 (PyPI) carries the
-    # matching mlx 0.32.1 pin; <0.5 guards the next kquant breaking change.
-    "mlx-vlm==0.6.15",
+    # 0.7.3 requires mlx>=0.32.2, so the mlx-kquant build must be one that
+    # pins mlx 0.32.2; <0.5 guards the next kquant breaking change.
+    "mlx-vlm==0.7.3",
     # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
     # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings
     # model classes. Lazy-imported only when an encoder embedder loads (no CLI
     # startup cost); every transitive dep is already pulled by mlx-vlm/transformers.
     "mlx-embeddings",
     # >=4.52: vlm.py imports transformers.BaseVideoProcessor at module top
-    # (mlx-vlm itself pins transformers>=5.5.0, so the resolved floor is
+    # (mlx-vlm itself pins transformers>=5.14.0, so the resolved floor is
     # higher). The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
     # NewlineTokenizer) no longer reproduces on 5.15.1.
     "transformers>=4.52",

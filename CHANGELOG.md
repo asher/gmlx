@@ -6,8 +6,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Chat, Responses and Messages requests take a `tool_parser` field that names
+  the tool-call parser, gmlx's own parsers included.
+
 ### Changed
 
+- Requires mlx-vlm 0.7.3, and with it mlx 0.32.2.
 - `/v1/chat/completions` merges all system messages into one leading system
   message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
 

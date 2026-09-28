@@ -352,8 +352,8 @@ def install_continuous_batch_admission() -> None:
         # boundaries. The scalar (B=1) generator never does, so a live
         # scalar host is preempted first: its generator closes at the round
         # boundary and the batch is rebuilt armless on the batch loop.
-        # `_all_uids` is an mlx-vlm generator internal (stable under the
-        # ==0.6.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
+        # `_all_uids` is an mlx-vlm generator internal (checked at the
+        # ==0.7.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
         preempted = False
         if pending and len(self._all_uids) == 1:
             preempted = _preempt_scalar(self)

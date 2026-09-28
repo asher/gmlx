@@ -332,16 +332,11 @@ def install_safe_kv_quantization() -> None:
     vlm_generate = importlib.import_module("mlx_vlm.generate")
     vlm_common = importlib.import_module("mlx_vlm.generate.common")
 
-    if hasattr(vlm_common, "mlx_maybe_quantize_kv_cache"):
-        # <= 0.6.3: the stock wrapper delegates its non-turboquant tail to
-        # this mlx-lm alias; rebinding it covers every caller.
-        setattr(vlm_common, "mlx_maybe_quantize_kv_cache", safe_maybe_quantize)
-        return
-    # >= 0.6.4: the tail is inlined (and lost the rotating exclusion). The
-    # AR engine resolves "maybe_quantize_kv_cache" from the mlx_vlm.generate
-    # package at call time (_generate_module_override), so publish a wrapper
-    # there that keeps the stock turboquant arm and routes the affine tail
-    # through the safe path.
+    # The stock wrapper inlines its affine tail, without the rotating
+    # exclusion. The AR engine resolves "maybe_quantize_kv_cache" from the
+    # mlx_vlm.generate package at call time (_generate_module_override), so
+    # publish a wrapper there that keeps the stock turboquant arm and routes
+    # the affine tail through the safe path.
     stock = getattr(vlm_common, "maybe_quantize_kv_cache", None)
     turbo_on = getattr(vlm_common, "turboquant_enabled", None)
     if stock is None:

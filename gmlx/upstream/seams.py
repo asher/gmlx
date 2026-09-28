@@ -41,7 +41,7 @@ _JSON_PATH = os.path.join(os.path.dirname(__file__), "seams.json")
 FLOORS = {
     "mlx": "0.31",
     "mlx-lm": "0.31",
-    "mlx-vlm": "0.6.3",
+    "mlx-vlm": "0.7.3",
 }
 
 
@@ -451,10 +451,6 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "model_apc_mode",
          "residency + spec_engine L1 probe (legacy mode of the plan, which "
          "the kvarn_apc plan wrap stamps)", critical=True),
-    # <= 0.6.3 the wrapper delegates to this mlx-lm alias; 0.6.4 inlined it.
-    Seam("mlx_vlm.generate.common", "mlx_maybe_quantize_kv_cache",
-         "apc_pooling (rotating-safe KV-quant replacement, <=0.6.3 arm)",
-         critical=True, attr_optional=True),
     Seam("mlx_vlm.generate", "maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement)", critical=True),
     # --- cache classes (dual-origin via gmlx.cache.compat; on <= 0.6.3

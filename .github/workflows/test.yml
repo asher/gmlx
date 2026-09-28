@@ -32,7 +32,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: |
-          pip install "mlx==0.32.1"
+          pip install "mlx==0.32.2"
           # Wheel, not sdist. Must satisfy the pyproject floor or the
           # editable install upgrades it; tests/test_ci_pins.py gates that.
           pip install "mlx-kquant==0.4.15"
