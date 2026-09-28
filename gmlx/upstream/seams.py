@@ -237,6 +237,9 @@ SEAMS: tuple[Seam, ...] = (
          "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
          "restore + stock-path ckpt arming + packed warm_cache kwarg "
          "recovered to fp16 before init)", critical=True),
+    Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_progress",
+         "ckpt._install_restored_prompt_progress (a gmlx-owned restore "
+         "reported as the row's cached tokens)"),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
          "ckpt._install_plain_ckpt_decode (token accounting + "
          "decode-time snapshots)", critical=True),

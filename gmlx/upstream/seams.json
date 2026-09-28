@@ -84,6 +84,7 @@
   "mlx_vlm.generate.ar:PromptProcessingBatch.__init__": "463151a660348eb1b33871c7e8ec88c14327655067f6ef34fb0bd1b99ab278f1",
   "mlx_vlm.generate.ar:PromptProcessingBatch._store_apc_exact_checkpoints": "f99f6008c1083e777c7836e559cd3674e5007844f478e1f72bdae5c53cbe2f79",
   "mlx_vlm.generate.ar:PromptProcessingBatch.generate": "c95fc2769ea5bb7d7875d1b1ef865694a054dd0cd34a7f60c1130f99f3233d27",
+  "mlx_vlm.generate.ar:PromptProcessingBatch.prompt_progress": "e2556f4a55e796274d06ef5894dd39027a873abbd1fb85f087d29b3b533bc7a3",
   "mlx_vlm.generate.ar:PromptProcessingBatch.prompt_step": "e75522874dbf69303e414234a2a51ea22531e038824a115477b4fff36b1aba1d",
   "mlx_vlm.generate.ar:SpeculativeGenerationBatch.__len__": "7ba92533c6bece23c0a70111d988c2c557a606a4c5b83d696bc985691b7a75ab",
   "mlx_vlm.generate.ar:SpeculativeGenerationBatch.filter": "862b60a4599b2b1f9ef18be37e73ceaf255db67e7fad318c274e90fcfd705d82",

@@ -21,6 +21,7 @@ from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
     _install_exact_anchor_pick,
     _install_plain_ckpt_decode,
+    _install_restored_prompt_progress,
     _l1_lookup_and_arm_store,
     _media_safe,
     _plain_anchor_init,
@@ -419,6 +420,7 @@ def install_full_prompt_mtp_prefill() -> None:
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
     _install_exact_anchor_pick()
+    _install_restored_prompt_progress()
     _install_l0_tenant_rows()
 
     if getattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, False):

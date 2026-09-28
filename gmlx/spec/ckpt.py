@@ -6,6 +6,7 @@ probes, and env flags these helpers read.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from collections.abc import Callable
@@ -771,6 +772,41 @@ def _plain_anchor_init(batch) -> None:
             "render_ctx": lookup_render_ctx(ids_list),
             "gen": [],
         }
+
+
+_RESTORED_PROGRESS_FLAG = "_kq_restored_prompt_progress"
+
+
+def _owned_restore_len(batch) -> int:
+    """Tokens a gmlx-owned tier (the checkpoint tier, the MTP L0 or L1
+    ladder) restored into a single-row prompt batch. These trim the
+    prompt in place and leave stock's per-row cached count at 0."""
+    if len(getattr(batch, "uids", None) or ()) != 1:
+        return 0
+    rec = getattr(batch, "_kq_apc_restored", None)
+    n = int(rec[0]) if rec else 0
+    return max(n, int(getattr(batch, "_mtp_apc_prefix_len", 0) or 0))
+
+
+def _install_restored_prompt_progress() -> None:
+    """Report a gmlx-owned restore as the row's cached tokens, which the
+    server's usage and its "Prefill completed" log line read. Idempotent.
+    """
+    from mlx_vlm.generate.ar import PromptProcessingBatch
+
+    orig = PromptProcessingBatch.prompt_progress
+    if getattr(orig, _RESTORED_PROGRESS_FLAG, False):
+        return
+
+    def prompt_progress(self):
+        out = orig(self)
+        n = _owned_restore_len(self)
+        if n and len(out) == 1 and n > int(out[0].cached_tokens or 0):
+            out = [dataclasses.replace(out[0], cached_tokens=n)]
+        return out
+
+    prompt_progress.__dict__[_RESTORED_PROGRESS_FLAG] = True
+    PromptProcessingBatch.prompt_progress = prompt_progress
 
 
 _ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"

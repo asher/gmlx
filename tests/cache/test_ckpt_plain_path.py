@@ -5,6 +5,7 @@ cursor riding the wrapped stock checkpoint store, and B=1 retirement at
 generation-batch row exit.
 """
 
+import logging
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -100,6 +101,66 @@ def test_plain_init_trims_mrope_position_ids_on_their_sequence_axis():
     assert b._processed_prompt_columns == 32
     assert b._prompt_kwargs["position_ids"].tolist() == pos[:, :, 32:].tolist()
     assert b._prompt_kwargs["attention_mask"].shape == (1, 64)
+
+
+def _progress_batch(b, prompt_tokens):
+    """The fields the stock ``prompt_progress`` reads, as the stock init
+    and the prefill timer set them."""
+    b._prompt_uids = list(b.uids)
+    b._prompt_tokens_per_row = [prompt_tokens] * len(b.uids)
+    b._cached_tokens_per_row = [0] * len(b.uids)
+    b._prompt_time_s = 0.5
+    return b
+
+
+def _prefill_line(caplog, progress):
+    from mlx_vlm.server.generation import ResponseGenerator
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="mlx_vlm.server"):
+        ResponseGenerator._log_prefill_completed(
+            progress.uid, {"request_id": "r"}, progress)
+    return [m for m in caplog.messages if "Prefill completed" in m][0]
+
+
+def test_prefill_line_counts_the_checkpoint_restore(caplog):
+    """A checkpoint restore keeps stock's per-row cached count at 0 (the
+    prompt is trimmed in place), and the usage and the "Prefill
+    completed" line report the restored tokens."""
+    from mlx_vlm.generate.ar import PromptProcessingBatch
+
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+
+    install_full_prompt_mtp_prefill()
+    engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(700, 796))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=11))
+    b = _plain_batch(man, ids)
+    ckpt._plain_ckpt_init(b)
+    assert b._processed_prompt_columns == 32
+    (progress,) = PromptProcessingBatch.prompt_progress(_progress_batch(b, 96))
+    assert progress.cached_tokens == 32
+    assert "prompt_tokens=96 cached_tokens=32 " in _prefill_line(caplog, progress)
+
+
+def test_prefill_line_counts_the_mtp_prefix_restore(caplog):
+    """The owned MTP ladder records its L0 or L1 restore the same way. A
+    batch of two rows keeps the stock counts."""
+    from mlx_vlm.generate.ar import PromptProcessingBatch
+
+    from gmlx.spec.mtp_prefill import install_full_prompt_mtp_prefill
+
+    install_full_prompt_mtp_prefill()
+    b = _progress_batch(SimpleNamespace(uids=[4], _mtp_apc_prefix_len=40), 64)
+    (progress,) = PromptProcessingBatch.prompt_progress(b)
+    assert "prompt_tokens=64 cached_tokens=40 " in _prefill_line(caplog, progress)
+    two = _progress_batch(SimpleNamespace(
+        uids=[4, 5], _mtp_apc_prefix_len=40,
+        _kq_apc_restored=(40, "ckpt")), 64)
+    two._cached_tokens_per_row = [16, 0]
+    rows = PromptProcessingBatch.prompt_progress(two)
+    assert [r.cached_tokens for r in rows] == [16, 0]
 
 
 def test_plain_init_leaves_batched_rows_stock():

@@ -37,6 +37,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a request with other images of the same sizes, and answer about those images.
 - On `/v1/chat/completions`, an image sent in an earlier turn reached the model
   in the latest user message, and a new turn could not reuse the earlier turns.
+- The usage `cached_tokens` and the "Prefill completed" log line showed 0 when a
+  request reused a prefix from the checkpoint tier or the MTP prefix cache.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a
   prefill batch with a much longer one could start its reply with a wrong token.
 - A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system
