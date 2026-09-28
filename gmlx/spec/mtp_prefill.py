@@ -77,22 +77,6 @@ def _carries_media(batch) -> bool:
         int(t) in media_ids for t in batch._input_ids[0].tolist())
 
 
-def _declines_chunking(batch) -> bool:
-    """True when the target's own chunking policy, asked without a drafter,
-    keeps this prompt in one pass. Asked with the drafter, the stock gate
-    also declines for the drafter's hidden-state contract, which the MTP
-    prompt step meets."""
-    from mlx_vlm.generate.common import _chunked_prefill_enabled
-
-    return not _chunked_prefill_enabled(
-        batch.model,
-        input_ids=batch._input_ids,
-        inputs_embeds=batch._inputs_embeds,
-        prompt_cache=batch.prompt_cache,
-        prefill_kwargs=dict(batch._prompt_kwargs or {}),
-    )
-
-
 def _l0_salt(batch):
     """The L0 key salt for a B=1 MTP batch, or None when L0 must skip it.
 
@@ -464,16 +448,10 @@ def install_full_prompt_mtp_prefill() -> None:
         # our prompt_step captures it, so the gate no longer applies.
         # Restoring at construction (not first prompt_step) matters: the
         # scheduler consults needs_processing() first, and with a None step
-        # an APC-less deep prompt would one-shot the whole prefill. A
-        # decline the target makes without a drafter is about the prompt
-        # itself (a gemma-4 image under bidirectional image attention
-        # needs one pass), so the step stays None as on stock plain serve.
-        if getattr(self, "draft_kind", None) == "mtp":
-            self._mtp_one_pass = _declines_chunking(self)
-            if self._mtp_one_pass:
-                self.prefill_step_size = None
-            elif self.prefill_step_size is None:
-                self.prefill_step_size = _resolve_mtp_prefill_step()
+        # an APC-less deep prompt would one-shot the whole prefill.
+        if (getattr(self, "draft_kind", None) == "mtp"
+                and self.prefill_step_size is None):
+            self.prefill_step_size = _resolve_mtp_prefill_step()
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
         if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
@@ -520,8 +498,7 @@ def install_full_prompt_mtp_prefill() -> None:
             flip("prefill")
 
         if not hasattr(self, "_mtp_full_input_ids"):
-            if (self.prefill_step_size is None
-                    and not getattr(self, "_mtp_one_pass", False)):
+            if self.prefill_step_size is None:
                 self.prefill_step_size = _resolve_mtp_prefill_step()
             # APC lookup (L0 then L1) + prefix trim + store arming.
             _mtp_prefill_init(self)
@@ -549,10 +526,6 @@ def install_full_prompt_mtp_prefill() -> None:
         checkpoint_col = self._next_apc_checkpoint_column()
         if checkpoint_col is not None:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
-        # Media requests ride this body too: keep image blocks whole (a
-        # boundary inside a block moves to its edge, see media_spans).
-        from gmlx.gen.media_spans import span_aware_prompt_n
-        n = span_aware_prompt_n(self, n)
         # A final chunk under ~3 simdgroup tiles routes the projections
         # through the skinny-M kernels, whose accumulation order seeds fp
         # noise that stacked recurrent (GDN) layers amplify into
@@ -573,6 +546,12 @@ def install_full_prompt_mtp_prefill() -> None:
             ends = [e for e in self._suffix_lens if e > start]
             if ends:
                 n = min(n, min(ends) - start)
+        # Media requests ride this body too: keep image blocks whole (a
+        # boundary inside a block moves to its edge, see media_spans). A
+        # block that extends the chunk past a row end keeps that row's
+        # logits at its own column.
+        from gmlx.gen.media_spans import span_aware_prompt_n
+        n = span_aware_prompt_n(self, n)
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
@@ -590,11 +569,11 @@ def install_full_prompt_mtp_prefill() -> None:
         finished = []
         if self._right_pad_per_row is not None:
             finished = [i for i, e in enumerate(self._suffix_lens)
-                        if e == start + n]
+                        if start < e <= start + n]
             logits = out.logits if hasattr(out, "logits") else out
             for i in finished:
                 self._finished_prompt_logits[i] = mx.contiguous(
-                    mx.array(logits[i, -1]))
+                    mx.array(logits[i, self._suffix_lens[i] - start - 1]))
         # Seed streaming: teacher-force this chunk into the request-scoped
         # head KV at the head's running offset. The shifted span for
         # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range

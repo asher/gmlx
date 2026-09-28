@@ -191,3 +191,70 @@ def test_install_wrapper_pins_the_extension(monkeypatch):
     from mlx_vlm.generate.ar import PromptProcessingBatch
     assert ms.install_span_aware_prompt_step()
     assert getattr(PromptProcessingBatch, "_gmlx_span_aware_prompt_step")
+
+
+def test_vision_spans_merge_rows_and_keep_audio_causal():
+    types = mx.array([[0, 1, 1, 0, 2, 2, 0, 3, 3, 0],
+                      [0, 0, 1, 1, 1, 0, 0, 0, 1, 0]])
+    # image and video runs are blocks; audio (3) is not; runs overlapping
+    # across rows merge, touching ones do not
+    assert ms.vision_spans(types) == [(1, 6), (8, 9)]
+    assert ms.vision_spans(mx.array([[1, 2, 2, 1]])) == [(0, 4)]
+    assert ms.vision_spans(mx.array([[0, 3, 0]])) == []
+    assert ms.vision_spans(None) == []
+
+
+def test_vision_blocks_reads_the_text_config():
+    from types import SimpleNamespace as NS
+
+    vision = NS(use_bidirectional_attention="vision")
+    assert ms.vision_blocks(NS(config=vision))
+    assert ms.vision_blocks(NS(config=NS(text_config=vision)))
+    assert ms.vision_blocks(NS(config=NS(), language_model=NS(config=vision)))
+    assert not ms.vision_blocks(NS(config=NS(use_bidirectional_attention=None)))
+    assert not ms.vision_blocks(None)
+
+
+def test_span_aware_prompt_n_reads_token_types_on_bidirectional_models():
+    from types import SimpleNamespace as NS
+
+    b = _Batch(None, length=40, uids=(1, 2))
+    b._prompt_kwargs = {"mm_token_type_ids": mx.array(
+        [[0] * 6 + [1] * 14 + [0] * 20, [0] * 14 + [1] * 12 + [0] * 14])}
+    b.model = NS(config=NS(use_bidirectional_attention="vision"))
+    # the rows' blocks merge into [6, 26); columns are the remaining prompt
+    assert ms.span_aware_prompt_n(b, 8) == 6
+    assert ms.span_aware_prompt_n(b, 30) == 30
+    b._prompt_kwargs["mm_token_type_ids"] = b._prompt_kwargs[
+        "mm_token_type_ids"][:, 6:]
+    assert ms.span_aware_prompt_n(b, 8) == 20
+    b.model = NS(config=NS(use_bidirectional_attention=None))
+    assert ms.span_aware_prompt_n(b, 8) == 8
+
+
+def test_run_checkpoints_start_blocks_and_drop_caller_checkpoints_inside():
+    spans = [(6, 20), (24, 34)]
+    step, lengths, kept = ms.run_checkpoints(spans, 40, 8, [10, 22, 36])
+    assert step == 14  # grows to the longest block
+    assert lengths == [6, 22, 24, 36]
+    assert kept == {22, 36}
+    assert ms.run_checkpoints(spans, 40, 2048, [])[0] == 2048
+    # a None step (the caller declined chunking) stays None
+    assert ms.run_checkpoints(spans, 40, None, [])[0] is None
+    # a block at column 0 needs no checkpoint
+    assert ms.run_checkpoints([(0, 5)], 40, 8, [])[1] == []
+
+
+def test_run_spans_start_after_the_cached_prefix():
+    from types import SimpleNamespace as NS
+
+    model = NS(config=NS(text_config=NS(use_bidirectional_attention="vision")))
+    types = mx.array([[0] * 6 + [1] * 14 + [0] * 4 + [1] * 10 + [0] * 6])
+    ids = mx.zeros((1, 40), dtype=mx.int32)
+    assert ms._run_spans(ids, model, {"mm_token_type_ids": types}) == [
+        (6, 20), (24, 34)]
+    # a reused 20-token prefix: the suffix holds the second block only
+    assert ms._run_spans(ids[:, 20:], model, {"mm_token_type_ids": types}) == [
+        (4, 14)]
+    assert ms._run_spans(ids, NS(config=NS()), {"mm_token_type_ids": types}) == []
+    assert ms._run_spans(ids, model, {}) == []

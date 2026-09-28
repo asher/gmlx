@@ -196,31 +196,9 @@ def _install_apc_manager_stash() -> None:
                 _log.warning(
                     "APC ckpt formation gate failed; continuing", exc_info=True
                 )
-        # A multi-row prompt batch cuts every row at the lowest row
-        # checkpoint column, which left padding can place inside another
-        # row's image. A model that keeps image prompts in one pass (gemma-4
-        # with bidirectional image attention) answers wrongly after such a
-        # cut, so with a prefix cache it forms prompt groups of one.
-        if kwargs.get("apc_manager") is not None:
-            try:
-                if _declines_image_chunking(model):
-                    self.prefill_batch_size = 1
-            except Exception:
-                _log.warning(
-                    "APC image formation gate failed; continuing",
-                    exc_info=True)
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
     BatchGenerator.__init__ = _init_with_stash
-
-
-def _declines_image_chunking(model) -> bool:
-    """True when the model's own chunking policy, asked with no drafter,
-    keeps a prompt holding an image token in one pass."""
-    from mlx_vlm.generate.common import _chunked_prefill_enabled
-
-    return not _chunked_prefill_enabled(
-        model, prefill_kwargs={"mm_token_type_ids": mx.array([[1]])})
 
 
 def _resolve_l1(model):

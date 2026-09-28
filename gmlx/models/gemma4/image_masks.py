@@ -2,17 +2,19 @@
 
 transformers builds them with ``create_masks_for_vision_model``:
 full-attention layers stay causal, and sliding layers take
-AND(window, OR(causal, block)), so a token of an image block sees the
-rest of its block within the sliding window. llama.cpp's gemma4 graph
-does the same (non-causal on sliding layers only). mlx-vlm 0.7.3 ORs the
-block into both layer types and past the window.
+AND(window, OR(causal, block)), so a token of an image or video block
+sees the rest of its block within the sliding window. llama.cpp's gemma4
+graph does the same (non-causal on sliding layers only). mlx-vlm 0.7.3
+ORs the block into both layer types and past the window.
 
 ``image_masks`` wraps a stock-shaped ``_make_masks`` body. The body runs
 without token types, so it builds the causal masks, one object per layer
-type (the batched-sdpa pad relay keys on that identity). For a request
+type (the batched-sdpa pad relay keys on that identity). For a chunk
 with image or video tokens the sliding mask is then rebuilt as an array
-with the block overlay. As in stock, the overlay applies only to a
-one-pass square mask from column 0.
+with the block overlay on its trailing columns, the chunk's own keys.
+The prefill loops keep every block inside one chunk
+(``gmlx.gen.media_spans``), so a block never reaches back into cached
+keys.
 """
 from __future__ import annotations
 
@@ -38,25 +40,48 @@ def _block_ids(token_types: mx.array) -> mx.array:
 
 def sliding_block_overlay(base: mx.array, token_types: mx.array,
                           window: int) -> mx.array:
-    """``base`` with each block token seeing its block's keys inside the
-    window: key k is visible from query q when k > q - window."""
-    n = base.shape[-1]
-    if token_types.shape[1] != n or base.shape[-2] != n:
+    """``base`` of shape (..., n, cached + n) with each block token seeing
+    its block's keys among the trailing n columns inside the window: key k
+    is visible from query q when k > q - window."""
+    n = token_types.shape[1]
+    if base.shape[-2] != n or base.shape[-1] < n:
         return base
     ids = _block_ids(token_types)
     same = (ids[:, :, None] != -1) & (ids[:, :, None] == ids[:, None, :])
     pos = mx.arange(n)
-    in_window = pos[None, :] > pos[:, None] - window
-    return base | mx.expand_dims(same & in_window, 1)
+    same = same & (pos[None, :] > pos[:, None] - window)
+    cached = base.shape[-1] - n
+    if cached:
+        same = mx.concatenate(
+            [mx.zeros((same.shape[0], n, cached), dtype=mx.bool_), same],
+            axis=-1)
+    return base | mx.expand_dims(same, 1)
+
+
+def chunk_types(token_types, n: int, cache):
+    """The token types of an ``n``-column chunk. A caller that passes the
+    whole prompt's types with every chunk (mlx-vlm's ``generate_step``)
+    gets them sliced at the cache offset; None when they cannot be
+    aligned."""
+    if token_types is None or token_types.shape[1] == n:
+        return token_types
+    offset = next((c.offset for c in cache
+                   if c is not None and hasattr(c, "offset")), None)
+    if isinstance(offset, int) and offset + n <= token_types.shape[1]:
+        return token_types[:, offset:offset + n]
+    return None
 
 
 def image_masks(self, h, cache, token_types, build):
     """The masks ``build`` makes, with the sliding ones rebuilt for image
-    blocks when the setting is "vision" and the prompt holds image or video
+    blocks when the setting is "vision" and the chunk holds image or video
     tokens. Full-attention masks stay causal."""
     masks = build(self, h, cache, None)
     if not (getattr(self.config, "use_bidirectional_attention", None) == "vision"
-            and h.shape[1] > 1 and visual_tokens(token_types)):
+            and h.shape[1] > 1):
+        return masks
+    token_types = chunk_types(token_types, h.shape[1], cache)
+    if token_types is None or not visual_tokens(token_types):
         return masks
     sliding = [i for i, lyr in enumerate(self.layers)
                if lyr.layer_type == "sliding_attention"]

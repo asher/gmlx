@@ -45,12 +45,13 @@ at call time so other patches compose.
 
 The same install also wraps the gemma4 chunking policies and the mask
 builder, correctness fixes that GMLX_G4_NOSYNC=0 leaves in place. Under
-bidirectional image attention the image overlay applies with or without
-audio, as in transformers, so a prompt holding image or video tokens
-prefills in one pass. Stock allows chunking once audio is present. The
-installed builder runs the carried body under ``image_masks``, which keeps
-full-attention layers causal and puts the image blocks on the sliding
-layers only; with GMLX_G4_NOSYNC=0 the stock body runs under it.
+bidirectional image attention stock declines chunking for an image
+prompt without audio, since its overlay needs the whole prompt in one
+pass. gmlx chunks every prompt instead: the prefill loops keep each image
+or video block inside one chunk (``gmlx.gen.media_spans``), and the
+installed builder runs the carried body under ``image_masks``, which
+keeps full-attention layers causal and puts each chunk's blocks on the
+sliding layers. With GMLX_G4_NOSYNC=0 the stock body runs under it.
 """
 from __future__ import annotations
 
@@ -59,7 +60,6 @@ import mlx.core as mx
 from gmlx.envflags import env_bool
 
 from .image_masks import image_masks
-from .image_masks import visual_tokens as _visual_tokens
 
 _installed = False
 
@@ -76,29 +76,11 @@ def _cache_has_prefix(c) -> bool:
         return True
 
 
-def _token_types(kwargs: dict):
-    types = kwargs.get("mm_token_type_ids", None)
-    return kwargs.get("token_type_ids", None) if types is None else types
-
-
-def _visual_request(config, input_ids, kwargs: dict) -> bool:
-    """Image or video tokens in the request, from its token types, else
-    from its ids."""
-    types = _token_types(kwargs)
-    if types is not None:
-        return _visual_tokens(types)
-    if input_ids is None:
-        return False
-    ids = [getattr(config, k, None) for k in ("image_token_id", "video_token_id")]
-    return any(i is not None and int(mx.sum(input_ids == i).item()) > 0
-               for i in ids)
-
-
 def _install_image_chunking_policy() -> None:
-    """Decline chunked prefill for a prompt holding image or video tokens
-    under bidirectional image attention, whether or not it holds audio.
-    Stock allows chunking once audio is present, while the image overlay
-    still needs the whole prompt in one pass from column 0. Idempotent."""
+    """Let the gemma4 chunking policies chunk image and video prompts under
+    bidirectional image attention: the language model answers as it does
+    for a causal model, and the gemma4_unified container never declines.
+    Idempotent."""
     try:
         from mlx_vlm.models.gemma4 import language as g4
     except ImportError:
@@ -107,11 +89,14 @@ def _install_image_chunking_policy() -> None:
     if policy is not None and getattr(policy, "_gmlx_orig", None) is None:
         def chunked_prefill_policy(self, **kwargs):
             if (getattr(self.config, "use_bidirectional_attention", None)
-                    == "vision"
-                    and _visual_tokens(
-                        _token_types(kwargs.get("prefill_kwargs") or {}))):
-                return False
-            return policy(self, **kwargs)
+                    != "vision"):
+                return policy(self, **kwargs)
+            if kwargs.get("draft_model") is not None:
+                prefill_kwargs = kwargs.get("prefill_kwargs") or {}
+                return (kwargs.get("draft_kind") == "mtp"
+                        and bool(prefill_kwargs.get("return_hidden", False))
+                        and bool(prefill_kwargs.get("return_shared_kv", False)))
+            return True
 
         chunked_prefill_policy.__dict__["_gmlx_orig"] = policy
         g4.LanguageModel.chunked_prefill_policy = chunked_prefill_policy
@@ -123,10 +108,7 @@ def _install_image_chunking_policy() -> None:
     decline = getattr(g4u.Model, "_should_disable_chunked_prefill", None)
     if decline is not None and getattr(decline, "_gmlx_orig", None) is None:
         def _should_disable_chunked_prefill(self, input_ids=None, **kwargs):
-            if (getattr(self, "_base_no_chunked_prefill", False)
-                    and _visual_request(self.config, input_ids, kwargs)):
-                return True
-            return decline(self, input_ids, **kwargs)
+            return False
 
         _should_disable_chunked_prefill.__dict__["_gmlx_orig"] = decline
         g4u.Model._should_disable_chunked_prefill = (

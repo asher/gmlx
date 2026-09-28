@@ -125,14 +125,14 @@ SEAMS: tuple[Seam, ...] = (
          "gemma4_owned._owned_make_masks (mirror)"),
     # A correctness fix installed by the same call, ahead of its kill switch.
     Seam("mlx_vlm.models.gemma4.language", "LanguageModel.chunked_prefill_policy",
-         "gemma4_sync._install_image_chunking_policy (wrap: declines for any "
-         "image or video token under bidirectional image attention, audio "
-         "or not; the owned MTP target inherits it)", critical=True),
+         "gemma4_sync._install_image_chunking_policy (wrap: under "
+         "bidirectional image attention answers as for a causal model, "
+         "since the prefill loops keep image blocks whole; the owned MTP "
+         "target inherits it)", critical=True),
     Seam("mlx_vlm.models.gemma4_unified.gemma4_unified",
          "Model._should_disable_chunked_prefill",
-         "gemma4_sync._install_image_chunking_policy (wrap: the per-request "
-         "stamp declines for any image or video token, audio or not)",
-         critical=True),
+         "gemma4_sync._install_image_chunking_policy (wrap: never declines, "
+         "so the per-request stamp stays off)", critical=True),
     Seam("mlx_vlm.models.gemma4.language", "Attention.__call__",
          "gemma4_sync.install_gemma4_nosync (body carried, offset wrap); "
          "gemma4_owned._owned_attention_call (mirror)"),
@@ -222,12 +222,6 @@ SEAMS: tuple[Seam, ...] = (
          "mtp_prefill.install_full_prompt_mtp_prefill (prefill-step "
          "restore + stock-path ckpt arming + packed warm_cache kwarg "
          "recovered to fp16 before init)", critical=True),
-    Seam("mlx_vlm.generate.common", "_chunked_prefill_enabled",
-         "mtp_prefill._declines_chunking (the target's policy asked "
-         "without a drafter; a decline keeps the MTP prefill one pass); "
-         "engine._declines_image_chunking (asked for an image row; a "
-         "decline forms prefix-cache prompt groups of one)",
-         critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
          "ckpt._install_plain_ckpt_decode (token accounting + "
          "decode-time snapshots)", critical=True),
@@ -235,7 +229,15 @@ SEAMS: tuple[Seam, ...] = (
          "ckpt._install_plain_ckpt_decode (B=1 retirement at row "
          "exit)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
-         "mtp_prefill.install_full_prompt_mtp_prefill", critical=True),
+         "mtp_prefill.install_full_prompt_mtp_prefill; "
+         "media_spans.install_span_aware_prompt_step (pins the block "
+         "step; a chunk past right-padded row ends rides the _suffix_lens "
+         "end clip and the _speculative_prefill.append output)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "generate_step",
+         "media_spans.install_block_aware_generate_step (block starts "
+         "ride prompt_cache_checkpoint_lengths through a pass-through "
+         "prompt_cache_checkpoint)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
          "mtp_prefill.install_full_prompt_mtp_prefill; "
          "seed_rows.install_per_request_seed (row-uid publish); "

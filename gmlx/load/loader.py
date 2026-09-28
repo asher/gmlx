@@ -1156,8 +1156,12 @@ def _install_and_load(
     if install_rope_batch_fix():
         log("[install] rope int-offset batch fix active")
     # Inside the decay wrap (installed first): media blocks stay whole.
-    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    from gmlx.gen.media_spans import (
+        install_block_aware_generate_step,
+        install_span_aware_prompt_step,
+    )
     install_span_aware_prompt_step()
+    install_block_aware_generate_step()
     install_prefill_tail()
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
@@ -1653,8 +1657,12 @@ def load_model(
     if install_rope_batch_fix():
         _log("[install] rope int-offset batch fix active")
     # Inside the decay wrap (installed first): media blocks stay whole.
-    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    from gmlx.gen.media_spans import (
+        install_block_aware_generate_step,
+        install_span_aware_prompt_step,
+    )
     install_span_aware_prompt_step()
+    install_block_aware_generate_step()
     install_prefill_tail()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")

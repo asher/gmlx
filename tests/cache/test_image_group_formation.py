@@ -1,11 +1,10 @@
-"""Prompt groups on a model that keeps image prompts in one pass.
+"""Prompt groups with a prefix cache, for image models.
 
 A multi-row prompt batch cuts every row at the lowest row checkpoint
 column, and left padding can place that column inside another row's
-image. Under bidirectional image attention the cut changes that row's
-answer, so with a prefix cache such a model forms prompt groups of one.
-Causal models keep batched groups: a cut inside their image does not
-change the answer.
+image. The prefill loops move such a boundary to the image edge and drop
+the checkpoint (``gmlx.gen.media_spans``), so gemma-4 under bidirectional
+image attention keeps batched groups like the causal models.
 """
 
 import importlib
@@ -48,8 +47,8 @@ def _language_model(model_type, text):
 
 
 @pytest.mark.parametrize("model_type,text,width", [
-    ("gemma4", {"use_bidirectional_attention": "vision"}, 1),
-    ("gemma4_unified", {}, 1),
+    ("gemma4", {"use_bidirectional_attention": "vision"}, 8),
+    ("gemma4_unified", {}, 8),
     ("gemma4", {}, 8),
     ("gemma4_unified", {"use_bidirectional_attention": None}, 8),
     ("glm5_next", None, 8),
@@ -60,7 +59,7 @@ def _language_model(model_type, text):
     # (model_has_pools). The probe generator skips that gate, so it shows 8.
     ("deepseek_v4_vl", None, 8),
 ])
-def test_prefix_cache_groups_follow_the_image_chunking_policy(
+def test_prefix_cache_groups_follow_the_decode_width(
         model_type, text, width, monkeypatch):
     lm = _language_model(model_type, text)
     manager = APCManager(num_blocks=64, block_size=16)

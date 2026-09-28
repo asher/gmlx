@@ -2,10 +2,10 @@
 attention.
 
 transformers applies the image overlay whenever the setting is "vision",
-with or without audio, and keeps audio causal. Such a prompt needs the
-image in one pass from column 0 on every path: the plain and MTP language
-models agree in one pass, and a served batch holding it, alone or beside
-an audio row, keeps one pass.
+with or without audio, and keeps audio causal. The plain and MTP language
+models agree on such a prompt, and a served batch holding it, alone or
+beside an audio row, chunks with its boundaries at the image edges and
+matches one pass.
 """
 
 import mlx.core as mx
@@ -17,6 +17,7 @@ import gmlx.load.vlm as gvlm
 import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
+from gmlx.gen import media_spans
 from gmlx.load.mtp_target import _vlm_spec_language_model
 
 from test_apc_media import _HIDDEN, _gemma4_config
@@ -112,6 +113,9 @@ def serve_env(monkeypatch):
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", True)
     monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", True)
+    # Serve's order: the span wrapper goes outside the MTP body.
+    mtp_prefill.install_full_prompt_mtp_prefill()
+    assert media_spans.install_span_aware_prompt_step()
 
 
 @pytest.mark.parametrize("model_type,text", _BIDIRECTIONAL)
@@ -124,9 +128,14 @@ def test_plain_and_mtp_agree_on_an_image_and_audio_prompt(model_type, text):
     assert d.item() <= 1e-4
 
 
+# At a step of 16 the first chunk ends at the image start (10), the next
+# takes the whole 20-token image, and the last runs to the final column.
+_IMAGE_CHUNKS = [10, 20, 9]
+
+
 @pytest.mark.parametrize("mtp", [False, True], ids=["plain", "mtp"])
 @pytest.mark.parametrize("model_type,text", _BIDIRECTIONAL)
-def test_a_served_image_and_audio_prompt_keeps_one_pass(
+def test_a_served_image_and_audio_prompt_chunks_at_the_image_edges(
         model_type, text, mtp, serve_env):
     model, lm, target = _models(model_type, text)
     m = target if mtp else lm
@@ -134,14 +143,16 @@ def test_a_served_image_and_audio_prompt_keeps_one_pass(
     _stamp(model, m, ids, types)
     embeds = mx.random.normal((1, _N, _HIDDEN), key=mx.random.key(7)) * 0.5
     t = mx.array([types])
-    chunks, got = _served(m, [ids], embeds, t, mtp)
-    assert chunks == []
-    assert mx.max(mx.abs(got - _one_pass(m, embeds, t))).item() <= 1e-4
+    with mx.stream(mx.cpu):
+        chunks, got = _served(m, [ids], embeds, t, mtp)
+        ref = _one_pass(m, embeds, t)
+    assert chunks == _IMAGE_CHUNKS
+    assert mx.max(mx.abs(got - ref)).item() <= 1e-4
 
 
 @pytest.mark.parametrize("mtp", [False, True], ids=["plain", "mtp"])
 @pytest.mark.parametrize("model_type,text", _BIDIRECTIONAL)
-def test_an_image_row_beside_an_audio_row_keeps_one_pass(
+def test_an_image_row_beside_an_audio_row_chunks_at_the_image_edges(
         model_type, text, mtp, serve_env):
     """The group's token types hold an image in one row and audio in the
     other, and the audio request embedded last."""
@@ -152,26 +163,26 @@ def test_an_image_row_beside_an_audio_row_keeps_one_pass(
     _stamp(model, m, audio_ids, audio_types)
     embeds = mx.random.normal((2, _N, _HIDDEN), key=mx.random.key(7)) * 0.5
     t = mx.array([image_types, audio_types])
-    chunks, got = _served(m, [image_ids, audio_ids], embeds, t, mtp)
-    assert chunks == []
-    ref = _one_pass(m, embeds, t)
-    assert mx.max(mx.abs(got[0] - ref[0])).item() <= 1e-4
+    with mx.stream(mx.cpu):
+        chunks, got = _served(m, [image_ids, audio_ids], embeds, t, mtp)
+        ref = _one_pass(m, embeds, t)
+    assert chunks == _IMAGE_CHUNKS
+    for row in range(2):
+        assert mx.max(mx.abs(got[row] - ref[row])).item() <= 1e-4, row
 
 
-@pytest.mark.parametrize("image,audio,declines", [
-    (True, True, True), (True, False, True),
-    (False, True, False), (False, False, False),
+@pytest.mark.parametrize("image,audio", [
+    (True, True), (True, False), (False, True), (False, False),
 ])
-def test_the_unified_container_declines_chunking_for_any_image(
-        image, audio, declines):
+def test_the_unified_container_never_declines_chunking(image, audio):
     """From the token types, and from the ids alone when the request
     carries none."""
     model, _lm, _target = _models("gemma4_unified", {})
     ids, types = _prompt(model, image=image, audio=audio)
     decline = model._should_disable_chunked_prefill
     assert decline(mx.array([ids]),
-                   mm_token_type_ids=mx.array([types])) is declines
-    assert decline(mx.array([ids])) is declines
+                   mm_token_type_ids=mx.array([types])) is False
+    assert decline(mx.array([ids])) is False
 
 
 def test_causal_gemma4_keeps_chunking_an_image_and_audio_prompt():

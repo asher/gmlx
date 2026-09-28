@@ -138,8 +138,9 @@ def test_logits_match_transformers(model_type, case, path):
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
 def test_a_left_padded_batch_matches_transformers(model_type, path,
                                                    serve_env):  # noqa: F811
-    """An image row beside a shorter text row, left-padded, served in one
-    pass: each row matches transformers run on that row alone."""
+    """An image row beside a shorter text row, left-padded, served in
+    chunks with their boundaries at the image edges: each row matches
+    transformers run on that row alone."""
     window, blocks = _CASES["narrow"]
     hf_mod, tc, hf, lm, target = _models(model_type, window)
     m = lm if path == "plain" else target
@@ -155,7 +156,7 @@ def test_a_left_padded_batch_matches_transformers(model_type, path,
         chunks, got = _served(m, rows, mx.array(embeds), mx.array(types),
                               path == "mtp")
         got = np.array(got)
-    assert chunks == []
+    assert chunks == [6, 16, 16, 1]
     for row, (e, t) in enumerate(((image_e, image_t), (text_e, text_t))):
         ref = _reference(hf_mod, tc, hf, e, t)[-1]
         assert np.abs(got[row] - ref).max() <= _TOL, row
@@ -189,3 +190,37 @@ def test_every_builder_gives_the_same_masks(case):
         for a, b in zip(got[0], masks):
             assert type(a) is type(b)
             assert a == b if isinstance(a, str) else mx.array_equal(a, b).item()
+
+
+@pytest.mark.parametrize("start,end", [(6, 20), (24, 34)])
+def test_every_builder_gives_the_one_pass_masks_for_a_chunk(start, end):
+    """A chunk holding one whole block, after a cached prefix: every
+    builder gives the rows of the one-pass masks for the chunk's queries,
+    over the keys the caches hold (the sliding cache keeps the last
+    window - 1 prefix keys)."""
+    window, blocks = _CASES["narrow"]
+    _hf_mod, _tc, _hf, lm, _target = _models("gemma4_unified", window)
+    tm = lm.model
+    installed = g4.Gemma4TextModel._make_masks
+    builders = [installed._gmlx_orig, installed._gmlx_body,
+                gemma4_owned._owned_make_masks]
+    types = mx.array(_types(blocks).astype(np.int32))
+    embeds = mx.array(_embeds())
+    whole = image_masks(tm, embeds, [None] * len(tm.layers), types,
+                        installed._gmlx_body)
+    kept = min(window - 1, start)
+    with mx.stream(mx.cpu):
+        for build in builders:
+            cache = lm.make_cache()
+            mx.eval(lm(None, inputs_embeds=embeds[:, :start], cache=cache,
+                       mm_token_type_ids=types[:, :start]).logits)
+            cache = cache + [None] * (len(tm.layers) - len(cache))
+            masks = image_masks(tm, embeds[:, start:end], cache,
+                                types[:, start:end], build)
+            for layer, mask, full in zip(tm.layers, masks, whole):
+                if layer.layer_type == "full_attention":
+                    assert isinstance(mask, str) and mask == "causal"
+                    continue
+                want = full[..., start:end, start - kept:end]
+                assert mx.array_equal(
+                    mx.broadcast_to(mask, want.shape), want).item()

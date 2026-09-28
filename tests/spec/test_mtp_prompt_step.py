@@ -138,23 +138,31 @@ def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
 
 
 class _BidirModel(_Model):
-    """The stock gemma-4 chunking policy on a bidirectional image config."""
+    """The gemma-4 chunking policy gmlx installs, on a bidirectional image
+    config."""
 
     config = SimpleNamespace(use_bidirectional_attention="vision")
-    chunked_prefill_policy = Gemma4LanguageModel.chunked_prefill_policy
+
+    def __init__(self):
+        super().__init__()
+        from gmlx.models.gemma4 import sync
+
+        sync._install_image_chunking_policy()
+
+    def chunked_prefill_policy(self, **kwargs):
+        return Gemma4LanguageModel.chunked_prefill_policy(self, **kwargs)
 
 
 @pytest.mark.parametrize("types,calls", [
-    ([0, 1, 1, 1, 0, 0, 0, 0], [8]),
+    ([0, 1, 1, 1, 0, 0, 0, 0], [1, 3, 2, 1, 1]),
     ([0] * 8, [2, 2, 2, 1, 1]),
 ])
-def test_mtp_keeps_one_pass_when_the_target_declines_chunking(
+def test_mtp_chunks_an_image_prompt_at_block_edges(
         ar, monkeypatch, types, calls):
-    """Asked without a drafter, the gemma-4 policy declines to chunk an
-    image prompt under bidirectional image attention, so stock plain
-    serve prefills it in one forward. An MTP batch built the way serve
-    builds it keeps that one forward and chunks a text prompt at the MTP
-    step."""
+    """Under bidirectional image attention an MTP batch built the way
+    serve builds it chunks at the MTP step, with the boundaries at the
+    image edges: a boundary inside the image moves to its start, and the
+    image, longer than the step, prefills in one chunk."""
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2")
     monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
     ids = [1, 5, 5, 5, 2, 3, 4, 6]
@@ -168,6 +176,39 @@ def test_mtp_keeps_one_pass_when_the_target_declines_chunking(
     _run(batch)
 
     assert [c["n"] for c in model.calls] == calls
+
+
+@pytest.mark.parametrize("mtp", [False, True], ids=["plain", "mtp"])
+def test_a_row_ending_inside_another_rows_image_keeps_its_logits(
+        ar, monkeypatch, mtp):
+    """A right-padded batch whose shorter row ends inside the longer row's
+    image. The chunk keeps the image whole, runs past that row end, and
+    the row keeps the logits of its last real column."""
+    from gmlx.gen import media_spans
+
+    assert media_spans.install_span_aware_prompt_step()
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "16")
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    rows = [[5, 6, 7], [11, 12, 13, 14, 15, 16, 17]]
+    types = [[0] * 7, [0, 1, 1, 1, 1, 1, 0]]
+    model = _BidirModel()
+    kw = dict(draft_model=object(), draft_kind="mtp") if mtp else dict(
+        prefill_step_size=16)
+    batch = ar.PromptProcessingBatch(
+        model, [0, 1], rows, [4, 4], _embeds(rows, 7),
+        {"mm_token_type_ids": mx.array(types)},
+        warm_cache=[BatchKVCache(left_padding=[0, 0])],
+        right_pad_per_row=[4, 0], suffix_lens=[3, 7], **kw)
+
+    steps = []
+    while batch.needs_processing():
+        steps.append(batch.prompt_step())
+
+    # The first chunk stops at the image start, the second takes the
+    # whole image past row 0's end at column 3.
+    assert steps == [1, 5]
+    assert int(mx.argmax(batch._finished_prompt_logits[0]).item()) == 7
+    assert batch._suffix_lens == [3, 7]
 
 
 def test_l0_restore_trims_mrope_position_ids(ar, monkeypatch):
