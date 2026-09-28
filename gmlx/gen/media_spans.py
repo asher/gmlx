@@ -343,8 +343,10 @@ class _TailForward:
     hidden states split at the last token: the held columns fill the
     stub's list, where the drafter's prefill capture reads them, and the
     final output keeps the last column, as after a one-token forward.
-    Other threads, and any call that does not match, reach the real
-    language model, and a mismatched chunk disarms the stand-in.
+    Other threads, and a chunk that does not match, reach the real
+    language model, and a mismatched chunk disarms the stand-in. A final
+    forward without positional ids or ``inputs_embeds`` disarms it and
+    raises, since the real model would run without the held columns.
     """
 
     def __init__(self, model, width: int):
@@ -398,13 +400,14 @@ class _TailForward:
             self.disarm()
             return lm(*args, **kwargs)
         self.disarm()
+        (held_ids, held_embeds), self._held = self._held, None
         embeds = kwargs.get("inputs_embeds")
         if len(args) != 1 or embeds is None:
-            return lm(*args, **kwargs)
+            raise RuntimeError(
+                "media tail prefill: the final forward carries no positional "
+                "ids or no inputs_embeds, so the held chunk cannot run with it")
         import mlx.core as mx
 
-        held_ids, held_embeds = self._held
-        self._held = None
         kwargs["inputs_embeds"] = mx.concatenate([held_embeds, embeds], axis=1)
         out = lm(mx.concatenate([held_ids, args[0]], axis=1), **kwargs)
         self._split_hidden(out, self._width + int(args[0].shape[1]))

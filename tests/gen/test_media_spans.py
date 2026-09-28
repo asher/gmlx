@@ -4,6 +4,7 @@ import logging
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from gmlx.gen import media_spans as ms
 from gmlx.gen import prefill_decay
@@ -304,6 +305,26 @@ def test_tail_forward_disarms_on_a_chunk_it_does_not_expect():
     list(ms._disarm_after(iter([1, 2]), fwd))
     assert model.language_model is lm
 
+
+
+def test_tail_forward_raises_on_a_final_forward_it_cannot_join():
+    from types import SimpleNamespace as NS
+
+    ids, emb = mx.array([[5, 6, 7, 8]]), mx.zeros((1, 4, 2))
+    for final in ({"inputs": ids[:, 3:], "inputs_embeds": emb[:, 3:]},
+                  {"args": (ids[:, 3:],)}):
+        lm = _TailLM()
+        model = NS(language_model=lm)
+        fwd = ms._TailForward(model, 3)
+        fwd.arm()
+        model.language_model(inputs=ids[:, :3], inputs_embeds=emb[:, :3],
+                             n_to_process=3)
+        args = final.pop("args", ())
+        with pytest.raises(RuntimeError, match="held chunk"):
+            model.language_model(*args, **final)
+        # Neither the held chunk nor the final forward reached the model.
+        assert lm.calls == [] and model.language_model is lm
+        assert fwd._held is None
 
 def test_run_spans_start_after_the_cached_prefix():
     from types import SimpleNamespace as NS
