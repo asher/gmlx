@@ -132,7 +132,7 @@ class _Sessions:
             for aid, alias in (getattr(cfg, "assistants", None) or {}).items()}
         self.open: dict[str, _Session] = {}
 
-    def hidden(self, model, session: _Session) -> bool:
+    def hidden(self, model: str, session: _Session) -> bool:
         return model in self.tools and model not in session.allowed
 
     async def start(self, client: str, allowed: frozenset) -> _Session:
@@ -304,14 +304,16 @@ def _replay(body: bytes, receive):
     return replay
 
 
-def _model_field(body: bytes):
+def _model_field(body: bytes) -> str | None:
     # The routes parse their body with json.loads too, so both read the
-    # same model when a key repeats.
+    # same model when a key repeats. A model that is not a string names no
+    # alias, and the route refuses it.
     try:
         doc = json.loads(body)
     except ValueError:
         return None
-    return doc.get("model") if isinstance(doc, dict) else None
+    model = doc.get("model") if isinstance(doc, dict) else None
+    return model if isinstance(model, str) else None
 
 
 def _unknown_model(path: str, model: str) -> dict:
@@ -390,7 +392,7 @@ class _SessionApp:
             if body is None:
                 return
             model = _model_field(body)
-            if self.sessions.hidden(model, self.session):
+            if model is not None and self.sessions.hidden(model, self.session):
                 await JSONResponse(status_code=404, content=_unknown_model(
                     path, model))(scope, receive, send)
                 return

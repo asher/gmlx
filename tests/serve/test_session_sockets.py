@@ -337,6 +337,8 @@ def test_open_session_answers_the_contract_body(server):
     {"client": "opencode", "assistants": "home"},
     {"client": "opencode", "assistants": [1]},
     ["opencode"],
+    # The body launch probes with: a 400 tells it the server offers sessions.
+    {"probe": True},
 ])
 def test_open_session_refuses_a_bad_body(server, body):
     srv = server()
@@ -408,6 +410,16 @@ def test_listed_alias_with_client_tools_passes_through(server):
     assert r.status == 200, r.body
     assert r.json()["choices"][0]["message"]["content"] == "stub answer"
     assert srv.tools == [] and [c["model"] for c in srv.chat] == ["m-a"]
+
+
+@pytest.mark.parametrize("model", [["hidden"], {"id": "hidden"}, 3, None])
+def test_a_model_that_is_not_a_string_passes_to_the_route(server, model):
+    srv = server()
+    path = srv.open_session([])["socket"]
+    body = {**_chat("x"), "model": model}
+    r = _unix(path, "POST", "/v1/chat/completions", body)
+    assert r.status != 500, r.body
+    assert srv.tools == []
 
 
 @pytest.mark.parametrize("api_key", [None, _KEY])
