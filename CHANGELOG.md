@@ -16,10 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Requires mlx-vlm 0.7.3, and with it mlx 0.32.2 and mlx-kquant 0.5.0.
 - `/v1/chat/completions` merges all system messages into one leading system
   message, as mlx-vlm 0.7.3 does. Developer messages stay where they were sent.
-- The server's engine thread for an unloaded model now exits instead of staying
-  parked, since mlx 0.32.2 fixes the crash at thread exit.
-- `gmlx run` and `gmlx chat` prefill a DeepSeek-V4-Flash-Vision-Exp image
-  prompt in chunks that keep each image whole, instead of in one pass.
+- In `gmlx run` and `gmlx chat`, a Gemma-4 12B or DeepSeek-V4-Flash-Vision-Exp
+  image prompt prefills in chunks that keep each image whole, not in one pass.
 - On a Gemma-4 model other than E2B and E4B, the prefix cache reuses a cached
   prefix that ends before an image, when the request holds the same images.
 
@@ -47,7 +45,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and answered differently with MTP than without it.
 - With `--kv-bits`, MTP and the prefix cache on, a request that reused a
   cached prefix could fail when it joined a batch that was already decoding.
-- Concurrent requests on a gemma-4 model that shared a prompt prefix of 1024
+- Concurrent requests on a Gemma-4 model that shared a prompt prefix of 1024
   or more tokens could decode wrong tokens.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
