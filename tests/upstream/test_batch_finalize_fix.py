@@ -4,7 +4,7 @@ Stock finalize adds the rolled tail to ``left_padding`` in place, so the
 identity-keyed pad memos keep the pads from before the trim. CPU checks per
 class origin through the memo readers and through the vendored qwen3.5
 rollback, and a GPU model check: a B=2 qwen3.5 speculative rollback with
-accept counts 2 and 0, then one decode, matches single-stream on both rows.
+accept counts 4 and 0, then one decode, matches single-stream on both rows.
 """
 
 from __future__ import annotations
@@ -116,8 +116,24 @@ def test_install_is_idempotent():
     assert cls.finalize is fn
 
 
+# The GPU runs production numerics: float32 matmuls at TF32 precision on
+# M5-class GPUs, where the batch and a single-stream row differ by rounding.
+# Over 16 weight seeds that difference reached 0.0148 on row 0 and 0.0087 on
+# row 1, and each row's tolerance is about three times its worst case. With
+# stock finalize, row 1 attends its four rolled-in drafts and differs by
+# 0.177 to 0.444, at least 6.8 times its tolerance.
+_ROW_TOL = (0.045, 0.026)
+
+
+def _stock_finalize(cls):
+    """The stock ``finalize`` the fix wraps (its ``_orig`` default)."""
+    fn = cls.__dict__["finalize"]
+    assert getattr(fn, "_gmlx_finalize_rebinds_left_padding", False)
+    return fn.__defaults__[0]
+
+
 @_NEEDS_GPU
-def test_ragged_rollback_then_decode_matches_single_stream():
+def test_ragged_rollback_then_decode_matches_single_stream(monkeypatch):
     from mlx_vlm.models.cache import BatchKVCache, KVCache
 
     import gmlx.models.qwen35.owned as qwen35_owned
@@ -144,8 +160,8 @@ def test_ragged_rollback_then_decode_matches_single_stream():
 
     prompts = [[3, 17, 42, 9, 8, 7, 6, 5, 4], [11, 12, 13, 14]]
     first, nxt = [20, 21], [50, 51]
-    blocks = [[30, 31, 32], [40, 41, 42]]
-    accepted = [2, 0]
+    blocks = [[30, 31, 32, 33, 34], [40, 41, 42, 43, 44]]
+    accepted, width = [4, 0], 5
 
     def verify(ids, cache):
         return lm(ids, cache=cache, capture_layer_ids=[], return_hidden=True,
@@ -157,23 +173,31 @@ def test_ragged_rollback_then_decode_matches_single_stream():
         lm(mx.array([prompts[r]]), cache=c)
         lm(mx.array([[first[r]]]), cache=c)
         out = verify(mx.array([blocks[r]]), c)
-        lm.rollback_speculative_cache(c, out.gdn_states, accepted[r], 3)
+        lm.rollback_speculative_cache(c, out.gdn_states, accepted[r], width)
         refs.append(lm(mx.array([[nxt[r]]]), cache=c).logits)
 
-    rows = []
-    for r in range(2):
-        c = lm.make_cache()
-        lm(mx.array([prompts[r]]), cache=c)
-        rows.append(c)
-    batch = [
-        (BatchKVCache if isinstance(a, KVCache) else Qwen35ArraysCache).merge(
-            [a, b])
-        for a, b in zip(*rows)
-    ]
-    lm(mx.array([[t] for t in first]), cache=batch)
-    out = verify(mx.array(blocks), batch)
-    lm.rollback_speculative_cache(batch, out.gdn_states, accepted, 3)
-    logits = lm(mx.array([[t] for t in nxt]), cache=batch).logits
-    for r in range(2):
-        diff = mx.abs(logits[r : r + 1] - refs[r]).max().item()
-        assert diff < 1e-2, (r, diff)
+    def batched():
+        rows = []
+        for r in range(2):
+            c = lm.make_cache()
+            lm(mx.array([prompts[r]]), cache=c)
+            rows.append(c)
+        batch = [
+            (BatchKVCache if isinstance(a, KVCache)
+             else Qwen35ArraysCache).merge([a, b])
+            for a, b in zip(*rows)
+        ]
+        lm(mx.array([[t] for t in first]), cache=batch)
+        out = verify(mx.array(blocks), batch)
+        lm.rollback_speculative_cache(batch, out.gdn_states, accepted, width)
+        logits = lm(mx.array([[t] for t in nxt]), cache=batch).logits
+        return [mx.abs(logits[r : r + 1] - refs[r]).max().item()
+                for r in range(2)]
+
+    fixed = batched()
+    assert all(d <= tol for d, tol in zip(fixed, _ROW_TOL)), fixed
+    # Control: stock finalize must fail this check by a wide margin, or the
+    # tolerance could not tell the bug from rounding.
+    monkeypatch.setattr(BatchKVCache, "finalize", _stock_finalize(BatchKVCache))
+    stock = batched()
+    assert stock[1] > 3 * _ROW_TOL[1], stock
