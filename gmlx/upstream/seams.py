@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -54,6 +55,25 @@ class Seam:
     module_optional: bool = False  # module absent on some qualified versions
     attr_optional: bool = False    # attr absent on some qualified versions
     impl: str = ""  # "module:attr" a forwarding lambda calls; pinned with it
+    # The text to pin, for a value whose generic pin says too little.
+    pin: Callable[[object], str] | None = None
+
+
+def _stock_parser_specs(table) -> str:
+    """The stock entries of a tool-parser table (the SPECS tuple in order,
+    or the _BY_NAME dict by name) as (name, markers, priority) lines,
+    specs that gmlx registered left out. An added or re-ranked upstream
+    spec changes which parser a template routes to; the table's type
+    alone would pin nothing."""
+    from gmlx.upstream.tool_parsers import registered_names
+
+    ours = registered_names()
+    specs = (sorted(table.values(), key=lambda spec: spec.name)
+             if isinstance(table, dict) else list(table))
+    return "\n".join(
+        repr((spec.name, getattr(spec, "template_markers", None),
+              getattr(spec, "priority", None)))
+        for spec in specs if spec.name not in ours)
 
 
 SEAMS: tuple[Seam, ...] = (
@@ -356,10 +376,11 @@ SEAMS: tuple[Seam, ...] = (
          "groups and priority)", critical=True),
     Seam("mlx_vlm.tools.registry", "SPECS",
          "tool_parsers.register_tool_parser (priority-200 spec prepended; "
-         "module global rebound)", critical=True),
+         "module global rebound)", critical=True, pin=_stock_parser_specs),
     Seam("mlx_vlm.tools.registry", "_BY_NAME",
          "tool_parsers.register_tool_parser (name lookup; an upstream spec "
-         "of the same name keeps its markers)", critical=True),
+         "of the same name keeps its markers)", critical=True,
+         pin=_stock_parser_specs),
     Seam("mlx_vlm.tools.registry", "_infer_tool_parser",
          "tool_parsers.register_tool_parser (reads the SPECS module global "
          "per call, highest priority first)"),
@@ -368,7 +389,8 @@ SEAMS: tuple[Seam, ...] = (
          "mlx_vlm.tools.parsers.<name> through the sys.modules graft)"),
     Seam("mlx_vlm.tools", "SPECS",
          "tool_parsers.register_tool_parser (the request schemas validate "
-         "a tool_parser override against this re-export)"),
+         "a tool_parser override against this re-export)",
+         pin=_stock_parser_specs),
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
@@ -726,10 +748,11 @@ def _key(seam: Seam) -> str:
 
 def _row_fingerprint(seam: Seam, obj, impl) -> str:
     """The seam's fingerprint. A forwarding seam pins the binding and the
-    implementation it calls together, so a change to either shows."""
-    if not seam.impl:
-        return _fingerprint(obj)
-    text = _pin_text(obj) + "\0" + _pin_text(impl)
+    implementation it calls together, so a change to either shows. A row
+    with its own pin function pins what that returns."""
+    text = seam.pin(obj) if seam.pin is not None else _pin_text(obj)
+    if seam.impl:
+        text += "\0" + _pin_text(impl)
     return hashlib.sha256(text.encode()).hexdigest()
 
 

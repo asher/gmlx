@@ -16,6 +16,15 @@ from gmlx.upstream.graft import graft_module
 # A gmlx format outranks any stock spec whose markers overlap its own.
 _GMLX_PRIORITY = 200
 
+# Names of the specs this module added to the registry. The seam guard pins
+# the stock table without them.
+_REGISTERED: set[str] = set()
+
+
+def registered_names() -> frozenset[str]:
+    """Names of the tool-parser specs gmlx added to mlx-vlm's registry."""
+    return frozenset(_REGISTERED)
+
 
 def register_tool_parser(name: str, module, markers) -> None:
     """Make ``mlx_vlm.tools.parsers.<name>`` resolve to ``module``, ahead of
@@ -37,6 +46,7 @@ def register_tool_parser(name: str, module, markers) -> None:
     # re-export, a separate binding.
     registry.SPECS = (spec, *registry.SPECS)
     registry._BY_NAME[name] = spec
+    _REGISTERED.add(name)
     package = sys.modules.get("mlx_vlm.tools")
     if package is not None and hasattr(package, "SPECS"):
         package.SPECS = registry.SPECS

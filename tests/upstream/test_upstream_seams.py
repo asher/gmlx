@@ -102,6 +102,53 @@ def test_forwarding_seam_pins_its_implementation(monkeypatch):
                for p in problems)
 
 
+_TOOL_TABLES = ("mlx_vlm.tools.registry:SPECS",
+                "mlx_vlm.tools.registry:_BY_NAME", "mlx_vlm.tools:SPECS")
+
+
+def _tool_table_problems():
+    return sorted(k for k in _TOOL_TABLES
+                  if any(p.startswith(k + ":") for p in us.check_seams()))
+
+
+def _pin_tool_tables(monkeypatch):
+    import mlx_vlm.tools as tools
+    import mlx_vlm.tools.registry as reg
+
+    monkeypatch.setattr(reg, "SPECS", reg.SPECS)
+    monkeypatch.setattr(reg, "_BY_NAME", dict(reg._BY_NAME))
+    monkeypatch.setattr(tools, "SPECS", tools.SPECS)
+    return reg, tools
+
+
+def test_tool_parser_tables_pin_the_stock_specs(monkeypatch):
+    """An upstream spec added to the tool-parser table changes which parser
+    a template routes to, so the three table rows trip."""
+    reg, tools = _pin_tool_tables(monkeypatch)
+    assert _tool_table_problems() == []
+    spec = reg.ParserSpec("atem", (("<atem:invoke",),), priority=300)
+    reg.SPECS = tuple(x for x in reg.SPECS if x.name != "atem") + (spec,)
+    reg._BY_NAME["atem"] = spec
+    tools.SPECS = reg.SPECS
+    assert _tool_table_problems() == sorted(_TOOL_TABLES)
+
+
+def test_tool_parser_tables_leave_out_gmlx_specs(monkeypatch):
+    import mlx_vlm.tools.parsers as parsers
+
+    import gmlx.upstream.tool_parsers as tp
+
+    reg, _ = _pin_tool_tables(monkeypatch)
+    monkeypatch.setattr(tp, "_REGISTERED", set(tp._REGISTERED))
+    probe = types.ModuleType("_gmlx_seam_probe_parser")
+    monkeypatch.setitem(sys.modules, "mlx_vlm.tools.parsers._gmlx_seam_probe",
+                        probe)
+    monkeypatch.setattr(parsers, "_gmlx_seam_probe", probe, raising=False)
+    tp.register_tool_parser("_gmlx_seam_probe", probe, (("<probe>",),))
+    assert reg.SPECS[0].name == "_gmlx_seam_probe"
+    assert _tool_table_problems() == []
+
+
 def test_missing_attr_is_named(monkeypatch):
     bogus = us.Seam("mlx_vlm.generate.ar", "definitely_not_a_thing",
                     "test", critical=True)
