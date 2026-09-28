@@ -115,9 +115,16 @@ def test_multiline_parameter_value_is_preserved():
 
 
 def test_ensure_registered_grafts_into_mlx_vlm():
-    pytest.importorskip("mlx_vlm.tool_parsers")
+    from mlx_vlm.tools import registry
+
     muse_glimmer_tools.ensure_registered()
-    assert "mlx_vlm.tool_parsers.muse_glimmer" in sys.modules
-    mod = sys.modules["mlx_vlm.tool_parsers.muse_glimmer"]
+    assert "mlx_vlm.tools.parsers.muse_glimmer" in sys.modules
+    mod = registry.load_tool_module("muse_glimmer")
     assert hasattr(mod, "parse_tool_call")
+    # The stock atem spec shares the ATEM markers; the graft outranks it.
+    template = ('<atem:function_calls><atem:invoke name="f">'
+                '</atem:invoke></atem:function_calls>')
+    assert registry._infer_tool_parser(template) == "muse_glimmer"
+    before = registry.SPECS
     muse_glimmer_tools.ensure_registered()   # idempotent
+    assert registry.SPECS == before

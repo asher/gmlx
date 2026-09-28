@@ -13,14 +13,14 @@ to the first ``<arg_key:...>``.
     </tool_calls:6124c78e>
 
 mlx-vlm's parser registry knows none of this: its template-marker inference
-(``mlx_vlm.tool_parsers._TEMPLATE_MARKERS``) matches bare ``<arg_key>`` etc.,
-and the HY4 template defines its tags via ``'<arg_key{}>'.format(HYTK)`` so
-no stock marker fires. ``ensure_registered()`` grafts this module in as
-``mlx_vlm.tool_parsers.hy_v4`` (upstream-first, same pattern as
-``hy_v4_model``) and prepends the HY4 markers so
+(``mlx_vlm.tools.registry.SPECS``) matches bare ``<arg_key>`` etc., and the
+HY4 template defines its tags via ``'<arg_key{}>'.format(HYTK)`` so no stock
+marker fires. ``ensure_registered()`` grafts this module in as
+``mlx_vlm.tools.parsers.hy_v4`` (upstream-first, same pattern as
+``hy_v4_model``) and registers the HY4 markers so
 ``_infer_tool_parser_from_processor`` resolves it from the template.
 
-Parser contract (see mlx-vlm's ``tool_parsers/__init__.py`` consumers):
+Parser contract (see ``mlx_vlm.tools.base.ToolParser``):
 module attributes ``tool_call_start`` / ``tool_call_end`` delimit the call
 block in the generated text; ``parse_tool_call(text, tools)`` receives the
 inner text and returns ``{"name", "arguments"}`` or a list of them. The
@@ -64,10 +64,7 @@ _ARG_RE = re.compile(
 # (tags are built via HYTK .format()); a template with pre-expanded tags
 # carries the suffixed spelling. The suffix is what separates HY4 from Hy3,
 # so it must be part of every marker tuple.
-_TEMPLATE_MARKERS = [
-    (("<arg_key{}>", _HYTK), "hy_v4"),
-    ((tool_call_start,), "hy_v4"),
-]
+_TEMPLATE_MARKERS = (("<arg_key{}>", _HYTK), (tool_call_start,))
 
 
 def _string_arg_names(tool_name: str, tools: list[Any] | None) -> set[str]:
@@ -126,21 +123,8 @@ def parse_tool_call(text: str, tools: list[Any] | None = None):
 
 
 def ensure_registered() -> None:
-    """Make ``mlx_vlm.tool_parsers.hy_v4`` resolve (upstream wins) and teach
-    the template-marker inference the HY4 spellings. Idempotent."""
-    import importlib
+    """Make ``mlx_vlm.tools.parsers.hy_v4`` resolve (upstream wins) and route
+    templates carrying the HY4 spellings to it. Idempotent."""
+    from gmlx.upstream.tool_parsers import register_tool_parser
 
-    if "mlx_vlm.tool_parsers.hy_v4" not in sys.modules:
-        try:
-            importlib.import_module("mlx_vlm.tool_parsers.hy_v4")  # upstream wins
-        except ImportError:
-            sys.modules["mlx_vlm.tool_parsers.hy_v4"] = sys.modules[__name__]
-    try:
-        registry = importlib.import_module("mlx_vlm.tool_parsers")
-    except ImportError:
-        return
-    markers = getattr(registry, "_TEMPLATE_MARKERS", None)
-    if isinstance(markers, list):
-        for entry in _TEMPLATE_MARKERS:
-            if entry not in markers:
-                markers.insert(0, entry)
+    register_tool_parser("hy_v4", sys.modules[__name__], _TEMPLATE_MARKERS)

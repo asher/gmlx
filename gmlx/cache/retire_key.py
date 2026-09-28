@@ -220,9 +220,9 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     if tool_module is not None:
         tc = srv.process_tool_calls(
             model_output=full_text, tool_module=tool_module, tools=tools)
-        if tc.get("calls"):
+        if tc.calls:
             tool_calls = []
-            for call in tc["calls"]:
+            for call in tc.calls:
                 call = dict(call) if isinstance(call, dict) else call
                 if isinstance(call, dict) and "function" in call:
                     fn = dict(call["function"])
@@ -234,8 +234,7 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
                             fn["arguments"] = {}
                     call["function"] = fn
                 tool_calls.append(call)
-            _, content = srv._split_thinking(tc.get("remaining_text") or "",
-                                             ts, te)
+            _, content = srv._split_thinking(tc.remaining_text or "", ts, te)
             if content:
                 content = _CONTROL_TOKEN_RE.sub("", content).strip()
             content = content or None
@@ -400,7 +399,7 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
     return lcp
 
 
-def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
+def next_turn_lcp(ctx: dict | None, seq: list[int], generated: list[int],
                   *, partial: bool = False) -> int | None:
     """Longest common prefix of ``seq`` with the predicted next-turn render.
 

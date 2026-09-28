@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import sys
 
-import pytest
-
 import gmlx.models.hy_v3.tools as hy_v3_tools
 from gmlx.models.hy_v3.tools import parse_tool_call, tool_call_end, tool_call_start
 
@@ -52,7 +50,10 @@ def _calls(*bodies):
 
 
 def _registry():
-    return pytest.importorskip("mlx_vlm.tool_parsers")
+    # A plain import: a registry move must fail here, not skip.
+    from mlx_vlm.tools import registry
+
+    return registry
 
 
 def test_delimiters_are_the_wrapper_tags():
@@ -149,7 +150,8 @@ def test_ensure_registered_makes_module_loadable():
 def test_ensure_registered_idempotent():
     registry = _registry()
     hy_v3_tools.ensure_registered()
-    before = list(registry._TEMPLATE_MARKERS)
+    before = registry.SPECS
     hy_v3_tools.ensure_registered()
-    assert registry._TEMPLATE_MARKERS == before
-    assert sys.modules["mlx_vlm.tool_parsers.hy_v3"] is not None
+    assert registry.SPECS == before
+    assert sum(spec.name == "hy_v3" for spec in registry.SPECS) == 1
+    assert sys.modules["mlx_vlm.tools.parsers.hy_v3"] is not None
