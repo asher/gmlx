@@ -8,9 +8,12 @@ coordinator sees the cache after every chunk. CPU only: the stub runs no
 kernel beyond array ops.
 """
 
+from types import SimpleNamespace
+
 import mlx.core as mx
 import pytest
 from mlx_vlm.models.cache import BatchKVCache
+from mlx_vlm.models.gemma4.language import LanguageModel as Gemma4LanguageModel
 
 _V = 32
 _D = 4
@@ -132,6 +135,39 @@ def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
     assert [p.shape for p in seen] == [(3, 1, 2), (3, 1, 2), (3, 1, 1),
                                        (3, 1, 1)]
     assert mx.concatenate(seen, axis=2).tolist() == pos.tolist()
+
+
+class _BidirModel(_Model):
+    """The stock gemma-4 chunking policy on a bidirectional image config."""
+
+    config = SimpleNamespace(use_bidirectional_attention="vision")
+    chunked_prefill_policy = Gemma4LanguageModel.chunked_prefill_policy
+
+
+@pytest.mark.parametrize("types,calls", [
+    ([0, 1, 1, 1, 0, 0, 0, 0], [8]),
+    ([0] * 8, [2, 2, 2, 1, 1]),
+])
+def test_mtp_keeps_one_pass_when_the_target_declines_chunking(
+        ar, monkeypatch, types, calls):
+    """Asked without a drafter, the gemma-4 policy declines to chunk an
+    image prompt under bidirectional image attention, so stock plain
+    serve prefills it in one forward. An MTP batch built the way serve
+    builds it keeps that one forward and chunks a text prompt at the MTP
+    step."""
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "2")
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    ids = [1, 5, 5, 5, 2, 3, 4, 6]
+    model = _BidirModel()
+    batch = ar.PromptProcessingBatch(
+        model, [0], [ids], [4], _embeds([ids], 8),
+        {"mm_token_type_ids": mx.array([types])},
+        warm_cache=[BatchKVCache(left_padding=[0])], prefill_step_size=None,
+        draft_model=object(), draft_kind="mtp")
+
+    _run(batch)
+
+    assert [c["n"] for c in model.calls] == calls
 
 
 def test_l0_restore_trims_mrope_position_ids(ar, monkeypatch):

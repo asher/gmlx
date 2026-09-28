@@ -80,6 +80,7 @@
   "mlx_vlm.generate.ar:_make_cache": "fa0d72c4f06d5295424dde057bf06ac07ff7e3351e9b3221112f53912ee41371",
   "mlx_vlm.generate.ar:_slice_sequence_aligned_prompt_kwarg": "cbf69bb495c4ac5057c927e76f8576c2367b796658ad9068e5c600d30801d0ab",
   "mlx_vlm.generate.ar:run_speculative_server_rounds": "a97853c0faa5c672226856995b183a096c70212f915a90d9da643c877b16d0c1",
+  "mlx_vlm.generate.common:_chunked_prefill_enabled": "7d34766c299dcc08dfaefdd5d945d5a7c40e5d03a2ae1c48a22fe2412ef7879b",
   "mlx_vlm.generate.common:generation_stream": "eac2321ace44b5f445f08b4a6f0b4fb309a1acc96121f91712ea1b171676e713",
   "mlx_vlm.generate.diffusion:_diffusion_entropy_transfer_mask": "2dd41a6de99b91328a0100d93ae23ce0491ff383c2ae33889a28a57fdc9c13ba",
   "mlx_vlm.generate.diffusion:stream_diffusion_generate": "28a0eb07fde1539e8ea8c5c60c5dff621bd4aefd5572eb4a48e54542f4372cd1",
