@@ -6,7 +6,12 @@
 # The layers go from the most shared to the least: the common packages are
 # one layer for every client, and a packages: change rebuilds only the last
 # layer, never the client install.
-FROM docker.io/library/node:22-bookworm-slim
+#
+# The base image is pinned by digest, each client by version, and each
+# release download by version and sha256, so a build installs what gmlx
+# names. To move a pin, change the version and its sha256 together: the
+# digest of a GitHub release asset is on its release page.
+FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
 
 RUN set -eux; \
     apt-get update; \
@@ -25,30 +30,36 @@ RUN set -eux; \
 
 RUN set -eux; \
     gh=https://github.com; \
-    venv() { python3 -m venv /opt/venv; /opt/venv/bin/pip install --no-cache-dir -U pip; }; \
+    venv() { python3 -m venv /opt/venv; /opt/venv/bin/pip install --no-cache-dir pip==26.2.1; }; \
+    fetch() { curl -fsSL -o "$1" "$2"; echo "$3  $1" | sha256sum -c -; }; \
     case "$CLIENT" in \
-    opencode) npm install -g opencode-ai ;; \
-    claude-code) npm install -g @anthropic-ai/claude-code ;; \
-    pi) npm install -g @mariozechner/pi-coding-agent ;; \
-    dsh) npm install -g @deepseek-ai/dsh@next ;; \
+    opencode) npm install -g opencode-ai@1.18.32 ;; \
+    claude-code) npm install -g @anthropic-ai/claude-code@2.1.283 ;; \
+    pi) npm install -g @mariozechner/pi-coding-agent@0.73.1 ;; \
+    dsh) npm install -g @deepseek-ai/dsh@0.1.7-rc.2 ;; \
     omp) \
-        curl -fsSL -o /usr/local/bin/omp \
-            "$gh/can1357/oh-my-pi/releases/latest/download/omp-linux-arm64"; \
+        fetch /usr/local/bin/omp "$gh/can1357/oh-my-pi/releases/download/v18.4.0/omp-linux-arm64" \
+            8ade0ab092b569c73a3be3ce7c5f74f8107d4528b85fd9767ed68dc029b062e1; \
         chmod 755 /usr/local/bin/omp ;; \
     goose) \
-        curl -fsSL "$gh/aaif-goose/goose/releases/latest/download/goose-aarch64-unknown-linux-musl.tar.bz2" \
-            | tar -xj -C /usr/local/bin ./goose ;; \
+        fetch /tmp/goose.tar.bz2 \
+            "$gh/aaif-goose/goose/releases/download/v1.52.0/goose-aarch64-unknown-linux-musl.tar.bz2" \
+            ff8f21ac5740c4bf45905dd310b331037f0fe8bdf148c468945ba3ac14b6089a; \
+        tar -xjf /tmp/goose.tar.bz2 -C /usr/local/bin ./goose; \
+        rm /tmp/goose.tar.bz2 ;; \
     aichat) \
-        tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$gh/sigoden/aichat/releases/latest"); \
-        tag=${tag##*/}; \
-        curl -fsSL "$gh/sigoden/aichat/releases/download/$tag/aichat-$tag-aarch64-unknown-linux-musl.tar.gz" \
-            | tar -xz -C /usr/local/bin aichat ;; \
-    hermes) venv; /opt/venv/bin/pip install --no-cache-dir hermes-agent ;; \
-    elia) venv; /opt/venv/bin/pip install --no-cache-dir elia-chat ;; \
+        fetch /tmp/aichat.tar.gz \
+            "$gh/sigoden/aichat/releases/download/v0.30.0/aichat-v0.30.0-aarch64-unknown-linux-musl.tar.gz" \
+            eb1cd0948569404c5d9d01c10b32b902e11f8231073315456454dec246bdf26e; \
+        tar -xzf /tmp/aichat.tar.gz -C /usr/local/bin aichat; \
+        rm /tmp/aichat.tar.gz ;; \
+    hermes) venv; /opt/venv/bin/pip install --no-cache-dir hermes-agent==0.19.0 ;; \
+    elia) venv; /opt/venv/bin/pip install --no-cache-dir elia-chat==1.10.0 ;; \
     open-webui) \
         venv; \
-        /opt/venv/bin/pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
-        /opt/venv/bin/pip install --no-cache-dir open-webui ;; \
+        /opt/venv/bin/pip install --no-cache-dir torch==2.14.0 \
+            --index-url https://download.pytorch.org/whl/cpu; \
+        /opt/venv/bin/pip install --no-cache-dir open-webui==0.11.4 ;; \
     *) echo "unknown CLIENT '$CLIENT'" >&2; exit 1 ;; \
     esac; \
     npm cache clean --force

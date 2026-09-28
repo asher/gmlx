@@ -126,19 +126,38 @@ def test_a_stopped_builder_is_started_and_stopped_again(fake_container, no_other
 
 def test_a_running_builder_keeps_running_with_its_own_settings(fake_container, monkeypatch,
                                                                no_other_builds):
-    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
     fake_container.update(builder=True, builder_config={"cpus": 6, "memory": 8 << 30,
-                                                        "ssh": True})
+                                                        "ssh": False})
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert not fake_container.calls("builder", "stop")
-    assert fake_container.load()["builder_args"] == [
-        ["--cpus", "6", "--memory", "8192M", "--ssh", "default"]]
+    assert fake_container.load()["builder_args"] == [["--cpus", "6", "--memory", "8192M"]]
 
 
-def test_builder_ssh_passes_only_with_an_agent(fake_container, monkeypatch):
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+def test_a_launch_build_never_passes_ssh(monkeypatch):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
     running = cli.Builder("running", cpus=4, memory_bytes=4 << 30, ssh=True)
     assert cli.builder_build_args(running) == ["--cpus", "4", "--memory", "4096M"]
+
+
+@pytest.mark.parametrize("kind", ["shipped", "build"])
+def test_a_builder_that_forwards_ssh_is_refused(fake_container, monkeypatch, no_other_builds,
+                                               tmp_path, kind):
+    """A RUN --mount=type=ssh step would reach every key in the Mac's agent,
+    whatever ssh_agent says."""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    fake_container.update(builder=True, builder_config={"cpus": 2, "memory": 2 << 30,
+                                                        "ssh": True})
+    plan = images.ImagePlan("shipped", "pi")
+    if kind == "build":
+        ctx = tmp_path / "ctx"
+        ctx.mkdir()
+        (ctx / "Containerfile").write_text("FROM debian\nRUN --mount=type=ssh true\n")
+        plan = images.ImagePlan("build", "pi", containerfile=ctx / "Containerfile",
+                                context=ctx)
+    with pytest.raises(images.ImageError, match="stop it with container builder stop$"):
+        images.ensure_image(plan, say=_quiet)
+    assert not fake_container.load().get("builds")
+    assert not fake_container.calls("builder", "stop")
 
 
 def test_the_builder_stays_while_another_launch_builds(fake_container, no_other_builds):
@@ -298,8 +317,19 @@ def test_a_running_builder_keeps_its_colour_settings(fake_container, no_other_bu
 
 
 def test_a_build_waits_while_the_builder_stops(fake_container, no_other_builds, monkeypatch):
+    # images.time is the time module, so subprocess sees the patch too: its
+    # wait for a child that closed its pipes but has not exited yet sleeps
+    # in short steps under load. Only the waits of images count here.
+    import sys
     waits = []
-    monkeypatch.setattr(images.time, "sleep", waits.append)
+    real = images.time.sleep
+
+    def sleep(seconds):
+        if sys._getframe(1).f_globals.get("__name__") == images.__name__:
+            waits.append(seconds)
+        else:
+            real(seconds)
+    monkeypatch.setattr(images.time, "sleep", sleep)
     fake_container.update(builder=False, builder_stopping=2)
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
     assert waits == [0.5, 0.5] and len(fake_container.load()["builds"]) == 1
@@ -536,6 +566,98 @@ def test_build_path_rules(tmp_path):
     big.write_text("#" * images.CONTAINERFILE_MAX)
     with pytest.raises(images.ImageError, match="refuses a Containerfile"):
         images.resolve_image("pi", LaunchClientCfg(build=str(big)), cfg)
+
+
+@pytest.mark.parametrize("layout", ["context in share", "file in share", "share in context",
+                                    "file linked into share", "context in share, file linked out"])
+def test_a_build_folder_the_client_can_write_is_refused(tmp_path, layout):
+    """A guest edit would run at the next build, with the network and the
+    builder, and later launches from other projects would build it too."""
+    proj = tmp_path / "proj"
+    ctx = proj / ".gmlx"
+    ctx.mkdir(parents=True)
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    build, share = str(ctx), str(proj)
+    if layout == "file in share":
+        build = str(ctx / "Containerfile")
+    elif layout == "share in context":
+        (proj / "Containerfile").write_text("FROM debian\n")
+        build, share = str(proj), str(ctx)
+    elif layout == "file linked into share":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "Containerfile").symlink_to(ctx / "Containerfile")
+        build = str(outside)
+    elif layout == "context in share, file linked out":
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (ctx / "Containerfile").rename(elsewhere / "Containerfile")
+        (ctx / "Containerfile").symlink_to(elsewhere / "Containerfile")
+    cfg = LaunchContainerCfg()
+    with pytest.raises(images.ImageError, match="shares read-write"):
+        images.resolve_image("pi", LaunchClientCfg(build=build), cfg,
+                             writable=[os.path.realpath(share)])
+    other = tmp_path / "other"
+    other.mkdir()
+    plan = images.resolve_image("pi", LaunchClientCfg(build=build), cfg,
+                                writable=[os.path.realpath(other)])
+    assert plan.kind == "build"
+
+
+def test_a_containerfile_that_is_a_pipe_is_refused_at_once(tmp_path):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir()
+    os.mkfifo(ctx / "Containerfile")
+    with pytest.raises(images.ImageError, match="not a regular file"):
+        images.resolve_image("pi", LaunchClientCfg(build=str(ctx)), LaunchContainerCfg())
+
+
+def test_a_rebuild_names_what_changed(fake_container, tmp_path):
+    ctx, plan = _user_build(tmp_path, text="FROM debian\n")
+    said = []
+    images.ensure_image(plan, say=said.append)
+    assert not [line for line in said if "rebuilding because" in line]   # first build
+    (ctx / "Containerfile").write_text("FROM debian\nRUN true\n")
+    said.clear()
+    images.ensure_image(plan, say=said.append)
+    assert [line for line in said if "rebuilding because" in line] == [
+        f"[launch] rebuilding because {ctx / 'Containerfile'} changed"]
+    for name in "abcde":
+        (ctx / name).write_text(name)
+    said.clear()
+    images.ensure_image(plan, say=said.append)
+    (line,) = [line for line in said if "rebuilding because" in line]
+    assert line == f"[launch] rebuilding because {ctx / 'a'}, {ctx / 'b'}, {ctx / 'c'} and 2 more changed"
+    said.clear()
+    images.ensure_image(plan, say=said.append)          # nothing changed, nothing built
+    assert not [line for line in said if "rebuilding" in line]
+
+
+def test_the_rebuild_reason_names_a_changed_base_and_escapes_names():
+    old = {"containerfile": "/c/Containerfile", "context": "/c", "containerfile_sha256": "x",
+           "bases": {"pi": D1}, "files": {"a": "1"}}
+    new = dict(old, bases={"pi": D2}, files={"a": "1", "b\x1b[2Jc": "2"})
+    assert images.rebuild_reason(old, new) == (
+        "[launch] rebuilding because /c/b\\x1b[2Jc and the pi base image changed")
+    assert images.rebuild_reason(None, new) is None
+    assert images.rebuild_reason(old, old) is None
+
+
+def test_records_are_private_and_never_written_through_a_link(fake_container, tmp_path):
+    images.images_dir().mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    images._records_path().symlink_to(outside)
+    old = os.umask(0o002)
+    try:
+        images._update_records(lambda records: records.update({"x": {"clients": ["pi"]}}))
+        images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
+    finally:
+        os.umask(old)
+    assert outside.read_text() == "keep"
+    for path in (images._records_path(), images._owed_path()):
+        assert not path.is_symlink()
+        assert (os.stat(path).st_mode & 0o777) == 0o600, path
 
 
 def test_shipped_containerfile_stays_under_the_limit_and_covers_every_client():
@@ -879,10 +1001,30 @@ def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
 
 
 def test_the_node_download_is_named_only_when_it_happens(fake_container):
-    fake_container.update(images={"docker.io/library/node:22-bookworm-slim": _img(D2)})
+    fake_container.update(images={images._node_base(): _img(D2)})
     said = []
     images.ensure_image(images.ImagePlan("shipped", "pi"), say=said.append)
     assert "[launch] building the pi image" in said
+
+
+def test_the_shipped_image_installs_only_pinned_versions():
+    """The base by digest, each client by version, each download by version
+    and sha256, so a build installs what gmlx names."""
+    import re
+    text = images.SHIPPED_CONTAINERFILE.read_text()
+    assert re.fullmatch(r"docker\.io/library/node:22-bookworm-slim@sha256:[0-9a-f]{64}",
+                        images._node_base())
+    assert "releases/latest" not in text and "url_effective" not in text
+    for line in re.findall(r"npm install -g [^;]*", text):
+        for pkg in line.split()[3:]:
+            assert re.search(r".@\d[\w.-]*$", pkg), pkg
+    for line in re.findall(r"pip install --no-cache-dir [^;]*", text):
+        pkgs = [w for w in line.split()[3:] if not w.startswith(("-", "http", "\\"))]
+        assert pkgs and all(re.fullmatch(r"[\w-]+==[\w.]+", w) for w in pkgs), line
+    for url in re.findall(r'"\$gh/[^"]+"', text):
+        assert "/releases/download/v" in url, url
+    fetches = re.findall(r"fetch (\S+) \\?\s*\n?\s*\"([^\"]+)\" \\\s*\n\s*([0-9a-f]{64})", text)
+    assert len(fetches) == 3
 
 
 def test_the_shipped_layers_share_the_common_packages():
@@ -1012,7 +1154,7 @@ def test_date_records_use_a_temporary_name_per_process(fake_container, monkeypat
     monkeypatch.setattr(images.os, "replace", replace)
     images.images_dir().mkdir(parents=True, exist_ok=True)
     images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
-    assert names == [f"builder-owed.{os.getpid()}.tmp"]
+    assert len(names) == 1 and names[0].startswith(f"builder-owed.{os.getpid()}.")
     assert images._read_date(images._owed_path()) == "2026-09-28T09:00:00Z"
     assert sorted(p.name for p in images.images_dir().glob("builder-owed*")) == ["builder-owed"]
 

@@ -179,3 +179,77 @@ def test_lines_split_on_newlines_only():
 ])
 def test_excludes_all_below(patterns, folder, prune):
     assert ignore.Matcher(patterns).excludes_all_below(folder) is prune
+
+
+# Hostile ignore files: the file can lie in a folder the client writes.
+
+def test_the_step_matcher_agrees_with_the_regular_expression():
+    """Patterns without a character class are matched without re. Both
+    forms must give the same answer."""
+    import random
+    rng = random.Random(7)
+    pieces = ["a", "b", "/", ".", "*", "**", "**/", "?", "a/b", "+"]
+    compared = 0
+    for _ in range(3000):
+        pattern = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 7)))
+        try:
+            matcher = ignore.Matcher([pattern])
+        except ignore.UnsupportedPattern:
+            continue
+        for pat in matcher.patterns:
+            if pat.steps is None:
+                continue
+            for _ in range(20):
+                path = "".join(rng.choice("ab/.\n+") for _ in range(rng.randint(0, 10)))
+                assert ignore._run_steps(pat.steps, path) == (pat.regex.match(path) is not None), \
+                    (pattern, path)
+                compared += 1
+    assert compared > 10000
+
+
+def test_a_star_heavy_pattern_matches_a_long_name_quickly():
+    import time
+    matcher = ignore.Matcher(["*a" * 14 + "b"])
+    started = time.monotonic()
+    assert not matcher.excluded("a" * 120)
+    assert not matcher.excluded(("a" * 250 + "/") * 16)
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_character_class_with_many_stars_is_unsupported():
+    ignore.Matcher(["*[ab]*"])
+    with pytest.raises(ignore.UnsupportedPattern, match="more than 2 stars"):
+        ignore.Matcher(["*[ab]*a*"])
+
+
+def test_too_many_patterns_are_unsupported():
+    ignore.Matcher([f"f{i}" for i in range(ignore.PATTERNS_MAX)])
+    with pytest.raises(ignore.UnsupportedPattern, match="more than"):
+        ignore.Matcher([f"f{i}" for i in range(ignore.PATTERNS_MAX + 1)])
+
+
+def _build_folder(tmp_path):
+    (tmp_path / "Containerfile").write_text("FROM x\n")
+    return tmp_path / "Containerfile"
+
+
+def test_a_large_sparse_ignore_file_is_not_read(tmp_path):
+    cf = _build_folder(tmp_path)
+    with open(tmp_path / ".dockerignore", "wb") as f:
+        f.truncate(768 << 20)
+    matcher, notice = ignore.load(cf, tmp_path)
+    assert matcher is None and "larger than 1 MiB" in notice
+
+
+def test_an_ignore_file_that_is_a_link_or_a_pipe_is_not_read(tmp_path):
+    import os
+    cf = _build_folder(tmp_path)
+    (tmp_path / "real").write_text("node_modules\n")
+    named = tmp_path / "Containerfile.dockerignore"
+    named.symlink_to(tmp_path / "real")
+    matcher, notice = ignore.load(cf, tmp_path)
+    assert matcher is None and "symbolic link" in notice
+    named.unlink()
+    os.mkfifo(named)
+    matcher, notice = ignore.load(cf, tmp_path)      # returns at once, no writer
+    assert matcher is None and "not a regular file" in notice

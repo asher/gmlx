@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -45,20 +46,32 @@ def runtime_root() -> Path:
 
 
 def _complete(folder: Path) -> bool:
-    if not ((folder / "gmlx-entry").is_file() and (folder / ".lock").exists()):
+    """Whether the folder holds the entry its name promises, as a regular
+    file whose digest is the folder name, and the clipboard links. A
+    session that shared the launch data folder could have replaced it."""
+    entry = folder / "gmlx-entry"
+    try:
+        st = os.lstat(entry)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or not (folder / ".lock").exists():
         return False
     bin_dir = folder / "bin"
-    return all(
-        (bin_dir / tool).is_symlink() and os.readlink(bin_dir / tool) == "../gmlx-entry"
-        for tool in CLIP_TOOLS
-    )
+    if not all((bin_dir / tool).is_symlink() and os.readlink(bin_dir / tool) == "../gmlx-entry"
+               for tool in CLIP_TOOLS):
+        return False
+    try:
+        return entry_digest(entry) == folder.name
+    except OSError:
+        return False
 
 
 def _install(folder: Path, source: Path) -> None:
     """Build the folder beside its final path and rename it into place, so no
     launch ever sees half a folder."""
     tmp = folder.parent / f".tmp-{uuid.uuid4().hex[:8]}"
-    tmp.mkdir(parents=True)
+    folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp.mkdir(mode=0o700)
     try:
         shutil.copyfile(source, tmp / "gmlx-entry")
         os.chmod(tmp / "gmlx-entry", 0o755)

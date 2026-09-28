@@ -21,8 +21,11 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import time
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +35,7 @@ from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
 from . import cli, ignore
 from .cli import ContainerError, ImageInfo
-from .state import FileLock, LockHeld, images_dir
+from .state import FileLock, LockHeld, images_dir, path_inside
 
 DOMAIN = "gmlx.invalid"
 SHIPPED_CONTAINERFILE = Path(__file__).parent / "files" / "Containerfile"
@@ -40,6 +43,10 @@ SHIPPED_CONTAINERFILE = Path(__file__).parent / "files" / "Containerfile"
 CONTAINERFILE_MAX = 16 * 1024
 DEFAULT_CONTAINERFILES = ("Containerfile", "Dockerfile")
 AGE_NOTE_DAYS = 30
+# The most context files a rebuild reason can name from its record, and the
+# most it names in its line.
+MANIFEST_MAX = 20_000
+REASON_NAMES = 3
 LAUNCH_LABELS = {cli.LAUNCH_LABEL: "1"}
 
 # The command each shipped image installs for its client.
@@ -50,6 +57,56 @@ CLIENT_BINARY = {
 }
 
 Say = Callable[[str], None]
+
+
+def _shown(path: str | os.PathLike) -> str:
+    """A path for a message: ``~`` for the home folder, and any control
+    character written as an escape, since a file name can hold one."""
+    text = str(path)
+    home = os.path.expanduser("~")
+    if text == home or text.startswith(home.rstrip("/") + "/"):
+        text = "~" + text[len(home.rstrip("/")):]
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+
+
+def _read_regular(path: Path, limit: int) -> bytes:
+    """A regular file of less than ``limit`` bytes. Never waits on a named
+    pipe or a device."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        raise ImageError(f"cannot read {_shown(path)}: {e.strerror}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ImageError(f"{_shown(path)} is not a regular file.")
+        data = b""
+        while len(data) < limit:
+            chunk = os.read(fd, limit - len(data))
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        os.close(fd)
+    if len(data) >= limit:
+        raise ImageError(f"{_shown(path)} is {limit} bytes or more. `container build` "
+                         f"refuses a Containerfile of {limit} bytes or more.")
+    return data
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` through a new temporary file beside it,
+    created with ``O_EXCL`` and ``O_NOFOLLOW`` at mode 0600, so a link
+    planted at either name is never written through. The temporary file is
+    removed when the write fails."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _say(line: str) -> None:
@@ -121,20 +178,26 @@ def _containerfile(build: str, client: str) -> tuple[Path, Path]:
         raise ImageError(
             f"launch.container.clients.{client}.build is {build!r}. Give an absolute "
             "path or one that starts with ~, since launch runs from many folders.")
+    # Anything at the name counts, so a named pipe reaches the regular-file
+    # check instead of passing for a missing file.
     if path.is_dir():
         for name in DEFAULT_CONTAINERFILES:
-            if (path / name).is_file():
+            if os.path.lexists(path / name) and not (path / name).is_dir():
                 return path / name, path
         raise ImageError(f"{path} holds no Containerfile or Dockerfile.")
-    if path.is_file():
+    if os.path.lexists(path):
         return path, path.parent
     raise ImageError(f"launch.container.clients.{client}.build names {path}, which does not exist.")
 
 
 def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerCfg, *,
-                  image_override: str | None = None) -> ImagePlan:
+                  image_override: str | None = None,
+                  writable: Sequence[str] = ()) -> ImagePlan:
     """Decide which image ``client`` runs, and refuse a ``build:``
-    Containerfile that cannot build."""
+    Containerfile that cannot build. ``writable`` holds the Mac folders the
+    session shares read-write. A ``build:`` folder that overlaps one is
+    refused, because the client could change what the next build runs, and
+    a build has the network and the builder."""
     if image_override:
         notices = []
         if cfg.packages:
@@ -145,11 +208,9 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
         return ImagePlan("image", client, ref=cfg.image)
     if cfg.build:
         file, context = _containerfile(cfg.build, client)
-        size = file.stat().st_size
-        if size >= CONTAINERFILE_MAX:
-            raise ImageError(f"{file} is {size} bytes. `container build` refuses a "
-                             f"Containerfile of {CONTAINERFILE_MAX} bytes or more.")
-        bases = base_refs_in(file.read_text(encoding="utf-8", errors="replace"))
+        _refuse_writable_build(client, file, context, writable)
+        text = _read_regular(file, CONTAINERFILE_MAX).decode("utf-8", errors="replace")
+        bases = base_refs_in(text)
         if cfg.packages and client not in bases:
             raise ImageError(
                 f"the {client} packages: list reaches a build: image only through its "
@@ -159,6 +220,19 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
                          bases=bases, packages=list(cfg.packages),
                          base_packages={b: container.for_client(b).packages for b in bases})
     return ImagePlan("shipped", client, packages=list(cfg.packages))
+
+
+def _refuse_writable_build(client: str, file: Path, context: Path,
+                           writable: Sequence[str]) -> None:
+    real_file, real_context = os.path.realpath(file), os.path.realpath(context)
+    for share in writable:
+        if (path_inside(real_file, share) or path_inside(real_context, share)
+                or path_inside(share, real_context)):
+            raise ImageError(
+                f"the {client} build: folder {_shown(real_context)} overlaps "
+                f"{_shown(share)}, which this launch shares read-write, so the client "
+                "could change what the next build runs. Move the build folder out of "
+                "the share, or share that folder read-only.")
 
 
 def shipped_hash(client: str, packages: list[str]) -> str:
@@ -217,25 +291,89 @@ def context_files(context: Path, matcher: ignore.Matcher | None):
     return found
 
 
-def build_hash(plan: ImagePlan, base_digests: dict[str, str], say: Say) -> str:
-    """The tag of a ``build:`` image: its Containerfile, the path, size and
-    modification time of every context file the build sees, and the digest
-    of each base it names."""
+def _context_entries(plan: ImagePlan, say: Say) -> dict[str, str]:
+    """What the hash records of each context file the build sees: its size,
+    modification time, mode and link target, in path order."""
     assert plan.containerfile is not None and plan.context is not None
     matcher, notice = ignore.load(plan.containerfile, plan.context)
     if notice:
         say(notice)
-    h = hashlib.sha256(plan.containerfile.read_bytes())
-    h.update(json.dumps(sorted(base_digests.items())).encode())
+    entries: dict[str, str] = {}
     for rel, st in context_files(plan.context, matcher):
         if st is None:
-            h.update(f"{rel}\0unreadable\n".encode())
+            entries[rel] = "unreadable"
             continue
-        link = ""
-        if os.path.islink(plan.context / rel):
-            link = os.readlink(plan.context / rel)
-        h.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_mode}\0{link}\n".encode())
+        link = os.readlink(plan.context / rel) if stat.S_ISLNK(st.st_mode) else ""
+        entries[rel] = f"{st.st_size}\0{st.st_mtime_ns}\0{st.st_mode}\0{link}"
+    return entries
+
+
+def _hash_of(containerfile: bytes, base_digests: dict[str, str],
+             entries: dict[str, str]) -> str:
+    h = hashlib.sha256(containerfile)
+    h.update(json.dumps(sorted(base_digests.items())).encode())
+    for rel, entry in entries.items():
+        h.update(f"{rel}\0{entry}\n".encode())
     return h.hexdigest()[:16]
+
+
+def build_hash(plan: ImagePlan, base_digests: dict[str, str], say: Say) -> str:
+    """The tag of a ``build:`` image: its Containerfile, the path, size and
+    modification time of every context file the build sees, and the digest
+    of each base it names."""
+    assert plan.containerfile is not None
+    return _hash_of(_read_regular(plan.containerfile, CONTAINERFILE_MAX), base_digests,
+                    _context_entries(plan, say))
+
+
+def _manifest_path(repo: str) -> Path:
+    return images_dir() / (re.sub(r"[^A-Za-z0-9_.-]+", "_", repo) + ".context.json")
+
+
+def _manifest(plan: ImagePlan, containerfile: bytes, base_digests: dict[str, str],
+              entries: dict[str, str]) -> dict:
+    return {"containerfile": str(plan.containerfile), "context": str(plan.context),
+            "containerfile_sha256": hashlib.sha256(containerfile).hexdigest(),
+            "bases": dict(sorted(base_digests.items())),
+            "files": entries if len(entries) <= MANIFEST_MAX else None}
+
+
+def _join(names: list[str]) -> str:
+    if len(names) > REASON_NAMES:
+        return f"{', '.join(names[:REASON_NAMES])} and {len(names) - REASON_NAMES} more"
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def rebuild_reason(old: dict | None, new: dict) -> str | None:
+    """The line that names what changed since the last build of the
+    repository, or None when the record of that build is missing or shows
+    no change, such as after the image was deleted."""
+    if not isinstance(old, dict):
+        return None
+    if (old.get("containerfile"), old.get("context")) != (new["containerfile"], new["context"]):
+        return f"[launch] rebuilding because build: now names {_shown(new['containerfile'])}"
+    changed: list[str] = []
+    if old.get("containerfile_sha256") != new["containerfile_sha256"]:
+        changed.append(_shown(new["containerfile"]))
+    old_files, new_files = old.get("files"), new["files"]
+    context = Path(new["context"])
+    if isinstance(old_files, dict) and new_files is not None:
+        for rel in sorted(set(old_files) | set(new_files)):
+            if old_files.get(rel) != new_files.get(rel):
+                path = _shown(context / rel)
+                if path not in changed:
+                    changed.append(path)
+    elif old_files != new_files:
+        changed.append(f"files in {_shown(context)}")
+    old_bases = old.get("bases") if isinstance(old.get("bases"), dict) else {}
+    for base in sorted(set(old_bases) | set(new["bases"])):
+        if old_bases.get(base) != new["bases"].get(base):
+            changed.append(f"the {base} base image")
+    if not changed:
+        return None
+    return f"[launch] rebuilding because {_join(changed)} changed"
 
 
 @dataclass
@@ -282,9 +420,7 @@ def _update_records(fn: Callable[[dict], None]) -> dict:
             elif not isinstance(entry, dict):
                 del records[ref]
         fn(records)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(records, indent=1, sort_keys=True))
-        os.replace(tmp, path)
+        _write_private(path, json.dumps(records, indent=1, sort_keys=True))
         return records
 
 
@@ -434,14 +570,7 @@ def _read_date(path: Path) -> str | None:
 
 
 def _write_date(path: Path, value: str) -> None:
-    # A name per process, so two launches that finish at once never write
-    # the same temporary file.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(value + "\n")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    _write_private(path, value + "\n")
 
 
 def _current_builder() -> cli.Builder | None:
@@ -469,6 +598,11 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
     try:
         current = _current_builder()
         if current is not None and current.state == "running":
+            if current.ssh:
+                raise ImageError(
+                    "the image builder that runs now forwards your SSH agent, so a "
+                    "Containerfile could use every key in it. Launch does not build on "
+                    "it until you stop it with container builder stop")
             kw["builder_args"] = cli.builder_build_args(current)
             kw["env"] = cli.builder_build_env(current)
         else:
@@ -674,11 +808,22 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
                       say: Say, announce: _Announce) -> ReadyImage:
     assert plan.containerfile is not None and plan.context is not None
     repo = build_repo(plan.client)
-    tag = f"{repo}:{build_hash(plan, digests, say)}"
+    containerfile = _read_regular(plan.containerfile, CONTAINERFILE_MAX)
+    entries = _context_entries(plan, say)
+    tag = f"{repo}:{_hash_of(containerfile, digests, entries)}"
     with repo_lock(repo, say=say):
         info = None if rebuild else cli.image_info(tag)
         action = "found"
         if info is None:
+            manifest = _manifest(plan, containerfile, digests, entries)
+            if not rebuild:
+                try:
+                    old = json.loads(_manifest_path(repo).read_text())
+                except (OSError, ValueError, RecursionError):
+                    old = None
+                reason = rebuild_reason(old, manifest)
+                if reason:
+                    say(reason)
             announce(f"building {plan.containerfile}")
             _build(str(plan.context), say=say, announce=announce,
                    file=str(plan.containerfile), tags=[tag],
@@ -687,6 +832,10 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
             if info is None:
                 raise ImageError(f"the build finished but {tag} is not in the image store.")
             action = "built"
+            try:
+                _write_private(_manifest_path(repo), json.dumps(manifest, sort_keys=True))
+            except OSError as e:
+                say(f"[launch] warning: could not record the build context ({e}).")
         check_arch(info, tag)
         run_ref = _pin(tag, repo, info, plan.client)
         _cleanup(repo, {tag, run_ref}, plan.client, tags=True, say=say)
@@ -781,7 +930,7 @@ def check_command(ready: ReadyImage, word: str, runtime_dir: str, *, shell: bool
             except (FileNotFoundError, json.JSONDecodeError):
                 seen = {}
             seen[key] = True
-            _checks_path().write_text(json.dumps(seen, indent=1, sort_keys=True))
+            _write_private(_checks_path(), json.dumps(seen, indent=1, sort_keys=True))
         return
     if rc not in (126, 127):
         raise ImageError(f"the check of {ready.tag} for {word} failed (exit {rc})"

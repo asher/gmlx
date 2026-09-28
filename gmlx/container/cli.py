@@ -253,15 +253,16 @@ def builder() -> Builder | None:
 def builder_build_args(running: Builder) -> list[str]:
     """The ``container build`` options that match a running builder. A build
     with other settings makes 1.4.1 stop, delete and create the builder
-    again, which ends any build that runs on it."""
+    again, which ends any build that runs on it. ``--ssh`` is never passed,
+    since it would give the Containerfile every key in the Mac's SSH agent,
+    so a builder that forwards the agent cannot be matched and launch
+    refuses to build on it."""
     args = []
     if running.cpus:
         args += ["--cpus", str(running.cpus)]
     if running.memory_bytes:
         # The builder takes memory in whole MiB.
         args += ["--memory", f"{running.memory_bytes >> 20}M"]
-    if running.ssh and os.environ.get("SSH_AUTH_SOCK"):
-        args += ["--ssh", "default"]
     return args
 
 
