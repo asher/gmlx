@@ -208,12 +208,11 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
     assert seen["apc_manager"] is mgr
 
 
-def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
-    """Upstream nulls the APC manager whenever kv_bits is set, with no
-    signal; a server booted with APC_ENABLED and a KV-quant scheme runs
-    every request cold. The stash wrapper must say so once at
-    construction. Warm boots (no kv_bits) and draft-model batches
-    (upstream nulls their manager by design) stay quiet."""
+def test_kv_bits_adds_no_apc_off_warning_at_boot(monkeypatch, caplog):
+    """mlx-vlm 0.7.3 keeps the APC manager when kv_bits is set. It drops the
+    manager only when no APC tier serves the cache stack, which _resolve_l1
+    reports on its own. The stash wrapper adds no KV quantization warning,
+    whether the constructor keeps the manager or drops it."""
     import importlib
     import logging
     from types import SimpleNamespace
@@ -223,11 +222,10 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
     ar = importlib.import_module("mlx_vlm.generate.ar")
 
     class _UpstreamLikeBG:
+        drop = False
+
         def __init__(self, model, processor, **kwargs):
-            mgr = kwargs.get("apc_manager")
-            if mgr is not None and kwargs.get("kv_bits") is not None:
-                mgr = None
-            self.apc_manager = mgr
+            self.apc_manager = None if self.drop else kwargs.get("apc_manager")
 
     monkeypatch.setattr(ar, "BatchGenerator", _UpstreamLikeBG)
     monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
@@ -235,16 +233,12 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
     mgr = object()
 
     with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
-        ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr, kv_bits=8)
-    assert any("APC OFF: KV quantization" in r.message for r in caplog.records)
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
-        ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr)
-        ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr,
-                          kv_bits=8, draft_model=object())
-    # the dead-stack probe may warn separately on these bare fakes; only
-    # the kv_bits line must stay quiet here
+        for drop in (False, True):
+            _UpstreamLikeBG.drop = drop
+            ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr, kv_bits=8)
+            ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr,
+                              kv_bits=8, draft_model=object())
+    # The dead-stack probe may warn separately on these bare fakes.
     assert not any("KV quantization" in r.message for r in caplog.records)
 
 

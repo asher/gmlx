@@ -180,20 +180,6 @@ def _install_apc_manager_stash() -> None:
         cbs = getattr(self, "completion_batch_size", None)
         if pbs is not None and cbs is not None and pbs >= cbs:
             self.prefill_batch_size = 1
-        # A manager passed with kv_bits and dropped by the constructor means
-        # every request prefills cold. mlx-vlm 0.6.4 dropped it whenever
-        # kv_bits was set. From 0.6.15 the constructor keeps it and drops it
-        # only when no APC tier serves the cache stack, which _resolve_l1
-        # also reports. Draft-model batches resolve and warn through
-        # _resolve_l1.
-        if (kwargs.get("apc_manager") is not None
-                and kwargs.get("kv_bits") is not None
-                and kwargs.get("draft_model") is None
-                and getattr(self, "apc_manager", None) is None):
-            _log.warning(
-                "APC OFF: KV quantization (kv_bits=%s) opts out of the "
-                "block APC tier upstream -- every request prefills cold",
-                kwargs.get("kv_bits"))
         # Ckpt-tier models form prompt batches one request at a time: the
         # owned APC declines B>1 prefill, so a coalesced burst would go
         # all-cold, and B>1 prompt batching is not a throughput win anyway
