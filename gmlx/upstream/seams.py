@@ -222,7 +222,9 @@ SEAMS: tuple[Seam, ...] = (
          "recovered to fp16 before init)", critical=True),
     Seam("mlx_vlm.generate.common", "_chunked_prefill_enabled",
          "mtp_prefill._declines_chunking (the target's policy asked "
-         "without a drafter; a decline keeps the MTP prefill one pass)",
+         "without a drafter; a decline keeps the MTP prefill one pass); "
+         "engine._declines_image_chunking (asked for an image row; a "
+         "decline forms prefix-cache prompt groups of one)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
          "ckpt._install_plain_ckpt_decode (token accounting + "
