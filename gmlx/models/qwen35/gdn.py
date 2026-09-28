@@ -53,8 +53,14 @@ def stock_gdn_fallback(model_type) -> bool:
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
     """Sink-shaped scan, calling the tiled state-capturing ops directly
     (what upstream's ``gated_delta_update_with_states`` resolves to
-    after the rebind patch)."""
+    after the rebind patch). Without the GGUF tiled-V fixup the scan
+    pairs V head hv with K head hv // (Hv / Hk), and so does this."""
     from mlx_lm.models.gated_delta import compute_g
+
+    if (r := v.shape[-2] // q.shape[-2]) > 1 \
+            and not _gp._tiled_v_patch_applied():
+        q = mx.repeat(q, r, axis=-2)
+        k = mx.repeat(k, r, axis=-2)
 
     g = compute_g(A_log, a, dt_bias)
     beta = mx.sigmoid(b)

@@ -257,17 +257,10 @@ def test_run_and_chat_keep_the_stock_floor(serve):
 _MTP = []
 
 
-def _mtp_model(monkeypatch):
+def _mtp_model():
     """A second tiny Qwen3.5, armed as an MTP target the way the VLM
-    loader arms one, with a random-weight MTP head bound to it.
-
-    The fused GDN routes are off (``GMLX_FUSED_GDN=0``): on this model's
-    f32 weights and 32-wide heads the fused single-token step does not
-    match the chunked scan, so the turn-1 state it leaves differs from
-    the one a cold turn 2 reaches, and a restore could not match cold.
-    """
+    loader arms one, with a random-weight MTP head bound to it."""
     if not _MTP:
-        monkeypatch.setenv("GMLX_FUSED_GDN", "0")
         mx.random.seed(5)
         model = _q35_vlm()
 
@@ -308,7 +301,7 @@ def test_the_mtp_target_restores_the_prefix_before_its_new_image(
     emptied, from the checkpoint tier (l1)."""
     install_owned_spec_engine()
     install_continuous_batch_admission()
-    model, head = _mtp_model(monkeypatch)
+    model, head = _mtp_model()
     lm = model.language_model
     pos = _Positions(monkeypatch, lm)
     hits = []

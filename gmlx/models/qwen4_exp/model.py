@@ -472,6 +472,8 @@ class GatedDeltaNet(nn.Module):
     launch) runs unchanged; ``gdn_gate_sigmoid`` selects its gate."""
 
     gdn_gate_sigmoid = True
+    # The fused kernels pair V head hv with K head hv % Hk.
+    gdn_kv_tiled = True
 
     def __init__(self, args: ModelArgs):
         super().__init__()

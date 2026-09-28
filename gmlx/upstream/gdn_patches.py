@@ -484,6 +484,17 @@ def _live_cat(gdn, slot, members):
     return w
 
 
+def _kv_heads_tiled(gdn) -> int:
+    """1 when V head hv reads K head hv % Hk (the GGUF tiled order), 0 when
+    it reads K head hv // (Hv / Hk). A module that tiles its K heads itself
+    sets ``gdn_kv_tiled``. The qwen3.5 classes pair as the scan in this
+    process does, which is tiled once ``_patch_gated_delta_tiled_v`` ran."""
+    if gdn.num_k_heads == gdn.num_v_heads:
+        return 0
+    return int(bool(getattr(gdn, "gdn_kv_tiled", False))
+               or _tiled_v_patch_applied())
+
+
 def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     """Shared fused S=1 gated-delta decode step. mlx-lm's ``GatedDeltaNet`` and
     mlx-vlm's ``Qwen3_5GatedDeltaNet`` share the attribute + cache layout, so both
@@ -561,7 +572,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     if pend is not None:
         state, records, steps = pend
         kernel, replay = _gdn_fused_decode_replay_kernel, [*records, steps]
-    tiled = int(self.num_k_heads != self.num_v_heads)
+    tiled = _kv_heads_tiled(self)
     y, state = kernel(
         inputs=[
             conv_input,
@@ -1330,7 +1341,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
 
     SGS, RPS = _GDN_VERIFY_SGS, _GDN_VERIFY_RPS
     Hv, Dk = self.num_v_heads, self.head_k_dim
-    tiled = int(self.num_k_heads != self.num_v_heads)
+    tiled = _kv_heads_tiled(self)
     template = [
         ("InT", conv_input.dtype),
         ("StT", state.dtype),
