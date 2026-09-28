@@ -47,6 +47,10 @@ def short_dir():
 
 
 def _free_port() -> int:
+    """A port that was free a moment ago. The entry binds the port it is
+    given, so the port must be closed here before the entry takes it, and
+    another process can take it in between. The callers retry on exit 125,
+    which makes that rare race harmless; launch never asks for port 0."""
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -239,6 +243,8 @@ def test_shell_skips_a_bash_without_the_execute_bit(entry, tmp_path):
     ("#!/nope/python3 -u", "/nope/python3"),
     ("#!/usr/bin/env missingtool", "missingtool"),
     ("#!/usr/bin/env -S -u HOME X=1 missingtool --flag", "missingtool"),
+    # Without -S, Linux gives env the rest of the line as one command name.
+    ("#!/usr/bin/env sh -e", "sh -e"),
 ])
 def test_a_missing_shebang_interpreter_exits_126(entry, tmp_path, line, missing):
     script = _script(tmp_path / "bin" / "start", f"{line}\necho ran\n", 0o755)
@@ -261,6 +267,18 @@ def test_a_present_shebang_interpreter_runs(entry, tmp_path, line):
     assert done.returncode == 0 and done.stdout.strip() == "ran", done.stderr
     check = _run(entry, "--check", "start", env=env)
     assert check.returncode == 0 and check.stdout.strip() == str(script), check.stderr
+
+
+def test_a_windows_line_ending_in_the_shebang_exits_126(entry, tmp_path):
+    script = _script(tmp_path / "bin" / "start", "#!/bin/sh\r\necho ran\r\n", 0o755)
+    env = dict(os.environ, PATH=f"{script.parent}:/usr/bin:/bin")
+    message = (f"gmlx-entry: {script} has a #! line that ends in a carriage return, from "
+               "Windows line endings. Convert the file to Unix line endings.")
+    for args in (("--", "start"), ("--check", "start")):
+        done = _run(entry, *args, env=env)
+        assert done.returncode == CANNOT_RUN, (args, done.stderr)
+        assert done.stderr == message + "\n", args
+        assert done.stdout == "", args
 
 
 def test_shell_reports_a_bash_whose_interpreter_is_missing(entry, tmp_path):

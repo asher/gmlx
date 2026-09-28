@@ -189,19 +189,29 @@ fn fail_unresolved(resolved: Resolved, cmd: &OsStr, path_env: Option<&OsStr>) ->
     }
 }
 
-/// The longest `#!` line the Linux kernel reads.
+/// The longest `#!` line the Linux kernel reads, `#!` and newline included.
 const SHEBANG_MAX: usize = 256;
 
 /// The `env` options that take the next word as their value.
 const ENV_VALUE_OPTIONS: [&str; 6] = ["-u", "--unset", "-C", "--chdir", "-P", "-a"];
 
-/// The program a `#!` line of `file` needs that is not in the image, if
-/// any. An absolute or relative interpreter must be an executable file.
-/// For `env`, the command it runs is looked up on `PATH` as env would. A
-/// file with no `#!` line, or one that cannot be read, needs nothing here.
-pub fn missing_interpreter(file: &Path, path_env: Option<&OsStr>) -> Option<OsString> {
+/// Why the `#!` line of a found file stops it from running.
+#[derive(Debug, PartialEq)]
+pub enum Shebang {
+    /// The interpreter, or the command `env` runs, is not in the image.
+    Missing(OsString),
+    /// The line ends in a carriage return, from Windows line endings.
+    CarriageReturn,
+}
+
+/// What stops the `#!` line of `file` from running, read the way the Linux
+/// kernel reads it. An absolute or relative interpreter must be an
+/// executable file. For `env`, the command it runs is looked up on `PATH`
+/// as env would. A file with no `#!` line, one that cannot be read, and a
+/// line longer than the kernel reads give None, and exec reports those.
+pub fn shebang_problem(file: &Path, path_env: Option<&OsStr>) -> Option<Shebang> {
     use std::io::Read;
-    let mut head = [0u8; SHEBANG_MAX];
+    let mut head = [0u8; SHEBANG_MAX + 1];
     let mut f = std::fs::File::open(file).ok()?;
     let mut len = 0;
     while len < head.len() {
@@ -211,21 +221,48 @@ pub fn missing_interpreter(file: &Path, path_env: Option<&OsStr>) -> Option<OsSt
             Err(_) => return None,
         }
     }
-    let line = head[..len].strip_prefix(b"#!")?;
-    let line = &line[..line.iter().position(|b| *b == b'\n').unwrap_or(line.len())];
+    let seen = &head[..len.min(SHEBANG_MAX)];
+    let line = match seen.iter().position(|b| *b == b'\n') {
+        Some(end) => &seen[..end],
+        // Linux refuses a #! line that does not end within what it reads.
+        None if len > SHEBANG_MAX => return None,
+        None => seen,
+    };
+    let line = line.strip_prefix(b"#!")?;
+    // Linux reads the line as a C string, so a NUL byte ends it.
+    let line = &line[..line.iter().position(|b| *b == 0).unwrap_or(line.len())];
     let blank = |b: &u8| *b == b' ' || *b == b'\t';
-    let words: Vec<&[u8]> = line.split(blank).filter(|w| !w.is_empty()).collect();
-    let interpreter = OsStr::from_bytes(words.first()?);
+    let trimmed = trim(line, blank);
+    if trimmed.last() == Some(&b'\r') {
+        return Some(Shebang::CarriageReturn);
+    }
+    // The kernel gives the interpreter the rest of the line as one
+    // argument, with the blanks at its ends removed.
+    let split = trimmed.iter().position(blank).unwrap_or(trimmed.len());
+    let interpreter = OsStr::from_bytes(&trimmed[..split]);
+    if interpreter.is_empty() {
+        return None;
+    }
     if file_state(Path::new(interpreter)) != Some(true) {
-        return Some(interpreter.to_os_string());
+        return Some(Shebang::Missing(interpreter.to_os_string()));
     }
     if Path::new(interpreter).file_name() != Some(OsStr::new("env")) {
         return None;
     }
-    // The kernel passes the rest of the line to env as one argument, and
-    // env -S splits it. Either way the command is the first word that is
-    // not an option, an option's value or a NAME=VALUE setting.
-    let mut rest = words[1..].iter();
+    let arg = trim(&trimmed[split..], blank);
+    let words = if let Some(rest) = split_string_option(arg) {
+        env_split(rest)
+    } else if arg.is_empty() || arg.starts_with(b"-") || arg.contains(&b'=') {
+        // Other options in one argument, or a setting with no command:
+        // env decides, so there is nothing to look up here.
+        return None;
+    } else {
+        // Without -S, env runs the whole argument as one command name.
+        vec![arg.to_vec()]
+    };
+    // The command is the first word that is not an option, an option's
+    // value or a NAME=VALUE setting.
+    let mut rest = words.iter();
     while let Some(word) = rest.next() {
         let text = OsStr::from_bytes(word).to_str().unwrap_or("");
         if ENV_VALUE_OPTIONS.contains(&text) {
@@ -236,22 +273,76 @@ pub fn missing_interpreter(file: &Path, path_env: Option<&OsStr>) -> Option<OsSt
             let cmd = OsStr::from_bytes(word);
             return match resolve_full(cmd, path_env) {
                 Resolved::Found(_) => None,
-                _ => Some(cmd.to_os_string()),
+                _ => Some(Shebang::Missing(cmd.to_os_string())),
             };
         }
     }
     None
 }
 
-fn missing_interpreter_message(file: &Path, interpreter: &OsStr) -> String {
-    format!("gmlx-entry: {} names {} in its #! line, which is not in the image.",
-            file.display(), interpreter.to_string_lossy())
+fn trim(bytes: &[u8], blank: impl Fn(&u8) -> bool) -> &[u8] {
+    let start = bytes.iter().position(|b| !blank(b)).unwrap_or(bytes.len());
+    let end = bytes.iter().rposition(|b| !blank(b)).map_or(start, |i| i + 1);
+    &bytes[start..end]
 }
 
-/// Exits 126 when `file` needs an interpreter that is not in the image.
+/// The text after `-S` or `--split-string` when the argument starts with
+/// one of them.
+fn split_string_option(arg: &[u8]) -> Option<&[u8]> {
+    for option in [&b"--split-string="[..], b"--split-string", b"-S"] {
+        if let Some(rest) = arg.strip_prefix(option) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Splits `env -S` text into words at blanks, removing single and double
+/// quotes around parts of a word as env does for simple cases.
+fn env_split(text: &[u8]) -> Vec<Vec<u8>> {
+    let mut words = Vec::new();
+    let mut word: Option<Vec<u8>> = None;
+    let mut quote: Option<u8> = None;
+    for &b in text {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => word.get_or_insert_with(Vec::new).push(b),
+            None if b == b'\'' || b == b'"' => {
+                quote = Some(b);
+                word.get_or_insert_with(Vec::new);
+            }
+            None if b == b' ' || b == b'\t' => words.extend(word.take()),
+            None => word.get_or_insert_with(Vec::new).push(b),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// A name as it may appear in a message, with control characters escaped
+/// so they never reach the terminal.
+fn shown(name: &OsStr) -> String {
+    name.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_control() { c.escape_default().to_string() } else { c.to_string() })
+        .collect()
+}
+
+fn shebang_message(file: &Path, problem: &Shebang) -> String {
+    match problem {
+        Shebang::Missing(interpreter) => format!(
+            "gmlx-entry: {} names {} in its #! line, which is not in the image.",
+            shown(file.as_os_str()), shown(interpreter)),
+        Shebang::CarriageReturn => format!(
+            "gmlx-entry: {} has a #! line that ends in a carriage return, from Windows line \
+             endings. Convert the file to Unix line endings.", shown(file.as_os_str())),
+    }
+}
+
+/// Exits 126 when the `#!` line of `file` stops it from running.
 fn check_interpreter(file: &Path, path_env: Option<&OsStr>) {
-    if let Some(interpreter) = missing_interpreter(file, path_env) {
-        fail(EXIT_CANNOT_RUN, &missing_interpreter_message(file, &interpreter));
+    if let Some(problem) = shebang_problem(file, path_env) {
+        fail(EXIT_CANNOT_RUN, &shebang_message(file, &problem));
     }
 }
 
@@ -363,8 +454,8 @@ fn run(spec: RunSpec, path_env: Option<OsString>) -> ! {
     if err.kind() == std::io::ErrorKind::NotFound {
         // The file itself was found, so the missing file is the program
         // that runs it: a #! interpreter or the ELF program loader.
-        if let Some(interpreter) = missing_interpreter(&program, path_env.as_deref()) {
-            fail(EXIT_CANNOT_RUN, &missing_interpreter_message(&program, &interpreter));
+        if let Some(problem) = shebang_problem(&program, path_env.as_deref()) {
+            fail(EXIT_CANNOT_RUN, &shebang_message(&program, &problem));
         }
         fail(EXIT_CANNOT_RUN, &format!(
             "gmlx-entry: cannot run {}: its #! interpreter or its program loader is not in \
@@ -491,22 +582,81 @@ mod tests {
         script(&bin.join("tool"), "#!/bin/sh\n");
         let path = OsString::from(format!("{}:/usr/bin:/bin", bin.display()));
         let p = Some(path.as_os_str());
+        let missing = |name: &str| Some(Shebang::Missing(OsString::from(name)));
         let absolute = script(&dir.join("a"), "#!/nope/python3 -u\nprint(1)\n");
-        assert_eq!(missing_interpreter(&absolute, p), Some(OsString::from("/nope/python3")));
+        assert_eq!(shebang_problem(&absolute, p), missing("/nope/python3"));
         let present = script(&dir.join("b"), "#! /bin/sh\necho hi\n");
-        assert_eq!(missing_interpreter(&present, p), None);
+        assert_eq!(shebang_problem(&present, p), None);
         let env_missing = script(&dir.join("c"), "#!/usr/bin/env missingtool\n");
-        assert_eq!(missing_interpreter(&env_missing, p), Some(OsString::from("missingtool")));
-        let env_found = script(&dir.join("d"), "#!/usr/bin/env tool --flag\n");
-        assert_eq!(missing_interpreter(&env_found, p), None);
+        assert_eq!(shebang_problem(&env_missing, p), missing("missingtool"));
+        // Without -S, env gets "tool --flag" as one command name.
+        let env_one_arg = script(&dir.join("d"), "#!/usr/bin/env tool --flag\n");
+        assert_eq!(shebang_problem(&env_one_arg, p), missing("tool --flag"));
+        let env_found = script(&dir.join("d2"), "#!/usr/bin/env tool\n");
+        assert_eq!(shebang_problem(&env_found, p), None);
         let env_split = script(&dir.join("e"), "#!/usr/bin/env -S -u HOME X=1 missingtool -x\n");
-        assert_eq!(missing_interpreter(&env_split, p), Some(OsString::from("missingtool")));
+        assert_eq!(shebang_problem(&env_split, p), missing("missingtool"));
         let env_split_found = script(&dir.join("f"), "#!/usr/bin/env -S tool -x\n");
-        assert_eq!(missing_interpreter(&env_split_found, p), None);
+        assert_eq!(shebang_problem(&env_split_found, p), None);
+        let env_long = script(&dir.join("f2"), "#!/usr/bin/env --split-string=tool -x\n");
+        assert_eq!(shebang_problem(&env_long, p), None);
         let plain = script(&dir.join("g"), "echo no shebang\n");
-        assert_eq!(missing_interpreter(&plain, p), None);
+        assert_eq!(shebang_problem(&plain, p), None);
         let bare_env = script(&dir.join("h"), "#!/usr/bin/env\n");
-        assert_eq!(missing_interpreter(&bare_env, p), None);
+        assert_eq!(shebang_problem(&bare_env, p), None);
+        let env_option = script(&dir.join("i"), "#!/usr/bin/env -i tool\n");
+        assert_eq!(shebang_problem(&env_option, p), None);    // env decides
+    }
+
+    #[test]
+    fn env_split_removes_simple_quotes() {
+        assert_eq!(env_split(b" 'my tool' \"-x\" a'b'c "),
+                   vec![b"my tool".to_vec(), b"-x".to_vec(), b"abc".to_vec()]);
+        assert_eq!(env_split(b"''"), vec![Vec::<u8>::new()]);
+        let dir = scratch("quoted");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        script(&bin.join("tool"), "#!/bin/sh\n");
+        let path = OsString::from(format!("{}:/usr/bin:/bin", bin.display()));
+        let quoted = script(&dir.join("q"), "#!/usr/bin/env -S 'tool' -x\n");
+        assert_eq!(shebang_problem(&quoted, Some(&path)), None);
+        let quoted_missing = script(&dir.join("r"), "#!/usr/bin/env -S \"no tool\" -x\n");
+        assert_eq!(shebang_problem(&quoted_missing, Some(&path)),
+                   Some(Shebang::Missing(OsString::from("no tool"))));
+    }
+
+    #[test]
+    fn reads_the_line_as_linux_does() {
+        let dir = scratch("linux-line");
+        let p = Some(OsStr::new("/usr/bin:/bin"));
+        let crlf = script(&dir.join("crlf"), "#!/bin/sh\r\necho hi\r\n");
+        assert_eq!(shebang_problem(&crlf, p), Some(Shebang::CarriageReturn));
+        let crlf_arg = script(&dir.join("crlf-arg"), "#!/bin/sh -e\r\n");
+        assert_eq!(shebang_problem(&crlf_arg, p), Some(Shebang::CarriageReturn));
+        // A NUL byte ends the line.
+        let nul = script(&dir.join("nul"), "#!/nope/x\0/bin/sh\n");
+        assert_eq!(shebang_problem(&nul, p), Some(Shebang::Missing(OsString::from("/nope/x"))));
+        // Past 256 bytes the kernel refuses the file itself, so exec reports it.
+        let long = format!("#!/nope/x {}\n", "a".repeat(300));
+        let long = script(&dir.join("long"), &long);
+        assert_eq!(shebang_problem(&long, p), None);
+        let fits = format!("#!/nope/x {}\n", "a".repeat(200));
+        let fits = script(&dir.join("fits"), &fits);
+        assert_eq!(shebang_problem(&fits, p), Some(Shebang::Missing(OsString::from("/nope/x"))));
+        // A short file with no newline still has its #! line read.
+        let no_newline = script(&dir.join("eof"), "#!/nope/y");
+        assert_eq!(shebang_problem(&no_newline, p),
+                   Some(Shebang::Missing(OsString::from("/nope/y"))));
+    }
+
+    #[test]
+    fn messages_escape_control_characters() {
+        let message = shebang_message(Path::new("/s"),
+                                      &Shebang::Missing(OsString::from("tool\x1b[31m")));
+        assert_eq!(message, "gmlx-entry: /s names tool\\u{1b}[31m in its #! line, which is not \
+                             in the image.");
+        assert!(shebang_message(Path::new("/s"), &Shebang::CarriageReturn)
+            .contains("ends in a carriage return, from Windows line endings"));
     }
 
     #[test]
