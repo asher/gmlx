@@ -209,20 +209,17 @@ def _mtp_prefill_init(batch) -> None:
         _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
         return
 
-    # Gated to B=1 because PromptProcessingBatch prefills one request at a
-    # time today. The restored single-row cache (with its offset) later
-    # merges into the live B>1 decode batch via BatchKVCache.extend during
-    # continuous-batch injection -- so APC absolutely works in a B>1
-    # serving context; the gate is about prefill granularity, not decode
-    # batch size. If mlx-vlm ever coalesces prefills into a multi-row
-    # PromptProcessingBatch, this guard silently disables APC for those
-    # rows. The warning below makes that visible.
+    # The owned lookup (L0, then L1) restores into a single-row prompt
+    # batch, whose cache later merges into the live decode batch. mlx-vlm
+    # coalesces prompts into multi-row batches too; those skip the owned
+    # lookup and keep whatever prefix the stock cache restored at
+    # admission, and each row retires at the batch decode's finish seam.
     b = int(batch._input_ids.shape[0])
     if b > 1:
         if not _SPEC_APC_DISABLED:
             _log.warning(
-                "APC skipped: prefill batch B=%d > 1 "
-                "(owned-path APC requires single-request prefill)",
+                "owned MTP prefix lookup skipped: prompt batch B=%d > 1 "
+                "(its rows keep any prefix the stock cache restored)",
                 b,
             )
         return

@@ -196,3 +196,23 @@ def test_l0_restore_trims_mrope_position_ids(ar, monkeypatch):
     seen = [c["position_ids"] for c in model.calls]
     assert [c["n"] for c in model.calls] == [2, 1]
     assert mx.concatenate(seen, axis=2).tolist() == pos[:, :, 6:].tolist()
+
+
+def test_a_multi_row_batch_logs_the_skipped_owned_lookup(monkeypatch, caplog):
+    """A multi-row prompt batch skips the owned prefix lookup only. Its rows
+    keep what the stock prefix cache restored, so the log does not say the
+    APC was skipped."""
+    import logging
+
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", False)
+    batch = SimpleNamespace(
+        model=_Model(), _input_ids=mx.array([[1, 2, 3], [4, 5, 6]]),
+        _inputs_embeds=mx.zeros((2, 3, _D)), _prompt_kwargs={},
+        _apc_meta=None, prompt_cache=[])
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.mtp_prefill"):
+        mtp_prefill._mtp_prefill_init(batch)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "owned MTP prefix lookup skipped" in text
+    assert "APC skipped" not in text
