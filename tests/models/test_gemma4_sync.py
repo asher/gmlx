@@ -63,7 +63,10 @@ def test_install_idempotent_and_killable(monkeypatch):
 
     monkeypatch.setenv("GMLX_G4_NOSYNC", "0")
     assert gemma4_sync.install_gemma4_nosync() is False
-    assert g4.Gemma4TextModel._make_masks is _orig[0]
+    # The kill switch keeps the stock body, run under image_masks.
+    killed = g4.Gemma4TextModel._make_masks
+    assert killed._gmlx_orig is _orig[0] and killed._gmlx_body is _orig[0]
+    assert g4.Attention.__call__ is _orig[1]
     for (cls, name), f in zip(policies, stock):
         assert getattr(cls, name)._gmlx_orig is f
 
@@ -72,6 +75,7 @@ def test_install_idempotent_and_killable(monkeypatch):
     patched = (g4.Gemma4TextModel._make_masks, g4.Attention.__call__)
     assert patched[0] is not _orig[0]
     assert patched[0]._gmlx_orig is _orig[0]
+    assert patched[0]._gmlx_body is not _orig[0]
     assert patched[1]._gmlx_orig is _orig[1]
     _install()  # second install: no double wrap
     assert g4.Gemma4TextModel._make_masks is patched[0]

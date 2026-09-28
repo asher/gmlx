@@ -120,7 +120,9 @@ SEAMS: tuple[Seam, ...] = (
     # stock-built trees (multimodal construction, GMLX_GEMMA_OWNED=0). ---
     Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
          "gemma4_sync.install_gemma4_nosync (body carried and mirror-tested, "
-         "offset probe); gemma4_owned._owned_make_masks (mirror)"),
+         "offset probe; the carried body, or the stock one under "
+         "GMLX_G4_NOSYNC=0, runs under image_masks); "
+         "gemma4_owned._owned_make_masks (mirror)"),
     # A correctness fix installed by the same call, ahead of its kill switch.
     Seam("mlx_vlm.models.gemma4.language", "LanguageModel.chunked_prefill_policy",
          "gemma4_sync._install_image_chunking_policy (wrap: declines for any "

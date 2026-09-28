@@ -43,17 +43,23 @@ upstream_seams.json); module-level collaborators (create_attention_mask,
 scaled_dot_product_attention, ...) are resolved through the upstream module
 at call time so other patches compose.
 
-The same install also wraps the gemma4 chunking policies, a correctness
-fix that GMLX_G4_NOSYNC=0 leaves in place. Under bidirectional image
-attention the image overlay applies with or without audio, as in
-transformers, so a prompt holding image or video tokens prefills in one
-pass. Stock allows chunking once audio is present.
+The same install also wraps the gemma4 chunking policies and the mask
+builder, correctness fixes that GMLX_G4_NOSYNC=0 leaves in place. Under
+bidirectional image attention the image overlay applies with or without
+audio, as in transformers, so a prompt holding image or video tokens
+prefills in one pass. Stock allows chunking once audio is present. The
+installed builder runs the carried body under ``image_masks``, which keeps
+full-attention layers causal and puts the image blocks on the sliding
+layers only; with GMLX_G4_NOSYNC=0 the stock body runs under it.
 """
 from __future__ import annotations
 
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+
+from .image_masks import image_masks
+from .image_masks import visual_tokens as _visual_tokens
 
 _installed = False
 
@@ -68,11 +74,6 @@ def _cache_has_prefix(c) -> bool:
         return int(off) > 0
     except (TypeError, ValueError):  # exotic cache: keep upstream's answer
         return True
-
-
-def _visual_tokens(token_types) -> bool:
-    return (token_types is not None
-            and int(mx.sum((token_types == 1) | (token_types == 2)).item()) > 0)
 
 
 def _token_types(kwargs: dict):
@@ -132,14 +133,33 @@ def _install_image_chunking_policy() -> None:
             _should_disable_chunked_prefill)
 
 
+def _install_stock_image_masks() -> None:
+    """Wrap the stock mask builder with ``image_masks`` when no gmlx
+    builder is installed, as under GMLX_G4_NOSYNC=0. Idempotent."""
+    try:
+        from mlx_vlm.models.gemma4 import language as g4
+    except ImportError:
+        return
+    stock = g4.Gemma4TextModel._make_masks
+    if getattr(stock, "_gmlx_orig", None) is not None:
+        return
+
+    def _make_masks(self, h, cache, mm_token_type_ids=None):
+        return image_masks(self, h, cache, mm_token_type_ids, stock)
+
+    _make_masks.__dict__.update(_gmlx_orig=stock, _gmlx_body=stock)
+    g4.Gemma4TextModel._make_masks = _make_masks
+
+
 def install_gemma4_nosync() -> bool:
     """Replace the two host-syncing gemma4 call sites. Idempotent; no-op when
     GMLX_G4_NOSYNC=0 or the gemma4 module is unavailable. Returns True if the
-    patch is active. The image chunking policy installs first, whatever
-    GMLX_G4_NOSYNC says."""
+    patch is active. The image chunking policy and the image masks install
+    whatever GMLX_G4_NOSYNC says."""
     global _installed
     _install_image_chunking_policy()
     if not env_bool("GMLX_G4_NOSYNC", True):
+        _install_stock_image_masks()
         return False
     if _installed:
         return True
@@ -212,8 +232,12 @@ def install_gemma4_nosync() -> bool:
             masks.append(mask[lyr.layer_type])
         return masks
 
-    _make_masks._gmlx_orig = masks_orig
-    g4.Gemma4TextModel._make_masks = _make_masks
+    def _make_image_masks(self, h, cache, mm_token_type_ids=None):
+        return image_masks(self, h, cache, mm_token_type_ids, _make_masks)
+
+    _make_image_masks.__dict__.update(_gmlx_orig=masks_orig,
+                                      _gmlx_body=_make_masks)
+    g4.Gemma4TextModel._make_masks = _make_image_masks
 
     attn_orig = getattr(g4.Attention.__call__, "_gmlx_orig",
                         g4.Attention.__call__)

@@ -375,13 +375,13 @@ def test_make_masks_mirror():
 
 def test_nosync_make_masks_mirror():
     """gemma4_sync carries its own copy of the same body for stock-built
-    trees."""
+    trees, which the installed builder runs under image_masks."""
     assert gemma4_sync.install_gemma4_nosync()
-    carried = _G.Gemma4TextModel._make_masks
-    assert getattr(carried, "_gmlx_orig", None) is not None
+    installed = _G.Gemma4TextModel._make_masks
+    assert getattr(installed, "_gmlx_orig", None) is not None
     _assert_mirror(
-        carried,
-        _upstream(carried),
+        installed._gmlx_body,
+        _upstream(installed),
         [
             ("mm_token_type_ids: Optional[mx.array]=None)",
              "mm_token_type_ids=None)", 1),

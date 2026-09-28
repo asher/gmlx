@@ -43,6 +43,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cached prefix could fail when it joined a batch that was already decoding.
 - Concurrent requests on a gemma-4 model that shared a prompt prefix of 1024
   or more tokens could decode wrong tokens.
+- A Gemma-4 12B image request could answer wrongly, because image tokens
+  attended to later image tokens on the full-attention layers.
 
 ## [0.4.19] - 2026-09-27
 

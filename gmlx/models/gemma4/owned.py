@@ -13,7 +13,9 @@ inherited stock. The owned surface is exactly the patched one:
 - ``_make_masks`` carries the gemma4_sync nosync semantics natively (int
   offsets compare host-side, array offsets skip the ``.item()`` probe).
   One mask object per layer type is preserved; the batched-sdpa pad
-  relay keys on that identity.
+  relay keys on that identity. It runs under ``image_masks``, which keeps
+  full-attention layers causal for images and puts the image blocks on
+  the sliding layers only, as transformers does.
 - ``Attention.__call__`` carries the offset handling natively: int rope
   offsets pass to rope unwrapped, array offsets are snapshot-copied
   (``update_and_fetch`` advances ``cache.offset`` with an in-place ``+=``
@@ -48,6 +50,7 @@ from mlx_vlm.models.gemma4 import language as _G
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 from . import batched_sdpa as gemma4_batched_sdpa
+from .image_masks import image_masks
 from gmlx.envflags import env_bool
 
 _OWNED_MASK_CALLS = 0
@@ -237,7 +240,7 @@ class OwnedGemma4TextModel(_G.Gemma4TextModel):
     def _make_masks(self, h, cache, mm_token_type_ids=None):
         global _OWNED_MASK_CALLS
         _OWNED_MASK_CALLS += 1
-        return _owned_make_masks(self, h, cache, mm_token_type_ids)
+        return image_masks(self, h, cache, mm_token_type_ids, _owned_make_masks)
 
 
 class OwnedGemma4LanguageModel(_G.LanguageModel):
