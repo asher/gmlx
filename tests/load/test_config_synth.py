@@ -306,24 +306,58 @@ def _meta_gemma4_size(arch: str, *, layers, hidden, experts) -> dict:
     return m
 
 
-@pytest.mark.parametrize("layers, hidden, experts, want", [
-    (30, 2816, 128, "vision"),   # 26B-A4B
-    (60, 5376, None, "vision"),  # 31B
-    (35, 1536, None, None),      # E2B
-    (42, 2560, None, None),      # E4B
-])
-def test_gemma4_image_attention_follows_the_hf_config(layers, hidden,
-                                                       experts, want):
-    # use_bidirectional_attention as each checkpoint's HF config.json sets it.
+_GEMMA4_SIZES = [
+    # projector, layers, width, experts, HF use_bidirectional_attention
+    ("gemma4v", 30, 2816, 128, "vision"),    # 26B-A4B
+    ("gemma4v", 60, 5376, None, "vision"),   # 31B
+    ("gemma4v", 35, 1536, None, None),       # E2B
+    ("gemma4v", 42, 2560, None, None),       # E4B
+    ("gemma4uv", 48, 3840, None, "vision"),  # 12B
+    ("gemma4v", 30, 2048, None, "vision"),   # a gemma4v model at a new width
+]
+
+
+@pytest.mark.parametrize("proj, layers, hidden, experts, want", _GEMMA4_SIZES)
+def test_gemma4_image_attention_follows_the_projector_and_width(
+        proj, layers, hidden, experts, want):
+    # The VLM load sets use_bidirectional_attention as llama.cpp's mtmd
+    # does, which matches each published checkpoint's HF config.json.
+    from mlx_vlm.models.gemma4.config import TextConfig as Gemma4Text
+    from mlx_vlm.models.gemma4_unified.config import TextConfig as UnifiedText
+
+    from gmlx.load.vlm import resolve_vlm_model_type, synthesize_vlm_config
+
+    m = _meta_gemma4_size("gemma4", layers=layers, hidden=hidden,
+                          experts=experts)
+    clip = {
+        "clip.vision.projector_type": proj,
+        "clip.vision.block_count": 1,
+        "clip.vision.embedding_length": 32,
+        "clip.vision.feed_forward_length": 64,
+        "clip.vision.attention.head_count": 2,
+        "clip.vision.patch_size": 16,
+        "clip.vision.image_size": 224,
+    }
+    model_type = resolve_vlm_model_type("gemma4", clip)
+    cfg = synthesize_vlm_config(model_type, m,
+                                {"blk.5.attn_v.weight": [16, 64]}, clip)
+    text = {"gemma4": Gemma4Text, "gemma4_unified": UnifiedText}[model_type]
+    built = text.from_dict(cfg["text_config"])
+    assert built.use_bidirectional_attention == want
+
+
+@pytest.mark.parametrize("proj, layers, hidden, experts, want", _GEMMA4_SIZES)
+def test_gemma4_text_only_load_sets_no_image_attention(
+        proj, layers, hidden, experts, want):
     m = _meta_gemma4_size("gemma4", layers=layers, hidden=hidden,
                           experts=experts)
     c = synthesize_config(m, tensor_shapes={"blk.5.attn_v.weight": [16, 64]})
-    assert c.get("use_bidirectional_attention") == want
+    assert "use_bidirectional_attention" not in c
 
 
 def test_diffusion_gemma_image_attention_is_its_text_config_default():
-    # DiffusionGemma shares the Gemma-4 synth but never gets the key, the
-    # 26B-A4B shape included. The TextConfig it loads defaults to "vision".
+    # DiffusionGemma shares the Gemma-4 synth, which sets no key. The
+    # TextConfig it loads defaults to "vision".
     from mlx_vlm.models.diffusion_gemma.config import TextConfig
 
     m = _meta_gemma4_size("diffusion-gemma", layers=30, hidden=2816,

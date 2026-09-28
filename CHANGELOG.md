@@ -20,7 +20,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parked, since mlx 0.32.2 fixes the crash at thread exit.
 - `gmlx run` and `gmlx chat` prefill a DeepSeek-V4-Flash-Vision-Exp image
   prompt in chunks that keep each image whole, instead of in one pass.
-- On a Gemma-4 26B-A4B, 31B or 12B model, the prefix cache reuses a cached
+- On a Gemma-4 model other than E2B and E4B, the prefix cache reuses a cached
   prefix that ends before an image, when the request holds the same images.
 
 ### Fixed
@@ -51,8 +51,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or more tokens could decode wrong tokens.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
-- A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
-  image token saw only the image tokens before it.
+- A Gemma-4 image request on a model other than E2B, E4B and 12B, such as
+  26B-A4B or 31B, could answer wrongly, because each image token saw only
+  the image tokens before it.
 - On a request without tools, a reply holding tool-call text left less of the
   conversation in the prefix cache for the next turn.
 - A model whose load failed after its weights were read, as when its

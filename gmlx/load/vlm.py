@@ -1765,6 +1765,28 @@ def synthesize_vlm_config(
     }
 
 
+# Whether Gemma-4 image tokens attend to the whole image, keyed as
+# llama.cpp's mtmd keys it: always under the gemma4uv projector (the 12B),
+# and under gemma4v unless the text width is 1536 (E2B) or 2560 (E4B). The
+# GGUFs carry no key for the setting, and the rule agrees with the HF
+# config of every published checkpoint. A text-only load has no image
+# tokens and gets no key.
+_GEMMA4_CAUSAL_IMAGE_WIDTHS = frozenset({1536, 2560})
+
+
+def _gemma4_image_attention(text_config: dict, mm_meta: dict) -> None:
+    """Set ``use_bidirectional_attention`` on a Gemma-4 text config from the
+    vision projector type and the text width."""
+    proj = (_mm(mm_meta, "clip.vision.projector_type")
+            or mm_meta.get("clip.projector_type"))
+    if proj == "gemma4uv":
+        text_config["use_bidirectional_attention"] = "vision"
+    elif proj == "gemma4v":
+        causal = text_config["hidden_size"] in _GEMMA4_CAUSAL_IMAGE_WIDTHS
+        text_config["use_bidirectional_attention"] = (
+            None if causal else "vision")
+
+
 def _synthesize_gemma4_vlm_config(
     text_config: dict, mm_meta: dict, *, standardize: bool = False
 ) -> dict:
@@ -1819,6 +1841,7 @@ def _synthesize_gemma4_vlm_config(
             "output_proj_dims": 1536,
         }
 
+    _gemma4_image_attention(text_config, mm_meta)
     return {
         "model_type": "gemma4",
         "text_config": text_config,
@@ -1844,6 +1867,7 @@ def _synthesize_gemma4_unified_vlm_config(text_config: dict, mm_meta: dict) -> d
     its GGUF and match the unified TextConfig defaults)."""
     text_config = dict(text_config)
     text_config["model_type"] = "gemma4_unified_text"
+    _gemma4_image_attention(text_config, mm_meta)
 
     mm_embed = _mm_int(mm_meta, "clip.vision.embedding_length")
     proj_dim = _mm(mm_meta, "clip.vision.projection_dim")
