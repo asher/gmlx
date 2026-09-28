@@ -188,6 +188,7 @@ markers = [
 include = [
     "gmlx/cache/apc_manager.py",
     "gmlx/cache/apc_pooling.py",
+    "gmlx/cache/fresh_gate.py",
     "gmlx/cache/retire_key.py",
     "gmlx/cache/snapshot.py",
     "gmlx/commands/cli.py",
@@ -201,6 +202,7 @@ include = [
     "gmlx/load/modules.py",
     "gmlx/load/mtp_target.py",
     "gmlx/load/vlm.py",
+    "gmlx/lora_rows.py",
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
     "gmlx/serve/cb_phase.py",
@@ -252,7 +254,6 @@ reportOptionalOperand = "none"
 # list only shrinks. tests/test_pyright_scope.py holds both lists to
 # the tree.
 backlog = [
-    "gmlx/cache/fresh_gate.py",
     "gmlx/cache/kv_policy.py",
     "gmlx/cache/kvarn_cache.py",
     "gmlx/cache/kvarn_serve.py",
@@ -262,7 +263,6 @@ backlog = [
     "gmlx/gen/diffusion.py",
     "gmlx/gen/generation.py",
     "gmlx/gen/thinking_budget.py",
-    "gmlx/lora_rows.py",
     "gmlx/serve/admit_gate.py",
     "gmlx/serve/batch_sched.py",
     "gmlx/serve/capacity.py",

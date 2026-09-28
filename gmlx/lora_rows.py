@@ -32,8 +32,11 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Any
 
 import mlx.core as mx
+
+from gmlx.cache.media_salt import as_salt
 
 _log = logging.getLogger(__name__)
 
@@ -364,7 +367,7 @@ def install_row_channel() -> None:
             # a prefix (same tokens, different logits). Salt the row's
             # semantic hash with its scale tuple, computing the base hash
             # the way the engine would when the request carried none.
-            kws = kwargs.get("prompt_kwargs")
+            kws: Any = kwargs.get("prompt_kwargs")
             if kws is None and len(args) >= 2:
                 kws = args[1]
             if kws is None:
@@ -380,7 +383,7 @@ def install_row_channel() -> None:
                 base = kw.get("_apc_semantic_hash")
                 if base is None:
                     base = self._apc_extra_hash(kw)
-                kw["_apc_semantic_hash"] = int(base) ^ salt
+                kw["_apc_semantic_hash"] = as_salt(base) ^ salt
         uids = _orig_insert(self, prompts, *args, **kwargs)
         for uid in uids:
             register_uid(uid, scales if scales else None)

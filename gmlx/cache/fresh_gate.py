@@ -37,6 +37,8 @@ import time
 
 from gmlx.serve.batch_rows import batch_rows
 
+from .media_salt import salt_at, salt_windows
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_fresh_gate"
@@ -96,24 +98,33 @@ def _covered_len(manager, ids, extra_hash: int) -> int:
     with manager.lock:
         bs = int(getattr(manager, "block_size", 0) or 0)
         table = getattr(manager, "hash_table", None)
-        if bs > 0 and table:
+        # A prompt with images walks the block chain once per window of
+        # lengths that share a salt, as the manager's lookup does.
+        for salt, lo, hi in (salt_windows(extra_hash)
+                             if bs > 0 and table else ()):
             parent = _apc.SEED_PARENT_HASH
-            for i in range(len(tt) // bs):
+            walked = 0
+            for i in range((len(tt) if hi is None else hi) // bs):
                 chunk = tt[i * bs:(i + 1) * bs]
-                h = _apc._hash_tokens(parent, tokens=chunk, extra=extra_hash)
+                h = _apc._hash_tokens(parent, tokens=chunk, extra=salt)
                 blk = table.get(h)
                 if blk is None or blk.token_ids != chunk:
                     break
                 parent = h
-                best = (i + 1) * bs
+                walked = (i + 1) * bs
+            if walked > lo:
+                best = walked
+                break
         for entry in (getattr(manager, "_exact_cache", None) or {}).values():
             p = len(entry.token_ids)
-            if (entry.extra_hash == extra_hash and best < p < len(tt)
+            if (entry.extra_hash == salt_at(extra_hash, p)
+                    and best < p < len(tt)
                     and tt[:p] == tuple(entry.token_ids)):
                 best = p
         for kids, kh in (getattr(manager, "_kq_anchor_cache", None) or {}):
             p = len(kids)
-            if kh == extra_hash and best < p < len(tt) and tt[:p] == kids:
+            if (kh == salt_at(extra_hash, p) and best < p < len(tt)
+                    and tt[:p] == kids):
                 best = p
     return best
 

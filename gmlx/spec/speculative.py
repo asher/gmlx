@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -1508,7 +1509,7 @@ def owned_server_rounds(
     if retire_ctx is not None:
         sidecar_ctx = {
             "full_ids": retire_ctx["full_ids"],
-            "extra_hash": int(retire_ctx.get("extra_hash", 0)),
+            "extra_hash": as_salt(retire_ctx.get("extra_hash", 0)),
             "checkpoint_len": _sidecar_boundary(retire_ctx),
             "manager": getattr(model, "_kq_apc_manager", None),
             # Live reference: the ckpt sidecar key set is derived at
@@ -1627,7 +1628,7 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
                       "boundary landed")
             return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                            extra_hash=int(retire_ctx.get("extra_hash", 0)),
+                            extra_hash=as_salt(retire_ctx.get("extra_hash", 0)),
                             grid_truncate=True)
         if stored and meta is not None:
             meta.setdefault("ckpt_stored_boundaries", []).append(stored)
@@ -1686,7 +1687,7 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
         if manager is None:
             return
         from gmlx.cache.snapshot import drafter_sidecar_store
-        extra_hash = int(sidecar_ctx.get("extra_hash", 0))
+        extra_hash = as_salt(sidecar_ctx.get("extra_hash", 0))
         if sidecar_ctx.get("mode") == "ckpt":
             # One sidecar key per adoptable target record, derived from
             # the live meta (never recomputing a store decision): every
@@ -1860,7 +1861,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
-            row=0, extra_hash=int(retire.get("extra_hash", 0)),
+            row=0, extra_hash=as_salt(retire.get("extra_hash", 0)),
             max_len=max_len, decode_snaps=retire.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
@@ -1878,7 +1879,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             from gmlx.cache.snapshot import drafter_sidecar_store
             if drafter_sidecar_store(
                     manager, drafter, seq, len(seq),
-                    int(retire.get("extra_hash", 0))):
+                    as_salt(retire.get("extra_hash", 0))):
                 _log.info("APC sidecar store (retire): tokens=%d", len(seq))
     except Exception:
         _log.warning("APC retire failed; continuing", exc_info=True)
@@ -1979,7 +1980,7 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
         from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, "block", seq[:store_len], prompt_cache,
-            row=slot, extra_hash=int(retire.get("extra_hash", 0)))
+            row=slot, extra_hash=as_salt(retire.get("extra_hash", 0)))
         if ok:
             _log.info("APC retire store (row): tokens=%d", ok)
     except Exception:
@@ -2018,7 +2019,7 @@ def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
               retire.get("render_ctx") is not None, lcp, max_len)
     ok = retirement_store(
         manager, "exact", seq, prompt_cache, row=slot,
-        extra_hash=int(retire.get("extra_hash", 0)), max_len=max_len)
+        extra_hash=as_salt(retire.get("extra_hash", 0)), max_len=max_len)
     if ok:
         _log.info("APC retire store (row): tokens=%d", ok)
 

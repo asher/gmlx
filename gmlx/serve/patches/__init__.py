@@ -250,6 +250,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Media guard reads config-declared media ids (expanded image blocks).
     from gmlx.cache.apc_media import install_media_token_ids
     install_media_token_ids()
+    # APC keys a prefix by the images inside it.
+    from gmlx.cache.media_salt import install_media_salt
+    install_media_salt()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()

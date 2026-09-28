@@ -15,6 +15,7 @@ import mlx.core as mx
 
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
@@ -90,7 +91,7 @@ def _l0_salt(batch):
     """
     meta = (getattr(batch, "_apc_meta", None) or [None])[0]
     if isinstance(meta, dict) and "extra_hash" in meta:
-        stock = int(meta["extra_hash"])
+        stock = as_salt(meta["extra_hash"])
     elif _carries_media(batch):
         return None
     else:
@@ -268,7 +269,7 @@ def _mtp_prefill_init(batch) -> None:
         from gmlx.cache.retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
-            "extra_hash": int(meta.get("extra_hash", 0)),
+            "extra_hash": as_salt(meta.get("extra_hash", 0)),
             "mode": (
                 "ckpt"
                 if _ckpt_active(batch.model, mode, int(manager.block_size))
@@ -691,7 +692,7 @@ def install_full_prompt_mtp_prefill() -> None:
                                       "landed")
                         elif ckpt_store(
                                 stash["manager"], stash["full_ids"], cache,
-                                extra_hash=int(stash.get("extra_hash", 0))):
+                                extra_hash=as_salt(stash.get("extra_hash", 0))):
                             if m is not None:
                                 m.setdefault(
                                     "ckpt_stored_boundaries", []

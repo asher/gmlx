@@ -19,6 +19,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from .media_salt import salt_at
+
 _log = logging.getLogger(__name__)
 
 # Module-wide counters, merged into /v1/cache/stats: spec-path reuse is
@@ -271,6 +273,13 @@ def _ids_tuple(token_ids: mx.array) -> tuple[int, ...]:
     return tuple(int(x) for x in row.tolist())
 
 
+def _salt_at(salt: Any, n: int) -> Any:
+    """An L0 salt at prefix length ``n``: a tuple resolves each part."""
+    if isinstance(salt, tuple):
+        return tuple(salt_at(part, n) for part in salt)
+    return salt_at(salt, n)
+
+
 class _PrefixEntry:
     __slots__ = ("salt", "token_ids", "kv_snaps", "hidden", "nbytes")
 
@@ -299,7 +308,8 @@ class SpecPrefixCache:
     Designed for the chat use case where each turn shares system_prompt +
     conversation_history as a token prefix with the previous turn. The
     salt covers what the ids do not show (an image's pixels, a LoRA
-    adapter): an entry matches only a lookup with an equal salt.
+    adapter): an entry matches only a lookup whose salt at the entry's
+    length is equal (``_salt_at``).
 
     Parameters
     ----------
@@ -345,7 +355,8 @@ class SpecPrefixCache:
         best_len = 0
         for entry in self._entries.values():
             n = len(entry.token_ids)
-            if entry.salt != salt or n >= len(ids) or n <= best_len:
+            if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
+                    salt, n):
                 continue
             if ids[:n] == entry.token_ids:
                 best = (n, entry)
@@ -380,7 +391,7 @@ class SpecPrefixCache:
             return
 
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
-        entry = _PrefixEntry(salt, ids, kv_snaps, hidden)
+        entry = _PrefixEntry(_salt_at(salt, len(ids)), ids, kv_snaps, hidden)
         key = entry.key
 
         # Budget check before materializing: nbytes needs only shapes, and

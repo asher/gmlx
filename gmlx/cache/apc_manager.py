@@ -12,8 +12,8 @@ builds a manager to discard.
 Override rule: an override may wrap, pre/post-process, or replace an
 inherited method outright, but does not duplicate an inherited body to edit
 part of it; when a change would need a copied body, vendor instead.
-``store_kv_blocks`` is the one standing copied body (the chunked eval is
-mid-loop, unwrappable) - carried from the retired
+``_store_kv_blocks_copy`` is the one standing copied body (the chunked
+eval is mid-loop, unwrappable) - carried from the retired
 ``install_apc_batched_store_eval`` method patch, not repeated. It now also
 carries the ckpt-store policy (``_ckpt_disk``: suppress layer-major,
 optionally memory-only), a second in-body divergence - one more divergence
@@ -30,6 +30,8 @@ from pathlib import Path
 from mlx_vlm import apc as _apc
 
 from gmlx.envflags import env_int
+
+from .media_salt import MediaSalt, salt_at, salt_windows
 
 _log = logging.getLogger(__name__)
 
@@ -73,8 +75,8 @@ class GmlxAPCManager(_apc.APCManager):
     are pure materialization (nothing in the loop consumes their values), so
     they can be evaluated in chunks: same data volume, ~30x fewer syncs.
 
-    ``store_kv_blocks`` is a verbatim copy of the stock method with the eval
-    hoisted into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32;
+    ``_store_kv_blocks_copy`` is a verbatim copy of the stock store with the
+    eval hoisted into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32;
     <=0 means a single eval before return). All evals still complete before
     the method returns, preserving the stock guarantee that block tensors
     are decoupled from the caller's cache before ``mx.clear_cache`` can
@@ -360,20 +362,66 @@ class GmlxAPCManager(_apc.APCManager):
     # namespace is the model path and carries no scheme.
     _exact_extra_salt = 0
 
+    # A prompt with images salts each prefix by the images inside it
+    # (``MediaSalt``). An exact entry keys on the salt at its length, a
+    # block chain on the salt of its whole prompt. The lookups run the
+    # stock body once per window of prefix lengths that share a salt,
+    # longest first, so a turn that adds an image still restores the
+    # prefix the earlier turn stored.
+
     def lookup_exact_cache(self, token_ids, extra_hash=0,
                            max_prefix_tokens=None, min_prefix_tokens=0):
         self._trim_exact_to_budget()
-        return super().lookup_exact_cache(
-            token_ids, extra_hash ^ self._exact_extra_salt,
-            max_prefix_tokens=max_prefix_tokens,
-            min_prefix_tokens=min_prefix_tokens)
+        extra = extra_hash ^ self._exact_extra_salt
+        for salt, lo, hi in salt_windows(extra, min_prefix_tokens,
+                                         max_prefix_tokens):
+            got = super().lookup_exact_cache(
+                token_ids, salt, max_prefix_tokens=hi, min_prefix_tokens=lo)
+            if got[0] is not None:
+                return got
+        return None, 0
 
     def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
         out = super().store_exact_cache(
             token_ids, prompt_cache,
-            extra_hash=extra_hash ^ self._exact_extra_salt)
+            extra_hash=(salt_at(extra_hash, len(token_ids))
+                        ^ self._exact_extra_salt))
         self._trim_exact_to_budget()
         return out
+
+    def lookup_prefix(self, token_ids, extra_hash=0):
+        if not isinstance(extra_hash, MediaSalt):
+            return super().lookup_prefix(token_ids, extra_hash=extra_hash)
+        # One hit or one miss per lookup in the stats, as the stock walk
+        # counts it.
+        with self.lock:
+            stats = self.stats
+            hits, misses, matched = (stats.hits, stats.misses,
+                                     stats.matched_tokens)
+            for salt, lo, hi in salt_windows(extra_hash):
+                ids = token_ids if hi is None else token_ids[:hi]
+                blocks, n = super().lookup_prefix(ids, extra_hash=salt)
+                if n > lo:
+                    stats.hits, stats.misses = hits + 1, misses
+                    stats.matched_tokens = matched + n
+                    return blocks, n
+                self.release(blocks)
+            stats.hits, stats.misses = hits, misses + 1
+            stats.matched_tokens = matched
+            return [], 0
+
+    def lookup_prefix_disk_cache(self, token_ids, extra_hash=0,
+                                 max_prefix_tokens=None, min_prefix_tokens=0,
+                                 allow_memory_overlap=False):
+        for salt, lo, hi in salt_windows(extra_hash, min_prefix_tokens,
+                                         max_prefix_tokens):
+            got = super().lookup_prefix_disk_cache(
+                token_ids, extra_hash=salt, max_prefix_tokens=hi,
+                min_prefix_tokens=lo,
+                allow_memory_overlap=allow_memory_overlap)
+            if got[0] is not None:
+                return got
+        return None, 0
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
@@ -406,6 +454,41 @@ class GmlxAPCManager(_apc.APCManager):
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
                         _ckpt_disk=None):
+        """The block store, with a prompt's images keyed on the salt of the
+        whole prompt. A warm turn may have restored its prefix from a
+        chain stored under fewer images. The blocks it skips are then
+        missing from this chain, so the store covers the whole prompt."""
+        if isinstance(extra_hash, MediaSalt):
+            if skip_first_n_tokens and not self._chain_held(
+                    token_ids, int(extra_hash), skip_first_n_tokens):
+                skip_first_n_tokens = 0
+            extra_hash = int(extra_hash)
+        return self._store_kv_blocks_copy(
+            token_ids, layer_keys, layer_values, extra_hash=extra_hash,
+            skip_first_n_tokens=skip_first_n_tokens, _ckpt_disk=_ckpt_disk)
+
+    def _chain_held(self, token_ids, extra_hash: int, n_tokens: int) -> bool:
+        """Whether the chain under ``extra_hash`` holds every block of the
+        first ``n_tokens``, in the pool or on disk."""
+        h = _store_helpers()
+        if h is None:
+            return False
+        bs = int(self.block_size)
+        parent = h["seed_parent"]
+        with self.lock:
+            for i in range(n_tokens // bs):
+                chunk = tuple(int(t) for t in token_ids[i * bs:(i + 1) * bs])
+                parent = h["hash_tokens"](parent, chunk, extra_hash)
+                b = self.hash_table.get(parent)
+                if ((b is None or b.token_ids != chunk)
+                        and not (self.disk is not None
+                                 and self.disk.has(parent))):
+                    return False
+        return True
+
+    def _store_kv_blocks_copy(self, token_ids, layer_keys, layer_values,
+                              *, extra_hash=0, skip_first_n_tokens=0,
+                              _ckpt_disk=None):
         import mlx.core as mx
 
         h = _store_helpers()

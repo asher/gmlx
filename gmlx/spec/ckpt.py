@@ -11,6 +11,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
 from gmlx.spec.engine import (
     _L1View,
@@ -57,7 +58,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         # from them misses the image, tenant and LoRA salt. The cold meta
         # holds the row's salt; the stock helpers read it back from
         # `_apc_semantic_hash`.
-        extra_hash = int(cold["extra_hash"])
+        extra_hash = as_salt(cold["extra_hash"])
         prompt_kwargs = {**prompt_kwargs, "_apc_semantic_hash": extra_hash}
     else:
         extra_hash = view._apc_extra_hash(prompt_kwargs)
@@ -81,7 +82,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             warm = pick.get("warm_cache")
             blocks = list(pick.get("matched_blocks") or ())
             prefix_len = int(pick.get("prefix_len") or 0)
-            extra_hash = int(pick.get("extra_hash", extra_hash))
+            extra_hash = as_salt(pick.get("extra_hash", extra_hash))
             if warm is None and blocks:
                 from mlx_vlm import apc as _apc
 
@@ -469,7 +470,7 @@ def _exact_anchor_store(batch) -> None:
         return
     from gmlx.cache.snapshot import anchor_exact_store
     anchor_exact_store(manager, meta["full_input_ids"][:pos], cache,
-                       extra_hash=int(meta.get("extra_hash", 0)))
+                       extra_hash=as_salt(meta.get("extra_hash", 0)))
 
 
 def _sched_insert(bounds: list, pos: int, kind: str, *,
@@ -577,7 +578,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
 
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
-            batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
+            batch.prompt_cache, extra_hash=as_salt(meta.get("extra_hash", 0)),
             skeleton_disk=skel, kind=kind):
         meta["ckpt_last_stored"] = checkpoint_len
         meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
@@ -684,7 +685,7 @@ def _plain_ckpt_init(batch) -> None:
     ids_list = [int(t) for t in meta["full_input_ids"]]
     if len(ids_list) < 2:
         return
-    extra_hash = int(meta.get("extra_hash", 0))
+    extra_hash = as_salt(meta.get("extra_hash", 0))
     view: Any = _L1View(batch.model, manager, mode)
     restored = 0
     from gmlx.cache.snapshot import ckpt_lookup
@@ -764,7 +765,7 @@ def _plain_anchor_init(batch) -> None:
         ids_list = [int(t) for t in meta["full_input_ids"]]
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
-            "extra_hash": int(meta.get("extra_hash", 0)),
+            "extra_hash": as_salt(meta.get("extra_hash", 0)),
             "mode": "exact",
             "manager": manager,
             "render_ctx": lookup_render_ctx(ids_list),
@@ -953,7 +954,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         ok = retirement_store(
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
-            extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
+            extra_hash=as_salt(stash.get("extra_hash", 0)), max_len=max_len,
             decode_snaps=stash.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)

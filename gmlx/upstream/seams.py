@@ -294,7 +294,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_exact_checkpoint_len",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_extra_hash",
-         "spec_engine._bind_l1_view (L1 APC helpers)"),
+         "spec_engine._bind_l1_view (L1 APC helpers) + "
+         "media_salt.install_media_salt (a MediaSalt passes whole)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_media_token_ids",
          "spec_engine._bind_l1_view (L1 APC helpers) + "
          "load.vlm._mirror_media_token_ids (the guard reads self.model's "
@@ -538,6 +539,24 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "adjust_prefix_to_text_suffix_boundary",
          "apc_media.install_media_token_ids (a WholeMediaBlocks column "
          "inside a run moves to its end)", critical=True),
+    Seam("mlx_vlm.apc", "semantic_extra_hash",
+         "media_salt.install_media_salt (a request with images carries "
+         "the salt of its text)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._gpu_embed",
+         "media_salt.install_media_salt (the request salt becomes a "
+         "MediaSalt from the ids and pixels)"),
+    Seam("mlx_vlm.apc", "APCManager.lookup_exact_cache",
+         "apc_manager.GmlxAPCManager.lookup_exact_cache (one call per "
+         "MediaSalt window: min exclusive, a positive max inclusive)"),
+    Seam("mlx_vlm.apc", "APCManager.store_exact_cache",
+         "apc_manager.GmlxAPCManager.store_exact_cache (keys on the salt "
+         "at the entry length)"),
+    Seam("mlx_vlm.apc", "APCManager.lookup_prefix",
+         "apc_manager.GmlxAPCManager.lookup_prefix (one walk per "
+         "MediaSalt window; the hit and miss counts are restored to one)"),
+    Seam("mlx_vlm.apc", "APCManager.lookup_prefix_disk_cache",
+         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (one call "
+         "per MediaSalt window)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "

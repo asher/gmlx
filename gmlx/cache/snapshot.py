@@ -21,6 +21,8 @@ from typing import Any
 
 from gmlx.envflags import env_int
 
+from .media_salt import as_salt, salt_at
+
 _log = logging.getLogger(__name__)
 
 
@@ -335,6 +337,7 @@ def drafter_sidecar_store(
         return False
     if not getattr(drafter, "supports_kv_sidecar", False):
         return False
+    extra_hash = int(salt_at(extra_hash, store_len))
     try:
         caches = drafter.export_kv()
         if not caches:
@@ -410,6 +413,7 @@ def drafter_sidecar_lookup(
     """
     if manager is None or prefix_len < 1:
         return None
+    extra_hash = int(salt_at(extra_hash, prefix_len))
     try:
         ids = tuple(int(t) for t in token_ids)
         if len(ids) < prefix_len:
@@ -502,7 +506,7 @@ def anchor_exact_store(
             _ckpt_decline(manager, "anchor_clone")
             return False
         nbytes = _caches_nbytes(clones)
-        key = (ids, int(extra_hash))
+        key = (ids, int(salt_at(extra_hash, len(ids))))
         idx = _anchor_index(manager)
         with manager.lock:
             idx[key] = (clones, nbytes)
@@ -544,7 +548,7 @@ def anchor_exact_lookup(
             for key in idx:
                 kids, kh = key
                 p = len(kids)
-                if (kh != int(extra_hash)
+                if (kh != int(salt_at(extra_hash, p))
                         or not min_prefix_tokens < p < n
                         or ids[:p] != kids):
                     continue
@@ -760,7 +764,8 @@ def _rec_nbytes(rec) -> int:
 
 
 def ckpt_extra_hash(extra_hash: int) -> int:
-    return int(extra_hash) ^ _CKPT_SALT
+    # A MediaSalt stays one: the disk lookup resolves it per window.
+    return as_salt(extra_hash) ^ _CKPT_SALT
 
 
 def bounded_extra_hash(extra_hash: int, p: int) -> int:
@@ -768,7 +773,8 @@ def bounded_extra_hash(extra_hash: int, p: int) -> int:
     each checkpoint's window an independent chain, so identical window text
     at different absolute positions can never cross-match, and releasing a
     record releases exactly its own window blocks."""
-    return (int(extra_hash) ^ _BOUNDED_SALT) ^ (int(p) * 0x9E3779B1)
+    return ((int(salt_at(extra_hash, p)) ^ _BOUNDED_SALT)
+            ^ (int(p) * 0x9E3779B1))
 
 
 def _rot_tag(cache) -> str:
@@ -1417,6 +1423,8 @@ def ckpt_store(
                     "APC ckpt store: terminal grid store at %d (prompt "
                     "%d below window %d)", p, trunc_from, geom[0])
         tail_len = p - b_full
+        # A record keys on the images inside its own p.
+        extra_hash = int(salt_at(extra_hash, p))
         salted = ckpt_extra_hash(extra_hash)
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
                      and not isinstance(c, rot_types)]
@@ -1809,7 +1817,7 @@ def _ckpt_scan(manager, tid: tuple, extra_hash: int, min_prefix_tokens: int,
             # unrelated queries reject in O(1), so tallying refused
             # matches here costs the hot path nothing and the miss
             # path never rescans the index.
-            if rec.extra_hash != int(extra_hash):
+            if rec.extra_hash != int(salt_at(extra_hash, rec.p)):
                 if rec.ids and tid[:bs] == rec.ids[:bs]:
                     salted += 1
                 continue
@@ -2022,6 +2030,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         _log.info("APC ckpt disk miss: layout %s != model %s",
                   tags, list(layout))
         return None, 0
+    # The skeleton's chains key on the images inside its p.
+    salted = ckpt_extra_hash(int(salt_at(extra_hash, p)))
     bs = int(manager.block_size)
     b_full = _ckpt_block_prefix(p, bs)
     n_kv = sum(1 for t in tags if _is_chain(t))
