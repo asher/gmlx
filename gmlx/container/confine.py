@@ -128,9 +128,11 @@ def _host_target(path: Path) -> Path:
     link keeps working. Any other link is refused."""
     if not os.path.islink(path):
         return path
+    from .state import path_inside
+
     real = os.path.realpath(path)
     home = _home_real()
-    if real == home or not real.startswith(home.rstrip("/") + "/"):
+    if real == home or not path_inside(real, home):
         raise ConfinedError(f"{path} is a symbolic link to {real}, outside your home "
                             "folder, so launch will not replace it.")
     return Path(real)
@@ -140,14 +142,15 @@ def _refuse_unconfined(path) -> None:
     """Fail closed: a private home is read or written only inside
     :func:`confined`, so a new call site can never follow the guest's links
     by mistake."""
-    from .state import data_path
+    from .state import data_path, path_inside
 
     data = os.path.realpath(data_path())
+    depth = len(data.rstrip("/").split("/"))
     for p in {os.path.abspath(os.path.expanduser(str(path))),
               os.path.realpath(os.path.expanduser(str(path)))}:
-        if p.startswith(data.rstrip("/") + "/"):
-            rest = p[len(data.rstrip("/")) + 1:].split("/")
-            if len(rest) >= 2 and rest[1] == "home":
+        if p != data and path_inside(p, data):
+            rest = p.split("/")[depth:]
+            if len(rest) >= 2 and rest[1].casefold() == "home":
                 raise ConfinedError(f"{p} is in a private home, which launch reads "
                                     "only with the links in it checked.")
 

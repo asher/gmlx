@@ -21,7 +21,7 @@ from pathlib import Path
 
 from gmlx.config import (LaunchClientCfg, parse_size_bytes, parse_volume_spec)
 
-from .state import data_dir, data_path
+from .state import data_dir, data_path, path_inside
 
 # Clients whose built-in default shares no current folder.
 NO_CWD_CLIENTS = frozenset({"open-webui", "elia"})
@@ -93,10 +93,13 @@ def _real(path: str | os.PathLike) -> str:
 
 def _inside(path: str, folder: str) -> bool:
     """True when ``path`` is ``folder`` or lies inside it, by whole path
-    components."""
-    if folder == "/":
-        return path.startswith("/")
-    return path == folder or path.startswith(folder.rstrip("/") + "/")
+    components, ignoring case on a volume that ignores it."""
+    return path_inside(path, folder)
+
+
+def _same(a: str, b: str) -> bool:
+    """One path, ignoring case on a volume that ignores it."""
+    return _inside(a, b) and _inside(b, a)
 
 
 def _host_home() -> str:
@@ -126,7 +129,7 @@ def sensitive_hits(path: str, home: str | None = None) -> list[str]:
 def auto_share_refusal(path: str, home: str | None = None) -> str | None:
     """Why launch will not share ``path`` by default, or None."""
     home = home or _host_home()
-    if path in SYSTEM_FOLDERS:
+    if any(_same(path, f) for f in SYSTEM_FOLDERS):
         return f"{path} is a system folder"
     if _inside(home, path):
         return f"{_tilde(path, home)} is your home folder or holds it"
@@ -230,7 +233,8 @@ def guest_path(host_path: str, mounts: list[Mount]) -> str | None:
                 best = m
     if best is None:
         return None
-    rest = host_path[len(best.source):].lstrip("/")
+    # By components, since the source may differ from the path in case.
+    rest = "/".join(host_path.split("/")[len(best.source.rstrip("/").split("/")):])
     return best.target.rstrip("/") + ("/" + rest if rest else "") or "/"
 
 
@@ -285,7 +289,8 @@ def git_extra_mount(cwd: str, shares: list[Mount], home: str | None = None
     # can change: the .git file, and a commondir file in a .git folder. So
     # an outside git folder is shared only when it names this project back,
     # from a file outside the share.
-    what = _git_back_reference(toplevel, git_dir, common)
+    guest_roots = [m.source for m in shares] + [_real(data_path())]
+    what = _git_back_reference(toplevel, git_dir, common, guest_roots)
     if what is None:
         return None, [f"[launch] git in the container cannot use the git folder "
                       f"{_tilde(common, home)}, because it does not name "
@@ -321,12 +326,16 @@ def _read_small(path: str) -> str | None:
         os.close(fd)
 
 
-def _git_back_reference(toplevel: str, git_dir: str, common: str) -> str | None:
+def _git_back_reference(toplevel: str, git_dir: str, common: str,
+                        guest_roots: list[str]) -> str | None:
     """``"worktree"`` or ``"submodule"`` when the git folder outside the
     share names ``toplevel`` back, else None.
 
     - A linked worktree's ``<common>/worktrees/<id>/gitdir`` names the
-      project's ``.git`` file.
+      project's ``.git`` file, as an absolute path or relative to that
+      entry. No symbolic link on the way may lie in a share or a private
+      home, since the guest could put it there to point the name at this
+      project.
     - A submodule's ``core.worktree`` names the project folder.
     - A ``.git`` folder inside the share never counts, because its
       ``commondir`` file can name any repository."""
@@ -334,16 +343,38 @@ def _git_back_reference(toplevel: str, git_dir: str, common: str) -> str | None:
     if os.path.islink(dotgit) or not os.path.isfile(dotgit):
         return None
     if git_dir != common:
-        if os.path.dirname(git_dir) != os.path.join(common, "worktrees"):
+        if not _same(os.path.dirname(git_dir), os.path.join(common, "worktrees")):
             return None
         named = (_read_small(os.path.join(git_dir, "gitdir")) or "").strip()
-        return "worktree" if named and _real(named) == _real(dotgit) else None
+        if not named:
+            return None
+        resolved = _resolve_outside(os.path.join(git_dir, named), guest_roots)
+        return "worktree" if resolved and _same(resolved, _real(dotgit)) else None
     out = _git(toplevel, "config", "--file", os.path.join(git_dir, "config"),
                "--get", "core.worktree")
     if not out:
         return None
-    worktree = out[0].strip()
-    return "submodule" if _real(os.path.join(git_dir, worktree)) == toplevel else None
+    resolved = _resolve_outside(os.path.join(git_dir, out[0].strip()), guest_roots)
+    return "submodule" if resolved and _same(resolved, toplevel) else None
+
+
+def _resolve_outside(path: str, guest_roots: list[str]) -> str | None:
+    """``path`` with its links resolved one component at a time, or None
+    when a link on the way lies in one of ``guest_roots``."""
+    cur = "/"
+    for part in path.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, part)
+        if os.path.islink(nxt):
+            if any(_inside(cur, root) for root in guest_roots):
+                return None
+            nxt = _real(nxt)
+        cur = nxt
+    return cur
 
 
 def protected_folder_warnings(mounts: list[Mount], home: str | None = None) -> list[str]:

@@ -57,8 +57,10 @@ def _flag_set(a, dest: str) -> bool:
 def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
     """Whether this launch runs in a container, from the flags and the
     ``enabled`` keys of the user-level config, and those settings. A broken
-    ``launch`` block stops only a launch that asks for container mode on the
-    command line. Any other launch runs on the Mac with one notice."""
+    ``launch`` block stops a launch that asks for container mode on the
+    command line, and a launch of a client the block may turn on. Only
+    ``--no-container``, or a block that clearly leaves this client off, runs
+    the client on the Mac, with one notice."""
     implied = [_flag_name(dest, getattr(a, dest, None))
                for dest in CONTAINER_FLAGS if _flag_set(a, dest)]
     if a.container is False and implied:

@@ -825,14 +825,21 @@ def _launch_block(path: Path):
         raise ConfigError(f"cannot read {path}: {e}")
     except yaml.YAMLError as e:
         raise ConfigError(f"malformed YAML in {path}: {e}")
-    return doc.get("launch") if isinstance(doc, dict) else None
+    if doc is None:
+        return None
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{path} holds a {type(doc).__name__}, not a mapping of "
+                          "settings.")
+    return doc.get("launch")
 
 
 def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     """Whether the raw ``launch`` block of the user-level config turns
-    container mode on for ``client``, read without the shape checks, and
-    the file. None when the file cannot be read as YAML, so the answer is
-    unknown."""
+    container mode on for ``client``, read without the full checks, and the
+    file. False only when every level on the way is absent or a mapping of
+    known keys, and every ``enabled`` there is exactly ``false``. None, which
+    stops the launch, for any other value or shape, since the block may
+    have meant to turn container mode on."""
     found = next((q for q in default_config_paths()[1:] if q.is_file()), None)
     if found is None:
         return False, None
@@ -840,13 +847,27 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
         block = _launch_block(found)
     except ConfigError:
         return None, found
+    if block is None:
+        return False, found
     box = block.get("container") if isinstance(block, dict) else None
-    if not isinstance(box, dict):
-        return (None if block is not None and not isinstance(block, dict) else False), found
-    clients = box.get("clients")
+    clients = box.get("clients") if isinstance(box, dict) else None
     own = clients.get(client) if isinstance(clients, dict) else None
-    on = box.get("enabled") is True or (isinstance(own, dict) and own.get("enabled") is True)
-    return on, found
+    missing = object()
+    values = [box.get("enabled", missing) if isinstance(box, dict) else missing,
+              own.get("enabled", missing) if isinstance(own, dict) else missing]
+    if any(v is True for v in values):
+        return True, found
+    if not isinstance(block, dict) or set(block) - _LAUNCH_KEYS:
+        return None, found
+    if box is None:
+        return False, found
+    if not isinstance(box, dict) or set(box) - _LAUNCH_CONTAINER_KEYS:
+        return None, found
+    if clients is not None and not isinstance(clients, dict):
+        return None, found
+    if own is not None and not isinstance(own, dict):
+        return None, found
+    return (False if all(v is missing or v is False for v in values) else None), found
 
 
 def load_launch_settings() -> tuple[LaunchCfg, str | None]:

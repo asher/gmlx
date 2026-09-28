@@ -288,6 +288,8 @@ def test_a_commondir_file_in_a_shared_git_folder_mounts_nothing(home):
     (proj / ".git" / "commondir").write_text(str(private / ".git") + "\n")
     git, notes = _proj_git_mounts(home, proj)
     assert git == []
+    assert any("cannot use the git folder ~/work/private/.git" in n and "--mount" in n
+               for n in notes)
 
 
 def test_a_gitfile_naming_another_repository_mounts_nothing(home):
@@ -310,6 +312,73 @@ def test_a_gitfile_naming_another_worktree_mounts_nothing(home):
     git, notes = _proj_git_mounts(home, proj)
     assert git == []
     assert any("--mount" in n for n in notes)
+
+
+def test_a_worktree_with_relative_paths_shares_its_git_folder(home):
+    repo = _private_repo(home)
+    wt = home / "src" / "rel-wt"
+    _git("worktree", "add", "-q", "--relative-paths", str(wt), cwd=repo)
+    assert not (repo / ".git" / "worktrees" / "rel-wt" / "gitdir").read_text().startswith("/")
+    git, notes = _proj_git_mounts(home, wt)
+    assert [m.source for m in git] == [os.path.realpath(repo / ".git")]
+
+
+@pytest.mark.parametrize("link", ["folder", "dotgit"])
+def test_a_link_in_the_share_never_claims_another_worktree(home, link):
+    """Another repository has a worktree inside the share. The guest links
+    that worktree to the project and points the project's .git at it."""
+    other = _private_repo(home)
+    proj = home / "src" / "proj"
+    wt = proj / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=other)
+    entry = other / ".git" / "worktrees" / "wt"
+    if link == "folder":
+        import shutil
+        shutil.rmtree(wt)
+        wt.symlink_to(proj, target_is_directory=True)
+    else:
+        (wt / ".git").unlink()
+        (wt / ".git").symlink_to(proj / ".git")
+    (proj / ".git").write_text(f"gitdir: {entry}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+
+
+def test_a_submodule_whose_worktree_names_another_folder_mounts_nothing(home):
+    lib = _private_repo(home)
+    proj = home / "src" / "proj"
+    subprocess.run(["git", "config", "--file", str(lib / ".git" / "config"),
+                    "core.worktree", str(home / "elsewhere")], check=True)
+    (proj / ".git").write_text(f"gitdir: {lib / '.git'}\n")
+    git, notes = _proj_git_mounts(home, proj)
+    assert git == []
+
+
+def test_git_runs_with_fsmonitor_off(home, monkeypatch):
+    seen = []
+    real = subprocess.run
+
+    def spy(argv, *a, **k):
+        seen.append(argv)
+        return real(argv, *a, **k)
+    monkeypatch.setattr(settings.subprocess, "run", spy)
+    _plan(home)
+    assert seen and all(a[:3] == ["git", "-c", "core.fsmonitor=false"] for a in seen
+                        if a[0] == "git")
+
+
+def test_a_mount_in_another_case_still_covers_a_worktree_git_folder(home):
+    if not settings.path_inside("/A", "/a"):
+        pytest.skip("this volume compares names with case")
+    repo = home / "src" / "R"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=repo)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty",
+         "-m", "x", cwd=repo)
+    wt = home / "src" / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=repo)
+    plan = _plan(home, cwd=str(wt), cli_mounts=[str(home / "SRC" / "R") + ":ro"])
+    assert not [m for m in plan.mounts if m.kind == "git"]     # the ro mount covers it
 
 
 # Protected folders and memory

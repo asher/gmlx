@@ -11,9 +11,43 @@ lock passes to a ``container`` child process.
 from __future__ import annotations
 
 import fcntl
+import functools
 import os
+import unicodedata
 from pathlib import Path
 from typing import Callable
+
+
+# pathconf name of _PC_CASE_SENSITIVE on macOS, which Python does not list.
+_PC_CASE_SENSITIVE = 11
+
+
+@functools.lru_cache(maxsize=256)
+def _case_insensitive(folder: str) -> bool:
+    """Whether the volume that holds ``folder`` compares names without
+    case, as APFS does by default."""
+    p = folder
+    while p != "/" and not os.path.exists(p):
+        p = os.path.dirname(p)
+    try:
+        return os.pathconf(p, _PC_CASE_SENSITIVE) == 0
+    except (OSError, ValueError):
+        return False
+
+
+def _fold(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def path_inside(path: str, folder: str) -> bool:
+    """True when ``path`` is ``folder`` or lies inside it, by whole path
+    components. On a volume that ignores case, as APFS does, ``~/SRC`` and
+    ``~/src`` are one folder, so the names are compared the same way."""
+    if folder == "/":
+        return path.startswith("/")
+    if _case_insensitive(folder):
+        path, folder = _fold(path), _fold(folder)
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
 def data_path() -> Path:

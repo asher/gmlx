@@ -89,7 +89,7 @@ def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",
                         lambda name: "/usr/bin/pi" if name == "pi" else which(name))
-    _user_config(env.home, "launch:\n  container:\n    bogus: 1\n")
+    _user_config(env.home, "launch:\n  container:\n    network: offline\n")
     calls = []
     assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     assert calls and not env.runs
@@ -119,6 +119,49 @@ def test_a_broken_block_that_enables_container_mode_never_runs_on_the_mac(env, c
     assert ".config/gmlx/gmlx.yaml" in err
     assert _run(["pi", "--no-container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     assert calls                                            # asked for the Mac
+
+
+@pytest.mark.parametrize("block", [
+    "launch:\n  container:\n    enabled: \"yes\"\n",
+    "launch:\n  container:\n    enabled: 1\n",
+    "launch:\n  container:\n    enabled: false\n    bogus: 1\n",
+    "launch:\n  container:\n    clients:\n      pi: true\n",
+    "launch:\n  container: true\n",
+    "launch:\n  container: [enabled]\n",
+    "launch:\n  container:\n    clients: [pi]\n",
+    "launch:\n  containers:\n    enabled: true\n",
+    "launch:\n  container:\n    enable: true\n",
+    "launch: true\n",
+    "- launch\n",
+    "launch:\n  container:\n    enabled: true\n    clients:\n      pi:\n"
+    "        enabled: false\n        bogus: 1\n",
+])
+def test_every_unclear_enabled_shape_refuses(env, capsys, monkeypatch, block):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, block)
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    assert not calls and not env.runs
+    assert "--no-container" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("block", [
+    "launch:\n  container:\n    enabled: false\n    memory: lots\n",
+    "launch:\n  container:\n    memory: lots\n",
+    "launch:\n  container:\n    clients:\n      pi:\n        enabled: false\n"
+    "        memory: lots\n",
+])
+def test_a_broken_block_that_clearly_leaves_the_client_off_runs_on_the_mac(
+        env, capsys, monkeypatch, block):
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, block)
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls and "ignoring the launch settings" in capsys.readouterr().err
 
 
 def test_a_broken_block_that_enables_another_client_runs_this_one_on_the_mac(env, capsys,
