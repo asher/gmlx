@@ -48,7 +48,17 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     view: Any = _L1View(batch.model, manager, mode)
     ids_list = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
     prompt_kwargs = batch._prompt_kwargs or {}
-    extra_hash = view._apc_extra_hash(prompt_kwargs)
+    cold = (getattr(batch, "_apc_meta", None) or [None])[0]
+    if isinstance(cold, dict) and "extra_hash" in cold:
+        # The stock merge drops `_apc_semantic_hash` from the batch kwargs
+        # and the server never forwards pixel_values, so a salt computed
+        # from them misses the image, tenant and LoRA salt. The cold meta
+        # holds the row's salt; the stock helpers read it back from
+        # `_apc_semantic_hash`.
+        extra_hash = int(cold["extra_hash"])
+        prompt_kwargs = {**prompt_kwargs, "_apc_semantic_hash": extra_hash}
+    else:
+        extra_hash = view._apc_extra_hash(prompt_kwargs)
     ckpt = _ckpt_active(batch.model, mode, int(manager.block_size))
     held_blocks = []
     l1_prefix = 0

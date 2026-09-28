@@ -266,26 +266,40 @@ def _entry_nbytes(kv_snaps: list[Any], hidden: mx.array) -> int:
     return total
 
 
+def _ids_tuple(token_ids: mx.array) -> tuple[int, ...]:
+    row = token_ids[0] if token_ids.ndim == 2 else token_ids
+    return tuple(int(x) for x in row.tolist())
+
+
 class _PrefixEntry:
-    __slots__ = ("token_ids", "kv_snaps", "hidden", "nbytes")
+    __slots__ = ("salt", "token_ids", "kv_snaps", "hidden", "nbytes")
 
     def __init__(
         self,
+        salt: Any,
         token_ids: tuple[int, ...],
         kv_snaps: list[Any],
         hidden: mx.array,
     ):
+        self.salt = salt
         self.token_ids = token_ids
         self.kv_snaps = kv_snaps
         self.hidden = hidden
         self.nbytes = _entry_nbytes(kv_snaps, hidden)
 
+    @property
+    def key(self) -> tuple[Any, tuple[int, ...]]:
+        return (self.salt, self.token_ids)
+
 
 class SpecPrefixCache:
-    """LRU cache of target KV + hidden snapshots keyed by token prefix.
+    """LRU cache of target KV + hidden snapshots keyed by salt and token
+    prefix.
 
     Designed for the chat use case where each turn shares system_prompt +
-    conversation_history as a token prefix with the previous turn.
+    conversation_history as a token prefix with the previous turn. The
+    salt covers what the ids do not show (an image's pixels, a LoRA
+    adapter): an entry matches only a lookup with an equal salt.
 
     Parameters
     ----------
@@ -307,7 +321,8 @@ class SpecPrefixCache:
 
     def __init__(self, max_entries: int = 4, min_prefix: int = 32,
                  max_bytes: int = 8 << 30):
-        self._entries: OrderedDict[tuple[int, ...], _PrefixEntry] = OrderedDict()
+        self._entries: OrderedDict[tuple[Any, tuple[int, ...]], _PrefixEntry] = (
+            OrderedDict())
         self._max = max_entries
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
@@ -315,32 +330,29 @@ class SpecPrefixCache:
         _LIVE_CACHES.add(self)
 
     def lookup(
-        self, token_ids: mx.array
+        self, token_ids: mx.array, salt: Any = 0
     ) -> tuple[int, _PrefixEntry] | None:
-        """Find the longest cached prefix matching token_ids.
+        """Find the longest cached prefix matching token_ids under ``salt``.
 
         Returns (prefix_len, entry) on hit, None on miss.  Requires at least
         one suffix token (``prefix_len < len(query)``) so the caller always
         has tokens to forward through the model for logits + shared_kv.
         Moves the matched entry to the head of the LRU on access.
         """
-        if token_ids.ndim == 2:
-            ids = tuple(int(x) for x in token_ids[0].tolist())
-        else:
-            ids = tuple(int(x) for x in token_ids.tolist())
+        ids = _ids_tuple(token_ids)
 
         best: tuple[int, _PrefixEntry] | None = None
         best_len = 0
-        for key, entry in self._entries.items():
-            n = len(key)
-            if n >= len(ids) or n <= best_len:
+        for entry in self._entries.values():
+            n = len(entry.token_ids)
+            if entry.salt != salt or n >= len(ids) or n <= best_len:
                 continue
-            if ids[:n] == key:
+            if ids[:n] == entry.token_ids:
                 best = (n, entry)
                 best_len = n
 
         if best is not None and best_len >= self._min_prefix:
-            self._entries.move_to_end(best[1].token_ids)
+            self._entries.move_to_end(best[1].key)
             global _HITS, _HIT_TOKENS
             _HITS += 1
             _HIT_TOKENS += best_len
@@ -352,24 +364,24 @@ class SpecPrefixCache:
         token_ids: mx.array,
         prompt_cache: list,
         hidden: mx.array,
+        salt: Any = 0,
     ) -> None:
-        """Cache target KV state + hidden for this token sequence.
+        """Cache target KV state + hidden for this token sequence under
+        ``salt``.
 
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
         target hidden. Arrays are evaluated/materialized so they survive
         subsequent in-place cache mutation during decode.
         """
-        if token_ids.ndim == 2:
-            ids = tuple(int(x) for x in token_ids[0].tolist())
-        else:
-            ids = tuple(int(x) for x in token_ids.tolist())
+        ids = _ids_tuple(token_ids)
 
         if len(ids) < self._min_prefix:
             return
 
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
-        entry = _PrefixEntry(ids, kv_snaps, hidden)
+        entry = _PrefixEntry(salt, ids, kv_snaps, hidden)
+        key = entry.key
 
         # Budget check before materializing: nbytes needs only shapes, and
         # skipping the eval avoids a doomed multi-GB copy of deep-context KV.
@@ -384,11 +396,11 @@ class SpecPrefixCache:
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
-        if ids in self._entries:
-            old = self._entries.pop(ids)
+        if key in self._entries:
+            old = self._entries.pop(key)
             self._total_bytes -= old.nbytes
-        self._entries[ids] = entry
-        self._entries.move_to_end(ids)
+        self._entries[key] = entry
+        self._entries.move_to_end(key)
         self._total_bytes += entry.nbytes
         global _STORES
         _STORES += 1
@@ -397,11 +409,11 @@ class SpecPrefixCache:
             len(self._entries) > self._max
             or self._total_bytes > self._max_bytes
         ):
-            evicted_key, evicted = self._entries.popitem(last=False)
+            _, evicted = self._entries.popitem(last=False)
             self._total_bytes -= evicted.nbytes
             _log.debug(
                 "APC evict prefix len=%d (%.1f MB)",
-                len(evicted_key), evicted.nbytes / 2**20,
+                len(evicted.token_ids), evicted.nbytes / 2**20,
             )
 
     def restore(self, entry: _PrefixEntry, prompt_cache: list) -> None:

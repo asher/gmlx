@@ -41,6 +41,50 @@ from gmlx.spec.engine import (
 
 _log = logging.getLogger(__name__)
 
+# Prompt kwargs that carry media payloads (the stock APC salt hashes the
+# first three; the grids come with them).
+_MEDIA_PROMPT_KWARGS = ("pixel_values", "pixel_values_videos", "input_features",
+                        "image_grid_thw", "video_grid_thw")
+
+
+def _carries_media(batch) -> bool:
+    kwargs = batch._prompt_kwargs or {}
+    if any(kwargs.get(k) is not None for k in _MEDIA_PROMPT_KWARGS):
+        return True
+    config = getattr(batch.model, "config", None)
+    if config is None:
+        return False
+    from mlx_vlm import apc as _apc
+
+    # The stock reader names image and video placeholders only.
+    media_ids = _apc.multimodal_token_ids_from_config(config) | {
+        int(getattr(config, a)) for a in ("audio_token_id", "audio_token_index")
+        if getattr(config, a, None) is not None}
+    return bool(media_ids) and any(
+        int(t) in media_ids for t in batch._input_ids[0].tolist())
+
+
+def _l0_salt(batch):
+    """The L0 key salt for a B=1 MTP batch, or None when L0 must skip it.
+
+    Token ids do not identify a prompt's KV. The stock cold meta carries
+    the row's APC salt (`_apc_extra_hash`: the server's image hash, the
+    tenant and the gmlx LoRA salt). Without a cold meta the server hashed
+    no image, so a prompt that carries media skips L0. The row's adapter
+    scales join the key either way, since lora_rows salts only when an
+    APC manager is set.
+    """
+    meta = (getattr(batch, "_apc_meta", None) or [None])[0]
+    if isinstance(meta, dict) and "extra_hash" in meta:
+        stock = int(meta["extra_hash"])
+    elif _carries_media(batch):
+        return None
+    else:
+        stock = 0
+    uids = getattr(batch, "uids", None) or ()
+    scales = lora_rows.scales_for(uids[0]) if uids else None
+    return (stock, tuple(scales) if scales and any(scales) else None)
+
 
 def _mtp_prefill_init(batch) -> None:
     """One-time APC lookup + prefix trim for an MTP prompt batch.
@@ -58,6 +102,8 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_full_input_ids = batch._input_ids
     batch._mtp_chunk_hiddens = []
     batch._mtp_l1_prefix_len = 0
+    # Before the L1 arm rewrites the cold meta.
+    batch._mtp_l0_salt = _l0_salt(batch)
 
     if batch._inputs_embeds is None:
         _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
@@ -104,8 +150,8 @@ def _mtp_prefill_init(batch) -> None:
 
     restored = 0
     spec_cache = _get_spec_prefix_cache(batch.model)
-    if spec_cache is not None:
-        hit = spec_cache.lookup(batch._input_ids)
+    if spec_cache is not None and batch._mtp_l0_salt is not None:
+        hit = spec_cache.lookup(batch._input_ids, salt=batch._mtp_l0_salt)
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)
@@ -211,9 +257,11 @@ def _mtp_seed_stream_init(batch) -> None:
         "len": 0,
         "active": True,
         # Retain chunk hiddens alongside streaming whenever an L0 store can
-        # arm: the store needs full-prompt hidden. APC off => no retention
-        # while streaming (the capture-memory win lands in that config).
-        "retain": _get_spec_prefix_cache(batch.model) is not None,
+        # arm: the store needs full-prompt hidden. APC off, or a prompt L0
+        # skips => no retention while streaming (the capture-memory win
+        # lands there).
+        "retain": (_get_spec_prefix_cache(batch.model) is not None
+                   and getattr(batch, "_mtp_l0_salt", None) is not None),
         "retained_from": 0,
     }
     batch._mtp_seed_ctx = ctx
@@ -622,9 +670,11 @@ def install_full_prompt_mtp_prefill() -> None:
         full_covers_prompt = seed_len == 0 or (
             bool(chunk_hiddens)
             and int(seed_ctx.get("retained_from") or 0) == 0)
+        l0_salt = getattr(self, "_mtp_l0_salt", None)
         spec_cache = (
             _get_spec_prefix_cache(self.model)
             if b == 1 and l1_prefix == 0 and full_covers_prompt
+            and l0_salt is not None
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
@@ -635,7 +685,8 @@ def install_full_prompt_mtp_prefill() -> None:
             limit = getattr(self.draft_model, "hidden_capture_limit", None)
             store_hidden = (full_hidden if not limit
                             else full_hidden[:, -int(limit):])
-            spec_cache.store(full_ids, result.prompt_cache, store_hidden)
+            spec_cache.store(full_ids, result.prompt_cache, store_hidden,
+                             salt=l0_salt)
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]),
