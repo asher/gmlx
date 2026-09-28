@@ -55,8 +55,6 @@ LANG_EDITS = [
      "        if input_ids is not None and (\n"),
 ]
 GD_EDITS = [
-    ('name=f"qwen3_5_gated_delta_with_states{suffix}"',
-     'name=f"gmlx_qwen3_5_gated_delta_with_states{suffix}"'),
     ("import mlx.nn as nn\n", "import mlx.nn as nn\n\nfrom gmlx.eval_guard import guard\n"),
     ("        mx.async_eval(Y, S)\n",
      '        guard.async_eval(Y, S, site="gated_delta_chunked", owner="scratch")\n'),
@@ -131,13 +129,10 @@ temporal patch group.
     out["gated_delta.py"] = ("qwen3_5/gated_delta.py", """mlx-vlm 0.6.15 gated-delta ops and kernels for the vendored qwen3.5 model.
 
 Includes the state-capture, state-replay and accept-states kernels the
-vendored rollback runs. Edits to the upstream file: the state-capture
-kernel is named ``gmlx_qwen3_5_gated_delta_with_states``, because mlx-vlm
-0.7.3 compiles a kernel under the upstream name with the same template list
-and a different state stride, and MLX keys compiled kernels by name and
-template values; the ``async_eval`` in ``gated_delta_chunked`` goes through
-``gmlx.eval_guard`` (the graph-transformation refusal it catches schedules
-nothing, so the returned arrays are not async survivors); comments are ASCII.
+vendored rollback runs. Edits to the upstream file: the ``async_eval`` in
+``gated_delta_chunked`` goes through ``gmlx.eval_guard`` (the
+graph-transformation refusal it catches schedules nothing, so the returned
+arrays are not async survivors), and comments are ASCII.
 """, gd)
 
     out["config.py"] = ("qwen3_5/config.py", """mlx-vlm 0.6.15 qwen3.5 dense ``TextConfig``, the text half only.

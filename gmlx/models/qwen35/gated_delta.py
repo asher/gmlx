@@ -5,13 +5,10 @@
 """mlx-vlm 0.6.15 gated-delta ops and kernels for the vendored qwen3.5 model.
 
 Includes the state-capture, state-replay and accept-states kernels the
-vendored rollback runs. Edits to the upstream file: the state-capture
-kernel is named ``gmlx_qwen3_5_gated_delta_with_states``, because mlx-vlm
-0.7.3 compiles a kernel under the upstream name with the same template list
-and a different state stride, and MLX keys compiled kernels by name and
-template values; the ``async_eval`` in ``gated_delta_chunked`` goes through
-``gmlx.eval_guard`` (the graph-transformation refusal it catches schedules
-nothing, so the returned arrays are not async survivors); comments are ASCII.
+vendored rollback runs. Edits to the upstream file: the ``async_eval`` in
+``gated_delta_chunked`` goes through ``gmlx.eval_guard`` (the
+graph-transformation refusal it catches schedules nothing, so the returned
+arrays are not async survivors), and comments are ASCII.
 """
 
 from functools import partial
@@ -515,7 +512,7 @@ def _make_gated_delta_with_states_kernel(has_mask: bool = False):
         inputs.append("mask")
     suffix = "_mask" if has_mask else ""
     return mx.fast.metal_kernel(
-        name=f"gmlx_qwen3_5_gated_delta_with_states{suffix}",
+        name=f"qwen3_5_gated_delta_with_states{suffix}",
         input_names=inputs,
         output_names=["y", "state_out", "states"],
         source=source,
