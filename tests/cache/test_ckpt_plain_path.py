@@ -105,11 +105,13 @@ def test_plain_init_trims_mrope_position_ids_on_their_sequence_axis():
 
 def _progress_batch(b, prompt_tokens):
     """The fields the stock ``prompt_progress`` reads, as the stock init
-    and the prefill timer set them."""
+    and the prefill timer set them, and the row ids emptied as the stock
+    ``generate`` leaves them before the server reads the progress."""
     b._prompt_uids = list(b.uids)
     b._prompt_tokens_per_row = [prompt_tokens] * len(b.uids)
     b._cached_tokens_per_row = [0] * len(b.uids)
     b._prompt_time_s = 0.5
+    b.uids = []
     return b
 
 

@@ -780,8 +780,13 @@ _RESTORED_PROGRESS_FLAG = "_kq_restored_prompt_progress"
 def _owned_restore_len(batch) -> int:
     """Tokens a gmlx-owned tier (the checkpoint tier, the MTP L0 or L1
     ladder) restored into a single-row prompt batch. These trim the
-    prompt in place and leave stock's per-row cached count at 0."""
-    if len(getattr(batch, "uids", None) or ()) != 1:
+    prompt in place and leave stock's per-row cached count at 0. The
+    stock ``generate`` empties ``uids`` before the server reads the
+    progress, so the rows come from ``_prompt_uids``."""
+    rows = getattr(batch, "_prompt_uids", None)
+    if rows is None:
+        rows = getattr(batch, "uids", None)
+    if len(rows or ()) != 1:
         return 0
     rec = getattr(batch, "_kq_apc_restored", None)
     n = int(rec[0]) if rec else 0
