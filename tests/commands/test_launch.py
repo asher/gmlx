@@ -817,6 +817,42 @@ def test_load_yaml_non_mapping_raises(tmp_path):
     assert "refusing to overwrite" in str(e.value)
 
 
+@pytest.mark.parametrize("load, name", [("_load_yaml", "big.yml"), ("_load_json", "big.json")])
+def test_a_config_past_the_parse_cap_is_refused_before_parsing(tmp_path, monkeypatch,
+                                                                load, name):
+    p = tmp_path / name
+    p.write_text("a: " + "x" * (launch.CONFIG_PARSE_MAX + 1) + "\n")
+    monkeypatch.setattr(launch.yaml, "safe_load",
+                        lambda text: pytest.fail("parsed a file past the cap"))
+    monkeypatch.setattr(launch.json, "loads",
+                        lambda text: pytest.fail("parsed a file past the cap"))
+    with pytest.raises(launch.LaunchError, match="larger than 256 KiB"):
+        getattr(launch, load)(p)
+
+
+@pytest.mark.parametrize("build, kwargs, what", [
+    ("build_omp_configs", {"existing_models": {"providers": ["a", "b"]}},
+     "omp's models.yml has providers as a list"),
+    ("build_omp_configs", {"existing_config": {"modelRoles": "x"}, "default_model": "m"},
+     "omp's config.yml has modelRoles as a str"),
+    ("build_pi_configs", {"existing_models": {"providers": [1]}},
+     "pi's models.json has providers as a list"),
+])
+def test_a_merged_config_of_another_shape_is_refused(build, kwargs, what):
+    """A client in a container can write any shape into its own config. A
+    mapping the merge needs that holds something else is refused, never a
+    TypeError on the Mac."""
+    with pytest.raises(launch.LaunchError, match=what):
+        getattr(launch, build)("http://127.0.0.1:8080/v1", [{"id": "m"}], **kwargs)
+
+
+def test_hermes_providers_of_another_shape_are_refused():
+    for existing in ({"providers": ["x"]}, {"providers": {"custom": "y"}}):
+        with pytest.raises(launch.LaunchError, match="refusing to overwrite"):
+            launch.build_hermes_config("http://127.0.0.1:8080/v1", default_model="m",
+                                       existing=existing)
+
+
 # omp: _launch_omp flow (faked probe + recording exec)
 def test_launch_omp_writes_both_files_and_execs(monkeypatch, tmp_path):
     _fake_pi_probe(monkeypatch)                              # which() -> /usr/bin/<name>

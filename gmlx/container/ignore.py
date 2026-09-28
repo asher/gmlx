@@ -26,7 +26,12 @@ _EXACT, _PREFIX, _SUFFIX, _REGEXP = range(4)
 _ESCAPE = set(".+()|{}$")
 # The largest ignore file read, and the most patterns in it.
 IGNORE_MAX = 1 << 20
-PATTERNS_MAX = 1000
+PATTERNS_MAX = 200
+# The most matching work one rebuild check spends on the ignore patterns,
+# counted as the pattern states each path character moves, about 10 to 50
+# million a second. A check past it stops using the patterns, so a crafted
+# ignore file cannot hold up a launch.
+WORK_MAX = 50_000_000
 # The most unbounded repeats in a pattern with a character class, which is
 # matched with ``re``. Two keep a match of a long path quick.
 _CLASS_REPEATS_MAX = 2
@@ -38,6 +43,10 @@ _SIMPLE_CLASS = re.compile(r"\[\^?[^\]\\\[]+\]")
 
 class UnsupportedPattern(ValueError):
     """A pattern outside what this port matches the way BuildKit does."""
+
+
+class TooMuchWork(UnsupportedPattern):
+    """Matching the patterns passed :data:`WORK_MAX` in one check."""
 
 
 def _clean(path: str) -> str:
@@ -145,7 +154,12 @@ class _Pattern:
             else:
                 self.steps = steps
 
-    def match(self, path: str) -> bool:
+    def match(self, path: str, meter: list[int] | None = None) -> bool:
+        """Whether the pattern matches ``path``. ``meter[0]`` grows by the
+        work the match took."""
+        if meter is not None and self.steps is None:
+            # A regular expression here has at most two unbounded repeats.
+            meter[0] += len(path) * (len(self.cleaned) if self.regex is not None else 1) + 1
         if self.kind == _EXACT:
             return path == self.cleaned
         if self.kind == _PREFIX:
@@ -156,12 +170,13 @@ class _Pattern:
                 return True
             return suffix.startswith("/") and path == suffix[1:]
         if self.steps is not None:
-            return _run_steps(self.steps, path)
+            return _run_steps(self.steps, path, meter)
         assert self.regex is not None
         return self.regex.match(path) is not None
 
 
-def _run_steps(steps: list[tuple[int, str]], path: str) -> bool:
+def _run_steps(steps: list[tuple[int, str]], path: str,
+               meter: list[int] | None = None) -> bool:
     """Whether ``steps`` match the whole of ``path``, as the regular
     expression that :meth:`_Pattern.compile` builds from them matches it.
     The set of reachable steps moves one character at a time, so the time is
@@ -181,6 +196,8 @@ def _run_steps(steps: list[tuple[int, str]], path: str) -> bool:
 
     states = close({0})
     for c in path:
+        if meter is not None:
+            meter[0] += len(states)
         nxt: set[int] = set()
         for s in states:
             if s < 0:                          # inside (.*/)?
@@ -219,9 +236,11 @@ def _run_steps(steps: list[tuple[int, str]], path: str) -> bool:
 class Matcher:
     """The patterns of one ignore file, in order."""
 
-    def __init__(self, patterns: list[str]):
+    def __init__(self, patterns: list[str], work_max: int | None = None):
         if len(patterns) > PATTERNS_MAX:
             raise UnsupportedPattern(f"it holds more than {PATTERNS_MAX} patterns")
+        self._meter = [0]
+        self.work_max = WORK_MAX if work_max is None else work_max
         self.patterns: list[_Pattern] = []
         for raw in patterns:
             p = raw.strip()
@@ -248,16 +267,26 @@ class Matcher:
         for pat in self.patterns:
             if pat.exclusion != matched:
                 continue
-            hit = pat.match(path)
+            hit = self._match(pat, path)
             if not hit and parent != ".":
                 for i in range(len(dirs)):
-                    if pat.match("/".join(dirs[:i + 1])):
+                    if self._match(pat, "/".join(dirs[:i + 1])):
                         hit = True
                         break
             if hit:
                 matched = not pat.exclusion
         return matched
 
+
+    @property
+    def work(self) -> int:
+        return self._meter[0]
+
+    def _match(self, pat: _Pattern, path: str) -> bool:
+        hit = pat.match(path, self._meter)
+        if self._meter[0] > self.work_max:
+            raise TooMuchWork("matching its patterns takes too long")
+        return hit
 
     def excludes_all_below(self, folder: str) -> bool:
         """Whether ``folder`` and every path below it are excluded, so a walk

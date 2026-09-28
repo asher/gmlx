@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from gmlx.config import LaunchClientCfg, LaunchContainerCfg
-from gmlx.container import cli, images
+from gmlx.container import cli, ignore, images
 from gmlx.container.state import FileLock
 
 D1 = "sha256:" + "1" * 64
@@ -537,6 +537,23 @@ def test_unsupported_ignore_pattern_counts_every_file(fake_container, tmp_path):
     assert images.build_hash(plan, {}, _quiet) != before
 
 
+def test_an_ignore_file_past_the_work_budget_counts_every_file(fake_container, tmp_path,
+                                                               monkeypatch):
+    ctx, plan = _user_build(tmp_path, text="FROM debian\n")
+    (ctx / ".dockerignore").write_text("node_modules\n*a*a*a*b\n")
+    (ctx / "node_modules").mkdir()
+    (ctx / "node_modules" / "a.js").write_text("1")
+    for i in range(20):
+        (ctx / f"file{i}.txt").write_text("x")
+    monkeypatch.setattr(ignore, "WORK_MAX", 50)
+    said = []
+    before = images.build_hash(plan, {}, said.append)
+    assert [line for line in said if "takes too long" in line
+            and "every context file counts" in line]
+    (ctx / "node_modules" / "a.js").write_text("22")        # now counted
+    assert images.build_hash(plan, {}, _quiet) != before
+
+
 def test_packages_with_build_need_the_own_base(tmp_path):
     with pytest.raises(images.ImageError, match="FROM gmlx.invalid/launch-pi:base"):
         _user_build(tmp_path, text="FROM debian\n", packages=["make"])
@@ -602,6 +619,27 @@ def test_a_build_folder_the_client_can_write_is_refused(tmp_path, layout):
     plan = images.resolve_image("pi", LaunchClientCfg(build=build), cfg,
                                 writable=[os.path.realpath(other)])
     assert plan.kind == "build"
+
+
+@pytest.mark.parametrize("alias", ["build", "share"])
+def test_a_firmlink_alias_never_hides_a_build_folder_in_a_share(tmp_path, alias):
+    """realpath keeps /System/Volumes/Data, so the refusal compares the form
+    macOS gives each path."""
+    proj = tmp_path / "proj"
+    ctx = proj / "ctx"
+    ctx.mkdir(parents=True)
+    (ctx / "Containerfile").write_text("FROM debian\n")
+    data = "/System/Volumes/Data" + os.path.realpath(ctx)
+    if not os.path.isdir(data):
+        pytest.skip("no /System/Volumes/Data firmlink here")
+    build, share = str(ctx), os.path.realpath(proj)
+    if alias == "build":
+        build = data
+    else:
+        share = "/System/Volumes/Data" + share
+    with pytest.raises(images.ImageError, match="shares read-write"):
+        images.resolve_image("pi", LaunchClientCfg(build=build), LaunchContainerCfg(),
+                             writable=[share])
 
 
 def test_a_containerfile_that_is_a_pipe_is_refused_at_once(tmp_path):

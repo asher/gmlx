@@ -47,9 +47,15 @@ CONNECTIONS_MAX = 256
 # seconds closes. Each one holds a connection to the target too, such as the
 # gmlx server, so idle guest connections cannot use up its descriptors. Once
 # bytes flow there is no deadline, so a quiet stream stays open, until one
-# side ends its half: from then on the connection closes once no byte moves
-# for this long, since the other side may never end its own.
+# side ends its half. Once the target ends its half, the answer is complete,
+# and the connection closes when no byte moves for this long, since the
+# client may never end its own.
 IDLE_DEADLINE = 30.0
+# Once the client ends its half, it waits for an answer, which the target
+# can take minutes to compute and send, such as a long reply that does not
+# stream. So the connection waits this long with no byte before it closes,
+# and a target that never answers or ends cannot hold it for ever.
+ANSWER_DEADLINE = 3600.0
 PROBE_TIMEOUT = 1.0
 
 
@@ -336,7 +342,8 @@ class _Pair:
     def __init__(self, loop: RelayLoop, down: socket.socket, targets: list,
                  name: str, owner: "Relay | None" = None,
                  idle_deadline: float | None = IDLE_DEADLINE,
-                 idle_until_head: bool = False):
+                 idle_until_head: bool = False,
+                 answer_deadline: float = ANSWER_DEADLINE):
         self.loop, self.down, self.name, self.owner = loop, down, name, owner
         self.targets = list(targets)
         self.tried: list = []
@@ -352,8 +359,8 @@ class _Pair:
         # whole request head came from the client.
         self.moved = False
         self.idle_deadline = idle_deadline
+        self.answer_deadline = answer_deadline
         self.last = time.monotonic()      # when a byte last moved
-        self.ended = False                # one side ended its half
         self.until_head = idle_until_head
         self.head_tail = b""
         down.setblocking(False)
@@ -373,23 +380,37 @@ class _Pair:
         if not self.closed and not self.moved:
             self.close()
 
+    def _quiet_limit(self) -> float | None:
+        """How long the pair may stay with no byte moving, once a side has
+        ended its half. While only the client has ended, an answer is
+        pending, so the limit is the long answer deadline. Once the target
+        has ended, the answer is complete and the idle deadline applies."""
+        if self.idle_deadline is None:
+            return None
+        if self.up_eof:
+            return self.idle_deadline
+        if self.down_eof:
+            return max(self.idle_deadline, self.answer_deadline)
+        return None
+
     def _one_side_ended(self) -> None:
-        """Start the quiet deadline once, when the first side ends its half."""
-        if self.ended or self.idle_deadline is None:
-            return
-        self.ended = True
-        self.loop.call_later(self.idle_deadline, self._expire_quiet)
+        """Start the quiet deadline for the side that just ended its half.
+        A second end shortens the limit, so it arms its own timer."""
+        limit = self._quiet_limit()
+        if limit is not None:
+            self.loop.call_later(limit, self._expire_quiet)
 
     def _expire_quiet(self) -> None:
-        """Close the pair when no byte moved for the idle time, else wait
-        until that time has passed since the last byte."""
-        if self.closed or self.idle_deadline is None:
+        """Close the pair when no byte moved for the current limit, else
+        wait until that time has passed since the last byte."""
+        limit = self._quiet_limit()
+        if self.closed or limit is None:
             return
         quiet = time.monotonic() - self.last
-        if quiet >= self.idle_deadline:
+        if quiet >= limit:
             self.close()
         else:
-            self.loop.call_later(self.idle_deadline - quiet, self._expire_quiet)
+            self.loop.call_later(limit - quiet, self._expire_quiet)
 
     def _note_down(self, data: bytes) -> None:
         """Mark the pair as moving: at the first byte from the client, or
@@ -567,7 +588,10 @@ class Relay:
 
     A connection that moves no byte within ``idle_deadline`` seconds is
     closed. With ``idle_until_head`` it must instead send a whole HTTP
-    request head, ending in an empty line, in that time. At most
+    request head, ending in an empty line, in that time. After the client
+    ends its half, the connection closes once no byte moved for
+    ``answer_deadline`` seconds, and after the target ends its half, for
+    ``idle_deadline`` seconds. At most
     ``accept_rate`` connections a second are accepted, after a first
     ``accept_burst``."""
 
@@ -576,9 +600,11 @@ class Relay:
                  max_connections: int = CONNECTIONS_MAX,
                  idle_deadline: float | None = IDLE_DEADLINE,
                  idle_until_head: bool = False,
+                 answer_deadline: float = ANSWER_DEADLINE,
                  accept_rate: float = ACCEPT_RATE, accept_burst: int = ACCEPT_BURST):
         self.loop = loop
         self.idle_until_head = idle_until_head
+        self.answer_deadline = answer_deadline
         self.listen = listen
         self.targets = list(connect) if isinstance(connect, list) else [connect]
         self.name = name or _describe(listen)
@@ -621,7 +647,8 @@ class Relay:
             try:
                 _Pair(self.loop, conn, self.targets, self.name, owner=self,
                       idle_deadline=self.idle_deadline,
-                      idle_until_head=self.idle_until_head)
+                      idle_until_head=self.idle_until_head,
+                      answer_deadline=self.answer_deadline)
             except OSError as e:
                 # A socket for the upstream side could not be made.
                 self.loop.log(f"{self.name}: cannot relay a connection ({e})")

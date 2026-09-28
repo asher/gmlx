@@ -35,7 +35,7 @@ from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 
 from . import cli, ignore
 from .cli import ContainerError, ImageInfo
-from .state import FileLock, LockHeld, images_dir, path_inside
+from .state import FileLock, LockHeld, canonical, images_dir, path_inside
 from .text import printable
 
 DOMAIN = "gmlx.invalid"
@@ -225,8 +225,10 @@ def resolve_image(client: str, cfg: LaunchClientCfg, container: LaunchContainerC
 
 def _refuse_writable_build(client: str, file: Path, context: Path,
                            writable: Sequence[str]) -> None:
-    real_file, real_context = os.path.realpath(file), os.path.realpath(context)
-    for share in writable:
+    # The form macOS gives a path, so a /System/Volumes/Data alias of a share
+    # or of the build folder still compares equal.
+    real_file, real_context = canonical(file), canonical(context)
+    for share in (canonical(w) for w in writable):
         if (path_inside(real_file, share) or path_inside(real_context, share)
                 or path_inside(share, real_context)):
             raise ImageError(
@@ -299,8 +301,15 @@ def _context_entries(plan: ImagePlan, say: Say) -> dict[str, str]:
     matcher, notice = ignore.load(plan.containerfile, plan.context)
     if notice:
         say(notice)
+    try:
+        files = context_files(plan.context, matcher)
+    except ignore.TooMuchWork as e:
+        # Every file counts then, so a rebuild is never missed.
+        say(f"[launch] {_shown(ignore.ignore_file(plan.containerfile, plan.context))}: "
+            f"{e}, so every context file counts toward the rebuild check.")
+        files = context_files(plan.context, None)
     entries: dict[str, str] = {}
-    for rel, st in context_files(plan.context, matcher):
+    for rel, st in files:
         if st is None:
             entries[rel] = "unreadable"
             continue

@@ -623,10 +623,12 @@ def _released_to_zero(r):
 @pytest.mark.parametrize("sent", [b"", b"x"])
 def test_a_pair_the_client_ended_closes_once_quiet(loop, tmp_path, sent):
     """The client ends its half and the target never answers or closes. The
-    pair must not linger, whether or not a byte moved before."""
+    pair must not linger, whether or not a byte moved before: it closes at
+    the answer deadline."""
     srv, kept = _mute_server()
     path = str(tmp_path / "linger.sock")
-    r = relay.Relay(loop, path, srv.getsockname(), name="forward 5432", idle_deadline=0.3)
+    r = relay.Relay(loop, path, srv.getsockname(), name="forward 5432", idle_deadline=0.3,
+                    answer_deadline=0.3)
     gone = _released_to_zero(r)
     c = _unix_client(path)
     if sent:
@@ -638,11 +640,81 @@ def test_a_pair_the_client_ended_closes_once_quiet(loop, tmp_path, sent):
         k.close()
 
 
+def test_a_slow_answer_after_the_client_ended_still_arrives(loop, tmp_path):
+    """The client sends a request and ends its half, and the target thinks
+    past the idle deadline before it answers, as a long reply that does not
+    stream does. The answer must reach the client."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    answer = threading.Event()
+
+    def serve():
+        conn, _ = srv.accept()
+        while conn.recv(1024):
+            pass                                   # read until the client ended
+        answer.wait(10)
+        conn.sendall(b"the answer")
+        conn.close()
+    threading.Thread(target=serve, daemon=True).start()
+    path = str(tmp_path / "slow.sock")
+    relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
+    c = _unix_client(path)
+    c.sendall(b"GET / HTTP/1.1\r\n\r\n")
+    c.shutdown(socket.SHUT_WR)
+    _past_deadline(loop, 0.3)                      # the idle deadline has run
+    _past_deadline(loop, 0.3)
+    answer.set()
+    got = b""
+    while chunk := c.recv(64):
+        got += chunk
+    assert got == b"the answer"
+    c.close()
+    srv.close()
+
+
+def test_a_pair_the_target_ended_closes_once_quiet(loop, tmp_path):
+    """The target answers and ends its half, and the client never ends its
+    own. The pair closes at the idle deadline, not the long answer one."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.sendall(b"bye")
+        conn.shutdown(socket.SHUT_WR)
+    threading.Thread(target=serve, daemon=True).start()
+    path = str(tmp_path / "ended.sock")
+    r = relay.Relay(loop, path, srv.getsockname(), name="forward 5432", idle_deadline=0.3,
+                    answer_deadline=3600.0)
+    gone = _released_to_zero(r)
+    c = _unix_client(path)
+    assert c.recv(3) == b"bye"
+    assert gone.wait(5)
+    c.close()
+    srv.close()
+
+
+def test_the_quiet_limit_follows_the_side_that_ended():
+    pair = relay._Pair.__new__(relay._Pair)
+    pair.idle_deadline, pair.answer_deadline = 30.0, 3600.0
+    pair.down_eof = pair.up_eof = False
+    assert pair._quiet_limit() is None
+    pair.down_eof = True                           # an answer is pending
+    assert pair._quiet_limit() == 3600.0
+    pair.up_eof = True                             # the answer is complete
+    assert pair._quiet_limit() == 30.0
+    pair.down_eof = False
+    assert pair._quiet_limit() == 30.0
+
+
 def test_the_quiet_deadline_waits_for_the_last_byte():
     pair = relay._Pair.__new__(relay._Pair)
     lp = _FakeLoop()
     closed = []
     pair.loop, pair.closed, pair.idle_deadline = lp, False, 30.0
+    pair.answer_deadline, pair.down_eof, pair.up_eof = 3600.0, False, True
     pair.close = lambda: closed.append(True)
     pair.last = time.monotonic() - 10.0                # a byte moved 10 s ago
     pair._expire_quiet()

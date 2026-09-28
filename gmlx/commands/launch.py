@@ -386,13 +386,41 @@ def _read_config_text(path: Path) -> str:
         raise LaunchError(f"cannot read {path}: {e}")
 
 
+# The largest client config launch parses. A config the client wrote in a
+# container can be crafted to take long to parse, and real ones are small.
+CONFIG_PARSE_MAX = 256 << 10
+
+
+def _parse_text(path: Path) -> str:
+    """The text of a config launch merges into, at most
+    :data:`CONFIG_PARSE_MAX` bytes. A missing file reads as empty."""
+    text = _read_config_text(path)
+    if len(text.encode("utf-8", "surrogatepass")) > CONFIG_PARSE_MAX:
+        raise LaunchError(f"{path} is larger than {CONFIG_PARSE_MAX >> 10} KiB; refusing "
+                          "to read or overwrite it")
+    return text
+
+
+def _submap(doc: dict, key: str, what: str) -> dict:
+    """A copy of the mapping at ``doc[key]``, or ``{}`` when it is absent.
+    Any other value stops the merge, since launch would otherwise replace
+    it, or fail on it."""
+    value = doc.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise LaunchError(f"{what} has {key} as a {type(value).__name__}, not a mapping; "
+                          "refusing to overwrite it")
+    return dict(value)
+
+
 def _load_json(path: Path) -> dict:
     """Read a JSON object from ``path``; ``{}`` if it's absent or empty. Raises
     :class:`LaunchError` on malformed JSON (we won't silently clobber a file we
     can't parse)."""
     if not _exists(path):
         return {}
-    text = _read_config_text(path)
+    text = _parse_text(path)
     if not text:
         return {}
     try:
@@ -459,7 +487,7 @@ def build_pi_configs(base_url: str, models: list, *,
     as an ``openai-completions`` provider with every served id; preserves any other
     providers/settings the user already configured. Pure - no IO."""
     models_doc = dict(existing_models or {})
-    providers = dict(models_doc.get("providers") or {})
+    providers = _submap(models_doc, "providers", "pi's models.json")
     providers[provider_id] = {
         "baseUrl": base_url,
         "api": "openai-completions",
@@ -515,7 +543,7 @@ def _load_yaml(path: Path) -> dict:
     clobber a file we can't parse)."""
     if not _exists(path):
         return {}
-    text = _read_config_text(path)
+    text = _parse_text(path)
     if not text:
         return {}
     try:
@@ -541,7 +569,7 @@ def build_omp_configs(base_url: str, models: list, *,
     a default is known) pins ``modelRoles.default`` to it. Preserves any other
     providers/roles. Pure - no IO."""
     models_doc = dict(existing_models or {})
-    providers = dict(models_doc.get("providers") or {})
+    providers = _submap(models_doc, "providers", "omp's models.yml")
     providers[provider_id] = {
         "baseUrl": base_url,
         "api": "openai-completions",
@@ -553,7 +581,7 @@ def build_omp_configs(base_url: str, models: list, *,
 
     config_doc = dict(existing_config or {})
     if default_model:
-        roles = dict(config_doc.get("modelRoles") or {})
+        roles = _submap(config_doc, "modelRoles", "omp's config.yml")
         roles["default"] = f"{provider_id}/{default_model}"
         config_doc["modelRoles"] = roles
     return models_doc, config_doc
@@ -659,8 +687,8 @@ def build_hermes_config(base_url: str, *, default_model: str,
     if api_key:
         model["api_key"] = api_key
     cfg["model"] = model
-    providers = dict(cfg.get("providers") or {})
-    custom = dict(providers.get("custom") or {})
+    providers = _submap(cfg, "providers", "hermes's config.yaml")
+    custom = _submap(providers, "custom", "hermes's config.yaml providers")
     custom["base_url"] = base_url
     if api_key:
         custom["api_key"] = api_key

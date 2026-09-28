@@ -223,9 +223,37 @@ def test_a_character_class_with_many_stars_is_unsupported():
 
 
 def test_too_many_patterns_are_unsupported():
-    ignore.Matcher([f"f{i}" for i in range(ignore.PATTERNS_MAX)])
-    with pytest.raises(ignore.UnsupportedPattern, match="more than"):
-        ignore.Matcher([f"f{i}" for i in range(ignore.PATTERNS_MAX + 1)])
+    ignore.Matcher([f"f{i}" for i in range(200)])
+    with pytest.raises(ignore.UnsupportedPattern, match="more than 200"):
+        ignore.Matcher([f"f{i}" for i in range(201)])
+
+
+def test_matching_past_the_work_budget_stops():
+    matcher = ignore.Matcher(["*a" * 14 + "b"] * 50, work_max=100_000)
+    with pytest.raises(ignore.TooMuchWork, match="takes too long"):
+        for i in range(1000):
+            matcher.excluded(f"src/{'a' * 200}{i}")
+    assert matcher.work > 100_000
+
+
+def test_the_default_budget_bounds_the_worst_ignore_file():
+    """The largest file the caps allow, of the slowest patterns, stops
+    within a few seconds of matching work."""
+    import time
+    matcher = ignore.Matcher(["*a" * 14 + "b"] * ignore.PATTERNS_MAX)
+    started = time.monotonic()
+    with pytest.raises(ignore.TooMuchWork):
+        # Bounded, so a matcher with no budget fails here instead of hanging.
+        for i in range(30):
+            matcher.excluded(("a" * 60 + "/") * 16 + str(i))
+    assert time.monotonic() - started < 15
+
+
+def test_a_typical_ignore_file_stays_far_under_the_budget():
+    matcher = ignore.Matcher(["node_modules", "**/node_modules", "*.log", "dist", ".git",
+                              "**/*.pyc", "!keep.log", "coverage", ".env*"])
+    matcher.excluded("packages/web-app/src/components/Button/index.test.tsx")
+    assert matcher.work * 20_000 < ignore.WORK_MAX         # 20,000 such files fit
 
 
 def _build_folder(tmp_path):
