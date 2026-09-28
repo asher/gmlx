@@ -3408,6 +3408,9 @@ def load_vlm_model(
     # A text-only system message reaches the template as a string.
     from gmlx.upstream.system_content_fix import install_system_content_fix
     install_system_content_fix()
+    # A prompt that opens with BOS is encoded without another.
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+    install_single_bos_fix()
 
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")

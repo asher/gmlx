@@ -75,7 +75,6 @@ from .apc import (
 from .api_contract import install_api_contract, install_context_overflow_wording
 from .chat_behavior import (
     install_chat_template_kwargs,
-    install_diffusion_single_bos,
     install_ignore_eos,
     install_openai_stop_sequences,
     install_role_normalization,
@@ -151,7 +150,6 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_context_overflow_wording",
-    "install_diffusion_single_bos",
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
@@ -283,7 +281,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_chat_template_kwargs()
     from gmlx.upstream.system_content_fix import install_system_content_fix
     install_system_content_fix()
-    install_diffusion_single_bos()
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
+    install_single_bos_fix()
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()

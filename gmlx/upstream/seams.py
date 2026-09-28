@@ -380,10 +380,11 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_retire_render_capture (ids hop + "
          "tokenize path for the next-turn retirement key)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
-         "chat_behavior.install_diffusion_single_bos (wrapped: a "
-         "DiffusionGemma prompt that opens with BOS gets no second one)"),
+         "single_bos_fix (calls the prepare_inputs binding with prompts= "
+         "and a model-type add_special_tokens)"),
     Seam("mlx_vlm.server.generation", "prepare_inputs",
-         "chat_behavior.install_diffusion_single_bos (module attr)"),
+         "single_bos_fix (module attr: a prompt that opens with BOS is "
+         "encoded without special tokens)"),
     # The route modules' render, parser and tool-module bindings are
     # _protocol_deps lambdas that look the mlx_vlm.server attribute up per
     # call; impl pins that attribute with the binding.
@@ -463,6 +464,14 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (HF download gate)", critical=True),
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
+    Seam("mlx_vlm.utils", "process_inputs",
+         "single_bos_fix (module attr: the flag reaches only a processor "
+         "that names it; forwarded through **kwargs)"),
+    Seam("mlx_vlm.generate.dispatch", "_prepare_generation_inputs",
+         "single_bos_fix (calls the prepare_inputs binding with prompts= "
+         "and a model-type add_special_tokens)"),
+    Seam("mlx_vlm.generate.dispatch", "prepare_inputs",
+         "single_bos_fix (module attr, generate path)"),
     # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
     # used by the hy_v3, hy_v4, deepseek_v41, muse_glimmer and
     # function_gemma tools) ---

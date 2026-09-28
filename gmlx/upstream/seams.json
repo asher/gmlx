@@ -103,6 +103,8 @@
   "mlx_vlm.generate.common:generation_stream": "eac2321ace44b5f445f08b4a6f0b4fb309a1acc96121f91712ea1b171676e713",
   "mlx_vlm.generate.diffusion:_diffusion_entropy_transfer_mask": "2dd41a6de99b91328a0100d93ae23ce0491ff383c2ae33889a28a57fdc9c13ba",
   "mlx_vlm.generate.diffusion:stream_diffusion_generate": "28a0eb07fde1539e8ea8c5c60c5dff621bd4aefd5572eb4a48e54542f4372cd1",
+  "mlx_vlm.generate.dispatch:_prepare_generation_inputs": "9ba1daba6634845b78aae71e617622050cd855c4dc79cc51ed0ad28b7f992a6a",
+  "mlx_vlm.generate.dispatch:prepare_inputs": "51cdb24efbcfb28c690f0566f7859d8f7a4c9351b50dc85fec85976e29de5fe7",
   "mlx_vlm.generate:maybe_quantize_kv_cache": "de5182950c15eece7a5113e39f16d81bdfc4df73ec84bfca04a27843a9957a28",
   "mlx_vlm.models.base:quantized_scaled_dot_product_attention": "7cab56b63f914bc577bea07afa65c902be456825f88f7033c54d69ab8b49393b",
   "mlx_vlm.models.base:scaled_dot_product_attention": "9b12ea1ee54be83003091a88dd8657b1448e1a68681dd791e69fbe971cd27cb5",
@@ -217,7 +219,8 @@
   "mlx_vlm.tools.registry:load_tool_module": "52cf43f29fa410a234830c71a1a5c5a0fcf40322a254cffbda7d8ef3a742bb7f",
   "mlx_vlm.tools:SPECS": "fdcf9f54d7b8eedb65578af867a7132848916f154fa4411fde684e8274f296b5",
   "mlx_vlm.utils:StoppingCriteria.__call__": "bd314db5ccbb31720e5f9e48684fc8c32296308d8e4ef54c09ec487f45258a3a",
-  "mlx_vlm.utils:get_model_path": "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499"
+  "mlx_vlm.utils:get_model_path": "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499",
+  "mlx_vlm.utils:process_inputs": "fa7e8b37dccccf11113e3cf375cfe1cc40b139d9a904ff31a11644627e0782d6"
  },
  "generated_with": {
   "mlx": "0.32.2",

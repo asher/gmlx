@@ -1,5 +1,6 @@
 """DiffusionGemma prompts carry one BOS on the run and serve paths: the
-GGUF template opens with BOS and the tokenizer adds one by default."""
+GGUF template opens with BOS and the tokenizer adds one by default. On the
+serve path the rule holds for every model type."""
 
 from __future__ import annotations
 
@@ -53,16 +54,21 @@ def _fake_rg(model_type):
     ("diffusion_gemma", BOS + "hi", False),
     ("diffusion_gemma", "hi", True),
     ("gemma4", BOS + "hi", False),
-    ("llama", BOS + "hi", True),
+    ("gemma4_text", BOS + "hi", False),
+    ("llama", BOS + "hi", False),
+    ("llama", "hi", True),
 ])
 def test_serve_path_adds_special_tokens_only_without_a_leading_bos(
         monkeypatch, model_type, prompt, special):
     generation = pytest.importorskip("mlx_vlm.server.generation")
 
-    from gmlx.serve.patches.chat_behavior import install_diffusion_single_bos
+    from gmlx.upstream.single_bos_fix import install_single_bos_fix
 
     cls = generation.ResponseGenerator
-    monkeypatch.setattr(cls, "_cpu_preprocess", cls._cpu_preprocess)
+    dispatch = importlib.import_module("mlx_vlm.generate.dispatch")
+    utils = importlib.import_module("mlx_vlm.utils")
+    monkeypatch.setattr(dispatch, "prepare_inputs", dispatch.prepare_inputs)
+    monkeypatch.setattr(utils, "process_inputs", utils.process_inputs)
     seen = {}
 
     def fake_prepare(processor, **kwargs):
@@ -70,7 +76,7 @@ def test_serve_path_adds_special_tokens_only_without_a_leading_bos(
         return {}
 
     monkeypatch.setattr(generation, "prepare_inputs", fake_prepare)
-    install_diffusion_single_bos()
-    install_diffusion_single_bos()
+    install_single_bos_fix()
+    install_single_bos_fix()
     cls._cpu_preprocess(_fake_rg(model_type), prompt)
     assert seen["add_special_tokens"] is special

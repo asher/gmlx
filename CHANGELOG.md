@@ -39,6 +39,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the latest user message, and a new turn could not reuse the earlier turns.
 - A Gemma-4 model loaded with its mmproj read the system or developer message
   as a Python list, not as its text.
+- A Gemma-4 image prompt, and a served prompt on a text-only Gemma-4 or Llama-3
+  GGUF, started with two BOS tokens.
 - The usage `cached_tokens` and the "Prefill completed" log line showed 0 when a
   request reused a prefix from the checkpoint tier or the MTP prefix cache.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a
