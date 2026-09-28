@@ -431,6 +431,19 @@ def _pinned_max_tokens(args):
     return mt
 
 
+def _check_media(images, audio, videos) -> None:
+    """Refuse a media path or URL that reached the generation path, with
+    the rules of :mod:`gmlx.serve.patches.media_gate`."""
+    from fastapi import HTTPException
+
+    from .patches.media_gate import MediaRefused, check_media_lists
+
+    try:
+        check_media_lists(images, audio, videos)
+    except MediaRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+
 def install_memory_preflight() -> None:
     """Run the memory preflight on both request entry points.
 
@@ -448,12 +461,14 @@ def install_memory_preflight() -> None:
 
     def _generate(self, prompt, images=None, audio=None, args=None,
                   videos=None):
+        _check_media(images, audio, videos)
         preflight_prompt_memory(self, prompt, images, audio, videos, args)
         return _orig_generate(self, prompt, images=images, audio=audio,
                               args=args, videos=videos)
 
     def _validate(self, prompt, images=None, audio=None, args=None,
                   videos=None):
+        _check_media(images, audio, videos)
         _orig_validate(self, prompt, images=images, audio=audio,
                        args=args, videos=videos)
         preflight_prompt_memory(self, prompt, images, audio, videos, args)

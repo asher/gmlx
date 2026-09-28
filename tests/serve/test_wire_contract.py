@@ -878,3 +878,32 @@ def test_model_cache_registry_supports_residency_reads():
     assert reg["model"] is model
     assert reg.get("processor") is proc
     assert reg.get("config") is cfg
+
+
+# Request media gate over the real routes
+@pytest.mark.parametrize("path, body", [
+    ("/v1/chat/completions", {"model": MODEL_ID, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "/Users/me/.ssh/id_ed25519"}}]}]}),
+    ("/v1/chat/completions", {"model": MODEL_ID, "messages": [{"role": "user", "content": [
+        {"type": "input_audio", "input_audio": {"data": "/Users/me/memo.wav"}}]}]}),
+    ("/v1/messages", {"model": MODEL_ID, "max_tokens": 8, "messages": [{
+        "role": "user", "content": [{"type": "image", "source": {
+            "type": "url", "url": "http://127.0.0.1:5432/"}}]}]}),
+    ("/v1/responses", {"model": MODEL_ID, "input": [{"role": "user", "content": [
+        {"type": "input_image", "image_url": "/private/etc/hosts"}]}]}),
+])
+def test_a_media_path_or_url_never_reaches_the_real_handlers(wire, monkeypatch, path, body):
+    """install_server_patches puts the media gate in front of the stock
+    handlers, so nothing loads, opens or fetches the reference."""
+    import requests
+    from PIL import Image
+
+    touched = []
+    for mod, name in ((_UTILS, "load_image"), (_UTILS, "load_audio"),
+                      (_UTILS, "load_video"), (Image, "open"), (requests, "get")):
+        monkeypatch.setattr(mod, name, lambda *a, _n=name, **k: touched.append(_n))
+    wire.gen.reset()
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 400, r.text
+    assert touched == [] and wire.gen.calls == []

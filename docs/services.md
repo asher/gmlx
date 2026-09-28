@@ -123,7 +123,8 @@ A request is a JSON body with `input`, and the optional fields `model`,
 `response_format` is `mp3`, the default, or `wav`, `flac`, `opus` or `pcm`,
 and every format except `wav` and `pcm` needs ffmpeg on your PATH. Without
 `voice`, Kokoro speaks as `af_heart`, and other models use their own
-default voice:
+default voice. `voice` is a voice name, or several joined by commas, and a
+value with a dot or a slash gets a 400, because it would name a file:
 
 ```sh
 curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \

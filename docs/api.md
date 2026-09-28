@@ -287,17 +287,30 @@ TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ### Vision messages
 
 OpenAI `image_url` content parts work against a model configured with
-`mmproj:`. The image can be an `http(s)://` URL or a base64 `data:` URI.
+`mmproj:`. The image must be a base64 `data:image/` URI, the form that chat
+apps and coding clients send.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
   "model": "gemma-e4b-vlm",
   "messages": [{"role": "user", "content": [
     {"type": "text", "text": "What is in this image?"},
-    {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}}
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo..."}}
   ]}]
 }'
 ```
+
+The server takes every image, audio and video in a request only as inline
+data, in each dialect: a `data:` URI, an Anthropic `base64` image source, or
+base64 `input_audio` data. A file path, a `file://` URL or a `file_id` gets
+a 400 before anything reads it, so a client that holds the API key cannot
+make the server read a file on the Mac. An `http(s)://` URL gets a 400 too,
+because the server would fetch it from the Mac, where loopback services and
+the local network are in reach.
+[`server.media_urls`](config.md#servermedia_urls) lets the server fetch
+http(s) URLs. The image routes refuse `output_path`, `output_dir`,
+`response_format: "path"` and `prompt_expansion_model`, which name files and
+folders on the Mac.
 
 ## Limits and back-pressure
 

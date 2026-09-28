@@ -198,6 +198,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     ``uvicorn.run``."""
     from gmlx.config import LOOPBACK_HOSTS
 
+    # Before the API-key middleware, so the key check runs first.
+    from .media_gate import install_media_gate
+    install_media_gate(bool(getattr(cfg, "media_urls", False)))
     install_api_key_auth(getattr(cfg, "api_key", None))
     install_json_content_type_tolerance()
     if getattr(cfg, "host", None) in LOOPBACK_HOSTS:
