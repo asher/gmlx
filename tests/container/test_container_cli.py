@@ -955,3 +955,70 @@ def test_query_timeout_shortens_queries_in_its_block(fake_container, monkeypatch
     monkeypatch.setattr(cli.subprocess, "run", slow)
     with cli.query_timeout(5), pytest.raises(cli.ContainerError, match="no answer in 5 s"):
         cli.containers()
+
+
+def test_stop_follows_the_query_timeout(fake_container, monkeypatch):
+    seen = []
+    real = cli.subprocess.run
+
+    def run(argv, **kw):
+        seen.append(kw.get("timeout"))
+        return real(argv, **kw)
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    cli.stop("gmlx-pi-1", timeout=5)
+    with cli.query_timeout(5):
+        cli.stop("gmlx-pi-1", timeout=5)
+    assert seen == [5 + cli.QUERY_TIMEOUT, 10]
+
+
+def test_builder_notice_without_settle_leaves_an_owed_builder(fake_container,
+                                                             no_other_builds, monkeypatch):
+    settle = images._settle_builder
+    monkeypatch.setattr(images, "_settle_builder", lambda say: None)   # killed first
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=_quiet)
+    monkeypatch.setattr(images, "_settle_builder", settle)
+    assert images.builder_notice(settle=False) is None      # this launch builds next
+    assert _stops(fake_container) == 0 and images._owed_path().exists()
+    assert images.builder_notice() is None                   # settled now
+    assert _stops(fake_container) == 1 and not images._owed_path().exists()
+
+
+def test_a_failed_owed_record_never_hides_the_build_error(fake_container, no_other_builds,
+                                                         monkeypatch):
+    lines = []
+
+    def refuse(path, value):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(images, "_write_date", refuse)
+    fake_container.update(fail_build=True)
+    with pytest.raises(cli.ContainerError):
+        images.ensure_image(images.ImagePlan("shipped", "pi"), say=lines.append)
+    assert any("could not record that launch started the image builder" in line
+               for line in lines)
+    fake_container.update(fail_build=False, builder=False)      # stopped again
+    lines.clear()
+    images.ensure_image(images.ImagePlan("shipped", "pi"), say=lines.append)
+    assert sum("could not record" in line for line in lines) == 1
+
+
+def test_date_records_use_a_temporary_name_per_process(fake_container, monkeypatch):
+    names = []
+    real = images.os.replace
+
+    def replace(src, dst):
+        names.append(os.path.basename(src))
+        return real(src, dst)
+    monkeypatch.setattr(images.os, "replace", replace)
+    images.images_dir().mkdir(parents=True, exist_ok=True)
+    images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
+    assert names == [f"builder-owed.{os.getpid()}.tmp"]
+    assert images._read_date(images._owed_path()) == "2026-09-28T09:00:00Z"
+    assert sorted(p.name for p in images.images_dir().glob("builder-owed*")) == ["builder-owed"]
+
+
+def test_the_check_line_keeps_a_carriage_return(fake_container):
+    line = 'gmlx-entry: /start.sh names "/bin/sh\\r" in its #! line, which is not in the image.'
+    raw = "gmlx-entry: /start.sh names /bin/sh\r in its #! line, which is not in the image."
+    fake_container.update(checks={"a": [126, line], "b": [126, raw]})
+    assert cli.run_entry_check("img", "/rt", "a") == (126, line)
+    assert cli.run_entry_check("img", "/rt", "b") == (126, raw)

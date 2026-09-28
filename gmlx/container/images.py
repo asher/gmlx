@@ -434,9 +434,14 @@ def _read_date(path: Path) -> str | None:
 
 
 def _write_date(path: Path, value: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(value + "\n")
-    os.replace(tmp, path)
+    # A name per process, so two launches that finish at once never write
+    # the same temporary file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(value + "\n")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _current_builder() -> cli.Builder | None:
@@ -470,12 +475,16 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
             started_here = True
         cli.build(context, **kw)
     finally:
+        # Nothing here may replace the build's own error.
         try:
             after = cli.builder() if started_here else None
             if after is not None and after.state == "running" and after.started:
                 _write_date(_owed_path(), after.started)
         except ContainerError:
             pass
+        except OSError as e:
+            say(f"[launch] warning: could not record that launch started the image "
+                f"builder ({e}). Stop it when the build ends with: container builder stop")
         finally:
             using.release()
 
@@ -563,17 +572,21 @@ def builder_report() -> tuple[str, bool] | None:
     return _builder_line(current), owed
 
 
-def builder_notice(say: Say = _say) -> str | None:
+def builder_notice(say: Say = _say, *, settle: bool = True) -> str | None:
     """For a launch: stop a builder whose stop launch owes, else one line
     about a running builder that no build uses, once for each start of the
-    builder. None otherwise. It never raises."""
+    builder. None otherwise. It never raises.
+
+    With ``settle`` false an owed builder is left running, for a launch
+    that builds next and would only start the builder again."""
     try:
         found = _idle_builder()
         if found is None:
             return None
         current, owed = found
         if owed:
-            _settle_builder(say)
+            if settle:
+                _settle_builder(say)
             return None
         if current.started and _read_date(_noticed_path()) == current.started:
             return None

@@ -56,12 +56,14 @@ def query_timeout(seconds: float):
 
 
 def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
-         check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
+         check: bool = True, env: dict | None = None,
+         keep_cr: bool = False) -> subprocess.CompletedProcess:
     """Run ``container ARGS``. With ``capture`` the output is returned as
     text, else it goes to the terminal. ``check`` raises
     :class:`ContainerError` on a nonzero exit. A query without a timeout of
     its own gets :data:`QUERY_TIMEOUT`, or the one :func:`query_timeout`
-    sets."""
+    sets. ``keep_cr`` keeps each carriage return in the text, which text
+    mode would turn into a newline."""
     if timeout is _QUERY:
         timeout = _query_timeout if _query_timeout is not None else QUERY_TIMEOUT
     binary = find()
@@ -69,8 +71,9 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
         raise ContainerError(f"container is not on PATH. {INSTALL_HINT}")
     argv = [binary, *args]
     try:
-        proc = subprocess.run(argv, capture_output=capture, text=True, timeout=timeout,
-                              env=env, stdin=subprocess.DEVNULL if capture else None)
+        proc = subprocess.run(argv, capture_output=capture, text=not keep_cr,
+                              timeout=timeout, env=env,
+                              stdin=subprocess.DEVNULL if capture else None)
     except subprocess.TimeoutExpired:
         raise ContainerError(
             f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s. "
@@ -79,6 +82,9 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     except OSError as e:
         # Such as too many open files, or a binary that went away.
         raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None
+    if keep_cr and capture:
+        proc.stdout = proc.stdout.decode(errors="replace")
+        proc.stderr = proc.stderr.decode(errors="replace")
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
         raise ContainerError(
@@ -374,14 +380,18 @@ def run_entry_check(ref: str, runtime_dir: str, word: str) -> tuple[int, str]:
         proc = _run(["run", "--rm", "--name", name, "--progress", "none",
                      "--network", "none", "--entrypoint", "/opt/gmlx/gmlx-entry",
                      "--mount", f"type=bind,source={runtime_dir},target=/opt/gmlx,readonly",
-                     ref, "--check", word], check=False, timeout=CHECK_TIMEOUT)
+                     ref, "--check", word], check=False, timeout=CHECK_TIMEOUT,
+                    keep_cr=True)
     except ContainerError:
         try:
             delete(name)
         except ContainerError:
             pass
         raise
-    lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+    # Split on newlines only, so a carriage return inside a message, such
+    # as one from a #! line with Windows line endings, keeps the line whole.
+    text = proc.stderr if proc.stderr.strip() else proc.stdout
+    lines = [line for line in text.split("\n") if line.strip()]
     return proc.returncode, lines[-1] if lines else ""
 
 
