@@ -46,11 +46,13 @@ def rebind_to_runtime_origin(caches):
     """Rebind mlx-lm-origin plain cache entries to the mlx-vlm runtime's
     class identities via ``__class__`` swap, recursing into CacheList.
 
-    The vendored classes are attribute-compatible (plain ``__dict__``
-    layouts, no slots), so the swap is a pure identity change on an empty
-    or populated cache. Entries from any other origin (gmlx pooling
-    caches, already-vlm entries) pass through. No-op when mlx-vlm is not
-    loaded.
+    Both origins keep plain ``__dict__`` layouts with no slots, so the swap
+    works on an empty or populated cache. Where the vlm class reads its
+    state through properties over fields its ``__new__`` seeds (the mlx-vlm
+    0.7 ``ArraysCache`` keeps ``left_padding`` and ``lengths`` that way),
+    the swap seeds those fields and moves the plain attributes through the
+    properties. Entries from any other origin (gmlx pooling caches,
+    already-vlm entries) pass through. No-op when mlx-vlm is not loaded.
     """
     vlm = sys.modules.get("mlx_vlm.models.cache")
     if vlm is None:
@@ -68,7 +70,14 @@ def _rebind_entry(c, vlm) -> None:
         return
     target = getattr(vlm, cls.__name__, None)
     if isinstance(target, type) and target is not cls:
+        state = vars(c)
+        shadowed = {k: state.pop(k) for k in list(state)
+                    if isinstance(getattr(target, k, None), property)}
+        for k, v in vars(target.__new__(target)).items():
+            state.setdefault(k, v)
         c.__class__ = target
+        for k, v in shadowed.items():
+            setattr(c, k, v)
 
 
 def ensure_runtime_origin_make_cache(model):
