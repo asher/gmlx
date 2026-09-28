@@ -6,6 +6,7 @@ import pickle
 from types import SimpleNamespace
 
 import mlx.core as mx
+import numpy as np
 import pytest
 from mlx_vlm import apc as _apc
 from mlx_vlm.utils import StoppingCriteria
@@ -302,7 +303,8 @@ def _rig(bidirectional: bool):
             while b < len(ids) and ids[b] == img:
                 b += 1
             # An image's rows depend on its pixels.
-            emb[:, a:b] = runs[:b - a] * (1.0 + mx.mean(pixel_values[k]))
+            emb[:, a:b] = runs[:b - a] * (
+                1.0 + mx.mean(mx.array(pixel_values[k])))
         return SimpleNamespace(to_dict=lambda: {"inputs_embeds": emb})
 
     rg = SimpleNamespace(model=SimpleNamespace(config=model.config,
@@ -316,12 +318,20 @@ def _pix(v):
     return mx.full((3, 4, 4), float(v))
 
 
+def _listed(*values):
+    """Images of different sizes, as the server holds them: a list of
+    numpy arrays."""
+    return [np.full((3, 4, 4 * (k + 1)), float(v), np.float32)
+            for k, v in enumerate(values)]
+
+
 def _request(rig, ids, pixels, tenant=None):
     """``_gpu_embed`` as the server calls it, with the salt its request
-    handler computes."""
+    handler computes. A list of numpy arrays stays a list."""
     raw = {"input_ids": mx.array([ids]),
            "mm_token_type_ids": mx.array([[int(t == rig.img) for t in ids]])}
-    pv = mx.stack(pixels) if pixels else None
+    listed = bool(pixels) and isinstance(pixels[0], np.ndarray)
+    pv = (list(pixels) if listed else mx.stack(pixels)) if pixels else None
     if pv is not None:
         raw["pixel_values"] = pv
     salt = _apc.semantic_extra_hash(
@@ -416,6 +426,36 @@ def test_a_prefix_with_other_images_does_not_restore(serve, change):
     if tenant is not None:
         assert restored == 0
     cold = _run(rig, _manager(), [_request(rig, second, pixels, tenant)])
+    _assert_same(warm[0], cold[0])
+
+
+def test_images_of_different_sizes_key_on_their_pixels(serve):
+    """The stock payload hash reads a list of images of different sizes
+    as no images, so a request with other images of the same sizes
+    restored the whole prompt."""
+    rig = _rig(False)
+    _turn1, turn2 = _prompts(rig.img)
+    m = _manager()
+    _run(rig, m, [_request(rig, turn2, _listed(1, 2))])
+    before = _matched(m)
+    warm = _run(rig, m, [_request(rig, turn2, _listed(3, 2))])
+    # Image A differs, so only the text before it may restore.
+    assert _matched(m) - before <= 42
+    cold = _run(rig, _manager(), [_request(rig, turn2, _listed(3, 2))])
+    _assert_same(warm[0], cold[0])
+
+
+def test_turn_two_with_images_of_different_sizes_restores_turn_one(serve):
+    """Turn 1 holds its one image as an mx array, turn 2 its two images
+    as a list of numpy arrays. Image A hashes alike in both."""
+    rig = _rig(False)
+    turn1, turn2 = _prompts(rig.img)
+    m = _manager()
+    _run(rig, m, [_request(rig, turn1, [_pix(1)])])
+    before = _matched(m)
+    warm = _run(rig, m, [_request(rig, turn2, _listed(1, 2))])
+    assert _matched(m) - before == len(turn1)
+    cold = _run(rig, _manager(), [_request(rig, turn2, _listed(1, 2))])
     _assert_same(warm[0], cold[0])
 
 

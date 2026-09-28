@@ -141,14 +141,17 @@ def salt_windows(salt: Any, min_prefix: int = 0,
 
 
 def _content_hash(x: Any) -> int:
-    """Shape, dtype and bytes of an array, or of each array in a list."""
+    """Shape, dtype and bytes of an array, or of each array in a list. An
+    mx array and a numpy array of the same values hash alike: the server
+    holds one image as an mx array and a list of images of different
+    sizes as numpy arrays."""
     if isinstance(x, (list, tuple)):
         return _mix(len(x), *(_content_hash(e) for e in x))
     import mlx.core as mx
     import numpy as np
 
     if isinstance(x, mx.array):
-        dtype = str(x.dtype)
+        dtype = str(x.dtype).rsplit(".", 1)[-1]
         arr = np.asarray(x.astype(mx.float32) if x.dtype == mx.bfloat16
                          else x)
     else:
@@ -263,10 +266,12 @@ class _RequestSalt(int):
 def install_media_salt() -> bool:
     """Key the serve engine's APC by the images inside each prefix.
 
-    Wraps ``semantic_extra_hash`` so a request's stock salt carries its
-    text salt, ``ResponseGenerator._gpu_embed`` to replace that salt with
-    a ``MediaSalt`` built from the request's ids and pixels, and
-    ``BatchGenerator._apc_extra_hash`` to hand the ``MediaSalt`` on whole.
+    Wraps ``hash_image_payload`` so a list of images of different sizes
+    hashes by content, ``semantic_extra_hash`` so a request's stock salt
+    carries its text salt, ``ResponseGenerator._gpu_embed`` to replace
+    that salt with a ``MediaSalt`` built from the request's ids and
+    pixels, and ``BatchGenerator._apc_extra_hash`` to hand the
+    ``MediaSalt`` on whole.
     Idempotent. The APC tiers resolve it per prefix (``GmlxAPCManager``,
     ``gmlx.cache.snapshot``, ``SpecPrefixCache``).
     """
@@ -275,9 +280,21 @@ def install_media_salt() -> bool:
         return True
     ar = importlib.import_module("mlx_vlm.generate.ar")
     server = importlib.import_module("mlx_vlm.server.generation")
+    stock_image_hash = apc.hash_image_payload
     stock_semantic = apc.semantic_extra_hash
     stock_embed = server.ResponseGenerator._gpu_embed
     stock_extra = ar.BatchGenerator._apc_extra_hash
+
+    def hash_image_payload(pixel_values=None, image_ref=None):
+        # The stock hash returns 0, the image hash of a text prompt, for a
+        # list of images of different sizes, as Gemma-4's processor
+        # returns them. Such a request could restore a prefix stored for
+        # other images of the same sizes.
+        h = stock_image_hash(pixel_values=pixel_values, image_ref=image_ref)
+        if not h and isinstance(pixel_values, (list, tuple)) \
+                and pixel_values:
+            h = _content_hash(list(pixel_values))
+        return h
 
     def semantic_extra_hash(*, tenant=None, image_hash=0, media=None,
                             model=None, processor=None):
@@ -311,9 +328,11 @@ def install_media_salt() -> bool:
             return salt
         return stock_extra(self, prompt_kwargs)
 
+    hash_image_payload.__wrapped__ = stock_image_hash  # type: ignore[attr-defined]
     semantic_extra_hash.__wrapped__ = stock_semantic  # type: ignore[attr-defined]
     _gpu_embed.__wrapped__ = stock_embed  # type: ignore[attr-defined]
     _apc_extra_hash.__wrapped__ = stock_extra  # type: ignore[attr-defined]
+    setattr(apc, "hash_image_payload", hash_image_payload)
     setattr(apc, "semantic_extra_hash", semantic_extra_hash)
     server.ResponseGenerator._gpu_embed = _gpu_embed
     ar.BatchGenerator._apc_extra_hash = _apc_extra_hash

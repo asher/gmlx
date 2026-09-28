@@ -540,6 +540,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "adjust_prefix_to_text_suffix_boundary",
          "apc_media.install_media_token_ids (a WholeMediaBlocks column "
          "inside a run moves to its end)", critical=True),
+    Seam("mlx_vlm.apc", "hash_image_payload",
+         "media_salt.install_media_salt (a list of images of different "
+         "sizes hashes by content, not as 0)"),
     Seam("mlx_vlm.apc", "semantic_extra_hash",
          "media_salt.install_media_salt (a request with images carries "
          "the salt of its text)"),

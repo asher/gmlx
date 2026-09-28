@@ -55,6 +55,7 @@
   "mlx_vlm.apc:apc_lookup_plan": "6e21cfb24078d2d0deb6dbe93b8943feca5f7ea5e40e0989093bfb7431063f2f",
   "mlx_vlm.apc:from_env": "467da0e185cba69115e3bdc3b235dcf70b91b3c51287f46598b345244c92aacb",
   "mlx_vlm.apc:harvest_blocks_from_batch_cache": "90ffae03efc603b07605490aa69aca8df969131b45c814c0ef311526c19211ba",
+  "mlx_vlm.apc:hash_image_payload": "142bc865c5d536d70a9ac695b7dd57eea5cd035523a706511b0d7ec8e0719ca2",
   "mlx_vlm.apc:media_safe_prefix_min": "65189153738382aa074fb3c3d3ed2e2ce43bc65b74c91f133605ef47082a4505",
   "mlx_vlm.apc:model_apc_mode": "e11c1b2f03002f5e2902a8b072cbc10cbc0711fc642e96c425452d433292e4b2",
   "mlx_vlm.apc:multimodal_token_ids_from_config": "08878dc4a0e30b7eb1181988f7a3ddce09632d41b7a4c8380c36254ff7709db2",

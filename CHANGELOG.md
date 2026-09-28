@@ -33,6 +33,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reused a cached prompt prefix, or when MTP prefilled it in several chunks.
 - With MTP, a request could reuse the cached prefix of an earlier request that
   had the same tokens but another image or LoRA adapter, and answer for that one.
+- A Gemma-4 request whose images differ in size could reuse the cached prefix of
+  a request with other images of the same sizes, and answer about those images.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a
   prefill batch with a much longer one could start its reply with a wrong token.
 - A DeepSeek-V4 or V4.1 vision model loaded with its mmproj failed on a system
