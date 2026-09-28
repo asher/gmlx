@@ -49,9 +49,10 @@ Launch reads its container settings only from the config file in your
 home folder, as [Launch](config.md#launch) explains.
 
 The first container launch takes a few minutes. Launch numbers the steps
-it runs, so that a slow download does not look like a hang. Every refusal,
-such as a folder launch will not share, comes before these steps, so a
-mistake never waits behind a download.
+it runs, so that a slow download does not look like a hang. Every refusal
+that needs neither the service nor the image, such as a folder launch will
+not share, comes before these steps, so such a mistake never waits behind a
+download.
 
 1. The container service starts. Its first start asks to install a Linux
    kernel and downloads about 700 MB. When the service is stopped and the
@@ -89,6 +90,9 @@ from a project folder instead:
 - Credential folders such as `~/.ssh`, `~/.aws`, `~/.config/gh` and
   `~/.config/gmlx`, and any folder that holds one or lies inside one.
 - gmlx's own data, under `~/.cache/gmlx` and `~/.local/share/gmlx`.
+
+On a volume that ignores the case of names, as APFS does by default, launch
+compares these paths the same way, so `~/.SSH` counts as `~/.ssh`.
 
 `--mount PATH[:DST][:ro]` and
 [`launch.container.mounts`](config.md#launchcontainermounts) share more
@@ -144,19 +148,25 @@ commands, fails in the container. Seed a copy without those settings.
 Git in the container works when you launch from the root of a repository.
 A linked worktree or a submodule keeps its git folder outside its own
 folder, so launch also shares that git folder, read-write, and prints a
-line saying so. Launch shares it only when that folder names the project
-back. For a worktree, the repository's entry for it names the project's
-`.git` file, and for a submodule, its `core.worktree` names the project
-folder. The client can edit the `.git` file in the share, but not the
-repository outside it, so it cannot use this to reach another repository.
+line saying so.
 
-Launch applies the same refusals to that git folder, and to the repository
-that holds it, as to the current folder. A worktree of a dotfiles
-repository in your home folder therefore gets no git folder. In each case
-that shares nothing, launch prints a note, and `--mount` shares the
-folder when you intend it. Launched from a subfolder of a repository, the
-client sees only that subfolder, and launch notes that git needs the
-repository root.
+Launch shares that git folder only when it names the project back. For a
+worktree, the repository's entry for it names the project's `.git` file,
+by an absolute path or by one relative to the entry. For a submodule, its
+`core.worktree` names the project folder. The client can edit the `.git`
+file in the share, but not the repository outside it, so it cannot use
+this to reach another repository. Launch refuses the git folder when the
+recorded path passes through a symbolic link in a share or a private home,
+because the client can place such a link. After you delete a worktree by
+hand, run `git worktree prune`, because its stale entry still names the old
+path, and a new folder there would count as that worktree.
+
+The refusals for the current folder also apply to that git folder, and to
+the repository that holds it. A worktree of a dotfiles repository in your
+home folder therefore gets no git folder. In each case that shares nothing,
+launch prints a note, and `--mount` shares the folder when you intend it.
+Launched from a subfolder of a repository, the client sees only that
+subfolder, and launch notes that git needs the repository root.
 
 ## Security model
 
@@ -474,10 +484,11 @@ when you give the container more than a quarter of the Mac's memory.
 Work with many small files, such as `npm install`, runs slower in a share
 than on a volume.
 
-Launch closes a relayed connection, such as one from the container to the
-server or to a forwarded port, when no data moves in either direction for
-30 seconds after it opens. Once data flows the connection has no time
-limit, so a streamed answer is never cut. Idle connections therefore
+Launch closes a relayed connection, such as one to a forwarded port, when
+no data moves in either direction for 30 seconds after it opens. A
+connection from the container to the server must instead send a whole
+request head in those 30 seconds. Once data flows, the connection has no
+time limit, so a streamed answer is never cut. Idle connections therefore
 cannot use up the file handles of the server that other clients share.
 
 ## Removing container data

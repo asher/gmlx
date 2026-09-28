@@ -64,11 +64,10 @@ launch:
 `build` names a folder that holds a file named `Containerfile` or
 `Dockerfile`, and that folder is the build context. It can also name the
 Containerfile itself, and then the folder that holds the file is the build
-context. Write the
-`gmlx.invalid/launch-<client>:base` reference literally, since launch finds
-it by reading the file. Any client's `:base` works, and launch refuses any
-other `gmlx.invalid` reference, because those tags are deleted when a newer
-build replaces them.
+context. Write the `gmlx.invalid/launch-<client>:base` reference literally,
+since launch finds it by reading the file. Any client's `:base` works, and
+launch refuses any other `gmlx.invalid` reference, because those tags are
+deleted when a newer build replaces them.
 
 Launch builds your image again when the Containerfile or a file in the
 build context changes, and when a gmlx upgrade changes the base. A

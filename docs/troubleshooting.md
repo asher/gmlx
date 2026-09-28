@@ -294,18 +294,25 @@ and the search path it used. The image lacks the client or the command in
 image, as [Custom container images](container-images.md) shows, or fix the
 `command` list.
 
-A launch that stops with `has no execute bit` found the file but cannot
-run it. Add `RUN chmod 755` for that file to the Containerfile, as the
+The message `has no execute bit` means that launch found the file but
+cannot run it. Add `RUN chmod 755` for that file to the Containerfile, as the
 [start script example](container-images.md#starting-services-with-the-client)
-does. A launch that stops with `names X in its #! line, which is not in the
+does.
+
+A launch that stops with `names X in its #! line, which is not in the
 image` found a script whose interpreter, such as `python3`, is missing.
 Install the interpreter in the image, or change the script's `#!` line.
+Linux reads `#!/usr/bin/env tool --flag` as the one command name
+`tool --flag`, so write `#!/usr/bin/env -S tool --flag` instead. A message
+that the `#!` line ends in a carriage return means the script has Windows
+line endings. Convert it to Unix line endings, for example with `dos2unix`.
 
-The check before a session stops the launch with exit 1. A session that
-exits 127 or 126 on its own prints the same messages. Exit 126 with
-`its #! interpreter or its program loader is not in the image` means the
-file is a program for another system, such as a build for glibc in a
-musl image.
+Exit 127 or 126 from a session that ends on its own comes with the same
+messages. Exit 126 with `its #! interpreter or its program loader is not
+in the image` means the file is a program for another system, such as a
+build for glibc in a musl image. Exit 126 with `Exec format error` means
+the file is an x86_64 build, which needs an arm64 one, or a script with no
+`#!` line, which needs one.
 
 ### A container command gave no answer
 
@@ -331,10 +338,10 @@ port.
 
 ### Launch will not follow a file in the private home
 
-A launch that stops with `in the private home is a symbolic link or not a
-folder`, `cannot be used` or `is not UTF-8 text` found a file in the
-[private home](launch-container.md#the-private-home) that launch will not
-read or replace. The client in the container owns that folder and can put
+A launch that stops with a message that names a path in the
+[private home](launch-container.md#the-private-home) found a file there
+that launch will not read or replace, such as a symbolic link or a file
+larger than 16 MiB. The client in the container owns that folder and can put
 links there, so launch never follows one. Delete the path the message
 names, or reset the client by deleting
 `~/.local/share/gmlx/launch/<client>/home`, and launch again. A file that

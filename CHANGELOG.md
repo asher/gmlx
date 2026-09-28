@@ -46,7 +46,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backup, and refuses `--config-path` for hermes.
 - `gmlx launch` keeps the mode of each configuration file it rewrites, so a
   file that holds a key stays private, and writes through a symbolic link
-  that stays inside your home folder instead of replacing it.
+  that stays inside your home folder instead of replacing it. It refuses a
+  link that leads outside your home folder.
+- `gmlx serve` raises its soft limit on open files to 10240, or to the hard
+  limit when that is lower, so many client connections no longer use up the
+  256 that macOS gives a program started from Terminal. It warns when the
+  limit stays below 3000.
 - `--kv-bits` keeps an fp16 cache on Kimi K3, whose attention cannot read a
   quantized one. The server quantized its attention layers and failed at the
   first token, and `run` and `chat` did the same on Kimi K2 and K3.

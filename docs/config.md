@@ -1374,12 +1374,18 @@ cloned repository could otherwise share `~/.ssh` with the client or turn
 the container off. The server takes no setting from the block.
 
 A malformed block never stops the server, which prints one warning and
-loads the rest of the file. `gmlx launch` refuses a client that the block
-runs in a container, and it refuses every client when the file cannot be
-read as YAML. The message names the file, and `--no-container` runs the
-client on the Mac instead. A client that the block does not turn on runs
-on the Mac with one notice. A launch with `--container` or another
-container flag always refuses a malformed block.
+loads the rest of the file. `gmlx launch` then runs a client on the Mac,
+with one notice, only when the block clearly leaves it off. Each level on
+the way, from `launch` through `container` and `clients` to the client's
+entry, must be absent or a mapping, with no unknown key in `launch` or
+`container`, and each `enabled` there must be absent or exactly `false`.
+
+Any other value or shape refuses the launch, and so does a file that cannot
+be read as YAML. A `container.enabled: true` refuses even beside the
+client's `enabled: false`, since the block is broken. The message names the
+file, and `--no-container` runs the client on the Mac instead. A launch
+with `--container` or another container flag always refuses a malformed
+block.
 
 ```yaml
 # doctest: build
