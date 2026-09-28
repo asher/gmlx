@@ -54,6 +54,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file that holds a key stays private, and writes through a symbolic link
   that stays inside your home folder instead of replacing it. It refuses a
   link that leads outside your home folder.
+- A server, menu bar or extra install that gmlx starts no longer imports a
+  `gmlx` or `pip` package from the current folder in place of the installed
+  one. A server started from a source checkout therefore runs the installed
+  gmlx.
 - `gmlx serve` raises its soft limit on open files to 10240, or to the hard
   limit when that is lower, so many client connections no longer use up the
   256 that macOS gives a program started from Terminal. It warns when the

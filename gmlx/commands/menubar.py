@@ -862,7 +862,7 @@ class _MenuBarApp:
         import shlex
         from gmlx.serve.procname import stable_executable
         exe = shlex.quote(stable_executable())
-        cmd = f"{exe} -m gmlx talk"
+        cmd = f"{exe} -P -m gmlx talk"   # -P: never a gmlx in the terminal's folder
         # The terminal shell's cwd won't find the server's config by
         # discovery, and talk's wake word / persona / brain live there.
         cfg = (self._runinfo() or {}).get("config_abspath")

@@ -90,8 +90,8 @@ def _as_uv_tool(monkeypatch, tmp_path, receipt: str):
 def test_route_defaults_to_pip(monkeypatch, tmp_path):
     monkeypatch.setattr(extras.sys, "prefix", str(tmp_path))
     assert extras.install_route() == extras.ROUTE_PIP
-    assert extras.install_command("stt")[:3] == [extras.sys.executable,
-                                                 "-m", "pip"]
+    assert extras.install_command("stt")[:4] == [extras.sys.executable,
+                                                 "-P", "-m", "pip"]
     assert extras.install_hint("stt") == "pip install 'gmlx[stt]'"
 
 

@@ -353,7 +353,7 @@ def identity_ok(run: dict | None) -> bool:
 
 def child_argv(serve_args: list) -> list:
     exe = procname.named_python() or procname.stable_executable()
-    return [exe, "-m", "gmlx", "serve", *serve_args]
+    return [*procname.gmlx_argv(exe), "serve", *serve_args]
 
 
 def _agent_path() -> str:
@@ -517,6 +517,8 @@ def _spawn_detached(child: list, *, host: str, port: int,
                   file=sys.stderr)
             return None
 
+        # A restart or an autostart replays an argv an older gmlx recorded.
+        child = procname.with_safe_path(child)
         lp = Path(os.path.expanduser(log)) if log else log_path(host, port)
         lp.parent.mkdir(parents=True, exist_ok=True)
         rotate_log(lp)
@@ -753,7 +755,7 @@ def start_menubar(*, extra: list | None = None, auto: bool = False) -> int:
     # The gmlx.app-bundled stub makes the notification-permission prompt (and
     # ps / Activity Monitor) read "gmlx" instead of "Python".
     exe = procname.menubar_bundle() or procname.stable_executable()
-    argv = [exe, "-m", "gmlx", "launch", "menubar",
+    argv = [*procname.gmlx_argv(exe), "launch", "menubar",
             "--foreground", *(["--auto-raised"] if auto else []), *(extra or [])]
     # stdout/stderr to a log (crashed GUI threads used to vanish into DEVNULL);
     # "Open logs" in the bar surfaces it next to the server log.
@@ -1113,7 +1115,7 @@ def _agent_entry() -> list:
     tramp = procname.agent_trampoline()
     if tramp:
         return [tramp]
-    return [procname.stable_executable(), "-m", "gmlx"]
+    return procname.gmlx_argv(procname.stable_executable())
 
 
 def _load_agent(label: str, pp: Path) -> str | None:

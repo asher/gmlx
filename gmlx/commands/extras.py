@@ -222,7 +222,8 @@ def install_command(extra: str, route: str | None = None) -> list[str]:
         return cmd + (["--python", python] if python else [])
     if route == ROUTE_PIPX:
         return ["pipx", "inject", DIST_NAME, *extra_packages(extra)]
-    return [sys.executable, "-m", "pip", "install", *extra_packages(extra)]
+    # -P, so a pip package in the current folder never runs in place of pip.
+    return [sys.executable, "-P", "-m", "pip", "install", *extra_packages(extra)]
 
 
 def install_hint(extra: str) -> str:

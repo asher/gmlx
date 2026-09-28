@@ -491,7 +491,7 @@ def test_install_extra_uses_runner():
         return SimpleNamespace(returncode=0)
 
     assert extras.install_extra("stt", runner=runner) is True
-    assert seen["cmd"][:4] == [sys.executable, "-m", "pip", "install"]
+    assert seen["cmd"][:5] == [sys.executable, "-P", "-m", "pip", "install"]
     assert "mlx-whisper" in seen["cmd"]
 
 

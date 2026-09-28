@@ -1393,35 +1393,32 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
     from . import bridge_vlm as _serving
 
     def pooled_get_cached_model(model_path, adapter_path=inherit, *, model_kind="auto"):
-        # In config mode the incoming ``model_path`` is a friendly id (maybe
-        # ``id@profile``): resolve it to a concrete GGUF abspath + merged spec,
-        # bind the spec for this request (read at the gen-args seam), fold the
-        # load_signature into the cache_key, and carry the load/APC env into the
-        # build window. Without a registered config (single-model launch) the path
-        # is used verbatim - today's behaviour, unchanged.
-        ttl = None
-        cache_key_extra = ()
-        env = None
-        build_spec = None
-        loaded_as = None
-        load_path = model_path
-        if _serving.server_config() is not None:
-            try:
-                # The body `profile` field rides a request-scoped ContextVar
-                # (install_request_profile_capture) - this seam only receives
-                # the model string. Inline `id@profile` still wins inside.
-                load_path, spec = _serving.resolve_request_model(
-                    model_path,
-                    profile_field=_serving.get_request_profile())
-            except (_serving.ModelNotFound, _serving.ModelFileMissing,
-                    _serving.UnknownProfile, _serving.NoModelSpecified) as e:
-                raise _http_from_resolver_error(e) from e
-            _serving.set_active_spec(spec)
-            ttl = spec.ttl_s
-            cache_key_extra = spec.load_signature()
-            env = _config.env_for(spec)
-            build_spec = spec          # crosses into the load worker thread (see _build)
-            loaded_as = spec.id + (f"@{spec.profile_name}" if spec.profile_name else "")
+        # The incoming ``model_path`` is a friendly id (maybe ``id@profile``):
+        # resolve it to a concrete GGUF abspath + merged spec, bind the spec for
+        # this request (read at the gen-args seam), fold the load_signature into
+        # the cache_key, and carry the load/APC env into the build window. Every
+        # `gmlx serve` mode registers a config, a single model and a discovery
+        # scan included. With none registered, a request never names a load
+        # path or a hub id: a client holding the key could otherwise make the
+        # Mac load any file.
+        if _serving.server_config() is None:
+            raise _http_from_resolver_error(_serving.ModelNotFound(str(model_path), {}))
+        try:
+            # The body `profile` field rides a request-scoped ContextVar
+            # (install_request_profile_capture) - this seam only receives
+            # the model string. Inline `id@profile` still wins inside.
+            load_path, spec = _serving.resolve_request_model(
+                model_path,
+                profile_field=_serving.get_request_profile())
+        except (_serving.ModelNotFound, _serving.ModelFileMissing,
+                _serving.UnknownProfile, _serving.NoModelSpecified) as e:
+            raise _http_from_resolver_error(e) from e
+        _serving.set_active_spec(spec)
+        ttl = spec.ttl_s
+        cache_key_extra = spec.load_signature()
+        env = _config.env_for(spec)
+        build_spec = spec          # crosses into the load worker thread (see _build)
+        loaded_as = spec.id + (f"@{spec.profile_name}" if spec.profile_name else "")
         if adapter_path is inherit:
             adapter_path = pool.resident_adapter(load_path)
         try:

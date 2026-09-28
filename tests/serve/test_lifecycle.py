@@ -8,6 +8,7 @@ SIGTERM (never SIGHUP), child-death fail-fast, and an absolute-interpreter relau
 from __future__ import annotations
 
 import os
+import subprocess
 import plistlib
 import signal
 import sys
@@ -141,7 +142,7 @@ def test_child_argv_is_absolute_interpreter(monkeypatch):
     argv = lc.child_argv(["--config", "/abs/c.yaml"])
     assert argv[0] == os.path.abspath(sys.executable)
     assert os.path.isabs(argv[0])
-    assert argv[1:4] == ["-m", "gmlx", "serve"]
+    assert argv[1:5] == ["-P", "-m", "gmlx", "serve"]
     assert argv[-2:] == ["--config", "/abs/c.yaml"]
 
 
@@ -151,7 +152,7 @@ def test_child_argv_prefers_named_stub(monkeypatch):
     monkeypatch.setattr(lc.procname, "named_python", lambda: "/tmp/proc/gmlx")
     argv = lc.child_argv(["--config", "/abs/c.yaml"])
     assert argv[0] == "/tmp/proc/gmlx"
-    assert argv[1:4] == ["-m", "gmlx", "serve"]
+    assert argv[1:5] == ["-P", "-m", "gmlx", "serve"]
 
 
 def test_child_env_carries_venv_interpreter():
@@ -262,7 +263,7 @@ def test_launchd_reexec_refreshes_then_execs(monkeypatch):
                                    ["serve", "--foreground", "--launchd"])
     path, argv, env = calls["exec"]
     assert path == "/tmp/stub"
-    assert argv == ["/tmp/stub", "-m", "gmlx", "serve", "--foreground",
+    assert argv == ["/tmp/stub", "-P", "-m", "gmlx", "serve", "--foreground",
                     "--launchd"]
     assert env["GMLX_LAUNCHD_REEXEC"] == "1"       # exec'd process skips
     assert env["PYTHONEXECUTABLE"] == os.path.abspath(sys.executable)
@@ -479,7 +480,7 @@ def test_start_menubar_spawns_foreground_child(monkeypatch):
     assert rc == 0
     argv = captured["argv"]
     assert argv[0] == os.path.abspath(sys.executable)
-    assert argv[1:6] == ["-m", "gmlx", "launch", "menubar", "--foreground"]
+    assert argv[1:7] == ["-P", "-m", "gmlx", "launch", "menubar", "--foreground"]
     # No --host/--port pinned: the one bar tracks the primary, not the spawning server.
     assert "--host" not in argv and "--port" not in argv
     assert argv[-2:] == ["--interval", "9"]
@@ -785,7 +786,7 @@ def test_load_agent_verifies_legacy_load_fallback(monkeypatch):
 def test_agent_entry_falls_back_to_venv_python(monkeypatch):
     monkeypatch.setattr(lc.procname, "agent_trampoline", lambda: None)
     assert lc._agent_entry() == [os.path.abspath(sys.executable),
-                                 "-m", "gmlx"]
+                                 "-P", "-m", "gmlx"]
 
 
 # The trampoline: a signed sh script inside the bundle. It must exec the
@@ -811,13 +812,13 @@ def test_agent_trampoline_execs_bundle_binary_first(monkeypatch, tmp_path):
         body = f.read()
     assert body.startswith("#!/bin/sh\n")
     assert f'BIN="{exe}"' in body
-    assert 'exec "$BIN" -m gmlx "$@"' in body       # TCC pins here
+    assert 'exec "$BIN" -P -m gmlx "$@"' in body       # TCC pins here
     assert body.index('exec "$BIN"') < body.index('exec "$PY"')
     assert f'PY="{os.path.abspath(sys.executable)}"' in body
     assert 'export PYTHONEXECUTABLE="$PY"' in body      # before the probe
     assert body.index("PYTHONEXECUTABLE") < body.index('if "$BIN" -c ""')
     assert 'export GMLX_LAUNCHD_REEXEC=1' in body      # happy path: no re-exec
-    assert 'exec "$PY" -m gmlx "$@"' in body        # stale-copy fallback
+    assert 'exec "$PY" -P -m gmlx "$@"' in body        # stale-copy fallback
     assert any(tramp in argv for argv in signed)        # script got signed
 
     signed.clear()
@@ -1418,3 +1419,34 @@ def test_status_notes_stale_source(monkeypatch, capsys):
                         lambda: {"files": 1, "newest_mtime": 1.0})
     assert lc.status("127.0.0.1", 9001) == 0
     assert "source changed" not in capsys.readouterr().out
+
+
+def test_a_gmlx_package_in_the_current_folder_never_runs(tmp_path):
+    """A container client can write gmlx/__init__.py into a shared project.
+    A server or menu bar spawned from that folder must still run the
+    installed gmlx."""
+    proj = tmp_path / "proj"
+    (proj / "gmlx").mkdir(parents=True)
+    marker = tmp_path / "planted-code-ran"
+    (proj / "gmlx" / "__init__.py").write_text(
+        f"open({str(marker)!r}, 'w').write('x')\n")
+    (proj / "gmlx" / "__main__.py").write_text("")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = {**os.environ, "PYTHONPATH": root}
+    argv = [*lc.procname.gmlx_argv(sys.executable), "--version"]
+    r = subprocess.run(argv, cwd=proj, env=env, capture_output=True, timeout=120)
+    assert r.returncode == 0, r.stderr.decode()[-500:]
+    assert not marker.exists()
+    for built in (lc.child_argv([]), lc._agent_entry()):
+        assert built[1:4] == ["-P", "-m", "gmlx"] or built[0].endswith("-agent")
+
+
+def test_a_replayed_argv_from_an_older_gmlx_gets_safe_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    monkeypatch.setattr(lc.subprocess, "Popen",
+                        lambda argv, **kw: seen.append(argv) or _FakeProc(pid=4244))
+    lc._spawn_detached(["/stub", "-m", "gmlx", "serve", "--foreground"],
+                       host="127.0.0.1", port=8080)
+    assert seen == [["/stub", "-P", "-m", "gmlx", "serve", "--foreground"]]
+    assert lc.procname.with_safe_path(["/x", "-P", "-m", "gmlx"]) == ["/x", "-P", "-m", "gmlx"]

@@ -216,9 +216,29 @@ def launchd_reexec(refresh, argv_tail: list) -> None:
     env = child_env()
     env["GMLX_LAUNCHD_REEXEC"] = "1"
     try:
-        os.execve(target, [target, "-m", "gmlx", *argv_tail], env)
+        os.execve(target, [*gmlx_argv(target), *argv_tail], env)
     except OSError:
         return
+
+
+def gmlx_argv(exe: str) -> list[str]:
+    """``exe -P -m gmlx``. Without ``-P``, Python puts the current folder
+    first on ``sys.path``, so a ``gmlx`` package in the folder a command
+    runs from, such as one a container client wrote into a shared project,
+    would run in place of the installed gmlx. ``-P`` rather than
+    ``PYTHONSAFEPATH``, because the variable would reach the server's own
+    children too."""
+    return [exe, "-P", "-m", "gmlx"]
+
+
+def with_safe_path(argv: list) -> list:
+    """``argv`` with ``-P`` added when it runs ``-m gmlx`` without it, as the
+    argv a runfile or the menu bar's autostart record from an older gmlx
+    holds."""
+    argv = [str(x) for x in argv]
+    if argv[1:3] == ["-m", "gmlx"]:
+        return [argv[0], "-P", *argv[1:]]
+    return argv
 
 
 def named_python() -> str | None:
@@ -298,9 +318,9 @@ def agent_trampoline() -> str | None:
                 'export PYTHONEXECUTABLE="$PY"\n'
                 'if "$BIN" -c "" 2>/dev/null; then\n'
                 '    export GMLX_LAUNCHD_REEXEC=1\n'
-                '    exec "$BIN" -m gmlx "$@"\n'
+                '    exec "$BIN" -P -m gmlx "$@"\n'
                 'fi\n'
-                'exec "$PY" -m gmlx "$@"\n')
+                'exec "$PY" -P -m gmlx "$@"\n')
         try:
             if script.read_text() == body:
                 return str(script)
