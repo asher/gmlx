@@ -36,6 +36,7 @@ from gmlx.config import LAUNCH_CLIENTS, LaunchClientCfg, LaunchContainerCfg
 from . import cli, ignore
 from .cli import ContainerError, ImageInfo
 from .state import FileLock, LockHeld, images_dir, path_inside
+from .text import printable
 
 DOMAIN = "gmlx.invalid"
 SHIPPED_CONTAINERFILE = Path(__file__).parent / "files" / "Containerfile"
@@ -110,7 +111,7 @@ def _write_private(path: Path, text: str) -> None:
 
 
 def _say(line: str) -> None:
-    print(line, flush=True)             # before the build's own output
+    print(printable(line), flush=True)  # before the build's own output
 
 
 class ImageError(ContainerError):

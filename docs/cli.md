@@ -629,6 +629,7 @@ These flags control `gmlx launch`:
 | `--mount-cwd`, `--no-mount-cwd` | The config's [`mount_cwd`](config.md#launchcontainermount_cwd) | Share the current folder with the container, or not. |
 | `--image REF` | The configured image | Run this image in the container, as [A ready-made image](container-images.md#a-ready-made-image) describes. |
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
+| `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
 | `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container, as [The shell](launch-container.md#the-shell) describes. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |

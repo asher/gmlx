@@ -32,7 +32,7 @@ from typing import Callable
 from gmlx.config import parse_size_bytes
 from gmlx.rlimit import low_limit_warning, raise_nofile_limit
 
-from . import cli, runtime
+from . import cli, runtime, settings
 from .clipboard import ClipboardServer
 from .relay import Address, Relay, RelayLoop, loopback_targets
 from .settings import ContainerPlan, Mount, SettingsError
@@ -334,6 +334,21 @@ def _mount_arg(m: Mount) -> list[str]:
             + (",readonly" if m.readonly else "")]
 
 
+def recheck_sources(spec: RunSpec) -> None:
+    """Check the shared folders and the runtime folder again just before
+    ``container run``. A client of another session can swap a shared folder
+    for a link after the plan was made, and ``container run`` would follow
+    it."""
+    settings.recheck_sources(spec.plan)
+    try:
+        st = os.lstat(spec.runtime_dir)
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISDIR(st.st_mode) or not runtime._complete(Path(spec.runtime_dir)):
+        raise SettingsError(f"the runtime folder {spec.runtime_dir} changed after launch "
+                            "checked it. Launch again.")
+
+
 def compose_run_argv(spec: RunSpec, binary: str = "container") -> list[str]:
     s, plan = spec.session, spec.plan
     argv = [binary, "run", "--rm", "--init", "--progress", "none", "--name", s.name]
@@ -602,6 +617,7 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
                 threading.Thread(target=open_when_ready,
                                  args=(spec.web_port, opener, stop_open, say),
                                  daemon=True).start()
+        recheck_sources(spec)
         argv = compose_run_argv(spec, cli.find() or "container")
         # A child that reads the terminal stays in the foreground group, or its
         # first read stops it with SIGTTIN. Any other child gets its own group,

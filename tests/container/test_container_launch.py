@@ -75,6 +75,33 @@ def test_container_only_flags_imply_container(env):
     assert env.runs
 
 
+def test_reseed_implies_container_and_reaches_the_seed_step(env, monkeypatch):
+    from gmlx.container import settings
+    seen = []
+    monkeypatch.setattr(settings, "seed_home",
+                        lambda home, seeds, reseed=False: seen.append(reseed) or [])
+    assert _run(["pi", "--reseed"]) == 0
+    assert env.runs and seen == [True]
+    with pytest.raises(SystemExit):
+        _run(["pi", "--reseed", "--no-container"])
+
+
+def test_the_image_step_gets_the_read_write_shares(env, monkeypatch):
+    from gmlx.container import images
+    seen = []
+    real = images.resolve_image
+
+    def spy(*a, **k):
+        seen.append(k.get("writable"))
+        return real(*a, **k)
+    monkeypatch.setattr(images, "resolve_image", spy)
+    (env.home / "notes").mkdir()
+    assert _run(["pi", "--mount", str(env.home / "notes") + ":ro"]) == 0
+    proj = os.path.realpath(env.proj)
+    assert seen and proj in seen[0]
+    assert os.path.realpath(env.home / "notes") not in seen[0]      # read-only
+
+
 def test_no_mount_cwd_implies_container(env):
     assert _run(["pi", "--no-mount-cwd"]) == 0
     assert env.runs

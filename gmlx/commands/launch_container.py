@@ -27,13 +27,15 @@ from gmlx.container.text import printable
 
 # Flags that only mean something in container mode, by argparse dest.
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
-                   "rebuild": "--rebuild", "network": "--network", "shell": "--shell"}
+                   "rebuild": "--rebuild", "reseed": "--reseed", "network": "--network",
+                   "shell": "--shell"}
 # What an attaching --shell accepts. Every other flag shapes a new session.
 _ATTACH_DEFAULTS = {
     "model": None, "base_url": None, "host": None, "port": None, "api_key": None,
     "provider_id": "gmlx", "config_path": None, "config_only": False,
     "no_start": False, "start_timeout": 0.0, "no_keep": False, "dsh_profile": None,
-    "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "network": None,
+    "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "reseed": False,
+    "network": None,
 }
 _DSH_URL_LINE = r"dsh web: (\S+)"
 
@@ -483,14 +485,17 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {a.base_url}, which is not a local "
                             "http server. Use the default network for this server.")
-    image_plan = images.resolve_image(client, cfg, launch_cfg.container, image_override=a.image)
+    # A build: folder the client can write would run its code at the next build.
+    writable = [m.source for m in plan.mounts if not m.readonly and m.kind != "volume"]
+    image_plan = images.resolve_image(client, cfg, launch_cfg.container,
+                                      image_override=a.image, writable=writable)
     for line in [*plan.warnings, *plan.notes, *image_plan.notices,
                  *settings.server_config_warnings(
                      settings.server_config_path(host, port,
                                                  autostart=not (a.base_url or a.no_start)),
                      plan.shares)]:
         say(line)
-    for line in settings.seed_home(plan.home, plan.seed):
+    for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False)):
         say(line)
     rc = _server_precheck(a)
     if rc is not None:

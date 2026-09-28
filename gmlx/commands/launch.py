@@ -1735,6 +1735,9 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                      help="Run this image instead of the configured or shipped one.")
     box.add_argument("--rebuild", action="store_true",
                      help="Rebuild the client's image, or pull an image: reference again.")
+    box.add_argument("--reseed", action="store_true",
+                     help="Copy every seed file into the private home again, replacing "
+                          "the copies there.")
     box.add_argument("--network", choices=("default", "none"), default=None,
                      help="none leaves the client only the gmlx server and the "
                           "forwarded ports.")
@@ -1753,11 +1756,12 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
     from gmlx.config import ConfigError
+    from gmlx.container.text import printable_lines
     from .launch_container import container_mode, run_container
     try:
         in_container, launch_cfg = container_mode(a, ap)
     except ConfigError as e:
-        print(f"[launch] {e}", file=sys.stderr)
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1
     if in_container:
         return run_container(a, launch_cfg, exec_fn=exec_fn)
@@ -1775,5 +1779,6 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
             _keep_model(a)                       # server is reachable here; best-effort
         return _HARNESSES[a.harness](a, exec_fn=exec_fn)
     except LaunchError as e:
-        print(f"[launch] {e}", file=sys.stderr)
+        # A message can name a file or value read from a client's config.
+        print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1

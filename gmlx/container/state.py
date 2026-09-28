@@ -145,7 +145,7 @@ def write_record(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 def images_dir() -> Path:
     d = data_dir() / "images"
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(mode=ROOT_MODE, exist_ok=True)
     return d
 
 

@@ -25,6 +25,14 @@ from gmlx.container.state import FileLock
 D1 = "sha256:" + "1" * 64
 
 
+@pytest.fixture(autouse=True)
+def _no_recheck(request, monkeypatch):
+    """The plans here name folders that do not exist. The tests of the
+    check itself, named test_recheck_*, run the real one."""
+    if not request.node.name.startswith("test_recheck_"):
+        monkeypatch.setattr(session, "recheck_sources", lambda spec: None)
+
+
 def _plan(tmp_path, **kw):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
@@ -986,3 +994,52 @@ def test_a_low_open_file_limit_is_logged(fake_container, tmp_path, monkeypatch):
     session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
     text = (session.cache_dir() / "last-pi.log").read_text()
     assert "can open only 2048 files at a time" in text
+
+
+def _real_layout(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    real = os.path.realpath
+    plan = _plan(tmp_path, mounts=[Mount(real(proj), real(proj), note="working folder"),
+                                   Mount(real(home), real(home), kind="home")])
+    return proj, plan, None
+
+
+def test_recheck_passes_the_folders_the_plan_checked(tmp_path, monkeypatch):
+    proj, plan, _ = _real_layout(tmp_path)
+    monkeypatch.setattr(session.runtime, "_complete", lambda folder: True)
+    (tmp_path / "rt").mkdir()
+    session.recheck_sources(_spec(tmp_path, plan=plan))
+
+
+def test_recheck_refuses_a_share_swapped_for_a_link(tmp_path, monkeypatch):
+    proj, plan, _ = _real_layout(tmp_path)
+    monkeypatch.setattr(session.runtime, "_complete", lambda folder: True)
+    (tmp_path / "rt").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    proj.rmdir()
+    proj.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    with pytest.raises(session.SettingsError, match="changed after launch checked it"):
+        session.recheck_sources(_spec(tmp_path, plan=plan))
+
+
+def test_recheck_refuses_a_changed_runtime_folder(tmp_path, monkeypatch):
+    proj, plan, _ = _real_layout(tmp_path)
+    monkeypatch.setattr(session.runtime, "_complete", lambda folder: False)
+    (tmp_path / "rt").mkdir()
+    with pytest.raises(session.SettingsError, match="runtime folder"):
+        session.recheck_sources(_spec(tmp_path, plan=plan))
+
+
+def test_supervise_checks_the_sources_before_the_run(fake_container, tmp_path, monkeypatch):
+    def refuse(spec):
+        raise session.SettingsError("swapped")
+    monkeypatch.setattr(session, "recheck_sources", refuse)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[]))
+    with pytest.raises(session.SettingsError, match="swapped"):
+        session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={},
+                          say=lambda line: None)
+    assert not fake_container.load().get("runs")
