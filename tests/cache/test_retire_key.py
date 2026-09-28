@@ -173,6 +173,17 @@ def test_build_assistant_message_uses_the_request_tool_parser():
     assert msg["content"] == ""
 
 
+def test_build_assistant_message_parses_no_tool_call_without_tools():
+    # The handlers load no tool parser when the request declares no tools,
+    # so a reply holding tool markup keeps it as content.
+    ctx = _fake_ctx([1])
+    ctx["tool_parser"] = "json_tools"
+    text = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+    msg = rk.build_assistant_message(ctx, text)
+    assert "tool_calls" not in msg
+    assert msg["content"] == text
+
+
 def test_truncated_thinking_predicate():
     pairs = (("<think>", "</think>"),)
     f = rk.truncated_thinking

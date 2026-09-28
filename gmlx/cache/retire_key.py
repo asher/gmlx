@@ -196,9 +196,9 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     Mirrors the server's response construction: thinking split via the
     request's thinking tokens, tool calls parsed by the request's tool
     module (its ``tool_parser`` override, else the one inferred from the
-    template) with arguments normalized to dicts (the endpoint
-    json-decodes them before templating), and post-tool text scrubbed of
-    control tokens.
+    template) when the request declares tools, with arguments normalized
+    to dicts (the endpoint json-decodes them before templating), and
+    post-tool text scrubbed of control tokens.
     """
     from mlx_vlm.server import openai as srv
 
@@ -216,9 +216,13 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
 
     tool_calls = None
     tools = kw.get("tools")
-    parser = srv._infer_tool_parser_from_processor(
-        ctx["processor"], override=ctx.get("tool_parser"))
-    tool_module = srv.load_tool_module(parser) if parser else None
+    tool_module = None
+    if tools:
+        # The handlers parse tool calls only for a request that declares
+        # tools; without them tool markup stays in the content.
+        parser = srv._infer_tool_parser_from_processor(
+            ctx["processor"], override=ctx.get("tool_parser"))
+        tool_module = srv.load_tool_module(parser) if parser else None
     if tool_module is not None:
         tc = srv.process_tool_calls(
             model_output=full_text, tool_module=tool_module, tools=tools)

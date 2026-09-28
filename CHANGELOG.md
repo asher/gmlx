@@ -47,6 +47,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attended to later image tokens on the full-attention layers.
 - A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
   image token saw only the image tokens before it.
+- On a request without tools, a reply holding tool-call text left less of the
+  conversation in the prefix cache for the next turn.
 
 ## [0.4.19] - 2026-09-27
 
