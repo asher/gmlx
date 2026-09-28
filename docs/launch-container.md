@@ -161,11 +161,12 @@ this to reach another repository.
 
 Launch compares the recorded path as git wrote it and follows no symbolic
 link in it, because the client can place a link in any folder it could
-write, in this launch or an earlier one. git records real paths, so every
+write, in this launch or an earlier one. Git records real paths, so every
 worktree and submodule that git creates passes. A worktree that was moved
 by hand and is reached through a link does not, and launch then does not
-share its git folder and prints a note. Run `git worktree repair` in the
-worktree to record its real path.
+share its git folder and prints a note that names the repository. When that
+folder really is a worktree of that repository, run `git worktree repair`
+in it to record its real path.
 
 After you delete a worktree by hand, run `git worktree prune`. Its stale
 entry still names the old path, and a `.git` file placed there later would
@@ -498,8 +499,9 @@ Launch closes a relayed connection, such as one to a forwarded port, when
 no data moves in either direction for 30 seconds after it opens. A
 connection from the container to the server must instead send a whole
 request head in those 30 seconds. After that first data, or that request
-head, the connection has no time limit, so a streamed answer is never cut. Idle connections therefore
-cannot use up the file handles of the server that other clients share.
+head, the connection has no time limit, so a streamed answer is never cut.
+Idle connections therefore cannot use up the file handles of the server
+that other clients share.
 
 ## Removing container data
 

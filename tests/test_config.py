@@ -2336,6 +2336,10 @@ def test_launch_clients_match_the_launch_handlers():
      "        memory: 4G\n", False),
     # Another client's block is not checked.
     ("launch:\n  container:\n    clients:\n      pi:\n        bogus: 1\n", False),
+    # A misspelled launch key that holds a container block is unclear.
+    ("lauch:\n  container:\n    enabled: true\n", None),
+    # An unknown key without one turns nothing on; the server reports it.
+    ("lauch:\n  memory: 4G\n", False),
 ])
 def test_launch_block_enables_checks_the_client_level(tmp_path, monkeypatch, block, want):
     cfg = tmp_path / ".config" / "gmlx" / "gmlx.yaml"

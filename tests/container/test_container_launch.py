@@ -138,6 +138,7 @@ def test_a_broken_block_that_enables_container_mode_never_runs_on_the_mac(env, c
     "        enabled: false\n        bogus: 1\n",
     "launch:\n  container:\n    clients:\n      pi:\n        enable: true\n",
     "launch:\n  container:\n    clients:\n      pie:\n        enabled: true\n",
+    "lauch:\n  container:\n    enabled: true\n",
 ])
 def test_every_unclear_enabled_shape_refuses(env, capsys, monkeypatch, block):
     which = launch.shutil.which
@@ -148,6 +149,24 @@ def test_every_unclear_enabled_shape_refuses(env, capsys, monkeypatch, block):
     assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
     assert not calls and not env.runs
     assert "--no-container" in capsys.readouterr().err
+
+
+def test_a_misspelled_launch_key_with_a_container_block_refuses(env, capsys, monkeypatch):
+    """The server's strict top-level check does not run when the server is
+    already up, so launch checks the key itself."""
+    which = launch.shutil.which
+    monkeypatch.setattr(launch.shutil, "which",
+                        lambda name: "/usr/bin/pi" if name == "pi" else which(name))
+    _user_config(env.home, "lauch:\n  container:\n    clients:\n      pi:\n"
+                           "        enabled: true\n")
+    calls = []
+    assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
+    err = capsys.readouterr().err
+    assert not calls and not env.runs
+    assert "unknown top-level key 'lauch'" in err and "Did you mean launch?" in err
+    assert "may turn container mode on for pi" in err
+    assert _run(["pi", "--no-container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls
 
 
 @pytest.mark.parametrize("block", [

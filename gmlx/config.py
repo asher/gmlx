@@ -817,7 +817,10 @@ def default_config_paths() -> list[Path]:
 
 
 def _launch_block(path: Path):
-    """The raw ``launch`` block of a config file, or None when it has none."""
+    """The raw ``launch`` block of a config file, or None when it has none.
+    An unknown top-level key that holds a ``container`` block, such as a
+    misspelled ``launch``, is a ConfigError, because the block may have
+    meant to turn container mode on."""
     try:
         with open(path) as f:
             doc = yaml.safe_load(f)
@@ -830,6 +833,10 @@ def _launch_block(path: Path):
     if not isinstance(doc, dict):
         raise ConfigError(f"{path} holds a {type(doc).__name__}, not a mapping of "
                           "settings.")
+    for key, value in doc.items():
+        if key not in _TOP_KEYS and isinstance(value, dict) and "container" in value:
+            raise ConfigError(f"{path} has the unknown top-level key {key!r} with a "
+                              "container block under it. Did you mean launch?")
     return doc.get("launch")
 
 
@@ -841,8 +848,9 @@ def launch_block_enables(client: str) -> tuple[bool | None, Path | None]:
     Every key under ``clients`` must name a known client. False only when
     each of the three levels is absent or a mapping of known keys, and every
     ``enabled`` there is exactly ``false``. None, which stops the launch, for
-    any other value or shape, since the block may have meant to turn
-    container mode on. The keys of other clients' blocks are not checked."""
+    any other value or shape, and for an unknown top-level key that holds a
+    ``container`` block, since the block may have meant to turn container
+    mode on. The keys of other clients' blocks are not checked."""
     found = next((q for q in default_config_paths()[1:] if q.is_file()), None)
     if found is None:
         return False, None

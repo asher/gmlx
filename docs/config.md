@@ -1377,15 +1377,18 @@ A malformed block never stops the server, which prints one warning and
 loads the rest of the file. `gmlx launch` then runs a client on the Mac,
 with one notice, only when the block clearly leaves it off. Each level on
 the way, from `launch` through `container` and `clients` to the client's
-entry, must be absent or a mapping, with no unknown key in `launch` or
-`container`, and each `enabled` there must be absent or exactly `false`.
+entry, must be absent or a mapping, with no unknown key in `launch`,
+`container` or the client's entry. Every name under `clients` must be a
+known client, and each `enabled` on the way must be absent or exactly
+`false`.
 
 Any other value or shape refuses the launch, and so does a file that cannot
-be read as YAML. A `container.enabled: true` refuses even beside the
-client's `enabled: false`, since the block is broken. The message names the
-file, and `--no-container` runs the client on the Mac instead. A launch
-with `--container` or another container flag always refuses a malformed
-block.
+be read as YAML. An unknown top-level key that holds a `container` block,
+such as a misspelled `lauch:`, refuses the launch too. A
+`container.enabled: true` refuses even beside the client's
+`enabled: false`, since the block is broken. The message names the file,
+and `--no-container` runs the client on the Mac instead. A launch with
+`--container` or another container flag always refuses a malformed block.
 
 ```yaml
 # doctest: build
