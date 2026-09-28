@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from gmlx.envflags import env_int
 from gmlx.spec.engine import (
@@ -42,7 +43,8 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     restored prefix blocks, but ``store_kv_blocks`` dedups by hash chain
     (acquire+release of existing blocks, no data copies).
     """
-    view = _L1View(batch.model, manager, mode)
+    # The lookup helpers are grafted onto _L1View at bind time.
+    view: Any = _L1View(batch.model, manager, mode)
     ids_list = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
     prompt_kwargs = batch._prompt_kwargs or {}
     extra_hash = view._apc_extra_hash(prompt_kwargs)
@@ -51,7 +53,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     l1_prefix = 0
     if l0_prefix == 0 and len(ids_list) >= 2:
         warm = None
-        blocks = []
+        blocks: list[Any] = []
         prefix_len = 0
         tier = "exact"
         pick = view._apc_pick_for((0, ids_list, 0, prompt_kwargs, None, None))
@@ -390,12 +392,14 @@ def _exact_anchor_boundary(batch, meta, guard: int,
 
 def _exact_anchor_arm(batch, meta, guard: int, restored: int) -> None:
     """Schedule the anchor pause by mirroring its position into
-    ``checkpoint_len`` (the key the stock column truncation reads).
+    ``checkpoint_len`` (the key the stock column truncation reads once
+    the stock ``checkpoint_lengths`` schedule is dropped).
     ``_exact_anchor_store`` hands the column back to the stock guard
     after firing, so the stock store still runs exactly as unarmed."""
     pos = _exact_anchor_boundary(batch, meta, guard, restored)
     if pos is None:
         return
+    meta.pop("checkpoint_lengths", None)
     meta["anchor_len"] = pos
     meta["anchor_guard"] = guard
     if pos != guard:
@@ -458,8 +462,9 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
                        block_size: int) -> None:
     """Publish the boundary schedule into the request meta. The head
     mirrors into ``checkpoint_len`` (an int) because the stock
-    checkpoint-column truncation and store reads exactly that key.
-    ``ckpt_stored_boundaries`` collects every boundary whose store
+    checkpoint-column truncation and store read exactly that key once
+    the stock ``checkpoint_lengths`` schedule is dropped (it takes
+    precedence when present). ``ckpt_stored_boundaries`` collects every boundary whose store
     landed (record verified in the index) -- the settled variable the
     post-prefill p=N decision and the sidecar key set both read;
     ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
@@ -477,6 +482,7 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
         # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
     meta["ckpt_boundaries"] = bounds
+    meta.pop("checkpoint_lengths", None)
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
     meta["ckpt_terminal"] = terminal
     meta["ckpt_interval"] = interval
@@ -636,7 +642,7 @@ def _plain_ckpt_init(batch) -> None:
     if len(ids_list) < 2:
         return
     extra_hash = int(meta.get("extra_hash", 0))
-    view = _L1View(batch.model, manager, mode)
+    view: Any = _L1View(batch.model, manager, mode)
     restored = 0
     from gmlx.cache.snapshot import ckpt_lookup
     warm, cp = ckpt_lookup(

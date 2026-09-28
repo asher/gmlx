@@ -52,13 +52,13 @@ def _store_helpers():
             "hash_tokens": _apc._hash_tokens,
             "disk_block_cls": _apc._DiskLayerMajorBlock,
             "copy_arr": _apc._copy_mlx_array,
-            "time": _apc.time,
+            "nbytes": _apc._cache_nbytes,
         }
     except AttributeError as e:
         _HELPERS_FAILED = True
         print(f"[apc] prompt-cache fast path not installed ({e}); the cache "
               "still works, slower - reinstall the pinned mlx-vlm "
-              "(pip install mlx-vlm==0.6.4)")
+              "(pip install mlx-vlm==0.7.3)")
     return _HELPERS
 
 
@@ -81,6 +81,18 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The stock checkpoint defaults changed to a 1-token guard plus a
+        # checkpoint every 2048 tokens. gmlx keeps the 16-token guard and
+        # schedules intermediate checkpoints in its own ckpt tier, so
+        # both stay at their prior values unless set explicitly.
+        if not (os.environ.get("APC_CHECKPOINT_GUARD_TOKENS")
+                or os.environ.get("APC_EXACT_PREFIX_GUARD_TOKENS")):
+            self.exact_cache_guard_tokens = 16
+        if not os.environ.get("APC_CHECKPOINT_INTERVAL_TOKENS"):
+            self.checkpoint_interval_tokens = 0
+
     def autosize(self, model, budget_fraction: float | None = None) -> None:
         """Size the caches to the box post-load. Pool: raise the block
         cap to a working-budget share when APC_NUM_BLOCKS is unset
@@ -88,7 +100,10 @@ class GmlxAPCManager(_apc.APCManager):
         committed; never shrinks, committed blocks would dangle).
         Exact tier: when APC_EXACT_CACHE_ENTRIES is unset, replace the
         2-entry count cap with a byte budget (entries are full KV
-        snapshots; counting them says nothing about their cost)."""
+        snapshots; counting them says nothing about their cost).
+        Byte cap: the stock manager evicts to its own memory cap and
+        reserve, sized from the Metal working set; both follow the gmlx
+        working budget instead, since the governor owns pressure."""
         if model is None:
             return
         if budget_fraction is None:
@@ -116,21 +131,30 @@ class GmlxAPCManager(_apc.APCManager):
             self._exact_cache_max = 64
             _log.info("APC exact tier budget: %.1f GB (count cap 64)",
                       self._exact_budget_bytes / 1e9)
-        if os.environ.get("APC_NUM_BLOCKS"):
-            return
-        target = int(free * budget_fraction
-                     // (self.block_size * per_tok))
+        if not os.environ.get("APC_NUM_BLOCKS"):
+            self._grow_pool(free * budget_fraction, per_tok, len(costs))
+        self._working_set_bytes = int(budget)
+        if not os.environ.get("APC_MEMORY_MAX_GB"):
+            cap = (self.num_blocks * self.block_size * per_tok
+                   + (getattr(self, "_exact_budget_bytes", None) or 0))
+            self.memory_max_bytes = max(self.memory_max_bytes, int(cap))
+        if not os.environ.get("APC_MEMORY_RESERVE_GB"):
+            self.memory_reserve_bytes = 0
+
+    def _grow_pool(self, pool_bytes: float, per_tok: float,
+                   n_layers: int) -> None:
+        target = int(pool_bytes // (self.block_size * per_tok))
         # A committed block holds K+V arrays per layer; the pool competes
         # with everything else against the Metal resource limit, which is
         # what APC_MAX_POOL_TENSORS guards.
-        tensors_per_block = 2 * len(costs)
+        tensors_per_block = 2 * n_layers
         max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
         target = min(target, max_tensors // max(1, tensors_per_block))
         if target <= self.num_blocks:
             return
         with self.lock:
-            for i in range(len(self.pool), target):
-                b = _apc.APCBlock(block_id=i)
+            for _ in range(len(self.pool), target):
+                b = _apc.APCBlock()
                 self.pool.append(b)
                 self._free_push(b)
             self.num_blocks = target
@@ -349,10 +373,42 @@ class GmlxAPCManager(_apc.APCManager):
         _hash_tokens = h["hash_tokens"]
         _disk_block_cls = h["disk_block_cls"]
         _copy_arr = h["copy_arr"]
-        _time = h["time"]
+        _nbytes = h["nbytes"]
         eval_chunk_blocks = env_int("GMLX_APC_STORE_EVAL_CHUNK", 32)
 
+        size = _nbytes(layer_keys + layer_values)
+        self._prefill_reserve_bytes = self.memory_plan.observe_kv(
+            layer_keys, layer_values, live_bytes=size)
+        # Reserve no more than the pool can retain. Larger requests
+        # continue directly to disk once the byte budget is exhausted.
+        per_token_bytes = (size / max(1, layer_keys[0].shape[2])
+                           if layer_keys else 0)
+        block_bytes = int(per_token_bytes * self.block_size)
+        compact_tokens = (
+            max(0, (len(token_ids) - self.exact_cache_guard_tokens)
+                // self.block_size) * self.block_size)
+        compact_size = int(compact_tokens * per_token_bytes)
+        # A ckpt store never takes the layer-major branch below, so its
+        # admission is the per-block pool share.
+        want_compact = (
+            not is_ckpt
+            and self._layer_major_memory_min_tokens > 0
+            and self._exact_cache_max > 0
+            and compact_tokens >= self._layer_major_memory_min_tokens
+        )
+        admission = min(
+            self.memory_max_bytes,
+            compact_size if want_compact
+            else min(size, self.num_blocks * block_bytes),
+        )
+        can_store_memory = self.memory_max_bytes > 0 and self._make_room(
+            admission, retain_bytes=admission)
+
         with self.lock:
+            memory_slots = (
+                max(0, self.memory_max_bytes - self._resident_bytes_locked())
+                // max(1, block_bytes)
+                if can_store_memory else 0)
             n_full = len(token_ids) // self.block_size
             skip_full = skip_first_n_tokens // self.block_size
             full_prefix_tokens = n_full * self.block_size
@@ -373,6 +429,8 @@ class GmlxAPCManager(_apc.APCManager):
                 not is_ckpt
                 and self._layer_major_memory_min_tokens > 0
                 and self._exact_cache_max > 0
+                and can_store_memory
+                and compact_size <= admission
                 and layer_major_prefix_tokens
                 >= self._layer_major_memory_min_tokens
             ):
@@ -387,7 +445,6 @@ class GmlxAPCManager(_apc.APCManager):
                         token_ids=token_tuple,
                         extra_hash=int(extra_hash),
                         prompt_cache=copied,
-                        last_used=_time.time(),
                     )
                     self._exact_cache.move_to_end(key)
                     while len(self._exact_cache) > self._exact_cache_max:
@@ -444,6 +501,9 @@ class GmlxAPCManager(_apc.APCManager):
                     new_blocks.append(acquired)
                     parent = h2
                     continue
+                if memory_slots <= 0:
+                    parent = h2
+                    continue
                 if (
                     self._max_pool_tensors > 0
                     and per_block_tensors > 0
@@ -495,15 +555,14 @@ class GmlxAPCManager(_apc.APCManager):
                 pending.extend(v_slabs)
                 _flush_pending()
                 b.block_hash = h2
-                b.parent_hash = parent
                 b.token_ids = chunk
-                b.extra_hash = extra_hash
                 b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
+                memory_slots -= 1
                 new_blocks.append(b)
                 self.stats.stores += 1
-                self.stats.served_tokens += self.block_size
+                self.stats.stored_tokens += self.block_size
                 parent = h2
             _flush_pending(force=True)
             if allow_disk and disk_blocks:
@@ -513,13 +572,13 @@ class GmlxAPCManager(_apc.APCManager):
                     # copies leave these lazy). Owned survivors: the slices
                     # are the live generation's KV, retained by the prompt
                     # cache; the guard drains before this handler continues.
+                    # The writer counts disk_writes through its callbacks.
                     from gmlx.eval_guard import guard
                     guard.eval(*(list(layer_keys) + list(layer_values)),
                                site="apc-disk-save", owner="owned")
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size
                     )
-                    self.stats.disk_writes += len(disk_blocks)
                 except Exception as e:
                     _apc.logger.warning(
                         "APC disk save scheduling failed: %s", e)
@@ -624,10 +683,8 @@ def build_apc_manager(model_namespace=None):
                 max_bytes=max_bytes,
             )
             cap_str = f"{max_gb:.1f} GB" if max_bytes else "unbounded"
-            _log.info(
-                "APC disk tier at %s (ns=%s, cap=%s, read_mode=%s)",
-                disk.dir, ns, cap_str, disk._read_mode,
-            )
+            _log.info("APC disk tier at %s (ns=%s, cap=%s)",
+                      disk.dir, ns, cap_str)
         except Exception as e:
             _log.warning("APC disk tier disabled (init failed): %s", e)
 

@@ -113,6 +113,9 @@ def test_wrapped_stock_store_runs_cursor_and_suppresses_stock():
         _kq_ckpt_armed = True
         prompt_cache = make_hybrid_cache(32, seed=8)
 
+        _apc_uses_checkpoints = PromptProcessingBatch._apc_uses_checkpoints
+        _apc_pending_checkpoint = PromptProcessingBatch._apc_pending_checkpoint
+
         def _row_real_tokens_processed(self, i):
             return 32
 

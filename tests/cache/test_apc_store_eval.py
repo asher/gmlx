@@ -43,9 +43,7 @@ def _pool_snapshot(mgr):
     out = {}
     for h, b in mgr.hash_table.items():
         out[h] = (
-            b.parent_hash,
             b.token_ids,
-            b.extra_hash,
             [k.tolist() for k in b.keys],
             [v.tolist() for v in b.values],
         )

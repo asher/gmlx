@@ -996,12 +996,14 @@ def test_window_chain_disk_follows_kind(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
+        disk.flush()  # disk_writes counts completed writes
         # boundary: 3 main blocks + the skeleton -- no window shards
         assert man.stats_snapshot()["disk_writes"] == 4
         assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
         cache2 = make_swa_cache(p, seed=6)
         ids2 = list(range(800, 800 + p))
         assert ckpt_store(man, ids2, cache2, extra_hash=0, kind="replay")
+        disk.flush()
         # replay: 3 main + 2 window blocks + the skeleton entry
         assert man.stats_snapshot()["disk_writes"] == 10
         assert man.stats_snapshot()["ckpt_skeleton_writes"] == 2

@@ -98,6 +98,7 @@ def test_skeleton_write_counts_on_both_ledgers(tmp_path):
         p = 33
         assert ckpt_store(man, _ids(p), make_hybrid_cache(p, seed=2),
                           extra_hash=0)
+        disk.flush()  # disk_writes counts completed writes
         snap = man.stats_snapshot()
         assert snap["ckpt_skeleton_writes"] == 1
         # 2 main-chain shard blocks (b_full=32) + the skeleton entry.
@@ -112,6 +113,7 @@ def test_sidecar_write_counts_on_both_ledgers(tmp_path):
     try:
         assert drafter_sidecar_store(man, _Drafter(32), _ids(32), 32,
                                      extra_hash=0)
+        disk.flush()  # disk_writes counts completed writes
         snap = man.stats_snapshot()
         assert snap["sidecar_writes"] == 1
         assert snap["disk_writes"] == 1

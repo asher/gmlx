@@ -382,9 +382,8 @@ def drafter_sidecar_store(
                     getattr(manager, "_exact_extra_salt", 0) or 0)
                 khash = _apc._sequence_hash(ids, extra_hash=salted,
                                             block_size=manager.block_size)
+                # The disk writer counts disk_writes when the write lands.
                 disk.save_exact_cache(khash, ids, salted, clones)
-                with manager.lock:
-                    manager.stats.disk_writes += 1
             except Exception:
                 _log.debug("APC sidecar disk save failed", exc_info=True)
         _ckpt_bump(manager, "sidecar_writes")
@@ -930,9 +929,9 @@ def _ckpt_stats(manager) -> dict:
     with manager.lock:
         st = getattr(manager, "_kq_ckpt_stats", None)
         if st is None:
-            st = {k: 0 for k in _CKPT_STAT_INTS}
-            st["ckpt_declines"] = {}
-            manager._kq_ckpt_stats = st
+            fresh: dict[str, Any] = {k: 0 for k in _CKPT_STAT_INTS}
+            fresh["ckpt_declines"] = {}
+            manager._kq_ckpt_stats = st = fresh
         return st
 
 
@@ -952,7 +951,7 @@ def _ckpt_decline(manager, reason: str) -> None:
 def ckpt_stats_snapshot(manager) -> dict:
     st = _ckpt_stats(manager)
     with manager.lock:
-        out = {k: int(st.get(k, 0)) for k in _CKPT_STAT_INTS}
+        out: dict[str, Any] = {k: int(st.get(k, 0)) for k in _CKPT_STAT_INTS}
         out["ckpt_declines"] = dict(st["ckpt_declines"])
         return out
 
@@ -1692,10 +1691,9 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
             getattr(manager, "_exact_extra_salt", 0) or 0)
         khash = _apc._sequence_hash(tid, extra_hash=salted,
                                     block_size=manager.block_size)
+        # The disk writer counts disk_writes when the write lands.
         disk.save_exact_cache(khash, tid, salted, entries)
         _ckpt_bump(manager, "ckpt_skeleton_writes")
-        with manager.lock:
-            manager.stats.disk_writes += 1
     except Exception:
         _log.debug("APC ckpt disk skeleton save failed", exc_info=True)
 
@@ -2423,7 +2421,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                                 grid_truncate=True, kind="retire")
             if stored:
                 return stored
-        for p, states in sorted(decode_snaps or (),
+        for p, states in sorted(decode_snaps or [],
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
                 continue

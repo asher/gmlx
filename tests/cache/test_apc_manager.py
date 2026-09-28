@@ -47,6 +47,9 @@ def test_disk_namespace_key_wins_over_the_model_path(monkeypatch, tmp_path):
         def __init__(self, path, *, namespace, **kw):
             seen["ns"] = namespace
 
+        def set_write_callbacks(self, success, failure):
+            pass
+
     monkeypatch.setattr(apc, "DiskBlockStore", FakeStore)
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
     monkeypatch.setenv("APC_DISK_PATH", str(tmp_path))
@@ -219,7 +222,7 @@ def test_autosize_extends_pool_to_budget_share(monkeypatch):
                450000 // (2 * 10))
     assert m.num_blocks == want > 2048
     assert len(m.pool) == want
-    assert m.pool[-1].block_id == want - 1
+    assert m._free_tail is m.pool[-1]  # new blocks join the free queue
 
 
 def test_autosize_env_and_floor_win(monkeypatch):
@@ -234,6 +237,42 @@ def test_autosize_env_and_floor_win(monkeypatch):
     assert m.num_blocks == 2048  # never shrinks
     m.autosize(None)
     assert m.num_blocks == 2048
+
+
+def test_autosize_byte_cap_follows_the_budgets(monkeypatch):
+    # The stock byte cap (at most 8 GiB) and reserve would evict the pool
+    # below its autosized share; both follow the gmlx working budget.
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES",
+              "APC_MEMORY_MAX_GB", "APC_MEMORY_RESERVE_GB"):
+        monkeypatch.delenv(k, raising=False)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    per_tok = 10 * 2 * 4 * 64 * 2.0
+    pool = m.num_blocks * 16 * per_tok
+    assert m.memory_max_bytes >= int(pool + m._exact_budget_bytes)
+    assert m.memory_reserve_bytes == 0
+    assert m._working_set_bytes == 100 * GB
+    monkeypatch.setenv("APC_MEMORY_MAX_GB", "2")
+    monkeypatch.setenv("APC_MEMORY_RESERVE_GB", "3")
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    assert m.memory_max_bytes == 2 * (1 << 30)
+    assert m.memory_reserve_bytes == 3 * (1 << 30)
+
+
+def test_checkpoint_defaults_keep_the_guard_and_no_interval(monkeypatch):
+    for k in ("APC_CHECKPOINT_GUARD_TOKENS", "APC_EXACT_PREFIX_GUARD_TOKENS",
+              "APC_CHECKPOINT_INTERVAL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    assert m.exact_cache_guard_tokens == 16
+    assert m.checkpoint_interval_tokens == 0
+    monkeypatch.setenv("APC_CHECKPOINT_GUARD_TOKENS", "1")
+    monkeypatch.setenv("APC_CHECKPOINT_INTERVAL_TOKENS", "2048")
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    assert m.exact_cache_guard_tokens == 1
+    assert m.checkpoint_interval_tokens == 2048
 
 
 def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
@@ -287,7 +326,7 @@ def test_exact_tier_byte_budget(monkeypatch):
     for i in range(5):
         m._exact_cache[i] = APCExactCacheEntry(
             token_ids=(i,), extra_hash=0,
-            prompt_cache=[FakeKVClone()], last_used=float(i))
+            prompt_cache=[FakeKVClone()])
     m._trim_exact_to_budget()
     assert set(m._exact_cache) == {2, 3, 4}  # oldest two evicted
 
@@ -315,7 +354,7 @@ def test_exact_bytes_reaches_stats_snapshot():
     m._exact_budget_bytes = 10 * FakeKVClone().keys.nbytes
     m._exact_cache[1] = APCExactCacheEntry(
         token_ids=(1,), extra_hash=0,
-        prompt_cache=[FakeKVClone()], last_used=1.0)
+        prompt_cache=[FakeKVClone()])
     m._trim_exact_to_budget()
     snap = m.stats_snapshot()
     assert snap.get("exact_bytes") == FakeKVClone().keys.nbytes
@@ -343,7 +382,7 @@ def test_exact_bytes_counts_cachelist_wrapped_layers():
     m._exact_budget_bytes = 10 ** 9
     m._exact_cache[1] = APCExactCacheEntry(
         token_ids=(1,), extra_hash=0,
-        prompt_cache=[FakeList()], last_used=1.0)
+        prompt_cache=[FakeList()])
     m._trim_exact_to_budget()
     expect = sum(a.nbytes for a in FakePool()._pbuf)
     assert m.stats.exact_bytes == expect

@@ -18,32 +18,13 @@ from mlx_vlm.models.cache import KVCache  # noqa: E402
 
 from gmlx.cache import kvarn_apc  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402
+from helpers import pin_apc_arms  # noqa: E402
 from kvarn_testlib import D, H, needs_kvarn_ops  # noqa: E402
-
-
-_ARM_NAMES = (
-    "_cache_entry_supports_exact_apc",
-    "_merge_exact_cache_entries",
-    "_clone_cache_entry_for_apc",
-    "_safetensors_dtype_info",
-    "model_apc_mode",
-)
 
 
 @pytest.fixture
 def restorable(monkeypatch):
-    for name in _ARM_NAMES:
-        monkeypatch.setattr(apc, name, getattr(apc, name))
-    monkeypatch.setattr(
-        apc.DiskBlockStore,
-        "_snapshot_exact_cache_entry",
-        apc.DiskBlockStore._snapshot_exact_cache_entry,
-    )
-    monkeypatch.setattr(
-        apc.DiskBlockStore,
-        "_load_exact_cache_entry",
-        apc.DiskBlockStore._load_exact_cache_entry,
-    )
+    pin_apc_arms(monkeypatch)
     monkeypatch.setattr(apc, kvarn_apc._FLAG, False, raising=False)
     monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
     monkeypatch.delenv("KV_BITS", raising=False)
@@ -192,7 +173,9 @@ def test_merge_arm(restorable):
 
 def test_supports_and_mode(restorable):
     kvarn_apc.install_kvarn_apc()
-    assert apc._cache_entry_supports_exact_apc(KVarNKVCache())
+    assert apc.model_apc_mode(
+        type("_KV", (), {"make_cache": lambda self: [KVarNKVCache()]})()
+    ) == "exact"
 
     class _LM:
         def make_cache(self):

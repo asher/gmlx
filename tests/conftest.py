@@ -239,17 +239,11 @@ def kvarn_ops_ok(monkeypatch):
 
 @pytest.fixture
 def kvarn_apc_arms(monkeypatch):
-    """install_kvarn_apc for one test: the mlx_vlm.apc arms it rebinds are
-    pinned first, so the wrap does not outlive the test."""
-    apc = pytest.importorskip("mlx_vlm.apc")
+    """install_kvarn_apc for one test: the APC arms it rebinds are pinned
+    first, so the wrap does not outlive the test."""
     from gmlx.cache import kvarn_apc
+    from helpers import pin_apc_arms
 
-    for name in ("_cache_entry_supports_exact_apc", "_merge_exact_cache_entries",
-                 "_clone_cache_entry_for_apc", "_safetensors_dtype_info",
-                 "model_apc_mode"):
-        monkeypatch.setattr(apc, name, getattr(apc, name))
-    for name in ("_snapshot_exact_cache_entry", "_load_exact_cache_entry"):
-        monkeypatch.setattr(apc.DiskBlockStore, name,
-                            getattr(apc.DiskBlockStore, name))
+    apc = pin_apc_arms(monkeypatch)
     monkeypatch.setattr(apc, kvarn_apc._FLAG, False, raising=False)
     kvarn_apc.install_kvarn_apc()

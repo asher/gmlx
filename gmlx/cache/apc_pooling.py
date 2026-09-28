@@ -40,16 +40,17 @@ def install_pooling_apc_support() -> None:
     if getattr(apc, "_kq_pooling_apc", False):
         return
     try:
+        adapters = importlib.import_module("mlx_vlm.apc_adapters")
         _copy = apc._copy_mlx_array
-        stock_clone = apc._clone_cache_entry_for_apc
-        stock_supports = apc._cache_entry_supports_exact_apc
-        stock_merge = apc._merge_exact_cache_entries
+        stock_clone = adapters.clone_cache_entry
+        stock_merge = adapters.merge_cache_entries
+        register_capability = adapters.register_capability
+        checkpoint = adapters.Capability.CHECKPOINT
         disk_cls = apc.DiskBlockStore
         stock_snap = disk_cls._snapshot_exact_cache_entry
         stock_load = disk_cls._load_exact_cache_entry
         _read = apc._read_safetensors_tensor
-        stock_dtype_info = apc._safetensors_dtype_info
-    except AttributeError as e:
+    except (AttributeError, ModuleNotFoundError) as e:
         raise RuntimeError(
             "APC pooling support cannot install: mlx-vlm apc surface "
             f"changed ({e}) - re-audit against the pinned seams "
@@ -57,10 +58,12 @@ def install_pooling_apc_support() -> None:
 
     from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
 
-    def supports_exact(c):
-        # Without this arm model_apc_mode resolves to None for pooling
-        # stacks and APC never engages, making the clone/disk arms moot.
-        return isinstance(c, PoolingCache) or stock_supports(c)
+    # The prefix-cache plan (APCCoordinator) marks a stack restorable only
+    # when every entry has a capability. Without these rows a pooling stack
+    # resolves no strategy and APC never engages, making the clone and disk
+    # arms below moot.
+    register_capability(PoolingCache, checkpoint)
+    register_capability(BatchPoolingCache, checkpoint)
 
     def merge_exact_entries(entries, prefix_lens):
         # Warm-batch adoption: a restored exact hit is merged per entry into
@@ -69,15 +72,6 @@ def install_pooling_apc_support() -> None:
         if entries and all(isinstance(c, PoolingCache) for c in entries):
             return BatchPoolingCache.merge(entries)
         return stock_merge(entries, prefix_lens)
-
-    def dtype_info(dtype):
-        # Packed pooled planes are uint32 (--kv-bits) or uint8 (FP4); the
-        # stock shard reader only decodes float dtypes.
-        if dtype == "U32":
-            return apc.np.dtype("<u4"), apc.mx.uint32, None
-        if dtype == "U8":
-            return apc.np.dtype("<u1"), apc.mx.uint8, None
-        return stock_dtype_info(dtype)
 
     def clone_entry(c, *, min_capacity_tokens, eval_targets):
         if not isinstance(c, PoolingCache):
@@ -167,7 +161,10 @@ def install_pooling_apc_support() -> None:
         *,
         min_capacity_tokens,
         eval_targets,
+        prefix_len=None,
     ):
+        # prefix_len is a trim request; the shard loader only issues one
+        # when every entry is a plain "kv" record, never for kq_pooling.
         if metadata.get(f"{prefix}_kind") != "kq_pooling":
             for k, v in metadata.items():
                 if k.endswith("__kq_empty"):
@@ -188,6 +185,7 @@ def install_pooling_apc_support() -> None:
                 prefix,
                 min_capacity_tokens=min_capacity_tokens,
                 eval_targets=eval_targets,
+                prefix_len=prefix_len,
             )
         try:
             ratio = int(metadata[f"{prefix}_ratio"])
@@ -268,35 +266,18 @@ def install_pooling_apc_support() -> None:
                 return None
         return _read(path, data_start, entry)
 
-    apc._cache_entry_supports_exact_apc = supports_exact
-    apc._merge_exact_cache_entries = merge_exact_entries
-    apc._read_safetensors_tensor = read_tensor
-    apc._clone_cache_entry_for_apc = clone_entry
-    apc._safetensors_dtype_info = dtype_info
+    # The apc module's _clone_cache_entry_for_apc and
+    # _merge_exact_cache_entries import these adapter functions per call,
+    # and both recurse through the module globals, so rebinding the adapter
+    # module covers top-level entries and CacheList members alike. The
+    # shard reader decodes the packed U32/U8 planes natively.
+    setattr(adapters, "clone_cache_entry", clone_entry)
+    setattr(adapters, "merge_cache_entries", merge_exact_entries)
+    setattr(apc, "_read_safetensors_tensor", read_tensor)
     disk_cls._snapshot_exact_cache_entry = snap_entry
     disk_cls._load_exact_cache_entry = load_entry
 
-    # mlx-vlm >= 0.6.15 dispatches recursive clone/merge through the
-    # apc_adapters registry, bypassing the module functions patched above,
-    # so PoolingCache needs a registry rule as well.
-    try:
-        adapters = importlib.import_module("mlx_vlm.apc_adapters")
-    except ModuleNotFoundError:
-        adapters = None
-    if adapters is not None:
-        class _PoolingCloneAdapter:
-            def clone(self, c, *, min_capacity_tokens, eval_targets):
-                return clone_entry(c, min_capacity_tokens=min_capacity_tokens,
-                                   eval_targets=eval_targets)
-
-            def merge_rows(self, caches, prefix_lens):
-                return BatchPoolingCache.merge(caches)
-
-        rules = adapters._clone_rules()
-        if not any(t is PoolingCache for t, _ in rules):
-            rules.insert(0, (PoolingCache, _PoolingCloneAdapter()))
-
-    apc._kq_pooling_apc = True
+    setattr(apc, "_kq_pooling_apc", True)
 
 
 def install_safe_kv_quantization() -> None:
@@ -335,11 +316,15 @@ def install_safe_kv_quantization() -> None:
             _pack_pools(c, group, bits)
             if isinstance(c, rotating) or getattr(c, "caches", None) is not None:
                 continue
+            # Caches whose K/V rows carry auxiliary state (mlx-vlm's
+            # qwen4_exp) opt out of conversion, as in the stock arms.
+            if getattr(c, "preserve_auxiliary_kv_state", False):
+                continue
             if hasattr(c, "to_quantized") and c.offset >= quantized_kv_start:
                 prompt_cache[e] = c.to_quantized(group_size=group, bits=bits)
 
-    lm_gen.maybe_quantize_kv_cache = safe_maybe_quantize
-    lm_gen._kq_safe_kv_quant = True
+    setattr(lm_gen, "maybe_quantize_kv_cache", safe_maybe_quantize)
+    setattr(lm_gen, "_kq_safe_kv_quant", True)
     # No fallback: without the rebind, stock KV quantization corrupts
     # rotating/pooling caches on the VLM serve path.
     # importlib, not `import mlx_vlm.generate as ...`: the mlx_vlm package
@@ -350,7 +335,7 @@ def install_safe_kv_quantization() -> None:
     if hasattr(vlm_common, "mlx_maybe_quantize_kv_cache"):
         # <= 0.6.3: the stock wrapper delegates its non-turboquant tail to
         # this mlx-lm alias; rebinding it covers every caller.
-        vlm_common.mlx_maybe_quantize_kv_cache = safe_maybe_quantize
+        setattr(vlm_common, "mlx_maybe_quantize_kv_cache", safe_maybe_quantize)
         return
     # >= 0.6.4: the tail is inlined (and lost the rotating exclusion). The
     # AR engine resolves "maybe_quantize_kv_cache" from the mlx_vlm.generate
@@ -382,8 +367,8 @@ def install_safe_kv_quantization() -> None:
         return safe_maybe_quantize(
             prompt_cache, quantized_kv_start, kv_group_size, kv_bits)
 
-    vlm_generate.maybe_quantize_kv_cache = safe_vlm_maybe_quantize
-    vlm_common.maybe_quantize_kv_cache = safe_vlm_maybe_quantize
+    setattr(vlm_generate, "maybe_quantize_kv_cache", safe_vlm_maybe_quantize)
+    setattr(vlm_common, "maybe_quantize_kv_cache", safe_vlm_maybe_quantize)
 
 
 def model_has_pools(model) -> bool:
@@ -401,7 +386,7 @@ def model_has_pools(model) -> bool:
     found = False
     if callable(make):
         try:
-            stack = list(make() or [])
+            stack = list(model.make_cache() or [])
         except Exception:
             stack = []
         while stack:
@@ -456,7 +441,7 @@ def install_pooled_prefill_batch_gate() -> None:
             _log.warning("pooled prefill gate failed; continuing",
                          exc_info=True)
 
-    _gated_init._kq_pooled_prefill_b1 = True
+    _gated_init.__dict__["_kq_pooled_prefill_b1"] = True
     BatchGenerator.__init__ = _gated_init
 
 
@@ -533,7 +518,7 @@ def install_batched_cachelist_admission() -> None:
             extended.append(ca)
         return extended
 
-    _extend_cache._kq_batched_cachelist = True
+    _extend_cache.__dict__["_kq_batched_cachelist"] = True
     _ar._extend_cache = _extend_cache
 
 
@@ -619,4 +604,4 @@ def install_pooled_prompt_kv_quant() -> None:
             print(kv_line(None, policy), flush=True)
 
     ppb.__init__ = _pooled_init
-    ppb._kq_pooled_prompt_kv = True
+    setattr(ppb, "_kq_pooled_prompt_kv", True)

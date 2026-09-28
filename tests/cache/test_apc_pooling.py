@@ -109,8 +109,9 @@ def test_clone_roundtrip(mode):
 
 
 def test_model_apc_mode_resolves_exact_for_pooling_stack():
-    # Gate ahead of every other arm: if the support predicate rejects
-    # PoolingCache, model_apc_mode is None and serve-side APC never engages.
+    # Gate ahead of every other arm: if the prefix-cache plan finds no
+    # capability for PoolingCache, model_apc_mode is None and serve-side
+    # APC never engages.
     from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
@@ -124,7 +125,7 @@ def test_model_apc_mode_resolves_exact_for_pooling_stack():
         def make_cache(self):
             return stack
 
-    assert apc._cache_entry_supports_exact_apc(stack[0])
+    assert apc.model_apc_plan(_LM()).restorable
     assert apc.model_apc_mode(_LM()) == "exact"
 
 

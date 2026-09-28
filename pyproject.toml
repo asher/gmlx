@@ -186,6 +186,9 @@ markers = [
 # there is nothing to infer from.
 include = [
     "gmlx/cache/apc_manager.py",
+    "gmlx/cache/apc_pooling.py",
+    "gmlx/cache/retire_key.py",
+    "gmlx/cache/snapshot.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
     "gmlx/gen/prefill_decay.py",
@@ -196,6 +199,7 @@ include = [
     "gmlx/serve/bridge_vlm.py",
     "gmlx/serve/cb_phase.py",
     "gmlx/serve/engine_jobs.py",
+    "gmlx/spec/ckpt.py",
     "gmlx/spec/dflash_drafter.py",
     "gmlx/spec/helpers.py",
     "gmlx/spec/mtp_drafter.py",
@@ -231,13 +235,10 @@ reportOptionalOperand = "none"
 # list only shrinks. tests/test_pyright_scope.py holds both lists to
 # the tree.
 backlog = [
-    "gmlx/cache/apc_pooling.py",
     "gmlx/cache/fresh_gate.py",
     "gmlx/cache/kv_policy.py",
     "gmlx/cache/kvarn_cache.py",
     "gmlx/cache/kvarn_serve.py",
-    "gmlx/cache/retire_key.py",
-    "gmlx/cache/snapshot.py",
     "gmlx/commands/cli.py",
     "gmlx/commands/train.py",
     "gmlx/eval_guard.py",
@@ -270,7 +271,6 @@ backlog = [
     "gmlx/serve/step_timing.py",
     "gmlx/serve/tick_guard.py",
     "gmlx/spec/admission.py",
-    "gmlx/spec/ckpt.py",
     "gmlx/spec/engine.py",
     "gmlx/spec/kv_quant.py",
     "gmlx/spec/mtp_prefill.py",

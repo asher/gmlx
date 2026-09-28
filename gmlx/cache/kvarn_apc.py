@@ -3,7 +3,7 @@
 install_kvarn_apc() chains kvarn arms onto the same seams
 apc_pooling arms for pooling caches:
 
-- supports/clone/merge: KVarNKVCache entries store and warm-adopt through
+- capability/clone/merge: KVarNKVCache entries store and warm-adopt through
   the exact tier. A B=1 BatchKVarNKVCache (the lone-batch store shortcut
   hands the live batch caches over verbatim) normalizes to single-stream
   via extract(0). Warm-batch adoption is single-row only: multi-row exact
@@ -14,11 +14,12 @@ apc_pooling arms for pooling caches:
   The load arm fail-closes (None -> clean cold miss) on any layout or
   version mismatch instead of raising -- meta_state's own version check
   raises ValueError, which must never escape the lookup path.
-- model_apc_mode: kvarn caches are built by the serve installers after
-  model construction, so the stock probe of model.make_cache() sees plain
+- prefix-cache plan: kvarn caches are built by the serve installers after
+  model construction, so the stock plan over model.make_cache() sees plain
   fp16 caches and resolves "block" -- a tier kvarn cannot serve (128-token
   records do not split into 16-token blocks). Models stamped by the kvarn
-  serve gate (stamp_model) resolve "exact" instead.
+  serve gate (stamp_model) resolve the checkpoint strategy ("exact")
+  instead.
 
 Entry isolation: the gmlx APC manager salts exact-tier extra hashes with
 the kvarn wire config (apply_kvarn_salt, called at residency's post-load
@@ -33,6 +34,7 @@ import hashlib
 import importlib
 import logging
 import secrets
+from dataclasses import replace
 
 _log = logging.getLogger(__name__)
 
@@ -48,7 +50,8 @@ def kvarn_apc_installed() -> bool:
 
 
 def stamp_model(model) -> None:
-    """Mark a model as serving kvarn KV so model_apc_mode resolves exact.
+    """Mark a model as serving kvarn KV so its prefix-cache plan resolves
+    the checkpoint strategy (model_apc_mode "exact").
     Stamps both the model and its language model: the live call sites
     disagree on which object they pass (the engine passes the top-level
     model, dispatch and spec_engine the language model)."""
@@ -155,17 +158,19 @@ def install_kvarn_apc() -> None:
     if getattr(apc, _FLAG, False):
         return
     try:
+        adapters = importlib.import_module("mlx_vlm.apc_adapters")
+        coordinator = importlib.import_module("mlx_vlm.apc_coordinator")
         _copy = apc._copy_mlx_array
-        stock_clone = apc._clone_cache_entry_for_apc
-        stock_supports = apc._cache_entry_supports_exact_apc
-        stock_merge = apc._merge_exact_cache_entries
+        stock_clone = adapters.clone_cache_entry
+        stock_merge = adapters.merge_cache_entries
+        stock_plan = adapters.build_prefix_cache_plan
+        register_capability = adapters.register_capability
+        checkpoint = adapters.Capability.CHECKPOINT
         disk_cls = apc.DiskBlockStore
         stock_snap = disk_cls._snapshot_exact_cache_entry
         stock_load = disk_cls._load_exact_cache_entry
-        stock_dtype_info = apc._safetensors_dtype_info
-        stock_mode = apc.model_apc_mode
         _read = apc._read_safetensors_tensor
-    except AttributeError as e:
+    except (AttributeError, ModuleNotFoundError) as e:
         raise RuntimeError(
             "APC kvarn support cannot install: mlx-vlm apc surface "
             f"changed ({e}) - re-audit against the pinned seams "
@@ -180,8 +185,10 @@ def install_kvarn_apc() -> None:
 
     ensure_registered()
 
-    def supports_exact(c):
-        return isinstance(c, KVarNKVCache) or stock_supports(c)
+    # Explicit rows: the plan would otherwise infer KVarNKVCache from its
+    # KVCache base, and the batch class has no stock base at all.
+    register_capability(KVarNKVCache, checkpoint)
+    register_capability(BatchKVarNKVCache, checkpoint)
 
     def clone_entry(c, *, min_capacity_tokens, eval_targets):
         # min_capacity_tokens is a K/V-padding hint; kvarn grows its own
@@ -218,24 +225,22 @@ def install_kvarn_apc() -> None:
             return BatchKVarNKVCache.merge(list(entries))
         return stock_merge(entries, prefix_lens)
 
-    def dtype_info(dtype):
-        # kvarn codes are uint32; the stock shard reader only decodes
-        # float dtypes. Chains after apc_pooling's identical arm.
-        if dtype == "U32":
-            return apc.np.dtype("<u4"), apc.mx.uint32, None
-        return stock_dtype_info(dtype)
-
-    def mode_wrap(language_model):
+    def plan_wrap(model, overrides=None):
         # Check-down: stamp_model stamps both objects, but a caller may
         # hand over a wrapper whose language model carries the stamp
         # (there is no walking up -- children hold no parent reference).
-        if getattr(language_model, _MODE_STAMP, False) or getattr(
-            getattr(language_model, "language_model", None),
+        # A stamped plan keeps its stock components but pages nothing, so
+        # its strategy is "checkpoint" (legacy mode "exact").
+        plan = stock_plan(model, overrides)
+        if plan.restorable and (getattr(model, _MODE_STAMP, False) or getattr(
+            getattr(model, "language_model", None),
             _MODE_STAMP,
             False,
-        ):
-            return "exact"
-        return stock_mode(language_model)
+        )):
+            plan.layer_specs = [
+                replace(spec, block_eligible=False) for spec in plan.layer_specs
+            ]
+        return plan
 
     def snap_entry(self, c, prefix, arrays, metadata):
         # Exact class, not isinstance: load_entry rebuilds through
@@ -260,7 +265,9 @@ def install_kvarn_apc() -> None:
         *,
         min_capacity_tokens,
         eval_targets,
+        prefix_len=None,
     ):
+        # A trim request only accompanies an all-"kv" shard, never kq_kvarn.
         if metadata.get(f"{prefix}_kind") != "kq_kvarn":
             return stock_load(
                 self,
@@ -271,6 +278,7 @@ def install_kvarn_apc() -> None:
                 prefix,
                 min_capacity_tokens=min_capacity_tokens,
                 eval_targets=eval_targets,
+                prefix_len=prefix_len,
             )
         state = []
         for j in range(_STATE_ARITY):
@@ -291,11 +299,14 @@ def install_kvarn_apc() -> None:
         eval_targets.extend(state)
         return out
 
-    apc._cache_entry_supports_exact_apc = supports_exact
-    apc._merge_exact_cache_entries = merge_exact_entries
-    apc._clone_cache_entry_for_apc = clone_entry
-    apc._safetensors_dtype_info = dtype_info
-    apc.model_apc_mode = mode_wrap
+    # Clone and merge recurse through the adapter module globals, and
+    # apc.model_apc_mode imports the plan builder per call; the
+    # coordinator module holds its own binding, rebound beside it. The
+    # shard reader decodes the uint32 kvarn codes natively.
+    adapters.clone_cache_entry = clone_entry
+    adapters.merge_cache_entries = merge_exact_entries
+    adapters.build_prefix_cache_plan = plan_wrap
+    coordinator.build_prefix_cache_plan = plan_wrap
     disk_cls._snapshot_exact_cache_entry = snap_entry
     disk_cls._load_exact_cache_entry = load_entry
     apc._gmlx_kvarn_apc = True

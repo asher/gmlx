@@ -18,6 +18,7 @@ import gmlx.spec.engine as se
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache.snapshot import ckpt_lookup
 from gmlx.spec.speculative import _sidecar_boundary
+from helpers import bind_stock_checkpoint_methods
 
 from test_ckpt_tier import make_hybrid_cache
 
@@ -241,9 +242,9 @@ def _armed_batch(man, ids, first, terminal, interval):
         "ckpt_interval": interval,
         "ckpt_last_stored": 0,
     }
-    return SimpleNamespace(
+    return bind_stock_checkpoint_methods(SimpleNamespace(
         _kq_ckpt_armed=True, _apc_manager=man, _apc_meta=[meta],
-        prompt_cache=None, _row_real_tokens_processed=lambda idx: 0), meta
+        prompt_cache=None, _row_real_tokens_processed=lambda idx: 0)), meta
 
 
 def test_cursor_advances_and_latches():

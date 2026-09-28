@@ -539,8 +539,7 @@ def test_apc_governor_bytes_and_evict():
     per_block = 2 * 4 * 8 * 4  # K+V float32
     entry_cache = types.SimpleNamespace(nbytes=64)
     mgr._exact_cache[1] = _apc.APCExactCacheEntry(
-        token_ids=(1,), extra_hash=0, prompt_cache=[entry_cache],
-        last_used=0.0)
+        token_ids=(1,), extra_hash=0, prompt_cache=[entry_cache])
     assert mgr.governor_bytes() == 2 * per_block + 64
 
     freed = mgr.governor_evict(1.0)

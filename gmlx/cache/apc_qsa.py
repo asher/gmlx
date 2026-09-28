@@ -33,36 +33,11 @@ def install_qsa_apc_support() -> None:
         stock_snap = disk_cls._snapshot_exact_cache_entry
         stock_load = disk_cls._load_exact_cache_entry
         _read = apc._read_safetensors_tensor
-        stock_dtype_info = apc._safetensors_dtype_info
     except AttributeError as e:
         raise RuntimeError(
             "APC QSA support cannot install: mlx-vlm apc surface "
             f"changed ({e}) - re-audit against the pinned seams "
             "(gmlx.upstream.seams)") from e
-
-    # The stock shard reader maps only BF16/F16/F32 while the writer
-    # accepts anything mx.save_safetensors takes (the PLE ArraysCache
-    # carries an I64 slot). Extend the reader, not the writer.
-    import numpy as np
-    import mlx.core as mx
-    _int_dtypes = {
-        "I64": (np.dtype("<i8"), mx.int64, None),
-        "U64": (np.dtype("<u8"), mx.uint64, None),
-        "I32": (np.dtype("<i4"), mx.int32, None),
-        "U32": (np.dtype("<u4"), mx.uint32, None),
-        "I16": (np.dtype("<i2"), mx.int16, None),
-        "U16": (np.dtype("<u2"), mx.uint16, None),
-        "I8": (np.dtype("<i1"), mx.int8, None),
-        "U8": (np.dtype("<u1"), mx.uint8, None),
-    }
-
-    def dtype_info(dtype):
-        got = stock_dtype_info(dtype)
-        if got is not None:
-            return got
-        return _int_dtypes.get(dtype)
-
-    apc._safetensors_dtype_info = dtype_info
 
     def _qsa_cls():
         from gmlx.models.qwen4_exp.model import QSAKVCache
@@ -102,7 +77,9 @@ def install_qsa_apc_support() -> None:
         *,
         min_capacity_tokens,
         eval_targets,
+        prefix_len=None,
     ):
+        # A trim request only accompanies an all-"kv" shard, never kq_qsa.
         if metadata.get(f"{prefix}_kind") != "kq_qsa":
             return stock_load(
                 self,
@@ -113,6 +90,7 @@ def install_qsa_apc_support() -> None:
                 prefix,
                 min_capacity_tokens=min_capacity_tokens,
                 eval_targets=eval_targets,
+                prefix_len=prefix_len,
             )
         try:
             ratio = int(metadata[f"{prefix}_ratio"])

@@ -101,14 +101,17 @@ def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
     stamp_model(wrapper)
     assert getattr(wrapper, _MODE_STAMP, False)
     assert getattr(wrapper.language_model, _MODE_STAMP, False)
-    assert apc.model_apc_mode(wrapper) == "exact"
+    assert apc.model_apc_plan(wrapper).legacy_mode == "exact"
     assert apc.model_apc_mode(wrapper.language_model) == "exact"
-    # Check-down: a wrapper whose language model carries the stamp still
-    # resolves exact when the wrapper itself is passed.
-    lm_only = SimpleNamespace(language_model=_hybrid())
+    # Check-down: the batch generator's coordinator plans from the
+    # top-level model, so a wrapper whose language model carries the
+    # stamp must still resolve exact. A dense stack resolves block
+    # unstamped, which makes the stamp the only way to exact.
+    lm_only = SimpleNamespace(language_model=FakeLM(stack=[KVCache, KVCache]))
+    assert apc.model_apc_plan(lm_only).legacy_mode == "block"
     stamp_model(lm_only.language_model)
     assert not getattr(lm_only, _MODE_STAMP, False)
-    assert apc.model_apc_mode(lm_only) == "exact"
+    assert apc.model_apc_plan(lm_only).legacy_mode == "exact"
 
 
 def test_salt_gated_on_conversion(kvarn_ops_ok):
