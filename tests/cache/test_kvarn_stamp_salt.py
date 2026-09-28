@@ -102,6 +102,7 @@ def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
     assert getattr(wrapper, _MODE_STAMP, False)
     assert getattr(wrapper.language_model, _MODE_STAMP, False)
     assert apc.model_apc_plan(wrapper).legacy_mode == "exact"
+    assert apc.model_apc_mode(wrapper) == "exact"
     assert apc.model_apc_mode(wrapper.language_model) == "exact"
     # Check-down: the batch generator's coordinator plans from the
     # top-level model, so a wrapper whose language model carries the
@@ -112,6 +113,28 @@ def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
     stamp_model(lm_only.language_model)
     assert not getattr(lm_only, _MODE_STAMP, False)
     assert apc.model_apc_plan(lm_only).legacy_mode == "exact"
+    assert apc.model_apc_mode(lm_only) == "exact"
+
+
+def test_stamped_model_without_make_cache_resolves_exact(kvarn_ops_ok,
+                                                         kvarn_apc_arms):
+    """A dense model without make_cache converts, so serve stamps it. The
+    mode probes must then give what the generator's coordinator plans,
+    not the stock no-make_cache answer."""
+    from mlx_vlm import apc
+
+    import gmlx.spec.engine as se
+
+    model = _DenseNoMakeCache()
+    assert kvarn_model_converts(model)
+    assert apc.model_apc_mode(model) == "block"
+    stamp_model(model)
+    assert apc.model_apc_plan(model).legacy_mode == "exact"
+    assert apc.model_apc_mode(model) == "exact"
+
+    se._bind_l1_view()
+    model._kq_apc_manager = SimpleNamespace(block_size=16)
+    assert se._resolve_l1(model)[1] == "exact"
 
 
 def test_salt_gated_on_conversion(kvarn_ops_ok):

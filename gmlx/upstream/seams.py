@@ -455,8 +455,9 @@ SEAMS: tuple[Seam, ...] = (
          "apc_pooling + kvarn_apc + apc_qsa shard readers (the stock "
          "decoder reads the packed uint32 and uint8 planes)", critical=True),
     Seam("mlx_vlm.apc", "model_apc_mode",
-         "residency + spec_engine L1 probe (legacy mode of the plan, which "
-         "the kvarn_apc plan wrap stamps)", critical=True),
+         "residency + spec_engine L1 probe; kvarn_apc wraps it (a stamped "
+         "model answers from the plan, as the coordinator does)",
+         critical=True),
     Seam("mlx_vlm.generate", "maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement)", critical=True),
     # --- cache classes (dual-origin via gmlx.cache.compat; on <= 0.6.3

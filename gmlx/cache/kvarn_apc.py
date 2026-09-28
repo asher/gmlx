@@ -14,12 +14,14 @@ apc_pooling arms for pooling caches:
   The load arm fail-closes (None -> clean cold miss) on any layout or
   version mismatch instead of raising -- meta_state's own version check
   raises ValueError, which must never escape the lookup path.
-- prefix-cache plan: kvarn caches are built by the serve installers after
-  model construction, so the stock plan over model.make_cache() sees plain
-  fp16 caches and resolves "block" -- a tier kvarn cannot serve (128-token
-  records do not split into 16-token blocks). Models stamped by the kvarn
-  serve gate (stamp_model) resolve the checkpoint strategy ("exact")
-  instead.
+- prefix-cache plan and model_apc_mode: kvarn caches are built by the
+  serve installers after model construction, so the stock plan over
+  model.make_cache() sees plain fp16 caches and resolves "block" -- a tier
+  kvarn cannot serve (128-token records do not split into 16-token
+  blocks). Models stamped by the kvarn serve gate (stamp_model) resolve
+  the checkpoint strategy ("exact") instead. model_apc_mode answers a
+  stamped model from the plan, since the stock function returns "block"
+  for a model without make_cache before it plans.
 
 Entry isolation: the gmlx APC manager salts exact-tier extra hashes with
 the kvarn wire config (apply_kvarn_salt, called at residency's post-load
@@ -164,6 +166,7 @@ def install_kvarn_apc() -> None:
         stock_clone = adapters.clone_cache_entry
         stock_merge = adapters.merge_cache_entries
         stock_plan = adapters.build_prefix_cache_plan
+        stock_mode = apc.model_apc_mode
         register_capability = adapters.register_capability
         checkpoint = adapters.Capability.CHECKPOINT
         disk_cls = apc.DiskBlockStore
@@ -225,22 +228,31 @@ def install_kvarn_apc() -> None:
             return BatchKVarNKVCache.merge(list(entries))
         return stock_merge(entries, prefix_lens)
 
-    def plan_wrap(model, overrides=None):
+    def stamped(model):
         # Check-down: stamp_model stamps both objects, but a caller may
         # hand over a wrapper whose language model carries the stamp
         # (there is no walking up -- children hold no parent reference).
+        return bool(getattr(model, _MODE_STAMP, False) or getattr(
+            getattr(model, "language_model", None), _MODE_STAMP, False))
+
+    def plan_wrap(model, overrides=None):
         # A stamped plan keeps its stock components but pages nothing, so
         # its strategy is "checkpoint" (legacy mode "exact").
         plan = stock_plan(model, overrides)
-        if plan.restorable and (getattr(model, _MODE_STAMP, False) or getattr(
-            getattr(model, "language_model", None),
-            _MODE_STAMP,
-            False,
-        )):
+        if plan.restorable and stamped(model):
             plan.layer_specs = [
                 replace(spec, block_eligible=False) for spec in plan.layer_specs
             ]
         return plan
+
+    def mode_wrap(language_model):
+        # The stock mode returns "block" for a model without make_cache
+        # before it plans, while the batch generator's coordinator plans
+        # that model from make_prompt_cache. A stamped model answers from
+        # the plan, as the coordinator does.
+        if stamped(language_model):
+            return plan_wrap(language_model).legacy_mode
+        return stock_mode(language_model)
 
     def snap_entry(self, c, prefix, arrays, metadata):
         # Exact class, not isinstance: load_entry rebuilds through
@@ -300,13 +312,15 @@ def install_kvarn_apc() -> None:
         return out
 
     # Clone and merge recurse through the adapter module globals, and
-    # apc.model_apc_mode imports the plan builder per call; the
+    # the stock model_apc_mode imports the plan builder per call; the
     # coordinator module holds its own binding, rebound beside it. The
+    # mode wrap covers the no-make_cache answer the plan never sees. The
     # shard reader decodes the uint32 kvarn codes natively.
     adapters.clone_cache_entry = clone_entry
     adapters.merge_cache_entries = merge_exact_entries
     adapters.build_prefix_cache_plan = plan_wrap
     coordinator.build_prefix_cache_plan = plan_wrap
+    apc.model_apc_mode = mode_wrap
     disk_cls._snapshot_exact_cache_entry = snap_entry
     disk_cls._load_exact_cache_entry = load_entry
     apc._gmlx_kvarn_apc = True

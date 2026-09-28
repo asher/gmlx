@@ -36,6 +36,7 @@ def pin_apc_arms(monkeypatch):
                         coordinator.build_prefix_cache_plan)
     monkeypatch.setattr(apc, "_read_safetensors_tensor",
                         apc._read_safetensors_tensor)
+    monkeypatch.setattr(apc, "model_apc_mode", apc.model_apc_mode)
     for name in ("_snapshot_exact_cache_entry", "_load_exact_cache_entry"):
         monkeypatch.setattr(apc.DiskBlockStore, name,
                             getattr(apc.DiskBlockStore, name))
