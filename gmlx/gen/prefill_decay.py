@@ -664,10 +664,9 @@ def decayed_for_batch(batch) -> int | None:
 
 
 def install_prefill_decay() -> bool:
-    """Wrap PromptProcessingBatch.prompt_step and needs_processing so both
-    run with the depth-decayed step. prompt_step sizes each chunk from it.
-    Stock needs_processing reads the step only to test it for None, so the
-    decayed value does not change its answer. Idempotent; composes with the
+    """Wrap PromptProcessingBatch.prompt_step so each chunk is sized from
+    the depth-decayed step. Stock needs_processing reads the step only to
+    test it for None, so it stays unwrapped. Idempotent; composes with the
     MTP prompt_step override in either install order (decay is idempotent,
     and the MTP body resolves its own step via decayed_for_batch)."""
     if not _enabled():
@@ -678,26 +677,18 @@ def install_prefill_decay() -> bool:
         return True
 
     orig_step = PromptProcessingBatch.prompt_step
-    orig_needs = PromptProcessingBatch.needs_processing
 
-    def _with_decayed_step(self, orig):
+    def _decay_prompt_step(self):
         base = self.prefill_step_size
         step = decayed_for_batch(self)
         if step == base:
-            return orig(self)
+            return orig_step(self)
         self.prefill_step_size = step
         try:
-            return orig(self)
+            return orig_step(self)
         finally:
             self.prefill_step_size = base
 
-    def _decay_prompt_step(self):
-        return _with_decayed_step(self, orig_step)
-
-    def _decay_needs_processing(self):
-        return _with_decayed_step(self, orig_needs)
-
     PromptProcessingBatch.prompt_step = _decay_prompt_step
-    PromptProcessingBatch.needs_processing = _decay_needs_processing
     setattr(PromptProcessingBatch, _FLAG, True)
     return True

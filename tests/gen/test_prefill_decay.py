@@ -536,6 +536,60 @@ def test_profile_base_step_swap(monkeypatch):
     assert pd.decayed_for_batch(_pbatch(2048, 200_000)) == 2048
 
 
+def test_needs_processing_answers_as_the_decayed_step_would(monkeypatch):
+    """Stock needs_processing reads the prefill step only to test it for
+    None. Run with the decayed step in place of the batch's, as the removed
+    wrap ran it, it answers as stock does: decay at depth, the arch base
+    swap, a pinned media step and a None step, each with no embeddings, a
+    one-token prompt, a longer one and a pending checkpoint column."""
+    from mlx_vlm.generate.ar import PromptProcessingBatch
+
+    stock = PromptProcessingBatch.needs_processing
+    _cap(monkeypatch, 1.0)
+    monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
+    _register(monkeypatch, "fake_arch",
+              lambda m, c: FLASH._replace(base_step=4096))
+
+    def with_decayed_step(b):
+        base = b.prefill_step_size
+        b.prefill_step_size = pd.decayed_for_batch(b)
+        try:
+            return stock(b)
+        finally:
+            b.prefill_step_size = base
+
+    def pinned():
+        b = _batch(2048, 0)
+        b._gmlx_pinned_step = 300
+        return b
+
+    makers = (lambda: _batch(2048, 100_000), lambda: _pbatch(2048, 0),
+              pinned, lambda: _batch(None, 100_000))
+    moved = 0
+    for make in makers:
+        for embeds in (None, (1, 1, 8), (1, 9, 8)):
+            for col in (None, 5):
+                b = make()
+                b._inputs_embeds = (None if embeds is None
+                                    else SimpleNamespace(shape=embeds))
+                b._next_apc_checkpoint_column = lambda col=col: col
+                moved += pd.decayed_for_batch(b) != b.prefill_step_size
+                assert with_decayed_step(b) == stock(b), (make, embeds, col)
+    assert moved == 18  # every case but the None step moves it
+
+
+def test_install_wraps_prompt_step_only(monkeypatch):
+    from mlx_vlm.generate.ar import PromptProcessingBatch as P
+
+    monkeypatch.setattr(P, "prompt_step", P.prompt_step)
+    monkeypatch.setattr(P, "needs_processing", P.needs_processing)
+    monkeypatch.delattr(P, pd._FLAG, raising=False)
+    step, needs = P.prompt_step, P.needs_processing
+    assert pd.install_prefill_decay()
+    assert P.prompt_step is not step
+    assert P.needs_processing is needs
+
+
 def test_decayed_seed_step_with_profile(monkeypatch):
     _cap(monkeypatch, 1.0)
     monkeypatch.setenv("GMLX_MTP_SEED_SCORE_CAP_GB", "1")
