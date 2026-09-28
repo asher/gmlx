@@ -55,8 +55,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cached prefix could fail when it joined a batch that was already decoding.
 - Concurrent requests on a Gemma-4 model that shared a prompt prefix of 1024
   or more tokens could decode wrong tokens.
-- Concurrent MTP requests on a Gemma-4 model could decode wrong tokens in a
-  short request batched with one longer than the sliding window.
+- Concurrent MTP requests on a Gemma-4 or DeepSeek-V4 model could decode wrong
+  tokens in a short request batched with one longer than the sliding window.
+- MTP on a DeepSeek-V4 model could decode wrong tokens after a concurrent
+  request finished, once the remaining request passed the sliding window.
 - In a server that had loaded a DeepSeek-V4 model, MTP on a Gemma-4 model
   could decode wrong tokens once a request passed the sliding window.
 - With MTP on a Gemma-4 model, a request past the sliding window could decode
