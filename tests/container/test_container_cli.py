@@ -4,6 +4,7 @@ references, tag cleanup, the one-time command check and the rebuild hash."""
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -1014,6 +1015,17 @@ def test_date_records_use_a_temporary_name_per_process(fake_container, monkeypat
     assert names == [f"builder-owed.{os.getpid()}.tmp"]
     assert images._read_date(images._owed_path()) == "2026-09-28T09:00:00Z"
     assert sorted(p.name for p in images.images_dir().glob("builder-owed*")) == ["builder-owed"]
+
+
+def test_a_date_record_that_cannot_be_written_leaves_no_temporary_file(
+        fake_container, monkeypatch):
+    def disk_full(src, dst):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(images.os, "replace", disk_full)
+    images.images_dir().mkdir(parents=True, exist_ok=True)
+    with pytest.raises(OSError):
+        images._write_date(images._owed_path(), "2026-09-28T09:00:00Z")
+    assert list(images.images_dir().glob("builder-owed*")) == []
 
 
 def test_the_check_line_keeps_a_carriage_return(fake_container):

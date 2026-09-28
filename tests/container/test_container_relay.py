@@ -508,7 +508,7 @@ def test_a_connection_that_moved_bytes_has_no_deadline(loop, tmp_path):
     relay.Relay(loop, path, srv.getsockname(), name="gmlx api", idle_deadline=0.3)
     c = _unix_client(path)
     assert _echoes(c, 5)
-    time.sleep(0.8)                                # quiet, past the deadline
+    _past_deadline(loop, 0.3)                      # quiet, past the deadline
     assert _echoes(c, 5)
     c.close()
     srv.close()
@@ -524,7 +524,7 @@ def test_a_server_that_speaks_first_keeps_the_connection(loop, tmp_path):
     conn, _ = srv.accept()
     conn.sendall(b"hello")                         # such as a MySQL greeting
     assert c.recv(5) == b"hello"
-    time.sleep(0.8)
+    _past_deadline(loop, 0.3)
     conn.sendall(b"again")
     assert c.recv(5) == b"again"
     c.close()
@@ -550,14 +550,40 @@ def test_no_socket_for_the_target_frees_the_slot(loop, tmp_path, monkeypatch):
     stop()
 
 
-def _refusing_port():
-    """A loopback port where nothing listens. A non-blocking connect to it
-    reports EINPROGRESS on macOS and fails afterwards with ECONNREFUSED."""
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    return port
+class _RefusedLater:
+    """A target socket whose connect starts and then fails, as a refused
+    loopback connect does on macOS: EINPROGRESS, then ECONNREFUSED once the
+    socket is writable. A socket pair end stands in, since it is writable at
+    once, so the failure never depends on timing."""
+
+    def __init__(self):
+        self._sock, self._peer = socket.socketpair()
+        self.checked = False
+
+    def connect_ex(self, addr):
+        return errno.EINPROGRESS
+
+    def getsockopt(self, level, option, *rest):
+        if option == socket.SO_ERROR:
+            self.checked = True
+            return errno.ECONNREFUSED
+        return self._sock.getsockopt(level, option, *rest)
+
+    def close(self):
+        self._sock.close()
+        self._peer.close()
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+def _past_deadline(loop, delay):
+    """Wait until a timer of ``delay`` seconds, set now, has run. The loop
+    runs timers in order of their due time, so every deadline set earlier
+    with the same delay has run too."""
+    ran = threading.Event()
+    loop.call_later(delay, ran.set)
+    assert ran.wait(10)
 
 
 def test_no_socket_after_a_failed_connect_frees_the_slot(loop, tmp_path, monkeypatch):
@@ -565,20 +591,19 @@ def test_no_socket_after_a_failed_connect_frees_the_slot(loop, tmp_path, monkeyp
     and the socket for the next target cannot be made."""
     port, stop = _echo_server()
     path = str(tmp_path / "emfile2.sock")
-    r = relay.Relay(loop, path, [("127.0.0.1", _refusing_port()), ("127.0.0.1", port)],
-                    name="gmlx api")
-    real = relay._upstream_socket
+    r = relay.Relay(loop, path, [("127.0.0.1", 9), ("127.0.0.1", port)], name="gmlx api")
     made = []
 
     def second_fails(family):
-        made.append(family)
-        if len(made) > 1:
+        if made:
+            made.append(None)
             raise OSError(errno.EMFILE, "Too many open files")
-        return real(family)
+        made.append(_RefusedLater())
+        return made[0]
     monkeypatch.setattr(relay, "_upstream_socket", second_fails)
     with _unix_client(path) as c:
         assert c.recv(10) == b""                   # closed, not left open
-    assert len(made) == 2
+    assert len(made) == 2 and made[0].checked     # the first failed after it started
     assert _in_loop(loop, lambda: r.open) == 0
     assert any("Too many open files" in line for line in loop.logged)
     stop()
@@ -596,7 +621,7 @@ def test_a_failed_connect_step_releases_the_slot_once(loop, tmp_path, monkeypatc
     monkeypatch.setattr(relay._Pair, "_connect_next", broken)
     with _unix_client(path) as c:
         assert c.recv(10) == b""
-    time.sleep(0.5)                                # past the deadline
+    _past_deadline(loop, 0.2)
     assert _in_loop(loop, lambda: r.open) == 0
     stop()
 
@@ -623,13 +648,40 @@ def test_the_api_relay_needs_a_whole_request_head_before_the_deadline(loop, tmp_
     got = b""
     while len(got) < len(head):
         got += whole.recv(64)
-    time.sleep(0.8)
+    _past_deadline(loop, 0.3)
     whole.settimeout(0.2)
     with pytest.raises(socket.timeout):             # still open past the deadline
         whole.recv(10)
     assert _in_loop(loop, lambda: r.open) == 1
     whole.close()
     srv.close()
+
+
+_HEAD = b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n"
+
+
+def _head_pair():
+    """A pair that only watches for the request head, with no sockets."""
+    pair = relay._Pair.__new__(relay._Pair)
+    pair.moved, pair.until_head, pair.head_tail = False, True, b""
+    return pair
+
+
+@pytest.mark.parametrize("cut", [1, 2, 3, 4])
+def test_a_request_head_split_anywhere_in_its_empty_line_counts(cut):
+    pair = _head_pair()
+    pair._note_down(_HEAD[:-cut])
+    assert not pair.moved
+    pair._note_down(_HEAD[-cut:])
+    assert pair.moved
+
+
+def test_a_request_head_sent_one_byte_at_a_time_counts():
+    pair = _head_pair()
+    for i in range(len(_HEAD)):
+        assert not pair.moved
+        pair._note_down(_HEAD[i:i + 1])
+    assert pair.moved
 
 
 def test_the_accept_pause_needs_no_timer_thread(loop, monkeypatch):

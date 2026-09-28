@@ -459,6 +459,21 @@ def test_supervise_keeps_lock_descriptors_out_of_the_child(fake_container, tmp_p
     assert files and not [f for f in files if f.endswith("session.lock")]
 
 
+def test_supervise_gives_only_the_api_relay_the_request_head_deadline(
+        fake_container, tmp_path, monkeypatch):
+    made = []
+    real = session.Relay
+
+    def spy(*a, **k):
+        made.append((k["name"], k.get("idle_until_head", False)))
+        return real(*a, **k)
+    monkeypatch.setattr(session, "Relay", spy)
+    sess = session.new_session("pi", [])
+    spec = _spec(tmp_path, session=sess, plan=_plan(tmp_path, forward=[6379]))
+    session.supervise(spec, api_targets=[("127.0.0.1", 9)], record={}, say=lambda line: None)
+    assert sorted(made) == [("gmlx api", True), ("port 6379", False)]
+
+
 def test_supervise_stops_and_deletes_a_container_still_listed(fake_container, tmp_path):
     sess = session.new_session("pi", [])
     fake_container.update(containers=[{"name": sess.name}])
