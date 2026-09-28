@@ -249,6 +249,11 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
          "key-merge wrap)"),
+    Seam("mlx_vlm.server.openai", "_normalize_instruction_messages",
+         "server_patches.install_role_normalization (wrapped: a call with "
+         "the messages alone, the chat completions one, keeps developer "
+         "messages in place) + estimate._estimate_bound (follows the "
+         "chat route's merge)"),
     Seam("mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
          "server_patches.install_context_overflow_wording (wrapped: the "
          "overflow 400 is recorded for the endpoint wrapper)"),

@@ -504,6 +504,43 @@ def test_anthropic_tool_choice_none_drops_tools_end_to_end(wire):
     assert wire.gen.calls[-1]["args"].skip_special_tokens is False
 
 
+# 4c. developer messages (chat_behavior.install_role_normalization): mlx-vlm
+#     merges system and developer messages into one leading system message.
+#     On the chat route developer messages stay in place, and the template
+#     decides their role; the Responses route keeps the stock merge.
+def _rendered_messages(wire):
+    return [(m["role"], m["content"]) for m in
+            json.loads(wire.gen.calls[-1]["prompt"][len("user: "):])]
+
+
+def test_chat_developer_messages_stay_in_place(wire, monkeypatch):
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "yo"},
+            {"role": "developer", "content": "D"},
+            {"role": "system", "content": "S2"},
+            {"role": "user", "content": "go"}]
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(messages=msgs))
+    assert r.status_code == 200, r.text
+    # the stub template never mentions the role: system, in place
+    assert _rendered_messages(wire) == [
+        ("system", "S\n\nS2"), ("user", "hi"), ("assistant", "yo"),
+        ("system", "D"), ("user", "go")]
+
+    monkeypatch.setattr(_WireTokenizer, "chat_template",
+                        _WireTokenizer.chat_template + " developer")
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(messages=msgs))
+    assert r.status_code == 200, r.text
+    assert _rendered_messages(wire)[3] == ("developer", "D")
+
+    r = wire.client.post("/v1/responses", json={
+        "model": MODEL_ID, "instructions": "I",
+        "input": [{"role": "developer", "content": "D"},
+                  {"role": "user", "content": "hi"}]})
+    assert r.status_code == 200, r.text
+    assert _rendered_messages(wire) == [("system", "I\n\nD"), ("user", "hi")]
+
+
 # 5. /v1/responses (README / getting-started promise the Responses API)
 def test_responses_route_shape(wire):
     r = wire.client.post("/v1/responses",

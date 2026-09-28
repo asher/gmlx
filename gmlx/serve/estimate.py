@@ -405,13 +405,19 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
         from mlx_vlm.server.app import _build_gen_args
         from mlx_vlm.server.schemas import ChatRequest
 
+        from gmlx.serve.patches.chat_behavior import roles_for_render
+
         req = ChatRequest(**body)
+        # The chat route's order: the instruction merge (developer messages
+        # stay in place), tool_choice, then the developer-role rule at render.
+        _oa._normalize_instruction_messages(msgs)
         msgs, tools, tool_choice = _oa._prepare_chat_tool_choice(
             msgs, body.get("tools"), body.get("tool_choice"))
         gen_args = _build_gen_args(req, processor, tenant_id=tenant_id)
         template_kwargs = gen_args.to_template_kwargs()
         if tool_choice is not None:
             template_kwargs["tool_choice"] = tool_choice
+        msgs = roles_for_render(processor, msgs, template_kwargs)
         prompt = pkg.apply_chat_template(processor, config, msgs, num_images=0,
                                          tools=tools or None, **template_kwargs)
         from gmlx.serve.patches.sampling import client_max_tokens

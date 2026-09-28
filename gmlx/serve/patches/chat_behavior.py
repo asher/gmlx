@@ -158,6 +158,12 @@ def install_chat_template_kwargs() -> None:
 # rendering. Rewrite developer -> system only when the effective template
 # never mentions the role; a template that handles it gets the messages
 # verbatim.
+# mlx-vlm merges every system and developer message into one leading
+# system message before the model is known. On /v1/chat/completions that
+# merge leaves developer messages where the client sent them, so the rule
+# above still decides them at render; system messages merge as upstream
+# does. The Responses routes pass their ``instructions`` and keep the
+# stock merge.
 _ROLE_NORM_FLAG = "_kq_gguf_role_normalization"
 
 
@@ -175,27 +181,67 @@ def _normalize_developer_roles(prompt, template: str):
             for m in prompt]
 
 
+def roles_for_render(processor, prompt, kw: dict):
+    """``prompt`` as the role-normalization wrap hands it to the template.
+    ``kw`` holds the render call's keyword arguments, whose
+    ``chat_template`` overrides the model's."""
+    override = kw.get("chat_template")
+    template = override if isinstance(override, str) and override \
+        else _model_template_text(processor)
+    return _normalize_developer_roles(prompt, template)
+
+
+def _developer_in_place(merge):
+    """``merge`` (mlx-vlm's instruction merge) leaving `developer` messages
+    in place when called with the messages alone, as chat completions
+    calls it. The system messages go through ``merge`` unchanged."""
+    def _normalize_instruction_messages(chat_messages, *args, **kwargs):
+        if args or kwargs:
+            return merge(chat_messages, *args, **kwargs)
+        held = {}
+        masked = []
+        for m in chat_messages:
+            if isinstance(m, dict) and m.get("role") == "developer":
+                stub = {"role": None}
+                held[id(stub)] = (stub, m)
+                m = stub
+            masked.append(m)
+        if not held:
+            return merge(chat_messages)
+        out = merge(masked)
+        chat_messages[:] = [held[id(m)][1] if id(m) in held else m
+                            for m in masked]
+        return out
+    return _normalize_instruction_messages
+
+
 def install_role_normalization() -> None:
     """Rewrite the OpenAI `developer` role to `system` before render for
     models whose chat template does not handle it. Wraps every captured
     ``apply_chat_template`` binding; install last among the render wraps so
-    the retire capture memoizes the normalized messages. Idempotent."""
+    the retire capture memoizes the normalized messages. Also keeps
+    developer messages out of mlx-vlm's instruction merge on chat
+    completions. Idempotent."""
     from ._common import _render_target_modules
 
     def _wrap(fn):
         def apply_chat_template(processor, config, prompt, *a, **kw):
-            override = kw.get("chat_template")
-            template = override if isinstance(override, str) and override \
-                else _model_template_text(processor)
-            return fn(processor, config,
-                      _normalize_developer_roles(prompt, template), *a, **kw)
+            return fn(processor, config, roles_for_render(processor, prompt, kw),
+                      *a, **kw)
         apply_chat_template.__dict__[_ROLE_NORM_FLAG] = True
         return apply_chat_template
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, _ROLE_NORM_FLAG, False):
-            target.apply_chat_template = _wrap(fn)
+            setattr(target, "apply_chat_template", _wrap(fn))
+
+    openai = importlib.import_module("mlx_vlm.server.openai")
+    merge = getattr(openai, "_normalize_instruction_messages", None)
+    if merge is not None and not getattr(merge, _ROLE_NORM_FLAG, False):
+        wrapped = _developer_in_place(merge)
+        wrapped.__dict__[_ROLE_NORM_FLAG] = True
+        setattr(openai, "_normalize_instruction_messages", wrapped)
 
 
 # thinking_budget for models that generate <think> (not just pre-fill it)
@@ -440,7 +486,7 @@ def install_stream_thinking_seed() -> None:
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, _STREAM_SEED_FLAG, False):
-            target.apply_chat_template = _wrap(fn)
+            setattr(target, "apply_chat_template", _wrap(fn))
 
     # Non-stream twin: a reply that hits max_tokens inside a prompt-opened
     # think block carries no marker, so the stock splitter classifies the
@@ -483,10 +529,10 @@ def install_stream_thinking_seed() -> None:
             return reasoning, content
 
         _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
-        app._split_thinking_text = _split_thinking_text
+        setattr(app, "_split_thinking_text", _split_thinking_text)
         # The /v1/responses output builder calls the responses_state module
         # global directly; give it the same splitter.
-        rs._split_thinking = _split_thinking_text
+        setattr(rs, "_split_thinking", _split_thinking_text)
 
 
 # ignore-eos: forced-length decode (server-level)
@@ -719,7 +765,7 @@ def install_openai_stop_sequences() -> None:
             return out, seq
 
         _apply_stop_sequences.__dict__[_STOP_FLAG] = True
-        an._apply_stop_sequences = _apply_stop_sequences
+        setattr(an, "_apply_stop_sequences", _apply_stop_sequences)
 
 
 def install_vanilla_stream_chunks() -> None:

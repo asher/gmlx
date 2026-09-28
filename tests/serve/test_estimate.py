@@ -287,6 +287,47 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     assert st == 200 and out["media"] is True and out["prompt_tokens"] is None
 
 
+def test_estimate_renders_the_chat_route_messages(monkeypatch):
+    """The estimate renders what the chat route renders: system messages
+    merged into one leading message, developer messages in place, and the
+    developer role kept only for a template that mentions it."""
+    import gmlx.serve.patches as sp
+
+    sp.install_role_normalization()
+    serving.register_resolved_models(build_config(
+        {"models": {"q": {"path": "/abs/q.gguf"}}}))
+    processor = SimpleNamespace(chat_template="{{ messages }}")
+    entry = SimpleNamespace(
+        response_generator=SimpleNamespace(), apc_manager=None,
+        model_cache={"model": None, "processor": processor, "config": {}})
+    _PKG._kq_residency_pool = SimpleNamespace(resident_entry=lambda p: entry)
+    rendered = []
+    monkeypatch.setattr(_PKG, "apply_chat_template",
+                        lambda p, c, msgs, **k: rendered.append(msgs) or "x",
+                        raising=False)
+    monkeypatch.setattr(_APP, "_build_gen_args",
+                        lambda req, processor=None, tenant_id=None:
+                        SimpleNamespace(to_template_kwargs=lambda: {},
+                                        max_tokens=0))
+    body = {"model": "q", "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "developer", "content": "D"},
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "go"}]}
+
+    st, _ = est.estimate_request(body)
+    assert st == 200
+    assert rendered[-1] == [{"role": "system", "content": "S"},
+                            {"role": "user", "content": "hi"},
+                            {"role": "system", "content": "D"},
+                            {"role": "user", "content": "go"}]
+
+    processor.chat_template = "{{ developer }}"
+    st, _ = est.estimate_request(body)
+    assert st == 200
+    assert rendered[-1][2] == {"role": "developer", "content": "D"}
+
+
 def test_estimate_route_and_chat_dry_run(monkeypatch):
     from fastapi.testclient import TestClient
 

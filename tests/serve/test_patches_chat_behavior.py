@@ -619,6 +619,44 @@ def test_install_role_normalization_rewrites_before_render():
     assert openai.apply_chat_template is fn
 
 
+def test_instruction_merge_leaves_developer_messages_in_place():
+    """mlx-vlm merges system and developer messages into one leading system
+    message. Called with the messages alone (chat completions), the merge
+    leaves developer messages where they were; called with instructions
+    (Responses), it runs stock."""
+    sp.install_role_normalization()
+    openai = importlib.import_module("mlx_vlm.server.openai")
+    merge = openai._normalize_instruction_messages
+    assert getattr(merge, sp_chat._ROLE_NORM_FLAG, False)
+
+    dev = {"role": "developer", "content": "D"}
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "yo"},
+            dev,
+            {"role": "system", "content": "S2"},
+            {"role": "user", "content": "go"}]
+    assert merge(msgs) == "S\n\nS2"
+    assert msgs == [{"role": "system", "content": "S\n\nS2"},
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "yo"},
+                    {"role": "developer", "content": "D"},
+                    {"role": "user", "content": "go"}]
+    assert msgs[3] is dev
+    only_dev = [dev, {"role": "user", "content": "hi"}]
+    assert merge(only_dev) is None and only_dev[0] is dev
+
+    resp = [{"role": "developer", "content": "D"},
+            {"role": "user", "content": "hi"}]
+    assert merge(resp, "I") == "I\n\nD"
+    assert resp == [{"role": "system", "content": "I\n\nD"},
+                    {"role": "user", "content": "hi"}]
+
+    # idempotent
+    sp.install_role_normalization()
+    assert openai._normalize_instruction_messages is merge
+
+
 def test_template_error_becomes_clean_400():
     """A raise_exception from the chat template answers 400 with the
     template's message; template bugs (subclasses) stay 500, clean body."""
