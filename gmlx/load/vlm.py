@@ -3405,7 +3405,8 @@ def load_vlm_model(
     # mlx-vlm renders the prompt (chat and run paths both call in here).
     from gmlx.tui.reasoning import install_template_default_thinking
     install_template_default_thinking()
-    # A text-only system message reaches the template as a string.
+    # A text-only system message reaches a Gemma-4 template as a string;
+    # the processor built below enables it.
     from gmlx.upstream.system_content_fix import install_system_content_fix
     install_system_content_fix()
     # A prompt that opens with BOS is encoded without another.
@@ -3582,6 +3583,8 @@ def load_vlm_model(
             model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
         _log("[vlm] processor: synthesized from GGUF (no download)")
+    from gmlx.upstream.system_content_fix import enable_system_content_fix
+    enable_system_content_fix(processor, model_type)
     collect_after_load()
     if return_tokenizer:
         return model, config, processor, mtp_tokenizer

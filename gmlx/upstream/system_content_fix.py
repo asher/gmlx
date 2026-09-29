@@ -11,10 +11,14 @@ handles lists in every other message, assistant history included.
 
 The fix wraps ``get_chat_template``, the render tail that
 ``apply_chat_template`` and the server's faithful-history wrap both call.
-A system or developer message whose content holds only text parts reaches
-the template as one string, joined the way the stock plain-prompt
-flattening joins text parts. Content with a media part and every other
-role pass through unchanged. Idempotent.
+It applies to a processor the VLM loader enabled for a Gemma-4 model type
+(``enable_system_content_fix``). Other templates read list content for
+every role (idefics3, SmolVLM and the llava-hf ones iterate it), so their
+messages pass through unchanged. A system or developer message whose
+content holds only text parts reaches the template as one string. The
+parts are joined the way the Gemma-4 template renders the text parts of a
+user message: each part trimmed, with no separator. Content with a media
+part and every other role pass through unchanged. Idempotent.
 """
 
 from __future__ import annotations
@@ -24,6 +28,11 @@ import importlib
 from gmlx.upstream.patching import wrapped_with
 
 _FLAG = "_gmlx_system_content_as_text"
+# Set on a processor the loader built for one of _MODEL_TYPES.
+_PROCESSOR_FLAG = "_gmlx_system_as_text"
+# The model types whose template prints the leading system message as a
+# string: Gemma-4 with its mmproj, and the unified Gemma-4 container.
+_MODEL_TYPES = ("gemma4", "gemma4_unified")
 _ROLES = ("system", "developer")
 _TEXT_PARTS = ("text", "input_text")
 
@@ -39,8 +48,20 @@ def _joined_text(content) -> str | None:
         text = item.get("text") or item.get("content") or ""
         if not isinstance(text, str):
             return None
-        texts.append(text)
+        texts.append(text.strip())
     return "".join(texts)
+
+
+def enable_system_content_fix(processor, model_type: str | None) -> bool:
+    """Turn the fix on for ``processor`` when the loaded model's type is in
+    ``_MODEL_TYPES``. Returns whether it did."""
+    if model_type not in _MODEL_TYPES or processor is None:
+        return False
+    try:
+        setattr(processor, _PROCESSOR_FLAG, True)
+    except (AttributeError, TypeError):
+        return False
+    return True
 
 
 def install_system_content_fix() -> None:
@@ -53,7 +74,8 @@ def install_system_content_fix() -> None:
 
     def get_chat_template(processor, messages, add_generation_prompt,
                           tokenize=False, **kwargs):
-        if isinstance(messages, list):
+        if (getattr(processor, _PROCESSOR_FLAG, False) is True
+                and isinstance(messages, list)):
             out = []
             for message in messages:
                 if (isinstance(message, dict)
