@@ -236,7 +236,12 @@ class Attention(nn.Module):
             else:
                 values = self.v_proj(x).reshape(B, L, self.n_kv_heads, self.head_dim)
 
-            offset = mx.array(cache.offset) if cache is not None else 0
+            # gmlx: an int offset reaches rope as is, with no device upload.
+            # An array offset is copied, since update_and_fetch advances
+            # cache.offset in place between the key rope and the query rope.
+            offset = cache.offset if cache is not None else 0
+            if isinstance(offset, mx.array):
+                offset = mx.array(offset)
 
             keys = self.k_norm(keys)
             keys = keys.transpose(0, 2, 1, 3)
@@ -377,6 +382,19 @@ class DecoderLayer(nn.Module):
             h = h * self.layer_scalar
 
         return h, shared_kv, offset
+
+
+# gmlx: the sliding mask probe without a host sync. An int offset is
+# compared on the host. An array offset is assumed to have a prefix, since
+# probing it syncs; the array mask is also right at offset 0.
+def _cache_has_prefix(c) -> bool:
+    off = getattr(c, "offset", 0)
+    if isinstance(off, mx.array):
+        return True
+    try:
+        return int(off) > 0
+    except (TypeError, ValueError):
+        return True
 
 
 class Gemma4TextModel(nn.Module):
@@ -530,10 +548,9 @@ class Gemma4TextModel(nn.Module):
                         h, c, return_array=return_array
                     )
                 elif l.layer_type == "sliding_attention":
+                    # gmlx: no .item() on the cache offset.
                     return_array = (
-                        h.shape[1] > 1
-                        and c is not None
-                        and int(mx.max(mx.array(c.offset)).item()) > 0
+                        h.shape[1] > 1 and c is not None and _cache_has_prefix(c)
                     ) or use_bidirectional_vision
                     mask["sliding_attention"] = create_attention_mask(
                         h, c, window_size=self.window_size, return_array=return_array
