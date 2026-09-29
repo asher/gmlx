@@ -15,6 +15,7 @@ import importlib
 from mlx_lm.models import llama as llama_mod
 
 import gmlx.upstream.cascade_sdpa as cs
+from gmlx.upstream.patching import wrapped_with
 
 _SEAM_MODS = []
 for _pkg, _name in cs._MODULES:
@@ -628,6 +629,8 @@ def test_stamp_install_killable(monkeypatch):
 
 
 def test_stamp_install_real_seams(monkeypatch):
+    """The stamp is somewhere in each chain: another installer, such as
+    the kvarn fast path, may wrap on top of it."""
     monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
     cs._installed_stamp = False
     from mlx_vlm.generate import ar
@@ -636,9 +639,9 @@ def test_stamp_install_real_seams(monkeypatch):
     orig_ext = ar._extend_cache
     try:
         assert cs.install_cascade_stamp()
-        assert getattr(ar.PromptProcessingBatch.__init__,
-                       "_gmlx_cascade_stamp", False)
-        assert getattr(ar._extend_cache, "_gmlx_cascade_stamp", False)
+        assert wrapped_with(ar.PromptProcessingBatch.__init__,
+                            "_gmlx_cascade_stamp")
+        assert wrapped_with(ar._extend_cache, "_gmlx_cascade_stamp")
         assert cs.install_cascade_stamp()  # idempotent
     finally:
         ar.PromptProcessingBatch.__init__ = orig_init
