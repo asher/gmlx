@@ -83,7 +83,7 @@ class _KwargsProcessor(_class(_GEMMA4)):
 
     chat_template = "t"
 
-    def __init__(self, eos=False):  # noqa: D107 - skips the stock setup
+    def __init__(self, eos=False):  # noqa: D107  skips the stock setup
         self.tokenizer = _tokenizer(eos)
 
     def __call__(self, images=None, text=None, **kwargs):

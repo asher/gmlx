@@ -98,7 +98,7 @@ def _probe_only_bos(tokenizer) -> bool:
                                                  add_special_tokens=False)]
         full = [int(t) for t in tokenizer.encode(_PROBE,
                                                  add_special_tokens=True)]
-    except Exception:  # noqa: BLE001 - an unreadable tokenizer keeps stock
+    except Exception:  # noqa: BLE001  an unreadable tokenizer keeps stock
         return False
     return full == [bos_id] + bare
 
