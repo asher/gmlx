@@ -1041,6 +1041,36 @@ def _install_hadamard(model, targets: dict | None, log) -> None:
         log(f"[install] Hadamard rotation shared on {n_shared} attention/MLP blocks")
 
 
+class UnfilledParametersError(RuntimeError):
+    """The GGUF weights leave model parameters without a tensor."""
+
+
+def _names(names: list[str], n: int = 5) -> str:
+    more = f" (+{len(names) - n} more)" if len(names) > n else ""
+    return ", ".join(names[:n]) + more
+
+
+def _require_filled(model_params: set[str], loadable: dict, hf_weights,
+                    hint: str = "") -> None:
+    """Refuse a load that leaves any model parameter without a tensor.
+
+    GGUF tensors with no parameter are dropped (they are logged as
+    redundant). A parameter with no tensor keeps its random initialization,
+    and the model would run on it."""
+    missing = sorted(model_params - loadable.keys())
+    if not missing:
+        return
+    unmatched = sorted(set(hf_weights) - loadable.keys())
+    msg = (
+        f"the GGUF weights fill {len(model_params) - len(missing)} of "
+        f"{len(model_params)} model parameters. Parameters without a tensor "
+        f"({len(missing)}): {_names(missing)}. Tensors without a parameter "
+        f"({len(unmatched)})"
+        + (f": {_names(unmatched)}" if unmatched else "")
+        + ". The model would run on random weights, so the load stops.")
+    raise UnfilledParametersError(msg + (f" {hint}" if hint else ""))
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -1212,6 +1242,7 @@ def _install_and_load(
             f"[load_weights] dropping {len(redundant)} redundant tensors "
             f"(no model slot): {redundant[:3]}..."
         )
+    _require_filled(model_params, loadable, hf_weights)
 
     act_dtype = activation_dtype()
     act_name = activation_dtype_name()
@@ -1242,12 +1273,6 @@ def _install_and_load(
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
     _warm_mmap_residency(model, log=log, active_before=active_before,
                          source_key=source_key)
-
-    missing = sorted(model_params - set(loadable.keys()))
-    if missing:
-        loadlog.warn(
-            f"WARNING: {len(missing)} model params not loaded: {missing[:5]}..."
-        )
 
     _verify_zero_copy_views(model, no_alias, log)
 
@@ -1716,6 +1741,11 @@ def load_model(
             f"[load_weights] dropping {len(redundant)} redundant tensors "
             f"(no model slot): {redundant[:3]}..."
         )
+    _require_filled(
+        model_params, loadable, hf_weights,
+        hint=(f"hf_source {hf_source!r} builds model_type "
+              f"{config.get('model_type')!r}, whose parameter names do not "
+              f"match this GGUF." if hf_source is not None else ""))
 
     # Cast non-quantized float params (norms, SSM weights, and the F16 matrix
     # weights some conversions ship - e.g. gemma-3n's AltUp/LAuReL/per-layer
@@ -1758,12 +1788,6 @@ def load_model(
     # probability-weighted soft-embedding step; dequantize it post-load.
     if config.get("model_type") == "diffusion_gemma":
         _dequantize_diffusion_embedding(model, _log)
-
-    missing = sorted(model_params - set(loadable.keys()))
-    if missing:
-        loadlog.warn(
-            f"WARNING: {len(missing)} model params not loaded: {missing[:5]}..."
-        )
 
     _verify_zero_copy_views(model, owned_names, _log)
 
