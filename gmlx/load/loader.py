@@ -28,7 +28,7 @@ import mlx_kquant as kq
 
 from . import loadlog
 from .dtypes import activation_dtype, activation_dtype_name
-from gmlx.device import metal_info, metal_value
+from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
@@ -785,8 +785,9 @@ def _warm_mmap_residency(
     ``threshold_bytes`` the watchdog is not at risk and lazy wiring during
     the first forward is near-free (measured: an eager touch costs seconds,
     the lazy path nothing), so the GPU touch is skipped there too and only
-    the page-cache populate runs. GMLX_RESIDENCY_WARM=0 disables
-    everything, =1 forces the GPU touch regardless of size.
+    the page-cache populate runs. On the CPU default device nothing is
+    wired, so only the populate runs there as well. GMLX_RESIDENCY_WARM=0
+    disables everything, =1 forces the GPU touch regardless of size.
     """
     pairs = cast(list[tuple[str, mx.array]], tree_flatten(model.parameters()))
     total = sum(a.nbytes for _, a in pairs)
@@ -853,6 +854,8 @@ def _warm_touch_pass(
         start_populate(paths, log=log)
     if mode != "1" and total < threshold_bytes:
         return
+    if cpu_default_device():
+        return  # nothing is wired on the CPU device
     t0 = time.time()
     pending, acc = [], 0
     for a in arrays:

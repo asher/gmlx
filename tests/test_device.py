@@ -200,6 +200,28 @@ def test_warm_touch_leaves_a_streaming_bound_model(on_cpu, monkeypatch):
     assert calls == []
 
 
+def test_warm_touch_runs_on_the_gpu_device_only(on_cpu, monkeypatch):
+    # Nothing is wired on the CPU device, so a model over the touch
+    # threshold gets the page cache populate and no touch there.
+    import gmlx.load.loader as loader
+
+    monkeypatch.delenv("GMLX_RESIDENCY_WARM", raising=False)
+    populated, logs = [], []
+    monkeypatch.setattr(loader, "start_populate",
+                        lambda p, log: populated.append(p))
+    arrays = [mx.ones((64, 64))]
+
+    def warm():
+        loader._warm_touch_pass(arrays, arrays[0].nbytes, log=logs.append,
+                                paths=["m.gguf"], batch_bytes=1 << 20,
+                                threshold_bytes=1)
+        return [m for m in logs if "residency warm" in m]
+
+    assert warm() == [] and populated == [["m.gguf"]]
+    mx.set_default_device(mx.gpu)
+    assert len(warm()) == 1 and len(populated) == 2
+
+
 def test_native_fp_auto_picks_wire_past_the_working_set(on_cpu, monkeypatch):
     import gmlx.load.loader as loader
 
