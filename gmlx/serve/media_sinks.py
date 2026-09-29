@@ -15,6 +15,10 @@ not know.
   folder, which the video reader streams. Every image is read with a
   fixed set of format plugins and at most
   :data:`~.media_gate.MEDIA_MAX_PIXELS` pixels.
+- ``mlx_audio.audio_io.read`` takes bytes or a file object of at most
+  :data:`~.media_gate.MEDIA_MAX_BYTES`, a file in the media folder, or a
+  path in the folder of a configured model, such as a voice prompt the
+  model's own code reads.
 - ``mlx_vlm.utils.load`` loads only a configured model path.
 - ``load_drafter`` loads only the drafter the server's own build chose.
 - ``DiskBlockStore`` stores only under the APC disk path the server's own
@@ -35,7 +39,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from gmlx.safe_path import LeavesRoot, NotFollowed, canonical, open_file_below
+from gmlx.safe_path import LeavesRoot, NotFollowed, canonical, open_file_below, path_inside
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
@@ -51,6 +55,9 @@ _MEDIA_DIR = ("gmlx", "media")
 
 # (module, attribute) -> the function or method replaced there.
 _originals: dict[tuple[object, str], object] = {}
+# The folders of the configured models, where mlx_audio's reader may open a
+# file a model's own code names. Set by install.
+_model_roots: tuple[str, ...] = ()
 
 
 class ModelRefused(ValueError):
@@ -227,6 +234,28 @@ def _audio_loader(original):
     return load_audio
 
 
+def _audio_reader(original):
+    def read(file, *args, **kwargs):
+        if isinstance(file, (bytes, bytearray)):
+            file = io.BytesIO(bytes(file))
+        elif isinstance(file, (str, os.PathLike)):
+            value = str(file)
+            if mg.media_parts(value) is not None:
+                file = io.BytesIO(read_media_file(value, "audio", _AUDIO_WANT))
+            elif any(path_inside(canonical(value), r) for r in _model_roots):
+                # A model's own file, such as a voice prompt in its folder.
+                return original(file, *args, **kwargs)
+            else:
+                raise mg.reference_refusal("audio", value, _AUDIO_WANT)
+        elif hasattr(file, "read") and not isinstance(file, io.BytesIO):
+            file = io.BytesIO(file.read(mg.MEDIA_MAX_BYTES + 1))
+        if isinstance(file, io.BytesIO):
+            _check_size(file.getbuffer().nbytes, "audio")
+            return original(file, *args, **kwargs)
+        raise MediaRefused(f"audio of type {type(file).__name__} is not accepted")
+    return read
+
+
 @contextlib.contextmanager
 def _private_file(data: bytes, suffix: str):
     """Write ``data`` to a file in a new private folder and yield its path.
@@ -284,6 +313,51 @@ def _configured_model_paths() -> tuple[set[str], set[str]]:
         adapters.update(a for a in (getattr(rm, "adapter", None),
                                     *(getattr(rm, "adapters", ()) or ())) if a)
     return models, adapters
+
+
+def _model_folder(path: str) -> str:
+    """The folder of a configured model file. For a file in the Hugging
+    Face cache this is its repo folder, which holds the repo's snapshots and
+    the blobs their files link to."""
+    folder = os.path.dirname(canonical(path))
+    probe = folder
+    while probe != os.path.dirname(probe):
+        if os.path.basename(probe).startswith("models--"):
+            return probe
+        probe = os.path.dirname(probe)
+    return folder
+
+
+def _tts_folder() -> str | None:
+    """The folder of the configured speech model, which the server loads
+    from a local folder or from its Hugging Face repo."""
+    import gmlx.serve.bridge_vlm as serving
+
+    value = getattr(serving._SERVER_CFG, "tts", None)
+    if not value:
+        return None
+    from gmlx.serve.tts import resolve_tts_model
+
+    ref = resolve_tts_model(value)
+    if os.path.isdir(os.path.expanduser(ref)):
+        return canonical(ref)
+    from huggingface_hub.constants import HF_HUB_CACHE
+    from huggingface_hub.file_download import repo_folder_name
+
+    return canonical(os.path.join(HF_HUB_CACHE, repo_folder_name(
+        repo_id=ref, repo_type="model")))
+
+
+def _resolve_model_roots() -> tuple[str, ...]:
+    models, adapters = _configured_model_paths()
+    roots = {_model_folder(p) for p in models | adapters}
+    tts = _tts_folder()
+    if tts:
+        roots.add(tts)
+    # A model file kept in the home folder itself must not open the whole
+    # home folder.
+    home = canonical(os.path.expanduser("~"))
+    return tuple(sorted(r for r in roots if not path_inside(home, r)))
 
 
 def _same_path(a, b) -> bool:
@@ -368,6 +442,18 @@ def install() -> None:
     _replace(drafters, "load_drafter", _drafter_loader)
     apc = importlib.import_module("mlx_vlm.apc")
     _replace(apc.DiskBlockStore, "__init__", _disk_store_init)
+    global _model_roots
+    _model_roots = _resolve_model_roots()
+    try:
+        audio_io = importlib.import_module("mlx_audio.audio_io")
+        server_audio = importlib.import_module("mlx_vlm.server.audio")
+    except ImportError:
+        return
+    _replace(audio_io, "read", _audio_reader)
+    # The transcription module copied the reader at import time.
+    if not getattr(server_audio.audio_read, _FLAG, False):
+        _originals.setdefault((server_audio, "audio_read"), server_audio.audio_read)
+        setattr(server_audio, "audio_read", audio_io.read)
 
 
 def uninstall() -> None:

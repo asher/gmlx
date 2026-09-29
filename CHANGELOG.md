@@ -75,6 +75,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A request whose model fails to load gets that load error. Before, the
   server sometimes answered 500 with an error about a missing `requests`
   attribute.
+- A Sesame speech model, such as `mlx-community/csm-1b`, reads its preset
+  voices from its own repository, so they no longer need access to the
+  gated `sesame/csm-1b` repository.
 - A server, menu bar or extra install that gmlx starts no longer imports a
   `gmlx` or `pip` package from the current folder in place of the installed
   one. A server started from a source checkout therefore runs the installed

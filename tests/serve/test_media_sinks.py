@@ -275,6 +275,113 @@ def test_inline_audio_over_the_limit_is_refused(sinks, monkeypatch):
         _UTILS.load_audio(io.BytesIO(b"RIFF\x24\x00"), 16000)
 
 
+# mlx_audio's reader
+
+def _reader(monkeypatch, *roots):
+    rec = _Recorder()
+    monkeypatch.setattr(ms, "_model_roots", tuple(ms.canonical(r) for r in roots))
+    return ms._audio_reader(rec), rec
+
+
+def test_the_audio_reader_takes_bytes_and_file_objects_within_the_limit(
+        sinks, monkeypatch, tmp_path):
+    read, rec = _reader(monkeypatch)
+    wav = b"RIFF\x24\x00\x00\x00WAVEfmt "
+    read(wav)
+    read(io.BytesIO(wav), always_2d=True)
+    (tmp_path / "a.wav").write_bytes(wav)
+    with open(tmp_path / "a.wav", "rb") as f:
+        read(f)
+    assert [args[0].getvalue() for args, _ in rec.calls] == [wav, wav, wav]
+    assert rec.calls[1][1] == {"always_2d": True}
+    monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", 4)
+    for value in (wav, io.BytesIO(wav)):
+        with pytest.raises(MediaRefused, match="larger than"):
+            read(value)
+    with open(tmp_path / "a.wav", "rb") as f, pytest.raises(MediaRefused):
+        read(f)
+    assert len(rec.calls) == 3
+
+    class Endless:
+        def read(self, size=-1):
+            self.size = size
+            return b"x" * (size if size > 0 else 1 << 20)
+    stream = Endless()
+    with pytest.raises(MediaRefused):
+        read(stream)
+    assert stream.size == mg.MEDIA_MAX_BYTES + 1     # the read stops at the limit
+
+
+def test_the_audio_reader_opens_the_media_folder_and_model_folders_only(
+        sinks, monkeypatch, tmp_path):
+    model_dir = tmp_path / "models" / "voice"
+    (model_dir / "prompts").mkdir(parents=True)
+    (model_dir / "prompts" / "a.wav").write_bytes(b"RIFF")
+    outside = tmp_path / "models" / "other.wav"
+    outside.write_bytes(b"RIFF")
+    (model_dir / "prompts" / "out.wav").symlink_to(outside)
+    read, rec = _reader(monkeypatch, str(model_dir))
+    # A model's own file passes as the path it names.
+    read(str(model_dir / "prompts" / "a.wav"))
+    assert rec.calls[-1][0][0] == str(model_dir / "prompts" / "a.wav")
+    # A media folder file is read through the no-follow walk.
+    media = os.path.join(sinks["root"], "b.wav")
+    with open(media, "wb") as f:
+        f.write(b"RIFFb")
+    read(media)
+    assert rec.calls[-1][0][0].getvalue() == b"RIFFb"
+    for value in (str(outside), str(model_dir / "prompts" / "out.wav"),
+                  str(model_dir / "prompts" / ".." / ".." / "other.wav"),
+                  "/Users/me/a.wav", "http://example.com/a.wav"):
+        with pytest.raises(MediaRefused):
+            read(value)
+    assert len(rec.calls) == 2
+
+
+def test_model_roots_are_the_configured_model_folders(sinks, monkeypatch, tmp_path):
+    import huggingface_hub.constants as hf_constants
+
+    import gmlx.serve.bridge_vlm as serving
+    from gmlx.config import build_config
+    hub = tmp_path / "hub"
+    snap = hub / "models--org--llm" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    blob = hub / "models--org--llm" / "blobs" / "123"
+    blob.parent.mkdir()
+    blob.write_bytes(b"GGUF")
+    (snap / "m.gguf").symlink_to(blob)
+    local = tmp_path / "local" / "m.gguf"
+    local.parent.mkdir()
+    local.write_bytes(b"GGUF")
+    home_model = tmp_path / "home.gguf"
+    home_model.write_bytes(b"GGUF")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(hub))
+    serving.clear_resolved_models()
+    serving.register_resolved_models(build_config({
+        "server": {"tts": "mlx-community/csm-1b"},
+        "models": {"a": {"path": str(snap / "m.gguf")}, "b": {"path": str(local)},
+                   "c": {"path": str(home_model)}}}))
+    try:
+        roots = ms._resolve_model_roots()
+    finally:
+        serving.clear_resolved_models()
+    # A cache model's root is its repo folder, and a model kept in the home
+    # folder itself opens nothing.
+    assert roots == tuple(sorted({
+        ms.canonical(hub / "models--org--llm"), ms.canonical(local.parent),
+        ms.canonical(hub / "models--mlx-community--csm-1b")}))
+
+
+def test_modules_that_copied_the_audio_reader_get_the_check(sinks):
+    audio_io = importlib.import_module("mlx_audio.audio_io")
+    server_audio = importlib.import_module("mlx_vlm.server.audio")
+    assert getattr(audio_io.read, ms._FLAG, False)
+    assert server_audio.audio_read is audio_io.read
+    with pytest.raises(MediaRefused):
+        audio_io.read("/Users/me/a.wav")
+
+
 # Video
 
 def test_an_inline_video_reaches_the_reader_as_a_private_file(sinks):
