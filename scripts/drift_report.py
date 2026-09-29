@@ -6,8 +6,9 @@
 Each registered owned file names its upstream package and source file, the
 functions it takes when it is an extract, and the baseline its vendor
 script's ``--check`` recorded at vendor time. The report splits the owned
-file and the new upstream source into units (functions, methods, the
-non-method body of each class, named module assignments), applies the
+file and the new upstream source into units (functions, methods, each
+property setter and deleter apart from its getter, the non-method body
+of each class, named module assignments), applies the
 baseline's vendor edits to the upstream text, and lists every unit that
 differs. It uses the baseline to tell who changed each unit:
 
@@ -71,6 +72,16 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _method_key(node) -> str:
+    """A property setter or deleter has its getter's name, so it keys as
+    ``name.setter`` or ``name.deleter``."""
+    for d in node.decorator_list:
+        if (isinstance(d, ast.Attribute) and d.attr in ("setter", "deleter")
+                and isinstance(d.value, ast.Name) and d.value.id == node.name):
+            return f"{node.name}.{d.attr}"
+    return node.name
+
+
 def units(text: str) -> dict[str, str]:
     """name -> source text of each unit of a module."""
     tree = ast.parse(text)
@@ -96,7 +107,7 @@ def units(text: str) -> dict[str, str]:
             rest = ["".join(lines[start - 1:node.body[0].lineno - 1])]
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    out[f"{node.name}.{sub.name}"] = seg(sub)
+                    out[f"{node.name}.{_method_key(sub)}"] = seg(sub)
                 else:
                     rest.append(seg(sub))
             out[node.name] = "".join(rest)

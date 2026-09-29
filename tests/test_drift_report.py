@@ -47,6 +47,29 @@ def test_units_split_classes_and_module_names():
     assert "k = 2" in u["A"] and "def f" not in u["A"]
 
 
+_PROP = """class A:
+    @property
+    def p(self):
+        return 1
+
+    @p.setter
+    def p(self, v):
+        self.v = v
+
+    @p.deleter
+    def p(self):
+        del self.v
+"""
+
+
+def test_units_key_a_setter_and_a_deleter_apart_from_the_getter():
+    u = dr.units(_PROP)
+    assert set(u) == {"<module>", "A", "A.p", "A.p.setter", "A.p.deleter"}
+    assert "return 1" in u["A.p"]
+    assert "self.v = v" in u["A.p.setter"]
+    assert "del self.v" in u["A.p.deleter"]
+
+
 _OLD = """import mlx
 
 def keep():
@@ -77,18 +100,20 @@ _OWNED = _OLD.replace("def fold():\n    return 1", "def fold():\n    return 3") 
     .replace("\\u2014", "--") + "\ndef ours():\n    return 1\n"
 
 
-def _tree(tmp_path, new_text):
+_EDITS = [{"old": "\\u2014", "new": "--", "count": 1}]
+
+
+def _tree(tmp_path, new_text, old_text=_OLD, owned_text=_OWNED, edits=_EDITS):
     pkg_old, pkg_new = tmp_path / "old" / "pkg", tmp_path / "new" / "pkg"
-    for pkg, text in ((pkg_old, _OLD), (pkg_new, new_text)):
+    for pkg, text in ((pkg_old, old_text), (pkg_new, new_text)):
         (pkg / "models").mkdir(parents=True)
         (pkg / "models" / "m.py").write_text(text)
         (pkg / "version.py").write_text('__version__ = "1.0"\n')
-    (tmp_path / "owned.py").write_text(_OWNED)
+    (tmp_path / "owned.py").write_text(owned_text)
     (tmp_path / "base.json").write_text(json.dumps({
         "version": "1.0",
-        "sources": {"models/m.py": {"sha256": dr.sha256(_OLD)}},
-        "outputs": {"owned.py": {"source": "models/m.py", "edits": [
-            {"old": "\\u2014", "new": "--", "count": 1}]}},
+        "sources": {"models/m.py": {"sha256": dr.sha256(old_text)}},
+        "outputs": {"owned.py": {"source": "models/m.py", "edits": edits}},
     }))
     return dr.Owned("owned.py", "pkg", "models/m.py", "base.json"), \
         pkg_old, pkg_new
@@ -102,6 +127,19 @@ def test_the_baseline_source_splits_upstream_from_gmlx(tmp_path):
                     "fresh": "upstream added", "gone": "upstream removed",
                     "ours": "gmlx added"}
     assert r["split"] and not r["new"]["unchanged"] and not r["stale_edits"]
+
+
+@pytest.mark.parametrize("old,new,unit", [
+    ("        return 1\n", "        v = 1\n        return v\n", "A.p"),
+    ("        self.v = v\n", "        self.v = int(v)\n", "A.p.setter"),
+    ("        del self.v\n", "        self.v = None\n", "A.p.deleter"),
+], ids=["getter", "setter", "deleter"])
+def test_an_upstream_property_change_shows_as_its_own_row(tmp_path, old, new,
+                                                          unit):
+    entry, pkg_old, pkg_new = _tree(tmp_path, _PROP.replace(old, new),
+                                    old_text=_PROP, owned_text=_PROP, edits=[])
+    r = dr.report(entry, pkg_new, pkg_old, root=tmp_path)
+    assert r["rows"] == [{"unit": unit, "change": "upstream"}]
 
 
 def test_an_unchanged_upstream_needs_no_old_source(tmp_path):
