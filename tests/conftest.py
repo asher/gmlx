@@ -145,7 +145,40 @@ def pytest_fixture_setup(fixturedef, request):
     if item is not None and fixturedef.scope == "function":
         _awaiting_capture = None
         _hand_back_process_state(item)
-    return (yield)
+    if fixturedef.scope == "function":
+        return (yield)
+    # A wider fixture sets up and tears down outside the capture of every
+    # test, so its KQ_* keys are recorded under its own name, around its
+    # setup here and around its teardown below.
+    import process_state
+
+    before = {"env": dict(os.environ)}
+    try:
+        return (yield)
+    finally:
+        process_state.note_kq_env(before, _fixture_name(fixturedef))
+        # Added after the fixture's own teardown, so it runs first.
+        fixturedef.addfinalizer(
+            lambda: _before_teardown.__setitem__(
+                fixturedef, {"env": dict(os.environ)}))
+
+
+# The environment as each wider fixture's teardown starts.
+_before_teardown: dict = {}
+
+
+def _fixture_name(fixturedef) -> str:
+    where = f"{fixturedef.baseid}::" if fixturedef.baseid else ""
+    return f"{where}{fixturedef.argname} ({fixturedef.scope} fixture)"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_fixture_post_finalizer(fixturedef, request):
+    before = _before_teardown.pop(fixturedef, None)
+    if before is not None:
+        import process_state
+
+        process_state.note_kq_env(before, _fixture_name(fixturedef))
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

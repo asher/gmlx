@@ -337,6 +337,52 @@ def test_the_end_of_run_check_names_a_kq_key_a_test_set(tmp_path):
     assert touched in r.stdout, r.stdout[-4000:]
 
 
+_KQ_FIXTURE_TESTS = '''
+import pytest
+
+
+@pytest.fixture(scope="module")
+def kq_module_env():
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("KQ_VERIFY_EXT", "0")
+        yield
+
+
+def test_one(kq_module_env):
+    pass
+
+
+def test_two(kq_module_env):
+    pass
+'''
+
+
+def test_the_end_of_run_check_names_a_kq_key_a_wider_fixture_set(tmp_path):
+    # The key is set before either test's capture, and its teardown
+    # removes it before the check.
+    root = _inner_tree(tmp_path)
+    (root / "test_kq_fixture.py").write_text(_KQ_FIXTURE_TESTS)
+    r = _inner_pytest(root, "test_kq_fixture.py", _END_OF_RUN)
+    assert r.returncode == 1, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "1 failed, 2 passed" in r.stdout, r.stdout[-4000:]
+    touched = ("[('test_kq_fixture.py::kq_module_env (module fixture)', "
+               "'KQ_VERIFY_EXT')]")
+    assert touched in r.stdout, r.stdout[-4000:]
+
+
+def test_the_end_of_run_check_names_a_kq_key_set_outside_any_test(tmp_path):
+    # Set as the module is collected, so every capture starts with it.
+    root = _inner_tree(tmp_path)
+    (root / "test_kq_import.py").write_text(
+        'import os\n\nos.environ["KQ_VERIFY_EXT"] = "0"\n\n\n'
+        "def test_one():\n    pass\n")
+    r = _inner_pytest(root, "test_kq_import.py", _END_OF_RUN)
+    assert r.returncode == 1, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "1 failed, 1 passed" in r.stdout, r.stdout[-4000:]
+    assert "[('the end of the run', 'KQ_VERIFY_EXT')]" in r.stdout, (
+        r.stdout[-4000:])
+
+
 _CHANGE_TESTS = '''
 import os
 import warnings
@@ -390,9 +436,11 @@ if __name__ == "__main__":
 
 
 def test_the_run_ends_on_production_numerics():
+    process_state.note_kq_env_left()
     assert not process_state.KQ_TOUCHED, (
         "mlx-kquant keeps these KQ_* keys from its first read, so each test "
-        f"decided one for the rest of the run: {process_state.KQ_TOUCHED}")
+        f"or fixture decided one for the rest of the run: "
+        f"{process_state.KQ_TOUCHED}")
     start = process_state.SESSION
     assert os.environ.get("MLX_ENABLE_TF32") == start["env"].get(
         "MLX_ENABLE_TF32")

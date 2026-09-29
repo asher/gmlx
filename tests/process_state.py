@@ -36,6 +36,10 @@ of the kernel route that reads it, and there is no one call that reaches
 them all. ``note_kq_env`` records instead each such key a test sets,
 changes or removes, and the end-of-run check fails on any: that test
 decided the key for the rest of the run, or found it already decided.
+A class, module or session fixture sets up before the capture of any
+test that uses it, so its setup and its teardown are recorded under the
+fixture's name, and ``note_kq_env_left`` compares the end of the run with
+the session start.
 """
 
 from __future__ import annotations
@@ -203,6 +207,17 @@ def note_kq_env(state: dict, nodeid: str) -> None:
                 and saved.get(k) != os.environ.get(k)
                 and (nodeid, k) not in KQ_TOUCHED):
             KQ_TOUCHED.append((nodeid, k))
+
+
+def note_kq_env_left() -> None:
+    """Record each KQ_* key outside _KQ_READ_EACH_CALL that differs from
+    the session start at the end of the run, when no test or fixture has
+    been named for it."""
+    named = {k for _, k in KQ_TOUCHED}
+    before = len(KQ_TOUCHED)
+    note_kq_env(SESSION, "the end of the run")
+    KQ_TOUCHED[before:] = [t for t in KQ_TOUCHED[before:]
+                           if t[1] not in named]
 
 
 def _restore_env(saved: dict, changed: list) -> None:
