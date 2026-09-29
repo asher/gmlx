@@ -548,7 +548,11 @@ SEAMS: tuple[Seam, ...] = (
          "generation does, and drops a duplicate BOS)"),
     Seam("mlx_vlm.utils", "should_add_special_tokens",
          "single_bos_fix (the count default: the model type rule "
-         "generation applies)"),
+         "generation applies; _template_owns_markers: the types whose "
+         "markers the chat template writes, laguna among them)"),
+    Seam("mlx_vlm.models.laguna.processing_laguna", "LagunaProcessor.__init__",
+         "single_bos_fix._template_owns_markers (the processor names its "
+         "model_type)"),
     Seam("mlx_vlm.server.app", "get_cached_model",
          "single_bos_fix (the count reads the processor and config this "
          "stores in the runtime's model cache)"),

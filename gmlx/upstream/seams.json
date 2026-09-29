@@ -178,6 +178,7 @@
   "mlx_vlm.models.kimi_k25.processing_kimi_k25:KimiK25ImageProcessor.patchify": "d0c95fda584f792402bf3ac67a31fcfdaeddbde68d8d12bac2814b9ebe4bd58c",
   "mlx_vlm.models.kimi_k25.processing_kimi_k25:KimiK25ImageProcessor.preprocess": "eee7a69ce388b17eb40127bf36b1576d3f995b1f4cdfd1562f2f110d7b294241",
   "mlx_vlm.models.kimi_k25.processing_kimi_k25:KimiK25Processor.__call__": "0e997687a37c9923aafc5c61d7eb893cde58d3b26a93aff96c5a7c99ae65b84d",
+  "mlx_vlm.models.laguna.processing_laguna:LagunaProcessor.__init__": "c74aa864bfedb73a2d63368e34c5f34646f19cd8f0699358a3f42b76190d55b7",
   "mlx_vlm.models.llava.processing_llava:LlavaProcessor.__call__": "f2eda4a6f69200c7e1d678cde9001aa824210796cd4fc6c97299202d376b7481",
   "mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor.__call__": "fe4072794510ff451d61b3a2f7cfc660af3e8d564923e71ec90b5f3cf9834050",
   "mlx_vlm.models.qwen3_5.config:": "b4db2144b162bbc27c0d843833fdd969413b44260ed1f024866eeadf1832dc0f",

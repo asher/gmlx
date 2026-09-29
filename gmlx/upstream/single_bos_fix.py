@@ -3,10 +3,11 @@
 The Gemma-4, Llama-3, Mistral, Pixtral and DiffusionGemma chat templates
 emit BOS, and their GGUF tokenizers add one on encode by default. mlx-vlm
 picks ``add_special_tokens`` by model type, not by the prompt: the
-server's ``ResponseGenerator._cpu_preprocess`` and the generate path's
-``should_add_special_tokens`` turn it off only for gemma3, gemma3n, gemma4
-and gemma4_unified with a chat template. A text-only Gemma-4 GGUF serves as
-gemma4_text, so its prompt, like a Llama-3 one, is encoded with two BOS.
+server's ``ResponseGenerator._cpu_preprocess`` turns it off only for
+gemma3, gemma3n, gemma4 and gemma4_unified with a chat template, and the
+generate path's ``should_add_special_tokens`` for those and laguna. A
+text-only Gemma-4 GGUF serves as gemma4_text, so its prompt, like a
+Llama-3 one, is encoded with two BOS.
 On the media path ``process_inputs`` hands the flag only to a processor
 that names it as a parameter. Gemma-4's processor takes it through
 ``**kwargs``, so a Gemma-4 image prompt gets two BOS as well.
@@ -17,6 +18,14 @@ tokenizer's BOS string is encoded without special tokens when the only
 special token the tokenizer adds to one sequence is a leading BOS
 (``_adds_only_bos``). A tokenizer that also adds EOS or another token keeps
 the stock flag, so the fix never drops more than the duplicate BOS.
+
+The Laguna chat template writes its own BOS, and its processor names its
+model type. When a processor names a type whose markers
+``should_add_special_tokens`` leaves to the chat template, a prompt that
+opens with the token the tokenizer adds in front is encoded without
+special tokens, as on the generate path (``_template_owns_markers``). A
+Laguna prompt on the server then holds the template's BOS alone, whatever
+its tokenizer adds.
 
 The rule applies where a generation prompt is encoded: the
 ``prepare_inputs`` bindings of the server's ``_cpu_preprocess`` and of the
@@ -62,6 +71,7 @@ _PROBE = "a"
 # True inside a prepare_inputs call that drops the duplicate BOS.
 _DROPPING = contextvars.ContextVar("_gmlx_single_bos_dropping", default=False)
 _ONLY_BOS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_LEAD: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def _tokenizer(processor):
@@ -82,42 +92,82 @@ def _bos_token(processor) -> str | None:
     return None
 
 
-def _opens_with_bos(processor, prompts) -> bool:
+def _opens_with(prompts, text: str | None) -> bool:
     texts = [prompts] if isinstance(prompts, str) else prompts
-    if not isinstance(texts, (list, tuple)) or not texts:
+    if not text or not isinstance(texts, (list, tuple)) or not texts:
         return False
-    bos = _bos_token(processor)
-    return bos is not None and all(
-        isinstance(t, str) and t.startswith(bos) for t in texts)
+    return all(isinstance(t, str) and t.startswith(text) for t in texts)
 
 
-def _probe_only_bos(tokenizer) -> bool:
-    bos_id = getattr(tokenizer, "bos_token_id", None)
-    if not isinstance(bos_id, int):
-        return False
+def _opens_with_bos(processor, prompts) -> bool:
+    return _opens_with(prompts, _bos_token(processor))
+
+
+def _probe(tokenizer) -> tuple[list[int], list[int]] | None:
+    """The probe text's ids without and with special tokens, or None."""
     try:
         bare = [int(t) for t in tokenizer.encode(_PROBE,
                                                  add_special_tokens=False)]
         full = [int(t) for t in tokenizer.encode(_PROBE,
                                                  add_special_tokens=True)]
     except Exception:  # noqa: BLE001  an unreadable tokenizer keeps stock
-        return False
-    return full == [bos_id] + bare
+        return None
+    return bare, full
+
+
+def _memo(cache, tokenizer, probe):
+    """``probe(tokenizer)``, once per tokenizer."""
+    try:
+        return cache[tokenizer]
+    except (KeyError, TypeError):
+        pass
+    value = probe(tokenizer)
+    try:
+        cache[tokenizer] = value
+    except TypeError:
+        pass
+    return value
+
+
+def _probe_only_bos(tokenizer) -> bool:
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    ids = _probe(tokenizer) if isinstance(bos_id, int) else None
+    return ids is not None and ids[1] == [bos_id] + ids[0]
 
 
 def _adds_only_bos(tokenizer) -> bool:
     """Whether the only special token ``tokenizer`` adds to one sequence
     is a leading BOS. Probed once per tokenizer."""
+    return _memo(_ONLY_BOS, tokenizer, _probe_only_bos)
+
+
+def _probe_lead(tokenizer) -> str | None:
+    ids = _probe(tokenizer)
+    if ids is None:
+        return None
+    bare, full = ids
+    if len(full) <= len(bare) or full[1:len(bare) + 1] != bare:
+        return None
     try:
-        return _ONLY_BOS[tokenizer]
-    except (KeyError, TypeError):
-        pass
-    only = _probe_only_bos(tokenizer)
-    try:
-        _ONLY_BOS[tokenizer] = only
-    except TypeError:
-        pass
-    return only
+        text = tokenizer.convert_ids_to_tokens(full[0])
+    except Exception:  # noqa: BLE001  an unreadable tokenizer keeps stock
+        return None
+    return text if isinstance(text, str) and text else None
+
+
+def _template_owns_markers(processor, prompts) -> bool:
+    """Whether mlx-vlm's model type rule (``should_add_special_tokens``)
+    leaves the special tokens to the chat template for the model type
+    ``processor`` names, and ``prompts`` open with the token the tokenizer
+    adds in front, named or not. Probed once per tokenizer."""
+    model_type = getattr(processor, "model_type", None)
+    if not isinstance(model_type, str):
+        return False
+    utils = importlib.import_module("mlx_vlm.utils")
+    if utils.should_add_special_tokens(model_type, processor):
+        return False
+    return _opens_with(prompts, _memo(_LEAD, _tokenizer(processor),
+                                      _probe_lead))
 
 
 def drops_duplicate_bos(processor, prompts) -> bool:
@@ -185,8 +235,9 @@ def _wrap_prepare(original, *, count=None):
             # tokenizer's special tokens unless the template owns them.
             kwargs["add_special_tokens"] = _count_adds_special_tokens(
                 count, processor)
-        dropping = drops_duplicate_bos(processor, kwargs.get("prompts"))
-        if dropping:
+        prompts = kwargs.get("prompts")
+        dropping = drops_duplicate_bos(processor, prompts)
+        if dropping or _template_owns_markers(processor, prompts):
             kwargs["add_special_tokens"] = False
         token = _DROPPING.set(dropping)
         try:

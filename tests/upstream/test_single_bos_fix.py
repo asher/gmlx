@@ -208,6 +208,70 @@ def test_a_tokenizer_that_adds_eos_keeps_the_stock_encoding(fixed, path,
     assert ids[0] == 0 and ids[-1] == 1
 
 
+# Laguna's BOS is token 2, which is also its EOS. Its chat templates open
+# with it.
+_LAGUNA_BOS = "\u3008|EOS|\u3009"
+_LAGUNA_TEMPLATE = (
+    _LAGUNA_BOS + "{% for m in messages %}<{{ m.role }}>{{ m.content }}"
+    "</{{ m.role }}>{% endfor %}{% if add_generation_prompt %}<assistant>"
+    "{% endif %}")
+
+
+def _laguna_tokenizer(adds):
+    """A byte-level tokenizer with Laguna's BOS at id 2 that adds ``adds``
+    to a sequence: "bos", "none", "bos-eos", or "unnamed-bos", a BOS its
+    config does not name."""
+    from transformers import PreTrainedTokenizerFast
+
+    tokens = (["<unk>", "<pad>", _LAGUNA_BOS, "</assistant>"]
+              + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He", "wo"])
+    tokenizer = load_tokenizer_from_gguf({
+        "general.architecture": "qwen2",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.merges": ["H e", "w o"],
+        "tokenizer.ggml.token_type": [3] * 4 + [1] * (len(tokens) - 4),
+        "tokenizer.ggml.bos_token_id": 2,
+        "tokenizer.ggml.eos_token_id": 2,
+        "tokenizer.ggml.padding_token_id": 1,
+        "tokenizer.ggml.add_bos_token": adds != "none",
+        "tokenizer.ggml.add_eos_token": adds == "bos-eos",
+    }, "qwen2")
+    if adds == "unnamed-bos":
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=tokenizer.backend_tokenizer,
+            eos_token=_LAGUNA_BOS, pad_token="<pad>")
+    return tokenizer
+
+
+@pytest.mark.parametrize("path", sorted(_PATHS))
+@pytest.mark.parametrize("adds", ["bos", "none", "bos-eos", "unnamed-bos"])
+def test_a_laguna_chat_prompt_holds_the_template_bos_alone(fixed, path, adds):
+    """mlx-vlm's model type rule leaves Laguna's markers to its chat
+    template on the generate path; the server's rule does not list laguna.
+    Both paths hold the template's BOS alone, whatever the tokenizer adds."""
+    from mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
+
+    processor = LagunaProcessor(_laguna_tokenizer(adds),
+                                chat_template=_LAGUNA_TEMPLATE)
+    prompt = processor.apply_chat_template(
+        [{"role": "user", "content": "Hello"}], tokenize=False,
+        add_generation_prompt=True)
+    assert prompt.startswith(_LAGUNA_BOS)
+    ids = _row(_PATHS[path]("laguna", processor, prompt))
+    assert ids[0] == 2 and ids.count(2) == 1
+
+
+def test_a_laguna_prompt_without_bos_keeps_the_tokenizer_bos(fixed):
+    from mlx_vlm.models.laguna.processing_laguna import LagunaProcessor
+
+    processor = LagunaProcessor(_laguna_tokenizer("bos"),
+                                chat_template=_LAGUNA_TEMPLATE)
+    ids = _row(_serve("laguna", processor, "Hello"))
+    assert ids[0] == 2 and ids.count(2) == 1
+
+
 def _run(tokenizer, prompt, monkeypatch):
     """The ids ``gmlx run`` prefills for the rendered ``prompt``."""
     generation = importlib.import_module("gmlx.gen.generation")
