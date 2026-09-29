@@ -145,15 +145,13 @@ def test_sinks_raise_loudly():
         kvarn_attention(q, cache, SCALE, None, sinks=mx.zeros((HQ,)))
 
 
-def test_install_sweeps_and_passes_through(monkeypatch):
+def _pin_sweep_modules(monkeypatch):
+    """Pin every module the sweep may rebind: the wrap must not outlive
+    the test."""
     import sys
 
     from gmlx.cache import kvarn_sdpa as ks
 
-    llama = importlib.import_module("mlx_lm.models.llama")
-    base = importlib.import_module("mlx_lm.models.base")
-    # Pin every module the sweep may rebind: the wrap must not outlive
-    # this test.
     for name, mod in list(sys.modules.items()):
         if mod is None or not (
             name in ks._BASE_MODULES or name.startswith(ks._MODEL_PREFIXES)
@@ -162,6 +160,20 @@ def test_install_sweeps_and_passes_through(monkeypatch):
         fn = getattr(mod, "scaled_dot_product_attention", None)
         if callable(fn):
             monkeypatch.setattr(mod, "scaled_dot_product_attention", fn)
+
+
+def _layers(fn):
+    n = 0
+    while fn is not None:
+        n += 1
+        fn = getattr(fn, "__wrapped__", None) or getattr(fn, "_gmlx_orig", None)
+    return n
+
+
+def test_install_sweeps_and_passes_through(monkeypatch):
+    llama = importlib.import_module("mlx_lm.models.llama")
+    base = importlib.import_module("mlx_lm.models.base")
+    _pin_sweep_modules(monkeypatch)
     n = install_kvarn_sdpa()
     assert n >= 2
     for mod in (llama, base):
@@ -181,6 +193,42 @@ def test_install_sweeps_and_passes_through(monkeypatch):
     wrapped = fn(q, k, v, cache=KVCache(), scale=1.0, mask=None)
     orig = fn._gmlx_orig(q, k, v, cache=KVCache(), scale=1.0, mask=None)
     assert np.array_equal(np.array(wrapped), np.array(orig))
+
+
+@pytest.mark.parametrize("order", ["kokkok", "okokko", "kkooko"])
+def test_install_keeps_one_layer_under_other_installers(monkeypatch, order):
+    """Every kvarn cache build sweeps again, and another installer may wrap
+    the same symbol in between. A flag read on the outermost function
+    missed kvarn's layer under that wrapper and added one per sweep."""
+    from gmlx.upstream.patching import wrapped_with
+
+    llama = importlib.import_module("mlx_lm.models.llama")
+    _pin_sweep_modules(monkeypatch)
+    fn = llama.scaled_dot_product_attention
+    while getattr(fn, "_gmlx_orig", None) is not None:
+        fn = fn._gmlx_orig  # start from stock, under any earlier test's wraps
+    monkeypatch.setattr(llama, "scaled_dot_product_attention", fn)
+
+    def other_install():
+        cur = llama.scaled_dot_product_attention
+        if wrapped_with(cur, "_test_other"):
+            return
+
+        def other(*args, **kwargs):
+            return cur(*args, **kwargs)
+
+        other.__dict__.update(_test_other=True, _gmlx_orig=cur)
+        llama.scaled_dot_product_attention = other
+
+    step = {"k": install_kvarn_sdpa, "o": other_install}
+    stock = _layers(llama.scaled_dot_product_attention)
+    depths = []
+    for c in order:
+        step[c]()
+        depths.append(_layers(llama.scaled_dot_product_attention) - stock)
+    both = max(order.index("k"), order.index("o"))
+    assert depths[both:] == [2] * (len(order) - both), depths
+    assert wrapped_with(llama.scaled_dot_product_attention, "_gmlx_kvarn")
 
 
 @needs_kvarn_ops

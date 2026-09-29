@@ -42,6 +42,7 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import wrapped_with
 from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
 
 _MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
@@ -599,7 +600,8 @@ def _make_wrapper(orig):
 
 def install_kvarn_sdpa() -> int:
     """Sweep-rebind the SDPA symbol over loaded model modules. Idempotent
-    per module; returns the number of modules now carrying the wrapper."""
+    per module, also when another installer's wrap sits on top of this
+    one; returns the number of modules now carrying the wrapper."""
     import importlib
 
     for name in _BASE_MODULES:
@@ -616,7 +618,7 @@ def install_kvarn_sdpa() -> int:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None or not callable(cur):
             continue
-        if getattr(cur, "_gmlx_kvarn", False):
+        if wrapped_with(cur, "_gmlx_kvarn"):
             patched += 1
             continue
         mod.scaled_dot_product_attention = _make_wrapper(cur)
