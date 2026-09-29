@@ -388,12 +388,16 @@ def test_save_load_prompt_cache_file(tmp_path):
 
 @needs_kvarn_ops
 def test_clone_row_faithful():
-    from gmlx.cache.snapshot import _clone_row_faithful
+    from gmlx.cache.snapshot import _clone_row
 
     c = _rot()
     k, v = tokens(2000)
     _feed(c, k, v, 128)
-    r = _clone_row_faithful(c)
+    targets = []
+    r = _clone_row(c, rot_canonical=False, eval_targets=targets)
+    # The copied state waits in targets for the caller's eval.
+    assert len(targets) == len(c.state)
+    mx.eval(*targets)
     assert type(r) is KVarNRotatingKVCache
     assert (r.max_size, r.evicted) == (c.max_size, c.evicted)
     _assert_common_window_equal(r, c)

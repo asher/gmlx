@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import mlx.core as mx
+
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from gmlx.cache.prefix_cache import (
     _KVARN_TAG,
@@ -55,10 +57,14 @@ def test_prefix_restore_does_not_alias_stored_entry():
 
 @needs_kvarn_ops
 def test_clone_row_faithful_arm():
-    from gmlx.cache.snapshot import _clone_row_faithful
+    from gmlx.cache.snapshot import _clone_row
 
     live = filled(300, tail=256)
-    twin = _clone_row_faithful(live)
+    targets = []
+    twin = _clone_row(live, rot_canonical=False, eval_targets=targets)
+    # The copied state waits in targets for the caller's eval.
+    assert len(targets) == len(live.state)
+    mx.eval(targets)
     assert type(twin) is KVarNKVCache
     live.update_and_fetch(*tokens(50, seed=9))
     _assert_same_content(twin, filled(300, tail=256))
