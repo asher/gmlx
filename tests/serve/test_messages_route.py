@@ -35,6 +35,7 @@ from gmlx.serve.patches.render import (  # noqa: E402
 from gmlx.upstream.patching import under, wrapped_with  # noqa: E402
 
 _ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
+_OPENAI = importlib.import_module("mlx_vlm.server.openai")
 _PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
 _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
@@ -56,6 +57,11 @@ _TEMPLATES = {
     "kimi-k2.5": ("kimi_k25", "kimi_k25_template.jinja"),
     "kimi-k3": ("kimi_k3", "kimi_k3_template.jinja"),
     "mistral3": ("mistral3", "mistral3_template.jinja"),
+}
+# Templates the Messages cases above do not take: Mistral 7B v0.3 takes
+# nine-character call ids only.
+_CHAT_TEMPLATES = {
+    "mistral-7b": ("mistral", "mistral7b_v03_template.jinja"),
 }
 
 
@@ -126,6 +132,9 @@ def _route(monkeypatch):
                             target.apply_chat_template)
     for name in ("get_chat_template", "apply_chat_template"):
         monkeypatch.setattr(_PROMPT_UTILS, name, getattr(_PROMPT_UTILS, name))
+    for name in ("extract_text_from_content",
+                 "_normalize_instruction_messages"):
+        monkeypatch.setattr(_OPENAI, name, getattr(_OPENAI, name))
     for row in ("deepseek_v4_vl", "deepseek_v41_vl"):
         monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, row,
                             _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
@@ -144,21 +153,29 @@ def _route(monkeypatch):
 
     client = TestClient(_APP.app)
 
-    def render(name, messages, stock=False, vision=False, status=200):
-        model_type, fixture = (_VISION if vision else _TEMPLATES)[name][:2]
+    def render(name, messages, stock=False, vision=False, status=200,
+               path="/v1/messages", processor=None):
+        model_type, fixture = (
+            _VISION if vision else {**_TEMPLATES, **_CHAT_TEMPLATES})[name][:2]
         kind = (_Gemma4Processor if model_type.startswith("gemma4")
-                else _Processor)
-        processor = kind(model_type, fixture)
+                else _Mistral7B if name == "mistral-7b" else _Processor)
+        processor = processor or kind(model_type, fixture)
         if vision:
             processor.image_token = _VISION[name][2]
-        monkeypatch.setattr(_ANTHROPIC, "get_cached_model", lambda *a, **k: (
-            None, processor, {"model_type": model_type}))
+        for module in (_ANTHROPIC, _OPENAI):
+            monkeypatch.setattr(module, "get_cached_model", lambda *a, **k: (
+                None, processor, {"model_type": model_type}))
         if stock:
             monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
                                 conversion)
-        r = client.post("/v1/messages", json={
-            "model": "m", "max_tokens": 1, "messages": messages,
-            "tools": _TOOLS})
+        if path == "/v1/responses":
+            body = {"model": "m", "max_output_tokens": 16, "input": messages}
+        elif path == "/v1/chat/completions":
+            body = {"model": "m", "max_tokens": 1, "messages": messages}
+        else:
+            body = {"model": "m", "max_tokens": 1, "messages": messages,
+                    "tools": _TOOLS}
+        r = client.post(path, json=body)
         assert r.status_code == status, r.text
         return rg.calls.pop() if status == 200 else r.text
 
@@ -352,6 +369,64 @@ def test_the_kill_switch_restores_the_stock_conversion(killed_route, name):
         {"role": "user", "content": [_image("x"), _text("Q2")]}]
     assert killed_route(name, messages, vision=True) == killed_route(
         name, messages, vision=True, stock=True)
+
+
+class _Mistral7B(_Processor):
+    """Mistral 7B v0.3: its template writes the BOS and EOS tokens."""
+
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=True, **kw):
+        return super().apply_chat_template(
+            messages, tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+            bos_token="<s>", eos_token="</s>", **kw)
+
+
+def _chat_round(*, system=None):
+    """A chat request: the user asks, the assistant calls ``shot``, the tool
+    answers, and the user writes again right after it."""
+    call = "abcdefghi"  # Mistral 7B takes nine-character call ids only.
+    head = [{"role": "system", "content": system}] if system else []
+    return head + [
+        {"role": "user", "content": "ASK-FIRST"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": call, "type": "function",
+             "function": {"name": "shot", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": call, "content": "RESULT-ONE"},
+        {"role": "user", "content": "TEXT-AFTER"}]
+
+
+def test_mistral3_reads_a_chat_user_turn_after_a_tool_in_the_results(route):
+    prompt, _ = route("mistral3", _chat_round(), path="/v1/chat/completions")
+    assert ("[TOOL_RESULTS]RESULT-ONE\n\nTEXT-AFTER[/TOOL_RESULTS]"
+            in prompt)
+
+
+def test_mistral3_reads_a_responses_user_item_after_a_tool_output(route):
+    items = [
+        {"role": "user", "content": [
+            {"type": "input_text", "text": "ASK-FIRST"}]},
+        {"type": "function_call", "call_id": "c1", "name": "shot",
+         "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1",
+         "output": "RESULT-ONE"},
+        {"role": "user", "content": [
+            {"type": "input_text", "text": "TEXT-AFTER"}]}]
+    prompt, _ = route("mistral3", items, path="/v1/responses")
+    assert ("[TOOL_RESULTS]RESULT-ONE\n\nTEXT-AFTER[/TOOL_RESULTS]"
+            in prompt)
+
+
+def test_a_fold_that_loses_the_system_text_is_rejected(route):
+    """The Mistral 7B template writes the system text into the last message
+    only when that is a user message. A fold that ends on the tool message
+    would drop it, so the template's error stands."""
+    prompt, _ = route("mistral-7b", _chat_round(),
+                      path="/v1/chat/completions")
+    assert '{"content": RESULT-ONE\n\nTEXT-AFTER, ' in prompt
+    body = route("mistral-7b", _chat_round(system="SYSTEM-TEXT"),
+                 path="/v1/chat/completions", status=500)
+    assert "must alternate" in body
 
 
 def test_mistral3_still_rejects_two_user_turns(route):

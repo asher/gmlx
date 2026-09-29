@@ -42,10 +42,13 @@ gets the tool text alone.
 
 The Mistral chat templates reject a user turn right after a tool turn, while
 the Messages API sends text and images beside the tool results in one user
-message. When a template rejects the conversation, the wrapper folds each
-user message that follows a tool message into the text of that tool
-message, each image as the processor's image token, and renders again
-(``_user_after_tool_folded``).
+message, and chat and Responses clients can send a user message right
+after a tool message too. When a template rejects the conversation, the
+wrapper folds each user message that follows a tool message into the text
+of that tool message, each image as the processor's image token, and renders
+again (``_user_after_tool_folded``). A fold whose render loses a system
+message's text raises the template's error instead
+(``_keeps_system_text``).
 Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 """
 
@@ -167,6 +170,27 @@ def _user_after_tool_folded(msgs: list,
             continue
         out.append(message)
     return out if len(out) < len(msgs) else None
+
+
+def _keeps_system_text(rendered, msgs: list) -> bool:
+    """Whether ``rendered`` holds the text of every system message of
+    ``msgs``. The Mistral 7B template writes the system text into the last
+    message only when that is a user message, so a fold that ends the
+    conversation on a tool message drops it."""
+    texts = []
+    for message in msgs:
+        if not isinstance(message, dict) or message.get("role") not in (
+                "system", "developer"):
+            continue
+        content = message.get("content")
+        parts = content if isinstance(content, list) else [content]
+        for part in parts:
+            text = part.get("text") if isinstance(part, dict) else part
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+    if not texts:
+        return True
+    return isinstance(rendered, str) and all(t in rendered for t in texts)
 
 
 def _images_in_place(built: dict, sent: dict) -> dict:
@@ -352,8 +376,12 @@ def install_faithful_history() -> None:
                         if type(exc) is TemplateError else None)
                     if folded is None:
                         raise
-                return prompt_utils.get_chat_template(
+                    rejected = exc
+                rendered = prompt_utils.get_chat_template(
                     processor, folded, add_generation_prompt, **kwargs)
+                if not _keeps_system_text(rendered, msgs):
+                    raise rejected
+                return rendered
             finally:
                 _TOOL_IMAGES_KEPT.reset(kept)
                 _IN_PLACE_SENT.reset(token)

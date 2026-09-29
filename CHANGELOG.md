@@ -49,8 +49,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the result, and a Gemma-4 model did not see the result at all.
 - On `/v1/messages`, a tool result image failed the request on DeepSeek-V4 and
   on other models could reach it twice, in another turn or as a Python list.
-- On `/v1/messages`, a Mistral model failed a request that sent text or an
-  image beside a tool result.
+- On `/v1/chat/completions`, `/v1/responses` and `/v1/messages`, a Mistral model
+  failed a request whose user text or image came right after a tool result.
 - A Gemma-4 model loaded with its mmproj, a Gemma-4 12B, DiffusionGemma and an
   MLX-format Gemma-4 read the system or developer message as a Python list.
 - A prompt started with two BOS tokens when the chat template wrote one and the
