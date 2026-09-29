@@ -156,16 +156,38 @@ def test_forward_matches_the_numpy_reference(hw, n_cap):
     lat = rng.standard_normal((1, 4, *hw)).astype(np.float32)
     cap = rng.standard_normal((1, n_cap, 16)).astype(np.float32)
     taps: dict = {}
-    got = m(mx.array(lat), 0.6, mx.array(cap), taps=taps)
+    # The CPU stream keeps fp32 matmuls exact. On the GPU they run at TF32,
+    # whose 1e-3 error hides a position id, RoPE theta, SDPA scale or norm
+    # eps mistake, each 5e-5 to 1e-2 here.
+    with mx.stream(mx.cpu):
+        got = m(mx.array(lat), 0.6, mx.array(cap), taps=taps)
+        mx.eval(got)
     assert got.dtype == mx.float32 and got.shape == (1, 4, *hw)
     assert sorted(taps) == ["context_refiner.0", "final_layer", "layers.0",
                             "layers.1", "noise_refiner.0"]
     ref = _ref_forward(p, lat[0].astype(np.float64), 0.6,
                        cap[0].astype(np.float64))
     err = np.linalg.norm(np.array(got[0]) - ref) / np.linalg.norm(ref)
-    # fp32 GEMM runs at TF32 on the GPU, about 1e-3 here. A wrong layout,
-    # sign or position id gives an error of order 1.
-    assert err < 1e-2
+    assert err < 1e-5
+
+
+def test_rope_tables_round_the_angles_to_fp32():
+    """Angles are formed in float64 and rounded to fp32 before cos and sin.
+    Large ids tell this apart from cos and sin taken in float64."""
+    from gmlx.image import ops
+
+    dims, theta = (32, 48, 48), 256.0
+    ids = np.stack([np.arange(1000, 1536), np.arange(536) % 512,
+                    np.arange(536)[::-1] % 512], 1)
+    cos, sin = ops.rope_tables(ids, dims, theta)
+    ang = np.concatenate(
+        [np.outer(ids[:, a].astype(np.float64),
+                  1.0 / theta ** (np.arange(0, d, 2, dtype=np.float64) / d))
+         for a, d in enumerate(dims)], 1)
+    ang32 = ang.astype(np.float32)
+    assert np.array_equal(np.array(cos), np.cos(ang32))
+    assert np.array_equal(np.array(sin), np.sin(ang32))
+    assert not np.array_equal(np.cos(ang32), np.cos(ang).astype(np.float32))
 
 
 def test_bf16_forward_stays_bf16_inside_and_returns_fp32():
