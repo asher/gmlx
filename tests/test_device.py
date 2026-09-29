@@ -226,12 +226,22 @@ def test_early_populate(on_cpu, monkeypatch, tmp_path):
     assert calls == [[str(shard)]]
 
 
-def test_teacher_over_budget(on_cpu, monkeypatch):
+@pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe"])
+def test_a_teacher_on_the_cpu_device_is_never_over_budget(on_cpu, monkeypatch,
+                                                          moe):
+    # `gmlx distill cache --cpu` loads the teacher resident: nothing is
+    # wired on the CPU device, and expert streaming runs on the GPU.
+    from mlx.utils import tree_flatten
+    from mlx_lm.models.switch_layers import SwitchGLU
+
     from gmlx.distill.teacher import teacher_over_budget
 
+    model = SwitchGLU(4, 8, 4) if moe else nn.Linear(4, 4)
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
     _metal(monkeypatch, **{WS: 10})
-    over, total, budget = teacher_over_budget(nn.Linear(4, 4))
-    assert (over, total, budget) == (True, 80, 9)
+    assert teacher_over_budget(model) == (False, total, 0)
+    mx.set_default_device(mx.gpu)
+    assert teacher_over_budget(model) == (True, total, 9)
 
 
 def test_capacity_working_set_and_ceiling(on_cpu, monkeypatch):

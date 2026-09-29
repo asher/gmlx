@@ -445,13 +445,16 @@ def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, in
     """(over, parameter bytes, budget): whether the model's parameters
     exceed the wired budget, nine tenths of the recommended working set
     as the expert streaming installer reads it. Never over when no
-    device reports one."""
+    device reports one, or on the CPU default device (``--cpu``), where
+    nothing is wired and the teacher loads resident."""
     from mlx.utils import tree_flatten
 
-    from gmlx.device import metal_value
+    from gmlx.device import cpu_default_device, metal_value
     flat: Any = tree_flatten(model.parameters())
     total = sum(int(a.nbytes) for _k, a in flat)
     if budget is None:
+        if cpu_default_device():
+            return False, total, 0
         try:
             budget = int(0.9 * int(metal_value("max_recommended_working_set_size")))
         except Exception:  # noqa: BLE001
