@@ -23,6 +23,8 @@ import secrets
 import stat
 from pathlib import Path
 
+from gmlx.safe_path import LeavesRoot, NotFollowed, open_dir_below
+
 # The largest config file a handler reads.
 READ_MAX = 16 << 20
 
@@ -78,34 +80,12 @@ def _open_dir(parts: list[str], *, create: bool) -> int:
     """A descriptor of the folder ``parts`` below the private home. Missing
     folders are created when ``create`` is set, else FileNotFoundError."""
     assert _root is not None
-    fd = os.open(_root, os.O_RDONLY | os.O_DIRECTORY)
-    shown = str(_root)
     try:
-        for part in parts:
-            if part in (".", ".."):
-                raise ConfinedError(f"{shown}/{part} leaves the private home.")
-            shown = f"{shown}/{part}"
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            try:
-                nxt = os.open(part, flags, dir_fd=fd)
-            except FileNotFoundError:
-                if not create:
-                    raise
-                try:
-                    os.mkdir(part, 0o755, dir_fd=fd)
-                except FileExistsError:
-                    pass
-                try:
-                    nxt = os.open(part, flags, dir_fd=fd)
-                except OSError as e:
-                    _refuse_link(shown, e)
-            except OSError as e:
-                _refuse_link(shown, e)
-            os.close(fd)
-            fd = nxt
-        return fd
-    except BaseException:
-        os.close(fd)
+        return open_dir_below(_root, parts, create=create)
+    except LeavesRoot as e:
+        raise ConfinedError(f"{e.shown} leaves the private home.") from None
+    except NotFollowed as e:
+        _refuse_link(e.shown, e.error)
         raise
 
 

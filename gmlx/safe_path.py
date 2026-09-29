@@ -1,0 +1,170 @@
+"""Path checks that follow no symbolic link, for files a less trusted party
+can change.
+
+Launch uses these for a container's private home, and the server uses them
+for the folder it reads request media from. :func:`open_dir_below` walks a
+path one folder at a time with ``O_NOFOLLOW`` and folder descriptors, so no
+symbolic link is followed and no folder can be swapped for a link between a
+check and the use. :func:`path_inside` and :func:`canonical` compare paths in
+the form macOS gives them.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import functools
+import os
+import unicodedata
+
+# pathconf name of _PC_CASE_SENSITIVE on macOS, which Python does not list.
+_PC_CASE_SENSITIVE = 11
+# fcntl command that returns the path of an open file on macOS.
+_F_GETPATH = getattr(fcntl, "F_GETPATH", 50)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class LeavesRoot(ValueError):
+    """A path component is ``.`` or ``..``, or holds a slash."""
+
+    def __init__(self, shown: str):
+        super().__init__(f"{shown} leaves the folder it must stay in.")
+        self.shown = shown
+
+
+class NotFollowed(OSError):
+    """A path component is a symbolic link, is not a folder, or cannot be
+    opened. ``error`` is the error the open raised."""
+
+    def __init__(self, shown: str, error: OSError):
+        super().__init__(error.errno, f"{shown}: {error.strerror or error}")
+        self.shown = shown
+        self.error = error
+
+
+def fd_path(fd: int) -> str:
+    """The path macOS itself gives an open file or folder."""
+    raw = fcntl.fcntl(fd, _F_GETPATH, b"\0" * 1024)
+    return raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+
+
+def canonical(path: str | os.PathLike) -> str:
+    """``path`` with its links resolved and in the form macOS gives it.
+
+    ``os.path.realpath`` keeps a firmlink alias such as
+    ``/System/Volumes/Data/Users/you`` and the case the name was typed in,
+    so a check by path would miss that it is ``/Users/you``. The folder is
+    opened and macOS names it. A path that is not a folder is named through
+    its folder."""
+    real = os.path.realpath(os.path.expanduser(str(path)))
+    try:
+        fd = os.open(real, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        parent, name = os.path.split(real)
+        if not name or parent == real:
+            return real
+        return os.path.join(canonical(parent), name)
+    try:
+        return fd_path(fd) or real
+    except OSError:
+        return real
+    finally:
+        os.close(fd)
+
+
+@functools.lru_cache(maxsize=256)
+def _case_insensitive(folder: str) -> bool:
+    """Whether the volume that holds ``folder`` compares names without
+    case, as APFS does by default."""
+    p = folder
+    while p != "/" and not os.path.exists(p):
+        p = os.path.dirname(p)
+    try:
+        return os.pathconf(p, _PC_CASE_SENSITIVE) == 0
+    except (OSError, ValueError):
+        return False
+
+
+def _fold(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def path_inside(path: str, folder: str) -> bool:
+    """True when ``path`` is ``folder`` or lies inside it, by whole path
+    components. On a volume that ignores case, as APFS does, ``~/SRC`` and
+    ``~/src`` are one folder, so the names are compared the same way."""
+    if folder == "/":
+        return path.startswith("/")
+    if _case_insensitive(folder):
+        path, folder = _fold(path), _fold(folder)
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
+def parts_below(path: str, folder: str) -> list[str] | None:
+    """The components of ``path`` below ``folder``, or None when ``path``
+    does not lie in it. Nothing is resolved, so ``..`` stays a component and
+    :func:`open_dir_below` refuses it."""
+    if not path_inside(path, folder):
+        return None
+    depth = len([c for c in folder.split("/") if c])
+    return [c for c in path.split("/") if c][depth:]
+
+
+def open_dir_below(root: str | os.PathLike, parts: list[str], *,
+                   create: bool = False, mode: int = 0o755) -> int:
+    """A descriptor of the folder ``parts`` below ``root``, opened one
+    component at a time without following a link. Missing folders are
+    created with ``mode`` when ``create`` is set, else FileNotFoundError.
+    Raises :class:`LeavesRoot` for a ``.`` or ``..`` component and
+    :class:`NotFollowed` for a link, a file or a folder that cannot be
+    opened."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    shown = str(root)
+    try:
+        for part in parts:
+            if part in ("", ".", "..") or "/" in part:
+                raise LeavesRoot(f"{shown}/{part}")
+            shown = f"{shown}/{part}"
+            try:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                try:
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except OSError as e:
+                    raise NotFollowed(shown, e) from None
+            except OSError as e:
+                raise NotFollowed(shown, e) from None
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_file_below(root: str | os.PathLike, parts: list[str]) -> int:
+    """A read-only descriptor of the file ``parts`` below ``root``, with no
+    link followed on the way and none at the file itself. The open never
+    blocks, so a named pipe cannot hold the caller. The caller checks what
+    kind of file it got."""
+    if not parts:
+        raise LeavesRoot(str(root))
+    dir_fd = open_dir_below(root, parts[:-1])
+    shown = os.path.join(str(root), *parts)
+    if parts[-1] in (".", "..") or "/" in parts[-1]:
+        os.close(dir_fd)
+        raise LeavesRoot(shown)
+    try:
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                       dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise NotFollowed(shown, e) from None
+    finally:
+        os.close(dir_fd)

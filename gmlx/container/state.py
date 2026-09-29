@@ -11,78 +11,17 @@ lock passes to a ``container`` child process.
 from __future__ import annotations
 
 import fcntl
-import functools
 import os
 import stat
-import unicodedata
 from pathlib import Path
 from typing import Callable
 
+# Launch modules import these from here.
+from gmlx.safe_path import canonical, fd_path, path_inside  # noqa: F401
 
-# pathconf name of _PC_CASE_SENSITIVE on macOS, which Python does not list.
-_PC_CASE_SENSITIVE = 11
-# fcntl command that returns the path of an open file on macOS.
-_F_GETPATH = getattr(fcntl, "F_GETPATH", 50)
+
 # Container-mode data is private to you, whatever the umask.
 ROOT_MODE = 0o700
-
-
-def fd_path(fd: int) -> str:
-    """The path macOS itself gives an open file or folder."""
-    raw = fcntl.fcntl(fd, _F_GETPATH, b"\0" * 1024)
-    return raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
-
-
-def canonical(path: str | os.PathLike) -> str:
-    """``path`` with its links resolved and in the form macOS gives it.
-
-    ``os.path.realpath`` keeps a firmlink alias such as
-    ``/System/Volumes/Data/Users/you`` and the case the name was typed in,
-    so a check by path would miss that it is ``/Users/you``. The folder is
-    opened and macOS names it. A path that is not a folder is named through
-    its folder."""
-    real = os.path.realpath(os.path.expanduser(str(path)))
-    try:
-        fd = os.open(real, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
-    except OSError:
-        parent, name = os.path.split(real)
-        if not name or parent == real:
-            return real
-        return os.path.join(canonical(parent), name)
-    try:
-        return fd_path(fd) or real
-    except OSError:
-        return real
-    finally:
-        os.close(fd)
-
-
-@functools.lru_cache(maxsize=256)
-def _case_insensitive(folder: str) -> bool:
-    """Whether the volume that holds ``folder`` compares names without
-    case, as APFS does by default."""
-    p = folder
-    while p != "/" and not os.path.exists(p):
-        p = os.path.dirname(p)
-    try:
-        return os.pathconf(p, _PC_CASE_SENSITIVE) == 0
-    except (OSError, ValueError):
-        return False
-
-
-def _fold(path: str) -> str:
-    return unicodedata.normalize("NFC", path).casefold()
-
-
-def path_inside(path: str, folder: str) -> bool:
-    """True when ``path`` is ``folder`` or lies inside it, by whole path
-    components. On a volume that ignores case, as APFS does, ``~/SRC`` and
-    ``~/src`` are one folder, so the names are compared the same way."""
-    if folder == "/":
-        return path.startswith("/")
-    if _case_insensitive(folder):
-        path, folder = _fold(path), _fold(folder)
-    return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
 def data_path() -> Path:
