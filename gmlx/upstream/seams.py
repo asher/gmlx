@@ -481,7 +481,9 @@ SEAMS: tuple[Seam, ...] = (
          "the image markers of each message)"),
     Seam("mlx_vlm.prompt_utils", "MODEL_CONFIG",
          "render._images_in_place (each in-place model type rebuilds a user "
-         "message as a list of one text part and its image parts)",
+         "message as a list of one text part and its image parts) + "
+         "render._tool_images_to_user (a model type outside the table takes "
+         "the text path of apply_chat_template, which has no image path)",
          pin=_in_place_image_rows),
     Seam("mlx_vlm.prompt_utils", "MessageFormatter._format_list_with_image",
          "render._images_in_place (a list format rebuild: one text part, "

@@ -37,7 +37,8 @@ one the Gemma-4 processor runs. For other types it moves them to a user
 message of their own right after the tool results, as the Responses route
 places a tool output's images, and hands the template the tool text as a
 string (``_tool_images_to_user``). Each tool image then renders in one
-place, and in the same place in every later turn.
+place, and in the same place in every later turn. A text-only model type
+gets the tool text alone.
 
 The Mistral chat templates reject a user turn right after a tool turn, while
 the Messages API sends text and images beside the tool results in one user
@@ -95,18 +96,22 @@ def _tool_images(message) -> int:
                for part in content)
 
 
-def _tool_images_to_user(items: list) -> list:
+def _tool_images_to_user(items: list, images: bool = True) -> list:
     """``items`` with each tool message's content as its text, joined as
     the route joins a tool result's text, and the images of each run of tool
     messages in a user message of their own right after the run, as the
-    Responses route places a tool output's images."""
+    Responses route places a tool output's images. Without ``images`` (a
+    model type with no image path, whose rebuild turns that message into an
+    empty turn), the images are left out."""
     out: list = []
     moved: list = []
     for message in items:
         if isinstance(message, dict) and message.get("role") == "tool":
             if _tool_images(message):
                 parts = [p for p in message["content"] if isinstance(p, dict)]
-                moved += [p for p in parts if p.get("type") in _IMAGE_ITEMS]
+                if images:
+                    moved += [p for p in parts
+                              if p.get("type") in _IMAGE_ITEMS]
                 text = "\n".join(str(p["text"]) for p in parts
                                  if p.get("type") == "text" and p.get("text"))
                 message = {**message, "content": text.strip()}
@@ -292,7 +297,11 @@ def install_faithful_history() -> None:
             if keep_tool_images:
                 num_images = max(num_images - tool_images, 0)
             elif tool_images:
-                prompt = _tool_images_to_user(prompt)
+                # A model type outside MODEL_CONFIG takes the stock text
+                # path, which has no image path.
+                prompt = _tool_images_to_user(
+                    prompt, str(cfg.get("model_type") or "").lower()
+                    in prompt_utils.MODEL_CONFIG)
             msgs = orig(processor, config, prompt,
                         add_generation_prompt=add_generation_prompt,
                         return_messages=True, num_images=num_images,

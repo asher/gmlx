@@ -314,6 +314,23 @@ def test_a_tool_turn_without_images_gets_its_text(route, name):
     _in_order(prompt, "RESULT-ONE")
 
 
+# Template: the turn a text-only template renders for a user message with
+# no text.
+_EMPTY_USER = {"qwen3": "<|im_start|>user\n<|im_end|>",
+               "gpt-oss": "<|start|>user<|message|><|end|>"}
+
+
+@pytest.mark.parametrize("after", (True, False), ids=("text", "no-text"))
+@pytest.mark.parametrize("name", sorted(_EMPTY_USER))
+def test_a_text_only_model_gets_a_tool_image_turn_as_its_text(route, name,
+                                                              after):
+    blocks = [_shot(_image("s"))] + ([_text("TEXT-AFTER")] if after else [])
+    prompt, _ = route(name, _round(*blocks))
+    assert _EMPTY_USER[name] not in prompt
+    assert "'type'" not in prompt and '"type": "image"' not in prompt
+    _in_order(prompt, "RESULT-ONE", *(["TEXT-AFTER"] if after else []))
+
+
 def test_mistral3_reads_the_user_text_in_the_tool_results(route):
     """Mistral3's template rejects a user turn right after a tool turn, so
     the text and images beside the tool results fold into them."""
