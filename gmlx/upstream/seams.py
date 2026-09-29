@@ -338,6 +338,19 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine._bind_l1_view (L1 APC helpers) + ckpt restore gates"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_prefix_has_media_tokens",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._build_mixed_prompt_batch",
+         "media_salt + apc_media (each row picks its prefix through "
+         "_apc_pick_for with its own MediaSalt; a warm row's inputs_embeds "
+         "and sequence-aligned kwargs, mrope position ids included, slice "
+         "at its prefix length; APC-private keys never reach the model)"),
+    Seam("mlx_vlm.generate.ar",
+         "PromptProcessingBatch._capture_rope_deltas_from_prompt_kwargs",
+         "apc_media.install_causal_serve_media (a restored Qwen3.5 row "
+         "decodes with the rope deltas of its prompt kwargs, else the "
+         "language model's)"),
+    Seam("mlx_vlm.generate.ar", "APC_PRIVATE_PROMPT_KEYS",
+         "media_salt.install_media_salt (_apc_semantic_hash, which carries "
+         "the MediaSalt, is dropped before the model call)"),
     Seam("mlx_vlm.apc", "apc_lookup_plan",
          "spec_engine._L1View (_apc_pick_for takes the legacy branch: the "
          "view has no coordinator)"),
@@ -385,6 +398,9 @@ SEAMS: tuple[Seam, ...] = (
          "tokenize path for the next-turn retirement key) + "
          "media_salt.install_media_salt (hands the request's inputs to "
          "its image hash)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._initialize_model",
+         "media_salt.install_media_salt (the image hash reads the "
+         "model, processor and apc_mode this sets)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
          "single_bos_fix (calls the prepare_inputs binding with prompts= "
          "and a model-type add_special_tokens)"),
@@ -411,6 +427,16 @@ SEAMS: tuple[Seam, ...] = (
          "render.install_chat_image_placement (wrapped: marked content "
          "returns its text parts and one image marker per image, which "
          "apply_chat_template counts per message)"),
+    Seam("mlx_vlm.prompt_utils", "extract_text_from_content",
+         "render.install_chat_image_placement (the stock extraction of "
+         "text-only content, behind the openai binding's wrap) + "
+         "estimate._estimate_bound (text of each message)"),
+    Seam("mlx_vlm.prompt_utils", "_content_media_count",
+         "render.install_chat_image_placement (apply_chat_template counts "
+         "the image markers of each message)"),
+    Seam("mlx_vlm.prompt_utils", "get_message_json",
+         "system_content_fix (a list-format model type gets its system and "
+         "developer text as a list of text parts)"),
     Seam("mlx_vlm.server.anthropic", "_preflight_stream_context_budget",
          "server_patches.install_context_overflow_wording (wrapped: the "
          "overflow 400 is recorded for the endpoint wrapper)"),
@@ -474,6 +500,19 @@ SEAMS: tuple[Seam, ...] = (
          "single_bos_fix (module attr: the flag reaches only a processor "
          "that names it; inside a generation call that drops the "
          "duplicate BOS, forwarded to a known type through **kwargs)"),
+    Seam("mlx_vlm.utils", "process_inputs_with_fallback",
+         "single_bos_fix (calls the process_inputs module attr with the "
+         "add_special_tokens it was given)"),
+    Seam("mlx_vlm.utils", "prepare_inputs",
+         "single_bos_fix (the body every prepare_inputs binding runs: a "
+         "text prompt reaches the tokenizer with add_special_tokens, a "
+         "media prompt reaches process_inputs_with_fallback with it)"),
+    Seam("mlx_vlm.server.embeddings", "_embed_image",
+         "single_bos_fix (embeddings encode through their own stock "
+         "prepare_inputs binding)"),
+    Seam("mlx_vlm.server.reranking", "_score_vl_batch",
+         "single_bos_fix (reranking encodes through its own stock "
+         "prepare_inputs binding)"),
     Seam("mlx_vlm.generate.dispatch", "_prepare_generation_inputs",
          "single_bos_fix (calls the prepare_inputs binding with prompts= "
          "and a model-type add_special_tokens)"),
@@ -498,6 +537,14 @@ SEAMS: tuple[Seam, ...] = (
          "PixtralProcessor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
          "self.tokenizer)"),
+    Seam("mlx_vlm.models.gemma4.processing_gemma4",
+         "Gemma4ImageProcessor.preprocess",
+         "media_salt._expected_tokens (a [C, H, W] image expands to one "
+         "token per pooling_kernel_size**2 patches of patch_size pixels)"),
+    Seam("mlx_vlm.models.kimi_k25.processing_kimi_k25",
+         "KimiK25Processor.__call__",
+         "media_salt._expected_tokens (an image expands to h*w of its "
+         "image_grid_hws row over the merge kernel's area)"),
     # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
     # used by the hy_v3, hy_v4, deepseek_v41, muse_glimmer and
     # function_gemma tools) ---
@@ -615,6 +662,15 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "adjust_prefix_to_text_suffix_boundary",
          "apc_media.install_media_token_ids (a WholeMediaBlocks column "
          "inside a run moves to its end)", critical=True),
+    Seam("mlx_vlm.apc", "media_token_spans",
+         "apc_media.safe_prefix and the WholeMediaBlocks guards (half-open "
+         "runs of media ids, in prompt order)"),
+    Seam("mlx_vlm.apc", "prefix_contains_media_tokens",
+         "apc_media (the stock pick's prefix_has_media test reads a "
+         "CausalMedia or WholeMediaBlocks set as a plain id set)"),
+    Seam("mlx_vlm.apc", "_tensor_content_hash",
+         "media_salt.install_media_salt (hash_image_payload outside a "
+         "request keeps the stock content hash)"),
     Seam("mlx_vlm.apc", "hash_image_payload",
          "media_salt.install_media_salt (a request's images hash once, "
          "per image, into spans; a list of images of different sizes "
