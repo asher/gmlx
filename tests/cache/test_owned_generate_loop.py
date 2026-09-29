@@ -1,12 +1,14 @@
 """mlx-lm's generate loops give the same tokens on the owned cache classes.
 
 From the binding, mlx_lm's ``stream_generate`` and ``BatchGenerator`` run
-on gmlx's cache classes. One script runs a tiny random llama and a tiny
-qwen3_next (GatedDeltaNet layers on ArraysCache) through both loops
-greedily, in a child that never imports gmlx and in a child that imports
-gmlx first, and the token ids must match. Both children run on the CPU
-device from a clean start, so neither depends on what this process
-installed.
+on gmlx's cache classes. One script runs a tiny random llama (plain and
+with an 8-bit KV cache), a tiny gemma3 (sliding window layers on
+RotatingKVCache) and a tiny qwen3_next (GatedDeltaNet layers on
+ArraysCache) through both loops greedily, in a child that never imports
+gmlx and in a child that imports gmlx first, and the token ids must match.
+Both children start clean, so neither depends on what this process
+installed, and both run on the GPU when there is one. Under
+KQUANT_FORCE_CPU, or without Metal, they run on the CPU device.
 
 The owned ArraysCache reads ``left_padding`` and ``lengths`` through an
 advance offset, which costs Python calls on the GDN decode path. A decode
@@ -27,20 +29,24 @@ _SCRIPT = r'''
 import contextlib
 import importlib
 import json
+import os
 import sys
 
 import mlx.core as mx
 from mlx.utils import tree_map
 
-mx.set_default_device(mx.cpu)
-# Memory policy only, the same in both arms: the stock wired-limit calls
-# read a GPU key the CPU device does not report.
-mx.metal.is_available = lambda: False
+cpu = bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available()
+if cpu:
+    mx.set_default_device(mx.cpu)
+    # Memory policy only, the same in both arms: the stock wired-limit
+    # calls read a GPU key the CPU device does not report.
+    mx.metal.is_available = lambda: False
 mode, arch = sys.argv[1], sys.argv[2]
 if mode == "owned":
     import gmlx  # noqa: F401
 gen = importlib.import_module("mlx_lm.generate")
-gen.wired_limit = lambda *a, **k: contextlib.nullcontext()
+if cpu:
+    gen.wired_limit = lambda *a, **k: contextlib.nullcontext()
 cache_mod = importlib.import_module("mlx_lm.models.cache")
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
@@ -72,9 +78,16 @@ def build():
     if arch == "llama":
         from mlx_lm.models import llama as m
         args = m.ModelArgs(
-            model_type="llama", hidden_size=64, num_hidden_layers=2,
+            model_type="llama", hidden_size=128, num_hidden_layers=2,
             intermediate_size=128, num_attention_heads=4,
             num_key_value_heads=2, rms_norm_eps=1e-5, vocab_size=97)
+    elif arch == "gemma3":
+        from mlx_lm.models import gemma3_text as m
+        args = m.ModelArgs(
+            model_type="gemma3_text", hidden_size=64, num_hidden_layers=4,
+            intermediate_size=128, num_attention_heads=4,
+            num_key_value_heads=2, head_dim=16, rms_norm_eps=1e-6,
+            vocab_size=97, sliding_window=8, sliding_window_pattern=2)
     else:
         from mlx_lm.models import qwen3_next as m
         args = m.ModelArgs(
@@ -108,6 +121,15 @@ stream = [int(r.token) for r in gen.stream_generate(
     model, tokenizer(), prompt, max_tokens=12, sampler=greedy,
     prompt_cache=cache)]
 classes = sorted({f"{type(c).__module__}.{type(c).__name__}" for c in cache})
+kv8 = None
+if arch == "llama":
+    cache = cache_mod.make_prompt_cache(model)
+    kv8 = [int(r.token) for r in gen.stream_generate(
+        model, tokenizer(), prompt, max_tokens=12, sampler=greedy,
+        prompt_cache=cache, kv_bits=8, kv_group_size=32,
+        quantized_kv_start=0)]
+    classes += sorted({f"{type(c).__module__}.{type(c).__name__}"
+                       for c in cache})
 
 bg = gen.BatchGenerator(model, sampler=greedy)
 prompts = [prompt, prompt[:5], [(5 * i + 1) % 97 for i in range(8)]]
@@ -140,8 +162,9 @@ if arch == "qwen3_next":
         mx.eval(out)
         counts.append(n[0])
     calls = counts
-print(json.dumps({"stream": stream, "batch": batch, "classes": classes,
-                  "calls": calls,
+print(json.dumps({"stream": stream, "kv8": kv8, "batch": batch,
+                  "classes": classes, "calls": calls,
+                  "device": "cpu" if cpu else "gpu",
                   "gmlx": any(m == "gmlx" for m in sys.modules)}))
 '''
 
@@ -164,25 +187,43 @@ def _run(mode, arch):
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["gmlx"] is (mode == "owned")
+    assert out["device"] == _DEVICE, out["device"]
     return out
 
 
-@pytest.fixture(scope="module", params=["llama", "qwen3_next"])
+def _device():
+    import mlx.core as mx
+
+    if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
+        return "cpu"
+    return "gpu"
+
+
+_DEVICE = _device()
+
+
+@pytest.fixture(scope="module", params=["llama", "gemma3", "qwen3_next"])
 def runs(request):
     arch = request.param
     return arch, _run("stock", arch), _run("owned", arch)
 
 
 def test_the_generate_loops_run_on_owned_classes(runs):
-    _arch, stock, owned = runs
+    arch, stock, owned = runs
     assert all(c.startswith("mlx_lm.models.cache.") for c in stock["classes"])
     assert all(c.startswith("gmlx.cache.kv_cache.") for c in owned["classes"])
+    names = {c.rsplit(".", 1)[1] for c in owned["classes"]}
+    want = {"llama": {"KVCache", "QuantizedKVCache"},
+            "gemma3": {"KVCache", "RotatingKVCache"},
+            "qwen3_next": {"KVCache", "ArraysCache"}}[arch]
+    assert names == want, (arch, owned["classes"])
 
 
 def test_stream_generate_tokens_match_stock(runs):
     arch, stock, owned = runs
     assert len(set(stock["stream"])) > 1, arch
     assert owned["stream"] == stock["stream"], arch
+    assert owned["kv8"] == stock["kv8"], arch
 
 
 def test_batch_generator_tokens_match_stock(runs):
