@@ -3,12 +3,15 @@
 ensure_rollback_attached wraps the rotating cache classes of every origin
 for the rest of the process, and a served process can hold a DeepSeek-V4
 model beside a Gemma-4 model. A cache that no DeepSeek-V4 verify armed
-must behave as the stock class. Each check runs in a fresh child that never
-attached the undo log and in children that attached it before and after the
-stock trim fix, as a DeepSeek-V4 load and a Gemma-4 load install them in
-either order. The children must agree, and each Gemma-4 rollback must match
-a single-row forward over the kept tokens, whether a one-token step or a
-verify-width block follows it.
+must behave as the class without the undo log. Each check runs in a fresh
+child that never attached the undo log and in children that attached it
+before and after the stock trim fix, as a DeepSeek-V4 load and a Gemma-4
+load install them in either order. Every child installs the trim fix, as
+the loader does. The children must agree, and each Gemma-4 rollback must
+match a single-row forward over the kept tokens, whether a one-token step
+or a verify-width block follows it. A control child runs without the trim
+fix, where the one-token step must miss that forward, so the check can
+still tell a broken rollback.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ def attach():
 
 # The loader installs the trim fix with every model; a DeepSeek-V4 model
 # attaches the undo log as it builds, before that install.
-order = {"stock": [install_rotating_trim_fix],
+order = {"no-undo": [install_rotating_trim_fix],
          "undo-first": [attach, install_rotating_trim_fix],
          "guard-first": [install_rotating_trim_fix, attach]}[sys.argv[1]]
 for step in order:
@@ -155,30 +158,37 @@ print(json.dumps({"caches": caches(), "gemma": gemma()}))
 '''
 
 _ORDERS = ("undo-first", "guard-first")
+# The control: no undo log and no trim fix.
+_UNGUARDED = "no-undo-no-fix"
 
 
 def _child(order: str) -> dict:
+    env = dict(os.environ)
+    if order == _UNGUARDED:
+        order = "no-undo"
+        env["GMLX_ROTATING_TRIM_FIX"] = "0"
     r = subprocess.run(
         [sys.executable, "-c", CHILD, order], capture_output=True,
-        text=True, env=dict(os.environ), timeout=600)
+        text=True, env=env, timeout=600)
     assert r.returncode == 0, r.stderr[-4000:]
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
 @pytest.fixture(scope="module")
 def runs():
-    return {order: _child(order) for order in ("stock",) + _ORDERS}
+    return {order: _child(order)
+            for order in ("no-undo",) + _ORDERS + (_UNGUARDED,)}
 
 
 @pytest.mark.parametrize("order", _ORDERS)
-def test_unarmed_rotating_caches_trim_like_stock(runs, order):
-    stock, attached = runs["stock"]["caches"], runs[order]["caches"]
-    assert set(stock) == set(attached)
-    assert len(stock) >= 4
-    for name, want in stock.items():
+def test_unarmed_rotating_caches_trim_as_without_the_undo_log(runs, order):
+    plain, attached = runs["no-undo"]["caches"], runs[order]["caches"]
+    assert set(plain) == set(attached)
+    assert len(plain) >= 4
+    for name, want in plain.items():
         got = attached[name]
         assert not want["undo"] and got["undo"], name
-        # A full window: stock reports it untrimmable and trims anyway.
+        # A full window reports itself untrimmable and trims anyway.
         assert not want["trimmable"] and want["trim"] == 2, name
         for key, v in want.items():
             if key != "undo":
@@ -188,22 +198,36 @@ def test_unarmed_rotating_caches_trim_like_stock(runs, order):
 _CASES = [f"{n} {f}" for n in ("one", "two") for f in ("step", "block")]
 
 
-@pytest.mark.parametrize("case", _CASES)
-@pytest.mark.parametrize("order", ("stock",) + _ORDERS)
-def test_gemma4_rollback_matches_a_single_row(runs, order, case):
-    got = runs[order]["gemma"][case]
+def _misses(got) -> list[float]:
+    """Each row's largest logit miss against the fresh forward, as a
+    fraction of the logit scale."""
+    out = []
     for row, want in zip(got["logits"], got["truth"]):
         want = np.array(want)
         d = float(np.abs(np.array(row) - want).max())
-        # A fresh forward agrees to about 1e-6 of the logit scale; rejected
-        # drafts left attended move the logits by about the scale.
-        assert d <= 1e-4 * float(np.abs(want).max()), (order, case, d)
+        out.append(d / float(np.abs(want).max()))
+    return out
+
+
+@pytest.mark.parametrize("case", _CASES)
+@pytest.mark.parametrize("order", ("no-undo",) + _ORDERS)
+def test_gemma4_rollback_matches_a_single_row(runs, order, case):
+    misses = _misses(runs[order]["gemma"][case])
+    # A fresh forward agrees to about 1e-6 of the logit scale; rejected
+    # drafts left attended move the logits by about the scale.
+    assert all(m <= 1e-4 for m in misses), (order, case, misses)
+
+
+@pytest.mark.parametrize("case", [c for c in _CASES if c.endswith("step")])
+def test_the_check_fails_without_the_trim_fix(runs, case):
+    misses = _misses(runs[_UNGUARDED]["gemma"][case])
+    assert all(m > 0.1 for m in misses), (case, misses)
 
 
 @pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("order", _ORDERS)
 def test_gemma4_rollback_after_a_deepseek_v4_attach(runs, order, case):
-    want = runs["stock"]["gemma"][case]
+    want = runs["no-undo"]["gemma"][case]
     got = runs[order]["gemma"][case]
     assert got["offsets"] == want["offsets"]
     assert got["idx"] == want["idx"]
