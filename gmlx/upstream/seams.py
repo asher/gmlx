@@ -578,7 +578,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "APCExactCacheEntry",
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_hash_tokens",
-         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks + "
+         "apc_manager.block_chain", critical=True),
     Seam("mlx_vlm.apc", "_DiskLayerMajorBlock",
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_copy_mlx_array",
@@ -596,7 +597,8 @@ SEAMS: tuple[Seam, ...] = (
          "parsing; disk tier stays opt-in)"),
     Seam("mlx_vlm.apc", "APCManager.store_kv_blocks",
          "apc_manager.GmlxAPCManager.store_kv_blocks (mirror: re-sync the "
-         "copy on change)", critical=True),
+         "copy on change; each block hashes under the salt at its end)",
+         critical=True),
     Seam("mlx_vlm.apc", "_cache_nbytes",
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "APCBlock",
@@ -688,11 +690,23 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.GmlxAPCManager.store_exact_cache (keys on the salt "
          "at the entry length)"),
     Seam("mlx_vlm.apc", "APCManager.lookup_prefix",
-         "apc_manager.GmlxAPCManager.lookup_prefix (one walk per "
-         "MediaSalt window; the hit and miss counts are restored to one)"),
+         "apc_manager.GmlxAPCManager.lookup_prefix (mirror for a "
+         "MediaSalt: the stock walk over block_chain, one hit or miss; "
+         "re-sync on change) + fresh_gate._covered_len (the same walk)"),
     Seam("mlx_vlm.apc", "APCManager.lookup_prefix_disk_cache",
-         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (one call "
-         "per MediaSalt window)"),
+         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (mirror for "
+         "a MediaSalt: the stock restore over block_chain, each shard "
+         "block's salt checked at its end; re-sync on change)"),
+    Seam("mlx_vlm.apc", "make_warm_kv_cache_from_layers",
+         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
+         "MediaSalt mirror builds the warm cache from the loaded prefix)"),
+    Seam("mlx_vlm.apc", "DiskBlockStore.load_layer_major_prefix",
+         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
+         "MediaSalt mirror: keys, values and per-block metadata with "
+         "token_ids and extra_hash)"),
+    Seam("mlx_vlm.apc", "DiskBlockStore.prefix_cache_bytes",
+         "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
+         "MediaSalt mirror sizes its _make_room call)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "

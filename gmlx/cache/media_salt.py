@@ -13,9 +13,9 @@ like a text prompt.
 The int value of a ``MediaSalt`` is the salt of the whole prompt, so a
 site that reads it as a plain int keys every prefix by all of the
 request's images, as the stock salt does. A store keys an entry on the
-salt at the entry's length (``salt_at``). A lookup over a stock body runs
-once per window of prefix lengths that share one salt, longest first
-(``salt_windows``).
+salt at the entry's length (``salt_at``), and a block on the salt at the
+block's end. A lookup over a stock body runs once per window of prefix
+lengths that share one salt, longest first (``salt_windows``).
 
 An image hash covers its pixel rows and the rows the processor emits for
 it beside them (``image_grid_thw``, ``image_grid_hws``, ``image_meta``,

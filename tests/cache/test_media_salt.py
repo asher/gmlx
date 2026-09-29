@@ -17,7 +17,7 @@ import gmlx.lora_rows as lora_rows
 import gmlx.load.vlm as gvlm
 import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.mtp_prefill as mtp_prefill
-from gmlx.cache import snapshot
+from gmlx.cache import fresh_gate, snapshot
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.apc_media import install_media_token_ids
 from gmlx.cache.media_salt import (
@@ -229,13 +229,16 @@ def test_the_block_walk_restores_the_prefix_before_a_new_image():
     m.release(blocks)
     assert n == len(t1)
     assert (m.stats.hits, m.stats.misses, m.stats.matched_tokens) == (1, 0, 64)
-    # Another image at A's column, another tenant salt, another LoRA mask.
-    for salt in (MediaSalt(7, [(40, 112), b]), MediaSalt(8, [a, b]),
-                 MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0))):
+    # Another image at A's column restores only the text before it, and
+    # another tenant salt or LoRA mask restores nothing.
+    for salt, want in ((MediaSalt(7, [(40, 112), b]), 32),
+                       (MediaSalt(8, [a, b]), 0),
+                       (MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0)),
+                        0)):
         blocks, n = m.lookup_prefix(t2, extra_hash=salt)
         m.release(blocks)
-        assert n == 0
-    assert (m.stats.hits, m.stats.misses) == (1, 3)
+        assert n == want
+    assert (m.stats.hits, m.stats.misses) == (2, 2)
 
 
 def test_the_block_store_covers_the_prefix_a_warm_turn_skipped():
@@ -250,6 +253,97 @@ def test_the_block_store_covers_the_prefix_a_warm_turn_skipped():
     blocks, n = m.lookup_prefix(t3, extra_hash=MediaSalt(7, [a, b, (128, 3)]))
     m.release(blocks)
     assert n == 128
+
+
+def _stored(m):
+    return sorted(b.token_ids for b in m.pool if b.block_hash is not None)
+
+
+def test_two_image_turns_store_their_shared_prefix_once():
+    """Turn 2 repeats turn 1's tokens and image and adds image B. Each
+    block keys on the images that start before its end, so turn 2 finds
+    turn 1's blocks and stores only the blocks after them."""
+    t1, t2, a, b = _turns()
+    m = GmlxAPCManager(num_blocks=64, block_size=_BS)
+    k1, v1 = _kv(len(t1), 1)
+    m.release(m.store_kv_blocks(t1, k1, v1, extra_hash=MediaSalt(7, [a])))
+    k2, v2 = _kv(len(t2), 2)
+    k2 = [mx.concatenate([k1[0], k2[0][..., len(t1):, :]], axis=2)]
+    v2 = [mx.concatenate([v1[0], v2[0][..., len(t1):, :]], axis=2)]
+    m.release(m.store_kv_blocks(t2, k2, v2, extra_hash=MediaSalt(7, [a, b]),
+                                skip_first_n_tokens=len(t1)))
+    chunks = [tuple(t2[i:i + _BS]) for i in range(0, len(t2), _BS)]
+    assert _stored(m) == sorted(chunks)
+    assert m.stats.stores == len(chunks)
+
+
+def _restores(t2):
+    """Lookups over turn 2's tokens and more, with the prefix length each
+    restores from turn 2's chain: all of turn 2 with a third image after
+    it, the text up to another image B, the text up to another image A,
+    and nothing under another text salt or LoRA mask."""
+    _t1, _t2, a, b = _turns()
+    t3 = t2 + [121] * 16 + [5] * 16
+    return t3, ((MediaSalt(7, [a, b, (128, 3)]), len(t2)),
+                (MediaSalt(7, [a, (80, 223)]), 80),
+                (MediaSalt(7, [(40, 112), b]), 32),
+                (MediaSalt(8, [a, b]), 0),
+                (MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0)), 0))
+
+
+def test_a_block_restore_holds_the_images_of_its_own_prefix():
+    _t1, t2, a, b = _turns()
+    m = GmlxAPCManager(num_blocks=64, block_size=_BS)
+    k2, v2 = _kv(len(t2), 2)
+    m.release(m.store_kv_blocks(t2, k2, v2, extra_hash=MediaSalt(7, [a, b])))
+    t3, cases = _restores(t2)
+    for salt, want in cases:
+        blocks, n = m.lookup_prefix(t3, extra_hash=salt)
+        assert n == want
+        if n:
+            got = mx.concatenate([blk.keys[0] for blk in blocks], axis=2)
+            assert mx.array_equal(got, k2[0][..., :n, :])
+        m.release(blocks)
+    # A text prompt restores the text before the first image.
+    blocks, n = m.lookup_prefix(t2[:40] + [9] * 24, extra_hash=7)
+    m.release(blocks)
+    assert n == 32
+    # The admission gate's peek reads the chain by the same rule.
+    for salt, want in cases:
+        assert fresh_gate._covered_len(m, t3, salt) == want
+
+
+def test_the_disk_tier_restores_the_images_of_its_own_prefix(tmp_path):
+    _t1, t2, a, b = _turns()
+    disk = _apc.DiskBlockStore(tmp_path, namespace="t")
+    try:
+        m = GmlxAPCManager(num_blocks=64, block_size=_BS, disk=disk)
+        m._disk_min_free_ram_bytes = 0
+        k2, v2 = _kv(len(t2), 2)
+        m.release(m.store_kv_blocks(t2, k2, v2,
+                                    extra_hash=MediaSalt(7, [a, b])))
+        disk.flush()
+        t3, cases = _restores(t2)
+        for salt, want in cases:
+            got, n = m.lookup_prefix_disk_cache(t3, extra_hash=salt,
+                                                allow_memory_overlap=True)
+            assert n == want and (got is None) == (want == 0)
+            if got is not None:
+                assert mx.array_equal(got[0].keys[..., :n, :],
+                                      k2[0][..., :n, :])
+        # The stock bounds: a hit is longer than the minimum and no longer
+        # than a positive maximum.
+        salt = cases[0][0]
+        assert m.lookup_prefix_disk_cache(
+            t3, extra_hash=salt, max_prefix_tokens=72,
+            allow_memory_overlap=True)[1] == 64
+        assert m.lookup_prefix_disk_cache(
+            t3, extra_hash=salt, min_prefix_tokens=len(t2),
+            allow_memory_overlap=True) == (None, 0)
+        # Without the overlap flag, a prefix the pool holds stays there.
+        assert m.lookup_prefix_disk_cache(t3, extra_hash=salt) == (None, 0)
+    finally:
+        disk.close()
 
 
 def _row(n, seed):
@@ -273,24 +367,6 @@ def test_the_exact_tier_restores_an_entry_under_fewer_images():
     m.store_exact_cache(t1[:32], _row(32, 2), extra_hash=7)
     got, p = m.lookup_exact_cache(t2, extra_hash=MediaSalt(7, [(40, 112), b]))
     assert got is not None and p == 32
-
-
-def test_disk_lookups_run_one_bounded_stock_call_per_window(monkeypatch):
-    calls = []
-
-    def stock(self, token_ids, extra_hash=0, max_prefix_tokens=None,
-              min_prefix_tokens=0, allow_memory_overlap=False):
-        calls.append((extra_hash, min_prefix_tokens, max_prefix_tokens))
-        return None, 0
-
-    monkeypatch.setattr(_apc.APCManager, "lookup_prefix_disk_cache", stock)
-    m = GmlxAPCManager(num_blocks=8, block_size=_BS)
-    s = MediaSalt(7, [(40, 1), (80, 2)])
-    assert m.lookup_prefix_disk_cache(list(range(120)), extra_hash=s,
-                                      max_prefix_tokens=100,
-                                      min_prefix_tokens=16) == (None, 0)
-    assert calls == [(s.at(81), 80, 100), (s.at(41), 40, 80),
-                     (s.at(1), 16, 40)]
 
 
 def test_the_spec_prefix_cache_keys_each_entry_at_its_length():

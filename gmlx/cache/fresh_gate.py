@@ -37,7 +37,7 @@ import time
 
 from gmlx.serve.batch_rows import batch_rows
 
-from .media_salt import salt_at, salt_windows
+from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
 
@@ -91,30 +91,21 @@ def _covered_len(manager, ids, extra_hash: int) -> int:
     exact entries, anchor LRU) without acquiring blocks, cloning, or
     touching hit counters, so a peek never distorts stats or LRU order.
     """
-    from mlx_vlm import apc as _apc
+    from .apc_manager import block_chain
 
     tt = tuple(int(t) for t in ids)
     best = 0
     with manager.lock:
         bs = int(getattr(manager, "block_size", 0) or 0)
         table = getattr(manager, "hash_table", None)
-        # A prompt with images walks the block chain once per window of
-        # lengths that share a salt, as the manager's lookup does.
-        for salt, lo, hi in (salt_windows(extra_hash)
-                             if bs > 0 and table else ()):
-            parent = _apc.SEED_PARENT_HASH
-            walked = 0
-            for i in range((len(tt) if hi is None else hi) // bs):
-                chunk = tt[i * bs:(i + 1) * bs]
-                h = _apc._hash_tokens(parent, tokens=chunk, extra=salt)
+        # Each block keys on the salt at its end, as the manager's lookup
+        # reads it.
+        if bs > 0 and table:
+            for chunk, h in block_chain(tt, extra_hash, len(tt) // bs, bs):
                 blk = table.get(h)
                 if blk is None or blk.token_ids != chunk:
                     break
-                parent = h
-                walked = (i + 1) * bs
-            if walked > lo:
-                best = walked
-                break
+                best += bs
         for entry in (getattr(manager, "_exact_cache", None) or {}).values():
             p = len(entry.token_ids)
             if (entry.extra_hash == salt_at(extra_hash, p)

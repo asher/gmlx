@@ -18,7 +18,12 @@ retired ``install_apc_batched_store_eval`` method patch and is not
 repeated elsewhere. It also carries the ckpt-store policy (``_ckpt_disk``:
 suppress layer-major, optionally memory-only), a second in-body
 divergence. One more divergence in this body is the agreed trigger to
-vendor the upstream file instead.
+vendor the upstream file instead. The per-block image salt
+(``block_chain``) is that divergence: the copied store hashes each block
+under its own salt, and the lookups of a prompt with images walk the
+stock chain the same way (``lookup_prefix``,
+``lookup_prefix_disk_cache``). The seam pins on the stock store and both
+lookups report any upstream change to them until the file is vendored.
 """
 
 from __future__ import annotations
@@ -35,6 +40,20 @@ from gmlx.envflags import env_int
 from .media_salt import MediaSalt, salt_at, salt_windows
 
 _log = logging.getLogger(__name__)
+
+
+def block_chain(token_ids, extra_hash, n_blocks: int, block_size: int):
+    """``(chunk, hash)`` of each of the first ``n_blocks`` blocks of
+    ``token_ids`` in the stock hash chain. Block ``i`` hashes under the
+    salt of the prefix that ends at its end (``salt_at``), so it keys on
+    the images that start before that end and on no later image. A plain
+    salt keys every block alike, as the stock chain does."""
+    parent = _apc.SEED_PARENT_HASH
+    for i in range(n_blocks):
+        end = (i + 1) * block_size
+        chunk = tuple(int(t) for t in token_ids[end - block_size:end])
+        parent = _apc._hash_tokens(parent, chunk, salt_at(extra_hash, end))
+        yield chunk, parent
 
 # Private upstream helpers the store override needs, resolved once. None means
 # the pinned mlx-vlm drifted: the override falls back to the stock store (the
@@ -364,11 +383,12 @@ class GmlxAPCManager(_apc.APCManager):
     _exact_extra_salt = 0
 
     # A prompt with images salts each prefix by the images inside it
-    # (``MediaSalt``). An exact entry keys on the salt at its length, a
-    # block chain on the salt of its whole prompt. The lookups run the
-    # stock body once per window of prefix lengths that share a salt,
-    # longest first, so a turn that adds an image still restores the
-    # prefix the earlier turn stored.
+    # (``MediaSalt``). An exact entry keys on the salt at its length, and
+    # the exact lookup runs the stock body once per window of prefix
+    # lengths that share a salt, longest first. A block keys on the salt
+    # at its end (``block_chain``), so two turns that share a prefix share
+    # its blocks, and a turn that adds an image restores the blocks the
+    # earlier turn stored.
 
     def lookup_exact_cache(self, token_ids, extra_hash=0,
                            max_prefix_tokens=None, min_prefix_tokens=0):
@@ -391,38 +411,94 @@ class GmlxAPCManager(_apc.APCManager):
         return out
 
     def lookup_prefix(self, token_ids, extra_hash=0):
+        """The stock walk. A prompt with images walks ``block_chain``."""
         if not isinstance(extra_hash, MediaSalt):
             return super().lookup_prefix(token_ids, extra_hash=extra_hash)
-        # One hit or one miss per lookup in the stats, as the stock walk
-        # counts it.
+        bs = int(self.block_size)
         with self.lock:
-            stats = self.stats
-            hits, misses, matched = (stats.hits, stats.misses,
-                                     stats.matched_tokens)
-            for salt, lo, hi in salt_windows(extra_hash):
-                ids = token_ids if hi is None else token_ids[:hi]
-                blocks, n = super().lookup_prefix(ids, extra_hash=salt)
-                if n > lo:
-                    stats.hits, stats.misses = hits + 1, misses
-                    stats.matched_tokens = matched + n
-                    return blocks, n
-                self.release(blocks)
-            stats.hits, stats.misses = hits, misses + 1
-            stats.matched_tokens = matched
-            return [], 0
+            matched = []
+            for chunk, h in block_chain(token_ids, extra_hash,
+                                        len(token_ids) // bs, bs):
+                b = self.hash_table.get(h)
+                if b is None or b.token_ids != chunk:
+                    break
+                matched.append(self._acquire_existing(b))
+            n = len(matched) * bs
+            if n > 0:
+                self.stats.hits += 1
+                self.stats.matched_tokens += n
+            else:
+                self.stats.misses += 1
+            return matched, n
 
     def lookup_prefix_disk_cache(self, token_ids, extra_hash=0,
                                  max_prefix_tokens=None, min_prefix_tokens=0,
                                  allow_memory_overlap=False):
-        for salt, lo, hi in salt_windows(extra_hash, min_prefix_tokens,
-                                         max_prefix_tokens):
-            got = super().lookup_prefix_disk_cache(
-                token_ids, extra_hash=salt, max_prefix_tokens=hi,
-                min_prefix_tokens=lo,
+        """The stock disk restore. A prompt with images walks
+        ``block_chain`` and checks each shard block's salt against the
+        salt at its end."""
+        if not isinstance(extra_hash, MediaSalt):
+            return super().lookup_prefix_disk_cache(
+                token_ids, extra_hash=extra_hash,
+                max_prefix_tokens=max_prefix_tokens,
+                min_prefix_tokens=min_prefix_tokens,
                 allow_memory_overlap=allow_memory_overlap)
-            if got[0] is not None:
-                return got
-        return None, 0
+        disk = self.disk
+        if disk is None:
+            return None, 0
+        bs = int(self.block_size)
+        with self.lock:
+            if self._disk_min_free_ram_bytes > 0:
+                free_now = _apc._free_ram_bytes()
+                if (free_now is not None
+                        and free_now < self._disk_min_free_ram_bytes):
+                    return None, 0
+            n_full = len(token_ids) // bs
+            if max_prefix_tokens is not None and max_prefix_tokens > 0:
+                n_full = min(n_full, int(max_prefix_tokens) // bs)
+            hashes, chunks = [], []
+            for chunk, h in block_chain(token_ids, extra_hash, n_full, bs):
+                # A prefix the pool holds restores from the pool.
+                b = self.hash_table.get(h)
+                if (not allow_memory_overlap and b is not None
+                        and b.token_ids == chunk):
+                    return None, 0
+                if not disk.has(h):
+                    break
+                hashes.append(h)
+                chunks.append(chunk)
+            matched = len(hashes) * bs
+            if not hashes or matched <= min_prefix_tokens:
+                return None, 0
+        if not self._make_room(2 * disk.prefix_cache_bytes(hashes)):
+            with self.lock:
+                self.stats.memory_skips += 1
+            return None, 0
+        loaded = disk.load_layer_major_prefix(hashes)
+        if loaded is None:
+            return None, 0
+        keys, values, metadatas = loaded
+        if len(metadatas) != len(chunks):
+            return None, 0
+        for i, (chunk, meta) in enumerate(zip(chunks, metadatas)):
+            try:
+                stored = tuple(int(x) for x in
+                               meta.get("token_ids", "").split(",") if x)
+                stored_extra = int(meta.get("extra_hash", "0"))
+            except (TypeError, ValueError):
+                return None, 0
+            if (stored != chunk
+                    or stored_extra != int(salt_at(extra_hash,
+                                                   (i + 1) * bs))):
+                return None, 0
+        warm = _apc.make_warm_kv_cache_from_layers(keys, values, matched)
+        self._prefill_reserve_bytes = self.memory_plan.observe_cache(
+            warm, matched)
+        with self.lock:
+            self.stats.disk_hits += len(hashes)
+            self.stats.hits += 1
+            self.stats.matched_tokens += matched
+        return warm, matched
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
@@ -455,35 +531,32 @@ class GmlxAPCManager(_apc.APCManager):
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
                         _ckpt_disk=None):
-        """The block store, with a prompt's images keyed on the salt of the
-        whole prompt. A warm turn may have restored its prefix from a
-        chain stored under fewer images. The blocks it skips are then
-        missing from this chain, so the store covers the whole prompt."""
+        """The block store, with each block of a prompt with images keyed
+        on the salt at its end (``block_chain``). A warm turn may have
+        restored its prefix from another tier, or from blocks evicted
+        since. The chain then lacks the blocks it skips, so the store
+        covers the whole prompt."""
         if isinstance(extra_hash, MediaSalt):
             if skip_first_n_tokens and not self._chain_held(
-                    token_ids, int(extra_hash), skip_first_n_tokens):
+                    token_ids, extra_hash, skip_first_n_tokens):
                 skip_first_n_tokens = 0
-            extra_hash = int(extra_hash)
         return self._store_kv_blocks_copy(
             token_ids, layer_keys, layer_values, extra_hash=extra_hash,
             skip_first_n_tokens=skip_first_n_tokens, _ckpt_disk=_ckpt_disk)
 
-    def _chain_held(self, token_ids, extra_hash: int, n_tokens: int) -> bool:
-        """Whether the chain under ``extra_hash`` holds every block of the
-        first ``n_tokens``, in the pool or on disk."""
-        h = _store_helpers()
-        if h is None:
+    def _chain_held(self, token_ids, extra_hash, n_tokens: int) -> bool:
+        """Whether ``block_chain`` holds every block of the first
+        ``n_tokens``, in the pool or on disk."""
+        if _store_helpers() is None:
             return False
         bs = int(self.block_size)
-        parent = h["seed_parent"]
         with self.lock:
-            for i in range(n_tokens // bs):
-                chunk = tuple(int(t) for t in token_ids[i * bs:(i + 1) * bs])
-                parent = h["hash_tokens"](parent, chunk, extra_hash)
-                b = self.hash_table.get(parent)
+            for chunk, h in block_chain(token_ids, extra_hash,
+                                        n_tokens // bs, bs):
+                b = self.hash_table.get(h)
                 if ((b is None or b.token_ids != chunk)
                         and not (self.disk is not None
-                                 and self.disk.has(parent))):
+                                 and self.disk.has(h))):
                     return False
         return True
 
@@ -494,9 +567,12 @@ class GmlxAPCManager(_apc.APCManager):
 
         h = _store_helpers()
         if h is None:
+            # The stock store keys every block on the whole prompt's salt,
+            # which the per-block lookups never read: a miss, not a wrong
+            # restore.
             out = super().store_kv_blocks(
                 token_ids, layer_keys, layer_values,
-                extra_hash=extra_hash,
+                extra_hash=int(extra_hash),
                 skip_first_n_tokens=skip_first_n_tokens)
             # The upstream base store has the same inline exact branch.
             self._trim_exact_to_budget()
@@ -578,10 +654,14 @@ class GmlxAPCManager(_apc.APCManager):
                     layer_major_prefix_tokens,
                 )
                 if copied is not None:
-                    key = _seq_hash(token_tuple, extra_hash, self.block_size)
+                    # The entry keys on the salt at its length, as
+                    # store_exact_cache keys one.
+                    entry_salt = int(salt_at(extra_hash,
+                                             layer_major_prefix_tokens))
+                    key = _seq_hash(token_tuple, entry_salt, self.block_size)
                     self._exact_cache[key] = _entry_cls(
                         token_ids=token_tuple,
-                        extra_hash=int(extra_hash),
+                        extra_hash=entry_salt,
                         prompt_cache=copied,
                     )
                     self._exact_cache.move_to_end(key)
@@ -593,6 +673,7 @@ class GmlxAPCManager(_apc.APCManager):
                     # too, not just in store_exact_cache (lock is an
                     # RLock, safe to re-enter).
                     self._trim_exact_to_budget()
+            # Each block hashes under the salt at its end (block_chain).
             parent = _seed_parent
             for i in range(skip_full):
                 chunk = tuple(
@@ -600,7 +681,9 @@ class GmlxAPCManager(_apc.APCManager):
                     for t in token_ids[
                         i * self.block_size:(i + 1) * self.block_size]
                 )
-                parent = _hash_tokens(parent, chunk, extra_hash)
+                parent = _hash_tokens(
+                    parent, chunk,
+                    salt_at(extra_hash, (i + 1) * self.block_size))
 
             # Deferred-eval accumulator (the only change vs stock).
             pending = []
@@ -619,13 +702,14 @@ class GmlxAPCManager(_apc.APCManager):
                     for t in token_ids[
                         i * self.block_size:(i + 1) * self.block_size]
                 )
-                h2 = _hash_tokens(parent, chunk, extra_hash)
+                block_salt = salt_at(extra_hash, (i + 1) * self.block_size)
+                h2 = _hash_tokens(parent, chunk, block_salt)
                 if allow_disk and not self.disk.has(h2):
                     disk_blocks.append(
                         _disk_block_cls(
                             block_hash=int(h2),
                             parent_hash=int(parent),
-                            extra_hash=int(extra_hash),
+                            extra_hash=int(block_salt),
                             token_ids=chunk,
                             source_block_idx=i,
                         )
