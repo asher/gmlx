@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import importlib
 
+from gmlx.upstream.patching import link
+
 
 def install_qsa_apc_support() -> None:
     """Add QSAKVCache arms to the APC disk shard writer and reader.
@@ -136,6 +138,6 @@ def install_qsa_apc_support() -> None:
         eval_targets.extend(loaded)
         return out
 
-    disk_cls._snapshot_exact_cache_entry = snap_entry
-    disk_cls._load_exact_cache_entry = load_entry
+    disk_cls._snapshot_exact_cache_entry = link(snap_entry, stock_snap)
+    disk_cls._load_exact_cache_entry = link(load_entry, stock_load)
     apc._kq_qsa_apc = True

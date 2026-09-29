@@ -40,6 +40,8 @@ import logging
 import os
 import weakref
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _CAP_FLAG = "_kq_gguf_queue_cap"
@@ -248,7 +250,7 @@ def _install_census() -> None:
     gaps, so the ref re-publishes whenever the instance changes."""
     from mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _PUB_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _PUB_FLAG):
         return
     _orig_next = _ar.BatchGenerator._next
 
@@ -260,7 +262,7 @@ def _install_census() -> None:
         return _orig_next(self, **kwargs)
 
     setattr(_published_next, _PUB_FLAG, True)
-    _ar.BatchGenerator._next = _published_next
+    _ar.BatchGenerator._next = link(_published_next, _orig_next)
 
 
 def install_queue_depth_cap() -> None:

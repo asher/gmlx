@@ -26,6 +26,7 @@ from gmlx.spec.engine import (
     _live_kv_quant_config,
     _trim_prompt_columns,
 )
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -602,9 +603,8 @@ def _install_ckpt_checkpoint_store() -> None:
     own single-stop hook. Idempotent."""
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    if getattr(
-        PromptProcessingBatch._store_apc_exact_checkpoints, _CKPT_STORE_FLAG, False
-    ):
+    if wrapped_with(PromptProcessingBatch._store_apc_exact_checkpoints,
+                    _CKPT_STORE_FLAG):
         return
     _orig = PromptProcessingBatch._store_apc_exact_checkpoints
 
@@ -616,7 +616,8 @@ def _install_ckpt_checkpoint_store() -> None:
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
-    PromptProcessingBatch._store_apc_exact_checkpoints = _store_with_ckpt_cursor
+    PromptProcessingBatch._store_apc_exact_checkpoints = link(
+        _store_with_ckpt_cursor, _orig)
 
 
 def _snap_fields(batch, manager) -> dict:
@@ -800,7 +801,7 @@ def _install_restored_prompt_progress() -> None:
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
     orig = PromptProcessingBatch.prompt_progress
-    if getattr(orig, _RESTORED_PROGRESS_FLAG, False):
+    if wrapped_with(orig, _RESTORED_PROGRESS_FLAG):
         return
 
     def prompt_progress(self):
@@ -811,7 +812,7 @@ def _install_restored_prompt_progress() -> None:
         return out
 
     prompt_progress.__dict__[_RESTORED_PROGRESS_FLAG] = True
-    PromptProcessingBatch.prompt_progress = prompt_progress
+    PromptProcessingBatch.prompt_progress = link(prompt_progress, orig)
 
 
 _ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
@@ -827,7 +828,7 @@ def _install_exact_anchor_pick() -> None:
     so it never shortens a restore. Idempotent.
     """
     from mlx_vlm.generate.ar import BatchGenerator
-    if getattr(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG, False):
+    if wrapped_with(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG):
         return
     _orig = BatchGenerator._apc_pick_for
 
@@ -881,7 +882,7 @@ def _install_exact_anchor_pick() -> None:
             return pick
 
     _pick_with_anchor.__dict__[_ANCHOR_PICK_FLAG] = True
-    BatchGenerator._apc_pick_for = _pick_with_anchor
+    BatchGenerator._apc_pick_for = link(_pick_with_anchor, _orig)
 
 
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
@@ -1018,7 +1019,7 @@ def _install_plain_ckpt_decode() -> None:
     Idempotent."""
     from mlx_vlm.generate.ar import GenerationBatch
 
-    if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
+    if wrapped_with(GenerationBatch._step, _PLAIN_DECODE_FLAG):
         return
     _orig_step = GenerationBatch._step
     _orig_filter = GenerationBatch.filter
@@ -1074,6 +1075,6 @@ def _install_plain_ckpt_decode() -> None:
     _step_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _filter_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _extend_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
-    GenerationBatch._step = _step_with_ckpt
-    GenerationBatch.filter = _filter_with_ckpt
-    GenerationBatch.extend = _extend_with_ckpt
+    GenerationBatch._step = link(_step_with_ckpt, _orig_step)
+    GenerationBatch.filter = link(_filter_with_ckpt, _orig_filter)
+    GenerationBatch.extend = link(_extend_with_ckpt, _orig_extend)

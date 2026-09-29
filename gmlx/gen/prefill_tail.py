@@ -12,6 +12,7 @@ import contextlib
 from typing import Any
 
 from gmlx.gen.prefill_decay import kv_depth
+from gmlx.upstream.patching import link
 
 _ATTR = "_gmlx_prefill_end"
 _FLAG = "_gmlx_prefill_tail_wrapped"
@@ -77,6 +78,6 @@ def install_prefill_tail() -> bool:
         arm_batch(self)
         return orig_step(self)
 
-    PromptProcessingBatch.prompt_step = _armed_prompt_step
+    PromptProcessingBatch.prompt_step = link(_armed_prompt_step, orig_step)
     setattr(PromptProcessingBatch, _FLAG, True)
     return True

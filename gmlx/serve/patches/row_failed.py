@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _BRIDGE_FLAG = "_kq_gguf_row_failed_bridge"
@@ -65,7 +67,7 @@ def install_row_failed_bridge() -> None:
 
     from ..tick_guard import on_row_failed
 
-    if getattr(gen_mod.ResponseGenerator._step, _BRIDGE_FLAG, False):
+    if wrapped_with(gen_mod.ResponseGenerator._step, _BRIDGE_FLAG):
         return
 
     def _collect(uid, info):
@@ -94,5 +96,5 @@ def install_row_failed_bridge() -> None:
                                  "failed", uid, exc_info=True)
 
     setattr(_bridged_step, _BRIDGE_FLAG, True)
-    gen_mod.ResponseGenerator._step = _bridged_step
+    gen_mod.ResponseGenerator._step = link(_bridged_step, _orig_step)
     _log.info("row-failed client bridge installed")

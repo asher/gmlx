@@ -54,6 +54,8 @@ import time
 import weakref
 from typing import cast
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _STEP_FLAG = "_kq_gguf_live_requests"
@@ -435,7 +437,7 @@ def install_live_requests() -> None:
     Idempotent."""
     from mlx_vlm.server import generation as gen_mod
 
-    if getattr(gen_mod.ResponseGenerator._step, _STEP_FLAG, False):
+    if wrapped_with(gen_mod.ResponseGenerator._step, _STEP_FLAG):
         return
     _orig_step = gen_mod.ResponseGenerator._step
 
@@ -446,6 +448,6 @@ def install_live_requests() -> None:
             publish(self, batch_gen, active, force=not active)
 
     setattr(_publishing_step, _STEP_FLAG, True)
-    gen_mod.ResponseGenerator._step = _publishing_step
+    gen_mod.ResponseGenerator._step = link(_publishing_step, _orig_step)
     _log.info("live request view installed")
 

@@ -12,6 +12,7 @@ import mlx.core as mx
 from gmlx.envflags import env_bool
 from gmlx.spec.engine import _debug_note
 from gmlx.spec.kv_quant import batch_liftable, lift_single_cache
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
@@ -248,7 +249,7 @@ def install_continuous_batch_admission() -> None:
         _orig_filter(self, keep)
         _release_if_finished(self)
 
-    SpecBatch.filter = _filter_with_release
+    SpecBatch.filter = link(_filter_with_release, _orig_filter)
 
     # 4. Process pending injections in next() before advancing the generator
     _orig_next = SpecBatch.next
@@ -422,7 +423,7 @@ def install_continuous_batch_admission() -> None:
         _release_if_finished(self)
         return responses
 
-    SpecBatch.next = _next_with_injection
+    SpecBatch.next = link(_next_with_injection, _orig_next)
     setattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, True)
     _debug_note(
         "[mtp] continuous batch: admission gate removed, mid-flight injection enabled"

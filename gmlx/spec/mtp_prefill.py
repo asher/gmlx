@@ -43,6 +43,7 @@ from gmlx.spec.engine import (
     _resolve_l1,
     _trim_prompt_columns,
 )
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
@@ -804,9 +805,9 @@ def install_full_prompt_mtp_prefill() -> None:
 
         return result
 
-    PromptProcessingBatch.__init__ = _mtp_init
-    PromptProcessingBatch.prompt_step = _mtp_prompt_step
-    PromptProcessingBatch.generate = _mtp_generate
+    PromptProcessingBatch.__init__ = link(_mtp_init, _orig_init)
+    PromptProcessingBatch.prompt_step = link(_mtp_prompt_step, _orig_prompt_step)
+    PromptProcessingBatch.generate = link(_mtp_generate, _orig_generate)
     setattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
     if _SPEC_APC_DISABLED:
         apc_status = "off"

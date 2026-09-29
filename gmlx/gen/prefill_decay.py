@@ -70,6 +70,7 @@ from typing import Callable, NamedTuple, Optional
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.upstream.patching import link
 
 _WS_CAP_BYTES: float | None = None
 _FLAG = "_gmlx_prefill_decay"
@@ -689,6 +690,6 @@ def install_prefill_decay() -> bool:
         finally:
             self.prefill_step_size = base
 
-    PromptProcessingBatch.prompt_step = _decay_prompt_step
+    PromptProcessingBatch.prompt_step = link(_decay_prompt_step, orig_step)
     setattr(PromptProcessingBatch, _FLAG, True)
     return True

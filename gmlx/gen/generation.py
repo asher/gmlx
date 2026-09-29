@@ -16,6 +16,7 @@ import time
 import mlx.core as mx
 
 import gmlx.stream.expert_streaming as expert_streaming
+from gmlx.upstream.patching import link, wrapped_with
 
 
 # Tokens per target prefill forward on the speculative path only. mlx-vlm forces
@@ -268,7 +269,7 @@ def harden_mtp_rollback(obj) -> None:
     from the survivors, so its positional zip with gdn_states holds.
     Idempotent."""
     fn = getattr(obj, "rollback_speculative_cache", None)
-    if fn is None or getattr(fn, "_gmlx_kvarn_guard", False):
+    if fn is None or wrapped_with(fn, "_gmlx_kvarn_guard"):
         return
 
     def _guarded(caches, gdn_states, accepted, block_size):
@@ -311,7 +312,7 @@ def harden_mtp_rollback(obj) -> None:
         return fn(rest, gdn_states, accepted, block_size)
 
     _guarded._gmlx_kvarn_guard = True
-    obj.rollback_speculative_cache = _guarded
+    obj.rollback_speculative_cache = link(_guarded, fn)
 
 
 def generate(

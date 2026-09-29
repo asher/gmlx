@@ -31,6 +31,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_mem_preflight"
@@ -440,7 +442,7 @@ def install_memory_preflight() -> None:
     Idempotent."""
     from mlx_vlm.server.generation import ResponseGenerator
 
-    if getattr(ResponseGenerator.generate, _INSTALLED_FLAG, False):
+    if wrapped_with(ResponseGenerator.generate, _INSTALLED_FLAG):
         return
 
     _orig_generate = ResponseGenerator.generate
@@ -460,6 +462,6 @@ def install_memory_preflight() -> None:
 
     _generate.__dict__[_INSTALLED_FLAG] = True
     _validate.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator.generate = _generate
-    ResponseGenerator.validate_context_budget = _validate
+    ResponseGenerator.generate = link(_generate, _orig_generate)
+    ResponseGenerator.validate_context_budget = link(_validate, _orig_validate)
     _log.info("memory preflight installed")

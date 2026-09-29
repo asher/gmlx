@@ -36,6 +36,7 @@ import os
 import time
 
 from gmlx.serve.batch_rows import batch_rows
+from gmlx.upstream.patching import link, wrapped_with
 
 from .media_salt import salt_at
 
@@ -203,7 +204,7 @@ def install_fresh_admission_gate() -> None:
     """
     from mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return
     if _wait_ms() <= 0:
         return
@@ -235,5 +236,5 @@ def install_fresh_admission_gate() -> None:
             self._unprocessed_sequences = leftover + tail + arrivals
 
     setattr(_gated_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _gated_next
+    _ar.BatchGenerator._next = link(_gated_next, _orig_next)
     _log.info("freshness admission gate installed")

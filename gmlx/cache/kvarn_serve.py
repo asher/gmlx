@@ -47,6 +47,8 @@ import logging
 import os
 from contextlib import contextmanager
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger("gmlx.cache.kvarn_serve")
 
 _MAKE_CACHE_FLAG = "_gmlx_kvarn_make_cache"
@@ -269,7 +271,7 @@ def install_kvarn_serve() -> None:
 
 
 def _install_make_cache(_ar, _gen):
-    if getattr(_ar._make_cache, _MAKE_CACHE_FLAG, False):
+    if wrapped_with(_ar._make_cache, _MAKE_CACHE_FLAG):
         return
     _orig = _ar._make_cache
 
@@ -319,13 +321,13 @@ def _install_make_cache(_ar, _gen):
         return caches
 
     _kvarn_make_cache.__dict__[_MAKE_CACHE_FLAG] = True
-    _ar._make_cache = _kvarn_make_cache
+    _ar._make_cache = link(_kvarn_make_cache, _orig)
     _gen._make_cache = _kvarn_make_cache
 
 
 def _install_ppb_fastpath(_ar):
     ppb = _ar.PromptProcessingBatch
-    if getattr(ppb.__init__, _PPB_FLAG, False):
+    if wrapped_with(ppb.__init__, _PPB_FLAG):
         return
     _orig_init = ppb.__init__
 
@@ -349,11 +351,11 @@ def _install_ppb_fastpath(_ar):
         )
 
     _kvarn_ppb_init.__dict__[_PPB_FLAG] = True
-    ppb.__init__ = _kvarn_ppb_init
+    ppb.__init__ = link(_kvarn_ppb_init, _orig_init)
 
 
 def _install_apc_gate(_ar):
-    if getattr(_ar.BatchGenerator.__init__, _APC_GATE_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator.__init__, _APC_GATE_FLAG):
         return
     _orig_init = _ar.BatchGenerator.__init__
 
@@ -397,4 +399,4 @@ def _install_apc_gate(_ar):
         return _orig_init(self, model, *args, **kwargs)
 
     _gated_init.__dict__[_APC_GATE_FLAG] = True
-    _ar.BatchGenerator.__init__ = _gated_init
+    _ar.BatchGenerator.__init__ = link(_gated_init, _orig_init)

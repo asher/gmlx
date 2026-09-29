@@ -43,6 +43,8 @@ from __future__ import annotations
 import importlib
 from collections.abc import Callable, Iterable, Sequence
 
+from gmlx.upstream.patching import wrapped_with
+
 _FLAG = "_kq_media_token_ids"
 _CAUSAL_FLAG = "_kq_causal_serve_media"
 _WHOLE_BLOCK_TYPES = ("gemma4_text", "gemma4_unified_text")
@@ -160,7 +162,7 @@ def install_causal_serve_media() -> bool:
     the config directly and keep the stock floor. Idempotent."""
     ar = importlib.import_module("mlx_vlm.generate.ar")
     stock = ar.BatchGenerator._apc_media_token_ids
-    if getattr(stock, _CAUSAL_FLAG, False):
+    if wrapped_with(stock, _CAUSAL_FLAG):
         return True
 
     def _apc_media_token_ids(self):

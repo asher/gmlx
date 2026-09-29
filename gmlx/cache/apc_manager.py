@@ -36,6 +36,7 @@ from pathlib import Path
 from mlx_vlm import apc as _apc
 
 from gmlx.envflags import env_int
+from gmlx.upstream.patching import wrapped_with
 
 from .media_salt import MediaSalt, salt_at, salt_windows
 
@@ -900,7 +901,7 @@ def _install_fork_free_free_ram() -> None:
 
     stock = getattr(_apc, "_free_ram_bytes", None)
     if (stock is None or stock is kernel_vm.available_bytes
-            or getattr(stock, "_gmlx_cached", False)):
+            or wrapped_with(stock, "_gmlx_cached")):
         return
     if kernel_vm.snapshot() is not None:
         _apc._free_ram_bytes = kernel_vm.available_bytes

@@ -9,7 +9,9 @@ reinstall finds its own layer under another installer's wrap.
   twice; use ``patching.wrapped_with``.
 - link: a wrapper that carries a flag, or that goes on a name more than one
   installer wraps, without a link to what it wraps. The walk stops there;
-  use ``patching.link``.
+  use ``patching.link``. A replacement that calls nothing under it is not
+  a wrapper, and a link would claim a chain that is gone; those are listed
+  in ``_REPLACEMENTS``.
 """
 
 from __future__ import annotations
@@ -28,31 +30,22 @@ _ROOT = pathlib.Path(gmlx.__file__).parent
 _LINKS = {"_gmlx_orig", "__wrapped__"}
 _SKIP = {"upstream/patching.py"}
 
+# Whole-body replacements on a name another installer also wraps, as
+# "path::installer::def". Neither calls what it replaces.
+_REPLACEMENTS = {
+    # Installs before the cascade stamp wraps it (serve patches order).
+    "cache/apc_pooling.py::install_batched_cachelist_admission::_extend_cache",
+    # SpeculativeGenerationBatch.extend raises in stock. The cascade wraps
+    # the extend of a cache, which is another name.
+    "spec/admission.py::install_continuous_batch_admission::_buffered_extend",
+}
+
 # Offenders not yet moved to the chain helpers, as "path::function".
 _KNOWN = {
     "guard": {
-        "cache/apc_manager.py::_install_fork_free_free_ram",
-        "cache/apc_media.py::install_causal_serve_media",
-        "cache/apc_pooling.py::install_batched_cachelist_admission",
-        "cache/apc_pooling.py::install_pooled_prefill_batch_gate",
-        "cache/compat.py::ensure_runtime_origin_make_cache",
-        "cache/fresh_gate.py::install_fresh_admission_gate",
-        "cache/kvarn_serve.py::_install_apc_gate",
-        "cache/kvarn_serve.py::_install_make_cache",
-        "cache/kvarn_serve.py::_install_ppb_fastpath",
         "eval_guard.py::install_stream_registry",
-        "gen/generation.py::harden_mtp_rollback",
-        "gen/media_spans.py::install_block_aware_generate_step",
         "models/deepseek_v4/chat.py::install_string_content",
         "models/deepseek_v41/tools.py::install_message_normalizer",
-        "serve/admit_gate.py::install_admit_headroom_gate",
-        "serve/batch_sched.py::install_decode_priority_sched",
-        "serve/engine_jobs.py::_install_diffusion_jobs",
-        "serve/engine_jobs.py::_install_step_jobs",
-        "serve/governor.py::install_governor",
-        "serve/live_requests.py::install_live_requests",
-        "serve/mem_preflight.py::install_memory_preflight",
-        "serve/memtrace.py::install_serve_memtrace",
         "serve/patches/_common.py::_install_gen_args_transform",
         "serve/patches/apc.py::install_retire_render_capture",
         "serve/patches/chat_behavior.py::install_chat_template_kwargs",
@@ -71,48 +64,15 @@ _KNOWN = {
         "serve/patches/render.py::install_faithful_history",
         "serve/patches/routes.py::install_hf_download_gate",
         "serve/patches/routes.py::install_runtime_snapshot_enrichment",
-        "serve/patches/row_failed.py::install_row_failed_bridge",
         "serve/patches/sampling.py::install_fast_sampler",
         "serve/patches/sampling.py::install_until_eos_default",
-        "serve/queue_cap.py::_install_census",
-        "serve/seed_rows.py::install_per_request_seed",
-        "serve/step_timing.py::install_step_timing",
-        "serve/tick_guard.py::install_tick_guard",
-        "spec/ckpt.py::_install_ckpt_checkpoint_store",
-        "spec/ckpt.py::_install_exact_anchor_pick",
-        "spec/ckpt.py::_install_plain_ckpt_decode",
-        "spec/ckpt.py::_install_restored_prompt_progress",
-        "spec/engine.py::_install_apc_manager_stash",
-        "spec/engine.py::install_owned_spec_engine",
         "stream/wired_limit.py::_install_wired_limit_warn_once",
         "stream/wired_limit.py::_neutralize_wired_limit_sweep",
     },
     "link": {
-        "cache/apc_pooling.py::install_batched_cachelist_admission",
-        "cache/apc_pooling.py::install_pooled_prefill_batch_gate",
-        "cache/apc_pooling.py::install_pooled_prompt_kv_quant",
-        "cache/apc_pooling.py::install_pooling_apc_support",
-        "cache/apc_qsa.py::install_qsa_apc_support",
-        "cache/compat.py::ensure_runtime_origin_make_cache",
-        "cache/fresh_gate.py::install_fresh_admission_gate",
-        "cache/kvarn_apc.py::install_kvarn_apc",
-        "cache/kvarn_serve.py::_install_apc_gate",
-        "cache/kvarn_serve.py::_install_make_cache",
-        "cache/kvarn_serve.py::_install_ppb_fastpath",
         "eval_guard.py::install_stream_registry",
-        "gen/generation.py::harden_mtp_rollback",
-        "gen/media_spans.py::install_span_aware_prompt_step",
-        "gen/prefill_decay.py::install_prefill_decay",
-        "gen/prefill_tail.py::install_prefill_tail",
-        "lora_rows.py::install_row_channel",
         "models/deepseek_v4/chat.py::install_string_content",
         "models/deepseek_v41/tools.py::install_message_normalizer",
-        "serve/admit_gate.py::install_admit_headroom_gate",
-        "serve/batch_sched.py::install_decode_priority_sched",
-        "serve/governor.py::install_governor",
-        "serve/live_requests.py::install_live_requests",
-        "serve/mem_preflight.py::install_memory_preflight",
-        "serve/memtrace.py::install_serve_memtrace",
         "serve/patches/_common.py::_install_gen_args_transform",
         "serve/patches/apc.py::install_retire_render_capture",
         "serve/patches/chat_behavior.py::install_chat_template_kwargs",
@@ -125,21 +85,8 @@ _KNOWN = {
         "serve/patches/observability.py::install_request_timing_log",
         "serve/patches/routes.py::install_hf_download_gate",
         "serve/patches/routes.py::install_runtime_snapshot_enrichment",
-        "serve/patches/row_failed.py::install_row_failed_bridge",
         "serve/patches/sampling.py::install_fast_sampler",
         "serve/patches/sampling.py::install_until_eos_default",
-        "serve/queue_cap.py::_install_census",
-        "serve/seed_rows.py::install_per_request_seed",
-        "serve/step_timing.py::install_step_timing",
-        "serve/tick_guard.py::install_tick_guard",
-        "spec/admission.py::install_continuous_batch_admission",
-        "spec/ckpt.py::_install_ckpt_checkpoint_store",
-        "spec/ckpt.py::_install_exact_anchor_pick",
-        "spec/ckpt.py::_install_plain_ckpt_decode",
-        "spec/ckpt.py::_install_restored_prompt_progress",
-        "spec/engine.py::_install_apc_manager_stash",
-        "spec/engine.py::install_owned_spec_engine",
-        "spec/mtp_prefill.py::install_full_prompt_mtp_prefill",
         "stream/wired_limit.py::_install_wired_limit_warn_once",
         "stream/wired_limit.py::_neutralize_wired_limit_sweep",
         "stream/wired_limit.py::configure_cpu_device",
@@ -287,7 +234,8 @@ def _scan():
     for key, slot, d, (flagged, linked) in wrappers:
         wrapped = any("wraps" in ast.unparse(x) for x in d.decorator_list)
         shared = len(installers[slot.rsplit(".", 1)[-1]]) > 1
-        if (flagged or shared) and not (linked or wrapped):
+        if (flagged or shared) and not (linked or wrapped) \
+                and f"{key}::{d.name}" not in _REPLACEMENTS:
             found["link"].add(key)
     return found
 
@@ -357,3 +305,35 @@ def test_route_reinstall_under_another_wrap_adds_no_layer(monkeypatch, route):
     monkeypatch.setattr(mod, installed, False)
     assert getattr(mod, install)()
     assert layers() == before
+
+
+_TICK = (
+    ("gmlx.serve.batch_sched", "install_decode_priority_sched",
+     "_kq_gguf_decode_priority_sched"),
+    ("gmlx.serve.admit_gate", "install_admit_headroom_gate",
+     "_kq_gguf_admit_headroom"),
+    ("gmlx.cache.fresh_gate", "install_fresh_admission_gate",
+     "_kq_gguf_fresh_gate"),
+    ("gmlx.serve.queue_cap", "_install_census", "_kq_gguf_queue_census"),
+    ("gmlx.serve.tick_guard", "install_tick_guard", "_kq_gguf_tick_guard"),
+)
+
+
+def test_tick_installers_rerun_in_another_order_add_no_layer(monkeypatch):
+    """The installers on BatchGenerator._next read their flag on the
+    outermost function, so running them again in another order put a
+    second layer of each on top of the others."""
+    ar = pytest.importorskip("mlx_vlm.generate.ar")
+    for name in ("GMLX_ADMIT_HEADROOM", "GMLX_APC_FRESH_WAIT_MS",
+                 "GMLX_TICK_GUARD"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ar.BatchGenerator, "_next", ar.BatchGenerator._next)
+    installs = [getattr(importlib.import_module(m), fn) for m, fn, _ in _TICK]
+    for install in installs:
+        install()
+    top = ar.BatchGenerator._next
+    for install in installs[::-1] + installs[1::2] + installs[::2]:
+        install()
+        assert ar.BatchGenerator._next is top, install.__name__
+    for *_, flag in _TICK:
+        assert sum(bool(f.__dict__.get(flag)) for f in _walk(top)) == 1, flag

@@ -44,6 +44,8 @@ from typing import Any
 
 import numpy as np
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _FLAG = "_gmlx_span_aware_prompt_step"
@@ -251,7 +253,7 @@ def install_span_aware_prompt_step(cls=None) -> bool:
             self.prefill_step_size = base
             setattr(self, PINNED_STEP, None)
 
-    cls.prompt_step = _span_prompt_step
+    cls.prompt_step = link(_span_prompt_step, orig)
     setattr(cls, _FLAG, True)
     return True
 
@@ -493,7 +495,7 @@ def install_block_aware_generate_step() -> bool:
     except ImportError:
         return False
     orig = dispatch.generate_step
-    if getattr(orig, _GEN_FLAG, False):
+    if wrapped_with(orig, _GEN_FLAG):
         return True
 
     def generate_step(input_ids, model, pixel_values, mask, **kwargs):

@@ -19,6 +19,8 @@ from __future__ import annotations
 import importlib
 import sys
 
+from gmlx.upstream.patching import link, wrapped_with
+
 
 def _origin_modules():
     lm = importlib.import_module("mlx_lm.models.cache")
@@ -86,14 +88,14 @@ def ensure_runtime_origin_make_cache(model):
     Idempotent; no-op for models without ``make_cache``.
     """
     make = getattr(model, "make_cache", None)
-    if not callable(make) or getattr(make, "_kq_runtime_origin", False):
+    if not callable(make) or wrapped_with(make, "_kq_runtime_origin"):
         return model
 
     def make_cache_runtime_origin():
         return rebind_to_runtime_origin(make())
 
     make_cache_runtime_origin._kq_runtime_origin = True
-    model.make_cache = make_cache_runtime_origin
+    model.make_cache = link(make_cache_runtime_origin, make)
     return model
 
 

@@ -37,6 +37,7 @@ from typing import Any
 import mlx.core as mx
 
 from gmlx.cache.media_salt import as_salt
+from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
 
@@ -410,11 +411,12 @@ def install_row_channel() -> None:
     for fn in (_procs_with_lora, _insert_with_lora, _step_with_rows,
                _generate_with_rows, _prompt_step_with_rows):
         fn.__dict__[_INSTALLED_FLAG] = True
-    ResponseGenerator._make_logits_processors = _procs_with_lora
-    _ar.BatchGenerator.insert = _insert_with_lora
-    _ar.GenerationBatch._step = _step_with_rows
-    _ar.PromptProcessingBatch.generate = _generate_with_rows
-    _ar.PromptProcessingBatch.prompt_step = _prompt_step_with_rows
+    ResponseGenerator._make_logits_processors = link(_procs_with_lora, _orig_procs)
+    _ar.BatchGenerator.insert = link(_insert_with_lora, _orig_insert)
+    _ar.GenerationBatch._step = link(_step_with_rows, _orig_step)
+    _ar.PromptProcessingBatch.generate = link(_generate_with_rows, _orig_generate)
+    _ar.PromptProcessingBatch.prompt_step = link(_prompt_step_with_rows,
+                                                 _orig_prompt_step)
     _log.info("lora row channel installed (mode=%s, slots=%d)", _mode, _n_slots)
 
 

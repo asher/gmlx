@@ -38,6 +38,8 @@ import os
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_tick_guard"
@@ -282,7 +284,7 @@ def install_tick_guard() -> bool:
         return False
     from mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return True
     _orig = _ar.BatchGenerator._next
 
@@ -308,6 +310,6 @@ def install_tick_guard() -> bool:
         return out
 
     setattr(_guarded_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _guarded_next
+    _ar.BatchGenerator._next = link(_guarded_next, _orig)
     _log.info("engine tick guard installed")
     return True

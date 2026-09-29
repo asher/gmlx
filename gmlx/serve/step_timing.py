@@ -25,6 +25,8 @@ import os
 import sys
 import time
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _PATH = None
 _ROWS = []
 _LAST_STEP_EXIT = [0.0]
@@ -66,7 +68,7 @@ def install_step_timing() -> None:
         return
     from mlx_vlm.generate import ar
 
-    if getattr(ar.GenerationBatch._step, "_kq_step_timing", False):
+    if wrapped_with(ar.GenerationBatch._step, "_kq_step_timing"):
         return
 
     orig_step = ar.GenerationBatch._step
@@ -95,7 +97,7 @@ def install_step_timing() -> None:
         return out
 
     _step._kq_step_timing = True
-    ar.GenerationBatch._step = _step
-    ar.GenerationBatch.next = _gnext
-    ar.BatchGenerator._next = _bnext
+    ar.GenerationBatch._step = link(_step, orig_step)
+    ar.GenerationBatch.next = link(_gnext, orig_gnext)
+    ar.BatchGenerator._next = link(_bnext, orig_bnext)
     atexit.register(_flush)

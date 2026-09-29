@@ -38,6 +38,8 @@ import logging
 import secrets
 from dataclasses import replace
 
+from gmlx.upstream.patching import link
+
 _log = logging.getLogger(__name__)
 
 _FLAG = "_gmlx_kvarn_apc"
@@ -316,11 +318,11 @@ def install_kvarn_apc() -> None:
     # coordinator module holds its own binding, rebound beside it. The
     # mode wrap covers the no-make_cache answer the plan never sees. The
     # shard reader decodes the uint32 kvarn codes natively.
-    adapters.clone_cache_entry = clone_entry
-    adapters.merge_cache_entries = merge_exact_entries
-    adapters.build_prefix_cache_plan = plan_wrap
+    adapters.clone_cache_entry = link(clone_entry, stock_clone)
+    adapters.merge_cache_entries = link(merge_exact_entries, stock_merge)
+    adapters.build_prefix_cache_plan = link(plan_wrap, stock_plan)
     coordinator.build_prefix_cache_plan = plan_wrap
-    apc.model_apc_mode = mode_wrap
-    disk_cls._snapshot_exact_cache_entry = snap_entry
-    disk_cls._load_exact_cache_entry = load_entry
+    apc.model_apc_mode = link(mode_wrap, stock_mode)
+    disk_cls._snapshot_exact_cache_entry = link(snap_entry, stock_snap)
+    disk_cls._load_exact_cache_entry = link(load_entry, stock_load)
     apc._gmlx_kvarn_apc = True

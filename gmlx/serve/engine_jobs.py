@@ -38,6 +38,7 @@ import mlx.core as mx
 from mlx_vlm.server import generation as _generation
 
 from gmlx.systemone.reads import Cancelled
+from gmlx.upstream.patching import wrapped_with
 
 _JOB_KEY = "_kq_engine_job"
 _STEP_JOB_KEY = "_kq_engine_step_job"
@@ -120,7 +121,7 @@ def install_engine_jobs() -> None:
 def _install_diffusion_jobs() -> None:
     cls = _generation.ResponseGenerator
     original = cls._generate_diffusion
-    if getattr(original, _INSTALLED_FLAG, False):
+    if wrapped_with(original, _INSTALLED_FLAG):
         return
 
     def _generate_diffusion(self, uid, rqueue, raw_inputs, args, cancelled,
@@ -248,7 +249,7 @@ def _advance(rg, run: _StepJob) -> bool:
 def _install_step_jobs() -> None:
     cls = _generation.ResponseGenerator
     original = cls._collect_pending_requests
-    if getattr(original, _INSTALLED_FLAG, False):
+    if wrapped_with(original, _INSTALLED_FLAG):
         return
     from gmlx.gen.diffusion import is_diffusion_model
 

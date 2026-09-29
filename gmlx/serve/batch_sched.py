@@ -48,6 +48,8 @@ import logging
 import os
 import time
 
+from gmlx.upstream.patching import link, wrapped_with
+
 from .batch_rows import batch_rows
 
 _log = logging.getLogger(__name__)
@@ -90,7 +92,7 @@ def install_decode_priority_sched() -> None:
 
     import gmlx.gen.prefill_decay as _pd
 
-    if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
+    if wrapped_with(_ar.BatchGenerator._next, _INSTALLED_FLAG):
         return
     _orig_next = _ar.BatchGenerator._next
 
@@ -181,7 +183,7 @@ def install_decode_priority_sched() -> None:
                 self._prompt_time_counter - before, rows)
 
     setattr(_paced_next, _INSTALLED_FLAG, True)
-    _ar.BatchGenerator._next = _paced_next
+    _ar.BatchGenerator._next = link(_paced_next, _orig_next)
     mode, value = _ratio()
     _log.info(
         "decode-priority prefill pacing installed (%s)",

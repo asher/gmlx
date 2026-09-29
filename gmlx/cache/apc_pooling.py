@@ -25,6 +25,8 @@ import importlib
 import json
 import logging
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 
 
@@ -271,11 +273,11 @@ def install_pooling_apc_support() -> None:
     # and both recurse through the module globals, so rebinding the adapter
     # module covers top-level entries and CacheList members alike. The
     # shard reader decodes the packed U32/U8 planes natively.
-    setattr(adapters, "clone_cache_entry", clone_entry)
-    setattr(adapters, "merge_cache_entries", merge_exact_entries)
-    setattr(apc, "_read_safetensors_tensor", read_tensor)
-    disk_cls._snapshot_exact_cache_entry = snap_entry
-    disk_cls._load_exact_cache_entry = load_entry
+    setattr(adapters, "clone_cache_entry", link(clone_entry, stock_clone))
+    setattr(adapters, "merge_cache_entries", link(merge_exact_entries, stock_merge))
+    setattr(apc, "_read_safetensors_tensor", link(read_tensor, _read))
+    disk_cls._snapshot_exact_cache_entry = link(snap_entry, stock_snap)
+    disk_cls._load_exact_cache_entry = link(load_entry, stock_load)
 
     setattr(apc, "_kq_pooling_apc", True)
 
@@ -420,7 +422,7 @@ def install_pooled_prefill_batch_gate() -> None:
 
     from mlx_vlm.generate.ar import BatchGenerator
 
-    if getattr(BatchGenerator.__init__, "_kq_pooled_prefill_b1", False):
+    if wrapped_with(BatchGenerator.__init__, "_kq_pooled_prefill_b1"):
         return
     if os.environ.get("GMLX_POOLED_PREFILL_B1", "1") == "0":
         return
@@ -437,7 +439,7 @@ def install_pooled_prefill_batch_gate() -> None:
                          exc_info=True)
 
     _gated_init.__dict__["_kq_pooled_prefill_b1"] = True
-    BatchGenerator.__init__ = _gated_init
+    BatchGenerator.__init__ = link(_gated_init, _orig_init)
 
 
 def _is_batched_cache(c) -> bool:
@@ -490,7 +492,7 @@ def install_batched_cachelist_admission() -> None:
 
     from mlx_vlm.generate import ar as _ar
 
-    if getattr(_ar._extend_cache, "_kq_batched_cachelist", False):
+    if wrapped_with(_ar._extend_cache, "_kq_batched_cachelist"):
         return
     if os.environ.get("GMLX_BATCHED_CACHELIST_ADMISSION", "1") == "0":
         return
@@ -598,5 +600,5 @@ def install_pooled_prompt_kv_quant() -> None:
             _noted[0] = True
             print(kv_line(None, policy), flush=True)
 
-    ppb.__init__ = _pooled_init
+    ppb.__init__ = link(_pooled_init, _orig_init)
     setattr(ppb, "_kq_pooled_prompt_kv", True)

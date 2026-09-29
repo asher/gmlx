@@ -22,7 +22,7 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_int
-from gmlx.upstream.patching import wrapped_with
+from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def _install_apc_manager_stash() -> None:
     """
     from mlx_vlm.generate.ar import BatchGenerator
 
-    if getattr(BatchGenerator.__init__, _APC_STASH_FLAG, False):
+    if wrapped_with(BatchGenerator.__init__, _APC_STASH_FLAG):
         return
     _orig_init = BatchGenerator.__init__
 
@@ -199,7 +199,7 @@ def _install_apc_manager_stash() -> None:
                 )
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
-    BatchGenerator.__init__ = _init_with_stash
+    BatchGenerator.__init__ = link(_init_with_stash, _orig_init)
 
 
 def _resolve_l1(model):
@@ -417,7 +417,7 @@ def install_owned_spec_engine() -> None:
     from mlx_vlm.generate import ar as _ar
 
     _orig = _ar.run_speculative_server_rounds
-    if getattr(_orig, _OWNED_MTP_ROUND_FLAG, False):
+    if wrapped_with(_orig, _OWNED_MTP_ROUND_FLAG):
         return
 
     from gmlx.spec.speculative import (
@@ -529,7 +529,7 @@ def install_owned_spec_engine() -> None:
 
     _owned_server_rounds.__dict__[_OWNED_MTP_ROUND_FLAG] = True
     # generate.ar is the only caller; the server module no longer binds it.
-    _ar.run_speculative_server_rounds = _owned_server_rounds
+    _ar.run_speculative_server_rounds = link(_owned_server_rounds, _orig)
     _debug_note("[mtp] serve round: owned engine installed (B=1 + B>1)")
     install_owned_b1_spec_cache()
 
