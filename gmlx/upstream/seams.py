@@ -206,6 +206,12 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.extend",
          "rotating_trim_fix (aligns the buffers at _idx and keeps the "
          "columns past it, so trimmed columns ride along)"),
+    Seam("mlx_vlm.models.cache", "RotatingKVCache.update_and_fetch",
+         "rotating_trim_fix (a one-token update goes in place, a wider "
+         "one through the concat)"),
+    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.update_and_fetch",
+         "rotating_trim_fix (same, with the concat while prepare lengths "
+         "are set)"),
     Seam("mlx_lm.models.cache", "RotatingKVCache.trim",
          "rotating_trim_fix (mlx-lm origin)"),
     Seam("mlx_lm.models.cache", "BatchRotatingKVCache.trim",
@@ -218,6 +224,14 @@ SEAMS: tuple[Seam, ...] = (
          "rotating_trim_fix (mlx-lm origin)"),
     Seam("mlx_lm.models.cache", "BatchRotatingKVCache.extend",
          "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "RotatingKVCache._update_concat",
+         "rotating_trim_fix (puts the buffer in temporal order and trims it "
+         "to the window, which drops the columns a trim left past _idx)"),
+    Seam("mlx_lm.models.cache", "RotatingKVCache.update_and_fetch",
+         "rotating_trim_fix (mlx-lm origin)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.update_and_fetch",
+         "rotating_trim_fix (mlx-lm origin, where a one-token update always "
+         "goes in place)"),
     # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
     Seam("mlx_lm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
@@ -806,7 +820,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.diffusion_gemma.diffusion_gemma", "Model.__init__",
          "systemone.engine (owner of _softcap)"),
     Seam("mlx_vlm.models.cache", "RotatingKVCache._update_concat",
-         "systemone.engine.PromptCache.extend (multi-token append)"),
+         "systemone.engine.PromptCache.extend (multi-token append); "
+         "rotating_trim_fix (temporal order and window trim drop the "
+         "columns a trim left past _idx)"),
     Seam("mlx_vlm.models.cache", "RotatingKVCache._update_in_place",
          "systemone.engine.PromptCache.extend (one-token append)"),
     Seam("mlx_vlm.models.cache", "RotatingKVCache._temporal_order",
