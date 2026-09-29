@@ -176,6 +176,56 @@ def test_reshaped_tensors_are_refused(toy, tmp_path):
         _load(path)
 
 
+def _forbid_tensor_reads(monkeypatch):
+    """Fail any read of tensor bytes: the wire load and the identity reads.
+    The header scan maps the file and reads only the header."""
+    import os
+
+    import gmlx.load.wire as wire
+
+    def boom(*a, **k):
+        raise AssertionError("tensor bytes were read")
+
+    monkeypatch.setattr(wire, "load_gguf_wire_bytes", boom)
+    monkeypatch.setattr(os, "pread", boom)
+
+
+def _identity_family(monkeypatch) -> Family:
+    """The toy family with an identity tensor, so identify would read."""
+    fam = _family()
+    fam = Family(**{**fam.__dict__, "identity_tensors": ("proj.bias",)})
+    monkeypatch.setattr(registry, "families", lambda: (fam,))
+    return fam
+
+
+def test_a_truncated_file_is_refused_before_any_bytes_are_read(
+        tmp_path, monkeypatch):
+    import os
+
+    _identity_family(monkeypatch)
+    p = write_gguf(tmp_path / "toy.gguf", _tensors())
+    with open(p, "r+b") as f:
+        f.truncate(os.path.getsize(p) - 16)
+    _forbid_tensor_reads(monkeypatch)
+    with pytest.raises(fp.ImageModelError, match="truncated GGUF"):
+        _load(p)
+
+
+def test_the_codec_refusal_comes_before_any_bytes_are_read(
+        tmp_path, monkeypatch):
+    import gguf
+    from gmlx.load.preflight import UnsupportedCodecError
+
+    _identity_family(monkeypatch)
+    t = _tensors()
+    tsize = gguf.GGML_QUANT_SIZES[gguf.GGMLQuantizationType.TQ1_0][1]
+    t["extra.weight"] = (np.zeros((4, tsize), np.uint8), "TQ1_0")
+    p = write_gguf(tmp_path / "tq.gguf", t)
+    _forbid_tensor_reads(monkeypatch)
+    with pytest.raises(UnsupportedCodecError, match="TQ1_0x1"):
+        _load(p)
+
+
 def test_an_unsupported_codec_is_refused_by_name(toy, tmp_path):
     import gguf
     from gmlx.load.preflight import UnsupportedCodecError
