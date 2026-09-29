@@ -421,13 +421,16 @@ if mode == "gmlx-first":
                  "mlx_vlm.models.base", "mlx_lm.models.base",
                  "mlx_lm.generate", "mlx_vlm.turboquant"):
         importlib.import_module(name)
-elif mode == "vlm-first":
+elif mode in ("vlm-first", "vlm-model-first"):
     import mlx_vlm  # noqa: F401
-    import gmlx  # noqa: F401
-elif mode == "vlm-model-first":
-    import mlx_vlm  # noqa: F401
-    importlib.import_module("mlx_vlm.models.qwen4_exp.language")
-    importlib.import_module("mlx_vlm.models.hy_v4.cache")
+    if mode == "vlm-model-first":
+        importlib.import_module("mlx_vlm.models.qwen4_exp.language")
+        importlib.import_module("mlx_vlm.models.hy_v4.cache")
+    # A served host fills the APC type tables and the capability table
+    # with the stock classes.
+    adapters = importlib.import_module("mlx_vlm.apc_adapters")
+    adapters._apc_type_tables()
+    adapters.register_default_capabilities()
     import gmlx  # noqa: F401
 elif mode == "lm-first":
     importlib.import_module("mlx_lm.generate")
@@ -472,6 +475,20 @@ for mod_name, names in (("mlx_lm.generate", ("KVCache", "BatchKVCache")),
                                    for n in names)
 out = {"late": list(bind.late_modules), "unbound": unbound,
        "strays": strays, "rebased": rebased, "globals": globals_ok}
+adapters = sys.modules.get("mlx_vlm.apc_adapters")
+if adapters is not None:
+    def names(classes):
+        return sorted(f"{c.__module__}.{c.__name__}" for c in classes)
+
+    exact, block = adapters._apc_type_tables()
+    out["apc"] = {
+        "exact": names(exact), "block": names(block),
+        "eligible": adapters.apc_block_eligible(owned.KVCache()),
+        "capability": adapters.resolve_capability(owned.KVCache()).name,
+        "stock_keys": names(k for k in adapters._CAPABILITY
+                            if isinstance(k, type)
+                            and k.__module__.startswith(("mlx_vlm.models.cache",
+                                                         "mlx_lm.models.cache")))}
 if early is not None:
     fresh = sys.modules["mlx_vlm.models.cache"].KVCache()
     out["early"] = [type(early).__module__, type(fresh).__module__]
@@ -507,6 +524,16 @@ def test_vlm_first_takes_the_late_path_and_rebases_subclasses(mode):
         want |= {"mlx_vlm.models.qwen4_exp.language.QSAKVCache",
                  "mlx_vlm.models.hy_v4.cache.HyV4KVCache"}
     assert set(out["rebased"]) == want and all(out["rebased"].values())
+    # The type tables filled before gmlx refill with the owned classes.
+    kv = "gmlx.cache.kv_cache."
+    assert out["apc"]["exact"] == sorted(kv + n for n in (
+        "KVCache", "BatchKVCache", "BatchRotatingKVCache",
+        "BatchQuantizedKVCache", "RotatingKVCache", "ChunkedKVCache",
+        "ArraysCache"))
+    assert out["apc"]["block"] == [kv + "KVCache"]
+    assert out["apc"]["eligible"] is True
+    assert out["apc"]["capability"] == "PAGEABLE"
+    assert out["apc"]["stock_keys"] == []
 
 
 def test_mlx_lm_first_takes_the_late_path():
