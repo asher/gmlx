@@ -4,7 +4,8 @@ gmlx/image/fingerprint.py refuses other diffusion model layouts by name
 using the model detection keys of convert.py at commit
 6ea2651e7df66d7585f6ffee804b20e92fb38b8a (the keys_detect lists of the
 FLUX, SD3, AuraFlow, HiDream, Cosmos, HunyuanVideo, Wan, LTX-Video, SDXL
-and SD1 templates). No other code is used.
+and SD1 templates, without the keys their keys_banned lists name). No
+other code is used.
 
 ComfyUI-GGUF is distributed under the Apache License 2.0:
 

@@ -137,15 +137,13 @@ def strip_prefix(view: HeaderView, prefixes: Iterable[str]) -> HeaderView:
 
 # Other diffusion layouts, refused by name. The detection keys follow
 # ComfyUI-GGUF's convert.py (Apache-2.0, see licenses/ComfyUI-GGUF-LICENSE).
-# A row names a model when every key of one of its key sets is present.
+# A row names a model when every key of one of its key sets is present. The
+# keys convert.py bans are left out: they mark diffusers layouts that other
+# models share, such as a diffusers FLUX file with the SD3 key.
 _OTHER_FAMILIES: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = (
     ("FLUX", (("double_blocks.0.img_attn.proj.weight",),)),
-    ("Stable Diffusion 3", (
-        ("transformer_blocks.0.attn.add_q_proj.weight",),
-        ("joint_blocks.0.x_block.attn.qkv.weight",))),
-    ("AuraFlow", (
-        ("double_layers.3.modX.1.weight",),
-        ("joint_transformer_blocks.3.ff_context.out_projection.weight",))),
+    ("Stable Diffusion 3", (("joint_blocks.0.x_block.attn.qkv.weight",),)),
+    ("AuraFlow", (("double_layers.3.modX.1.weight",),)),
     ("HiDream", ((
         "caption_projection.0.linear.weight",
         "double_stream_blocks.0.block.ff_i.shared_experts.w3.weight"),)),
@@ -288,8 +286,9 @@ def identify(view: HeaderView, *, family: str | None = None,
             f"not a {_families(family)[0].title} file. {describe_unknown(v)}")
     other = other_family(v)
     if other:
+        a = "an" if other[0] in "AEIO" or other.startswith("LTX") else "a"
         raise ImageModelError(
-            f"this is a {other} GGUF, which gmlx image does not support")
+            f"this is {a} {other} GGUF, which gmlx image does not support")
     raise ImageModelError(describe_unknown(v))
 
 

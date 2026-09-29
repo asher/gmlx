@@ -174,6 +174,40 @@ def test_other_diffusion_families_are_refused_by_name():
     assert "a Wan GGUF" in _refused(wan)
 
 
+# The keys ComfyUI-GGUF's convert.py bans, which mark diffusers layouts.
+_BANNED = ("transformer_blocks.0.attn.norm_added_k.weight",
+           "transformer_blocks.0.attn.add_q_proj.weight",
+           "joint_transformer_blocks.3.ff_context.out_projection.weight")
+
+
+def test_no_other_family_row_uses_a_banned_key():
+    keys = {k for _, sets in fp._OTHER_FAMILIES for ks in sets for k in ks}
+    assert not keys & set(_BANNED)
+
+
+def test_a_diffusers_flux_file_is_not_named_sd3():
+    b0 = "transformer_blocks.0.attn."
+    view = fp.HeaderView(kv={}, tensors={
+        "x_embedder.weight": fp.Tensor((64, 3072), "BF16"),
+        "context_embedder.weight": fp.Tensor((4096, 3072), "Q4_K"),
+        b0 + "add_q_proj.weight": fp.Tensor((3072, 3072), "Q4_K"),
+        b0 + "norm_added_k.weight": fp.Tensor((128,), "F32"),
+        "single_transformer_blocks.0.attn.to_q.weight":
+            fp.Tensor((3072, 3072), "Q4_K")})
+    msg = _refused(view)
+    assert "Stable Diffusion 3" not in msg
+    assert msg.startswith("unrecognized image GGUF: arch=none, 5 tensors")
+
+
+def test_the_reference_sd3_and_auraflow_layouts_keep_their_names():
+    sd3 = fp.HeaderView(kv={}, tensors={
+        "joint_blocks.0.x_block.attn.qkv.weight": fp.Tensor((8, 24), "F32")})
+    assert "a Stable Diffusion 3 GGUF" in _refused(sd3)
+    aura = fp.HeaderView(kv={}, tensors={
+        "double_layers.3.modX.1.weight": fp.Tensor((8, 8), "F32")})
+    assert "this is an AuraFlow GGUF" in _refused(aura)
+
+
 def test_an_unknown_file_is_described():
     tensors = {f"blocks.{i}.attn.qkv.weight": fp.Tensor((5120, 15360), "Q4_K")
                for i in range(3)}
