@@ -16,6 +16,11 @@ CPU-only; exercises both class origins the way the engines drive them.
 from __future__ import annotations
 
 import mlx.core as mx
+# Both origins load before the parameters are built: cache_types lists the
+# mlx-vlm classes only once mlx_vlm.models.cache is imported, and nothing
+# else imports it when this file is collected alone.
+import mlx_lm.models.cache  # noqa: F401
+import mlx_vlm.models.cache  # noqa: F401
 import pytest
 
 from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
