@@ -281,7 +281,6 @@ backlog = [
     "gmlx/upstream/dsv32_patches.py",
     "gmlx/upstream/occupancy_fuse.py",
     "gmlx/upstream/qkv_fuse.py",
-    "gmlx/upstream/rotating_cache_fix.py",
     "gmlx/upstream/softcap_f32.py",
     "scripts/check-coverage.py",
     "scripts/kld_harness.py",

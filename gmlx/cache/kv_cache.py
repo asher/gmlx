@@ -13,6 +13,7 @@ the standard library and, to record decode mask starts, its sibling
 gmlx change carries a comment where it sits.
 """
 
+import os
 from dataclasses import dataclass, replace
 from math import ceil
 from typing import Any, List, Optional, Tuple
@@ -664,6 +665,29 @@ class KVCache(_BaseCache):
         return self.keys.nbytes + self.values.nbytes
 
 
+def _sliding_notrim() -> bool:
+    """GMLX_SLIDING_NOTRIM=1: RotatingKVCache keeps every key through a
+    chunked prefill and trims to its window at the first decode step.
+
+    The window trim does not change what a query attends to, but it hands
+    SDPA a shorter key tensor than an unchunked prefill does, and the fused
+    kernel tiles the two lengths differently, so near-tie tokens can flip
+    between the two runs. In this mode each chunk sees a prefix of the key
+    tensor the unchunked run sees. The cost is prefill memory linear in the
+    prompt on each sliding layer, so the window trim is the default.
+    """
+    return os.environ.get("GMLX_SLIDING_NOTRIM", "0") == "1"
+
+
+def _ordered_size(cache) -> int:
+    """The key width ``_temporal_order`` gives before an update."""
+    if cache.keys is None:
+        return 0
+    if cache._idx == cache.keys.shape[2] or cache._idx < cache.offset:
+        return cache.keys.shape[2]
+    return cache._idx
+
+
 class RotatingKVCache(_BaseCache):
     memory_profile = _windowed_memory_profile
     step = 256
@@ -718,6 +742,10 @@ class RotatingKVCache(_BaseCache):
             # The largest size is self.max_size + S - 1 to ensure
             # every token gets at least self.max_size context
             trim_size = self._idx - self.max_size + 1
+            # gmlx: the no-trim mode leaves the trim to the first decode
+            # step (see _sliding_notrim).
+            if _sliding_notrim():
+                trim_size = 0
             self.keys = self._trim(trim_size, self.keys, keys)
             self.values = self._trim(trim_size, self.values, values)
         self.offset += keys.shape[2]
@@ -827,6 +855,10 @@ class RotatingKVCache(_BaseCache):
         if N > 1:
             window_size = window_size or self.max_size
             offset = min(self.max_size - 1, self.offset)
+            # gmlx: in the no-trim mode the update keeps every key, so the
+            # mask spans the ordered buffer.
+            if _sliding_notrim():
+                offset = _ordered_size(self)
             if offset + N > window_size or return_array:
                 return create_causal_mask(N, offset, window_size=window_size)
             else:
