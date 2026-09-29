@@ -296,8 +296,11 @@ def wire_app():
             m.kwargs.clear()
             m.kwargs.update(kw)
     fastapi_app.middleware_stack = None
+    from gmlx.serve import media_sinks
+    from gmlx.serve.patches import routes as sp_routes
+    media_sinks.uninstall()
     for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG, sp_hardening._JSON_CT_FLAG,
-                 media_gate._FLAG):
+                 media_gate._FLAG, sp_routes._UNCONFIGURED_FLAG):
         if hasattr(fastapi_app.state, flag):
             delattr(fastapi_app.state, flag)
     if saved["pool"] is None:

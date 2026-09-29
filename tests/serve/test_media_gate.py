@@ -56,6 +56,9 @@ def _client(allow_urls=False):
                  "/v1/images/generations", "/v1/images/edits", "/v1/audio/speech"):
         app.add_api_route(path, route, methods=["POST"])
     mg.install_media_gate(allow_urls, app=app)
+    # Outside the gate, as in the server.
+    from gmlx.serve.patches.hardening import install_json_content_type_tolerance
+    install_json_content_type_tolerance(app=app)
     return TestClient(app), ran
 
 
@@ -146,6 +149,17 @@ def test_allowing_urls_never_allows_a_path(opened):
     client, ran = _client(allow_urls=True)
     body = _chat({"type": "image_url", "image_url": {"url": "/Users/me/a.png"}})
     assert client.post("/v1/chat/completions", json=body).status_code == 400
+    assert ran == [] and opened == []
+
+
+@pytest.mark.parametrize("url, scheme", [("ftp://host/a.png", "ftp"),
+                                         ("GOPHER://h/x", "gopher")])
+def test_another_scheme_is_named_in_the_refusal(opened, url, scheme):
+    client, ran = _client(allow_urls=True)
+    body = _chat({"type": "image_url", "image_url": {"url": url}})
+    r = client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 400
+    assert f"names a {scheme}:// URL" in r.json()["error"]["message"]
     assert ran == [] and opened == []
 
 
@@ -295,7 +309,9 @@ def test_a_form_body_reaches_only_the_upload_routes(opened, ctype, content):
     client, ran = _form_client()
     for path in ("/v1/images/generations", "/v1/chat/completions", "/v1/audio/speech"):
         r = client.post(path, content=content, headers={"content-type": ctype})
-        assert r.status_code == 400 and "JSON body" in r.json()["error"]["message"]
+        message = r.json()["error"]["message"]
+        assert r.status_code == 400 and ("JSON body" in message
+                                         or "not valid JSON" in message), message
     assert ran == [] and opened == []
 
 
@@ -444,8 +460,8 @@ def _bad_checksum_png():
     (_uri(b"%!PS-Adobe-3.0 EPSF-3.0\n", "eps"), {}),
     (_uri(PNG.getvalue()[:40]), {}),
     (_uri(_bad_checksum_png()), {}),
-    (PNG_URI, {"_EDIT_IMAGE_MAX_BYTES": 16}),
-    (_uri(_image_bytes("PNG", (8, 8))), {"_EDIT_IMAGE_MAX_PIXELS": 63}),
+    (PNG_URI, {"MEDIA_MAX_BYTES": 16}),
+    (_uri(_image_bytes("PNG", (8, 8))), {"MEDIA_MAX_PIXELS": 63}),
 ])
 def test_an_edit_image_that_is_not_a_small_inline_image_is_refused(monkeypatch, value, limits):
     from fastapi import HTTPException
@@ -468,3 +484,77 @@ def test_websocket_routes_are_dropped():
     app.add_api_websocket_route("/v1/realtime", ws)
     mg.install_media_gate(app=app)
     assert not [r for r in app.router.routes if isinstance(r, WebSocketRoute)]
+
+
+# The media folder, the session rule and the size limits
+
+@pytest.fixture
+def media_root(tmp_path):
+    root = str(tmp_path / "media")
+    mg.set_media_root(root, (root,))
+    yield root
+    mg.set_media_root(None)
+
+
+def _check(body, *, paths_allowed=True, path="/v1/chat/completions"):
+    import asyncio
+    import json
+    return asyncio.run(mg.check_request(
+        "POST", path, {"content-type": "application/json"},
+        json.dumps(body).encode(), paths_allowed=paths_allowed))
+
+
+def test_a_path_in_the_media_folder_passes_the_gate(media_root):
+    for ref in (f"{media_root}/a.png", f"file://{media_root}/sub/a.png"):
+        _check(_chat({"type": "image_url", "image_url": {"url": ref}}))
+    _check(_chat({"type": "input_audio", "input_audio": {"data": f"{media_root}/a.wav"}}))
+
+
+@pytest.mark.parametrize("ref", ["{root}/../secret.png", "{root}/./a.png", "{root}",
+                                 "{root}x/a.png", "~/.cache/gmlx/media/a.png"])
+def test_a_path_that_leaves_the_media_folder_is_refused(media_root, ref):
+    with pytest.raises(mg.MediaRefused, match=f"cp -c FILE {media_root}/"):
+        _check(_chat({"type": "image_url",
+                      "image_url": {"url": ref.format(root=media_root)}}))
+
+
+def test_a_session_socket_request_takes_media_only_inline(media_root):
+    part = {"type": "image_url", "image_url": {"url": f"{media_root}/a.png"}}
+    with pytest.raises(mg.MediaRefused, match="launch container session takes media "
+                                              "only inline"):
+        _check(_chat(part), paths_allowed=False)
+    # The rule holds for this request only.
+    _check(_chat(part))
+
+
+def test_without_a_media_folder_every_path_is_refused():
+    mg.set_media_root(None)
+    with pytest.raises(mg.MediaRefused, match="does not open files"):
+        _check(_chat({"type": "image_url", "image_url": {"url": "/tmp/gmlx/media/a.png"}}))
+
+
+def test_inline_media_over_the_limit_is_refused_before_decoding(monkeypatch):
+    monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", 8)
+    decoded = []
+    monkeypatch.setattr(mg.base64, "b64decode",
+                        lambda *a, **k: decoded.append(1) or b"")
+    for part in ({"type": "image_url", "image_url": {"url": PNG_URI}},
+                 {"type": "input_audio", "input_audio": {"data": WAV_B64 * 4}},
+                 {"type": "video_url", "video_url": {"url": MP4_URI}}):
+        with pytest.raises(mg.MediaRefused, match="larger than the 0 MiB limit"):
+            _check(_chat(part))
+    assert decoded == []
+
+
+def test_a_body_that_is_not_json_is_refused():
+    import asyncio
+    for ctype, match in (("application/json", "not valid JSON"),
+                         ("application/x-www-form-urlencoded", "not a form"),
+                         ("text/plain", "not valid JSON")):
+        with pytest.raises(mg.MediaRefused, match=match):
+            asyncio.run(mg.check_request("POST", "/v1/chat/completions",
+                                         {"content-type": ctype}, b"a=b"))
+    # curl -d sends JSON as a form, and the routes read it as JSON.
+    asyncio.run(mg.check_request("POST", "/v1/chat/completions",
+                                 {"content-type": "application/x-www-form-urlencoded"},
+                                 b'{"model": "m"}'))

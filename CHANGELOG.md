@@ -46,8 +46,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since a file there can name commands the server runs. Pass
   `--config ./gmlx.yaml` to use a project file.
 - The server takes images, audio and video in a request only as inline
-  `data:` URIs and refuses file paths and URLs without opening them.
-  `server.media_urls` lets it fetch http(s) URLs again.
+  `data:` URIs or as files in its media folder, `~/.cache/gmlx/media`, and
+  refuses other file paths and URLs without opening them.
+  `server.media_urls` lets it fetch http(s) URLs again, from public
+  addresses only.
+- The speech, embeddings and rerank routes answer both with and without
+  `/v1`, and a route of a service that is not configured answers 404 with a
+  message that names its config key.
 
 ### Fixed
 
@@ -60,6 +65,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   link that leads outside your home folder.
 - The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
   which skipped the API key check.
+- The server no longer serves mlx-vlm's `/v1/settings` route, which could
+  point the prompt cache and the drafter at any folder, or its own
+  transcription routes, which decoded an upload with ffmpeg before any
+  check.
 - A request whose model fails to load gets that load error. Before, the
   server sometimes answered 500 with an error about a missing `requests`
   attribute.

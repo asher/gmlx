@@ -1447,6 +1447,9 @@ def test_resolve_service_missing_file_degrades(capsys):
                                 "x.gguf", ["/m"]) is None
     err = capsys.readouterr().err
     assert "server.embeddings disabled" in err and "x.gguf" in err
+    # Its routes then say the model is missing, not that the key is unset.
+    from gmlx.serve.patches import routes as sp_routes
+    assert "embeddings" in sp_routes._MISSING_SERVICES
 
 
 def test_resolve_service_malformed_value_fails_fast_naming_key():

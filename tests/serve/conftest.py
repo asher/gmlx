@@ -14,6 +14,8 @@ try:
     from gmlx.serve.patches import _common as sp_common
     from gmlx.serve.patches import hardening as sp_hardening
     from gmlx.serve.patches import media_gate
+    from gmlx.serve.patches import routes as sp_routes
+    from gmlx.serve import media_sinks
     _APP = importlib.import_module("mlx_vlm.server.app")
     _UTILS = importlib.import_module("mlx_vlm.utils")
     _PKG = importlib.import_module("mlx_vlm.server")
@@ -103,7 +105,11 @@ def _restore_mlxvlm(request):
             m.kwargs.update(kw)
     fastapi_app.middleware_stack = None       # force a rebuild from the restored list
     for flag in (sp_hardening._AUTH_FLAG, sp_hardening._HOST_GUARD_FLAG,
-                 sp_hardening._JSON_CT_FLAG, media_gate._FLAG):
+                 sp_hardening._JSON_CT_FLAG, media_gate._FLAG,
+                 sp_routes._UNCONFIGURED_FLAG):
         if hasattr(fastapi_app.state, flag):
             delattr(fastapi_app.state, flag)
+    media_sinks.uninstall()
+    media_gate.set_media_root(None)
+    sp_routes._MISSING_SERVICES.clear()
     serving.clear_resolved_models()

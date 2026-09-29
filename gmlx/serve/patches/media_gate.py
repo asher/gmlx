@@ -1,4 +1,5 @@
-"""Request media gate: media in a request arrives only as inline data.
+"""Request media gate: media in a request arrives inline, or from the
+server's own media folder.
 
 A request that names an image, audio or video by a file path makes the
 server open that file on the Mac, and one that names it by URL makes the
@@ -7,8 +8,14 @@ such as a client in a launch container, which gets a placeholder key and
 reaches the server through a scoped session socket. So neither may happen
 by default. The gate reads every request body before its route runs and
 answers 400 for any media reference that is not a ``data:`` URI of the
-right kind. It never stats, opens or fetches the reference. ``server.media_urls`` lets http(s) URLs through; a file path is
-never accepted.
+right kind, or an absolute path inside the media folder
+(``$XDG_CACHE_HOME/gmlx/media``). A request on a launch session socket may
+not name the media folder either. The gate never stats, opens or fetches the
+reference. ``server.media_urls`` lets http(s) URLs through.
+
+The gate is the fast, clearly worded refusal. The boundary is in
+:mod:`gmlx.serve.media_sinks`, which checks every reference again in the
+functions that open it, whatever route or body shape carried it.
 
 A route reads its body with ``json.loads`` whatever the Content-Type says,
 so the gate parses every body the same way. A form body reaches only the
@@ -27,6 +34,7 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import contextvars
 import dataclasses
 import importlib
 import io
@@ -36,12 +44,30 @@ import re
 import shutil
 import tempfile
 
-from ._common import _error_content
+from gmlx.safe_path import parts_below
+
+from ._common import SESSION_SCOPE_KEY, _error_content
 
 _FLAG = "_kq_media_gate"
 
+# The largest request body the server reads.
+BODY_MAX_BYTES = 64 << 20
+# The largest image, audio clip or video one inline reference or one fetch
+# may hold, decoded.
+MEDIA_MAX_BYTES = 32 << 20
+# The most pixels an image may decode to.
+MEDIA_MAX_PIXELS = 64 << 20
+
 # Whether http(s) URLs are accepted, set once by install_media_gate.
 _allow_urls = False
+# The media folder, as shown in messages, and every spelling of it a path
+# may start with. Empty until the server creates the folder.
+_media_root: str | None = None
+_media_root_forms: tuple[str, ...] = ()
+# False while the gate checks a request that came through a launch session
+# socket, which takes media only inline.
+_paths_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gmlx_media_paths_allowed", default=True)
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _VIDEO_PART_TYPES = frozenset({"video", "video_url", "input_video"})
@@ -59,33 +85,77 @@ _IMAGE_PATH_FIELDS = ("output_path", "output_dir", "prompt_expansion_model")
 _VOICE = re.compile(r"[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*")
 _MEDIA_TYPE = re.compile(r"[a-z]+/[A-Za-z0-9.+-]+")
 _URL_HINT = "Set server.media_urls to let the server fetch http(s) URLs."
+_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://")
 # The image loaders open files only, so an inline reference image of an
-# edit is written to a private temporary file for the call. These bound it.
+# edit is written to a private temporary file for the call.
 _EDIT_IMAGE_FORMATS = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}
-_EDIT_IMAGE_MAX_BYTES = 32 << 20
-_EDIT_IMAGE_MAX_PIXELS = 64 << 20
 
 
 class MediaRefused(ValueError):
     """A request names media in a form the server does not accept."""
 
 
+def set_media_root(root: str | None, forms: tuple[str, ...] = ()) -> None:
+    """Accept absolute paths inside ``root``, spelled as any of ``forms``,
+    or refuse every path with None."""
+    global _media_root, _media_root_forms
+    _media_root = root
+    _media_root_forms = tuple(dict.fromkeys(forms or ((root,) if root else ())))
+
+
+def media_root() -> str | None:
+    return _media_root
+
+
 def _is_url(value: str) -> bool:
     return value[:8].lower().startswith(("http://", "https://"))
 
 
-def _data_uri(value: str, kind: str) -> bytes | None:
-    """The decoded bytes of a ``data:<kind>/...;base64,`` URI, else None."""
+def media_parts(value: str) -> tuple[str, list[str]] | None:
+    """The media folder spelling ``value`` starts with and the components
+    below it, for an absolute path or a ``file://`` URL. Nothing is
+    resolved, and a ``.`` or ``..`` component fails the match."""
+    path = value[7:] if value[:7].lower() == "file://" else value
+    if not path.startswith("/"):
+        return None
+    for form in _media_root_forms:
+        parts = parts_below(path, form)
+        if parts and not any(p in (".", "..") for p in parts):
+            return form, parts
+    return None
+
+
+def too_many_pixels(field: str, width: int | None = None,
+                    height: int | None = None) -> MediaRefused:
+    size = f"{width}x{height} pixels, " if width is not None else ""
+    return MediaRefused(f"{field} is {size}over the limit of {MEDIA_MAX_PIXELS} "
+                        "pixels. Send a smaller image.")
+
+
+def _too_large(field: str) -> MediaRefused:
+    return MediaRefused(f"{field} is larger than the {MEDIA_MAX_BYTES >> 20} MiB limit "
+                        "for one image, audio clip or video. Send a smaller one.")
+
+
+def _data_uri(value: str, kind: str, field: str = "media") -> bytes | None:
+    """The decoded bytes of a ``data:<kind>/...;base64,`` URI, else None.
+    A payload over :data:`MEDIA_MAX_BYTES` is refused before it is
+    decoded."""
     head, comma, payload = value.partition(",")
     if not comma or not head.lower().startswith(f"data:{kind}/"):
         return None
     params = head[5:].split(";")
     if not _MEDIA_TYPE.fullmatch(params[0]) or "base64" not in params[1:]:
         return None
+    if len(payload) // 4 * 3 > MEDIA_MAX_BYTES + 3:
+        raise _too_large(field)
     try:
-        return base64.b64decode(payload, validate=False)
+        data = base64.b64decode(payload, validate=False)
     except (binascii.Error, ValueError):
         return None
+    if len(data) > MEDIA_MAX_BYTES:
+        raise _too_large(field)
+    return data
 
 
 def _video_container(data: bytes) -> bool:
@@ -101,7 +171,7 @@ def check_image(value, field: str) -> None:
     if not isinstance(value, str):
         raise MediaRefused(f"{field} must be a string")
     if value.startswith("data:"):
-        if _data_uri(value, "image") is None:
+        if _data_uri(value, "image", field) is None:
             raise MediaRefused(f"{field} must be a base64 data:image/... URI")
         return
     _refuse_reference(field, value, "data:image/...;base64,...")
@@ -111,7 +181,7 @@ def check_video(value, field: str) -> None:
     if not isinstance(value, str):
         raise MediaRefused(f"{field} must be a string")
     if value.startswith("data:"):
-        data = _data_uri(value, "video")
+        data = _data_uri(value, "video", field)
         if data is None:
             raise MediaRefused(f"{field} must be a base64 data:video/... URI")
         if not _video_container(data):
@@ -128,22 +198,45 @@ def check_audio_data(value, field: str) -> None:
     if not isinstance(value, str):
         raise MediaRefused(f"{field} must be a string")
     text = value.strip()
+    want = "base64 audio or a data:audio/... URI"
     if text.startswith("data:"):
-        if _data_uri(text, "audio") is None:
+        if _data_uri(text, "audio", field) is None:
             raise MediaRefused(f"{field} must be a base64 data:audio/... URI")
         return
-    if _is_url(text):
-        _refuse_reference(field, text, "base64 audio")
+    # The reader takes a value that starts like a path or a URL as one.
+    if _is_url(text) or text.startswith(("/", "./", "../", "~", "file:")):
+        _refuse_reference(field, text, want)
         return
-    refused = MediaRefused(f"{field} must be base64 audio or a data:audio/... URI. "
-                           "This server does not open files named in a request.")
-    # The reader takes a value that starts like a path as a path.
-    if text.startswith(("/", "./", "../", "~", "file:")):
-        raise refused
+    if len(text) // 4 * 3 > MEDIA_MAX_BYTES + 3:
+        raise _too_large(field)
     try:
         base64.b64decode(text, validate=True)
     except (binascii.Error, ValueError):
-        raise refused from None
+        raise MediaRefused(f"{field} must be {want}") from None
+
+
+def reference_refusal(field: str, value: str, want: str) -> MediaRefused:
+    """The refusal for a reference that is neither inline data, an allowed
+    URL nor a file in the media folder."""
+    scheme = _SCHEME.match(value)
+    if scheme and scheme.group(1).lower() != "file":
+        return MediaRefused(f"{field} names a {scheme.group(1).lower()}:// URL, and this "
+                            f"server takes media only as {want}.")
+    return path_refusal(field, want)
+
+
+def path_refusal(field: str, want: str) -> MediaRefused:
+    """The refusal for a file path the server does not open."""
+    if not _paths_allowed.get():
+        return MediaRefused(f"{field} names a file, and a launch container session "
+                            f"takes media only inline, as {want}.")
+    if _media_root is None:
+        return MediaRefused(f"{field} must be {want}. This server does not open "
+                            "files named in a request.")
+    return MediaRefused(
+        f"{field} names a file outside {_media_root}, the only folder this server "
+        f"opens media files from. Copy the file there, for example with "
+        f"cp -c FILE {_media_root}/, or send it inline as {want}.")
 
 
 def _refuse_reference(field: str, value: str, want: str) -> None:
@@ -152,8 +245,9 @@ def _refuse_reference(field: str, value: str, want: str) -> None:
             return
         raise MediaRefused(f"{field} names a URL, and this server takes media only "
                            f"as {want}. {_URL_HINT}")
-    raise MediaRefused(f"{field} must be {want}. This server does not open files "
-                       "named in a request.")
+    if _paths_allowed.get() and media_parts(value) is not None:
+        return
+    raise reference_refusal(field, value, want)
 
 
 def _check_part(d: dict) -> None:
@@ -219,7 +313,8 @@ def check_body(body, path: str) -> None:
                 raise MediaRefused("voice must be a voice name, such as af_heart")
             if body.get("ref_audio") is not None:
                 ref = body["ref_audio"]
-                if not (isinstance(ref, str) and _data_uri(ref, "audio") is not None):
+                if not (isinstance(ref, str)
+                        and _data_uri(ref, "audio", "ref_audio") is not None):
                     raise MediaRefused("ref_audio must be a base64 data:audio/... URI")
     # Iterative, so a deeply nested body cannot exhaust the stack.
     stack = [body]
@@ -293,51 +388,67 @@ async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
     return [(k, v) for k, v in form.multi_items() if isinstance(v, str)]
 
 
-async def check_request(method: str, path: str, headers, raw: bytes) -> None:
+async def check_request(method: str, path: str, headers, raw: bytes, *,
+                        paths_allowed: bool = True) -> None:
     """Raise :class:`MediaRefused` when the body of a request to ``path``
-    names media the server does not accept, or is a form sent to a route
-    that takes JSON."""
+    names media the server does not accept, is a form sent to a route that
+    takes JSON, or is not JSON. ``paths_allowed`` False refuses paths in the
+    media folder too."""
     if not raw:
         return
+    token = _paths_allowed.set(paths_allowed)
     try:
-        body = json.loads(raw)
-    except (ValueError, RecursionError):
-        body = None                   # the route reports a bad body itself
-    check_body(body, path)
-    kind = form_type(headers.get("content-type"))
-    if kind == _URLENCODED:
-        raise MediaRefused("this route takes a JSON body, not a form")
-    if kind == _MULTIPART:
-        if not path.endswith(_UPLOAD_ROUTES):
-            raise MediaRefused("this route takes a JSON body, not a multipart form")
+        kind = form_type(headers.get("content-type"))
+        if kind == _MULTIPART:
+            if not path.endswith(_UPLOAD_ROUTES):
+                raise MediaRefused("this route takes a JSON body, not a multipart form")
+            try:
+                fields = await multipart_text_fields(headers, raw)
+            except Exception as e:
+                raise MediaRefused(f"the multipart form cannot be read: {e}") from None
+            for name, value in fields:
+                check_body({name: value}, path)
+            return
+        # Every other route reads its body with json.loads, whatever the
+        # Content-Type says, so a form-encoded body that holds JSON is JSON.
         try:
-            fields = await multipart_text_fields(headers, raw)
-        except Exception as e:
-            raise MediaRefused(f"the multipart form cannot be read: {e}") from None
-        for name, value in fields:
-            check_body({name: value}, path)
+            body = json.loads(raw)
+        except RecursionError:
+            raise MediaRefused("the request body nests too deeply") from None
+        except ValueError as e:
+            if kind == _URLENCODED:
+                raise MediaRefused("this route takes a JSON body, not a form") from None
+            raise MediaRefused(f"the request body is not valid JSON ({e})") from None
+        check_body(body, path)
+    finally:
+        _paths_allowed.reset(token)
 
 
 def _decode_edit_image(value: str) -> tuple[bytes, str]:
-    """The bytes and file suffix of an inline reference image. Pillow reads
-    it with the allowed format plugins only and verifies it."""
+    """The bytes and file suffix of a reference image, inline or in the
+    media folder. Pillow reads it with the allowed format plugins only and
+    verifies it."""
     from PIL import Image
 
-    data = _data_uri(value, "image")
-    if data is None:
-        raise MediaRefused("image must be a base64 data:image/... URI")
-    if len(data) > _EDIT_IMAGE_MAX_BYTES:
-        raise MediaRefused(f"image is larger than {_EDIT_IMAGE_MAX_BYTES >> 20} MiB")
+    if value.startswith("data:"):
+        data = _data_uri(value, "image", "image")
+        if data is None:
+            raise MediaRefused("image must be a base64 data:image/... URI")
+    else:
+        from gmlx.serve.media_sinks import reference_bytes
+        data = reference_bytes(value, "image", "image", "data:image/...;base64,...")
     formats = list(_EDIT_IMAGE_FORMATS)
     try:
         with Image.open(io.BytesIO(data), formats=formats) as image:
             fmt = image.format
             width, height = image.size
             image.verify()
+    except Image.DecompressionBombError:
+        raise too_many_pixels("image") from None
     except Exception as e:  # noqa: BLE001 - Pillow raises many types for bad data
         raise MediaRefused("image is not a readable PNG, JPEG, WebP or GIF image") from e
-    if width * height > _EDIT_IMAGE_MAX_PIXELS:
-        raise MediaRefused(f"image has more than {_EDIT_IMAGE_MAX_PIXELS} pixels")
+    if width * height > MEDIA_MAX_PIXELS:
+        raise too_many_pixels("image", width, height)
     return data, _EDIT_IMAGE_FORMATS[fmt or ""]
 
 
@@ -423,13 +534,52 @@ def _refuse_image_writes(openai) -> None:
 
 
 def _drop_websocket_routes(app) -> None:
-    """Remove every WebSocket route. HTTP middleware, the API key check
-    among it, never sees a WebSocket, and mlx-vlm's ``/v1/realtime`` loads
-    the model a message names. gmlx serves no WebSocket route."""
+    """Remove every WebSocket route, in every router the app includes.
+    HTTP middleware, the API key check among it, never sees a WebSocket,
+    and mlx-vlm's ``/v1/realtime`` loads the model a message names. gmlx
+    serves no WebSocket route."""
     from starlette.routing import WebSocketRoute
 
-    app.router.routes[:] = [r for r in app.router.routes
-                            if not isinstance(r, WebSocketRoute)]
+    from ._common import _invalidate_route_caches, _iter_route_lists
+
+    for routes in list(_iter_route_lists(app)):
+        routes[:] = [r for r in routes if not isinstance(r, WebSocketRoute)]
+    _invalidate_route_caches(app)
+
+
+class _RefuseWebSockets:
+    """Close every WebSocket connection before any route sees it, so a
+    WebSocket route that a later mlx-vlm adds fails closed. HTTP middleware
+    never sees a WebSocket, so this is plain ASGI middleware."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            # Closing before the accept makes the server answer the
+            # handshake with 403.
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await self.app(scope, receive, send)
+
+
+async def _read_body(request) -> bytes | None:
+    """The request body, or None when it is larger than
+    :data:`BODY_MAX_BYTES`, which is refused before it is all read."""
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > BODY_MAX_BYTES:
+        return None
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > BODY_MAX_BYTES:
+            return None
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    # The routes below read this copy, as they would after request.body().
+    request._body = raw
+    return raw
 
 
 def install_media_gate(allow_urls: bool = False, app=None) -> None:
@@ -446,15 +596,27 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         app = importlib.import_module("mlx_vlm.server.app").app
     if stock:
         _refuse_image_writes(importlib.import_module("mlx_vlm.server.openai"))
+        from gmlx.serve import media_sinks
+        media_sinks.install()
     _drop_websocket_routes(app)
     if getattr(app.state, _FLAG, False):
         return
+    app.middleware_stack = None
+    app.add_middleware(_RefuseWebSockets)
 
     async def _media_gate(request, call_next):
         # Every method: a route reads a body whatever the method is.
-        raw = await request.body()
+        raw = await _read_body(request)
+        if raw is None:
+            return JSONResponse(status_code=413, content=_error_content(
+                request.url.path, 413, "invalid_request_error",
+                f"the request body is larger than the {BODY_MAX_BYTES >> 20} MiB "
+                "limit. Start a new conversation, or send fewer or smaller "
+                "images."))
         try:
-            await check_request(request.method, request.url.path, request.headers, raw)
+            await check_request(
+                request.method, request.url.path, request.headers, raw,
+                paths_allowed=request.scope.get(SESSION_SCOPE_KEY) is None)
         except MediaRefused as e:
             return JSONResponse(status_code=400, content=_error_content(
                 request.url.path, 400, "invalid_request_error", str(e)))

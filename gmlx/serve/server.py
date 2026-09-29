@@ -1796,7 +1796,9 @@ def _resolve_service(key: str, resolver, value, model_dirs):
     try:
         return resolver(value, model_dirs)
     except MissingModelFile as e:
+        from .patches.routes import note_missing_service
         print(f"[server] {key} disabled - {e}", file=sys.stderr)
+        note_missing_service(key.removeprefix("server."))
         return None
     except ConfigError as e:
         raise ConfigError(f"{key}: {e}") from None
@@ -2060,6 +2062,9 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # The patches need the *resolved* bind (CLI may override the config): the
     # loopback host guard keys off cfg.host.
     cfg.host, cfg.port = host, port
+    # A request may name media files in this folder, and in no other.
+    from gmlx.serve.media_sinks import ensure_media_root
+    ensure_media_root()
     install_server_patches(cfg, reload_fn=reload_fn)
     if getattr(a, "ignore_eos", False) or env_bool("GMLX_IGNORE_EOS", False):
         from .patches import install_ignore_eos

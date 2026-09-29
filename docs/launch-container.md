@@ -302,11 +302,12 @@ modest. A coding agent also sends text from the files, command output and
 web pages it reads, and any of them can carry instructions for the tools.
 Give a coding agent no assistants.
 
-The server takes an image, audio or video in a request only as inline data,
-so the client cannot make it read a Mac file or fetch a URL. With
-[`server.media_urls`](config.md#servermedia_urls) on, the server fetches
-http(s) URLs, and the client can then reach the Mac's loopback services and
-your local network through it, even under `network: none`.
+A request through the socket takes an image, audio or video only as inline
+data, so the client cannot make the server read a Mac file, even one in the
+server's [media folder](api.md#media-in-requests). With
+[`server.media_urls`](config.md#servermedia_urls) on, the client can make
+the Mac fetch any public URL, even under `network: none`, and the URL can
+carry data out of the container.
 
 A [browser app](#browser-apps) gives the client a page in your browser at a
 localhost origin, with whatever that origin can reach. That page runs on

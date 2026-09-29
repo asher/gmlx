@@ -863,11 +863,33 @@ The default is `false`.
 #### `server.media_urls`
 
 With `true`, a request may name an image, audio or video by an `http(s)://`
-URL, and the server fetches it. The fetch runs on the Mac, so any client
-that holds the API key can then reach loopback services and the local
-network through it. A file path is refused whatever this key says. The
-default is `false`, which takes media only as inline `data:` URIs, as
-[Vision messages](api.md#vision-messages) describes.
+URL, and the server fetches it from the Mac. The server refuses a host with
+any address that is not public, such as one on the Mac or the local
+network, checks each redirect the same way, and uses no proxy. It stops a
+fetch that takes more than 60 seconds or brings more than 32 MiB.
+
+Any client that reaches the server can then make the Mac send requests to
+any public host, and the URL can carry data out. That includes a client in
+a launch container with `network: none`. This key does not change which
+files a request can name, which [Media in requests](api.md#media-in-requests)
+describes. The default is `false`, which takes no URLs.
+
+#### `server.cors_origins`
+
+Browser pages from these origins may call the server, besides the pages on
+a loopback address such as `http://localhost:3000` or
+`http://127.0.0.1:5173`, which may always call it. Each entry is a scheme,
+a host and an optional port, such as `https://chat.example.com` or
+`http://192.168.1.20:3000`, with nothing after them. A browser sends the
+page's origin with each request, and the server answers a page from any
+other origin with status 403 and a message that names this key. Programs
+that are not browsers send no origin and are not affected.
+
+Listing an origin gives every page on it whatever the server offers,
+including the MCP tools of [served assistants](#served-assistants), which
+run on the Mac. When the server starts, it reads the list and logs each
+listed origin that is not a loopback one. The entries `*` and `null` are
+refused, since neither names one origin. The default is no origins.
 
 ### Model folders
 

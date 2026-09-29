@@ -26,8 +26,8 @@ def install_api_key_auth(api_key: str | None) -> None:
     No-op without a key; idempotent.
 
     This is HTTP middleware, and Starlette HTTP middleware never sees a
-    WebSocket connection. The media gate therefore removes the stock
-    WebSocket routes, such as mlx-vlm's ``/v1/realtime``.
+    WebSocket connection. The media gate therefore removes every WebSocket
+    route and closes every WebSocket connection.
 
     A request on a launch session socket needs no key. The scope of its
     socket limits it instead (:mod:`.session_sockets`)."""
@@ -69,7 +69,7 @@ def install_api_key_auth(api_key: str | None) -> None:
 _JSON_CT_FLAG = "_kq_gguf_json_ct_tolerance"
 
 
-def install_json_content_type_tolerance() -> None:
+def install_json_content_type_tolerance(app=None) -> None:
     """Treat body-bearing API requests without a JSON content-type as JSON.
 
     ``curl -d '{...}'`` - the shape of every copy-paste API example - sends
@@ -77,8 +77,10 @@ def install_json_content_type_tolerance() -> None:
     pydantic error before the body is even parsed. The JSON endpoints here
     accept exactly one body shape, so a missing, form-encoded, or text/plain
     content-type is rewritten to ``application/json``; multipart uploads
-    (audio transcription) pass through untouched. Idempotent."""
-    app = importlib.import_module("mlx_vlm.server.app").app
+    (audio transcription) pass through untouched. ``app`` defaults to
+    mlx-vlm's. Idempotent."""
+    if app is None:
+        app = importlib.import_module("mlx_vlm.server.app").app
     if getattr(app.state, _JSON_CT_FLAG, False):
         return
 

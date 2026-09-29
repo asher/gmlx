@@ -45,6 +45,10 @@ running service under the first name in its row:
 | Embeddings | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` |
 | Reranking | `reranker`. Any name is accepted and returned in the response, since the server runs one reranker. |
 
+The routes of a service that is not configured answer 404, with a message
+that names the service's key. Set the key in the config file and run
+`gmlx restart` to start the service.
+
 Speech-to-text and text-to-speech need the `stt` and `tts` extras, which
 [Optional features](installation.md#optional-features) describes. When a
 speech service is configured and its extra is missing, the server refuses
@@ -53,7 +57,8 @@ to start.
 When an embeddings or rerank service's model file is missing, the server
 starts without that service and prints a warning. For
 an alias, an `hf:` reference or a relative path, the service stays off
-until the server restarts, because a reload does not start it. For an
+until the server restarts, because a reload does not start it, and its
+routes answer 404 with a message that says the model was missing. For an
 absolute path, the endpoint returns a 404 until the file is back, and then
 it works with no restart.
 

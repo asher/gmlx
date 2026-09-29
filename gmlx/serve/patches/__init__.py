@@ -126,6 +126,8 @@ from .routes import (
     install_reload_route,
     install_rerank_route,
     install_resolver_error_handlers,
+    install_runtime_settings_removal,
+    install_unconfigured_answers,
     install_runtime_snapshot_enrichment,
     spawn_preload_warm,
 )
@@ -157,6 +159,7 @@ __all__ = [
     "install_embeddings_route",
     "install_faithful_history",
     "install_fast_sampler",
+    "install_unconfigured_answers",
     "install_until_eos_default",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
@@ -182,6 +185,7 @@ __all__ = [
     "install_capacity_plan",
     "install_estimate",
     "install_resolver_error_handlers",
+    "install_runtime_settings_removal",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
     "install_sse_keepalive",
@@ -204,6 +208,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the API-key middleware, so the key check runs first.
     from .media_gate import install_media_gate
     install_media_gate(bool(getattr(cfg, "media_urls", False)))
+    # Outside the gate, so a service that is not configured answers before
+    # the gate reads the body, and inside the key check.
+    install_unconfigured_answers(cfg)
     install_api_key_auth(getattr(cfg, "api_key", None))
     install_json_content_type_tolerance()
     if getattr(cfg, "host", None) in LOOPBACK_HOSTS:
@@ -306,6 +313,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         rerank_model=getattr(cfg, "rerank", None),
         model_dirs=getattr(cfg, "model_dirs", ()) or ())
     install_auto_docs_removal()
+    install_runtime_settings_removal()
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()

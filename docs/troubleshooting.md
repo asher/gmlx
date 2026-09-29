@@ -462,6 +462,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 | `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. To remove gmlx, delete those settings and keep the files. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on and has no `path` of its own. |
+| `~/.cache/gmlx/media/` | The server opens the media files a request names from here, as [Media in requests](api.md#media-in-requests) describes. |
 | `~/.cache/gmlx/talk/` | The first `talk` fetches the wake-word and voice-activity models here. |
 | `~/.cache/huggingface/` | `hf:` references resolve from these files. |
 | `~/.local/share/gmlx/chats/` | Saved chat sessions are kept here. |
