@@ -1,0 +1,66 @@
+{
+ "outputs": {
+  "gmlx/cache/attention.py": {
+   "edits": [
+    {
+     "count": 1,
+     "new": "layout is ``(B, 1, ..., 1, L, K)``.",
+     "old": "layout is ``(B, 1, \u2026, 1, L, K)``."
+    },
+    {
+     "count": 1,
+     "new": "    tq = sys.modules.get(\"mlx_vlm.turboquant\")\n    if tq is None or not isinstance(cache, tq.BatchTurboQuantKVCache):\n",
+     "old": "    if not isinstance(cache, BatchTurboQuantKVCache):\n"
+    },
+    {
+     "count": 1,
+     "new": "    tq = sys.modules.get(\"mlx_vlm.turboquant\")\n    if tq is not None and isinstance(\n        cache, (tq.TurboQuantKVCache, tq.BatchTurboQuantKVCache)\n    ):\n",
+     "old": "    if isinstance(cache, (TurboQuantKVCache, BatchTurboQuantKVCache)):\n"
+    }
+   ],
+   "imports": "import sys\nfrom typing import Optional\n\nimport mlx.core as mx\nfrom mlx.utils import tree_map\n\nfrom .kv_cache import create_causal_mask\n\n\n",
+   "match": true,
+   "sha256": "600dc8ee3a631642afc358edf8d5d226e10616389a8ad5d91d7e7313b434f32d",
+   "source": "models/base.py:263-430"
+  },
+  "gmlx/cache/kv_cache.py": {
+   "edits": [
+    {
+     "count": 1,
+     "new": "stays\n    unquantized, since it is sensitive",
+     "old": "stays\n    unquantized \u2014 it is sensitive"
+    },
+    {
+     "count": 1,
+     "new": "\"\"\"Batch pad lifecycle, the same contract as",
+     "old": "\"\"\"Batch pad lifecycle \u2014 same contract as"
+    },
+    {
+     "count": 1,
+     "new": "(B, H, S, ...), as in BatchKVCache.",
+     "old": "(B, H, S, \u2026) \u2014 same as BatchKVCache."
+    }
+   ],
+   "match": true,
+   "sha256": "d40da09cdb06a23b325c16df907de63d640ac6a59e2ce0f8abc263df8cdbcc66",
+   "source": "models/cache.py"
+  }
+ },
+ "package": "mlx-vlm",
+ "sources": {
+  "models/base.py": {
+   "extract": {
+    "first": 263,
+    "last": 430,
+    "sha256": "bb2b1a234597dedb7c65809adf34e6e3b1a13375caecb814bc03035ee3df2651"
+   },
+   "lines": 662,
+   "sha256": "a7cfa38413bea057946c5d56c9edd34dbcceb33f6613529f5201ca2ad5b41120"
+  },
+  "models/cache.py": {
+   "lines": 3821,
+   "sha256": "cf39d3de8c2014fcb5e919ebf33b9e2bf506925aa3d6a979cd28e871c275800b"
+  }
+ },
+ "version": "0.7.3"
+}
