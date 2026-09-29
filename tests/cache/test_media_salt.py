@@ -112,6 +112,66 @@ def test_image_spans_split_flattened_patches_by_grid():
     assert other[0][1] != spans[0][1] and other[1][1] == spans[1][1]
 
 
+def _kimi(*sizes):
+    """The Kimi K2.5 processor's rows for solid images of ``sizes`` (width,
+    height), and ids holding each image's run between text tokens."""
+    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+        KimiK25ImageProcessor,
+    )
+    from PIL import Image
+
+    out = KimiK25ImageProcessor().preprocess(
+        [Image.new("RGB", size, (200, 30, 30)) for size in sizes])
+    ids = [1]
+    for h, w in np.asarray(out["image_grid_hws"]).tolist():
+        ids += [9] * (h * w // 4) + [2]
+    return mx.array([ids]), {"pixel_values": out["pixel_values"],
+                             "image_grid_hws": out["image_grid_hws"]}
+
+
+def test_kimi_images_of_swapped_sides_key_apart():
+    """448x224 and 224x448 solid images patchify to the same pixel rows and
+    the same token count; only the grid tells them apart."""
+    cfg = SimpleNamespace(image_token_index=9)
+    ids, wide = _kimi((448, 224))
+    tall_ids, tall = _kimi((224, 448))
+    assert ids.tolist() == tall_ids.tolist()
+    assert mx.array_equal(wide["pixel_values"], tall["pixel_values"])
+    assert image_spans(ids, wide, cfg) != image_spans(ids, tall, cfg)
+    # Two images split by the grid: the second keys as it does alone.
+    both_ids, both = _kimi((448, 224), (224, 448))
+    spans = image_spans(both_ids, both, cfg)
+    assert [s for s, _h in spans] == [1, 130]
+    assert spans[0][1] == image_spans(ids, wide, cfg)[0][1]
+    assert spans[1][1] == image_spans(ids, tall, cfg)[0][1]
+
+
+def test_deepseek_v4_images_key_on_their_vit_grid():
+    """A (8, 9) and a (9, 8) vit grid both pool to a 3x3 block, so a solid
+    image gives the same pixel rows and ids; only ``image_meta`` differs."""
+    from gmlx.models.deepseek_v4.image_block import (
+        N_BLOCK_TYPES,
+        build_image_block,
+    )
+
+    vocab = 100
+    types, _perm = build_image_block(3, 3, 1)
+    block = [vocab + int(t) for t in types]
+    ids = mx.array([[1] + block + [2]])
+    cfg = SimpleNamespace(image_token_id=7, media_token_ids=[
+        vocab + t for t in range(N_BLOCK_TYPES)])
+    pv = mx.full((72, 3 * 14 * 14), 0.25)
+
+    def raw(meta):
+        return {"pixel_values": pv, "image_meta": mx.array([meta]),
+                "image_spans": [[1, 1 + len(block)]]}
+
+    a = image_spans(ids, raw([8, 9, 3, 3]), cfg)
+    b = image_spans(ids, raw([9, 8, 3, 3]), cfg)
+    assert a[0][0] == b[0][0] == 1
+    assert a != b
+
+
 def test_unmatched_runs_key_every_image_at_the_first_run():
     ids = mx.array([[1, 9, 2, 9, 3, 9]])
     pv = mx.stack([mx.full((3, 2, 2), 1.0), mx.full((3, 2, 2), 2.0)])

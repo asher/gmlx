@@ -35,6 +35,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had the same tokens but another image or LoRA adapter, and answer for that one.
 - A Gemma-4 request whose images differ in size could reuse the cached prefix of
   a request with other images of the same sizes, and answer about those images.
+- A Kimi K2.5, DeepSeek-V4 or V4.1 image request could reuse the cached prefix
+  of a request whose image had the same pixels in another shape.
 - On `/v1/chat/completions`, an image sent in an earlier turn reached the model
   in the latest user message, and a new turn could not reuse the earlier turns.
 - A Gemma-4 model loaded with its mmproj read the system or developer message

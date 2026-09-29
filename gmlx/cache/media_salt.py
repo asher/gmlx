@@ -18,9 +18,10 @@ once per window of prefix lengths that share one salt, longest first
 (``salt_windows``).
 
 An image hash covers its pixel rows and the rows the processor emits for
-it beside them (``image_grid_thw``, ``image_position_ids``,
-``image_sizes``, ``pixel_attention_mask``). The model and processor key
-dependencies, audio, video and the tenant stay in the text salt.
+it beside them (``image_grid_thw``, ``image_grid_hws``, ``image_meta``,
+``image_position_ids``, ``image_sizes``, ``pixel_attention_mask``). A
+grid also splits flattened patches into images. The model and processor
+key dependencies, audio, video and the tenant stay in the text salt.
 """
 
 from __future__ import annotations
@@ -35,8 +36,11 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 _MASK = (1 << 64) - 1
-# Processor outputs that hold one row per image beside the pixel rows.
-_PER_IMAGE_KEYS = ("image_grid_thw", "image_position_ids", "image_sizes",
+# Processor outputs that hold one row per image beside the pixel rows:
+# the Qwen and Kimi patch grids, the DeepSeek-V4 (n_vit_h, n_vit_w,
+# n_llm_h, n_llm_w) rows, and the position, size and mask rows.
+_PER_IMAGE_KEYS = ("image_grid_thw", "image_grid_hws", "image_meta",
+                   "image_position_ids", "image_sizes",
                    "pixel_attention_mask")
 _INSTALLED_FLAG = "_gmlx_media_salt"
 
@@ -195,18 +199,34 @@ def _run_starts(input_ids: Any, image_ids: set[int]) -> list[int]:
     return [int(i) for i in np.flatnonzero(first)]
 
 
+def _patch_counts(raw: dict) -> Any:
+    """Pixel rows per image when the processor flattens every image's
+    patches into one array, from the grid it emits beside them: t*h*w
+    (``image_grid_thw``), h*w (``image_grid_hws``) or n_vit_h*n_vit_w
+    (``image_meta``). None without a grid."""
+    import numpy as np
+
+    for key, width, cols in (("image_grid_thw", 3, 3),
+                             ("image_grid_hws", 2, 2),
+                             ("image_meta", 4, 2)):
+        grid = raw.get(key)
+        if grid is not None:
+            rows = np.asarray(grid).astype(np.int64).reshape(-1, width)
+            return rows[:, :cols].prod(axis=1)
+    return None
+
+
 def _image_rows(raw: dict, n: int) -> list[list[Any]] | None:
     """The arrays that make up each of ``n`` images, or None when the
     pixel payload does not split into ``n`` images."""
     import numpy as np
 
     pv = raw.get("pixel_values")
-    grid = raw.get("image_grid_thw")
     if pv is None:
         return None
-    if grid is not None and _is_array(pv):
-        # Flattened patches: each image owns t*h*w rows.
-        counts = np.asarray(grid).astype(np.int64).reshape(-1, 3).prod(axis=1)
+    counts = _patch_counts(raw)
+    if counts is not None and _is_array(pv):
+        # Flattened patches: each image owns its grid's rows.
         if counts.shape[0] != n or int(counts.sum()) != int(pv.shape[0]):
             return None
         ends = np.cumsum(counts)
