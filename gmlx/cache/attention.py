@@ -14,9 +14,10 @@
 written here and ``create_causal_mask`` comes from ``kv_cache``; the
 TurboQuant cache classes stay in mlx-vlm and are looked up in
 ``sys.modules`` at call time; comments are ASCII. gmlx adds the decode
-mask starts registry and two routes that
+mask starts registry, two routes that
 ``quantized_scaled_dot_product_attention`` takes ahead of its upstream
-body.
+body, and the KVarN route at the head of ``scaled_dot_product_attention``,
+which finds the KVarN classes in ``sys.modules`` as well.
 """
 
 import collections
@@ -291,6 +292,15 @@ def scaled_dot_product_attention(
     mask: Optional[mx.array],
     sinks: Optional[mx.array] = None,
 ) -> mx.array:
+    # A KVarN cache hands out views, not arrays, and its own attention
+    # reads the cache regions. A process that never built one has no
+    # kvarn_cache module and pays one dict lookup here.
+    kvarn = sys.modules.get("gmlx.cache.kvarn_cache")
+    if kvarn is not None and isinstance(keys, kvarn.KVarNView):
+        from gmlx.cache.kvarn_sdpa import kvarn_attention
+
+        return kvarn_attention(queries, keys.cache, scale, mask, sinks)
+
     tq = sys.modules.get("mlx_vlm.turboquant")
     if tq is not None and isinstance(
         cache, (tq.TurboQuantKVCache, tq.BatchTurboQuantKVCache)

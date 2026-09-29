@@ -106,20 +106,16 @@ def _fold_layers(fn):
     return n
 
 
-def test_install_keeps_an_earlier_kvarn_wrap(monkeypatch):
-    """A kvarn sweep from an earlier load in the same process wraps the
-    module global before the fold installs. The install unwrapped one
-    level and dropped that wrap, so KVarN views met the fold."""
+def test_the_batch_fold_passes_a_kvarn_view_to_the_owned_sdpa(monkeypatch):
+    """The fold sits over the owned SDPA, whose KVarN route takes the
+    view: the fold must hand it down untouched."""
     from gmlx.cache import kvarn_sdpa as ks
     from gmlx.cache.kvarn_cache import KVarNView
-    from gmlx.upstream.patching import wrapped_with
 
     _fresh_fold(monkeypatch)
-    q35.scaled_dot_product_attention = ks._make_wrapper(
-        q35.scaled_dot_product_attention)
     assert qwen35_verify_fold.install_qwen35_verify_fold()
     sdpa = q35.scaled_dot_product_attention
-    assert _fold_layers(sdpa) == 1 and wrapped_with(sdpa, "_gmlx_kvarn")
+    assert _fold_layers(sdpa) == 1
     claimed = []
     monkeypatch.setattr(ks, "kvarn_attention",
                         lambda q, cache, *a: claimed.append(cache) or q)
@@ -127,6 +123,26 @@ def test_install_keeps_an_earlier_kvarn_wrap(monkeypatch):
     q = mx.zeros((2, 8, 4, 64), dtype=mx.bfloat16)
     assert sdpa(q, view, view, cache=None, scale=1.0, mask=None) is q
     assert claimed == [view.cache]
+
+
+def test_the_verify_fold_passes_a_kvarn_view_through(monkeypatch):
+    """The verify fold reads keys.ndim on array keys. A KVarN view goes to
+    the function under the fold as it came."""
+    from gmlx.cache.kvarn_cache import KVarNView
+
+    seen = []
+    out = mx.zeros((1,))
+
+    def under(queries, keys, values, *, cache, scale, mask):
+        seen.append((keys, values, cache, scale, mask))
+        return out
+
+    fold = qwen35_verify_fold._fold_verify(q35, under, None)
+    kv, vv = KVarNView(object(), "k"), KVarNView(object(), "v")
+    q = mx.zeros((1, 8, 4, 64), dtype=mx.bfloat16)
+    assert fold(q, kv, vv, cache=None, scale=0.5, mask="causal") is out
+    assert len(seen) == 1 and seen[0][0] is kv and seen[0][1] is vv
+    assert seen[0][2:] == (None, 0.5, "causal")
 
 
 def test_reinstall_under_a_later_wrap_keeps_one_fold(monkeypatch):

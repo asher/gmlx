@@ -91,10 +91,9 @@ def _sdpa_dispatch(queries, keys, values, cache=None, scale=1.0, mask=None):
     global _OWNED_SDPA_CALLS
     _OWNED_SDPA_CALLS += 1
     if type(keys).__name__ == "KVarNView":
-        # Backstop: kvarn_unsupported declines the owned tree at setup
-        # (this call site bypasses the module-attribute sweep). If an arm
-        # is ever wanted here, route kvarn_attention(queries, keys.cache,
-        # scale, mask) as kvarn_sdpa's wrapper does.
+        # Backstop: kvarn_unsupported declines the owned tree at setup.
+        # If an arm is ever wanted here, pass the view on to _base_sdpa,
+        # whose KVarN route takes it.
         raise RuntimeError(
             "[kvarn] gemma-4 owned attention reached a kvarn cache; "
             "the scheme should have been declined at setup"

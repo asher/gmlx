@@ -1009,9 +1009,9 @@ def _resolve_impl(seam: Seam):
 def _identity_problem(seam: Seam, obj) -> str | None:
     """A problem line when an identity row's stock name no longer leads to
     its owned object. gmlx wrappers may sit on the stock name and on the
-    owned name alike (a per-arch SDPA claim, the KVarN sweep), so both
-    sides are followed down the ``_gmlx_orig`` and ``__wrapped__`` links
-    those wrappers leave, to the object that wraps nothing."""
+    owned name alike (a per-arch SDPA claim, say), so both sides are
+    followed down the ``_gmlx_orig`` and ``__wrapped__`` links those
+    wrappers leave, to the object that wraps nothing."""
     from gmlx.upstream.patching import root
 
     module, _, attr = seam.owned.partition(":")

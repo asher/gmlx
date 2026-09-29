@@ -139,10 +139,10 @@ def kvarn_unsupported(model) -> str | None:
 
     holders = (model, getattr(model, "language_model", None))
     if any(is_owned_language_model(h) for h in holders if h is not None):
-        # The owned tree's attention calls an import-time sdpa alias the
-        # kvarn sweep never rebinds; unreachable today (the shared-KV
-        # drafter gate declines first), declined here so a future drafter
-        # change fails informatively at setup, not mid-forward.
+        # The owned tree's SDPA tail refuses KVarN views; unreachable
+        # today (the shared-KV drafter gate declines first), declined here
+        # so a future drafter change fails informatively at setup, not
+        # mid-forward.
         return "gemma-4 owned (MTP) tree"
     return None
 

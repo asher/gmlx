@@ -222,11 +222,6 @@ def install_kvarn_apc() -> None:
                 # suffix prefill; None falls back to a cold prefill
                 # instead of crashing at finalize.
                 return None
-            # A restart's first request can warm-adopt before any
-            # _make_cache kvarn build armed the SDPA route.
-            from .kvarn_sdpa import install_kvarn_sdpa
-
-            install_kvarn_sdpa()
             return BatchKVarNKVCache.merge(list(entries))
         return stock_merge(entries, prefix_lens)
 

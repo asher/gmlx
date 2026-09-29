@@ -82,9 +82,8 @@ def install_qwen35_verify_fold() -> bool:
     GMLX_QWEN35_VERIFY_FOLD=0. Returns True if the patch is active.
 
     Each fold wraps the global as it finds it, so a wrap another installer
-    put there first (a kvarn sweep from an earlier load) stays under it,
-    and a fold already in the chain, under a later wrap, is not added
-    twice."""
+    put there first stays under it, and a fold already in the chain, under
+    a later wrap, is not added twice."""
     global _installed
     if not env_bool("GMLX_QWEN35_VERIFY_FOLD", True):
         return False
@@ -110,6 +109,10 @@ def _fold_verify(q35, orig, dbg):
         # the identical bottom-right causal mask. Upstream's own fallback
         # cannot take this case (it slices keys as raw arrays).
         quant = isinstance(keys, (tuple, list))
+        if not quant and not isinstance(keys, mx.array):
+            # A KVarN view has no .ndim; the owned SDPA routes it.
+            return orig(queries, keys, values, cache=cache, scale=scale,
+                        mask=mask)
         claimed = (
             queries.ndim == 4
             and (hasattr(cache, "bits") if quant
@@ -139,8 +142,8 @@ def _fold_batch_sdpa(sdpa_orig, dbg):
                            sinks=None):
         if not isinstance(keys, mx.array):
             # Packed KV tuples and KVarN views: never touch .ndim/.shape.
-            # Upstream dispatches tuple pairs to quantized SDPA, and a kvarn
-            # wrap under this one claims the views.
+            # The owned SDPA under this one sends tuple pairs to quantized
+            # SDPA and KVarN views to the KVarN route.
             return sdpa_orig(
                 queries, keys, values, cache=cache, scale=scale, mask=mask,
                 sinks=sinks

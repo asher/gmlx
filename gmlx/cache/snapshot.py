@@ -2172,13 +2172,6 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 warm.append(clone)
             else:
                 warm.append(e)
-        if any(_is_kvarn(t) for t in tags):
-            # Guard only: ensure_ppb_kvarn armed the sdpa route before
-            # this lookup could run; kept so a future entry path cannot
-            # restore kvarn caches into an unarmed process.
-            from .kvarn_sdpa import install_kvarn_sdpa
-
-            install_kvarn_sdpa()
         targets = []
         for c in warm:
             if getattr(c, "keys", None) is not None:

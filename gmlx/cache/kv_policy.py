@@ -618,13 +618,10 @@ def _convert_leaf(c, kind, policy: KvQuantPolicy):
                               bits=policy.bits)
     from gmlx.cache.kvarn_cache import KVarNKVCache, KVarNRotatingKVCache
 
-    from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
-
     v = policy.bits if policy.value_bits is None else policy.value_bits
     cls = KVarNRotatingKVCache if kind == "window" else KVarNKVCache
     out = cls.from_cache(c, k_bits=policy.bits, v_bits=v,
                          tail_tokens=policy.tail_tokens or 0)
-    install_kvarn_sdpa()
     return out
 
 

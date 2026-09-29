@@ -143,10 +143,6 @@ def kvarn_convert_batch_stack(caches, policy, left_padding, k_bits, v_bits,
                 tail_tokens=tail,
             )
             n += 1
-    if n:
-        from .kvarn_sdpa import install_kvarn_sdpa
-
-        install_kvarn_sdpa()
     return n
 
 
