@@ -106,8 +106,8 @@ def route(monkeypatch):
                         _OPENAI.extract_text_from_content)
     monkeypatch.setattr(_OPENAI, "_normalize_instruction_messages",
                         _OPENAI._normalize_instruction_messages)
-    monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
-                        _PROMPT_UTILS.get_chat_template)
+    for name in ("get_chat_template", "apply_chat_template"):
+        monkeypatch.setattr(_PROMPT_UTILS, name, getattr(_PROMPT_UTILS, name))
     monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
                         _ANTHROPIC._anthropic_messages_to_internal)
     rg = _RG()
@@ -315,8 +315,8 @@ def _rebuilt(monkeypatch, model_type, content, num_images):
     for target in sp_common._render_target_modules():
         monkeypatch.setattr(target, "apply_chat_template",
                             _PROMPT_UTILS.apply_chat_template)
-    monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
-                        _PROMPT_UTILS.get_chat_template)
+    for name in ("get_chat_template", "apply_chat_template"):
+        monkeypatch.setattr(_PROMPT_UTILS, name, getattr(_PROMPT_UTILS, name))
     install_faithful_history()
     msgs = _OPENAI.apply_chat_template(
         None, {"model_type": model_type},

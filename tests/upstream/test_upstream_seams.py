@@ -43,7 +43,7 @@ def test_no_vendored_module_shipped_upstream():
 def test_fingerprint_drift_is_named(monkeypatch):
     # A seam over a symbol no gmlx installer ever patches, so the check
     # can't be skipped as "ours" when other tests installed patches first.
-    seam = us.Seam("mlx_vlm.prompt_utils", "apply_chat_template", "test")
+    seam = us.Seam("mlx_vlm.prompt_utils", "_content_media_count", "test")
     key = us._key(seam)
     monkeypatch.setattr(us, "SEAMS", (seam,))
     monkeypatch.setattr(

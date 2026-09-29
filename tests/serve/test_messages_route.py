@@ -1,7 +1,11 @@
 """/v1/messages renders a user message's tool results before its text, in
 block order, as the Messages API orders them. The stock conversion emits the
 text first, between the assistant's tool call and the tool response, and the
-Gemma-4 templates then drop the tool response."""
+Gemma-4 templates then drop the tool response.
+
+An image in a tool result renders once: in the tool turn on a template that
+shows an image there, else at the start of the text after the tool results.
+The stock render also counts it into the last user message."""
 
 from __future__ import annotations
 
@@ -13,10 +17,12 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
+from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
 from gmlx.load.tokenizer import bundled_chat_template, finish_gguf_tokenizer  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import render  # noqa: E402
 from gmlx.serve.patches.chat_behavior import install_role_normalization  # noqa: E402
 from gmlx.serve.patches.messages_route import install_messages_route  # noqa: E402
 from gmlx.serve.patches.render import (  # noqa: E402
@@ -50,12 +56,12 @@ _TEMPLATES = {
 class _Processor:
     """Renders the template as the tokenizer gmlx builds for the type."""
 
-    def __init__(self, name):
-        model_type, fixture = _TEMPLATES[name]
+    def __init__(self, model_type, fixture):
+        base = model_type.removesuffix("_vl")
         self.chat_template = (
             (_FIXTURES / fixture).read_text() if fixture
-            else bundled_chat_template(model_type))
-        finish_gguf_tokenizer(self, model_type)
+            else bundled_chat_template(base))
+        finish_gguf_tokenizer(self, base)
 
     def apply_chat_template(self, messages, tokenize=False,
                             add_generation_prompt=True, **kw):
@@ -64,6 +70,20 @@ class _Processor:
             add_generation_prompt=add_generation_prompt, **kw)
         rendered = out[0] if isinstance(out, tuple) else out
         return rendered[0] if isinstance(rendered, list) else rendered
+
+
+class _Gemma4Processor:
+    """Renders as mlx-vlm's Gemma4Processor does: the stock rebuild once
+    more, then the tokenizer."""
+
+    apply_chat_template = Gemma4Processor.apply_chat_template
+    _extract_media_from_messages = Gemma4Processor._extract_media_from_messages
+    _as_list = staticmethod(Gemma4Processor._as_list)
+
+    def __init__(self, model_type, fixture):
+        self.model_type = model_type
+        self.tokenizer = _Processor(model_type, fixture)
+        self.chat_template = self.tokenizer.chat_template
 
 
 class _Tok:
@@ -87,8 +107,11 @@ def route(monkeypatch):
     for target in sp_common._render_target_modules():
         monkeypatch.setattr(target, "apply_chat_template",
                             target.apply_chat_template)
-    monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
-                        _PROMPT_UTILS.get_chat_template)
+    for name in ("get_chat_template", "apply_chat_template"):
+        monkeypatch.setattr(_PROMPT_UTILS, name, getattr(_PROMPT_UTILS, name))
+    for row in ("deepseek_v4_vl", "deepseek_v41_vl"):
+        monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, row,
+                            _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
     monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
                         _ANTHROPIC._anthropic_messages_to_internal)
     rg = _RG()
@@ -101,10 +124,13 @@ def route(monkeypatch):
 
     client = TestClient(_APP.app)
 
-    def render(name, messages, stock=False):
-        processor = _Processor(name)
+    def render(name, messages, stock=False, vision=False):
+        model_type, fixture = (_VISION if vision else _TEMPLATES)[name][:2]
+        kind = (_Gemma4Processor if model_type.startswith("gemma4")
+                else _Processor)
+        processor = kind(model_type, fixture)
         monkeypatch.setattr(_ANTHROPIC, "get_cached_model", lambda *a, **k: (
-            None, processor, {"model_type": _TEMPLATES[name][0]}))
+            None, processor, {"model_type": model_type}))
         if stock:
             claim = _ANTHROPIC._anthropic_messages_to_internal
             monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
@@ -183,3 +209,151 @@ _RESULTS_ONLY = {
 def test_a_message_of_tool_results_renders_as_before(route, name, case):
     messages = _RESULTS_ONLY[case]
     assert route(name, messages) == route(name, messages, stock=True)
+
+
+_QWEN = "<|image_pad|>"
+_DEEPSEEK = "<\uff5cdeepseek_image\uff5c>"
+# Template: model type, chat template, and the text one image renders as.
+_VISION = {
+    "qwen3.5": ("qwen3_5", "qwen35_template.jinja", _QWEN),
+    "qwen3.6": ("qwen3_5_moe", "qwen36_template.jinja", _QWEN),
+    "qwen3.8": ("qwen3_5", "qwen38_template.jinja", _QWEN),
+    "kimi-k2.5": ("kimi_k25", "kimi_k25_template.jinja", "<|media_pad|>"),
+    "gemma4-12b": ("gemma4_unified", "gemma4_12b_template.jinja",
+                   "<|image|>"),
+    "gemma4": ("gemma4", "gemma4_template.jinja", "<|image|>"),
+    "deepseek-v4": ("deepseek_v4_vl", "deepseek_v4_template.jinja",
+                    _DEEPSEEK),
+    "deepseek-v4.1": ("deepseek_v41_vl", None, _DEEPSEEK),
+    "mistral3": ("mistral3", "mistral3_template.jinja", "[IMG]"),
+    "glm-5.3": ("glm5_next", "glm5_template.jinja", "<|begin_of_image|>"),
+    "muse": ("muse_glimmer", "muse_template.jinja", "<|patch|>"),
+}
+# The templates that show an image in a tool turn.
+_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "muse", "qwen3.5",
+                 "qwen3.6", "qwen3.8")
+
+
+def test_the_tool_image_types_are_the_checked_ones():
+    assert set(render._TOOL_IMAGES) == {_VISION[n][0] for n in _IN_TOOL_TURN}
+
+
+def _image(name):
+    return {"type": "image",
+            "source": {"type": "url", "url": f"http://img/{name}"}}
+
+
+def _shot(*blocks):
+    return {"type": "tool_result", "tool_use_id": "toolu_0",
+            "content": [_text("RESULT-ONE"), *blocks]}
+
+
+def _in_order(prompt, *wants):
+    pos = prompt.index("ASK-FIRST")
+    for want in wants:
+        found = prompt.find(want, pos)
+        assert found >= 0, f"{want!r} missing or out of order in {prompt!r}"
+        pos = found + len(want)
+
+
+# Mistral3's template raises on a user turn right after a tool turn, so
+# its cases hold no text after the tool results.
+_WITH_TEXT_AFTER = sorted(set(_VISION) - {"mistral3"})
+
+
+@pytest.mark.parametrize("name", _WITH_TEXT_AFTER)
+def test_a_tool_result_image_renders_once_before_the_text(route, name):
+    image = _VISION[name][2]
+    prompt, images = route(name, _round(_shot(_image("s")),
+                                        _text("TEXT-AFTER")), vision=True)
+    assert images == ["http://img/s"]
+    assert prompt.count(image) == 1
+    _in_order(prompt, "RESULT-ONE", image, "TEXT-AFTER")
+
+
+@pytest.mark.parametrize("name", _IN_TOOL_TURN)
+def test_a_tool_result_image_alone_renders_in_its_tool_turn(route, name):
+    image = _VISION[name][2]
+    prompt, images = route(name, _round(_shot(_image("s"))), vision=True)
+    assert images == ["http://img/s"]
+    assert prompt.count(image) == 1
+    _in_order(prompt, "RESULT-ONE", image)
+
+
+def test_the_gemma4_12b_template_shows_a_tool_image_after_the_response(route):
+    prompt, _ = route("gemma4-12b", _round(_shot(_image("s"))), vision=True)
+    assert 'RESULT-ONE<|"|>}<tool_response|><|image|>' in prompt
+
+
+@pytest.mark.parametrize("name", ("deepseek-v4", "deepseek-v4.1",
+                                  "gemma4", "mistral3"))
+def test_a_tool_turn_without_images_gets_its_text(route, name):
+    """A template that shows no image in a tool turn gets the tool text as
+    a string: DeepSeek-V4 raises on a list there, DeepSeek-V4.1 prints an
+    unsupported block, and Mistral3 prints the list."""
+    prompt, _ = route(name, _round(_shot(_image("s"))), vision=True)
+    tail = prompt.split("ASK-FIRST")[-1]
+    assert "'type'" not in tail and '"type"' not in tail
+    assert "Unsupported" not in tail
+    _in_order(prompt, "RESULT-ONE")
+
+
+@pytest.mark.parametrize("name", ("gemma4", "gemma4-12b", "qwen3.5"))
+def test_a_tool_image_and_a_later_image_keep_their_order(route, name):
+    image = _VISION[name][2]
+    messages = _round(_shot(_image("s")), _text("TEXT-AFTER")) + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_text("NEXT-QUESTION"), _image("x")]}]
+    prompt, images = route(name, messages, vision=True)
+    assert images == ["http://img/s", "http://img/x"]
+    assert prompt.count(image) == 2
+    _in_order(prompt, "RESULT-ONE", image, "TEXT-AFTER", "ANSWER",
+              "NEXT-QUESTION", image)
+
+
+@pytest.mark.parametrize("name", ("gemma4", "gemma4-12b", "qwen3.5"))
+def test_the_next_turn_starts_with_a_tool_image_turn(route, name):
+    first = _round(_shot(_image("s")), _text("TEXT-AFTER"))
+    prompt1, _ = route(name, first, vision=True)
+    prompt2, _ = route(name, first + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_text("NEXT-QUESTION")]}], vision=True)
+    head = prompt1[:prompt1.index("TEXT-AFTER") + len("TEXT-AFTER")]
+    assert prompt2.startswith(head)
+
+
+def test_the_image_salt_keys_a_tool_image_where_it_renders(route):
+    """The next turn keys the tool image at the start and with the hash
+    this turn keyed it."""
+    import numpy as np
+    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+        Qwen3VLImageProcessor,
+    )
+    from PIL import Image
+    from types import SimpleNamespace
+
+    from gmlx.cache.media_salt import MediaSalt, image_spans
+
+    ip = Qwen3VLImageProcessor(patch_size=14, merge_size=1, min_pixels=0,
+                               max_pixels=14 * 14 * 64)
+    raw = ip([Image.new("RGB", (56, 28), (200, 0, 0))])
+    cfg = SimpleNamespace(image_token_id=9)
+    proc = SimpleNamespace(image_processor=ip)
+
+    def ids(prompt):
+        # One text id per character; each pad expands to the image's run.
+        row, parts = [], prompt.split(_QWEN)
+        assert len(parts) == 2, prompt
+        row = [1] * len(parts[0]) + [9] * int(np.prod(raw["image_grid_thw"][0]))
+        return np.array([row + [1] * len(parts[1])])
+
+    first = _round(_shot(_image("s")), _text("TEXT-AFTER"))
+    prompt1, _ = route("qwen3.5", first, vision=True)
+    prompt2, _ = route("qwen3.5", first + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_text("NEXT-QUESTION")]}], vision=True)
+    spans1 = image_spans(ids(prompt1), raw, cfg, proc)
+    spans2 = image_spans(ids(prompt2), raw, cfg, proc)
+    assert spans1 is not None and spans2 == spans1
+    end = prompt1.index("TEXT-AFTER")
+    assert MediaSalt(5, spans2).at(end) == MediaSalt(5, spans1).at(end)

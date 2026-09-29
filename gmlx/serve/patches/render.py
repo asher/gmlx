@@ -27,6 +27,16 @@ client sent. For the model types in ``_IN_PLACE_IMAGES`` the wrapper puts
 the images back between the text parts where the client sent them
 (``_images_in_place``), and again after the rebuild the Gemma-4
 processor runs inside the render (``_install_nested_in_place``).
+
+The Messages route sends a tool result's images as image markers in the
+tool message. The rebuild counts the markers of user messages only, so it
+also adds each tool image to the last user message. For the model types
+in ``_TOOL_IMAGES``, whose template renders an image in a tool turn, the
+wrapper leaves the tool images out of the count, in its rebuild and in the
+one the Gemma-4 processor runs. For other types it moves them to the start
+of the user message that follows the tool results and hands the template
+the tool text as a string (``_tool_images_to_user``); with no such message
+the rebuild places them as before.
 Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 """
 
@@ -56,6 +66,56 @@ _IN_PLACE_IMAGES = frozenset((
 ))
 # Image items as the client and the stock rebuild write them.
 _IMAGE_ITEMS = ("image", "image_url", "input_image")
+# The model types whose chat template renders an image item of a tool
+# message in that tool turn.
+_TOOL_IMAGES = frozenset((
+    "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "glm5_next",
+    "gemma4_unified",
+))
+
+
+def _tool_images(message) -> int:
+    """The image markers of ``message`` when it is a tool message."""
+    if not isinstance(message, dict) or message.get("role") != "tool":
+        return 0
+    content = message.get("content")
+    if not isinstance(content, list):
+        return 0
+    return sum(isinstance(part, dict) and part.get("type") in _IMAGE_ITEMS
+               for part in content)
+
+
+def _tool_images_to_user(items: list) -> list:
+    """``items`` with each tool message's images moved to the start of the
+    user message that follows its tool results, and its content as its
+    text, joined as the route joins a tool result's text. Images with no
+    such message stay with the rebuild, which puts them in the last user
+    message."""
+    out = list(items)
+    moved: list = []
+    for i, message in enumerate(out):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "tool":
+            if _tool_images(message):
+                parts = [p for p in message["content"] if isinstance(p, dict)]
+                moved += [p for p in parts if p.get("type") in _IMAGE_ITEMS]
+                text = "\n".join(str(p["text"]) for p in parts
+                                 if p.get("type") == "text" and p.get("text"))
+                out[i] = {**message, "content": text.strip()}
+            continue
+        if moved and role == "user":
+            content = message.get("content")
+            if isinstance(content, list):
+                content = moved + list(content)
+            elif content:
+                content = moved + [{"type": "text", "text": content}]
+            else:
+                content = list(moved)
+            out[i] = {**message, "content": content}
+        moved = []
+    return out
 
 
 def _images_in_place(built: dict, sent: dict) -> dict:
@@ -178,6 +238,15 @@ def install_faithful_history() -> None:
                                 add_generation_prompt=True,
                                 return_messages=False,
                                 num_images=0, num_audios=0, **kwargs):
+            cfg = config if isinstance(config, dict) else config.__dict__
+            tool_images = (sum(_tool_images(m) for m in prompt)
+                           if isinstance(prompt, list) else 0)
+            keep_tool_images = (tool_images > 0
+                                and cfg.get("model_type") in _TOOL_IMAGES)
+            if keep_tool_images:
+                num_images = max(num_images - tool_images, 0)
+            elif tool_images:
+                prompt = _tool_images_to_user(prompt)
             msgs = orig(processor, config, prompt,
                         add_generation_prompt=add_generation_prompt,
                         return_messages=True, num_images=num_images,
@@ -187,7 +256,6 @@ def install_faithful_history() -> None:
                 # fakes, exotic overrides) already produced final output.
                 return msgs
             items = prompt if isinstance(prompt, list) else [prompt]
-            cfg = config if isinstance(config, dict) else config.__dict__
             in_place = cfg.get("model_type") in _IN_PLACE_IMAGES
             # The stock rebuild appends one message per input item; items
             # it cannot read (no role/content) are skipped, breaking the
@@ -217,10 +285,12 @@ def install_faithful_history() -> None:
                 return msgs[-1]
             token = _IN_PLACE_SENT.set(
                 items if in_place and len(msgs) == len(items) else None)
+            kept = _TOOL_IMAGES_KEPT.set(keep_tool_images)
             try:
                 return prompt_utils.get_chat_template(
                     processor, msgs, add_generation_prompt, **kwargs)
             finally:
+                _TOOL_IMAGES_KEPT.reset(kept)
                 _IN_PLACE_SENT.reset(token)
 
         apply_chat_template._kq_faithful_history = True
@@ -236,6 +306,10 @@ def install_faithful_history() -> None:
 # The client's messages of the in-place render running in this context.
 _IN_PLACE_SENT: contextvars.ContextVar[list | None] = contextvars.ContextVar(
     "_gmlx_in_place_sent", default=None)
+# Whether the render running in this context keeps its tool images in the
+# tool messages.
+_TOOL_IMAGES_KEPT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_gmlx_tool_images_kept", default=False)
 _NESTED_FLAG = "_gmlx_in_place_nested"
 
 
@@ -248,8 +322,27 @@ def _install_nested_in_place(prompt_utils) -> None:
     text again. That rebuild renders through the module's
     ``get_chat_template``. Wrapped, it puts each message's images back
     where the client sent them while an in-place render runs, and passes
-    every other render through. Idempotent.
+    every other render through. The rebuild itself, wrapped, leaves the
+    tool images out of its count while a render that keeps them runs.
+    Idempotent.
     """
+    stock_apply = prompt_utils.apply_chat_template
+    if not wrapped_with(stock_apply, _NESTED_FLAG):
+        def apply_chat_template(processor, config, prompt,
+                                add_generation_prompt=True,
+                                return_messages=False, num_images=0,
+                                num_audios=0, **kwargs):
+            if _TOOL_IMAGES_KEPT.get() and isinstance(prompt, list):
+                num_images = max(
+                    num_images - sum(_tool_images(m) for m in prompt), 0)
+            return stock_apply(processor, config, prompt,
+                               add_generation_prompt=add_generation_prompt,
+                               return_messages=return_messages,
+                               num_images=num_images, num_audios=num_audios,
+                               **kwargs)
+
+        prompt_utils.apply_chat_template = link(apply_chat_template,
+                                                stock_apply, _NESTED_FLAG)
     original = prompt_utils.get_chat_template
     if wrapped_with(original, _NESTED_FLAG):
         return

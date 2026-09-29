@@ -514,6 +514,10 @@ SEAMS: tuple[Seam, ...] = (
          "calls and tool results; appends every image ref in block order)"),
     Seam("mlx_vlm.server.anthropic", "_anthropic_image_source_to_ref",
          "messages_route._placed (an image block the conversion keeps)"),
+    Seam("mlx_vlm.server.anthropic", "_anthropic_tool_result_content_to_openai",
+         "render._tool_images_to_user (a tool result with an image converts "
+         "to text parts and one image marker per image; without one, to "
+         "its text joined with newlines)"),
     Seam("mlx_vlm.server.anthropic", "_as_plain_dict",
          "messages_route._placed (reads each block as the stock "
          "conversion reads it)"),
@@ -536,7 +540,14 @@ SEAMS: tuple[Seam, ...] = (
          "(return_messages contract: one rebuilt message per readable "
          "input item; tool passthrough branch) + render._images_in_place "
          "(each user message gets as many images as it holds markers, "
-         "and the rest go to the last user message)"),
+         "and the rest go to the last user message) + "
+         "render._TOOL_IMAGES (a tool message's image markers count toward "
+         "the rest, so the wrapper leaves them out of num_images) + "
+         "render._install_nested_in_place (wrapped: the same, for the "
+         "rebuild a processor runs inside a render that keeps them)"),
+    Seam("mlx_vlm.prompt_utils", "_normalize_tool_message",
+         "render._TOOL_IMAGES (a tool message passes through with its "
+         "content list, image markers included)"),
     Seam("mlx_vlm.prompt_utils", "get_chat_template",
          "server_patches.render.install_faithful_history (owned render "
          "tail mirrors the stock function's) + "
@@ -633,7 +644,11 @@ SEAMS: tuple[Seam, ...] = (
          "Gemma4Processor.apply_chat_template",
          "render._install_nested_in_place (renders by running the stock "
          "rebuild once more, which renders through the prompt_utils "
-         "get_chat_template)"),
+         "get_chat_template and is looked up on prompt_utils per call)"),
+    Seam("mlx_vlm.models.gemma4.processing_gemma4",
+         "Gemma4Processor._extract_media_from_messages",
+         "render._install_nested_in_place (the rebuild it runs counts the "
+         "image items of every message, a tool message's too)"),
     Seam("mlx_vlm.models.pixtral.processing_pixtral",
          "PixtralProcessor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
