@@ -67,10 +67,10 @@ _allow_urls = False
 # may start with. Empty until the server creates the folder.
 _media_root: str | None = None
 _media_root_forms: tuple[str, ...] = ()
-# False while the gate checks a request that came through a launch session
-# socket, which takes media only inline.
-_paths_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "gmlx_media_paths_allowed", default=True)
+# True while the gate checks a request that came through a launch session
+# socket, which takes media only inline: no file and no URL.
+_inline_only: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gmlx_media_inline_only", default=False)
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _VIDEO_PART_TYPES = frozenset({"video", "video_url", "input_video"})
@@ -231,7 +231,7 @@ def reference_refusal(field: str, value: str, want: str) -> MediaRefused:
 
 def path_refusal(field: str, want: str) -> MediaRefused:
     """The refusal for a file path the server does not open."""
-    if not _paths_allowed.get():
+    if _inline_only.get():
         return MediaRefused(f"{field} names a file, and a launch container session "
                             f"takes media only inline, as {want}.")
     if _media_root is None:
@@ -245,11 +245,14 @@ def path_refusal(field: str, want: str) -> MediaRefused:
 
 def _refuse_reference(field: str, value: str, want: str) -> None:
     if _is_url(value):
+        if _inline_only.get():
+            raise MediaRefused(f"{field} names a URL, and a launch container session "
+                               f"takes media only inline, as {want}.")
         if _allow_urls:
             return
         raise MediaRefused(f"{field} names a URL, and this server takes media only "
                            f"as {want}. {_URL_HINT}")
-    if _paths_allowed.get() and media_parts(value) is not None:
+    if not _inline_only.get() and media_parts(value) is not None:
         return
     raise reference_refusal(field, value, want)
 
@@ -393,14 +396,14 @@ async def multipart_text_fields(headers, raw: bytes) -> list[tuple[str, str]]:
 
 
 async def check_request(method: str, path: str, headers, raw: bytes, *,
-                        paths_allowed: bool = True) -> None:
+                        inline_only: bool = False) -> None:
     """Raise :class:`MediaRefused` when the body of a request to ``path``
     names media the server does not accept, is a form sent to a route that
-    takes JSON, or is not JSON. ``paths_allowed`` False refuses paths in the
-    media folder too."""
+    takes JSON, or is not JSON. ``inline_only`` refuses files in the media
+    folder and URLs too."""
     if not raw:
         return
-    token = _paths_allowed.set(paths_allowed)
+    token = _inline_only.set(inline_only)
     try:
         kind = form_type(headers.get("content-type"))
         if kind == _MULTIPART:
@@ -425,7 +428,7 @@ async def check_request(method: str, path: str, headers, raw: bytes, *,
             raise MediaRefused(f"the request body is not valid JSON ({e})") from None
         check_body(body, path)
     finally:
-        _paths_allowed.reset(token)
+        _inline_only.reset(token)
 
 
 def _decode_edit_image(value: str) -> tuple[bytes, str]:
@@ -634,7 +637,7 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,
-                paths_allowed=request.scope.get(SESSION_SCOPE_KEY) is None)
+                inline_only=request.scope.get(SESSION_SCOPE_KEY) is not None)
         except MediaRefused as e:
             return JSONResponse(status_code=400, content=_error_content(
                 request.url.path, 400, "invalid_request_error", str(e)))

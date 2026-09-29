@@ -496,12 +496,12 @@ def media_root(tmp_path):
     mg.set_media_root(None)
 
 
-def _check(body, *, paths_allowed=True, path="/v1/chat/completions"):
+def _check(body, *, inline_only=False, path="/v1/chat/completions"):
     import asyncio
     import json
     return asyncio.run(mg.check_request(
         "POST", path, {"content-type": "application/json"},
-        json.dumps(body).encode(), paths_allowed=paths_allowed))
+        json.dumps(body).encode(), inline_only=inline_only))
 
 
 def test_a_path_in_the_media_folder_passes_the_gate(media_root):
@@ -522,9 +522,21 @@ def test_a_session_socket_request_takes_media_only_inline(media_root):
     part = {"type": "image_url", "image_url": {"url": f"{media_root}/a.png"}}
     with pytest.raises(mg.MediaRefused, match="launch container session takes media "
                                               "only inline"):
-        _check(_chat(part), paths_allowed=False)
+        _check(_chat(part), inline_only=True)
     # The rule holds for this request only.
     _check(_chat(part))
+
+
+def test_a_session_socket_request_may_not_name_a_url(monkeypatch):
+    monkeypatch.setattr(mg, "_allow_urls", True)
+    url = "https://example.com/a.png"
+    for body in (_chat({"type": "image_url", "image_url": {"url": url}}),
+                 _chat({"type": "input_audio", "input_audio": {"data": url}})):
+        with pytest.raises(mg.MediaRefused, match="names a URL, and a launch container "
+                                                  "session takes media only inline"):
+            _check(body, inline_only=True)
+        # server.media_urls still lets the TCP listener take it.
+        _check(body)
 
 
 def test_without_a_media_folder_every_path_is_refused():

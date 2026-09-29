@@ -870,11 +870,12 @@ any address that is not public, such as one on the Mac or the local
 network, checks each redirect the same way, and uses no proxy. It stops a
 fetch that takes more than 60 seconds or brings more than 32 MiB.
 
-Any client that reaches the server can then make the Mac send requests to
-any public host, and the URL can carry data out. That includes a client in
-a launch container with `network: none`. This key does not change which
-files a request can name, which [Media in requests](api.md#media-in-requests)
-describes. The default is `false`, which takes no URLs.
+Any client that reaches the server's port can then make the Mac send
+requests to any public host, and the URL can carry data out. A client in a
+launch container reaches the server through a session socket instead, which
+takes no URLs. This key does not change which files a request can name,
+which [Media in requests](api.md#media-in-requests) describes. The default
+is `false`, which takes no URLs.
 
 #### `server.cors_origins`
 

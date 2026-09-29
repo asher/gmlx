@@ -303,11 +303,9 @@ web pages it reads, and any of them can carry instructions for the tools.
 Give a coding agent no assistants.
 
 A request through the socket takes an image, audio or video only as inline
-data, so the client cannot make the server read a Mac file, even one in the
-server's [media folder](api.md#media-in-requests). With
-[`server.media_urls`](config.md#servermedia_urls) on, the client can make
-the Mac fetch any public URL, even under `network: none`, and the URL can
-carry data out of the container.
+data. The client therefore cannot make the server read a Mac file, even one
+in the server's [media folder](api.md#media-in-requests), or fetch a URL,
+even with [`server.media_urls`](config.md#servermedia_urls) on.
 
 A [browser app](#browser-apps) gives the client a page in your browser at
 `http://127.0.0.1:<web port>`, and that page runs on the Mac. The app's own
