@@ -90,6 +90,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could decode wrong tokens once a request passed the sliding window.
 - With Gemma-4 MTP, a request past the sliding window could decode wrong tokens
   once another joined its batch or its thinking budget or Ctrl-T ended thinking.
+- With MTP on a Gemma-4, DeepSeek-V4 or other sliding-window model, a request
+  reusing a cached prompt one or two tokens shorter could decode wrong tokens.
 - A Gemma-4 12B image request could answer wrongly, because image tokens
   attended to later image tokens on the full-attention layers.
 - A Gemma-4 26B-A4B or 31B image request could answer wrongly, because each
