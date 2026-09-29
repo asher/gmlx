@@ -230,6 +230,21 @@ def test_install_is_idempotent_and_has_a_kill_switch(guarded, monkeypatch):
     assert install_rotating_trim_fix() is False
 
 
+def test_each_rotating_class_is_pinned_whole():
+    """No rollback reaches the depth raise because is_trimmable reports a
+    buffer past its window as not trimmable. A class row fingerprints the
+    class body, is_trimmable included, so each origin's two classes need
+    one."""
+    from gmlx.upstream.seams import SEAMS
+
+    rows = {(s.module, s.attr) for s in SEAMS}
+    missing = sorted(
+        (m, c) for m in ("mlx_lm.models.cache", "mlx_vlm.models.cache")
+        for c in ("RotatingKVCache", "BatchRotatingKVCache")
+        if (m, c) not in rows)
+    assert not missing, missing
+
+
 def _child(order: str) -> dict:
     r = subprocess.run(
         [sys.executable, os.path.abspath(__file__), order],

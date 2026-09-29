@@ -232,6 +232,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_lm.models.cache", "BatchRotatingKVCache.update_and_fetch",
          "rotating_trim_fix (mlx-lm origin, where a one-token update always "
          "goes in place)"),
+    Seam("mlx_lm.models.cache", "BatchRotatingKVCache",
+         "rotating_trim_fix (is_trimmable reports a buffer past its window "
+         "as not trimmable, so no rollback reaches the depth raise)"),
     # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
     Seam("mlx_lm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
