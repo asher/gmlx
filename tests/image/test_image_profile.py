@@ -71,12 +71,44 @@ def test_summary_ratio_and_groups():
         records, wall = p.step(fn)
     s = prof.summarize(records, [wall], plain)
     assert s["step"]["booked_s"] == pytest.approx(wall, rel=1e-6, abs=1e-6)
-    assert s["step"]["sum_ratio"] > 0
+    assert s["step"]["instrumented_over_plain"] > 0
+    assert s["step"]["corrected_ops_over_plain"] == pytest.approx(
+        s["step"]["ops_s"] / s["step"]["plain_median_s"])
     shares = sum(g["share"] for g in s["by_class"])
     assert shares == pytest.approx(1.0)
     keys = {g["key"] for g in s["by_pattern"]}
     assert "module:layers.N.attention.qkv:Linear" in keys
     assert "seam:layers.N.attention:sdpa" in keys
+
+
+def _rec(kind, name, seconds):
+    return prof.OpRecord(kind, name, name, "", [], [], [], "", seconds)
+
+
+def test_summary_takes_one_round_trip_off_each_op_record():
+    records = [_rec("glue", "a", 0.02), _rec("module", "a", 0.5),
+               _rec("glue", "b", 0.01), _rec("seam", "b", 0.2),
+               _rec("glue", "c", 0.0), _rec("module", "c", 0.05),
+               _rec("glue", "tail", 0.02)]
+    s = prof.summarize(records, [0.8], [0.6, 0.62, 0.61], sync_s=0.1)
+    st = s["step"]
+    assert st["ops_s"] == pytest.approx(0.75)
+    assert st["ops_corrected_s"] == pytest.approx(0.4 + 0.1 + 0.0)
+    assert st["corrected_ops_over_plain"] == pytest.approx(0.5 / 0.61)
+    assert st["instrumented_over_plain"] == pytest.approx(0.8 / 0.61)
+    by = {g["key"]: g for g in s["by_class"]}
+    assert by["module:a:"]["corrected_seconds"] == pytest.approx(0.4)
+    assert by["module:c:"]["corrected_seconds"] == 0.0
+    assert by["glue"]["corrected_seconds"] == pytest.approx(0.05)
+    assert sum(g["corrected_share"] for g in s["by_class"]) ==         pytest.approx(1.0)
+    assert by["module:a:"]["corrected_share"] == pytest.approx(0.4 / 0.55)
+    assert by["module:a:"]["share"] == pytest.approx(0.5 / 0.8)
+
+
+def test_sync_round_trip_reports_a_small_positive_cost():
+    r = prof.sync_round_trip(iters=20, warmup=2)
+    assert 0 < r["p10_s"] <= r["median_s"] <= r["p90_s"] < 0.1
+    assert r["iters"] == 20
 
 
 def test_pattern_folds_block_indices():

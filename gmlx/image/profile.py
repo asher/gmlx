@@ -8,9 +8,12 @@ lazy work queued since the previous op. It then runs, evaluates its output
 and books its own time. Calls nested inside a timed op run untimed, so no
 time is booked twice, and the records of one step add up to its wall time.
 
-Each evaluation is a device sync, so an instrumented step runs longer than a
-plain one. ``summarize`` compares the booked total with plain steps, and a
-ratio near 1 says the per-op split is trustworthy.
+The glue records close every gap, so the records always add up to the
+instrumented step's own wall time. Each timed op also pays one eval round
+trip that a plain step does not, and ``sync_round_trip`` measures it in the
+same run. ``summarize`` subtracts it from every op record and scores the
+corrected op total against the plain step time, which checks that the
+per-op split accounts for the step.
 """
 
 from __future__ import annotations
@@ -195,6 +198,31 @@ class StepProfiler:
         return self.records, end - t0
 
 
+def sync_round_trip(iters: int = 200, warmup: int = 20) -> dict:
+    """Wall time of one eval round trip on a one-element add: the fixed cost
+    a timed op pays for its own command buffer and wait."""
+    x = mx.zeros((1,))
+    mx.eval(x)
+    ts: list[float] = []
+    for i in range(warmup + iters):
+        t0 = time.perf_counter()
+        x = x + 1
+        mx.eval(x)
+        if i >= warmup:
+            ts.append(time.perf_counter() - t0)
+    ts.sort()
+    return {"median_s": statistics.median(ts), "p10_s": ts[len(ts) // 10],
+            "p90_s": ts[9 * len(ts) // 10], "iters": iters}
+
+
+def corrected(r: OpRecord, sync_s: float) -> float:
+    """An op record's time less one round trip, at least 0. Glue keeps its
+    time."""
+    if r.kind == "glue":
+        return r.seconds
+    return max(0.0, r.seconds - sync_s)
+
+
 def plain_step(fn) -> float:
     """Wall time of one uninstrumented call of ``fn``."""
     mx.synchronize()
@@ -212,26 +240,33 @@ def pattern(path: str) -> str:
     return _NUM.sub(".N", path)
 
 
-def _group(records, key) -> list[dict]:
+def _group(records, key, sync_s: float) -> list[dict]:
     total = sum(r.seconds for r in records) or 1.0
+    total_c = sum(corrected(r, sync_s) for r in records) or 1.0
     out: dict = {}
     for r in records:
         k = key(r)
-        g = out.setdefault(k, {"key": k, "calls": 0, "seconds": 0.0})
+        g = out.setdefault(k, {"key": k, "calls": 0, "seconds": 0.0,
+                               "corrected_seconds": 0.0})
         g["calls"] += 1
         g["seconds"] += r.seconds
+        g["corrected_seconds"] += corrected(r, sync_s)
     rows = sorted(out.values(), key=lambda g: -g["seconds"])
     for g in rows:
         g["share"] = g["seconds"] / total
+        g["corrected_share"] = g["corrected_seconds"] / total_c
     return rows
 
 
 def summarize(records: list[OpRecord], instrumented: list[float],
-              plain: list[float]) -> dict:
+              plain: list[float], sync_s: float = 0.0) -> dict:
     """Aggregates for the profile JSON. ``instrumented`` and ``plain`` are
-    step wall times, ``records`` one instrumented step's records."""
+    step wall times, ``records`` one instrumented step's records and
+    ``sync_s`` the round trip measured in the same run. The exit ratio is
+    ``corrected_ops_over_plain``. Shares come raw and corrected."""
     booked = sum(r.seconds for r in records)
-    ops_only = sum(r.seconds for r in records if r.kind != "glue")
+    ops_s = sum(r.seconds for r in records if r.kind != "glue")
+    ops_c = sum(corrected(r, sync_s) for r in records if r.kind != "glue")
     plain_med = statistics.median(plain)
     return {
         "step": {
@@ -239,15 +274,17 @@ def summarize(records: list[OpRecord], instrumented: list[float],
             "plain_s": plain,
             "instrumented_s": instrumented,
             "booked_s": booked,
-            "ops_s": ops_only,
-            "glue_s": booked - ops_only,
-            "sum_ratio": booked / plain_med,
-            "ops_ratio": ops_only / plain_med,
+            "ops_s": ops_s,
+            "glue_s": booked - ops_s,
+            "sync_s": sync_s,
+            "ops_corrected_s": ops_c,
+            "instrumented_over_plain": booked / plain_med,
+            "corrected_ops_over_plain": ops_c / plain_med,
         },
         "by_class": _group(records, lambda r: f"{r.kind}:{r.name}:{r.codec}"
-                           if r.kind != "glue" else "glue"),
+                           if r.kind != "glue" else "glue", sync_s),
         "by_pattern": _group(records, lambda r: f"{r.kind}:{pattern(r.path)}"
-                             f":{r.name}"),
+                             f":{r.name}", sync_s),
         "records": [asdict(r) for r in records],
     }
 
