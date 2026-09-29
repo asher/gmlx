@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import ast
 import collections
+import importlib
 import pathlib
 
+import pytest
+
 import gmlx
+from gmlx.upstream.patching import _walk, link
 
 _ROOT = pathlib.Path(gmlx.__file__).parent
 _LINKS = {"_gmlx_orig", "__wrapped__"}
@@ -41,7 +45,6 @@ _KNOWN = {
         "gen/media_spans.py::install_block_aware_generate_step",
         "models/deepseek_v4/chat.py::install_string_content",
         "models/deepseek_v41/tools.py::install_message_normalizer",
-        "models/gemma4/batched_sdpa.py::install_gemma4_batched_sdpa",
         "serve/admit_gate.py::install_admit_headroom_gate",
         "serve/batch_sched.py::install_decode_priority_sched",
         "serve/engine_jobs.py::_install_diffusion_jobs",
@@ -83,17 +86,6 @@ _KNOWN = {
         "spec/engine.py::install_owned_spec_engine",
         "stream/wired_limit.py::_install_wired_limit_warn_once",
         "stream/wired_limit.py::_neutralize_wired_limit_sweep",
-        "tune/attention.py::install_training_attention",
-        "tune/checkpoint.py::checkpoint_layers",
-        "upstream/arrays_cache_fix.py::install_arrays_cache_fix",
-        "upstream/cascade_sdpa.py::_mask_stamp_on_filter",
-        "upstream/cascade_sdpa.py::_merge_stamp_on_extend",
-        "upstream/cascade_sdpa.py::install_cascade_sdpa",
-        "upstream/cascade_sdpa.py::install_cascade_stamp",
-        "upstream/quantized_cache_pack_fix.py::_wrap",
-        "upstream/quantized_sdpa_fix.py::_patch_make_mask",
-        "upstream/quantized_sdpa_fix.py::install_quantized_sdpa_mask_fix",
-        "upstream/sparse_sdpa.py::install_sparse_sdpa",
     },
     "link": {
         "cache/apc_pooling.py::install_batched_cachelist_admission",
@@ -113,7 +105,6 @@ _KNOWN = {
         "gen/prefill_decay.py::install_prefill_decay",
         "gen/prefill_tail.py::install_prefill_tail",
         "lora_rows.py::install_row_channel",
-        "models/deepseek_v4/cache.py::_wrap_rotating",
         "models/deepseek_v4/chat.py::install_string_content",
         "models/deepseek_v41/tools.py::install_message_normalizer",
         "serve/admit_gate.py::install_admit_headroom_gate",
@@ -154,11 +145,6 @@ _KNOWN = {
         "stream/wired_limit.py::configure_cpu_device",
         "tui/chat.py::_backend_mtp_text",
         "tui/chat.py::_backend_plain_text",
-        "upstream/cascade_sdpa.py::_mask_stamp_on_filter",
-        "upstream/cascade_sdpa.py::_merge_stamp_on_extend",
-        "upstream/gdn_patches.py::_patch_qwen35_empty_sequence_guard",
-        "upstream/quantized_cache_pack_fix.py::_wrap",
-        "upstream/rotating_cache_fix.py::_install_notrim",
     },
 }
 
@@ -323,3 +309,51 @@ def test_known_offenders_still_offend():
     found = _scan()
     for rule, known in _KNOWN.items():
         assert sorted(known - found[rule]) == [], rule
+
+
+_ROUTES = {
+    "cascade": ("gmlx.upstream.cascade_sdpa", "install_cascade_sdpa",
+                "_installed_route", "_gmlx_cascade_route"),
+    "sparse": ("gmlx.upstream.sparse_sdpa", "install_sparse_sdpa",
+               "_installed", "_gmlx_sparse_route"),
+    "g4": ("gmlx.models.gemma4.batched_sdpa", "install_gemma4_batched_sdpa",
+           "_installed", "_gmlx_g4_route"),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_ROUTES))
+def test_route_reinstall_under_another_wrap_adds_no_layer(monkeypatch, route):
+    """The SDPA route installers read their flag on the outermost function,
+    so a reinstall under another installer's wrap added a second route."""
+    modname, install, installed, flag = _ROUTES[route]
+    mod = importlib.import_module(modname)
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
+    monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
+    monkeypatch.delenv("GMLX_G4_BATCHED_SDPA", raising=False)
+    if route == "g4":
+        monkeypatch.setattr(mod.attn_hd512, "_installed", True)
+    seams = []
+    for pkg, name in mod._MODULES:
+        try:
+            seam = importlib.import_module(f"{pkg}.{name}")
+        except ImportError:
+            continue
+        monkeypatch.setattr(seam, "scaled_dot_product_attention",
+                            seam.scaled_dot_product_attention)
+        seams.append(seam)
+
+    def layers():
+        return [sum(bool(getattr(f, flag, False)) for f in _walk(
+            s.scaled_dot_product_attention)) for s in seams]
+
+    monkeypatch.setattr(mod, installed, False)
+    assert getattr(mod, install)()
+    before = layers()
+    assert max(before) == 1
+    for s in seams:
+        cur = s.scaled_dot_product_attention
+        s.scaled_dot_product_attention = link(
+            lambda *a, _cur=cur, **k: _cur(*a, **k), cur, "_test_other")
+    monkeypatch.setattr(mod, installed, False)
+    assert getattr(mod, install)()
+    assert layers() == before

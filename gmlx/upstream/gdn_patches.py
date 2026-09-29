@@ -19,7 +19,7 @@ from typing import Callable, NamedTuple, cast
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
 from gmlx.load.hadamard_modules import is_folded, shared_linears
-from .patching import ClassPatch
+from .patching import ClassPatch, link
 
 
 def _metal_kernel(**kwargs) -> Callable[..., list[mx.array]]:
@@ -1543,7 +1543,8 @@ def _patch_batched_verify_sdpa() -> None:
             queries, keys, values, scale=scale, mask=sdpa_mask
         )
 
-    _L._target_verify_left_padded_attention = _batched_verify_attention
+    _L._target_verify_left_padded_attention = link(_batched_verify_attention,
+                                                   _orig_left_padded)
     _BATCHED_VERIFY_SDPA_PATCHED = True
 
 
@@ -1602,7 +1603,7 @@ def _patch_qwen35_empty_sequence_guard() -> None:
             return self.norm(inputs_embeds)
         return _orig_model_call(self, inputs, inputs_embeds=inputs_embeds, **kw)
 
-    Qwen3_5Model.__call__ = _s0_guarded_call  # pyright: ignore[reportAttributeAccessIssue]
+    Qwen3_5Model.__call__ = link(_s0_guarded_call, _orig_model_call)  # pyright: ignore[reportAttributeAccessIssue]
     _S0_MODEL_GUARD_INSTALLED = True
 
 

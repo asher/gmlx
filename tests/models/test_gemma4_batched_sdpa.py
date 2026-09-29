@@ -22,6 +22,7 @@ from mlx_vlm.models.gemma4 import language as g4v
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 import gmlx.models.gemma4.batched_sdpa as gb
+from gmlx.upstream.patching import wrapped_with
 
 
 def _chain(fn):
@@ -46,8 +47,9 @@ _orig_lm = _stock(g4t.scaled_dot_product_attention)
 def _fresh_route_state():
     """Other suites can leave gb._installed latched while the module symbols
     hold a chain without the g4 route (a teardown elsewhere rebound them).
-    Clear the latch so _install() wraps fresh on whatever chain exists, and
-    restore the entry state on exit instead of severing chains to stock."""
+    Clear the latch so _install() finds or adds the route on whatever chain
+    exists, and restore the entry state on exit instead of severing chains
+    to stock."""
     snap_vlm = g4v.scaled_dot_product_attention
     snap_lm = g4t.scaled_dot_product_attention
     snap_latch = gb._installed
@@ -104,11 +106,12 @@ def test_route_matches_masked_reference(monkeypatch):
 
 def test_gemma4_text_seam_claims(monkeypatch):
     """Text-only loads build from mlx_lm.models.gemma4_text; the route must
-    claim at that module's symbol too, chained to mlx_lm's own original."""
+    claim at that module's symbol too, chained to mlx_lm's own original.
+    Another route, such as the cascade, may sit on top and pass the call on."""
     _install()
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
     route = g4t.scaled_dot_product_attention
-    assert getattr(route, "_gmlx_g4_route", False)
+    assert wrapped_with(route, "_gmlx_g4_route")
     assert any(fn is _orig_lm for fn in _chain(route))
     mx.random.seed(5)
     pads = [3, 0]

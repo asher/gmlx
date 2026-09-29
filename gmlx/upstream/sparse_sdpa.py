@@ -40,6 +40,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import wrapped_with
 
 _installed = False
 _CLAIMS = [0]
@@ -253,7 +254,7 @@ def install_sparse_sdpa() -> bool:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_sparse_route", False):
+        if wrapped_with(cur, "_gmlx_sparse_route"):
             patched += 1
             continue
         mod.scaled_dot_product_attention = _make_route(cur)

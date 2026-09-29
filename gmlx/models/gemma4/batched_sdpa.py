@@ -55,6 +55,7 @@ import mlx.core as mx
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import wrapped_with
 
 try:
     import mlx_kquant as _kq
@@ -279,7 +280,7 @@ def install_gemma4_batched_sdpa() -> bool:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_g4_route", False):
+        if wrapped_with(cur, "_gmlx_g4_route"):
             patched += 1
             continue
         mod.scaled_dot_product_attention = _make_route(cur)

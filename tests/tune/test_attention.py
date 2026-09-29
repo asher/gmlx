@@ -138,3 +138,46 @@ def test_installer_routes_training_calls_only(monkeypatch):
         assert llama.scaled_dot_product_attention is spy
     finally:
         llama.scaled_dot_product_attention = orig
+
+
+def test_install_and_restore_under_a_later_wrap(monkeypatch):
+    """Another installer's wrap on top hid the layer from a second install,
+    which added one more, and the restore put the stock function back over
+    that wrap and dropped it."""
+    from mlx_lm.models import llama
+    from mlx_lm.models.llama import ModelArgs
+
+    args = ModelArgs(model_type="llama", hidden_size=32, num_hidden_layers=1,
+                     intermediate_size=64, num_attention_heads=4,
+                     num_key_value_heads=2, rms_norm_eps=1e-5, vocab_size=64)
+    model = llama.Model(args)
+    calls = []
+    orig = llama.scaled_dot_product_attention
+
+    def spy(*a, **kw):
+        calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(llama, "scaled_dot_product_attention", spy)
+    restore = install_training_attention(model)
+    ours = llama.scaled_dot_product_attention
+
+    def other(*a, **kw):
+        return ours(*a, **kw)
+
+    other.__dict__["_gmlx_orig"] = ours
+    llama.scaled_dot_product_attention = other
+    again = install_training_attention(model)
+    assert again.count == 0
+    assert llama.scaled_dot_product_attention is other
+
+    again()
+    restore()
+    assert llama.scaled_dot_product_attention is other
+    model.train()
+    mx.eval(model(mx.array([[1, 2, 3, 4, 5]])))
+    assert calls == [1], "the spent layer kept the blocked route"
+    third = install_training_attention(model)
+    assert third.count >= 1
+    third()
+    assert llama.scaled_dot_product_attention is other

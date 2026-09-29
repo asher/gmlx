@@ -25,8 +25,10 @@ from __future__ import annotations
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import link, wrapped_with
 
 _BLOCK = 256
+_FLAG = "_gmlx_training_attention"
 
 
 def _prep_mask(mask, Tq: int, Tk: int):
@@ -183,41 +185,50 @@ def install_training_attention(model, *, block: int = _BLOCK):
     (the mlx-lm and mlx-vlm seam every stock attention calls) and returns
     a function that restores them. Calls with a cache or attention sinks,
     made while the model is in eval mode or made with
-    ``GMLX_TRAIN_BLOCKED_ATTN=0``, take the original path."""
+    ``GMLX_TRAIN_BLOCKED_ATTN=0``, take the original path.
+
+    The restore takes out each layer that is still on top. A layer that
+    another installer wrapped since stays under that wrap, spent: it drops
+    the model, passes every call through and no longer carries the flag,
+    so the wrap on top is kept and a later install adds a live layer."""
     import sys
 
     patched = []
     seen = set()
+    live = {"model": model}
     for m in model.modules():
         mod = sys.modules.get(type(m).__module__)
         if mod is None or id(mod) in seen:
             continue
         seen.add(id(mod))
         orig = getattr(mod, "scaled_dot_product_attention", None)
-        if orig is None or getattr(orig, "_gmlx_training_attention", False):
+        if orig is None or wrapped_with(orig, _FLAG):
             continue
 
         def make(orig):
             def sdpa(queries, keys, values, cache=None, scale=None, mask=None,
                      sinks=None, **kw):
-                if (model.training and cache is None and sinks is None
-                        and not kw and scale is not None
+                trained = live.get("model")
+                if (trained is not None and trained.training and cache is None
+                        and sinks is None and not kw and scale is not None
                         and isinstance(keys, mx.array)
                         and env_bool("GMLX_TRAIN_BLOCKED_ATTN", True)):
                     return blocked_attention(queries, keys, values, scale=scale,
                                              mask=mask, block=block)
                 return orig(queries, keys, values, cache, scale, mask,
                             *(() if sinks is None else (sinks,)), **kw)
-            sdpa._gmlx_training_attention = True
-            sdpa._gmlx_orig = orig
-            return sdpa
+            return link(sdpa, orig, _FLAG)
 
-        setattr(mod, "scaled_dot_product_attention", make(orig))
-        patched.append((mod, orig))
+        wrapper = make(orig)
+        setattr(mod, "scaled_dot_product_attention", wrapper)
+        patched.append((mod, orig, wrapper))
 
     def restore():
-        for mod, orig in patched:
-            setattr(mod, "scaled_dot_product_attention", orig)
+        live.clear()
+        for mod, orig, wrapper in patched:
+            wrapper.__dict__.pop(_FLAG, None)
+            if getattr(mod, "scaled_dot_product_attention", None) is wrapper:
+                setattr(mod, "scaled_dot_product_attention", orig)
         patched.clear()
 
     restore.count = len(patched)

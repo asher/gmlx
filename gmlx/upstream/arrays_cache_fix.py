@@ -24,6 +24,8 @@ single-stream on every row.
 
 from __future__ import annotations
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _PATCH_FLAG = "_kq_lengths_clears_left_padding"
 
 
@@ -38,7 +40,7 @@ def install_arrays_cache_fix() -> bool:
 
     for cls in cache_types("ArraysCache"):
         orig = cls.prepare
-        if getattr(orig, _PATCH_FLAG, False):
+        if wrapped_with(orig, _PATCH_FLAG):
             continue
 
         def prepare(self, lengths=None, _orig=orig, **kwargs):
@@ -46,6 +48,6 @@ def install_arrays_cache_fix() -> bool:
             if lengths is not None:
                 self.left_padding = None
 
-        prepare.__dict__[_PATCH_FLAG] = True
+        link(prepare, orig, _PATCH_FLAG)
         cls.prepare = prepare
     return True

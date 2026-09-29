@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _INSTALLED = "_gmlx_pack_fix"
 _WIDTHS: dict = {}
 
@@ -68,7 +70,7 @@ def _seed(cache, keys, values, rows_used: int) -> None:
 
 def _wrap(cls, offset_attr: str):
     stock = cls.update_and_fetch
-    if getattr(stock, _INSTALLED, False):
+    if wrapped_with(stock, _INSTALLED):
         return False
 
     def update_and_fetch(self, keys, values):
@@ -76,7 +78,7 @@ def _wrap(cls, offset_attr: str):
             _seed(self, keys, values, int(getattr(self, offset_attr, 0) or 0))
         return stock(self, keys, values)
 
-    setattr(update_and_fetch, _INSTALLED, True)
+    link(update_and_fetch, stock, _INSTALLED)
     cls.update_and_fetch = update_and_fetch
     return True
 

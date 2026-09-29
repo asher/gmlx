@@ -25,6 +25,8 @@ import mlx.core as mx
 
 from mlx_lm.models.cache import _BaseCache
 
+from gmlx.upstream.patching import link
+
 
 class PackedPool:
     """Pool rows at rest in the mlx-kquant latent_fp4_pack form: codes
@@ -1375,9 +1377,9 @@ def _wrap_rotating(cls, fields) -> None:
             self._mtp_undo = None
         return n
 
-    cls.update_and_fetch = update_and_fetch
-    cls.is_trimmable = is_trimmable
-    cls.trim = trim
+    cls.update_and_fetch = link(update_and_fetch, orig_update)
+    cls.is_trimmable = link(is_trimmable, orig_is_trimmable)
+    cls.trim = link(trim, orig_trim)
     cls._mtp_undo = None
     cls._gmlx_mtp_undo_attached = True
 

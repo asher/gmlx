@@ -59,6 +59,7 @@ import logging
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ def _patch_make_mask() -> bool:
     except ImportError:
         return False
     orig = BatchQuantizedKVCache.make_mask
-    if getattr(orig, "_gmlx_starts_reg", False):
+    if wrapped_with(orig, "_gmlx_starts_reg"):
         return True
 
     def make_mask(self, N, return_array=False, **kwargs):
@@ -246,7 +247,7 @@ def install_quantized_sdpa_mask_fix() -> bool:
         cur = getattr(mod, "quantized_scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_qsdpa_fix", False):
+        if wrapped_with(cur, "_gmlx_qsdpa_fix"):
             patched += 1
             continue
         mod.quantized_scaled_dot_product_attention = _make_fixed(cur, kq_fn)

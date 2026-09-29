@@ -50,6 +50,7 @@ from typing import cast
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import link, wrapped_with
 
 _installed_route = False
 _installed_stamp = False
@@ -309,7 +310,7 @@ def install_cascade_sdpa() -> bool:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None:
             continue
-        if getattr(cur, "_gmlx_cascade_route", False):
+        if wrapped_with(cur, "_gmlx_cascade_route"):
             patched += 1
             continue
         setattr(mod, "scaled_dot_product_attention", _make_route(cur))
@@ -366,7 +367,7 @@ def _merge_stamp_on_extend(cache):
     """Instance-level extend wrapper: admission re-derives the stamp from
     both sides' token bytes (an unstamped side clears it)."""
     fn = getattr(cache, "extend", None)
-    if fn is None or getattr(fn, "_gmlx_cascade_merge", False):
+    if fn is None or wrapped_with(fn, "_gmlx_cascade_merge"):
         return
     orig = fn
 
@@ -381,7 +382,7 @@ def _merge_stamp_on_extend(cache):
             _c._gmlx_cascade = merged
         return out
 
-    setattr(_extend, "_gmlx_cascade_merge", True)
+    link(_extend, orig, "_gmlx_cascade_merge")
     cache.extend = _extend
 
 
@@ -391,7 +392,7 @@ def _mask_stamp_on_filter(cache):
     surviving rows' indices, as the stock batch loop and the spec engine
     pass it; a stamp whose rows do not cover them is dropped."""
     fn = getattr(cache, "filter", None)
-    if fn is None or getattr(fn, "_gmlx_cascade_filter", False):
+    if fn is None or wrapped_with(fn, "_gmlx_cascade_filter"):
         return
     orig = fn
 
@@ -410,7 +411,7 @@ def _mask_stamp_on_filter(cache):
                 _c.__dict__.pop("_gmlx_cascade", None)
         return out
 
-    setattr(_filter, "_gmlx_cascade_filter", True)
+    link(_filter, orig, "_gmlx_cascade_filter")
     cache.filter = _filter
 
 
@@ -563,9 +564,9 @@ def install_cascade_stamp() -> bool:
     ext = getattr(ar, "_extend_cache", None)
     if ppb is None or ext is None:
         return False
-    if not getattr(ppb.__init__, "_gmlx_cascade_stamp", False):
+    if not wrapped_with(ppb.__init__, "_gmlx_cascade_stamp"):
         ppb.__init__ = _make_stamped_ppb_init(ppb.__init__)
-    if not getattr(ext, "_gmlx_cascade_stamp", False):
+    if not wrapped_with(ext, "_gmlx_cascade_stamp"):
         ar._extend_cache = _make_stamped_extend_cache(ext)
     _installed_stamp = True
     return True

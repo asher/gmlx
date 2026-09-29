@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import wrapped_with
+
 _NAMES = ("argpartition", "argsort", "argmax", "argmin")
 
 
@@ -55,7 +57,7 @@ def install_index_stop_gradient():
     patched = []
     for name in _NAMES:
         fn = getattr(mx, name)
-        if getattr(fn, "_gmlx_index_stop_gradient", False):
+        if wrapped_with(fn, "_gmlx_index_stop_gradient"):
             continue
         setattr(mx, name, _Detached(fn))
         patched.append((name, fn))

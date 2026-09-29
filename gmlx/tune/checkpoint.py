@@ -27,6 +27,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from gmlx.upstream.patching import wrapped_with
+
 
 def draws_random(module) -> bool:
     """True when a training forward of ``module`` draws from the global
@@ -112,7 +114,7 @@ def checkpoint_layers(model, replay_dropout: bool = False) -> int:
         layer._gmlx_ckpt = True
         layer._gmlx_replay_dropout = bool(replay_dropout)
         cls = type(layer)
-        if getattr(cls.__call__, "_gmlx_checkpointed", False):
+        if wrapped_with(cls.__call__, "_gmlx_checkpointed"):
             continue
         fn = cls.__call__
 

@@ -24,6 +24,8 @@ import os
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import link
+
 _installed = False
 
 
@@ -86,4 +88,4 @@ def _install_notrim(RotatingKVCache, create_causal_mask):
         )
 
     RotatingKVCache._update_concat = _notrim_update_concat
-    RotatingKVCache.make_mask = _notrim_make_mask
+    RotatingKVCache.make_mask = link(_notrim_make_mask, _orig_make_mask)
