@@ -10,20 +10,23 @@ into ``GMLX_APC_ENABLED``), so the stock call returns ``None`` and never
 builds a manager to discard.
 
 Override rule: an override may wrap, pre/post-process, or replace an
-inherited method outright, but does not duplicate an inherited body to edit
-part of it; when a change would need a copied body, vendor instead.
-``_store_kv_blocks_copy`` is the one standing copied body, because the
-chunked eval sits mid-loop where no wrapper reaches it. It came from the
-retired ``install_apc_batched_store_eval`` method patch and is not
-repeated elsewhere. It also carries the ckpt-store policy (``_ckpt_disk``:
-suppress layer-major, optionally memory-only), a second in-body
-divergence, and the per-block image salt (``block_chain``), a third: the
-copied store hashes each block under its own salt, and the lookups of a
-prompt with images walk the stock chain the same way (``lookup_prefix``,
-``lookup_prefix_disk_cache``). The upstream file is not vendored on its
-own. APC moves into owned code with the generate loop and spec decode in
-the engine step after 0.5. Until then the seam pins on the stock store
-and both lookups report any upstream change to them.
+inherited method outright. Three overrides mirror a stock body instead:
+
+* ``_store_kv_blocks_copy`` mirrors the stock store, because the chunked
+  eval sits mid-loop where no wrapper reaches it. It came from the retired
+  ``install_apc_batched_store_eval`` method patch. It also carries the
+  ckpt-store policy (``_ckpt_disk``: suppress layer-major, optionally
+  memory-only) and hashes each block under the image salt at its end
+  (``block_chain``).
+* ``lookup_prefix`` mirrors the stock memory walk and
+  ``lookup_prefix_disk_cache`` the stock disk restore. A prompt with
+  images takes them, and they walk ``block_chain`` as the store does.
+
+A mirrored body would call for vendoring the upstream file. APC moves into
+owned code with the generate loop and spec decode in the engine step after
+0.5, so nothing is vendored now. Until then the seam pins on the stock
+store and both lookups report any upstream change to the bodies they
+mirror.
 """
 
 from __future__ import annotations
@@ -96,13 +99,14 @@ class GmlxAPCManager(_apc.APCManager):
     are pure materialization (nothing in the loop consumes their values), so
     they can be evaluated in chunks: same data volume, ~30x fewer syncs.
 
-    ``_store_kv_blocks_copy`` is a verbatim copy of the stock store with the
-    eval hoisted into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32;
-    <=0 means a single eval before return). All evals still complete before
-    the method returns, preserving the stock guarantee that block tensors
-    are decoupled from the caller's cache before ``mx.clear_cache`` can
-    release it. If the private helpers it references drift upstream, the
-    override defers to the stock store instead.
+    ``_store_kv_blocks_copy`` mirrors the stock store with the eval hoisted
+    into ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32; <=0 means
+    a single eval before return), plus the ckpt-store policy and the
+    per-block image salt the module docstring lists. All evals still
+    complete before the method returns, preserving the stock guarantee that
+    block tensors are decoupled from the caller's cache before
+    ``mx.clear_cache`` can release it. If the private helpers it references
+    drift upstream, the override defers to the stock store instead.
     """
 
     def __init__(self, *args, **kwargs):
@@ -388,8 +392,10 @@ class GmlxAPCManager(_apc.APCManager):
     # the exact lookup runs the stock body once per window of prefix
     # lengths that share a salt, longest first. A block keys on the salt
     # at its end (``block_chain``), so two turns that share a prefix share
-    # its blocks, and a turn that adds an image restores the blocks the
-    # earlier turn stored.
+    # its blocks. Stock ``apc_lookup_plan`` drops a memory hit whose prefix
+    # holds a media id, so a prefix with an image restores its blocks from
+    # the disk tier, and from memory only where the model's media guard
+    # sees no media ids.
 
     def lookup_exact_cache(self, token_ids, extra_hash=0,
                            max_prefix_tokens=None, min_prefix_tokens=0):
