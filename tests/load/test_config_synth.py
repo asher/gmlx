@@ -2025,7 +2025,42 @@ _QWEN4EXP_SHAPES = {
 }
 
 
-def test_qwen4exp_synth_instantiates():
+def _qwen4exp_trace(monkeypatch, m) -> dict:
+    """Record the last position of each decoder layer's output, each MoE
+    router's gates, and each QSA indexer's block scores and selection."""
+    rec: dict = {"layer": [], "gates": [], "qsa": []}
+    layer_call, moe_call, select = (m.DecoderLayer.__call__,
+                                    m.SparseMoeBlock.__call__,
+                                    m.QSAIndexer.select)
+
+    def layer(self, h, *a, **k):
+        y = layer_call(self, h, *a, **k)
+        rec["layer"].append(y[0, -1])
+        return y
+
+    def moe(self, x):
+        rec["gates"].append(
+            mx.softmax(self.gate(x), axis=-1, precise=True)[0, -1])
+        return moe_call(self, x)
+
+    def sel(self, x, ik_all, cache, offset, **k):
+        r = select(self, x, ik_all, cache, offset, **k)
+        if r is not None:
+            n = ik_all.shape[1] // self.ratio
+            blocks = (cache.finished_blocks(n, self.finish_blocks)
+                      if cache is not None
+                      else self.finish_blocks(ik_all[:, :n * self.ratio], 0))
+            rec["qsa"].append((self.scores(x, blocks, offset)[0, -1],
+                               r[0][0, -1]))
+        return r
+
+    monkeypatch.setattr(m.DecoderLayer, "__call__", layer)
+    monkeypatch.setattr(m.SparseMoeBlock, "__call__", moe)
+    monkeypatch.setattr(m.QSAIndexer, "select", sel)
+    return rec
+
+
+def test_qwen4exp_synth_instantiates(monkeypatch):
     # Qwen3.8-Flash-Next: qwen35 GDN hybrid + hyper-connections + QSA sparse
     # attention + PLE n-gram hash embeddings. A tiny prefill + decode through
     # all four mechanisms (the 12-token prefill crosses the 2-block sparse
@@ -2033,6 +2068,14 @@ def test_qwen4exp_synth_instantiates():
     # full recompute.
     import gmlx.models.qwen4_exp.model as qwen4_exp_model
     qwen4_exp_model.ensure_registered()
+    # On M5 the full forward's f32 GEMMs run at TF32 and the step's GEMVs
+    # are exact, so a router gate differs ~5e-5 between the two forwards.
+    # Random weights put two experts that close at the top-k edge for about
+    # one seed in 40. The step then routes to the other expert and the
+    # logits drift ~3e-2. This seed routes every layer by over 1e-2 and
+    # scores the QSA blocks apart. The test asserts both margins before it
+    # compares the paths.
+    mx.random.seed(17)
 
     c = synthesize_config(_qwen4exp_meta(), tensor_shapes=_QWEN4EXP_SHAPES)
     assert c["model_type"] == "qwen4_exp"
@@ -2066,14 +2109,29 @@ def test_qwen4exp_synth_instantiates():
     out = model(ids, cache=cache)
     mx.eval(out)
     assert out.shape == (1, 12, VOCAB)
+    trace = _qwen4exp_trace(monkeypatch, qwen4_exp_model)
     step = mx.array([[13]])
     out = model(step, cache=cache)
     mx.eval(out)
+    at_step = {k: list(v) for k, v in trace.items()}
+    for v in trace.values():
+        v.clear()
     full = model(mx.concatenate([ids, step], axis=1))
     mx.eval(full)
-    # Not 1e-4: on M5 the GPU arm's f32 GEMMs run at TF32 precision while
-    # the decode-step GEMVs are exact, so full-vs-step drifts ~5e-4 across
-    # the 4 layers (CPU passes 1e-4).
+    k = c["num_experts_per_tok"]
+    for g_step, g_full in zip(at_step["gates"], trace["gates"], strict=True):
+        top = mx.sort(g_step)[::-1]
+        assert (top[k - 1] - top[k]).item() > 1e-3, "near-tie router"
+        assert (sorted(mx.argsort(-g_step)[:k].tolist())
+                == sorted(mx.argsort(-g_full)[:k].tolist()))
+    (s_step, sel_step), (_s, sel_full) = at_step["qsa"] + trace["qsa"]
+    top = sorted(s_step.tolist(), reverse=True)
+    assert top[1] - top[2] > 0.05, "near-tie QSA blocks"
+    assert sorted(sel_step.tolist()) == sorted(sel_full.tolist())
+    # Not 1e-4: the TF32 full forward against the exact step drifts ~5e-4
+    # across the 4 layers (CPU passes 1e-4).
+    for h_step, h_full in zip(at_step["layer"], trace["layer"], strict=True):
+        assert mx.abs(h_full - h_step).max().item() < 2e-3
     assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 2e-3
     assert cache[3].offset == 13 and cache[3].n_blocks == 3
 
