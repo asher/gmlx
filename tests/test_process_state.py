@@ -84,6 +84,30 @@ def test_b_the_next_test_finds_the_process_as_it_was():
     assert mx.set_memory_limit(_BEFORE["memory_limit"]) == _BEFORE["memory_limit"]
 
 
+def _phase_caps():
+    from gmlx.serve import cb_phase
+
+    caps = process_state.cb_caps()
+    if caps is None or caps == cb_phase.COARSE:
+        pytest.skip("needs command buffer caps apart from the decode caps")
+    return cb_phase
+
+
+def test_c_a_serve_step_flips_the_phase():
+    cb_phase = _phase_caps()
+    cb_phase.flip("decode")
+    assert process_state.cb_caps() == cb_phase.COARSE
+
+
+def test_d_the_next_decode_step_sets_the_decode_caps():
+    # The caps went back after the last test. cb_phase must not still name
+    # the decode phase, or this flip returns early and decode runs with the
+    # caps the last test found.
+    cb_phase = _phase_caps()
+    cb_phase.flip("decode")
+    assert process_state.cb_caps() == cb_phase.COARSE
+
+
 _GEMM = r"""
 import os
 

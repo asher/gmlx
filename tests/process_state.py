@@ -6,7 +6,9 @@ run, ``gmlx serve`` exports its settings, ``--stream-cpu`` lifts the MLX
 command buffer caps, the umbrella replaces ``warnings.formatwarning``, and
 library entry points set the MLX default device, seed the RNG, set the
 memory, cache and wired limits and the mlx-kquant command buffer caps,
-and rebind ``mx.set_wired_limit``.
+and rebind ``mx.set_wired_limit``. The caps come back with the phase
+``gmlx.serve.cb_phase`` last flipped to, since a flip to the phase it
+already names sets nothing.
 
 ``capture`` and ``restore`` bracket every test (tests/conftest.py). MLX
 reads MLX_ENABLE_TF32 and the command buffer caps once, at the first
@@ -18,6 +20,7 @@ test changes the environment before its own first matmul.
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 
 import mlx.core as mx
@@ -90,6 +93,12 @@ def cb_caps():
     return tuple(get())
 
 
+def _cb_phase_state():
+    """cb_phase's state dict, or None before the module is imported."""
+    mod = sys.modules.get("gmlx.serve.cb_phase")
+    return None if mod is None else mod._state
+
+
 def capture() -> dict:
     _prior.clear()
     state = {
@@ -100,6 +109,8 @@ def capture() -> dict:
         "streams": {},
         "set_wired_limit": mx.set_wired_limit,
         "cb_caps": cb_caps(),
+        # None before the module is imported, as its first flip finds it.
+        "cb_phase": (_cb_phase_state() or {}).get("phase"),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -130,6 +141,9 @@ def restore(state: dict) -> None:
     caps = state["cb_caps"]
     if caps is not None and cb_caps() != caps:
         _setters["set_cb_caps"](*caps)
+    phase = _cb_phase_state()
+    if phase is not None and phase["phase"] != state["cb_phase"]:
+        phase["phase"] = state["cb_phase"]
     if mx.default_device() != state["device"]:
         mx.set_default_device(state["device"])
     for d, stream in state["streams"].items():
