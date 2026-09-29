@@ -18,6 +18,7 @@ import os
 import gmlx.serve.bridge_vlm as serving
 from gmlx.systemone.extensions import GMLX_EXTENSIONS
 from gmlx.systemone.schema import JEV_EXTENSIONS
+from gmlx.upstream.patching import link, under, wrapped_with
 
 from ._common import _CHAT_PATHS, _error_content, _wrap_post_routes
 
@@ -360,9 +361,8 @@ def model_context_limit(spec) -> int | None:
     key, else the process-wide limit. None when neither is set. A value
     of 0 turns the limit off for that model."""
     gen = importlib.import_module("mlx_vlm.server.generation")
-    process_limit = gen.get_configured_context_limit
-    if getattr(process_limit, _CONTEXT_LIMIT_FLAG, False):
-        process_limit = process_limit.__wrapped__
+    process_limit = under(gen.get_configured_context_limit,
+                          _CONTEXT_LIMIT_FLAG)
     return _spec_context_limit(spec, process_limit)
 
 
@@ -396,8 +396,7 @@ def _make_overflow_preflight(original):
                     and isinstance(detail, str):
                 raise _StreamOverflow(detail) from None
             raise
-    preflight.__dict__[_OVERFLOW_ROUTE_FLAG] = True
-    return preflight
+    return link(preflight, original, _OVERFLOW_ROUTE_FLAG)
 
 
 def _make_messages_overflow_endpoint(original):
@@ -423,13 +422,13 @@ def install_context_overflow_wording() -> None:
     gen._check_configured_context_budget = _check_context_budget
     pkg._check_configured_context_budget = _check_context_budget
     limit = gen.get_configured_context_limit
-    if not getattr(limit, _CONTEXT_LIMIT_FLAG, False):
+    if not wrapped_with(limit, _CONTEXT_LIMIT_FLAG):
         limit = _make_context_limit(limit)
         gen.get_configured_context_limit = limit
         pkg.get_configured_context_limit = limit
     anthropic = importlib.import_module("mlx_vlm.server.anthropic")
     hook = anthropic._preflight_stream_context_budget
-    if hook is not None and not getattr(hook, _OVERFLOW_ROUTE_FLAG, False):
+    if hook is not None and not wrapped_with(hook, _OVERFLOW_ROUTE_FLAG):
         anthropic._preflight_stream_context_budget = \
             _make_overflow_preflight(hook)
     _wrap_post_routes(importlib.import_module("mlx_vlm.server.app").app,

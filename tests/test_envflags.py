@@ -104,8 +104,9 @@ def flagmod():
     # restored stale wrapper would fall back to None on its stock route.
     # Leaving the patch uninstalled is safe -- installs are idempotent and
     # re-run on every _install_and_load.
-    mx.fast.scaled_dot_product_attention = getattr(
-        sdpa, "_gmlx_orig_sdpa", sdpa)
+    from gmlx.upstream.patching import under
+
+    mx.fast.scaled_dot_product_attention = under(sdpa, "_gmlx_hd512")
 
 
 _HD512_FLAGS = [

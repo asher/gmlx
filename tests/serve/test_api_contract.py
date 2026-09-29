@@ -564,3 +564,43 @@ def test_top_logprobs_cap_clamped_to_engine_max(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=sp_api.__name__):
         sp_api._maybe_warn_top_logprobs("/v1/chat/completions", req)
     assert not caplog.records                     # within the effective cap
+
+
+def test_context_limit_reads_under_a_later_wrap(monkeypatch):
+    """A functools.wraps wrap on top of the per-model limit copies its
+    flag. The process limit then unwrapped one level, to the per-model
+    limit itself, and read the model of the request in flight."""
+    import functools
+    import types
+
+    import gmlx.serve.bridge_vlm as serving
+
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    pkg = importlib.import_module("mlx_vlm.server")
+    anthropic = importlib.import_module("mlx_vlm.server.anthropic")
+    for mod in (gen, pkg):
+        for name in ("_check_configured_context_budget",
+                     "get_configured_context_limit"):
+            monkeypatch.setattr(mod, name, getattr(mod, name))
+    monkeypatch.setattr(anthropic, "_preflight_stream_context_budget",
+                        anthropic._preflight_stream_context_budget)
+    monkeypatch.setattr(gen.runtime.config, "max_kv_size", None)
+    monkeypatch.setenv("MAX_KV_SIZE", "8192")
+    sp.install_context_overflow_wording()
+    limit = gen.get_configured_context_limit
+
+    @functools.wraps(limit)
+    def later():
+        return limit()
+
+    gen.get_configured_context_limit = later
+    token = serving.set_active_spec(
+        types.SimpleNamespace(load={"max_kv_size": 4096}))
+    try:
+        assert limit() == 4096 and later() == 4096
+        assert sp_api.model_context_limit(
+            types.SimpleNamespace(load={})) == 8192
+        sp.install_context_overflow_wording()
+        assert gen.get_configured_context_limit is later
+    finally:
+        serving.reset_active_spec(token)

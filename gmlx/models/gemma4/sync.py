@@ -58,10 +58,16 @@ from __future__ import annotations
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.upstream.patching import link, under, wrapped_with
 
 from .image_masks import image_masks
 
 _installed = False
+# Each gmlx layer below carries one of these, so a reinstall finds it under
+# another installer's wrap and reads the stock function under it.
+_POLICY_FLAG = "_gmlx_g4_image_chunking"
+_MASKS_FLAG = "_gmlx_g4_masks"
+_ATTN_FLAG = "_gmlx_g4_nosync_attn"
 
 
 def _cache_has_prefix(c) -> bool:
@@ -86,7 +92,7 @@ def _install_image_chunking_policy() -> None:
     except ImportError:
         return
     policy = getattr(g4.LanguageModel, "chunked_prefill_policy", None)
-    if policy is not None and getattr(policy, "_gmlx_orig", None) is None:
+    if policy is not None and not wrapped_with(policy, _POLICY_FLAG):
         def chunked_prefill_policy(self, **kwargs):
             if (getattr(self.config, "use_bidirectional_attention", None)
                     != "vision"):
@@ -98,7 +104,7 @@ def _install_image_chunking_policy() -> None:
                         and bool(prefill_kwargs.get("return_shared_kv", False)))
             return True
 
-        chunked_prefill_policy.__dict__["_gmlx_orig"] = policy
+        link(chunked_prefill_policy, policy, _POLICY_FLAG)
         g4.LanguageModel.chunked_prefill_policy = chunked_prefill_policy
 
     try:
@@ -106,11 +112,11 @@ def _install_image_chunking_policy() -> None:
     except ImportError:
         return
     decline = getattr(g4u.Model, "_should_disable_chunked_prefill", None)
-    if decline is not None and getattr(decline, "_gmlx_orig", None) is None:
+    if decline is not None and not wrapped_with(decline, _POLICY_FLAG):
         def _should_disable_chunked_prefill(self, input_ids=None, **kwargs):
             return False
 
-        _should_disable_chunked_prefill.__dict__["_gmlx_orig"] = decline
+        link(_should_disable_chunked_prefill, decline, _POLICY_FLAG)
         g4u.Model._should_disable_chunked_prefill = (
             _should_disable_chunked_prefill)
 
@@ -123,13 +129,14 @@ def _install_stock_image_masks() -> None:
     except ImportError:
         return
     stock = g4.Gemma4TextModel._make_masks
-    if getattr(stock, "_gmlx_orig", None) is not None:
+    if wrapped_with(stock, _MASKS_FLAG):
         return
 
     def _make_masks(self, h, cache, mm_token_type_ids=None):
         return image_masks(self, h, cache, mm_token_type_ids, stock)
 
-    _make_masks.__dict__.update(_gmlx_orig=stock, _gmlx_body=stock)
+    link(_make_masks, stock, _MASKS_FLAG)
+    _make_masks.__dict__["_gmlx_body"] = stock
     g4.Gemma4TextModel._make_masks = _make_masks
 
 
@@ -152,8 +159,10 @@ def install_gemma4_nosync() -> bool:
               flush=True)
         return False
 
-    masks_orig = getattr(g4.Gemma4TextModel._make_masks, "_gmlx_orig",
-                         g4.Gemma4TextModel._make_masks)
+    # Both replacements are whole bodies, so they go on top in place of
+    # what is there. Their _gmlx_orig records the stock function under any
+    # gmlx layer, not the layer that was on top.
+    masks_orig = under(g4.Gemma4TextModel._make_masks, _MASKS_FLAG)
 
     def _make_masks(self, h, cache, mm_token_type_ids=None):
         # Upstream body with the sliding-branch offset probe replaced by
@@ -217,12 +226,11 @@ def install_gemma4_nosync() -> bool:
     def _make_image_masks(self, h, cache, mm_token_type_ids=None):
         return image_masks(self, h, cache, mm_token_type_ids, _make_masks)
 
-    _make_image_masks.__dict__.update(_gmlx_orig=masks_orig,
-                                      _gmlx_body=_make_masks)
+    link(_make_image_masks, masks_orig, _MASKS_FLAG)
+    _make_image_masks.__dict__["_gmlx_body"] = _make_masks
     g4.Gemma4TextModel._make_masks = _make_image_masks
 
-    attn_orig = getattr(g4.Attention.__call__, "_gmlx_orig",
-                        g4.Attention.__call__)
+    attn_orig = under(g4.Attention.__call__, _ATTN_FLAG)
 
     def _attn_call(self, x, mask=None, cache=None, shared_kv=None,
                    offset=None):
@@ -273,7 +281,7 @@ def install_gemma4_nosync() -> bool:
 
         return self.o_proj(output), (keys, values), offset
 
-    _attn_call._gmlx_orig = attn_orig
+    link(_attn_call, attn_orig, _ATTN_FLAG)
     g4.Attention.__call__ = _attn_call
 
     _installed = True

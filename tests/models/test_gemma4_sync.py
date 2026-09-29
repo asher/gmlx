@@ -32,6 +32,12 @@ def _install():
     assert gemma4_sync.install_gemma4_nosync()
 
 
+def _stock(fn):
+    while getattr(fn, "_gmlx_orig", None) is not None:
+        fn = fn._gmlx_orig
+    return fn
+
+
 def test_cache_has_prefix_decision():
     class C:
         pass
@@ -58,7 +64,7 @@ def test_install_idempotent_and_killable(monkeypatch):
     stock = []
     for cls, name in policies:
         f = getattr(cls, name)
-        stock.append(getattr(f, "_gmlx_orig", f))
+        stock.append(_stock(f))
         monkeypatch.setattr(cls, name, stock[-1])
 
     monkeypatch.setenv("GMLX_G4_NOSYNC", "0")
@@ -80,6 +86,39 @@ def test_install_idempotent_and_killable(monkeypatch):
     _install()  # second install: no double wrap
     assert g4.Gemma4TextModel._make_masks is patched[0]
     assert g4.Attention.__call__ is patched[1]
+
+
+def test_installs_see_through_another_wrap(monkeypatch):
+    """A linked wrap from another installer on top of a stock function hid
+    it. The chunking policy took any link for its own and skipped its
+    install, and the nosync builder recorded the image masks layer under
+    that wrap as the stock builder."""
+    stock_masks = _stock(g4.Gemma4TextModel._make_masks)
+    monkeypatch.setattr(g4.Gemma4TextModel, "_make_masks", stock_masks)
+    monkeypatch.setattr(g4.Attention, "__call__", _stock(g4.Attention.__call__))
+    monkeypatch.setattr(gemma4_sync, "_installed", False)
+    policy = _stock(g4.LanguageModel.chunked_prefill_policy)
+
+    def other(self, **kwargs):
+        return policy(self, **kwargs)
+
+    other.__dict__["_gmlx_orig"] = policy
+    monkeypatch.setattr(g4.LanguageModel, "chunked_prefill_policy", other)
+    monkeypatch.setenv("GMLX_G4_NOSYNC", "0")
+    assert gemma4_sync.install_gemma4_nosync() is False
+    assert g4.LanguageModel.chunked_prefill_policy._gmlx_orig is other
+
+    masks = g4.Gemma4TextModel._make_masks
+    assert masks._gmlx_orig is stock_masks
+
+    def other_masks(self, *args, **kwargs):
+        return masks(self, *args, **kwargs)
+
+    other_masks.__dict__["_gmlx_orig"] = masks
+    g4.Gemma4TextModel._make_masks = other_masks
+    monkeypatch.delenv("GMLX_G4_NOSYNC")
+    assert gemma4_sync.install_gemma4_nosync()
+    assert g4.Gemma4TextModel._make_masks._gmlx_orig is stock_masks
 
 
 def test_mask_decisions_match_stock_int_offsets():

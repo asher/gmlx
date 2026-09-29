@@ -58,6 +58,7 @@ import re
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.upstream.patching import link, under, wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ def _probe_fa_max_rows():
 _FA_MAX_ROWS = _probe_fa_max_rows()
 _orig_sdpa = None
 _installed = False
+_FLAG = "_gmlx_hd512"
 
 
 def _causal_str(mask):
@@ -660,10 +662,12 @@ def install_hd512_sdpa() -> bool:
     if _installed:
         return True
     # A prior install (e.g. before a module reload) may have left its wrapper
-    # in place; unwrap to the true original instead of wrapping the wrapper.
+    # in place: take the original under it instead of wrapping the wrapper,
+    # replace it when it is on top, and keep it under another wrap.
     cur = mx.fast.scaled_dot_product_attention
-    _orig_sdpa = getattr(cur, "_gmlx_orig_sdpa", cur)
-    _wrapped_sdpa._gmlx_orig_sdpa = _orig_sdpa
-    mx.fast.scaled_dot_product_attention = _wrapped_sdpa
+    _orig_sdpa = under(cur, _FLAG)
+    link(_wrapped_sdpa, _orig_sdpa, _FLAG)
+    if getattr(cur, _FLAG, False) or not wrapped_with(cur, _FLAG):
+        mx.fast.scaled_dot_product_attention = _wrapped_sdpa
     _installed = True
     return True
