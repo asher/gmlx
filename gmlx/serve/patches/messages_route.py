@@ -23,6 +23,7 @@ converts as before.
 from __future__ import annotations
 
 import importlib
+import os
 
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -80,7 +81,12 @@ def _results_first(new: list, own: list) -> list:
 
 
 def install_messages_route() -> None:
-    """Claim the Messages route's conversion step. Idempotent."""
+    """Claim the Messages route's conversion step. Idempotent.
+
+    Kill: ``GMLX_FAITHFUL_HISTORY=0``, with the render wraps it relies on.
+    """
+    if os.environ.get("GMLX_FAITHFUL_HISTORY") == "0":
+        return
     an = importlib.import_module("mlx_vlm.server.anthropic")
     stock = an._anthropic_messages_to_internal
     if wrapped_with(stock, _FLAG):

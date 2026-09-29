@@ -81,7 +81,7 @@ per chunk takes effect on a running server.
 | `GMLX_SSE_KEEPALIVE_S` | The server sends an SSE keepalive comment at this interval in seconds while a stream is silent. The default is `15`, and `0` disables them. |
 | `GMLX_PREFLIGHT_MEM=0` | Disable the memory preflight that answers 400 when a prompt cannot fit. |
 | `GMLX_OVERCOMMIT=1` | Skip the load gate and the ceilings that the capacity table sets, so a model loads even when it does not fit beside the resident models. |
-| `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
+| `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks back within the cap. |
 | `GMLX_DRAFT_BLOCK_SIZE` | It sets the block size of each speculative round for `serve`, as `--draft-block-size` does. A round drafts one token fewer. |

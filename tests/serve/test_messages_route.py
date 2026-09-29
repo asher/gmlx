@@ -32,12 +32,14 @@ from gmlx.serve.patches.render import (  # noqa: E402
     install_chat_image_placement,
     install_faithful_history,
 )
+from gmlx.upstream.patching import under, wrapped_with  # noqa: E402
 
 _ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
 _PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
 _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
+_CLAIM = "_gmlx_messages_route"
 
 # Template: model type and chat template (a GGUF header's, or the one gmlx
 # ships for the type).
@@ -107,6 +109,17 @@ class _RG:
 @pytest.fixture
 def route(monkeypatch):
     """/v1/messages with the gmlx render wraps, on a stub model."""
+    yield from _route(monkeypatch)
+
+
+@pytest.fixture
+def killed_route(monkeypatch):
+    """/v1/messages installed under ``GMLX_FAITHFUL_HISTORY=0``."""
+    monkeypatch.setenv("GMLX_FAITHFUL_HISTORY", "0")
+    yield from _route(monkeypatch)
+
+
+def _route(monkeypatch):
     routes = sp_common._snapshot_routes(_APP.app)
     for target in sp_common._render_target_modules():
         monkeypatch.setattr(target, "apply_chat_template",
@@ -116,8 +129,11 @@ def route(monkeypatch):
     for row in ("deepseek_v4_vl", "deepseek_v41_vl"):
         monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, row,
                             _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
+    conversion = _ANTHROPIC._anthropic_messages_to_internal
+    if wrapped_with(conversion, _CLAIM):
+        conversion = under(conversion, _CLAIM)
     monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
-                        _ANTHROPIC._anthropic_messages_to_internal)
+                        conversion)
     rg = _RG()
     monkeypatch.setattr(_RUNTIME, "response_generator", rg, raising=False)
     install_faithful_history()
@@ -138,9 +154,8 @@ def route(monkeypatch):
         monkeypatch.setattr(_ANTHROPIC, "get_cached_model", lambda *a, **k: (
             None, processor, {"model_type": model_type}))
         if stock:
-            claim = _ANTHROPIC._anthropic_messages_to_internal
             monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
-                                getattr(claim, "_gmlx_orig", claim))
+                                conversion)
         r = client.post("/v1/messages", json={
             "model": "m", "max_tokens": 1, "messages": messages,
             "tools": _TOOLS})
@@ -311,6 +326,15 @@ def test_mistral3_reads_the_user_text_in_the_tool_results(route):
     assert images == ["http://img/x"]
     assert ("[TOOL_RESULTS]RESULT-ONE\n\n[IMG]TEXT-AFTER[/TOOL_RESULTS]"
             in prompt)
+
+
+@pytest.mark.parametrize("name", ("qwen3.5", "gemma4"))
+def test_the_kill_switch_restores_the_stock_conversion(killed_route, name):
+    messages = _round(_shot(_image("s")), _text("TEXT-AFTER")) + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_image("x"), _text("Q2")]}]
+    assert killed_route(name, messages, vision=True) == killed_route(
+        name, messages, vision=True, stock=True)
 
 
 def test_mistral3_still_rejects_two_user_turns(route):
