@@ -152,6 +152,16 @@ def test_single_model_cfg_stream_fast_disk(tmp_path):
     assert m.stream == "experts" and m.stream_fast_disk == "on"
 
 
+def test_chat_template_config_refuses_a_template_call_parameter(capsys):
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    with pytest.raises(SystemExit):
+        ap.parse_args(["m.gguf", "--chat-template-config",
+                       '{"chat_template": "{{ x }}"}'])
+    assert "names 'chat_template', which is a parameter" in capsys.readouterr().err
+
+
 def test_serve_parser_model_flags_survive_bg_relaunch():
     """Every positional-model flag added beside the config keys must parse,
     forward through _bg_serve_args, and rebuild the same config."""

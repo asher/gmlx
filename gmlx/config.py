@@ -143,6 +143,18 @@ _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
 _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
                             "chat_template", "chat_template_kwargs",
                             "thinking", "reasoning_effort"})
+# chat_template_kwargs keys that name a parameter of the template call rather
+# than a template variable. chat_template would swap the model's template for
+# the caller's Jinja source, and the rest change what the call returns or
+# collide with the arguments the server passes itself.
+TEMPLATE_CALL_KEYS = frozenset({
+    "chat_template", "conversation", "messages", "prompt", "processor", "config",
+    "tools", "tool_choice", "documents", "add_generation_prompt",
+    "continue_final_message", "tokenize", "padding", "truncation", "max_length",
+    "return_tensors", "return_dict", "return_assistant_tokens_mask",
+    "tokenizer_kwargs", "return_messages", "num_images", "num_audios", "video",
+    "max_pixels", "fps", "audio_token", "processor_kwargs",
+    "load_audio_from_video"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
@@ -1437,6 +1449,28 @@ def _warn_unknown_keys(where: str, raw, known, *, strict: bool = False) -> None:
     warnings.warn(msg, stacklevel=3)
 
 
+def template_call_key_refusal(where: str, kwargs, keys=TEMPLATE_CALL_KEYS) -> str | None:
+    """The message refusing the ``chat_template_kwargs`` keys in ``kwargs``
+    that name a parameter of the template call, or None when there are none."""
+    bad = sorted(k for k in kwargs if k in keys) if isinstance(kwargs, dict) else []
+    if not bad:
+        return None
+    what = (("is a parameter", "a template variable") if len(bad) == 1
+            else ("are parameters", "template variables"))
+    msg = (f"{where} names {', '.join(map(repr, bad))}, which {what[0]} of "
+           f"the chat template call, not {what[1]}")
+    if "chat_template" in bad:
+        msg += "; set the model's template with the chat_template key instead"
+    return msg
+
+
+def _check_template_kwargs(where: str, kwargs: dict) -> dict:
+    msg = template_call_key_refusal(where, kwargs)
+    if msg:
+        raise ConfigError(msg)
+    return kwargs
+
+
 def _section_mapping(where: str, raw) -> dict:
     """A config section that must be a mapping. ``None`` and the empty list
     (YAML's other rendering of an emptied-out section) mean "absent"; any other
@@ -1761,8 +1795,10 @@ def _parse_profile(name: str, raw: dict) -> Profile:
     _validate_stop(f"profile {name!r}", sampling)
     load = _section_mapping(f"profile {name!r} load", raw.get("load"))
     cache = _normalize_cache(f"profile {name!r} cache", raw.get("cache"))
-    ctk = _section_mapping(f"profile {name!r} chat_template_kwargs",
-                           raw.get("chat_template_kwargs"))
+    ctk = _check_template_kwargs(
+        f"profile {name!r} chat_template_kwargs",
+        _section_mapping(f"profile {name!r} chat_template_kwargs",
+                         raw.get("chat_template_kwargs")))
     _warn_unknown_keys(f"profile {name!r} load", load, LOAD_ENV)
     return Profile(
         name=name,
@@ -1806,6 +1842,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         if g in ov:
             ov[g] = _section_mapping(f"model {model_id!r} overrides.{g}",
                                      ov.get(g))
+    _check_template_kwargs(f"model {model_id!r} overrides.chat_template_kwargs",
+                           ov.get("chat_template_kwargs") or {})
     if "cache" in ov:
         ov["cache"] = _normalize_cache(f"model {model_id!r} overrides.cache",
                                        ov.get("cache"))
@@ -1833,6 +1871,9 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             if g in pv:
                 pv[g] = _section_mapping(
                     f"model {model_id!r} profiles.{pname!r}.{g}", pv.get(g))
+        _check_template_kwargs(
+            f"model {model_id!r} profiles.{pname!r}.chat_template_kwargs",
+            pv.get("chat_template_kwargs") or {})
         if "cache" in pv:
             pv["cache"] = _normalize_cache(
                 f"model {model_id!r} profiles.{pname!r}.cache", pv.get("cache"))

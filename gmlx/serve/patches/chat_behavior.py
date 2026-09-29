@@ -6,6 +6,7 @@ on DiffusionGemma prompts."""
 from __future__ import annotations
 
 import contextvars
+import functools
 import importlib
 import os
 
@@ -42,7 +43,9 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
     ``thinking`` / ``reasoning_effort`` controls mapped over it (spelled as
     the variables ``template`` reads), then request ``chat_template_kwargs``
     merged on top - a request's explicit kwargs always win, verbatim. Either
-    side absent => the other; both absent => {}."""
+    side absent => the other; both absent => {}. A request key that names a
+    parameter of the template call, such as ``chat_template``, is a 400:
+    the server never renders Jinja source a client sends."""
     from gmlx.tui.reasoning import map_thinking_controls, normalize_template_kwargs
 
     merged: dict = {}
@@ -56,8 +59,43 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
                                        warn=_warn_thinking)
     req_kw = getattr(request, "chat_template_kwargs", None)
     if isinstance(req_kw, dict):
+        from gmlx.config import template_call_key_refusal
+
+        msg = template_call_key_refusal("chat_template_kwargs", req_kw,
+                                        _template_call_keys())
+        if msg:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail=msg)
         merged.update(normalize_template_kwargs(req_kw, template))
     return merged
+
+
+@functools.cache
+def _template_call_keys() -> frozenset:
+    """:data:`gmlx.config.TEMPLATE_CALL_KEYS` plus every named parameter of
+    the template calls a request's kwargs reach, so a parameter that a later
+    transformers or mlx-vlm adds is refused too."""
+    import inspect
+
+    from gmlx.config import TEMPLATE_CALL_KEYS
+
+    keys = set(TEMPLATE_CALL_KEYS)
+    funcs = []
+    try:
+        import transformers
+
+        funcs += [transformers.PreTrainedTokenizerBase.apply_chat_template,
+                  transformers.ProcessorMixin.apply_chat_template]
+    except (ImportError, AttributeError):
+        pass
+    prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
+    funcs += [prompt_utils.apply_chat_template, prompt_utils.get_chat_template]
+    for fn in funcs:
+        for p in inspect.signature(fn).parameters.values():
+            if p.name != "self" and p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
+                keys.add(p.name)
+    return frozenset(keys)
 
 
 def _model_template_text(processor) -> str:

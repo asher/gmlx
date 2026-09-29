@@ -432,7 +432,10 @@ template.
 The chat template receives these variables on each request. For
 example, `preserve_thinking` on the Qwen3.6 and Gemma 4 templates keeps
 earlier `<think>` blocks in the prompt, so that an agent sees its earlier
-reasoning. Keys that the request sends win. The default is none.
+reasoning. Keys that the request sends win. A key that names a parameter
+of the template call, such as `chat_template` or `tokenize`, is a config
+error, and a request that sends one gets a 400. Set a template of your
+own with `chat_template`. The default is none.
 
 ### `profiles.*.thinking`
 

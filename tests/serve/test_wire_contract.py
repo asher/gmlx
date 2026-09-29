@@ -891,6 +891,42 @@ def test_model_cache_registry_supports_residency_reads():
     assert reg.get("config") is cfg
 
 
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses",
+                                  "/v1/responses/input_tokens", "/v1/messages",
+                                  "/v1/messages/count_tokens"])
+def test_a_client_chat_template_is_refused_on_every_alias_route(wire, monkeypatch, path):
+    rendered = []
+
+    def spy(processor, config, messages, **kwargs):
+        rendered.append(kwargs)
+        return _fake_apply_chat_template(processor, config, messages, **kwargs)
+
+    for mod in (_PKG, importlib.import_module("mlx_vlm.server.openai"),
+                importlib.import_module("mlx_vlm.server.anthropic"),
+                getattr(_APP, "_protocol_deps", None)):
+        if mod is not None and hasattr(mod, "apply_chat_template"):
+            monkeypatch.setattr(mod, "apply_chat_template", spy)
+    if path.startswith("/v1/messages"):
+        body = {"model": MODEL_ID, "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}]}
+    elif path.startswith("/v1/responses"):
+        body = {"model": MODEL_ID, "input": "hi"}
+    else:
+        body = _chat_body()
+    r = wire.client.post(path, json={
+        **body, "chat_template_kwargs": {"chat_template": "{{ 7 * 6 }}"}})
+    assert r.status_code == 400, r.text
+    assert "'chat_template'" in r.text
+    assert rendered == []
+    # A template variable still reaches the render. The token-count routes go
+    # on to preprocessing, which the fake generator lacks, so only the render
+    # is checked there.
+    r = wire.client.post(path, json={
+        **body, "chat_template_kwargs": {"preserve_thinking": True}})
+    assert r.status_code == 200 or path.endswith("tokens"), r.text
+    assert rendered and rendered[-1].get("preserve_thinking") is True
+
+
 # Request media gate over the real routes
 @pytest.mark.parametrize("path, body", [
     ("/v1/chat/completions", {"model": MODEL_ID, "messages": [{"role": "user", "content": [

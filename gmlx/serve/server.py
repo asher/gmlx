@@ -744,6 +744,11 @@ def _template_kwargs(raw: str) -> dict:
         raise argparse.ArgumentTypeError(f"not valid JSON: {e}") from e
     if not isinstance(out, dict):
         raise argparse.ArgumentTypeError("must be a JSON object")
+    from gmlx.config import template_call_key_refusal
+
+    msg = template_call_key_refusal("the object", out)
+    if msg:
+        raise argparse.ArgumentTypeError(msg)
     return out
 
 

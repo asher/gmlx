@@ -494,6 +494,27 @@ def test_chat_template_kwargs_override_merges_over_profile():
         "preserve_thinking": False, "extra": 1}
 
 
+@pytest.mark.parametrize("where, doc", [
+    ("profile 'p' chat_template_kwargs",
+     {"profiles": {"p": {"chat_template_kwargs": {"chat_template": "{{ x }}"}}}}),
+    ("model 'm' overrides.chat_template_kwargs",
+     {"models": {"m": {"path": "/abs/a.gguf", "overrides": {
+         "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}),
+    ("model 'm' profiles.'q'.chat_template_kwargs",
+     {"models": {"m": {"path": "/abs/a.gguf", "profiles": {"q": {
+         "chat_template_kwargs": {"chat_template": "{{ x }}"}}}}}}),
+])
+def test_chat_template_kwargs_refuse_a_template_call_parameter(where, doc):
+    with pytest.raises(ConfigError) as e:
+        build_config(doc)
+    msg = str(e.value)
+    assert msg.startswith(f"{where} names 'chat_template', which is a parameter")
+    assert "chat_template key instead" in msg
+    doc = {"profiles": {"p": {"chat_template_kwargs": {"tokenize": True, "tools": []}}}}
+    with pytest.raises(ConfigError, match="'tokenize', 'tools', which are parameters"):
+        build_config(doc)
+
+
 def test_thinking_controls_resolve_like_system():
     """Profile-level thinking/reasoning_effort are scalar layers: profile sets,
     override wins; unset stays None."""

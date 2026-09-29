@@ -359,6 +359,38 @@ def test_merged_template_kwargs_request_kwargs_beat_spec_controls():
     assert merged["reasoning_effort"] == "low"
 
 
+@pytest.mark.parametrize("key", sorted(sp_chat._template_call_keys()))
+def test_a_request_key_that_is_a_template_call_parameter_is_a_400(key):
+    """chat_template would make the server render the client's Jinja; every
+    other parameter of the template call changes what it returns or collides
+    with an argument the handler passes itself."""
+    from fastapi import HTTPException
+
+    req = types.SimpleNamespace(chat_template_kwargs={key: "x", "foo": 1})
+    with pytest.raises(HTTPException) as e:
+        sp_chat._merged_template_kwargs(req, None)
+    assert e.value.status_code == 400
+    assert repr(key) in e.value.detail
+
+
+def test_the_template_call_keys_cover_the_named_parameters_of_every_call():
+    import inspect
+
+    import transformers
+    from mlx_vlm import prompt_utils
+
+    for fn in (transformers.PreTrainedTokenizerBase.apply_chat_template,
+               transformers.ProcessorMixin.apply_chat_template,
+               prompt_utils.apply_chat_template, prompt_utils.get_chat_template):
+        named = {p.name for p in inspect.signature(fn).parameters.values()
+                 if p.name != "self" and p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)}
+        assert named <= sp_chat._template_call_keys()
+    # The config parser has no introspection, so its fixed list must hold
+    # the same names.
+    from gmlx.config import TEMPLATE_CALL_KEYS
+    assert sp_chat._template_call_keys() == TEMPLATE_CALL_KEYS
+
+
 def test_install_chat_template_kwargs_forwards_into_to_template_kwargs():
     """End-to-end seam: the gen-args wrapper stashes the merged dict and the
     patched to_template_kwargs folds it into what mlx-vlm hands the template."""

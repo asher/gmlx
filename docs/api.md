@@ -240,7 +240,7 @@ route:
 | `top_logprobs` | Honored | Ignored | Ignored | `TOP_LOGPROBS_K` caps it, as [Logprobs](#logprobs) explains. |
 | `stop` | Honored | Ignored | Ignored | Chat and `/v1/completions` honor it, and Anthropic uses `stop_sequences`. |
 | `stop_sequences` | Ignored | Ignored | Honored | It is the Anthropic spelling of `stop`. |
-| `chat_template_kwargs` | Honored | Honored | Honored | It passes extra template variables, and the request's values override the profile's. |
+| `chat_template_kwargs` | Honored | Honored | Honored | Its template variables override the profile's. A template call parameter, such as `chat_template`, gets a 400. |
 | `profile` | Honored | Honored | Honored | It selects a sampling and system [profile](config.md#profiles) by name. |
 | `xtc_probability` | Honored | Honored | Honored | It turns on XTC sampling, together with `xtc_threshold`. |
 

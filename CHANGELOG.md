@@ -72,6 +72,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   point the prompt cache and the drafter at any folder, or its own
   transcription routes, which decoded an upload with ffmpeg before any
   check.
+- A request's `chat_template_kwargs` can no longer replace the model's chat
+  template or set another parameter of the template call. Such a request
+  gets a 400, so the server never renders Jinja that a client sends.
 - A request whose model fails to load gets that load error. Before, the
   server sometimes answered 500 with an error about a missing `requests`
   attribute.
