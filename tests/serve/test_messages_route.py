@@ -404,6 +404,17 @@ def test_an_image_beside_a_tool_result_and_no_text_renders(route, name):
         "ASK-FIRST", "RESULT-ONE", "RESULT-ONE"]
 
 
+@pytest.mark.parametrize("name", ("qwen3.5", "gemma4", "deepseek-v4"))
+def test_an_image_ahead_of_a_tool_result_follows_its_image(route, name):
+    """The tool result renders first, so its image comes first in the list
+    though the message sends the other image ahead of it."""
+    prompt, images = route(name, _round(
+        _image("x"), _shot(_image("s")), _text("TEXT-AFTER")), vision=True)
+    assert images == ["http://img/s", "http://img/x"]
+    image = _VISION[name][2]
+    _in_order(prompt, "RESULT-ONE", image, image, "TEXT-AFTER")
+
+
 @pytest.mark.parametrize("name", _AFTER_TOOL_TURN)
 def test_a_tool_image_stays_put_in_the_next_turn(route, name):
     image = _VISION[name][2]
