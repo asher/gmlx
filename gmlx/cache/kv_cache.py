@@ -7,8 +7,10 @@
 """mlx-vlm 0.7.3 KV cache classes, owned by gmlx.
 
 All of ``mlx_vlm/models/cache.py``: every cache class, ``_BaseCache``,
-``CacheMemory`` and the module helpers. It imports nothing beyond mlx
-and the standard library. Edits to the upstream file: comments are ASCII.
+``CacheMemory`` and the module helpers. It imports nothing beyond mlx,
+the standard library and, to record decode mask starts, its sibling
+``attention``. Edits to the upstream file: comments are ASCII, and each
+gmlx change carries a comment where it sits.
 """
 
 from dataclasses import dataclass, replace
@@ -2643,9 +2645,21 @@ class BatchQuantizedKVCache(_BaseCache):
         return self.batch_size == 1
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
-        return create_causal_mask(
+        mask = create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
+        # A plain decode mask is causal over the left padding: record its
+        # row starts for the quantized SDPA decode route.
+        if (
+            N == 1
+            and isinstance(mask, mx.array)
+            and mask.dtype == mx.bool_
+            and not any(v is not None for v in kwargs.values())
+        ):
+            from .attention import _register_starts
+
+            _register_starts(mask, self.left_padding)
+        return mask
 
 
 def _select_pooling_remainder(

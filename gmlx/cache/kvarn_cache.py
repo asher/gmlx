@@ -1856,7 +1856,7 @@ class BatchKVarNKVCache(_KVarNStorage):
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
         if not any(v is not None for v in kwargs.values()):
-            from gmlx.upstream.quantized_sdpa_fix import _register_starts
+            from gmlx.cache.attention import _register_starts
 
             _register_starts(
                 mask, self.starts_mx, self._mirror(f"ends+{N}", [e + N for e in self.ends])

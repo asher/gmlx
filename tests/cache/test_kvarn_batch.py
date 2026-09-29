@@ -257,8 +257,7 @@ def test_unregistered_mask_falls_back():
 
 
 def test_make_mask_registers_starts():
-    from gmlx.upstream.quantized_sdpa_fix import (_registered_geometry,
-                                                  _registered_starts)
+    from gmlx.cache.attention import _registered_geometry, _registered_starts
 
     c = BatchKVarNKVCache([0, 5, 9])
     mask = c.make_mask(1, window_size=None)
