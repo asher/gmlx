@@ -120,6 +120,30 @@ def test_image_spans_split_flattened_patches_by_grid():
     assert other[0][1] != spans[0][1] and other[1][1] == spans[1][1]
 
 
+def test_qwen_runs_pair_by_the_image_processor_merge_size():
+    """Qwen3VLProcessor expands an image to t*h*w of its grid over the
+    image processor's merge_size squared, whatever the vision config
+    says."""
+    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+        Qwen3VLImageProcessor,
+    )
+    from PIL import Image
+
+    ip = Qwen3VLImageProcessor(patch_size=14, merge_size=1, min_pixels=0,
+                               max_pixels=14 * 14 * 64)
+    raw = {k: mx.array(v) for k, v in ip([
+        Image.new("RGB", (56, 28), (200, 0, 0)),
+        Image.new("RGB", (28, 42), (0, 200, 0))]).items()}
+    assert raw["image_grid_thw"].tolist() == [[1, 2, 4], [1, 3, 2]]
+    cfg = SimpleNamespace(image_token_id=9, vision_config=SimpleNamespace(
+        spatial_merge_size=2))
+    ids = mx.array([[1] + [9] * 8 + [2] + [9] * 6 + [3]])
+    spans = image_spans(ids, raw, cfg, SimpleNamespace(image_processor=ip))
+    assert [s for s, _h in spans] == [1, 10]
+    # The vision config's merge size alone gives 2 and 1 tokens.
+    assert len(image_spans(ids, raw, cfg)) == 1
+
+
 def _kimi(*sizes):
     """The Kimi K2.5 processor's rows for solid images of ``sizes`` (width,
     height), and ids holding each image's run between text tokens."""
