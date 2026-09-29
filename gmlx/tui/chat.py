@@ -2165,6 +2165,18 @@ def _opens_thinking(prompt) -> bool:
     return prompt_opens_thinking(prompt)
 
 
+def _encode_turn(tok, prompt_text, starts_cache: bool) -> list:
+    """The ids of one turn's render. A render that starts the cache is a
+    whole prompt and encodes as ``gmlx run`` and the server encode one
+    (``encode_prompt``). A later turn continues the cached sequence, so its
+    render adds no special tokens."""
+    if starts_cache:
+        from gmlx.gen.generation import encode_prompt
+
+        return encode_prompt(tok, prompt_text)
+    return tok.encode(prompt_text, add_special_tokens=False)
+
+
 def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
     """:func:`_opens_thinking` with the session's configured markers applied
     (the seed for the MTP path's ^T finish-thinking hook)."""
@@ -3873,6 +3885,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 from gmlx.gen.generation import stream_generate_speculative
 
                 messages = list(state.take("replay_messages") or [])
+                starts_cache = first_turn or bool(messages)
                 if first_turn and state.system_prompt:
                     sys_msg = {"role": "system", "content": state.system_prompt}
                     messages.append(sys_msg)
@@ -3885,7 +3898,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     messages, tokenize=False, add_generation_prompt=True,
                     **template_kwargs,
                 )
-                prompt = tok.encode(prompt_text, add_special_tokens=False)
+                prompt = _encode_turn(tok, prompt_text, starts_cache)
                 reply, _canceled = _stream_reply(
                     stream_generate_speculative(
                         model,
@@ -4010,6 +4023,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from gmlx.gen.generation import stream_generate_speculative
 
             messages = list(state.take("replay_messages") or [])
+            starts_cache = first_turn or bool(messages)
             if first_turn and state.system_prompt:
                 messages.append({"role": "system", "content": state.system_prompt})
             messages.append(
@@ -4019,7 +4033,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
                 stream_generate_speculative(
@@ -4057,6 +4071,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from gmlx.gen.diffusion import stream as diffusion_stream
 
             messages = list(state.take("replay_messages") or [])
+            starts_cache = first_turn or bool(messages)
             if first_turn and state.system_prompt:
                 messages.append({"role": "system", "content": state.system_prompt})
             messages.append(
@@ -4066,7 +4081,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
             first_turn = False
             reply, canceled = _stream_reply(
                 # Bounded canvas fallback shared with `gmlx run` - the
@@ -4087,6 +4102,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
         messages = list(state.take("replay_messages") or [])
+        starts_cache = first_turn or bool(messages)
         if first_turn and state.system_prompt:
             messages.append({"role": "system", "content": state.system_prompt})
         messages.append({"role": "user", "content": _compose_user_content(state, line)})
@@ -4097,15 +4113,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             prompt_text = prompt
         else:
-            # Render once, encode the render: token-identical to a tokenize=True
-            # template call (which is render + encode(add_special_tokens=False)
-            # internally), and the string is reused for thinking-budget seeding
-            # + reasoning detection.
+            # Render once, encode the render (``_encode_turn``); the string is
+            # reused for thinking-budget seeding + reasoning detection.
             prompt_text = tok.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
-            prompt = tok.encode(prompt_text, add_special_tokens=False)
+            prompt = _encode_turn(tok, prompt_text, starts_cache)
 
         xtc_kwargs = {}
         if s["xtc_probability"] > 0:

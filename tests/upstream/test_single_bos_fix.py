@@ -208,6 +208,49 @@ def test_a_tokenizer_that_adds_eos_keeps_the_stock_encoding(fixed, path,
     assert ids[0] == 0 and ids[-1] == 1
 
 
+def _run(tokenizer, prompt, monkeypatch):
+    """The ids ``gmlx run`` prefills for the rendered ``prompt``."""
+    generation = importlib.import_module("gmlx.gen.generation")
+    seen = []
+
+    def stream(model, tok, ids, **kwargs):
+        seen.append([int(t) for t in ids])
+        return iter(())
+
+    monkeypatch.setattr(importlib.import_module("mlx_lm.generate"),
+                        "stream_generate", stream)
+    monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
+                        lambda model, step: (None, False))
+    generation.generate(object(), tokenizer, prompt,
+                        apply_chat_template=False, max_tokens=1)
+    (ids,) = seen
+    return ids
+
+
+def _chat(tokenizer, prompt, monkeypatch):
+    """The ids ``gmlx chat`` prefills for the rendered ``prompt`` on a turn
+    that starts the cache."""
+    chat = importlib.import_module("gmlx.tui.chat")
+    return [int(t) for t in chat._encode_turn(tokenizer, prompt, True)]
+
+
+@pytest.mark.parametrize("eos", [False, True], ids=["bos-tok", "bos-eos-tok"])
+@pytest.mark.parametrize("prompt", [_BOS + "Hello", "Hello"],
+                         ids=["bos", "no-bos"])
+def test_serve_run_and_chat_encode_a_prompt_alike(fixed, monkeypatch, eos,
+                                                  prompt):
+    """A tokenizer that adds only BOS drops the duplicate on every path,
+    and one that adds EOS as well keeps the stock encoding on every path."""
+    tokenizer = TokenizerWrapper(_tokenizer(eos))
+    serve = _row(_serve("llama", _make_text_processor(tokenizer), prompt))
+    assert _run(tokenizer, prompt, monkeypatch) == serve
+    assert _chat(tokenizer, prompt, monkeypatch) == serve
+    if eos:
+        assert serve == tokenizer.encode(prompt)
+    else:
+        assert _bos_ids(mx.array([serve])) == 1
+
+
 def test_only_a_tokenizer_that_adds_bos_alone_drops_it():
     assert _adds_only_bos(_tokenizer())
     assert not _adds_only_bos(_tokenizer(eos=True))

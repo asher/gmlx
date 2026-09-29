@@ -43,6 +43,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MLX-format Gemma-4 read the system or developer message as a Python list.
 - A prompt started with two BOS tokens when the chat template wrote one and the
   tokenizer added another, as on Gemma-4, Llama-3, Mistral and Pixtral models.
+- `gmlx chat` left out the BOS token that `gmlx run` and `gmlx serve` add when
+  the tokenizer adds one and the chat template does not write it.
 - The usage `cached_tokens` and the "Prefill completed" log line showed 0 when a
   request reused a prefix from the checkpoint tier or the MTP prefix cache.
 - With a decode batch wider than 8 and the prefix cache on, a request sharing a

@@ -467,6 +467,10 @@ def generate(
             model, tokenizer, prompt, max_tokens=max_tokens, verbose=verbose
         )
 
+    # mlx-lm encodes a string prompt by its own rule, which drops every
+    # special token of a prompt that opens with BOS.
+    prompt_ids = (encode_prompt(tokenizer, prompt) if isinstance(prompt, str)
+                  else prompt)
     prompt_cache = None
     if (kv_quant_scheme or "uniform").lower() == "kvarn":
         if inject_critique is not None or (over_generation and over_generation > 0):
@@ -525,11 +529,7 @@ def generate(
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
         if prefill_tail.tail_model(model):
-            prefill_tail.arm_prefill_tail(
-                prompt_cache,
-                len(encode_prompt(tokenizer, prompt))
-                if isinstance(prompt, str) else len(prompt),
-            )
+            prefill_tail.arm_prefill_tail(prompt_cache, len(prompt_ids))
     # Module-attribute lookup so the monkeypatch seam
     # gmlx.stream.expert_streaming._resolve_prefill_step stays live for this path.
     step, defaulted = expert_streaming._resolve_prefill_step(model, prefill_step_size)
@@ -539,8 +539,7 @@ def generate(
             "(--prefill-step-size overrides)"
         )
     if step is not None and expert_streaming.moe_streaming_active(model):
-        n_prompt = (len(encode_prompt(tokenizer, prompt))
-                    if isinstance(prompt, str) else len(prompt))
+        n_prompt = len(prompt_ids)
         merged = expert_streaming.merge_prefill_tail(step, n_prompt - 1)
         if merged != step and verbose:
             print(f"[prefill] chunk widened to {merged} to fold in the "
@@ -590,7 +589,7 @@ def generate(
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]
         return _generate_over(
-            model, tokenizer, prompt,
+            model, tokenizer, prompt, prompt_ids=prompt_ids,
             main_sampler=sampler, over_sampler=over_sampler,
             logits_processors=logits_processors,
             over_logits_processors=over_logits_processors,
@@ -628,7 +627,7 @@ def generate(
                 print("=" * 10)
                 emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
                 text, last = "", None
-                for last in stream_generate(model, tokenizer, prompt,
+                for last in stream_generate(model, tokenizer, prompt_ids,
                                             **gen_kwargs):
                     emit(last.text)
                     text += last.text
@@ -649,7 +648,7 @@ def generate(
                     print(f"Peak memory: {last.peak_memory:.3f} GB")
                 return text
             return mlx_lm.generate(
-                model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
+                model, tokenizer, prompt_ids, verbose=verbose, **gen_kwargs)
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
@@ -661,7 +660,7 @@ def generate(
             emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
         scanner = StopScanner(stop)
         pieces, last = [], None
-        for r in stream_generate(model, tokenizer, prompt, **gen_kwargs):
+        for r in stream_generate(model, tokenizer, prompt_ids, **gen_kwargs):
             out, hit = scanner.feed(r.text)
             if out:
                 pieces.append(out)
@@ -721,6 +720,7 @@ def _generate_over(
     orig_prompt=None,
     label=None,
     reasoning=None,
+    prompt_ids=None,
 ):
     """Over-generation probe (experimental). Phase 1 generates to the natural
     stop (the seam); phase 2 continues from phase 1's KV cache, either forcing
@@ -729,7 +729,8 @@ def _generate_over(
     ``window`` are set, ``window`` caps the injected reply. Returns the full
     text and appends a JSONL record to ``log_path`` when set. See overgen.py.
     ``reasoning`` styles phase 1's verbose stream like :func:`generate`'s;
-    phase 2 prints raw (the forced continuation is the thing being probed)."""
+    phase 2 prints raw (the forced continuation is the thing being probed).
+    ``prompt_ids`` is the encoded ``prompt`` phase 1 prefills."""
     from mlx_lm.generate import stream_generate
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -758,7 +759,8 @@ def _generate_over(
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     with suppressed_eos(tokenizer):
         for r in stream_generate(
-            model, tokenizer, prompt, max_tokens=max_tokens,
+            model, tokenizer, prompt if prompt_ids is None else prompt_ids,
+            max_tokens=max_tokens,
             sampler=main_sampler, logits_processors=logits_processors,
             prompt_cache=cache, **base_kwargs,
         ):
@@ -910,18 +912,21 @@ _MTP_FINISH_WHY = "on the stock MTP engine (run with --no-mtp to use it)"
 
 
 def encode_prompt(tokenizer, prompt: str) -> list:
-    """Encode a prompt, adding specials only when it does not already open
-    with the BOS string.
+    """Encode a prompt as the server does: with the tokenizer's special
+    tokens, less a BOS the prompt already opens with.
 
-    mlx_lm.stream_generate's single-BOS rule. A chat template that emits
-    its own BOS, on a GGUF whose ``add_bos_token`` is true, would
-    otherwise get a second one from the tokenizer's post-processor. The
-    ds4 DeepSeek-V4.1 conversion sets that flag where the llama.cpp one
-    does not, and both ship the same template.
+    A chat template that emits its own BOS, on a GGUF whose
+    ``add_bos_token`` is true, would otherwise get a second one from the
+    tokenizer's post-processor. The ds4 DeepSeek-V4.1 conversion sets that
+    flag where the llama.cpp one does not, and both ship the same template.
+    The rule is ``single_bos_fix``'s: a prompt that opens with BOS encodes
+    without special tokens only when that BOS is the one token the
+    tokenizer adds, so a tokenizer that adds EOS too keeps both.
     """
-    bos = getattr(tokenizer, "bos_token", None)
+    from gmlx.upstream.single_bos_fix import drops_duplicate_bos
+
     return tokenizer.encode(
-        prompt, add_special_tokens=bos is None or not prompt.startswith(bos))
+        prompt, add_special_tokens=not drops_duplicate_bos(tokenizer, prompt))
 
 
 def _with_mtp_finish_key_notice(fn, *args, **kwargs):

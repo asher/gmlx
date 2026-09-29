@@ -457,6 +457,7 @@ class _Lock:
 
 class _Wrapper:
     bos_token = "<bos>"
+    bos_token_id = 2
 
     def __init__(self, lock):
         self.lock = lock
@@ -497,7 +498,8 @@ def test_chat_tokens_render_encode_and_lock():
     ids = tokens.chat_ids("S", False)
     assert renders[-1][1]["enable_thinking"] is False
     assert ids.count(2) == 1 and ids[0] == 2
-    assert wrapper.calls == [False, False]
+    # enc, then the rendered prompt without special tokens.
+    assert wrapper.calls[0] is False and wrapper.calls[-1] is False
     assert lock.entries == 5 and not lock.held
 
 

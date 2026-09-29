@@ -16,6 +16,7 @@ class _Tok:
     unless the caller opts out."""
 
     bos_token = BOS
+    bos_token_id = 0
 
     def encode(self, text, add_special_tokens=True):
         ids = [ord(c) for c in text.replace(BOS, "\x00")]
@@ -48,3 +49,14 @@ def test_the_deepseek41_template_stays_single_bos(flag):
             return ([0] + ids) if (add_special_tokens and flag) else ids
 
     assert encode_prompt(_T(), BOS + "<think>").count(0) == 1
+
+
+def test_a_tokenizer_that_adds_eos_too_keeps_both():
+    """Encoding without special tokens would drop EOS as well, so the
+    prompt keeps the tokenizer's encoding, as on the server."""
+    class _T(_Tok):
+        def encode(self, text, add_special_tokens=True):
+            ids = super().encode(text, add_special_tokens)
+            return ids + [1] if add_special_tokens else ids
+
+    assert encode_prompt(_T(), BOS + "hi") == [0, 0, ord("h"), ord("i"), 1]

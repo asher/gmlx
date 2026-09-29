@@ -360,6 +360,9 @@ def test_generate_wires_progress_callback_only_when_opted_in(monkeypatch):
         chat_template = None
         eos_token_ids = [0]
 
+        def encode(self, text, add_special_tokens=True):
+            return [1]
+
     def run(*, tty, **kw):
         monkeypatch.setattr(sys, "stderr", _FakeTty() if tty else io.StringIO())
         assert generation.generate(object(), _Tok(), "hi", **kw) == "ok"

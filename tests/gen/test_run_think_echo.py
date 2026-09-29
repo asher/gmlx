@@ -71,7 +71,8 @@ def test_closed_prompt_delegates_untouched(monkeypatch, capsys):
         apply_chat_template=False, verbose=True,
     )
     assert out == "plain"
-    assert calls == ["<|assistant|>\n"]
+    # The prompt, encoded as the server encodes it.
+    assert calls == [_Tok().encode("<|assistant|>\n")]
     assert "<think>" not in capsys.readouterr().out
 
 

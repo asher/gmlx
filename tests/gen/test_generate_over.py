@@ -38,12 +38,14 @@ class _Tok:
 
 
 def _patch_stream(monkeypatch, phase1, phase2):
-    """phase1/phase2 are [(token_id, text)]; phase is chosen by prompt type
-    (str = phase 1 templated prompt, list = phase 2 bridge)."""
+    """phase1/phase2 are [(token_id, text)]: the first call streams phase 1
+    (the prompt), a later one phase 2 (the bridge)."""
+    calls = []
 
     def fake(model, tokenizer, prompt, *, max_tokens, sampler,
              logits_processors, prompt_cache, **base):
-        seq = phase1 if isinstance(prompt, str) else phase2
+        seq = phase2 if calls else phase1
+        calls.append(prompt)
         for i, (tid, txt) in enumerate(seq):
             if i >= max_tokens:
                 break
