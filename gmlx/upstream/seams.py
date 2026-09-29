@@ -90,6 +90,12 @@ def _in_place_image_rows(table) -> str:
                      if name not in added)
 
 
+def _defined_on(fn) -> str:
+    """Where a method is defined, so an override in a subclass moves the
+    pin."""
+    return f"{fn.__module__}.{fn.__qualname__}"
+
+
 SEAMS: tuple[Seam, ...] = (
     # --- batched serve scheduler + ragged decode (batch_sched / ragged_decode) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator._next",
@@ -531,6 +537,17 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.anthropic", "_prepare_chat_tool_choice",
          "messages_route.install_messages_route (enforces the tool choice "
          "on the converted messages)"),
+    # The Responses route builds its messages in place: the in-place
+    # render and the Messages tool image placement follow it.
+    Seam("mlx_vlm.server.responses_state", "_append_response_item_to_prompt",
+         "render._images_in_place (a message's text parts and one image "
+         "marker per image, in content order) + render._tool_images_to_user "
+         "(a tool output's images go to a user message of their own right "
+         "after it)"),
+    Seam("mlx_vlm.server.openai", "responses_endpoint",
+         "render.install_faithful_history (renders the messages and image "
+         "list _response_items_to_chat builds, in the order it builds "
+         "them)"),
     Seam("mlx_vlm.server.app", "_protocol_deps",
          "server_patches._common._render_target_modules (the route "
          "modules copy their bindings from these members at route "
@@ -645,6 +662,11 @@ SEAMS: tuple[Seam, ...] = (
          "render._install_nested_in_place (renders by running the stock "
          "rebuild once more, which renders through the prompt_utils "
          "get_chat_template and is looked up on prompt_utils per call)"),
+    Seam("mlx_vlm.models.gemma4_unified.processing_gemma4_unified",
+         "Gemma4UnifiedProcessor.apply_chat_template",
+         "render._install_nested_in_place (the 12B processor renders with "
+         "the Gemma4Processor method, so through the same nested rebuild)",
+         pin=_defined_on),
     Seam("mlx_vlm.models.gemma4.processing_gemma4",
          "Gemma4Processor._extract_media_from_messages",
          "render._install_nested_in_place (the rebuild it runs counts the "
