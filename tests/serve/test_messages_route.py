@@ -20,6 +20,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
+from jinja2.exceptions import UndefinedError  # noqa: E402
 from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
@@ -427,6 +428,26 @@ def test_a_fold_that_loses_the_system_text_is_rejected(route):
     body = route("mistral-7b", _chat_round(system="SYSTEM-TEXT"),
                  path="/v1/chat/completions", status=500)
     assert "must alternate" in body
+
+
+class _UndefinedAfterTool(_Processor):
+    """Fails a user message right after a tool message with a TemplateError
+    subclass, as a template bug does, rather than the template's own raise."""
+
+    def apply_chat_template(self, messages, **kw):
+        roles = [m["role"] for m in messages]
+        if any(a == "tool" and b == "user" for a, b in zip(roles, roles[1:])):
+            raise UndefinedError("UNDEFINED-AFTER-TOOL")
+        return super().apply_chat_template(messages, **kw)
+
+
+def test_a_template_bug_after_a_tool_is_not_folded(route):
+    """Only the template's own raise_exception folds the user text into the
+    tool results; any other template error stands."""
+    body = route("mistral3", _chat_round(), path="/v1/chat/completions",
+                 status=500, processor=_UndefinedAfterTool(*_TEMPLATES[
+                     "mistral3"][:2]))
+    assert "UNDEFINED-AFTER-TOOL" in body
 
 
 def test_mistral3_still_rejects_two_user_turns(route):
