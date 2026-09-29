@@ -3,8 +3,8 @@
 Ownership posture: gmlx behavior lands as subclass overrides here, never as
 method assignments on the upstream class. The server's manager is constructed
 by the load bridge (``server_bridge_vlm.load_model_resources``) from the same
-env vars ``apc.from_env`` reads; ``from_env`` itself stays unpatched and
-unused for gmlx-served loads - the residency build window pins
+env vars ``apc.from_env`` reads. ``from_env`` itself stays unpatched and
+unused for gmlx-served loads. The residency build window pins
 ``APC_ENABLED=0`` around the stock load (after capturing the effective value
 into ``GMLX_APC_ENABLED``), so the stock call returns ``None`` and never
 builds a manager to discard.
@@ -12,12 +12,13 @@ builds a manager to discard.
 Override rule: an override may wrap, pre/post-process, or replace an
 inherited method outright, but does not duplicate an inherited body to edit
 part of it; when a change would need a copied body, vendor instead.
-``_store_kv_blocks_copy`` is the one standing copied body (the chunked
-eval is mid-loop, unwrappable) - carried from the retired
-``install_apc_batched_store_eval`` method patch, not repeated. It now also
-carries the ckpt-store policy (``_ckpt_disk``: suppress layer-major,
-optionally memory-only), a second in-body divergence - one more divergence
-in this body is the agreed trigger to vendor the upstream file instead.
+``_store_kv_blocks_copy`` is the one standing copied body, because the
+chunked eval sits mid-loop where no wrapper reaches it. It came from the
+retired ``install_apc_batched_store_eval`` method patch and is not
+repeated elsewhere. It also carries the ckpt-store policy (``_ckpt_disk``:
+suppress layer-major, optionally memory-only), a second in-body
+divergence. One more divergence in this body is the agreed trigger to
+vendor the upstream file instead.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ def _store_helpers():
     except AttributeError as e:
         _HELPERS_FAILED = True
         print(f"[apc] prompt-cache fast path not installed ({e}); the cache "
-              "still works, slower - reinstall the pinned mlx-vlm "
+              "still works, slower. Reinstall the pinned mlx-vlm "
               "(pip install mlx-vlm==0.7.3)")
     return _HELPERS
 
@@ -69,7 +70,7 @@ class GmlxAPCManager(_apc.APCManager):
     """APCManager with the per-block store eval batched into chunks.
 
     The stock store loop deep-copies each 16-token block's K/V slices and
-    evaluates them one block at a time - ~0.4-0.5 ms of dispatch/sync per
+    evaluates them one block at a time: ~0.4-0.5 ms of dispatch/sync per
     block regardless of data size, which compounds to ~1 s of synchronous
     prefill-thread stall for a 32k-token store on a 27B model. The copies
     are pure materialization (nothing in the loop consumes their values), so
@@ -249,8 +250,8 @@ class GmlxAPCManager(_apc.APCManager):
 
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
-        wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
-        model with zeroed ckpt_* keys is broken, not idle."""
+        wrap: super() + merge). Visible at /v1/cache/stats. A ckpt model
+        with zeroed ckpt_* keys is broken, not idle."""
         from .snapshot import ckpt_stats_snapshot
         from .prefix_cache import spec_prefix_stats
         snap = super().stats_snapshot()
@@ -358,7 +359,7 @@ class GmlxAPCManager(_apc.APCManager):
 
     # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
     # entries to the wire config (scheme/widths/tail/layout version) so a
-    # scheme change never warm-adopts a stale-format entry -- the disk
+    # scheme change never warm-adopts a stale-format entry. The disk
     # namespace is the model path and carries no scheme.
     _exact_extra_salt = 0
 
@@ -425,7 +426,7 @@ class GmlxAPCManager(_apc.APCManager):
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
-        """Block store for checkpoint chains: always per-block -- the
+        """Block store for checkpoint chains, always per-block. The
         layer-major branch would return no blocks (an unpinnable record)
         and clone the whole prefix into the 2-slot exact LRU. disk=False
         keeps a chain memory-only (the window chain's position salt makes
@@ -829,7 +830,7 @@ def build_apc_manager(model_namespace=None):
     Gated on ``GMLX_APC_ENABLED``, which the residency build window sets to
     the effective ``APC_ENABLED`` value (config-over-ambient) before pinning
     the stock var to ``0``. Absent gate (a non-pooled embedding of the
-    bridge) builds nothing - stock wiring applies there untouched. The knob
+    bridge) builds nothing, and stock wiring applies there untouched. The knob
     vars keep their stock names and parsing: ``APC_BLOCK_SIZE``,
     ``APC_NUM_BLOCKS``, and the ``APC_DISK_*`` family. The disk namespace
     is ``APC_DISK_NAMESPACE`` when set, else the model path.
