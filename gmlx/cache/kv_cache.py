@@ -1637,7 +1637,9 @@ class BatchKVCache(_BaseCache):
             self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
             self.values = dynamic_roll(self.values, padding[:, None], axis=2)
             self.offset -= padding
-            self.left_padding += padding
+            # Rebind, never add in place: gmlx pad memos key on the identity
+            # of left_padding.
+            self.left_padding = self.left_padding + padding
             self._right_padding = None
 
     @property
@@ -1957,7 +1959,9 @@ class BatchRotatingKVCache(_BaseCache):
             roll = mx.maximum(0, self.offset - self._lengths)
             self.keys = dynamic_roll(self.keys, roll[:, None], axis=2)
             self.values = dynamic_roll(self.values, roll[:, None], axis=2)
-            self.left_padding += roll
+            # Rebind, never add in place: gmlx pad memos key on the identity
+            # of left_padding.
+            self.left_padding = self.left_padding + roll
             self.offset -= roll
             self._lengths = None
 
@@ -2405,7 +2409,9 @@ class BatchQuantizedKVCache(_BaseCache):
                 dynamic_roll(v, padding[:, None], axis=2) for v in self.values
             )
         self.offset -= padding
-        self.left_padding += padding
+        # Rebind, never add in place: gmlx pad memos key on the identity of
+        # left_padding.
+        self.left_padding = self.left_padding + padding
         self._right_padding = None
 
     def update_and_fetch(self, keys: mx.array, values: mx.array):
