@@ -84,6 +84,8 @@ _awaiting_capture = None
 
 
 _CAPTURED = pytest.StashKey[dict]()
+# (test node id, fields restore changed), kept under GMLX_TEST_STATE_REPORT=1.
+_restored: list = []
 
 
 def _hand_back_process_state(item) -> None:
@@ -93,9 +95,27 @@ def _hand_back_process_state(item) -> None:
 
     def restore():
         process_state.note_kq_env(state, item.nodeid)
-        process_state.restore(state)
+        changed = process_state.restore(state)
+        if changed and _state_report():
+            _restored.append((item.nodeid, changed))
 
     item.addfinalizer(restore)
+
+
+def _state_report() -> bool:
+    import process_state
+
+    return process_state.SESSION["env"].get("GMLX_TEST_STATE_REPORT") == "1"
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _state_report():
+        return
+    terminalreporter.section("process state restored")
+    if not _restored:
+        terminalreporter.write_line("no test changed the process state")
+    for nodeid, changed in _restored:
+        terminalreporter.write_line(f"{nodeid}: {', '.join(changed)}")
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

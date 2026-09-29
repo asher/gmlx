@@ -200,51 +200,70 @@ def note_kq_env(state: dict, nodeid: str) -> None:
             KQ_TOUCHED.append((nodeid, k))
 
 
-def _restore_env(saved: dict) -> None:
+def _restore_env(saved: dict, changed: list) -> None:
     for k in list(os.environ):
         if k not in saved and k not in _ENV_SKIP:
+            changed.append(f"env {k}")
             del os.environ[k]
     for k, v in saved.items():
         if k not in _ENV_SKIP and os.environ.get(k) != v:
+            changed.append(f"env {k}")
             os.environ[k] = v
 
 
-def restore(state: dict) -> None:
-    _restore_env(state["env"])
-    warnings.formatwarning = state["formatwarning"]
-    warnings.showwarning = state["showwarning"]
-    mx.set_wired_limit = state["set_wired_limit"]
-    mx.device_info = state["device_info"]
+def restore(state: dict) -> list:
+    """Put back what ``state`` captured. Returns the name of each field
+    that had changed."""
+    changed: list = []
+    _restore_env(state["env"], changed)
+    for name, owner in (("formatwarning", warnings),
+                        ("showwarning", warnings),
+                        ("set_wired_limit", mx), ("device_info", mx)):
+        if getattr(owner, name) is not state[name]:
+            changed.append(f"{owner.__name__}.{name}")
+            setattr(owner, name, state[name])
     for name in _LIMITS:
-        if name in _prior:
-            _setters[name](_prior[name])
+        if name in _prior and _setters[name](_prior[name]) != _prior[name]:
+            changed.append(name.removeprefix("set_").replace("_", " "))
     if "rng" in _prior:
+        changed.append("rng")
         hi, lo = _prior["rng"].tolist()
         _setters["seed"]((int(hi) << 32) | int(lo))
     caps = state["cb_caps"]
     if caps is not None and cb_caps() != caps:
+        changed.append("cb_caps")
         _setters["set_cb_caps"](*caps)
     phase = _cb_phase_state()
     if phase is not None and phase["phase"] != state["cb_phase"]:
+        changed.append("cb_phase")
         phase["phase"] = state["cb_phase"]
     for mod, fn in state["wired_limit"]:
         if getattr(mod, "wired_limit", _MISSING) is fn:
             continue
+        changed.append(f"{mod.__name__}.wired_limit")
         if fn is _MISSING:
             del mod.wired_limit
         else:
             mod.wired_limit = fn
+    governor = False
     for st in list(_governor_states):
         saved = state["governor"].get(st, (None, None))
         if (st.saved_mem_limit, st.saved_cache_limit) != saved:
+            governor = True
             st.saved_mem_limit, st.saved_cache_limit = saved
+    if governor:
+        changed.append("governor saved limits")
     decay = _prefill_decay()
     if decay is not None and \
             decay._NOTED_CACHE_LIMIT != state["noted_cache_limit"]:
+        changed.append("noted_cache_limit")
         decay._NOTED_CACHE_LIMIT = state["noted_cache_limit"]
     if mx.default_device() != state["device"]:
+        changed.append("device")
         mx.set_default_device(state["device"])
     for d, stream in state["streams"].items():
         if mx.default_stream(d) != stream:
+            changed.append(f"stream {getattr(d, 'name', d)}")
             mx.set_default_stream(stream)
     _prior.clear()
+    return changed

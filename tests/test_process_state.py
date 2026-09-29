@@ -201,7 +201,8 @@ def _inner_tree(tmp_path) -> Path:
 
 def _inner_pytest(root: Path, *args, **env):
     run_env = {k: v for k, v in process_state.SESSION["env"].items()
-               if not k.startswith("PYTEST_")}
+               if not k.startswith("PYTEST_")
+               and k != "GMLX_TEST_STATE_REPORT"}
     run_env.update(KQUANT_FORCE_CPU="1", PYTHONPATH=str(_TESTS.parent), **env)
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "--tb=short",
@@ -313,6 +314,38 @@ def test_the_end_of_run_check_names_a_kq_key_a_test_set(tmp_path):
     assert "1 failed, 2 passed" in r.stdout, r.stdout[-4000:]
     touched = "[('test_kq.py::test_sets_a_key_kq_keeps', 'KQ_VERIFY_EXT')]"
     assert touched in r.stdout, r.stdout[-4000:]
+
+
+_CHANGE_TESTS = '''
+import os
+import warnings
+
+import mlx.core as mx
+
+
+def test_changes_the_process():
+    os.environ["GMLX_INNER_CHANGE"] = "1"
+    warnings.formatwarning = lambda *a, **k: ""
+    mx.set_cache_limit(123 << 20)
+
+
+def test_leaves_the_process_alone():
+    pass
+'''
+
+
+def test_the_state_report_names_each_field_restore_changed(tmp_path):
+    root = _inner_tree(tmp_path)
+    (root / "test_change.py").write_text(_CHANGE_TESTS)
+    r = _inner_pytest(root, "test_change.py", GMLX_TEST_STATE_REPORT="1")
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "process state restored" in r.stdout, r.stdout[-4000:]
+    assert ("test_change.py::test_changes_the_process: env GMLX_INNER_CHANGE, "
+            "warnings.formatwarning, cache limit") in r.stdout, r.stdout[-4000:]
+    assert "test_leaves_the_process_alone" not in r.stdout, r.stdout[-4000:]
+    quiet = _inner_pytest(root, "test_change.py")
+    assert quiet.returncode == 0, quiet.stdout[-4000:]
+    assert "process state restored" not in quiet.stdout, quiet.stdout[-4000:]
 
 
 _GEMM = r"""

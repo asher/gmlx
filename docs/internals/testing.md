@@ -32,6 +32,29 @@ the [documentation home](../README.md) and from the Documentation list in
 the [project README](../../README.md#documentation), so a new top-level
 page needs both links.
 
+## Process state between tests
+
+Each test hands the process back as it found it. `tests/process_state.py`
+captures the environment, the MLX default device and streams, the memory,
+cache and wired limits, the RNG key, the command buffer caps and the
+Python-side copies of those settings as the first function-scoped fixture
+of a test sets up, and puts them back after the last one tears down. What
+a class-, module- or session-scoped fixture changes stays for the tests
+that share it.
+
+The last test of a run, `test_the_run_ends_on_production_numerics` in
+`tests/test_process_state.py`, checks that the run ends on the session's
+settings. It also fails when a test set a `KQ_*` key that mlx-kquant
+reads once per process, since that test decided the key for the rest of
+the run. Run such a test in a child process.
+
+Set `GMLX_TEST_STATE_REPORT=1` to list, at the end of the run, each test
+whose changes the restore undid and the fields it put back:
+
+```sh
+GMLX_TEST_STATE_REPORT=1 pytest tests/serve
+```
+
 ## GGUF-gated integration tests
 
 The GGUF-gated tests check numerical correctness against real weights and
