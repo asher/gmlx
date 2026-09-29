@@ -26,8 +26,11 @@ from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 from gmlx._vendor.mlx_vlm.models.gemma4.config import TextConfig
 from gmlx._vendor.mlx_vlm.models.rope_utils import initialize_rope
 
-from gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention
+from gmlx.cache.attention import create_attention_mask
 from gmlx.cache.kv_cache import KVCache, RotatingKVCache, create_causal_mask
+
+# gmlx: the attention dispatch, whose claims run before the base.
+from .dispatch import scaled_dot_product_attention
 
 
 @partial(mx.compile, shapeless=True)

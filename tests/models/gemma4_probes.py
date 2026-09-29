@@ -324,6 +324,131 @@ def ple_batch_slice(lang) -> str:
     return "ok"
 
 
+ATTN = dict(num_hidden_layers=2, sliding_window_pattern=2, head_dim=64,
+            global_head_dim=512, num_attention_heads=2, num_key_value_heads=1)
+
+
+def attention(lang, layer_idx, dtype=mx.float32, kv_shared_only=False):
+    """An attention layer of a two-layer config: layer 0 slides with
+    head_dim 64, layer 1 is global with head_dim 512."""
+    mx.random.seed(7)
+    attn = lang.Attention(TextConfig(**{**BASE, **ATTN}), layer_idx,
+                          kv_shared_only=kv_shared_only)
+    attn.set_dtype(dtype)
+    mx.eval(attn.parameters())
+    return attn
+
+
+def fill(cache, rows, length, head_dim, dtype):
+    k = mx.random.normal((rows, 1, length, head_dim)).astype(dtype)
+    cache.update_and_fetch(k, k)
+
+
+def _zeros_like_queries(q, *args, **kwargs):
+    return mx.zeros(q.shape, q.dtype)
+
+
+def route_claims(lang) -> dict:
+    """Claims the gmlx attention routes take from the attention of
+    ``lang``, by call, with every route gate open: the batched hd512 route
+    at decode and verify width, its relay to a KV-shared consumer, the
+    cascade route on a stamped batch cache and on a rotating one, and the
+    sparse route by opt-in. The fused cascade and paged kernels are
+    stand-ins that return zeros."""
+    import os
+
+    import mlx_kquant
+
+    import gmlx.upstream.attn_hd512 as hd512
+    from gmlx.cache.attention import create_attention_mask
+    from gmlx.cache.kv_cache import BatchKVCache, BatchRotatingKVCache, KVCache
+    from gmlx.models.gemma4 import batched_sdpa as rows
+    from gmlx.models.gemma4 import dispatch
+    from gmlx.upstream import cascade_sdpa as cascade
+    from gmlx.upstream import sparse_sdpa as sparse
+
+    env = {"GMLX_CASCADE_MIN_P": "16", "GMLX_SPARSE_MIN_S": "64",
+           "GMLX_SPARSE_K": "16", "GMLX_SPARSE_ATTN": None,
+           "GMLX_SPARSE_ARCHS": None, "GMLX_G4_BATCHED_SDPA": None}
+    saved_env = {k: os.environ.get(k) for k in env}
+    kernels = ("sdpa_decode_gqa_cascade", "sdpa_decode_gqa_paged")
+    saved_kernels = {k: getattr(mlx_kquant, k, None) for k in kernels}
+    saved = (hd512._installed, hd512._MIN_KV, cascade._installed_route)
+
+    def setenv(**kw):
+        for k, v in kw.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        dispatch.configure()
+
+    out = {}
+    try:
+        for k in kernels:
+            setattr(mlx_kquant, k, _zeros_like_queries)
+        hd512._installed, hd512._MIN_KV = True, 32
+        cascade._installed_route = True
+        setenv(**env)
+
+        full = attention(lang, 1)
+        cache = BatchKVCache(left_padding=[0, 3])
+        fill(cache, 2, 40, 512, mx.float32)
+        for name, width in (("batched_decode", 1), ("batched_verify", 4)):
+            x = mx.random.normal((2, width, 64))
+            mask = create_attention_mask(x, cache, return_array=True)
+            n = rows.claims()
+            _o, shared, offset = full(x, mask, cache)
+            out[name] = rows.claims() - n
+        consumer = attention(lang, 1, kv_shared_only=True)
+        for name, m in (("relay", mask), ("relay_cold", mx.array(mask))):
+            n = rows.claims()
+            consumer(x, m, None, shared_kv=shared, offset=offset)
+            out[name] = rows.claims() - n
+
+        slide = attention(lang, 0, mx.float16)
+        prefix, tails = 32, [6, 4]
+        length = prefix + max(tails)
+        pads = [length - prefix - t for t in tails]
+        ids = [cascade._row_bytes(list(range(prefix))
+                                  + [1000 + 100 * b + j for j in range(t)])
+               for b, t in enumerate(tails)]
+        for name, c in (("cascade", BatchKVCache(left_padding=pads)),
+                        ("cascade_rotating",
+                         BatchRotatingKVCache(max_size=64, left_padding=pads))):
+            assert cascade._stamp_caches([c], ids)
+            fill(c, 2, length, 64, mx.float16)
+            x = mx.random.normal((2, 1, 64)).astype(mx.float16)
+            n = cascade.claims()
+            slide(x, c.make_mask(1), c)
+            out[name] = cascade.claims() - n
+
+        single = KVCache()
+        fill(single, 1, 256, 64, mx.float16)
+        for name, kw in (("sparse_default", {}),
+                         ("sparse_opted_in", {"GMLX_SPARSE_ATTN": "1",
+                                              "GMLX_SPARSE_ARCHS":
+                                              "gemma4_text"}),
+                         ("sparse_module_name", {"GMLX_SPARSE_ATTN": "1",
+                                                 "GMLX_SPARSE_ARCHS":
+                                                 "language"})):
+            setenv(**{**env, **kw})
+            x = mx.random.normal((1, 1, 64)).astype(mx.float16)
+            n = sparse.claims()
+            slide(x, None, single)
+            out[name] = sparse.claims() - n
+    finally:
+        for k, fn in saved_kernels.items():
+            if fn is None:
+                if hasattr(mlx_kquant, k):
+                    delattr(mlx_kquant, k)
+            else:
+                setattr(mlx_kquant, k, fn)
+        hd512._installed, hd512._MIN_KV, cascade._installed_route = saved
+        setenv(**saved_env)
+    return out
+
+
 def main():
     from gmlx._vendor.mlx_lm.models import gemma4_text as stock_lm
     from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
@@ -343,6 +468,7 @@ def main():
                     "gmlx._vendor.mlx_lm": softcap(stock_lm.logit_softcap)},
         "model_logits_dtype": model_logits_dtype(stock),
         "ple_batch_slice": ple_batch_slice(stock),
+        "route_claims": route_claims(stock),
     }
     print(json.dumps(result, sort_keys=True))
 

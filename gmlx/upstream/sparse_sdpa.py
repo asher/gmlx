@@ -68,6 +68,18 @@ def claims() -> int:
     return _CLAIMS[0]
 
 
+def arch_enabled(name: str) -> bool:
+    """True when the architecture ``name`` may take the route: a validated
+    one, or one named in GMLX_SPARSE_ARCHS."""
+    import os
+
+    extra = tuple(
+        x.strip() for x in os.environ.get("GMLX_SPARSE_ARCHS", "").split(",")
+        if x.strip()
+    )
+    return name in _VALIDATED + extra
+
+
 def _block_means(cache, keys, bl):
     """fp16 mean key per full page, maintained incrementally on the cache.
 
@@ -236,16 +248,10 @@ def install_sparse_sdpa() -> bool:
     if _installed:
         return True
     import importlib
-    import os
 
-    extra = tuple(
-        x.strip() for x in os.environ.get("GMLX_SPARSE_ARCHS", "").split(",")
-        if x.strip()
-    )
-    allowed = _VALIDATED + extra
     patched = 0
     for pkg, name in _MODULES:
-        if name not in allowed:
+        if not arch_enabled(name):
             continue
         try:
             mod = importlib.import_module(f"{pkg}.{name}")
