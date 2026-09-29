@@ -1986,7 +1986,10 @@ class BatchRotatingKVCache(_BaseCache):
             int,
             v[:3],
         )
-        self.rotated = bool(v[3])
+        # The getter writes the flag as a string, and bool("False") is True.
+        self.rotated = v[3] if isinstance(v[3], bool) else v[3] == "True"
+        # from_state skips __init__; a restored cache has no pending lengths.
+        self.__dict__.setdefault("_lengths", None)
 
     def is_trimmable(self):
         return self._offset < self.max_size

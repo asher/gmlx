@@ -1,4 +1,5 @@
-"""The owned cache classes and SDPA helpers behave as pristine stock.
+"""The owned cache classes and SDPA helpers behave as stock, except where
+an owned fix changes a result.
 
 cache_equivalence_ops.py runs one fixed operation sequence per cache class
 (``update_and_fetch`` at widths 1 and N, ``make_mask``, ``trim``, the state
@@ -7,9 +8,10 @@ and meta_state round trip, ``from_state``, ``extract``, ``merge``,
 over the module helpers and over the SDPA helpers, in three children on
 the CPU device: one on gmlx.cache.kv_cache and gmlx.cache.attention, and
 one each on stock mlx-vlm and mlx-lm that never import gmlx. The owned run
-must equal the mlx-vlm run in every result, a raised exception included.
-Against mlx-lm it must agree in every method whose body the two packages
-share.
+must equal the mlx-vlm run in every result, a raised exception included,
+except in the records OWNED_FIXES names: there an owned fix changes the
+result, and the two runs must differ. Against mlx-lm it must agree in
+every other method whose body the two packages share.
 """
 
 from __future__ import annotations
@@ -94,6 +96,13 @@ LM_GROUPS = ("KVCache", "RotatingKVCache", "RotatingKVCache keep",
              "ConcatenateKVCache", "QuantizedKVCache 4", "QuantizedKVCache 8",
              "ChunkedKVCache", "BatchKVCache", "BatchRotatingKVCache",
              "ArraysCache", "CacheList", "functions", "sdpa")
+# Records whose owned result differs from stock on purpose, per group: the
+# record an owned fix changes, and the later records that carry its state.
+OWNED_FIXES = {
+    # from_state seeds _lengths, which the stock restore leaves unset.
+    "BatchRotatingKVCache": {"BatchRotatingKVCache/031 from_state"},
+    "CacheList": {"CacheList/024 batch from_state"},
+}
 
 
 def _child(mode: str) -> dict:
@@ -136,8 +145,8 @@ def test_owned_matches_mlx_vlm(runs, group):
     own, vlm = _rows(runs["owned"], group), _rows(runs["vlm"], group)
     assert list(own) == list(vlm)
     assert len(own) >= 9
-    diff = [key for key in own if own[key]["full"] != vlm[key]["full"]]
-    assert not diff, diff[:10]
+    diff = {key for key in own if own[key]["full"] != vlm[key]["full"]}
+    assert diff == OWNED_FIXES.get(group, set()), sorted(diff)[:10]
 
 
 @pytest.mark.parametrize("group", LM_GROUPS)
@@ -148,7 +157,8 @@ def test_owned_matches_mlx_lm_where_bodies_agree(runs, group):
     for key, row in own.items():
         if LM_DIVERGES.get(row["cls"]) == row["method"]:
             break
-        if row["method"] == "__dict__" or not _lm_same(row["cls"], row["method"]):
+        if (row["method"] == "__dict__" or key in OWNED_FIXES.get(group, ())
+                or not _lm_same(row["cls"], row["method"])):
             continue
         compared += 1
         if row["reduced"] != lm[key]["reduced"]:
