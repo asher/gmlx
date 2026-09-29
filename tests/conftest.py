@@ -118,15 +118,17 @@ def pytest_terminal_summary(terminalreporter):
         terminalreporter.write_line(f"{nodeid}: {', '.join(changed)}")
 
 
-@pytest.hookimpl(wrapper=True, tryfirst=True)
-def pytest_runtest_setup(item):
+# Its own name, so the plain hook that skips the kvarn tests stays a plain
+# hook: a skip raised there runs inside every plugin's setup wrapper, whose
+# teardown then finds what its setup left.
+@pytest.hookimpl(wrapper=True, tryfirst=True, specname="pytest_runtest_setup")
+def pytest_runtest_setup_capture(item):
     global _awaiting_capture
-    _skip_without_kvarn_ops(item)
     _awaiting_capture = item
     try:
         result = yield
     except BaseException:
-        # Setup stopped before any function-scoped fixture ran.
+        # Setup stopped. A capture it made still restores at teardown.
         _awaiting_capture = None
         raise
     if _awaiting_capture is item:
@@ -306,7 +308,7 @@ def _no_live_server(monkeypatch):
                         lambda base_url, api_key=None: False)
 
 
-def _skip_without_kvarn_ops(item) -> None:
+def pytest_runtest_setup(item):
     ops = item.get_closest_marker("needs_kvarn_ops") is not None
     row_ends = item.get_closest_marker("needs_kvarn_row_ends") is not None
     if not (ops or row_ends):

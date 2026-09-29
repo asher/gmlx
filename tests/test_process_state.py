@@ -277,6 +277,27 @@ def test_restore_wraps_every_function_fixture_whatever_its_name(tmp_path):
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
 
 
+_KVARN_TESTS = '''
+import pytest
+
+
+@pytest.mark.needs_kvarn_ops
+def test_needs_kvarn_ops():
+    pass
+'''
+
+
+def test_a_test_skipped_in_setup_tears_down_clean(tmp_path):
+    # The CPU device has no kvarn kernels, so the conftest skips this test
+    # in its setup hook. The other plugins' setup wrappers run before the
+    # skip, so their teardown finds what they set.
+    root = _inner_tree(tmp_path)
+    (root / "test_kvarn.py").write_text(_KVARN_TESTS)
+    r = _inner_pytest(root, "-p", "no:warnings", "test_kvarn.py")
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "1 skipped" in r.stdout, r.stdout[-4000:]
+
+
 def test_the_end_of_run_check_stays_last_under_ff_and_nf(tmp_path):
     # The check failed last time and its file is the newest, so --ff and
     # --nf would each move it to the front.
