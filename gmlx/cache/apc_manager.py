@@ -17,13 +17,13 @@ chunked eval sits mid-loop where no wrapper reaches it. It came from the
 retired ``install_apc_batched_store_eval`` method patch and is not
 repeated elsewhere. It also carries the ckpt-store policy (``_ckpt_disk``:
 suppress layer-major, optionally memory-only), a second in-body
-divergence. One more divergence in this body is the agreed trigger to
-vendor the upstream file instead. The per-block image salt
-(``block_chain``) is that divergence: the copied store hashes each block
-under its own salt, and the lookups of a prompt with images walk the
-stock chain the same way (``lookup_prefix``,
-``lookup_prefix_disk_cache``). The seam pins on the stock store and both
-lookups report any upstream change to them until the file is vendored.
+divergence, and the per-block image salt (``block_chain``), a third: the
+copied store hashes each block under its own salt, and the lookups of a
+prompt with images walk the stock chain the same way (``lookup_prefix``,
+``lookup_prefix_disk_cache``). The upstream file is not vendored on its
+own. APC moves into owned code with the generate loop and spec decode in
+the engine step after 0.5. Until then the seam pins on the stock store
+and both lookups report any upstream change to them.
 """
 
 from __future__ import annotations
