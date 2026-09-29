@@ -197,11 +197,8 @@ def test_rotating_undo_replay_is_bit_identical():
     # Cache-level gate for the one-update undo log: a rotated cache takes an
     # armed S=2 update, trims 1, and must equal a control cache that saw the
     # same stream with only the confirmed token.
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx.cache.kv_cache import RotatingKVCache, set_undo_armed
 
-    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached, set_undo_armed
-
-    ensure_rollback_attached()
     mx.random.seed(3)
 
     def feed(cache, arrs):
@@ -234,11 +231,8 @@ def test_rotating_undo_replay_is_bit_identical():
 
 
 def test_rotating_undo_unarmed_update_not_trimmable():
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx.cache.kv_cache import RotatingKVCache
 
-    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
-
-    ensure_rollback_attached()
     cache = RotatingKVCache(max_size=4)
     for _ in range(6):
         cache.update_and_fetch(mx.zeros((1, 1, 1, 4)), mx.zeros((1, 1, 1, 0)))
@@ -312,11 +306,8 @@ def test_mtp_greedy_identity_gated_rollout(block):
 def test_rotating_undo_replay_3wide():
     # S=3 rounds write 3-wide verifies; trim(1) and trim(2) on a rotated
     # cache must each equal a control that saw only the confirmed prefix.
-    from mlx_lm.models.cache import RotatingKVCache
+    from gmlx.cache.kv_cache import RotatingKVCache, set_undo_armed
 
-    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached, set_undo_armed
-
-    ensure_rollback_attached()
     mx.random.seed(11)
 
     def feed(cache, arrs):
@@ -354,34 +345,32 @@ def test_rotating_undo_replay_3wide():
         assert mx.array_equal(control.keys, test_cache.keys)
 
 
-@pytest.fixture
-def rotating_undo(monkeypatch):
-    """The undo log on every origin's rotating cache classes, for this test
-    only when an earlier test has not attached it already."""
-    # cache_types lists the mlx-vlm classes only once their module is
-    # imported, and nothing else in this file imports it.
-    import mlx_vlm.models.cache  # noqa: F401
+def _stock_rotating_bodies(monkeypatch, cls):
+    """Put the stock mlx-vlm bodies of the methods the undo log changes on
+    the owned class ``cls``."""
+    import importlib
 
-    from gmlx.cache.compat import cache_types
-    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
+    from gmlx.cache import bind
 
-    for cls in (*cache_types("RotatingKVCache"),
-                *cache_types("BatchRotatingKVCache")):
-        for name in ("update_and_fetch", "is_trimmable", "trim"):
-            monkeypatch.setattr(cls, name, vars(cls)[name])
-        for name in ("_mtp_undo", "_gmlx_mtp_undo_attached"):
-            monkeypatch.setattr(cls, name, vars(cls).get(name), raising=False)
-    ensure_rollback_attached()
+    importlib.import_module("mlx_vlm.models.cache")
+    stock = next(old for old, new in bind.replaced()
+                 if new is cls and old.__module__ == "mlx_vlm.models.cache")
+    for name in ("update_and_fetch", "is_trimmable", "trim"):
+        monkeypatch.setattr(cls, name, vars(stock)[name])
 
 
+@pytest.mark.parametrize("body", ["owned", "stock"])
 @pytest.mark.parametrize("n_trim", [1, 2, 3])
-def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
-    # A batch whose sliding window is full: the stock update changes the
-    # offset and left_padding arrays in place, so trim must restore their
-    # values from before the verify write, then replay the confirmed prefix.
-    from gmlx.cache.compat import cache_types
-    from gmlx.models.deepseek_v4.cache import set_undo_armed
+def test_batch_rotating_undo_replay_matches_control(monkeypatch, body, n_trim):
+    # A batch whose sliding window is full: the update changes the offset
+    # and left_padding arrays in place, so trim must restore their values
+    # from before the verify write, then replay the confirmed prefix. The
+    # stock bodies have no undo log: the full window is not trimmable.
+    from gmlx.cache.kv_cache import BatchRotatingKVCache as cls
+    from gmlx.cache.kv_cache import set_undo_armed
 
+    if body == "stock":
+        _stock_rotating_bodies(monkeypatch, cls)
     mx.random.seed(29)
     stream = [mx.random.normal((2, 1, 1, 4)) for _ in range(12)]
     block = mx.random.normal((2, 1, 3, 4))
@@ -391,33 +380,32 @@ def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
         for a in arrs:
             cache.update_and_fetch(a, a)
 
-    classes = cache_types("BatchRotatingKVCache")
-    # Both origins name the owned class once gmlx is imported.
-    assert [c.__module__ for c in classes] == ["gmlx.cache.kv_cache"], classes
-    for cls in classes:
-        test_cache = cls(max_size=8, left_padding=[2, 0])
-        feed(test_cache, stream)
-        set_undo_armed(True)
-        try:
-            test_cache.update_and_fetch(block, block)
-        finally:
-            set_undo_armed(False)
-        assert test_cache.is_trimmable()
-        assert test_cache.trim(n_trim) == n_trim
+    test_cache = cls(max_size=8, left_padding=[2, 0])
+    feed(test_cache, stream)
+    set_undo_armed(True)
+    try:
+        test_cache.update_and_fetch(block, block)
+    finally:
+        set_undo_armed(False)
+    if body == "stock":
+        assert not test_cache.is_trimmable()
+        return
+    assert test_cache.is_trimmable()
+    assert test_cache.trim(n_trim) == n_trim
 
-        control = cls(max_size=8, left_padding=[2, 0])
-        feed(control, stream)
-        if k:
-            feed(control, [block[..., :k, :]])
+    control = cls(max_size=8, left_padding=[2, 0])
+    feed(control, stream)
+    if k:
+        feed(control, [block[..., :k, :]])
 
-        where = f"{cls.__module__} trim({n_trim})"
-        assert test_cache.offset.tolist() == control.offset.tolist(), where
-        assert (test_cache.left_padding.tolist()
-                == control.left_padding.tolist()), where
-        assert test_cache._offset == control._offset, where
-        assert test_cache._idx == control._idx, where
-        assert test_cache.rotated == control.rotated, where
-        assert mx.array_equal(test_cache.keys, control.keys), where
+    where = f"trim({n_trim})"
+    assert test_cache.offset.tolist() == control.offset.tolist(), where
+    assert (test_cache.left_padding.tolist()
+            == control.left_padding.tolist()), where
+    assert test_cache._offset == control._offset, where
+    assert test_cache._idx == control._idx, where
+    assert test_cache.rotated == control.rotated, where
+    assert mx.array_equal(test_cache.keys, control.keys), where
 
 
 def _pool_px(r_kv, ratio):

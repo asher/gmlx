@@ -1,17 +1,15 @@
-"""The DeepSeek-V4 MTP undo log leaves other rotating caches stock.
+"""The DeepSeek-V4 MTP undo log leaves other rotating caches as they are.
 
-ensure_rollback_attached wraps the rotating cache classes of every origin
-for the rest of the process, and a served process can hold a DeepSeek-V4
-model beside a Gemma-4 model. A cache that no DeepSeek-V4 verify armed
-must behave as the class without the undo log. Each check runs in a fresh
-child that never attached the undo log and in children that attached it
-before and after the stock trim fix, as a DeepSeek-V4 load and a Gemma-4
-load install them in either order. Every child installs the trim fix, as
-the loader does. The children must agree, and each Gemma-4 rollback must
-match a single-row forward over the kept tokens, whether a one-token step
-or a verify-width block follows it. A control child runs without the trim
-fix, where the one-token step must miss that forward, so the check can
-still tell a broken rollback.
+The owned rotating cache classes carry the undo log for the whole
+process, and a served process can hold a DeepSeek-V4 model beside a
+Gemma-4 model. A cache that no DeepSeek-V4 verify armed must behave as the
+class without the undo log, and a verify armed on one thread must not arm
+a cache updated on another. Each check runs in a fresh child with the undo
+log and in a child where it never stashes. The children must agree, and
+each Gemma-4 rollback must match a single-row forward over the kept
+tokens, whether a one-token step or a verify-width block follows it. A
+control child runs the stock trim bodies, where the one-token step must
+miss that forward, so the check can still tell a broken rollback.
 """
 
 from __future__ import annotations
@@ -32,27 +30,20 @@ import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
 
-# Serve loads the mlx-vlm runtime before a model builds, so the attach
-# wraps both origins.
 import mlx_vlm.models.cache  # noqa: F401
 
-from gmlx.cache.compat import cache_types
-from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
+import gmlx.cache.kv_cache as owned
+from gmlx.cache import bind
 
-
-def attach():
-    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
-
-    ensure_rollback_attached()
-
-
-# The loader installs the trim fix with every model; a DeepSeek-V4 model
-# attaches the undo log as it builds, before that install.
-order = {"no-undo": [install_rotating_trim_fix],
-         "undo-first": [attach, install_rotating_trim_fix],
-         "guard-first": [install_rotating_trim_fix, attach]}[sys.argv[1]]
-for step in order:
-    step()
+CLASSES = (owned.RotatingKVCache, owned.BatchRotatingKVCache)
+mode = sys.argv[1]
+if mode == "no-undo":
+    owned._stash_undo = lambda *args: None
+elif mode == "stock-trim":
+    for cls in CLASSES:
+        stock = next(old for old, new in bind.replaced()
+                     if new is cls and old.__module__ == "mlx_vlm.models.cache")
+        cls.trim = vars(stock)["trim"]
 
 
 def value(v):
@@ -72,7 +63,7 @@ def fill(cache, B):
     trimmable = cache.is_trimmable()
     got = cache.trim(2)
     return {
-        "undo": bool(vars(type(cache)).get("_gmlx_mtp_undo_attached")),
+        "stash": "_mtp_undo" in vars(cache),
         "trimmable": trimmable, "trim": got,
         "offset": value(cache.offset), "idx": cache._idx,
         "_offset": value(getattr(cache, "_offset", None)),
@@ -82,13 +73,9 @@ def fill(cache, B):
 
 
 def caches():
-    out = {}
-    for cls in cache_types("RotatingKVCache"):
-        out[f"{cls.__module__}.{cls.__name__}"] = fill(cls(max_size=8), 1)
-    for cls in cache_types("BatchRotatingKVCache"):
-        out[f"{cls.__module__}.{cls.__name__}"] = fill(
-            cls(max_size=8, left_padding=[2, 0]), 2)
-    return out
+    single, batch = CLASSES
+    return {single.__name__: fill(single(max_size=8), 1),
+            batch.__name__: fill(batch(max_size=8, left_padding=[2, 0]), 2)}
 
 
 def gemma():
@@ -153,44 +140,63 @@ def gemma():
 print(json.dumps({"caches": caches(), "gemma": gemma()}))
 '''
 
-_ORDERS = ("undo-first", "guard-first")
-# The control: no undo log and no trim fix.
-_UNGUARDED = "no-undo-no-fix"
+_MODES = ("owned", "no-undo")
+# The control: the stock trim bodies.
+_CONTROL = "stock-trim"
 
 
-def _child(order: str) -> dict:
-    env = dict(os.environ)
-    if order == _UNGUARDED:
-        order = "no-undo"
-        env["GMLX_ROTATING_TRIM_FIX"] = "0"
+def _child(mode: str) -> dict:
     r = subprocess.run(
-        [sys.executable, "-c", CHILD, order], capture_output=True,
-        text=True, env=env, timeout=600)
+        [sys.executable, "-c", CHILD, mode], capture_output=True,
+        text=True, env=dict(os.environ), timeout=600)
     assert r.returncode == 0, r.stderr[-4000:]
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
 @pytest.fixture(scope="module")
 def runs():
-    return {order: _child(order)
-            for order in ("no-undo",) + _ORDERS + (_UNGUARDED,)}
+    return {mode: _child(mode) for mode in _MODES + (_CONTROL,)}
 
 
-@pytest.mark.parametrize("order", _ORDERS)
-def test_unarmed_rotating_caches_trim_as_without_the_undo_log(runs, order):
-    plain, attached = runs["no-undo"]["caches"], runs[order]["caches"]
-    assert set(plain) == set(attached)
-    # Both origins name the owned classes, so each name is one class.
-    assert set(plain) == {"gmlx.cache.kv_cache.RotatingKVCache",
-                          "gmlx.cache.kv_cache.BatchRotatingKVCache"}
+def test_unarmed_rotating_caches_trim_as_without_the_undo_log(runs):
+    plain, owned = runs["no-undo"]["caches"], runs["owned"]["caches"]
+    assert set(plain) == set(owned) == {"RotatingKVCache",
+                                        "BatchRotatingKVCache"}
     for name, want in plain.items():
-        got = attached[name]
-        assert not want["undo"] and got["undo"], name
+        got = owned[name]
+        assert not want["stash"] and not got["stash"], name
         # A full window reports itself untrimmable and trims anyway.
         assert not want["trimmable"] and want["trim"] == 2, name
-        for key, v in want.items():
-            if key != "undo":
-                assert got[key] == v, (name, key)
+        assert got == want, name
+
+
+def test_a_verify_armed_on_another_thread_arms_nothing_here():
+    import threading
+
+    import mlx.core as mx
+
+    from gmlx.cache.kv_cache import RotatingKVCache, set_undo_armed
+
+    armed, done = threading.Event(), threading.Event()
+
+    def verify():
+        set_undo_armed(True)
+        armed.set()
+        done.wait(10)
+        set_undo_armed(False)
+
+    t = threading.Thread(target=verify)
+    t.start()
+    try:
+        assert armed.wait(10)
+        cache = RotatingKVCache(max_size=4)
+        for _ in range(6):
+            cache.update_and_fetch(mx.zeros((1, 1, 1, 4)), mx.zeros((1, 1, 1, 4)))
+        cache.update_and_fetch(mx.zeros((1, 1, 2, 4)), mx.zeros((1, 1, 2, 4)))
+        assert cache._mtp_undo is None and not cache.is_trimmable()
+    finally:
+        done.set()
+        t.join()
 
 
 _CASES = [f"{n} {f}" for n in ("one", "two") for f in ("step", "block")]
@@ -208,25 +214,24 @@ def _misses(got) -> list[float]:
 
 
 @pytest.mark.parametrize("case", _CASES)
-@pytest.mark.parametrize("order", ("no-undo",) + _ORDERS)
-def test_gemma4_rollback_matches_a_single_row(runs, order, case):
-    misses = _misses(runs[order]["gemma"][case])
+@pytest.mark.parametrize("mode", _MODES)
+def test_gemma4_rollback_matches_a_single_row(runs, mode, case):
+    misses = _misses(runs[mode]["gemma"][case])
     # A fresh forward agrees to about 1e-6 of the logit scale; rejected
     # drafts left attended move the logits by about the scale.
-    assert all(m <= 1e-4 for m in misses), (order, case, misses)
+    assert all(m <= 1e-4 for m in misses), (mode, case, misses)
 
 
 @pytest.mark.parametrize("case", [c for c in _CASES if c.endswith("step")])
-def test_the_check_fails_without_the_trim_fix(runs, case):
-    misses = _misses(runs[_UNGUARDED]["gemma"][case])
+def test_the_check_fails_with_the_stock_trim(runs, case):
+    misses = _misses(runs[_CONTROL]["gemma"][case])
     assert all(m > 0.1 for m in misses), (case, misses)
 
 
 @pytest.mark.parametrize("case", _CASES)
-@pytest.mark.parametrize("order", _ORDERS)
-def test_gemma4_rollback_after_a_deepseek_v4_attach(runs, order, case):
+def test_gemma4_rollback_is_the_same_without_the_undo_log(runs, case):
     want = runs["no-undo"]["gemma"][case]
-    got = runs[order]["gemma"][case]
+    got = runs["owned"]["gemma"][case]
     assert got["offsets"] == want["offsets"]
     assert got["idx"] == want["idx"]
     d = np.abs(np.array(got["logits"]) - np.array(want["logits"])).max()

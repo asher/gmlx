@@ -98,10 +98,22 @@ LM_GROUPS = ("KVCache", "RotatingKVCache", "RotatingKVCache keep",
              "ArraysCache", "CacheList", "functions", "sdpa")
 # Records whose owned result differs from stock on purpose, per group: the
 # record an owned fix changes, and the later records that carry its state.
+_TRIMMED = ("024 view", "025 after trim", "026 view", "027 state",
+            "029 from_state", "030 state.setter", "037 merge", "038 deepcopy",
+            "039 prefix_cache_snapshot", "040 prefix_cache_restore",
+            "041 prefix_cache_reserve", "042 prefix_cache_merge")
 OWNED_FIXES = {
+    # A trim through a buffer in temporal order drops the trimmed columns.
+    "RotatingKVCache": {f"RotatingKVCache/{k}" for k in _TRIMMED},
+    "RotatingKVCache keep": {f"RotatingKVCache keep/{k}" for k in _TRIMMED},
+    "BatchRotatingKVCache": {
+        f"BatchRotatingKVCache/{k}" for k in (
+            "021 view", "022 after trim", "029 state", "032 extract 0",
+            "033 extract 1", "034 filter", "035 extend", "039 deepcopy")}
     # from_state seeds _lengths, which the stock restore leaves unset.
-    "BatchRotatingKVCache": {"BatchRotatingKVCache/031 from_state"},
-    "CacheList": {"CacheList/024 batch from_state"},
+    | {"BatchRotatingKVCache/031 from_state"},
+    "CacheList": {"CacheList/009 nbytes", "CacheList/013 deepcopy"}
+    | {"CacheList/024 batch from_state"},
     # prepare(lengths=...) drops the left padding, so the mask reads lengths.
     "ArraysCache": {"ArraysCache/019 make_mask after prepare",
                     "ArraysCache/022 prefix_cache_snapshot",

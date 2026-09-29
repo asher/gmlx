@@ -19,7 +19,7 @@ Design (block_total = 2 -> 1 draft + bonus, zero speculative.py changes):
 - ``DeepseekV4SpecLM`` subclasses the vendored ``Model`` so the base remap's
   ``model.*`` / ``lm_head.*`` weight tree loads onto it unchanged, and adds
   the ``speculative_*`` hooks the owned engine probes. Its verify forward
-  arms the rotating-cache one-update undo log (deepseek_v4_cache) so a
+  arms the rotating-cache one-update undo log (gmlx.cache.kv_cache) so a
   rejected draft can be rolled back even after the sliding-window cache has
   rotated -- ``_buffer_mtp_target_cache`` isinstance-checks mlx-vlm cache
   classes and is a silent no-op for these mlx-lm caches.
@@ -51,8 +51,8 @@ import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
 
 from . import model as v4
+from gmlx.cache.kv_cache import set_undo_armed
 from gmlx.spec.drafter_protocol import native_block_size
-from .cache import ensure_rollback_attached, set_undo_armed
 from .hyper_connection import HyperHead
 
 
@@ -110,8 +110,6 @@ class DeepseekV4SpecHooks:
     backbone, ``self.lm_head``, ``self._dspark_capture``)."""
 
     def _init_spec_hooks(self) -> None:
-        # The verify rollback path needs the rotating undo log on the class.
-        ensure_rollback_attached()
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
         # outputs the drafter consumes. When set, every engine-facing hidden
         # is PACKED 3D: [raw_4d.flatten(hc) | cap_l0 | cap_l1 | ...].

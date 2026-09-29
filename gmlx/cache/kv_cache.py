@@ -1,7 +1,9 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT AND Apache-2.0
 # Copyright (c) 2026 Asher Feldman
 # Portions copyright (c) 2025 Prince Canuma (mlx-vlm, MIT)
 # Portions copyright (c) 2023-2024 Apple Inc. (mlx-lm, MIT)
+# The MTP undo log of the rotating classes is ported from omlx
+# patches/mlx_lm_mtp/cache_rollback.py (Apache-2.0; see licenses/omlx-LICENSE).
 # Vendored from mlx-vlm 0.7.3, mlx_vlm/models/cache.py.
 # Source sha256: cf39d3de8c2014fcb5e919ebf33b9e2bf506925aa3d6a979cd28e871c275800b
 """mlx-vlm 0.7.3 KV cache classes, owned by gmlx.
@@ -14,6 +16,7 @@ gmlx change carries a comment where it sits.
 """
 
 import os
+import threading
 from dataclasses import dataclass, replace
 from math import ceil
 from typing import Any, List, Optional, Tuple
@@ -688,9 +691,131 @@ def _ordered_size(cache) -> int:
     return cache._idx
 
 
+# gmlx: the MTP undo log of the rotating classes, a port of omlx
+# patches/mlx_lm_mtp/cache_rollback.py with the same semantics.
+#
+# A rotated RotatingKVCache is not trimmable, since the evicted token's slot
+# has been written over, so an MTP draft rejection could not roll back the
+# verify write, and the rejected tokens would stay in the cache and corrupt
+# the output more with each round (seen on DeepSeek-V4-Flash, sliding
+# window 128). A verify-width update always takes the ``_update_concat``
+# path, which rebinds ``keys`` and ``values`` and writes nothing in place,
+# so the attribute references from before the update and the update's
+# inputs give an exact undo, and ``trim(n)`` then replays the kept prefix
+# as a normal update. The batch update changes the ``offset`` and
+# ``left_padding`` arrays in place (``+=``, ``-=``), so the stash copies
+# them.
+#
+# Stashing is armed only around the DeepSeek-V4 MTP verify forward, so a
+# prefix-cache trim never sees a cache that reports itself trimmable when
+# it is not. A cache without a stash, which is every other model's cache
+# and a DeepSeek-V4 cache outside a verify round, runs each method as the
+# class without the log does.
+
+# Thread-local, so an engine step of another model on another thread never
+# sees the flag a verify forward armed.
+_UNDO_ARMED = threading.local()
+_ROTATING_UNDO_FIELDS = ("keys", "values", "offset", "_idx")
+_BATCH_ROTATING_UNDO_FIELDS = ("keys", "values", "offset", "_offset", "_idx",
+                               "rotated", "left_padding")
+
+
+def set_undo_armed(flag: bool) -> None:
+    """Arm or disarm the rotating-cache undo stash (MTP verify forwards)."""
+    _UNDO_ARMED.value = bool(flag)
+
+
+def _stash_value(field, value):
+    """A stashed field the update cannot change: a copy of an array other
+    than the rebound keys and values."""
+    if field in ("keys", "values") or not isinstance(value, mx.array):
+        return value
+    return mx.array(value)
+
+
+def _stash_undo(cache, keys, values, fields) -> None:
+    """Before an update, stash the undo of an armed verify-width update, or
+    drop a stale stash.
+
+    Only widths 2 to 6 are undoable (nextn verifies up to 4, dspark up to
+    6). A one-token update writes the ring in place, which would change the
+    stashed buffers, and a prompt chunk has no rollback. The concat path
+    rebinds the buffers, so plain references keep the values from before
+    the update, and no copy of the ring is made.
+    """
+    if 2 <= keys.shape[2] <= 6 and getattr(_UNDO_ARMED, "value", False):
+        snap = {f: _stash_value(f, getattr(cache, f)) for f in fields}
+        cache._mtp_undo = (snap, keys, values)
+    elif cache._mtp_undo is not None:
+        cache._mtp_undo = None
+
+
+def _undo_trim(cache, cls, undo, n) -> int:
+    """Restore the stash of a verify update and replay its kept prefix."""
+    snap, keys, values = undo
+    k = keys.shape[2] - n
+    if k < 0:
+        return 0
+    for f, v in snap.items():
+        setattr(cache, f, v)
+    if k > 0:
+        # The class body, so the replay stashes nothing and no instance
+        # recorder sees it.
+        cls.update_and_fetch(cache, keys[..., :k, :], values[..., :k, :])
+        cache._mtp_undo = None
+    return n
+
+
+# gmlx: a trim of a rotating cache in temporal order drops the trimmed
+# columns.
+#
+# The upstream trim moves ``_idx`` and the offsets back and keeps the
+# trimmed columns in the buffer. A wider update leaves the buffer in
+# temporal order with ``_idx`` at its length, and past a full window the
+# buffer then holds ``max_size - 1`` older keys plus the update. When a
+# speculative rollback trims the rejected drafts of such an update, the
+# next wider update drops them: the batch ``_update_concat`` slices the
+# buffer to ``_idx``, and the single-row ``_temporal_order`` moves them to
+# the front, where the window trim takes them. A one-token update does
+# not. ``_update_in_place`` trims ``keys.shape[2] - max_size`` of the
+# oldest keys and rotates, so the rejected drafts stay in the ring and are
+# attended while valid keys are lost in their place, and ``make_mask``,
+# which reads its trim from ``_idx``, matches neither. A batch reaches this
+# when a request joins a speculating batch after a rejected draft: the
+# upstream ``extend`` keeps the trimmed columns, and the width gate turns
+# the next rounds into one-token steps.
+
+
+def _check_trim_depth(cache, n, total) -> None:
+    """A trim deeper than ``_idx`` raises ValueError and leaves the cache as
+    it was. It can only reach a buffer that has wrapped or dropped tokens
+    off its window, where the upstream trim leaves ``_idx`` negative: the
+    tokens it would keep are no longer in the buffer. ``is_trimmable``
+    reports such a cache as not trimmable, and no rollback trims one that
+    deep."""
+    if cache.keys is not None and min(total, n) > cache._idx:
+        raise ValueError(
+            f"{type(cache).__name__}.trim({n}) goes past the write "
+            f"position {cache._idx} of a buffer that has wrapped or dropped "
+            f"tokens off its window, so the trimmed state cannot be held")
+
+
+def _drop_trimmed(cache, total) -> None:
+    """Cut the keys and values to ``_idx`` after a trim through a buffer in
+    temporal order. A buffer below ``max_size`` that no longer starts at
+    the first token stays whole, since ``_update_in_place`` would then grow
+    it from an offset past the window."""
+    idx = cache._idx
+    if cache.keys.shape[2] > idx and (idx >= cache.max_size or total == idx):
+        cache.keys = cache.keys[..., :idx, :]
+        cache.values = cache.values[..., :idx, :]
+
+
 class RotatingKVCache(_BaseCache):
     memory_profile = _windowed_memory_profile
     step = 256
+    # gmlx: the undo stash of an armed verify update (see set_undo_armed).
+    _mtp_undo = None
 
     def __init__(self, max_size, keep=0):
         self.keep = keep
@@ -796,6 +921,8 @@ class RotatingKVCache(_BaseCache):
         return self.keys, self.values
 
     def update_and_fetch(self, keys, values):
+        # gmlx: an armed verify update stashes its undo.
+        _stash_undo(self, keys, values, _ROTATING_UNDO_FIELDS)
         if keys.shape[2] == 1:
             return self._update_in_place(keys, values)
         return self._update_concat(keys, values)
@@ -838,12 +965,28 @@ class RotatingKVCache(_BaseCache):
         return None
 
     def is_trimmable(self):
+        # gmlx: a stashed verify update can be undone.
+        if self._mtp_undo is not None:
+            return True
         return self.offset < self.max_size
 
     def trim(self, n):
+        # gmlx: an armed verify update past a full window is undone from its
+        # stash.
+        undo = self._mtp_undo
+        if undo is not None:
+            self._mtp_undo = None
+            if not self.offset < self.max_size:
+                return _undo_trim(self, RotatingKVCache, undo, n)
+        # gmlx: a trim past the write position raises, and a trim through a
+        # buffer in temporal order drops the trimmed columns.
+        _check_trim_depth(self, n, self.offset)
+        in_order = self.keys is not None and self._idx == self.keys.shape[2]
         n = min(self.offset, n)
         self.offset -= n
         self._idx -= n
+        if in_order and n:
+            _drop_trimmed(self, self.offset)
         return n
 
     def to_quantized(self, group_size: int = 64, bits: int = 4) -> QuantizedKVCache:
@@ -1848,6 +1991,8 @@ class BatchKVCache(_BaseCache):
 class BatchRotatingKVCache(_BaseCache):
     memory_profile = _windowed_memory_profile
     step = 256
+    # gmlx: the undo stash of an armed verify update (see set_undo_armed).
+    _mtp_undo = None
 
     def __init__(self, max_size, left_padding: List[int]):
         self.keys = None
@@ -1985,6 +2130,8 @@ class BatchRotatingKVCache(_BaseCache):
         # right-padding bookkeeping is active (_lengths set by prepare()), the
         # last prefill step may still be S=1; that must go through concat so
         # pad tokens are tracked until finalize() rolls them out.
+        # gmlx: an armed verify update stashes its undo.
+        _stash_undo(self, keys, values, _BATCH_ROTATING_UNDO_FIELDS)
         if keys.shape[2] == 1 and self._lengths is None:
             return self._update_in_place(keys, values)
         return self._update_concat(keys, values)
@@ -2040,13 +2187,29 @@ class BatchRotatingKVCache(_BaseCache):
         self.__dict__.setdefault("_lengths", None)
 
     def is_trimmable(self):
+        # gmlx: a stashed verify update can be undone.
+        if self._mtp_undo is not None:
+            return True
         return self._offset < self.max_size
 
     def trim(self, n):
+        # gmlx: an armed verify update past a full window is undone from its
+        # stash.
+        undo = self._mtp_undo
+        if undo is not None:
+            self._mtp_undo = None
+            if not self._offset < self.max_size:
+                return _undo_trim(self, BatchRotatingKVCache, undo, n)
+        # gmlx: a trim past the write position raises, and a trim through a
+        # buffer in temporal order drops the trimmed columns.
+        _check_trim_depth(self, n, self._offset)
+        in_order = self.keys is not None and not self.rotated
         n = min(self._offset, n)
         self._offset -= n
         self._idx -= n
         self.offset -= n
+        if in_order and n:
+            _drop_trimmed(self, self._offset)
         return n
 
     def to_quantized(self, group_size: int = 64, bits: int = 4) -> QuantizedKVCache:
