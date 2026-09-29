@@ -38,8 +38,10 @@ _IDEFICS3 = (
     "{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}"
     "{% endfor %}<end_of_utterance>\n{% endfor %}"
     "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}")
+# DiffusionGemma's template uses the Gemma-4 turns.
 _TEMPLATES = {"gemma4": (_FIXTURES / "gemma4_template.jinja").read_text(),
               "gemma4_unified": (_FIXTURES / "gemma4_template.jinja").read_text(),
+              "diffusion_gemma": (_FIXTURES / "gemma4_template.jinja").read_text(),
               "qwen3_5": (_FIXTURES / "qwen35_template.jinja").read_text(),
               "idefics3": _IDEFICS3}
 _GEMMA4 = ("<bos><|turn>system\nBe brief.<turn|>\n<|turn>user\nHi.<turn|>\n"
@@ -48,6 +50,7 @@ _GEMMA4 = ("<bos><|turn>system\nBe brief.<turn|>\n<|turn>user\nHi.<turn|>\n"
 _EXPECTED = {
     "gemma4": _GEMMA4,
     "gemma4_unified": _GEMMA4,
+    "diffusion_gemma": _GEMMA4,
     "qwen3_5": ("<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\n"
                 "Hi.<|im_end|>\n<|im_start|>assistant\nHello.<|im_end|>\n"
                 "<|im_start|>user\nBye.<|im_end|>\n<|im_start|>assistant\n"
@@ -109,7 +112,8 @@ def test_system_and_history_render_as_text(model_type, role):
 
 
 @pytest.mark.parametrize("model_type,enabled", [
-    ("gemma4", True), ("gemma4_unified", True), ("gemma4_text", False),
+    ("gemma4", True), ("gemma4_unified", True), ("diffusion_gemma", True),
+    ("gemma4_text", False),
     ("idefics3", False), ("smolvlm", False), ("llava", False),
     ("qwen3_5", False), (None, False)])
 def test_only_the_gemma4_model_types_enable_the_fix(model_type, enabled):

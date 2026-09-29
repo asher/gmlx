@@ -884,6 +884,12 @@ def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
 _TEMPLATE_PROBE_TEXT = "gmlx-template-probe"
 
 
+def _model_type(config) -> str | None:
+    if isinstance(config, dict):
+        return config.get("model_type")
+    return getattr(config, "model_type", None)
+
+
 def _warn_if_template_drops_text(model_path: str, processor, config) -> None:
     """Warn when the chat template drops the text of a user message.
 
@@ -1087,8 +1093,16 @@ def install_gguf_server_bridge() -> None:
         except ModuleNotFoundError as e:
             _raise_if_first_party_import(e)
             raise
-        if _is_gguf(model_path) and isinstance(loaded, tuple) and len(loaded) == 3:
-            _warn_if_template_drops_text(model_path, loaded[1], loaded[2])
+        if isinstance(loaded, tuple) and len(loaded) == 3:
+            # Every route enables the system text fix from the loaded
+            # config: the DiffusionGemma branch and the stock loader of an
+            # MLX-format model do not go through the VLM loader.
+            from gmlx.upstream.system_content_fix import (
+                enable_system_content_fix,
+            )
+            enable_system_content_fix(loaded[1], _model_type(loaded[2]))
+            if _is_gguf(model_path):
+                _warn_if_template_drops_text(model_path, loaded[1], loaded[2])
         return loaded
 
     setattr(generation, "load_model_resources", load_model_resources)

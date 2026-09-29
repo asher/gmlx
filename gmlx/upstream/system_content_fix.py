@@ -11,14 +11,16 @@ handles lists in every other message, assistant history included.
 
 The fix wraps ``get_chat_template``, the render tail that
 ``apply_chat_template`` and the server's faithful-history wrap both call.
-It applies to a processor the VLM loader enabled for a Gemma-4 model type
-(``enable_system_content_fix``). Other templates read list content for
-every role (idefics3, SmolVLM and the llava-hf ones iterate it), so their
-messages pass through unchanged. A system or developer message whose
-content holds only text parts reaches the template as one string. The
-parts are joined the way the Gemma-4 template renders the text parts of a
-user message: each part trimmed, with no separator. Content with a media
-part and every other role pass through unchanged. Idempotent.
+It applies to a processor enabled for a model type in ``_MODEL_TYPES``
+(``enable_system_content_fix``), which the VLM loader does, and on the
+server the load bridge for every model it loads. Other templates read
+list content for every role (idefics3, SmolVLM and the llava-hf ones
+iterate it), so their messages pass through unchanged. A system or
+developer message whose content holds only text parts reaches the
+template as one string. The parts are joined the way the Gemma-4
+template renders the text parts of a user message: each part trimmed,
+with no separator. Content with a media part and every other role pass
+through unchanged. Idempotent.
 """
 
 from __future__ import annotations
@@ -31,8 +33,9 @@ _FLAG = "_gmlx_system_content_as_text"
 # Set on a processor the loader built for one of _MODEL_TYPES.
 _PROCESSOR_FLAG = "_gmlx_system_as_text"
 # The model types whose template prints the leading system message as a
-# string: Gemma-4 with its mmproj, and the unified Gemma-4 container.
-_MODEL_TYPES = ("gemma4", "gemma4_unified")
+# string: Gemma-4 with its mmproj, the unified Gemma-4 container, and
+# DiffusionGemma, whose template uses the Gemma-4 turns.
+_MODEL_TYPES = ("gemma4", "gemma4_unified", "diffusion_gemma")
 _ROLES = ("system", "developer")
 _TEXT_PARTS = ("text", "input_text")
 
