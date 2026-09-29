@@ -10,6 +10,21 @@ and rebind ``mx.set_wired_limit``. The caps come back with the phase
 ``gmlx.serve.cb_phase`` last flipped to, since a flip to the phase it
 already names sets nothing.
 
+Python-side copies of those settings come back with them: the
+``wired_limit`` context in ``mlx_lm.generate`` and ``mlx_lm.utils``, which
+the streaming and CPU device setups rebind, ``mx.device_info``, which
+``--stream-cpu`` rebinds to the GPU's answer, the limits the serve
+governor saved when it armed its throttle, and the cache limit the server
+noted for the prefill decay. A governor state that outlives the test goes
+back to the saved limits it held when the test started, and one the test
+created goes back to unarmed, as the MLX limits go back to their values
+from before the test.
+
+Known exclusion: the rest of a governor state (its band, the halved
+prefill step and the clamped width) stays as the test left it. The next
+tick in a band that throttles arms the limits again, and the next tick in
+the green band undoes the rest.
+
 ``capture`` and ``restore`` bracket every test (tests/conftest.py). MLX
 reads MLX_ENABLE_TF32 and the command buffer caps once, at the first
 matmul and the first command buffer, so ``start_session`` also runs one
@@ -19,9 +34,11 @@ test changes the environment before its own first matmul.
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import warnings
+import weakref
 
 import mlx.core as mx
 
@@ -35,6 +52,13 @@ _setters: dict = {}
 _LIMITS = ("set_memory_limit", "set_cache_limit", "set_wired_limit")
 # pytest sets it per phase and removes it after each one.
 _ENV_SKIP = ("PYTEST_CURRENT_TEST",)
+# The modules whose wired_limit context gmlx rebinds. Imported at session
+# start, so restore holds the stock context even when the test that first
+# imports one also rebinds it.
+_WIRED_LIMIT_MODULES = ("mlx_lm.generate", "mlx_lm.utils")
+_MISSING = object()
+# Every serve governor state the session creates.
+_governor_states: weakref.WeakSet = weakref.WeakSet()
 
 
 def _gpu() -> bool:
@@ -60,6 +84,22 @@ def _record_seed(fn):
     return seed
 
 
+def _track_governor_states() -> None:
+    from gmlx.serve import governor
+
+    cls = governor._GovState
+    init = cls.__init__
+    if getattr(init, "_gmlx_test_recorder", None) is not None:
+        return
+
+    def tracked(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        _governor_states.add(self)
+
+    tracked._gmlx_test_recorder = init
+    cls.__init__ = tracked
+
+
 def start_session() -> None:
     """Record the session-start environment and default device, wrap the
     MLX limit setters and the RNG seed so a test's changes can be undone,
@@ -80,6 +120,12 @@ def start_session() -> None:
         _setters["set_cb_caps"] = kq.set_cb_caps
     except (ImportError, AttributeError):
         pass
+    for name in _WIRED_LIMIT_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            pass
+    _track_governor_states()
     if _gpu():
         x = mx.ones((32, 32))
         mx.eval(mx.matmul(x, x, stream=mx.gpu))
@@ -99,8 +145,13 @@ def _cb_phase_state():
     return None if mod is None else mod._state
 
 
+def _prefill_decay():
+    return sys.modules.get("gmlx.gen.prefill_decay")
+
+
 def capture() -> dict:
     _prior.clear()
+    decay = _prefill_decay()
     state = {
         "env": dict(os.environ),
         "formatwarning": warnings.formatwarning,
@@ -108,9 +159,16 @@ def capture() -> dict:
         "device": mx.default_device(),
         "streams": {},
         "set_wired_limit": mx.set_wired_limit,
+        "device_info": mx.device_info,
         "cb_caps": cb_caps(),
         # None before the module is imported, as its first flip finds it.
         "cb_phase": (_cb_phase_state() or {}).get("phase"),
+        "wired_limit": [
+            (mod, getattr(mod, "wired_limit", _MISSING))
+            for mod in map(sys.modules.get, _WIRED_LIMIT_MODULES) if mod],
+        "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
+                     for st in _governor_states},
+        "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -132,6 +190,7 @@ def restore(state: dict) -> None:
     warnings.formatwarning = state["formatwarning"]
     warnings.showwarning = state["showwarning"]
     mx.set_wired_limit = state["set_wired_limit"]
+    mx.device_info = state["device_info"]
     for name in _LIMITS:
         if name in _prior:
             _setters[name](_prior[name])
@@ -144,6 +203,21 @@ def restore(state: dict) -> None:
     phase = _cb_phase_state()
     if phase is not None and phase["phase"] != state["cb_phase"]:
         phase["phase"] = state["cb_phase"]
+    for mod, fn in state["wired_limit"]:
+        if getattr(mod, "wired_limit", _MISSING) is fn:
+            continue
+        if fn is _MISSING:
+            del mod.wired_limit
+        else:
+            mod.wired_limit = fn
+    for st in list(_governor_states):
+        saved = state["governor"].get(st, (None, None))
+        if (st.saved_mem_limit, st.saved_cache_limit) != saved:
+            st.saved_mem_limit, st.saved_cache_limit = saved
+    decay = _prefill_decay()
+    if decay is not None and \
+            decay._NOTED_CACHE_LIMIT != state["noted_cache_limit"]:
+        decay._NOTED_CACHE_LIMIT = state["noted_cache_limit"]
     if mx.default_device() != state["device"]:
         mx.set_default_device(state["device"])
     for d, stream in state["streams"].items():

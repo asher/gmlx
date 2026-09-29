@@ -12,11 +12,13 @@ in a fresh process started from the session environment.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import os
 import subprocess
 import sys
 import warnings
+from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx_kquant as kq
@@ -106,6 +108,76 @@ def test_d_the_next_decode_step_sets_the_decode_caps():
     cb_phase = _phase_caps()
     cb_phase.flip("decode")
     assert process_state.cb_caps() == cb_phase.COARSE
+
+
+# The Python-side copies of the MLX settings. Each pair changes one group
+# the way a library entry point does and checks that the next test finds
+# it as the first found it.
+_MIRRORS: dict = {}
+# A batch generator that outlives its test, as a module-scoped server's
+# does.
+_GEN = SimpleNamespace()
+
+
+def _wired_limit_contexts() -> list:
+    # importlib, since import mlx_lm.generate binds the function mlx_lm
+    # re-exports under that name.
+    return [getattr(importlib.import_module(m), "wired_limit", None)
+            for m in ("mlx_lm.generate", "mlx_lm.utils")]
+
+
+def test_e_a_cpu_device_setup_rebinds_the_wired_limit_context():
+    from gmlx.stream.wired_limit import configure_cpu_device
+
+    _MIRRORS["wired_limit"] = _wired_limit_contexts()
+    configure_cpu_device()
+    assert _wired_limit_contexts() != _MIRRORS["wired_limit"]
+
+
+def test_f_the_next_test_finds_the_stock_wired_limit_context():
+    if "wired_limit" not in _MIRRORS:
+        pytest.skip("runs after test_e")
+    assert _wired_limit_contexts() == _MIRRORS["wired_limit"]
+
+
+def test_g_a_stream_cpu_setup_rebinds_device_info():
+    _MIRRORS["device_info"] = mx.device_info
+    # configure_stream_cpu keeps the GPU's answer for the CPU device.
+    gpu_info = {"max_recommended_working_set_size": 1 << 30}
+    mx.device_info = lambda: gpu_info
+
+
+def test_h_the_next_test_finds_the_stock_device_info():
+    if "device_info" not in _MIRRORS:
+        pytest.skip("runs after test_g")
+    assert mx.device_info is _MIRRORS["device_info"]
+
+
+def test_i_a_server_notes_its_cache_limit_and_arms_the_governor(monkeypatch):
+    from gmlx.gen import prefill_decay
+    from gmlx.serve import governor, memory
+
+    monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
+    _MIRRORS["noted_cache_limit"] = prefill_decay._NOTED_CACHE_LIMIT
+    memory.apply_cache_limit(SimpleNamespace(cache_limit_gb=3, models={}))
+    st = governor._state(_GEN)
+    governor._arm_throttle(_GEN, st, 64e9, 0.1)
+    assert st.saved_mem_limit is not None
+    assert st.saved_cache_limit is not None
+    assert prefill_decay._NOTED_CACHE_LIMIT == 3 * (1 << 30)
+
+
+def test_j_the_next_test_finds_the_governor_unarmed():
+    if "noted_cache_limit" not in _MIRRORS:
+        pytest.skip("runs after test_i")
+    from gmlx.gen import prefill_decay
+    from gmlx.serve import governor
+
+    # The MLX limits went back, so a governor that still held the limits
+    # it saved would take its throttle for armed and never arm it again.
+    st = governor._state(_GEN)
+    assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
+    assert prefill_decay._NOTED_CACHE_LIMIT == _MIRRORS["noted_cache_limit"]
 
 
 _GEMM = r"""
