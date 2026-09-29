@@ -103,7 +103,7 @@ def synth_config(view: HeaderView) -> dict:
     """The official transformer config keys, from shapes and constants, plus
     the derived widths the module tree needs."""
     c = CONSTANTS.values
-    s = view.shape
+    s = view.dims
     x_in, dim = s("x_embedder.weight")
     head_dim = s("layers.0.attention.q_norm.weight")[0]
     qkv_out = s("layers.0.attention.qkv.weight")[1]
@@ -136,6 +136,12 @@ def synth_config(view: HeaderView) -> dict:
     }
 
 
+def build(config: dict):
+    from .model import ZImageDiT
+
+    return ZImageDiT(config)
+
+
 FAMILY = Family(
     name="z_image",
     title="Z-Image",
@@ -145,7 +151,7 @@ FAMILY = Family(
     fingerprint=fingerprint,
     synth_config=synth_config,
     constants=CONSTANTS,
-    build=None,
+    build=build,
     fp32_keep=("t_embedder.", "cap_embedder.0."),
     identity_tensors=IDENTITY_TENSORS,
     variants=VARIANTS,

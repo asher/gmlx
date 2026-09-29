@@ -91,7 +91,7 @@ def synth_config(view: HeaderView) -> dict:
     """The official transformer config keys, from shapes and constants, plus
     the derived widths the module tree needs."""
     c = CONSTANTS.values
-    s = view.shape
+    s = view.dims
     in_ch, inner = s("img_in.weight")
     head_dim = s(_B0 + "attn.norm_q.weight")[0]
     if _layout(view) == "unfused":

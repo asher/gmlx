@@ -64,3 +64,37 @@ def write_gguf(path, tensors: dict, arch: str | None = None) -> str:
 def bf16_bits(x: np.ndarray) -> np.ndarray:
     """Truncated bf16 bits of float32 values that bf16 represents exactly."""
     return (np.asarray(x, np.float32).view(np.uint32) >> 16).astype(np.uint16)
+
+
+# A tiny Z-Image config: two heads of 32, one refiner block each, two layers.
+TINY_Z_CONFIG = {
+    "all_f_patch_size": [1], "all_patch_size": [2], "axes_dims": [8, 12, 12],
+    "axes_lens": [64, 32, 32], "cap_feat_dim": 16, "dim": 64,
+    "in_channels": 4, "n_heads": 2, "n_kv_heads": 2, "n_layers": 2,
+    "n_refiner_layers": 1, "norm_eps": 1e-5, "qk_norm": True,
+    "rope_theta": 256.0, "t_scale": 1000.0, "head_dim": 32, "ffn_dim": 170,
+    "adaln_dim": 32, "t_freq_dim": 16, "t_mid_dim": 24,
+    "final_norm_eps": 1e-6, "seq_multiple": 32,
+}
+
+
+def tiny_z_model(seed: int = 0):
+    """A tiny Z-Image DiT with random fp32 weights and fp32 activations,
+    and its parameters as float64 numpy arrays by name."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from gmlx.image.families.z_image.model import ZImageDiT
+
+    m = ZImageDiT(TINY_Z_CONFIG)
+    rng = np.random.default_rng(seed)
+    params = []
+    for k, v in tree_flatten(m.parameters()):
+        a = rng.standard_normal(v.shape) * 0.2
+        if k.endswith("norm1.weight"):
+            a += 1.0
+        params.append((k, mx.array(a.astype(np.float32))))
+    m.load_weights(params)
+    m.act_dtype = mx.float32
+    m.eval()
+    return m, {k: np.array(v, np.float64) for k, v in params}

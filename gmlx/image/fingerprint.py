@@ -59,6 +59,13 @@ class HeaderView:
         t = self.tensors.get(name)
         return None if t is None else t.shape
 
+    def dims(self, name: str) -> tuple[int, ...]:
+        """The shape of a tensor the rules already required."""
+        t = self.tensors.get(name)
+        if t is None:
+            raise ImageModelError(f"tensor {name!r} is missing")
+        return t.shape
+
     def count(self, group: str) -> int:
         """Number of distinct indices N over names ``group.N.*``."""
         pat = re.compile(re.escape(group) + r"\.(\d+)\.")
