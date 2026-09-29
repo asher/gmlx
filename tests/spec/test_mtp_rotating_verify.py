@@ -8,9 +8,11 @@ past the sliding window, that forward rotates each sliding layer's
 BatchRotatingKVCache, and the next round's verify block is wider. The
 shorter, left-padded row still has its first real key inside the window.
 The first test stops after that verify block, before any rollback runs. The
-second runs on through a rollback, an admission and a one-token step. A
-tiny random-weight owned target, with the prefill and the rounds on the CPU
-stream, and a drafter that proposes two fixed offsets of the bonus token.
+second runs on through a rollback, an admission and a one-token step. The
+third runs a lone row through a rollback and then a forced close of one id,
+a width-1 verify. A tiny random-weight owned target, with the prefill and
+the rounds on the CPU stream, and a drafter that proposes two fixed offsets
+of the bonus token.
 """
 
 import functools
@@ -234,3 +236,77 @@ def test_a_gated_round_after_an_admission_and_a_rejected_draft(
     # Each row agrees with its own forward to about 2e-6 of the logit scale;
     # the rejected drafts left in the ring move them by about the scale.
     assert all(r <= 1e-4 for r in worst), worst
+
+
+class _BudgetClose:
+    """A thinking budget that closes with one id once a rollback has
+    trimmed the sliding caches."""
+
+    budget = None
+
+    def __init__(self, trims):
+        self.trims, self.fired = trims, False
+
+    def observe(self, tok):
+        pass
+
+    def take_forced(self):
+        if self.fired or not any(self.trims):
+            return None
+        self.fired = True
+        return [7]
+
+
+def test_a_forced_one_id_round_after_a_rejected_draft(target, monkeypatch):
+    """A lone row past the window rejects both drafts, and the rollback
+    trims them. Its thinking budget then closes with one id, which runs as
+    a width-1 verify of the bonus token. That verify must match a
+    single-row forward over the row's history."""
+    lm = target
+    row = np.random.default_rng(3).integers(1, _VOCAB, 30).tolist()
+    verify, trim = spec._mtp_verify_target, vlm_cache.BatchRotatingKVCache.trim
+    history, trims, forced = [], [], []
+
+    def record_verify(lm_, verify_input, prompt_cache, sampler, **kwargs):
+        out = verify(lm_, verify_input, prompt_cache, sampler, **kwargs)
+        # The capture round is width 1 too, but runs before any rollback.
+        if verify_input.shape[1] == 1 and any(trims):
+            forced.append((int(verify_input[0, 0].item()), list(history),
+                           np.array(out.hidden[0, -1].astype(mx.float32)),
+                           kwargs))
+        return out
+
+    @functools.wraps(trim)
+    def record_trim(self, n):
+        trims.append(n)
+        return trim(self, n)
+
+    monkeypatch.setattr(spec, "_mtp_verify_target", record_verify)
+    monkeypatch.setattr(vlm_cache.BatchRotatingKVCache, "trim", record_trim)
+    with mx.stream(mx.cpu):
+        single = lm.make_cache()
+        out = lm(mx.array([row]), cache=single)
+        bonus = int(mx.argmax(out.logits[0, -1]).item())
+        cache = [type(c).merge([c]) for c in single]
+        history.extend(row + [bonus])
+        gen = spec._owned_decode_rounds_batch(
+            SimpleNamespace(), _Drafter(), lm, cache, hidden=None, b=[bonus],
+            shared_kv=None, seed_tokens=None, emitted=[1], max_tokens=40,
+            sampler=None, draft_block_size=None,
+            thinking_hook=_BudgetClose(trims))
+        for tokens, _meta in gen:
+            if tokens[0] is not None:
+                history.append(int(tokens[0]))
+            if forced:
+                gen.close()
+                break
+        # One forced round ran, after a rollback trimmed rejected drafts.
+        assert len(forced) == 1 and any(n > 0 for n in trims), (forced, trims)
+        token, seen, got, kwargs = forced[0]
+        assert token == seen[-1]
+        truth = verify(lm, mx.array([seen]), lm.make_cache(), None, **kwargs)
+        want = np.array(truth.hidden[0, -1].astype(mx.float32))
+    ratio = float(np.abs(got - want).max()) / float(np.abs(want).max())
+    # The verify agrees with the fresh forward to about 2e-6 of the hidden
+    # scale; the rejected drafts left in the ring move it by far more.
+    assert ratio <= 1e-4, ratio
