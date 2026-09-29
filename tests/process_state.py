@@ -139,6 +139,11 @@ def start_session() -> None:
         except ImportError:
             pass
     _track_governor_states()
+    # The run keeps the session's MLX_ENABLE_TF32, TF32 on unless the
+    # session sets it to 0. An in-process ``gmlx train`` or ``gmlx distill``
+    # test runs under it too: the CLI sets MLX_ENABLE_TF32=0 after this
+    # read, which changes nothing. Such a test checks numerics TF32 keeps,
+    # and a test that needs exact float32 runs the CLI in a child process.
     if _gpu():
         x = mx.ones((32, 32))
         mx.eval(mx.matmul(x, x, stream=mx.gpu))
