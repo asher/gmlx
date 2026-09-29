@@ -55,11 +55,10 @@ from mlx_lm.models.base import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models import cache as _lm_cache
-from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.cache import refusals
+from gmlx.cache import bind, refusals
+from gmlx.cache.kv_cache import KVCache
 from gmlx.load.dtypes import activation_dtype
 from gmlx.upstream.graft import graft_module
 
@@ -68,13 +67,9 @@ def ensure_registered() -> None:
     """Make ``import mlx_lm.models.minimax_m3`` resolve to this module,
     ahead of any upstream module of that name."""
     graft_module("mlx_lm.models.minimax_m3", sys.modules[__name__])
-    # Snapshot restore resolves cache classes by name inside mlx_lm.models.cache
-    # and gmlx.cache.kv_cache; graft the MSA cache alongside, ahead of any
-    # upstream class of that name, so saved M3 prompt caches round-trip.
-    import gmlx.cache.kv_cache as _owned_cache
-
-    _lm_cache.MSAKVCache = MSAKVCache
-    _owned_cache.MSAKVCache = MSAKVCache
+    # Snapshot restore resolves cache classes by name, so saved M3 prompt
+    # caches round-trip once the MSA cache is registered.
+    bind.register(MSAKVCache)
 
 
 @dataclass

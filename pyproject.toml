@@ -255,7 +255,6 @@ reportOptionalOperand = "none"
 # the tree.
 backlog = [
     "gmlx/cache/kv_policy.py",
-    "gmlx/cache/kvarn_cache.py",
     "gmlx/cache/kvarn_serve.py",
     "gmlx/commands/train.py",
     "gmlx/eval_guard.py",

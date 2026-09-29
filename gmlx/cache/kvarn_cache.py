@@ -39,7 +39,6 @@ by compacting the oldest sealed groups away at update entry.
 from __future__ import annotations
 
 import logging
-import sys
 
 import mlx.core as mx
 
@@ -260,7 +259,7 @@ class KVarNView:
 
 
 def _base_cache():
-    from mlx_lm.models.cache import _BaseCache
+    from gmlx.cache.kv_cache import _BaseCache
 
     return _BaseCache
 
@@ -588,7 +587,7 @@ class KVarNKVCache(_KVarNStorage):
         self.horizon_valid = True
 
     def make_mask(self, *args, **kwargs):
-        from mlx_lm.models.cache import create_attention_mask
+        from gmlx.cache.kv_cache import create_attention_mask
 
         return create_attention_mask(*args, offset=self.visible, **kwargs)
 
@@ -1851,7 +1850,7 @@ class BatchKVarNKVCache(_KVarNStorage):
         the pending update for the mask memo; the kvarn route itself reads
         the geometry off the cache."""
         del return_array
-        from mlx_vlm.models.cache import create_causal_mask
+        from gmlx.cache.kv_cache import create_causal_mask
 
         mask = create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
@@ -2002,22 +2001,11 @@ def kvarn_batch_row(batch, cache):
     return BatchKVarNKVCache.merge([row])
 
 def ensure_registered():
-    """Graft the kvarn cache classes onto the cache namespaces so snapshot
-    and prompt-cache restores resolve them by name. Upstream wins if the
-    names ever appear there."""
-    import gmlx.cache.kv_cache as owned_cache
-    import mlx_lm.models.cache as lm_cache
+    """Register the kvarn cache classes (gmlx.cache.bind.register), so
+    snapshot and prompt-cache restores resolve them by name."""
+    from gmlx.cache import bind
 
-    vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (owned_cache, lm_cache, vlm_cache):
-        if mod is None:
-            continue
-        if not hasattr(mod, "KVarNKVCache"):
-            mod.KVarNKVCache = KVarNKVCache
-        if not hasattr(mod, "KVarNRotatingKVCache"):
-            mod.KVarNRotatingKVCache = KVarNRotatingKVCache
-        if not hasattr(mod, "BatchKVarNKVCache"):
-            mod.BatchKVarNKVCache = BatchKVarNKVCache
+    bind.register(KVarNKVCache, KVarNRotatingKVCache, BatchKVarNKVCache)
 
 
 def convertible_kv_types():

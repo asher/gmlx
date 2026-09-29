@@ -11,7 +11,7 @@ transaction, whose abort restores the arrays it saved because they are
 never mutated in place.
 """
 
-from mlx_vlm.models.cache import ArraysCache
+from gmlx.cache.kv_cache import ArraysCache
 
 
 class Qwen35ArraysCache(ArraysCache):

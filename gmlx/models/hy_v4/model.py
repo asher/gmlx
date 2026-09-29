@@ -45,12 +45,12 @@ import mlx.nn as nn
 
 from mlx_lm.models.activations import swiglu
 from mlx_lm.models.base import BaseModelArgs, create_attention_mask
-from mlx_lm.models.cache import KVCache
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import refusals
+from gmlx.cache.kv_cache import KVCache
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,

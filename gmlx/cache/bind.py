@@ -18,6 +18,14 @@ replaced class is rebased onto the owned class, and the APC type tables
 that were filled with stock classes are reset. An instance created before
 that keeps its class.
 
+gmlx's own cache classes (the KVarN family, MSAKVCache, QSAKVCache and the
+DeepSeek-V4 pooling caches) join by ``register``. Stock and owned code
+resolve a cache class by name in their module globals when they restore a
+cache: ``CacheList.from_state`` in gmlx.cache.kv_cache and mlx_lm
+``load_prompt_cache``. ``register`` puts each class in those globals and in
+mlx_vlm.models.cache, and the finder puts it into a stock cache module that
+loads later.
+
 The install imports nothing from MLX. This module imports no upstream
 package; the owned modules load when a stock module first needs them.
 """
@@ -76,6 +84,12 @@ MAP: dict[str, dict[str, tuple[str, str]]] = {
                            **{n: (ATTN, n) for n in LM_BASE_NAMES}},
 }
 
+# The modules whose globals take registered gmlx cache classes.
+REGISTRY_MODULES = (KV, "mlx_lm.models.cache", "mlx_vlm.models.cache")
+
+# name -> registered gmlx cache class
+_registry: dict[str, type] = {}
+
 # id(stock object) -> (stock object, owned object). Holding the stock
 # object keeps its id from being reused.
 _replaced: dict[int, tuple[object, object]] = {}
@@ -104,9 +118,53 @@ def bind_module(module) -> None:
             setattr(module, name, new)
 
 
+def register(*classes: type) -> None:
+    """Make each gmlx cache class resolvable by name in the modules of
+    ``REGISTRY_MODULES``, including one that loads later. A name that
+    gmlx.cache.kv_cache defines, or that another class holds, raises
+    ValueError, so a gmlx class never shadows an owned class. Registering
+    a class again does nothing."""
+    owned = _owned(KV)
+    for cls in classes:
+        name = cls.__name__
+        held = _registry.get(name)
+        if held is cls:
+            continue
+        if held is not None:
+            raise ValueError(
+                f"cannot register {cls.__module__}.{cls.__qualname__}: the "
+                f"cache class name {name!r} is registered to "
+                f"{held.__module__}.{held.__qualname__}")
+        if name in vars(owned):
+            raise ValueError(
+                f"cannot register {cls.__module__}.{cls.__qualname__}: "
+                f"{KV} defines {name!r}")
+        _registry[name] = cls
+    for where in REGISTRY_MODULES:
+        module = sys.modules.get(where)
+        if module is not None:
+            _apply_registry(module)
+
+
+def registered() -> dict[str, type]:
+    """Each registered name and its gmlx cache class."""
+    return dict(_registry)
+
+
+def _apply_registry(module) -> None:
+    for name, cls in _registry.items():
+        setattr(module, name, cls)
+
+
+def _bind(module) -> None:
+    bind_module(module)
+    if module.__name__ in REGISTRY_MODULES:
+        _apply_registry(module)
+
+
 class _Finder:
     """Find the four stock modules through the other finders, and bind each
-    one as soon as it has executed."""
+    one as soon as it has executed, the registered classes included."""
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname not in MAP:
@@ -126,7 +184,7 @@ class _Finder:
 
         def exec_module(module):
             stock_exec(module)
-            bind_module(module)
+            _bind(module)
 
         # The loader instance serves this one module, so its import
         # metadata (__loader__, __spec__, __file__) stays the stock one.
@@ -184,7 +242,7 @@ def _reset_apc_tables() -> None:
 
 def _late_path(modules) -> None:
     for module in modules:
-        bind_module(module)
+        _bind(module)
     _sweep_globals()
     _rebase_subclasses()
     _reset_apc_tables()

@@ -6,7 +6,8 @@ modules as each one executes (gmlx.cache.bind). A stock module that
 loaded first takes the late path. These tests hold the binding in this
 process, in each import order in a child, and at the places that keep a
 class they saw first: borrowed module globals, the APC tables, the
-checkpoint class resolver and ``CacheList.from_state``.
+checkpoint class resolver and ``CacheList.from_state``. The class registry
+that makes gmlx's own cache classes resolvable by name is held here too.
 """
 
 from __future__ import annotations
@@ -240,6 +241,59 @@ def test_cache_list_from_state_resolves_registered_gmlx_classes():
                                               m3.MSAKVCache]
     assert back.caches[1].pooled.shape == pool.pooled.shape
     assert back.caches[2].ik.shape[-2] == 3
+
+
+# --- the class registry ---
+
+
+def test_the_registry_refuses_a_name_already_taken():
+    """A gmlx class never shadows an owned class, or another gmlx class,
+    where cache classes resolve by name."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    shadow = type("PoolingCache", (owned._BaseCache,), {})
+    with pytest.raises(ValueError, match="defines 'PoolingCache'"):
+        bind.register(shadow)
+    assert "PoolingCache" not in bind.registered()
+    for where in bind.REGISTRY_MODULES:
+        assert getattr(_mod(where), "PoolingCache", None) is not shadow, where
+    assert _mod("mlx_vlm.models.cache").PoolingCache is owned.PoolingCache
+    bind.register(QSAKVCache)
+    bind.register(QSAKVCache)
+    twin = type("QSAKVCache", (owned.KVCache,), {})
+    with pytest.raises(ValueError, match="is registered to"):
+        bind.register(twin)
+    for where in bind.REGISTRY_MODULES:
+        assert _mod(where).QSAKVCache is QSAKVCache, where
+
+
+_REGISTER_FIRST_CHILD = r"""
+import json
+import sys
+
+import mlx.core as mx
+
+mx.set_default_device(mx.cpu)
+import gmlx  # noqa: F401
+from gmlx.models.qwen4_exp.model import QSAKVCache, ensure_registered
+
+ensure_registered()
+loaded = "mlx_vlm.models.cache" in sys.modules
+import mlx_vlm.models.cache as vlm_cache
+
+print(json.dumps({"loaded": loaded,
+                  "held": getattr(vlm_cache, "QSAKVCache", None)
+                  is QSAKVCache}))
+"""
+
+
+def test_a_class_registered_before_the_vlm_cache_module_loads_is_there():
+    r = subprocess.run([sys.executable, "-c", _REGISTER_FIRST_CHILD],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == {"loaded": False, "held": True}
 
 
 def _msa():

@@ -852,9 +852,8 @@ SEAMS: tuple[Seam, ...] = (
          "cache.bind late path (resets _APC_EXACT_TYPES and "
          "_APC_BLOCK_TYPES so they refill with owned classes)"),
     Seam("mlx_lm.models.cache", "load_prompt_cache",
-         "kvarn_cache, qwen4_exp, minimax_m3 and deepseek_v4 "
-         "ensure_registered (resolves each class by name in the module "
-         "globals)"),
+         "cache.bind.register (resolves each registered gmlx cache class "
+         "by name in the module globals)"),
     Seam("mlx_vlm.server.runtime", "ModelCacheRegistry",
          "residency pool / test_wire_contract fake loader"),
     # --- vendored switch_layers ---

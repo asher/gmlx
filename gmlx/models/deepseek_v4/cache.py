@@ -25,8 +25,7 @@ from typing import List
 
 import mlx.core as mx
 
-from mlx_lm.models.cache import _BaseCache
-
+from gmlx.cache.kv_cache import _BaseCache
 from gmlx.upstream.patching import link
 
 

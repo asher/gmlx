@@ -289,18 +289,13 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.deepseek_v4`` resolve to this module,
-    ahead of any upstream module of that name, and expose the pooling
-    caches on the cache modules (name-based cache-class resolution in
-    ``CacheList.from_state`` and prompt-cache load looks them up there).
-    gmlx.cache.apc_pooling registers these classes with APC directly."""
-    import gmlx.cache.kv_cache as _owned_cache
-    import mlx_lm.models.cache as _mlx_cache
+    ahead of any upstream module of that name, and register the pooling
+    caches (gmlx.cache.bind.register), which ``CacheList.from_state`` and
+    prompt-cache load resolve by name. gmlx.cache.apc_pooling registers
+    these classes with APC directly."""
+    from gmlx.cache import bind
 
-    vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (_owned_cache, _mlx_cache, vlm_cache):
-        if mod is not None:
-            mod.DS4PoolingCache = DS4PoolingCache
-            mod.DS4BatchPoolingCache = DS4BatchPoolingCache
+    bind.register(DS4PoolingCache, DS4BatchPoolingCache)
     graft_module("mlx_lm.models.deepseek_v4", sys.modules[__name__])
 
 
