@@ -22,6 +22,7 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_int
+from gmlx.upstream.patching import wrapped_with
 
 _log = logging.getLogger(__name__)
 
@@ -536,17 +537,6 @@ def install_owned_spec_engine() -> None:
 _OWNED_B1_CACHE_FLAG = "_kq_gguf_owned_b1_spec_cache"
 
 
-def wrapped_by(fn, flag: str) -> bool:
-    """Whether ``flag`` marks ``fn`` or any wrap under it (``_gmlx_orig``
-    chain). A flag check on the top function alone wraps twice once another
-    installer stacks its wrap on top."""
-    while fn is not None:
-        if getattr(fn, flag, False):
-            return True
-        fn = getattr(fn, "_gmlx_orig", None)
-    return False
-
-
 def install_owned_b1_spec_cache() -> None:
     """Build the B=1 MTP prompt cache as single-stream caches.
 
@@ -562,7 +552,7 @@ def install_owned_b1_spec_cache() -> None:
     from mlx_vlm.speculative import utils as _su
 
     _orig = _su.make_speculative_prompt_cache
-    if wrapped_by(_orig, _OWNED_B1_CACHE_FLAG):
+    if wrapped_with(_orig, _OWNED_B1_CACHE_FLAG):
         return
 
     def _owned_spec_cache(lm, *, draft_kind, batch_size, left_padding,

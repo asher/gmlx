@@ -129,9 +129,9 @@ def _install_l0_tenant_rows() -> None:
     publish the generator's rows while it steps. Idempotent."""
     from mlx_vlm.generate import ar as _ar
 
-    from gmlx.spec.engine import wrapped_by
+    from gmlx.upstream.patching import wrapped_with
 
-    if not wrapped_by(_ar.BatchGenerator.insert, _TENANT_ROWS_FLAG):
+    if not wrapped_with(_ar.BatchGenerator.insert, _TENANT_ROWS_FLAG):
         _orig = _ar.BatchGenerator.insert
 
         def insert(self, prompts, *args, **kwargs):
@@ -157,7 +157,7 @@ def _install_l0_tenant_rows() -> None:
         insert.__dict__["_gmlx_orig"] = _orig
         _ar.BatchGenerator.insert = insert
 
-    if not wrapped_by(_ar.BatchGenerator._next, _TENANT_STEP_FLAG):
+    if not wrapped_with(_ar.BatchGenerator._next, _TENANT_STEP_FLAG):
         _orig_next = _ar.BatchGenerator._next
 
         def _next(self, **kwargs):

@@ -63,6 +63,44 @@ def test_wrapped_with_reads_every_layer():
     assert not wrapped_with(outer, "_b")  # a cycle ends the walk
 
 
+def test_wrapped_with_follows_gmlx_orig_links():
+    """Installers link through ``__wrapped__`` or ``_gmlx_orig``; a flag
+    under a layer of the other kind is still found."""
+    from gmlx.upstream.patching import wrapped_with
+
+    def stock():
+        return None
+
+    def own():
+        return None
+
+    def foreign():
+        return None
+
+    def top():
+        return None
+
+    own.__dict__.update(_a=True, _gmlx_orig=stock)
+    foreign.__dict__["_gmlx_orig"] = own
+    top.__wrapped__ = foreign  # type: ignore[attr-defined]
+    assert wrapped_with(top, "_a") and wrapped_with(foreign, "_a")
+    assert not wrapped_with(top, "_b") and not wrapped_with(stock, "_a")
+
+
+def test_wrapped_with_ends_on_generated_links():
+    """An object that makes a fresh attribute on every access (a mock, a
+    proxy) ends the walk instead of growing it forever."""
+    from gmlx.upstream.patching import wrapped_with
+
+    class Endless:
+        def __getattr__(self, name):
+            if name.startswith("_gmlx_orig"):
+                return Endless()
+            raise AttributeError(name)
+
+    assert not wrapped_with(Endless(), "_a")
+
+
 def _render_layers():
     """Frames named get_chat_template on one render: each wrapper layer is
     one, and the stock stand-in is the last."""

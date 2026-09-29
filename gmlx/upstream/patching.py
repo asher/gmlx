@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 
-def wrapped_with(fn, flag: str) -> bool:
-    """Whether ``fn``, or a function it wraps through ``__wrapped__``,
-    carries ``flag``.
+_LINKS = ("__wrapped__", "_gmlx_orig")
+_MAX_LAYERS = 256
 
-    Several installers wrap the same upstream function, and each runs again
+
+def wrapped_with(fn, flag: str) -> bool:
+    """Whether ``fn``, or any function it wraps, carries ``flag``.
+
+    Several installers wrap the same upstream function, and some run again
     on every model load. An installer that reads its flag on the outermost
     function only misses it when another wrapper sits on top, and adds a
-    second layer. Each wrapper in such a chain sets ``__wrapped__``."""
+    second layer. Each wrapper in such a chain links to what it wraps
+    through ``__wrapped__`` (``functools.wraps``) or ``_gmlx_orig``, and
+    the walk follows both. A cycle, or a chain of attributes generated on
+    access, ends the walk."""
     seen: set[int] = set()
-    while fn is not None and id(fn) not in seen:
+    todo = [fn]
+    while todo and len(seen) < _MAX_LAYERS:
+        fn = todo.pop()
+        if fn is None or id(fn) in seen:
+            continue
+        seen.add(id(fn))
         if getattr(fn, flag, False):
             return True
-        seen.add(id(fn))
-        fn = getattr(fn, "__wrapped__", None)
+        todo.extend(getattr(fn, link, None) for link in _LINKS)
     return False
 
 
