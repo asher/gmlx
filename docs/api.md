@@ -351,7 +351,8 @@ only lower it.
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
 | A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the load gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
-| The request body is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation or fewer images. | None |
+| A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation or fewer images. | None |
+| A form sent to `/v1/audio/transcriptions` or `/v1/audio/translations` is larger than 1024 MiB. | The server answers 413 before it reads the body, and the message suggests a compressed file or a split recording. | None |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |
 
 The preflight uses the same estimate as `POST /v1/estimate`, which

@@ -1953,6 +1953,46 @@ def test_a_body_over_the_ceiling_is_refused_before_it_is_read(monkeypatch):
     assert r.status_code == 413
 
 
+def test_an_audio_upload_has_its_own_ceiling(monkeypatch):
+    pytest.importorskip("multipart")               # python-multipart (stt extra)
+    import gmlx.serve.stt as stt
+    from gmlx.serve.patches import media_gate as mg
+    monkeypatch.setattr(mg, "BODY_MAX_BYTES", 1000)
+    monkeypatch.setattr(mg, "UPLOAD_MAX_BYTES", 4000)
+    monkeypatch.setattr(stt, "run_transcription",
+                        lambda *a, **k: ({"text": "hi"}, "application/json"))
+    client = _full_app(stt="mlx-community/whisper-large-v3-turbo")
+    for path in ("/v1/audio/transcriptions", "/audio/transcriptions",
+                 "/v1/audio/translations", "/audio/translations"):
+        # Over the body ceiling and under the upload ceiling.
+        r = client.post(path, files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+        assert r.status_code == 200, (path, r.text)
+        r = client.post(path, files={"file": ("a.wav", b"R" * 5000, "audio/wav")})
+        assert r.status_code == 413
+        message = r.json()["error"]["message"]
+        assert "audio upload" in message and "split the recording" in message
+        assert "new conversation" not in message
+    # A JSON body to an upload route, and a form to any other path, keep the
+    # body ceiling.
+    r = client.post("/v1/audio/transcriptions", content=b"{}" + b" " * 2000,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 413 and "new conversation" in r.text
+    r = client.post("/v1/x/audio/transcriptions",
+                    files={"file": ("a.wav", b"R" * 2000, "audio/wav")})
+    assert r.status_code == 413 and "new conversation" in r.text
+
+
+def test_a_declared_upload_length_over_its_ceiling_is_refused_unread():
+    from gmlx.serve.patches import media_gate as mg
+    _full_app(stt="mlx-community/whisper-large-v3-turbo")
+
+    async def receive():
+        raise AssertionError("the gate read the body")
+    assert _asgi_post("/v1/audio/transcriptions", [
+        (b"content-type", b"multipart/form-data; boundary=x"),
+        (b"content-length", str(mg.UPLOAD_MAX_BYTES + 1).encode())], receive) == 413
+
+
 def _asgi_post(path, headers, receive) -> int:
     """Send one POST straight to the app, with ``receive`` as the body
     source, and return the status it answers."""

@@ -52,6 +52,9 @@ _FLAG = "_kq_media_gate"
 
 # The largest request body the server reads.
 BODY_MAX_BYTES = 64 << 20
+# The largest form the audio upload routes read, so that a long recording
+# fits.
+UPLOAD_MAX_BYTES = 1 << 30
 # The largest image, audio clip or video one inline reference or one fetch
 # may hold, decoded.
 MEDIA_MAX_BYTES = 32 << 20
@@ -76,6 +79,7 @@ _SPEECH_ROUTE = "/audio/speech"
 # The routes that read a multipart form with a file part. Every other route
 # reads JSON, so a form body there is refused.
 _UPLOAD_ROUTES = ("/audio/transcriptions", "/audio/translations")
+_UPLOAD_PATHS = frozenset(p for r in _UPLOAD_ROUTES for p in (r, "/v1" + r))
 _MULTIPART = b"multipart/form-data"
 _URLENCODED = b"application/x-www-form-urlencoded"
 # Fields of the image routes that write files or load a model by path.
@@ -564,16 +568,32 @@ class _RefuseWebSockets:
         await self.app(scope, receive, send)
 
 
-async def _read_body(request) -> bytes | None:
-    """The request body, or None when it is larger than
-    :data:`BODY_MAX_BYTES`, which is refused before it is all read."""
+def _is_upload(request) -> bool:
+    """True for a multipart form sent to an audio upload route, which may be
+    as large as :data:`UPLOAD_MAX_BYTES`."""
+    return (request.url.path in _UPLOAD_PATHS
+            and form_type(request.headers.get("content-type")) == _MULTIPART)
+
+
+def _body_refusal(upload: bool) -> str:
+    if upload:
+        return (f"the audio upload is larger than the {UPLOAD_MAX_BYTES >> 20} MiB "
+                "limit of the transcription and translation routes. Send a "
+                "compressed file, such as MP3 or M4A, or split the recording.")
+    return (f"the request body is larger than the {BODY_MAX_BYTES >> 20} MiB "
+            "limit. Start a new conversation, or send fewer or smaller images.")
+
+
+async def _read_body(request, limit: int) -> bytes | None:
+    """The request body, or None when it is larger than ``limit``, which is
+    refused before it is all read."""
     length = request.headers.get("content-length", "")
-    if length.isdigit() and int(length) > BODY_MAX_BYTES:
+    if length.isdigit() and int(length) > limit:
         return None
     chunks, size = [], 0
     async for chunk in request.stream():
         size += len(chunk)
-        if size > BODY_MAX_BYTES:
+        if size > limit:
             return None
         chunks.append(chunk)
     raw = b"".join(chunks)
@@ -606,13 +626,11 @@ def install_media_gate(allow_urls: bool = False, app=None) -> None:
 
     async def _media_gate(request, call_next):
         # Every method: a route reads a body whatever the method is.
-        raw = await _read_body(request)
+        upload = _is_upload(request)
+        raw = await _read_body(request, UPLOAD_MAX_BYTES if upload else BODY_MAX_BYTES)
         if raw is None:
             return JSONResponse(status_code=413, content=_error_content(
-                request.url.path, 413, "invalid_request_error",
-                f"the request body is larger than the {BODY_MAX_BYTES >> 20} MiB "
-                "limit. Start a new conversation, or send fewer or smaller "
-                "images."))
+                request.url.path, 413, "invalid_request_error", _body_refusal(upload)))
         try:
             await check_request(
                 request.method, request.url.path, request.headers, raw,
