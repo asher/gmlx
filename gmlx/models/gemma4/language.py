@@ -397,6 +397,20 @@ def _cache_has_prefix(c) -> bool:
         return True
 
 
+# gmlx: the token types of an n-column chunk. A caller that passes the
+# whole prompt's types with every chunk (mlx-vlm's generate_step) gets them
+# sliced at the cache offset; None when they cannot be aligned.
+def _chunk_token_types(token_types, n, cache):
+    if token_types is None or token_types.shape[1] == n:
+        return token_types
+    offset = next(
+        (c.offset for c in cache if c is not None and hasattr(c, "offset")), None
+    )
+    if isinstance(offset, int) and offset + n <= token_types.shape[1]:
+        return token_types[:, offset : offset + n]
+    return None
+
+
 class Gemma4TextModel(nn.Module):
     def __init__(self, config: TextConfig, kv_shared_only: bool = False):
         super().__init__()
@@ -503,47 +517,56 @@ class Gemma4TextModel(nn.Module):
         base_mask: mx.array,
         mm_token_type_ids: mx.array,
     ) -> mx.array:
+        # gmlx: the sliding-layer overlay. base_mask is (..., n, cached + n)
+        # for an n-column chunk, and each block token sees the keys of its
+        # block among the trailing n columns inside the window: key k is
+        # visible from query q when k > q - window.
         if mm_token_type_ids is None:
             return base_mask
-        if mm_token_type_ids.shape[1] != base_mask.shape[-1]:
-            return base_mask
-        if base_mask.shape[-2] != base_mask.shape[-1]:
+        n = mm_token_type_ids.shape[1]
+        if base_mask.shape[-2] != n or base_mask.shape[-1] < n:
             return base_mask
 
         block_sequence_ids = self._block_sequence_ids_for_mask(mm_token_type_ids)
         q_blocks = mx.expand_dims(block_sequence_ids, -1)
         k_blocks = mx.expand_dims(block_sequence_ids, -2)
         same_block = (q_blocks != -1) & (q_blocks == k_blocks)
+        pos = mx.arange(n)
+        same_block = same_block & (pos[None, :] > pos[:, None] - self.window_size)
+        cached = base_mask.shape[-1] - n
+        if cached:
+            same_block = mx.concatenate(
+                [mx.zeros((same_block.shape[0], n, cached), dtype=mx.bool_), same_block],
+                axis=-1,
+            )
         return base_mask | mx.expand_dims(same_block, 1)
 
     def _make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = None):
         """Create attention masks, deduplicated by layer type."""
         mask = {}
         masks = []
-        has_visual_tokens = (
-            mm_token_type_ids is not None
-            and int(mx.sum((mm_token_type_ids == 1) | (mm_token_type_ids == 2)).item())
-            > 0
-        )
+        # gmlx: under bidirectional vision the block overlay goes on the
+        # sliding layers only, inside the window, and full attention stays
+        # causal, as in transformers and llama.cpp. The token types are the
+        # chunk's, and the visual token check syncs only for a chunk that
+        # carries them under bidirectional vision.
+        mm_token_type_ids = _chunk_token_types(mm_token_type_ids, h.shape[1], cache)
         # Audio spans are sequential; keep mixed image+audio prompts causal to
         # avoid the vision block overlay dominating quantized unified models.
         use_bidirectional_vision = (
             getattr(self.config, "use_bidirectional_attention", None) == "vision"
             and mm_token_type_ids is not None
-            and has_visual_tokens
             and h.shape[1] > 1
+            and int(mx.sum((mm_token_type_ids == 1) | (mm_token_type_ids == 2)).item())
+            > 0
         )
         for l, c in zip(self.layers, cache):
             if l.layer_type not in mask:
                 if l.layer_type == "full_attention":
                     # Full attention can use MLX's causal mask even when
                     # prefilling against an existing KV prefix. Only materialize
-                    # a mask for batch left-padding or the Gemma 4 vision
-                    # bidirectional overlay.
-                    return_array = (
-                        use_bidirectional_vision
-                        or getattr(c, "left_padding", None) is not None
-                    )
+                    # a mask for batch left-padding.
+                    return_array = getattr(c, "left_padding", None) is not None
                     mask["full_attention"] = create_attention_mask(
                         h, c, return_array=return_array
                     )
@@ -557,19 +580,17 @@ class Gemma4TextModel(nn.Module):
                     )
                 if (
                     use_bidirectional_vision
+                    and l.layer_type == "sliding_attention"
                     and isinstance(mask[l.layer_type], str)
                     and mask[l.layer_type] == "causal"
                 ):
-                    window = (
-                        self.window_size
-                        if l.layer_type == "sliding_attention"
-                        else None
-                    )
                     mask[l.layer_type] = create_causal_mask(
-                        h.shape[1], window_size=window
+                        h.shape[1], window_size=self.window_size
                     )
-                if use_bidirectional_vision and isinstance(
-                    mask[l.layer_type], mx.array
+                if (
+                    use_bidirectional_vision
+                    and l.layer_type == "sliding_attention"
+                    and isinstance(mask[l.layer_type], mx.array)
                 ):
                     mask[l.layer_type] = self._apply_blockwise_bidirectional_overlay(
                         mask[l.layer_type],

@@ -155,6 +155,50 @@ def mask_decisions(stock, owned) -> dict:
     return out
 
 
+IMAGE_WINDOW, IMAGE_BLOCKS, IMAGE_N = 8, [(6, 20), (24, 34)], 40
+
+
+def image_types(blocks=IMAGE_BLOCKS, n=IMAGE_N) -> mx.array:
+    row = [0] * n
+    for a, b in blocks:
+        row[a:b] = [1] * (b - a)
+    return mx.array([row], dtype=mx.int32)
+
+
+def image_mask_spread(lang) -> dict:
+    """Where one pass over a prompt with two image blocks, under
+    bidirectional vision and a window narrower than each block, lets a
+    query see a key: whether the full-attention mask is causal, whether a
+    sliding mask reaches a key past the window, and whether it lets a
+    block token see a later token of its block."""
+    lm = tiny(lang, use_bidirectional_attention="vision",
+              sliding_window=IMAGE_WINDOW)
+    tm = lm.model
+    n = IMAGE_N
+    masks = tm._make_masks(mx.zeros((1, n, 64)), [None] * len(tm.layers),
+                           image_types())
+    q = mx.arange(n)[:, None]
+    k = mx.arange(n)[None, :]
+    causal = k <= q
+    out = {}
+    for layer, mask in zip(tm.layers, masks):
+        if layer.layer_type in out:
+            continue
+        if isinstance(mask, str):
+            mask = causal
+        mask = mx.broadcast_to(mask, (1, 1, n, n))[0, 0]
+        if layer.layer_type == "full_attention":
+            out["full_attention"] = {
+                "causal": bool(mx.array_equal(mask, causal).item())}
+        else:
+            past = mask & (k <= q - IMAGE_WINDOW)
+            out["sliding_attention"] = {
+                "past_window": bool(mx.any(past).item()),
+                "block_ahead": bool(mask[6, 12].item()),
+            }
+    return out
+
+
 def main():
     from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
 
@@ -165,6 +209,7 @@ def main():
         "mask_syncs": mask_syncs(stock),
         "rope_offsets": rope_offsets(stock),
         "mask_decisions": mask_decisions(stock, owned),
+        "image_mask_spread": image_mask_spread(stock),
     }
     print(json.dumps(result, sort_keys=True))
 
