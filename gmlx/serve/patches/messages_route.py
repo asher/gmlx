@@ -101,12 +101,15 @@ def install_messages_route() -> None:
             # Tool results come only from a user message, and render ahead
             # of its text.
             out.extend(results)
-            if text or calls or not results:
-                if message.role == "user" and isinstance(message.content, list):
-                    placed = _placed(an, message.content)
-                    if placed is not None:
-                        text, own = placed
-                        images[start:] = _results_first(images[start:], own)
+            placed = (_placed(an, message.content)
+                      if message.role == "user"
+                      and isinstance(message.content, list) else None)
+            # A message of tool results and images, with no text, still
+            # renders its images.
+            if text or calls or not results or placed is not None:
+                if placed is not None:
+                    text, own = placed
+                    images[start:] = _results_first(images[start:], own)
                 msg: dict = {"role": message.role, "content": text}
                 if calls:
                     msg["tool_calls"] = calls

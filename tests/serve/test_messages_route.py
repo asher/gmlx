@@ -364,6 +364,22 @@ def test_each_image_fills_the_slot_of_its_turn(route, name):
         "RESULT-ONE", "ANSWER"]
 
 
+@pytest.mark.parametrize("name", ("qwen3.5", "kimi-k2.5", "gemma4",
+                                  "deepseek-v4"))
+def test_an_image_beside_a_tool_result_and_no_text_renders(route, name):
+    messages = [
+        {"role": "user", "content": [_text("ASK-FIRST"), _image("a")]},
+        {"role": "assistant", "content": [
+            _text("Taking it."),
+            {"type": "tool_use", "id": "toolu_0", "name": "shot",
+             "input": {}}]},
+        {"role": "user", "content": [_shot(_image("s")), _image("x")]}]
+    prompt, images = route(name, messages, vision=True)
+    assert images == ["http://img/a", "http://img/s", "http://img/x"]
+    assert _slots(prompt, _VISION[name][2], ("ASK-FIRST", "RESULT-ONE")) == [
+        "ASK-FIRST", "RESULT-ONE", "RESULT-ONE"]
+
+
 @pytest.mark.parametrize("name", _AFTER_TOOL_TURN)
 def test_a_tool_image_stays_put_in_the_next_turn(route, name):
     image = _VISION[name][2]
