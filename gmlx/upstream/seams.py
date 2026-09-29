@@ -506,7 +506,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.server.anthropic", "_anthropic_messages_to_internal",
          "messages_route.install_messages_route (replaced; the stock body, "
          "with a user message that holds an image as its text runs and "
-         "image markers in block order)"),
+         "image markers in block order, and its tool results ahead of its "
+         "text)"),
     Seam("mlx_vlm.server.anthropic",
          "_anthropic_content_blocks_to_text_and_tools",
          "messages_route.install_messages_route (each message's text, tool "

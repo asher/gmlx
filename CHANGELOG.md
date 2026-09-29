@@ -45,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   latest user message, and a new turn could not reuse the earlier turns.
 - In a chat, Responses or Messages request, a message's images reached the model
   ahead of its text (after it on Kimi K2.5), whatever order the client used.
+- On `/v1/messages`, text sent beside a tool result reached the model ahead of
+  the result, and a Gemma-4 model did not see the result at all.
 - A Gemma-4 model loaded with its mmproj, a Gemma-4 12B, DiffusionGemma and an
   MLX-format Gemma-4 read the system or developer message as a Python list.
 - A prompt started with two BOS tokens when the chat template wrote one and the
