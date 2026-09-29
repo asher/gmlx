@@ -82,22 +82,58 @@ def test_a_replacement_answers_for_the_metal_device(on_cpu, monkeypatch):
     assert metal_info() == {WS: 7}
 
 
+def _reads_device_info(node) -> bool:
+    if isinstance(node, ast.ImportFrom):
+        return ((node.module or "").startswith("mlx.core")
+                and any(a.name == "device_info" for a in node.names))
+    if isinstance(node, (ast.Attribute, ast.Name)):
+        name = node.attr if isinstance(node, ast.Attribute) else node.id
+        return name == "device_info" and isinstance(node.ctx, ast.Load)
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr" and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "device_info")
+
+
+def _device_info_reads(source: str) -> list[int]:
+    """The lines of ``source`` that read ``device_info``: an import of it
+    from mlx.core, any load of a name or attribute of that name, or a
+    getattr by that string. An assignment to it reads nothing."""
+    return sorted({node.lineno for node in ast.walk(ast.parse(source))
+                   if _reads_device_info(node)})
+
+
 def test_every_device_info_call_goes_through_the_helper():
     root = Path(__file__).resolve().parents[1] / "gmlx"
     found = []
     for path in sorted(root.rglob("*.py")):
         if path == root / "device.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "device_info"):
-                continue
-            base = node.func.value
-            if (isinstance(base, ast.Name) and base.id == "mx") or (
-                    isinstance(base, ast.Attribute) and base.attr == "metal"):
-                found.append(f"{path.relative_to(root.parent)}:{node.lineno}")
+        found += [f"{path.relative_to(root.parent)}:{line}"
+                  for line in _device_info_reads(path.read_text())]
     assert found == []
+
+
+# Each reads the default device's info without the helper.
+_DEVICE_INFO_READS = {
+    "from-import": "from mlx.core import device_info\ndevice_info()\n",
+    "module-alias": "import mlx.core as core\ncore.device_info()\n",
+    "full-path": "import mlx.core\nmlx.core.device_info()\n",
+    "bound-name": "import mlx.core as mx\nfn = mx.device_info\nfn()\n",
+    "getattr": 'import mlx.core as mx\ngetattr(mx, "device_info")()\n',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_DEVICE_INFO_READS))
+def test_the_check_flags_each_way_to_read_device_info(name):
+    assert _device_info_reads(_DEVICE_INFO_READS[name])
+
+
+def test_the_check_passes_the_helper_and_a_rebind():
+    # The --stream-cpu setup assigns mx.device_info, which reads nothing.
+    clean = ("import mlx.core as mx\nfrom gmlx.device import metal_info\n"
+             "info = metal_info()\nmx.device_info = lambda: info\n")
+    assert _device_info_reads(clean) == []
 
 
 # The table ceiling.
