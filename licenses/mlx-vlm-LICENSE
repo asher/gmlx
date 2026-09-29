@@ -13,6 +13,15 @@ ported from it, with modifications:
   gmlx cache class in make_cache, evals under an except routed through
   gmlx.eval_guard, ASCII comments, a video-grid bug fix from mlx-vlm
   0.7.3, and mlx-lm's SwitchGLU in the MoE block.
+- gmlx/cache/kv_cache.py: all of mlx_vlm/models/cache.py of mlx-vlm 0.7.3,
+  the KV cache classes and their module helpers. gmlx binds them under the
+  stock names (gmlx/cache/bind.py) and changes them in place; each change
+  carries a comment where it sits.
+- gmlx/cache/attention.py: the mask and SDPA helpers of
+  mlx_vlm/models/base.py of mlx-vlm 0.7.3 (create_attention_mask,
+  create_ssm_mask, align_attention_mask_to_scores,
+  quantized_scaled_dot_product_attention, _turboquant_attention_applies
+  and scaled_dot_product_attention), with gmlx's routes added.
 - gmlx/cache/apc_manager.py: the store_kv_blocks override is a copy of
   mlx_vlm.apc.APCManager.store_kv_blocks with the per-block mx.eval
   hoisted into chunked batches and gmlx's checkpoint-store policy added.

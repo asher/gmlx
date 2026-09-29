@@ -24,6 +24,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Gemma-4 and on the qwen35 and qwen35moe architectures.
 - On an M1 or M2, `gmlx distill --cpu` and a Python load on the CPU default
   device run the model in float16, as the GPU does, not bfloat16.
+- `import gmlx` makes mlx-lm and mlx-vlm in the same process use gmlx's own KV
+  cache classes and attention helpers, which carry gmlx's cache fixes.
+
+### Removed
+
+- `GMLX_QSDPA_MASK_FIX=0` no longer turns off the fix for concurrent `kv_bits`
+  requests on grouped-query models. The fix is always on.
 
 ### Fixed
 

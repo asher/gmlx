@@ -11,6 +11,24 @@ MLX and kernel-extension import happens at first use, and a broken runtime
 environment fails at that point with a message naming the missing
 component.
 
+## Effect on mlx-lm and mlx-vlm
+
+`import gmlx` changes mlx-lm and mlx-vlm for the whole process. gmlx owns
+the KV cache classes of `mlx_lm.models.cache` and `mlx_vlm.models.cache`,
+and the attention mask and SDPA helpers of their `base` modules, in
+`gmlx.cache.kv_cache` and `gmlx.cache.attention`. After the import, those
+stock names refer to the gmlx versions, so every cache that mlx-lm or
+mlx-vlm code creates in the process is a gmlx cache, whichever package
+loaded the model. The gmlx classes keep every stock member and parameter
+and add gmlx's fixes. Stock modules that loaded before gmlx are rebound at
+the import, but a cache created before it keeps its stock class. The
+import itself still loads no MLX.
+
+mlx-vlm's APC disk tier stores a generic checkpoint only for a cache class
+it can resolve, and learns the gmlx classes when gmlx loads a model. In a
+process that imports gmlx but loads no model through it, the disk tier
+stores no generic checkpoint for those caches.
+
 ## Load a model
 
 ```python
@@ -223,8 +241,10 @@ install_gguf_bridge()
 
 `install_gguf_bridge` patches `mlx_lm.server.ModelProvider` so that any
 `*.gguf` model path loads through `load_model`, and a second call changes
-nothing. Other paths pass through unchanged, so one `mlx_lm.server` process
-can mix GGUF files and ordinary MLX checkpoints. GGUF requests are pinned
+nothing. Other paths load through mlx-lm as before, so one `mlx_lm.server`
+process can mix GGUF files and ordinary MLX checkpoints. Their caches are
+the gmlx cache classes, as for any process that imports gmlx (see
+[Effect on mlx-lm and mlx-vlm](#effect-on-mlx-lm-and-mlx-vlm)). GGUF requests are pinned
 to mlx-lm's sequential path, with no batching. A `--draft-model` is
 ignored for GGUF models with a warning, and `--adapter` on one raises,
 since adapters are wired only in `gmlx serve`. Use the bridge to add GGUF
