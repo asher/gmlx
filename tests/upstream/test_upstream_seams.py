@@ -53,6 +53,16 @@ def test_fingerprint_drift_is_named(monkeypatch):
     assert any(key in p and "changed under the pin" in p for p in problems)
 
 
+def test_a_removed_row_is_named(monkeypatch):
+    """A row dropped from SEAMS leaves its pin in seams.json, and the check
+    names it, so a seam cannot stop being checked unnoticed."""
+    dropped = us.SEAMS[0]
+    monkeypatch.setattr(us, "SEAMS", us.SEAMS[1:])
+    problems = us.check_seams()
+    assert any(p.startswith(us._key(dropped) + ":") and "no row" in p
+               for p in problems)
+
+
 def test_every_seam_has_a_pin():
     # Values without source (constants, instances, properties) pin their
     # value; a null pin would let any drift under it pass.

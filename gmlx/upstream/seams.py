@@ -1273,6 +1273,11 @@ def check_seams() -> list[str]:
                 f"{_key(seam)}: source changed under the pin - re-audit "
                 f"{seam.used_by}, then regenerate "
                 f"(pinned for {pinned.get('generated_with')})")
+    rows = {_key(seam) for seam in SEAMS}
+    for key in sorted(set(fps) - rows):
+        problems.append(
+            f"{key}: pinned with no row in SEAMS; restore the row, or run "
+            f"`python -m gmlx.upstream.seams --regen` if it went on purpose")
     return problems
 
 
