@@ -501,6 +501,31 @@ SEAMS: tuple[Seam, ...] = (
          "history, retire capture, thinking seed, and developer-role "
          "normalization wrap every captured render binding)",
          impl="mlx_vlm.server:apply_chat_template"),
+    # The Messages route's conversion step: gmlx claims it and calls the
+    # stock helpers as the stock body does.
+    Seam("mlx_vlm.server.anthropic", "_anthropic_messages_to_internal",
+         "messages_route.install_messages_route (replaced; the stock body, "
+         "with a user message that holds an image as its text runs and "
+         "image markers in block order)"),
+    Seam("mlx_vlm.server.anthropic",
+         "_anthropic_content_blocks_to_text_and_tools",
+         "messages_route.install_messages_route (each message's text, tool "
+         "calls and tool results; appends every image ref in block order)"),
+    Seam("mlx_vlm.server.anthropic", "_anthropic_image_source_to_ref",
+         "messages_route._placed (an image block the conversion keeps)"),
+    Seam("mlx_vlm.server.anthropic", "_as_plain_dict",
+         "messages_route._placed (reads each block as the stock "
+         "conversion reads it)"),
+    Seam("mlx_vlm.server.anthropic", "_anthropic_system_text",
+         "messages_route.install_messages_route (the system message)"),
+    Seam("mlx_vlm.server.anthropic", "_anthropic_tools_to_openai",
+         "messages_route.install_messages_route (the request's tools)"),
+    Seam("mlx_vlm.server.anthropic", "_anthropic_tool_choice_to_openai",
+         "messages_route.install_messages_route (the request's tool "
+         "choice)"),
+    Seam("mlx_vlm.server.anthropic", "_prepare_chat_tool_choice",
+         "messages_route.install_messages_route (enforces the tool choice "
+         "on the converted messages)"),
     Seam("mlx_vlm.server.app", "_protocol_deps",
          "server_patches._common._render_target_modules (the route "
          "modules copy their bindings from these members at route "

@@ -26,12 +26,14 @@ from gmlx.cache.media_salt import MediaSalt, image_spans  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import render  # noqa: E402
 from gmlx.serve.patches.chat_behavior import install_role_normalization  # noqa: E402
+from gmlx.serve.patches.messages_route import install_messages_route  # noqa: E402
 from gmlx.serve.patches.render import (  # noqa: E402
     install_chat_image_placement,
     install_faithful_history,
 )
 
 _OPENAI = importlib.import_module("mlx_vlm.server.openai")
+_ANTHROPIC = importlib.import_module("mlx_vlm.server.anthropic")
 _PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
 _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
@@ -106,20 +108,35 @@ def route(monkeypatch):
                         _OPENAI._normalize_instruction_messages)
     monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
                         _PROMPT_UTILS.get_chat_template)
+    monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
+                        _ANTHROPIC._anthropic_messages_to_internal)
     rg = _RG()
     monkeypatch.setattr(_RUNTIME, "response_generator", rg, raising=False)
     install_faithful_history()
     install_role_normalization()
     install_chat_image_placement()
+    install_messages_route()
     from fastapi.testclient import TestClient
 
     client = TestClient(_APP.app)
 
-    def render(model_type, messages, responses=False, processor=None):
+    def render(model_type, messages, responses=False, processor=None,
+               anthropic=False, tools=None):
         processor = processor or _Processor(model_type)
-        monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
-            None, processor, {"model_type": model_type}))
-        if responses:
+        cached = lambda *a, **k: (  # noqa: E731
+            None, processor, {"model_type": model_type})
+        monkeypatch.setattr(_OPENAI, "get_cached_model", cached)
+        monkeypatch.setattr(_ANTHROPIC, "get_cached_model", cached)
+        if anthropic:
+            body = {"model": "m", "max_tokens": 1,
+                    "messages": [m for m in messages if m["role"] != "system"]}
+            system = [m["content"] for m in messages if m["role"] == "system"]
+            if system:
+                body["system"] = system[0]
+            if tools:
+                body["tools"] = tools
+            r = client.post("/v1/messages", json=body)
+        elif responses:
             r = client.post("/v1/responses", json={
                 "model": "m", "input": messages, "max_output_tokens": 16})
         else:
@@ -406,3 +423,138 @@ def test_the_image_salt_follows_the_images_in_place(route):
     s1, s2 = MediaSalt(5, spans1), MediaSalt(5, spans2)
     assert s2.at(start_b) == s1.at(start_b)
     assert s2.at(start_b + 1) != s1.at(start_b + 1)
+
+
+# /v1/messages: the stock conversion joins a user message's text into one
+# string and passes its images in the request's image list, so the render
+# places every image in the last user message, ahead of its text.
+
+
+def _anthropic(messages):
+    """``messages`` with each image part as an Anthropic image block."""
+    def block(item):
+        if item["type"] != "image_url":
+            return item
+        return {"type": "image",
+                "source": {"type": "url", "url": item["image_url"]["url"]}}
+    return [{**m, "content": [block(i) for i in m["content"]]}
+            if isinstance(m["content"], list) else m for m in messages]
+
+
+@pytest.mark.parametrize("layout", sorted(_LAYOUTS))
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_a_messages_request_keeps_the_client_order(route, model_type, layout):
+    content = _LAYOUTS[layout]
+    prompt, images = route(
+        model_type, _anthropic([{"role": "user", "content": content}]),
+        anthropic=True)
+    assert images == [item["image_url"]["url"] for item in content
+                      if item["type"] == "image_url"]
+    _assert_in_order(prompt, _MODELS[model_type][1], content)
+
+
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_each_messages_image_renders_in_its_own_turn(route, model_type):
+    image = _MODELS[model_type][1]
+    turn1, turn2 = (_anthropic(t) for t in _turns())
+    prompt1, images1 = route(model_type, turn1, anthropic=True)
+    prompt2, images2 = route(model_type, turn2, anthropic=True)
+    assert images1 == ["http://img/a"]
+    assert images2 == ["http://img/a", "http://img/b"]
+    first, second = prompt2.split("A red car.")
+    assert first.count(image) == 1 and second.count(image) == 1
+    _assert_in_order(prompt2, image, _turns()[1][1]["content"],
+                     _turns()[1][3]["content"])
+    end = _MODELS[model_type][2]
+    assert prompt2.startswith(prompt1[:prompt1.rindex(end) + len(end)])
+    if model_type == "gemma4":
+        assert prompt2.startswith(prompt1)
+
+
+@pytest.mark.parametrize("model_type", ("gemma4", "gemma4_unified"))
+def test_the_gemma4_processor_keeps_a_messages_order(route, model_type):
+    content = _LAYOUTS["text-image-text-image-text"]
+    prompt, _ = route(model_type,
+                      _anthropic([{"role": "user", "content": content}]),
+                      processor=_Gemma4Processor(model_type), anthropic=True)
+    _assert_in_order(prompt, "<|image|>", content)
+
+
+def test_the_image_salt_follows_the_messages_turns(route):
+    """Turn 2 keys image A at the start and with the hash turn 1 keyed it,
+    so its prefix through turn 1's question matches turn 1's."""
+    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+        Qwen3VLImageProcessor,
+    )
+    from PIL import Image
+
+    ip = Qwen3VLImageProcessor(patch_size=14, merge_size=1, min_pixels=0,
+                               max_pixels=14 * 14 * 64)
+    pics = [Image.new("RGB", (56, 28), (200, 0, 0)),
+            Image.new("RGB", (28, 42), (0, 200, 0))]
+    cfg = SimpleNamespace(image_token_id=9)
+    proc = SimpleNamespace(image_processor=ip)
+    pad = "<|image_pad|>"
+
+    def ids(prompt, grids):
+        row, parts = [], prompt.split(pad)
+        for i, part in enumerate(parts):
+            row += [1] * len(part)
+            if i < len(grids):
+                row += [9] * int(np.prod(grids[i]))
+        return np.array([row])
+
+    salts = []
+    for turn, n in zip(_turns(), (1, 2)):
+        prompt, _ = route("qwen3_5", _anthropic(turn), anthropic=True)
+        raw = ip(pics[:n])
+        spans = image_spans(ids(prompt, raw["image_grid_thw"]), raw, cfg,
+                            proc)
+        assert spans is not None and len(spans) == n
+        salts.append(spans)
+    spans1, spans2 = salts
+    assert spans2[0] == spans1[0]
+    s1, s2 = MediaSalt(5, spans1), MediaSalt(5, spans2)
+    assert s2.at(spans2[1][0]) == s1.at(spans2[1][0])
+
+
+_TOOL = [{"name": "shot", "description": "Take a screenshot.",
+          "input_schema": {"type": "object", "properties": {}}}]
+
+
+def _tool_turns(*results):
+    """A tool round: the user asks, the assistant calls ``shot`` once per
+    result, and the last user message holds ``results``."""
+    calls = [{"type": "tool_use", "id": f"toolu_{i}", "name": "shot",
+              "input": {}} for i in range(len(results))]
+    return [{"role": "user", "content": [_text("Take a screenshot.")]},
+            {"role": "assistant", "content": [_text("Taking it.")] + calls},
+            {"role": "user", "content": list(results)}]
+
+
+def _result(i, *content):
+    return {"type": "tool_result", "tool_use_id": f"toolu_{i}",
+            "content": list(content)}
+
+
+_SHOT = {"type": "image", "source": {"type": "url", "url": "http://img/s"}}
+_TOOL_ONLY = {
+    "one result": _tool_turns(_result(0, _text("Saved."))),
+    "two results": _tool_turns(_result(0, _text("First.")),
+                               _result(1, _text("Second."))),
+    "a result with an image": _tool_turns(_result(0, _text("Here."), _SHOT)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TOOL_ONLY))
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_messages_tool_rounds_render_as_before(route, monkeypatch,
+                                               model_type, case):
+    """A user message of tool results alone converts as the stock route
+    converts it."""
+    messages = _TOOL_ONLY[case]
+    patched = route(model_type, messages, anthropic=True, tools=_TOOL)
+    claim = _ANTHROPIC._anthropic_messages_to_internal
+    monkeypatch.setattr(_ANTHROPIC, "_anthropic_messages_to_internal",
+                        getattr(claim, "_gmlx_orig", claim))
+    assert patched == route(model_type, messages, anthropic=True, tools=_TOOL)

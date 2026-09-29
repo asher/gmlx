@@ -98,6 +98,7 @@ from .hardening import (
     install_json_content_type_tolerance,
     install_loopback_host_guard,
 )
+from .messages_route import install_messages_route
 from .mtp_thinking import install_mtp_thinking_budget
 from .observability import install_request_timing_log, uvicorn_log_config
 from .render import install_chat_image_placement, install_faithful_history
@@ -163,6 +164,7 @@ __all__ = [
     "install_keep_route",
     "install_loopback_host_guard",
     "install_max_completion_tokens",
+    "install_messages_route",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_mtp_thinking_budget",
@@ -326,8 +328,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # must exclude the stash so off-request predictions never write the
     # request contextvar the thinking splitters read.
     install_faithful_history()
-    # Chat completions renders each image in the message that sent it.
+    # Chat completions and Messages render each image in the message
+    # that sent it.
     install_chat_image_placement()
+    install_messages_route()
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_stream_thinking_seed()

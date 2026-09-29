@@ -301,7 +301,8 @@ def _placed_content(content) -> list:
 
 def install_chat_image_placement() -> None:
     """Render each image of a chat completions request in the user message
-    that sent it, as the Responses and Messages routes do.
+    that sent it, as the Responses route does (``messages_route`` does the
+    same for the Messages route).
 
     The stock route reduces every message to its text
     (``extract_text_from_content``) and passes only the image count, so
