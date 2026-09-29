@@ -762,20 +762,10 @@ class LanguageModel(nn.Module):
     ) -> bool:
         del input_ids, inputs_embeds, prompt_cache
         prefill_kwargs = prefill_kwargs or {}
-        if getattr(self, "no_chunked_prefill", False):
-            return False
-
-        token_types = prefill_kwargs.get("mm_token_type_ids", None)
-        if token_types is None:
-            token_types = prefill_kwargs.get("token_type_ids", None)
-        if (
-            getattr(self.config, "use_bidirectional_attention", None) == "vision"
-            and token_types is not None
-        ):
-            has_visual = int(mx.sum((token_types == 1) | (token_types == 2)).item()) > 0
-            has_audio = int(mx.sum(token_types == 3).item()) > 0
-            if has_visual and not has_audio:
-                return False
+        # gmlx: every prompt chunks, images included, and nothing here
+        # syncs. The prefill loops keep each image or video block inside
+        # one chunk, and _make_masks puts the block on the chunk's sliding
+        # mask. There is no no_chunked_prefill to read.
 
         if draft_model is not None:
             return (

@@ -48,13 +48,9 @@ class Model(nn.Module):
         super().__init__()
         self.model_type = config.model_type
         self.config = config
-        self._base_no_chunked_prefill = (
-            getattr(config.text_config, "use_bidirectional_attention", None) == "vision"
-        )
-        self.no_chunked_prefill = self._base_no_chunked_prefill
+        # gmlx: no chunking state. Every prompt chunks, images included.
 
         self.language_model = LanguageModel(config.text_config)
-        self.language_model.no_chunked_prefill = self.no_chunked_prefill
         self.vocab_size = config.text_config.vocab_size
 
         if config.vision_config is not None:
@@ -77,46 +73,6 @@ class Model(nn.Module):
         else:
             self.embed_audio = None
 
-    def _should_disable_chunked_prefill(self, input_ids=None, **kwargs) -> bool:
-        """Disable chunking only when a prompt needs vision bidirectional masks."""
-        if not self._base_no_chunked_prefill:
-            return False
-
-        token_types = kwargs.get("mm_token_type_ids", None)
-        if token_types is None:
-            token_types = kwargs.get("token_type_ids", None)
-
-        if token_types is not None:
-            has_visual = int(mx.sum((token_types == 1) | (token_types == 2)).item()) > 0
-            has_audio = int(mx.sum(token_types == 3).item()) > 0
-            return has_visual and not has_audio
-
-        if input_ids is None:
-            return True
-
-        video_token_id = getattr(self.config, "video_token_id", None)
-        image_token_id = getattr(self.config, "image_token_id", None)
-        audio_token_id = getattr(self.config, "audio_token_id", None)
-        has_visual = (
-            image_token_id is not None
-            and int(mx.sum(input_ids == image_token_id).item()) > 0
-        )
-        if video_token_id is not None:
-            has_visual = (
-                has_visual or int(mx.sum(input_ids == video_token_id).item()) > 0
-            )
-        has_audio = (
-            audio_token_id is not None
-            and int(mx.sum(input_ids == audio_token_id).item()) > 0
-        )
-        return has_visual and not has_audio
-
-    def _update_chunked_prefill_mode(self, input_ids=None, **kwargs):
-        self.no_chunked_prefill = self._should_disable_chunked_prefill(
-            input_ids, **kwargs
-        )
-        self.language_model.no_chunked_prefill = self.no_chunked_prefill
-
     def chunked_prefill_policy(
         self,
         *,
@@ -127,10 +83,10 @@ class Model(nn.Module):
         draft_kind=None,
         prefill_kwargs=None,
     ) -> bool:
-        del inputs_embeds, prompt_cache
+        del input_ids, inputs_embeds, prompt_cache
         prefill_kwargs = prefill_kwargs or {}
-        if self._should_disable_chunked_prefill(input_ids, **prefill_kwargs):
-            return False
+        # gmlx: no prompt declines chunking, and nothing here syncs. The
+        # prefill loops keep each image or video block inside one chunk.
 
         if draft_model is not None:
             return (
@@ -213,8 +169,6 @@ class Model(nn.Module):
             audio_features = input_features
         if input_features_mask is not None and audio_mask is None:
             audio_mask = input_features_mask
-
-        self._update_chunked_prefill_mode(input_ids, **kwargs)
 
         if inputs_embeds is None:
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)

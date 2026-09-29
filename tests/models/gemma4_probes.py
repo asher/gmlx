@@ -199,8 +199,81 @@ def image_mask_spread(lang) -> dict:
     return out
 
 
+POLICY_PROMPTS = {"image": (True, False), "image_audio": (True, True),
+                  "audio": (False, True), "text": (False, False)}
+
+
+def policy_prompt(image, audio, image_id=1, audio_id=2):
+    """(ids, token types) of a 16-token prompt with an image at 4-9 and
+    audio at 12-14."""
+    ids, types = [], []
+    for i in range(16):
+        if image and 4 <= i < 10:
+            ids.append(image_id)
+            types.append(1)
+        elif audio and 12 <= i < 15:
+            ids.append(audio_id)
+            types.append(3)
+        else:
+            ids.append(20 + i)
+            types.append(0)
+    return mx.array([ids]), mx.array([types])
+
+
+def lm_policy(lang) -> dict:
+    """The language model's chunking answer under bidirectional vision,
+    by prompt, without and with an MTP drafter, and the host syncs the
+    two calls take."""
+    lm = tiny(lang, use_bidirectional_attention="vision")
+    draft = object()
+    out = {}
+    for name, (image, audio) in POLICY_PROMPTS.items():
+        _ids, types = policy_prompt(image, audio)
+        kw = {"mm_token_type_ids": types}
+        with _Items() as items:
+            plain = lm.chunked_prefill_policy(prefill_kwargs=kw)
+            mtp = lm.chunked_prefill_policy(
+                draft_model=draft, draft_kind="mtp",
+                prefill_kwargs={**kw, "return_hidden": True,
+                                "return_shared_kv": True})
+        out[name] = {"plain": plain, "mtp": mtp, "syncs": items.n}
+    return out
+
+
+def unified(uni):
+    """A tiny gemma4_unified container of the module ``uni``."""
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import ModelConfig
+
+    cfg = ModelConfig.from_dict({
+        "model_type": "gemma4_unified",
+        "text_config": {**BASE, "model_type": "gemma4_unified_text"},
+        "vision_config": {}})
+    return uni.Model(cfg)
+
+
+def unified_policy(uni) -> dict:
+    """The gemma4_unified container's chunking answer, by prompt, from the
+    token types and from the ids alone, and the host syncs the two calls
+    take."""
+    model = unified(uni)
+    c = model.config
+    out = {}
+    for name, (image, audio) in POLICY_PROMPTS.items():
+        ids, types = policy_prompt(image, audio, c.image_token_id,
+                                   c.audio_token_id)
+        with _Items() as items:
+            by_types = model.chunked_prefill_policy(
+                input_ids=ids, prefill_kwargs={"mm_token_type_ids": types})
+            by_ids = model.chunked_prefill_policy(input_ids=ids,
+                                                  prefill_kwargs={})
+        out[name] = {"by_types": by_types, "by_ids": by_ids,
+                     "syncs": items.n}
+    return out
+
+
 def main():
     from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
+    from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as stock_uni
 
     from gmlx.models.gemma4 import language as owned
 
@@ -210,6 +283,8 @@ def main():
         "rope_offsets": rope_offsets(stock),
         "mask_decisions": mask_decisions(stock, owned),
         "image_mask_spread": image_mask_spread(stock),
+        "lm_policy": lm_policy(stock),
+        "unified_policy": unified_policy(stock_uni),
     }
     print(json.dumps(result, sort_keys=True))
 
