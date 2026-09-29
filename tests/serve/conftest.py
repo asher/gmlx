@@ -1,7 +1,7 @@
 """Shared serve-suite fixtures.
 
-The seam snapshot/restore fixture guards every test in this directory;
-it is a no-op when mlx-vlm is not installed."""
+The seam snapshot/restore fixtures guard every test in this directory;
+they are no-ops when mlx-vlm is not installed."""
 from __future__ import annotations
 
 import importlib
@@ -26,6 +26,20 @@ _PATCH_MODULES = {
     "test_patches_routes",
     "test_patches_sampling",
 }
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _restore_batch_next():
+    """The tick installers wrap BatchGenerator._next, and a test module
+    that runs one leaves its layer for every later test in the process."""
+    try:
+        ar = importlib.import_module("mlx_vlm.generate.ar")
+    except ImportError:
+        yield
+        return
+    saved = ar.BatchGenerator._next
+    yield
+    ar.BatchGenerator._next = saved
 
 
 @pytest.fixture(autouse=True)
