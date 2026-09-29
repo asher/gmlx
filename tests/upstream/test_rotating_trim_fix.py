@@ -168,6 +168,25 @@ def test_a_trim_below_the_window_keeps_the_growing_buffer(guarded):
             assert seen == want, (batch.__module__, col)
 
 
+def test_a_trim_below_the_window_past_its_start_keeps_the_stock_buffer(
+        guarded):
+    """A trim of a whole verify block past a full window, trim(3) at _idx
+    10, leaves _idx 7 below the window on a buffer that no longer starts at
+    the first token. Cut to _idx, the buffer would make _update_in_place
+    grow it from an offset past the window, which raises, so the guard
+    keeps the stock buffer. No rollback trims a whole block."""
+    for single, batch in guarded:
+        for cache in (single(max_size=W), batch(W, [0])):
+            for cols in (list(range(12)), [12], [13, 14, 15]):
+                k = _keys(cols, [0] * len(cols))
+                cache.update_and_fetch(k, k)
+            assert cache._idx == W + 2, type(cache)
+            assert cache.trim(3) == 3
+            assert cache._idx == W - 1 and cache.keys.shape[2] == W + 2, (
+                type(cache), cache._idx, cache.keys.shape)
+            assert len(_seen(cache, _keys([13], [1]))[0]) == W, type(cache)
+
+
 def _state(cache):
     offset = getattr(cache, "offset")
     if isinstance(offset, mx.array):
