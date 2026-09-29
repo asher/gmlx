@@ -179,8 +179,19 @@ def _cfg(config: Any, name: str) -> Any:
     return getattr(config, name, None)
 
 
+def _id_config(config: Any) -> Any:
+    """The config that names the image ids: the container's own, or its
+    thinker's, where qwen3_omni_moe keeps them."""
+    thinker = _cfg(config, "thinker_config")
+    if thinker is None or any(_cfg(config, k) is not None for k in (
+            "image_token_id", "image_token_index", "media_token_ids")):
+        return config
+    return thinker
+
+
 def image_token_ids(config: Any) -> set[int]:
     """The placeholder ids an image expands to, from the container config."""
+    config = _id_config(config)
     ids = {int(v) for v in (_cfg(config, "image_token_id"),
                             _cfg(config, "image_token_index"))
            if v is not None}
@@ -269,7 +280,7 @@ def _expected_tokens(raw: dict, n: int, config: Any,
     import numpy as np
 
     ip = getattr(processor, "image_processor", None)
-    vc = _cfg(config, "vision_config")
+    vc = _cfg(_id_config(config), "vision_config")
     grid = raw.get("image_grid_thw")
     if grid is not None:
         # Qwen: t*h*w patches, merge_size**2 per token.
@@ -329,8 +340,9 @@ def _runs_hold_one_image_each(row: Any, runs: list[tuple[int, int]],
         return False
     # The ids an image expands to, without the begin and end markers some
     # configs list beside them.
-    soft = [int(v) for v in (_cfg(config, "image_token_id"),
-                             _cfg(config, "image_token_index"))
+    ids = _id_config(config)
+    soft = [int(v) for v in (_cfg(ids, "image_token_id"),
+                             _cfg(ids, "image_token_index"))
             if v is not None]
     for (a, b), want in zip(runs, expected):
         got = int(np.isin(row[a:b], soft).sum()) if soft else b - a

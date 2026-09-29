@@ -24,6 +24,7 @@ from gmlx.cache.apc_media import install_media_token_ids
 from gmlx.cache.media_salt import (
     MediaSalt,
     image_spans,
+    image_token_ids,
     install_media_salt,
     salt_at,
     salt_windows,
@@ -177,6 +178,25 @@ def test_deepseek_v4_images_key_on_their_vit_grid():
     b = image_spans(ids, raw([9, 8, 3, 3]), cfg)
     assert a[0][0] == b[0][0] == 1
     assert a != b
+
+
+@pytest.mark.parametrize("as_dict", [False, True], ids=["attrs", "dict"])
+def test_omni_images_pair_by_the_thinker_ids(as_dict):
+    """qwen3_omni_moe names its image id and vision config on the thinker
+    alone."""
+    thinker = {"image_token_id": 9, "video_token_id": 8,
+               "vision_config": {"spatial_merge_size": 2}}
+    cfg = ({"model_type": "qwen3_omni_moe", "thinker_config": thinker}
+           if as_dict else SimpleNamespace(
+               model_type="qwen3_omni_moe",
+               thinker_config=SimpleNamespace(
+                   image_token_id=9, video_token_id=8,
+                   vision_config=SimpleNamespace(spatial_merge_size=2))))
+    assert image_token_ids(cfg) == {9}
+    raw = {"pixel_values": mx.arange(12 * 4, dtype=mx.float32).reshape(12, 4),
+           "image_grid_thw": mx.array([[1, 2, 4], [1, 2, 2]])}
+    ids = mx.array([[1, 9, 9, 2, 9, 3]])
+    assert [s for s, _h in image_spans(ids, raw, cfg)] == [1, 4]
 
 
 def test_unmatched_runs_key_every_image_at_the_first_run():
