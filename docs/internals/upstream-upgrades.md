@@ -62,7 +62,8 @@ the gmlx site that uses it.
    correctness fix when the bug applies to gmlx's copy, with its
    regression test, and list perf and structural changes for review.
    `tests/cache/test_owned_cache_surface.py` fails when a stock cache
-   class gains a member or a parameter that the owned class lacks.
+   class or function gains a member or a parameter that the owned twin
+   lacks, or when an owned signature binds a stock call another way.
 
 4. Regenerate the fingerprints in a fresh interpreter of the scratch venv,
    since the regeneration refuses to run once the installers have patched
