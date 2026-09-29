@@ -102,6 +102,13 @@ OWNED_FIXES = {
     # from_state seeds _lengths, which the stock restore leaves unset.
     "BatchRotatingKVCache": {"BatchRotatingKVCache/031 from_state"},
     "CacheList": {"CacheList/024 batch from_state"},
+    # prepare(lengths=...) drops the left padding, so the mask reads lengths.
+    "ArraysCache": {"ArraysCache/019 make_mask after prepare",
+                    "ArraysCache/022 prefix_cache_snapshot",
+                    "ArraysCache/023 deepcopy",
+                    "ArraysCache/025 left_padding after advance",
+                    "ArraysCache/027 make_mask after advance",
+                    "ArraysCache/028 view"},
 }
 
 

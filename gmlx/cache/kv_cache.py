@@ -1277,6 +1277,10 @@ class ArraysCache(_BaseCache):
 
     def prepare(self, lengths=None, **kwargs):
         self.lengths = mx.array(lengths)
+        # A lengths layout is right-padded, and make_mask prefers
+        # left_padding: drop the zeros a merge or the engine seeded.
+        if lengths is not None:
+            self.left_padding = None
 
     def finalize(self):
         self.lengths = None

@@ -10,6 +10,12 @@ Both children start clean, so neither depends on what this process
 installed, and both run on the GPU when there is one. Under
 KQUANT_FORCE_CPU, or without Metal, they run on the CPU device.
 
+Each row of a BatchGenerator run must also give the tokens a
+single-stream run of its prompt gives. The ragged batch right-pads its
+short prompts, and on stock qwen3_next those pad tokens enter the
+GatedDeltaNet state of the short rows, so there the stock batch differs
+from single-stream and the owned batch differs from stock.
+
 The owned ArraysCache reads ``left_padding`` and ``lengths`` through an
 advance offset, which costs Python calls on the GDN decode path. A decode
 step on the qwen3_next model may make at most 2 more Python calls per GDN
@@ -141,6 +147,9 @@ while responses := bg.next_generated():
             rows[r.uid].append(int(r.token))
 bg.close()
 batch = [rows[u] for u in uids]
+singles = [[int(r.token) for r in gen.stream_generate(
+    model, tokenizer(), p, max_tokens=10, sampler=greedy,
+    prompt_cache=cache_mod.make_prompt_cache(model))] for p in prompts]
 
 calls = None
 if arch == "qwen3_next":
@@ -163,7 +172,7 @@ if arch == "qwen3_next":
         counts.append(n[0])
     calls = counts
 print(json.dumps({"stream": stream, "kv8": kv8, "batch": batch,
-                  "classes": classes, "calls": calls,
+                  "singles": singles, "classes": classes, "calls": calls,
                   "device": "cpu" if cpu else "gpu",
                   "gmlx": any(m == "gmlx" for m in sys.modules)}))
 '''
@@ -226,8 +235,19 @@ def test_stream_generate_tokens_match_stock(runs):
     assert owned["kv8"] == stock["kv8"], arch
 
 
+def test_batch_generator_rows_match_single_stream(runs):
+    arch, stock, owned = runs
+    assert owned["batch"] == owned["singles"], arch
+
+
 def test_batch_generator_tokens_match_stock(runs):
     arch, stock, owned = runs
+    if arch == "qwen3_next":
+        # The stock ArraysCache masks by the zero left padding a merge
+        # seeded, not by the lengths prepare set, so the short rows break.
+        assert stock["batch"][0] == stock["singles"][0]
+        assert stock["batch"][1:] != stock["singles"][1:]
+        return
     assert owned["batch"] == stock["batch"], arch
 
 
