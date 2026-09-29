@@ -25,17 +25,19 @@ The rebuild also joins a message's text into one part and puts every
 image of the message before it (after it on Kimi), whatever order the
 client sent. For the model types in ``_IN_PLACE_IMAGES`` the wrapper puts
 the images back between the text parts where the client sent them
-(``_images_in_place``).
+(``_images_in_place``), and again after the rebuild the Gemma-4
+processor runs inside the render (``_install_nested_in_place``).
 Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 """
 
 from __future__ import annotations
 
+import contextvars
 import importlib
 import json
 import os
 
-from gmlx.upstream.patching import wrapped_with
+from gmlx.upstream.patching import link, wrapped_with
 
 # Stock tail: these model types return only the last message when a
 # rendered prompt is requested.
@@ -213,8 +215,13 @@ def install_faithful_history() -> None:
                 return msgs
             if cfg.get("model_type") in _LAST_MESSAGE_ONLY:
                 return msgs[-1]
-            return prompt_utils.get_chat_template(
-                processor, msgs, add_generation_prompt, **kwargs)
+            token = _IN_PLACE_SENT.set(
+                items if in_place and len(msgs) == len(items) else None)
+            try:
+                return prompt_utils.get_chat_template(
+                    processor, msgs, add_generation_prompt, **kwargs)
+            finally:
+                _IN_PLACE_SENT.reset(token)
 
         apply_chat_template._kq_faithful_history = True
         return apply_chat_template
@@ -223,6 +230,44 @@ def install_faithful_history() -> None:
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not wrapped_with(fn, "_kq_faithful_history"):
             target.apply_chat_template = _wrap(fn)
+    _install_nested_in_place(prompt_utils)
+
+
+# The client's messages of the in-place render running in this context.
+_IN_PLACE_SENT: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "_gmlx_in_place_sent", default=None)
+_NESTED_FLAG = "_gmlx_in_place_nested"
+
+
+def _install_nested_in_place(prompt_utils) -> None:
+    """Keep the images in place through a rebuild the processor nests.
+
+    ``Gemma4Processor.apply_chat_template``, which ``get_chat_template``
+    calls to render, runs the stock rebuild once more and renders its
+    output with the tokenizer, so each message's images move ahead of its
+    text again. That rebuild renders through the module's
+    ``get_chat_template``. Wrapped, it puts each message's images back
+    where the client sent them while an in-place render runs, and passes
+    every other render through. Idempotent.
+    """
+    original = prompt_utils.get_chat_template
+    if wrapped_with(original, _NESTED_FLAG):
+        return
+
+    def get_chat_template(processor, messages, add_generation_prompt,
+                          tokenize=False, **kwargs):
+        sent = _IN_PLACE_SENT.get()
+        if (sent is not None and isinstance(messages, list)
+                and len(messages) == len(sent)):
+            messages = [
+                _images_in_place(m, s)
+                if isinstance(m, dict) and isinstance(s, dict) else m
+                for m, s in zip(messages, sent)]
+        return original(processor, messages, add_generation_prompt,
+                        tokenize=tokenize, **kwargs)
+
+    prompt_utils.get_chat_template = link(get_chat_template, original,
+                                          _NESTED_FLAG)
 
 
 # Content part types, as mlx-vlm's text extraction reads them.

@@ -19,6 +19,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
+from mlx_vlm.models.gemma4.processing_gemma4 import Gemma4Processor  # noqa: E402
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
 from gmlx.cache.media_salt import MediaSalt, image_spans  # noqa: E402
@@ -61,6 +62,21 @@ class _Processor:
         return rendered[0] if isinstance(rendered, list) else rendered
 
 
+class _Gemma4Processor:
+    """Renders as mlx-vlm's Gemma4Processor does: its apply_chat_template
+    runs the stock rebuild on the messages once more and renders the result
+    with the tokenizer."""
+
+    apply_chat_template = Gemma4Processor.apply_chat_template
+    _extract_media_from_messages = Gemma4Processor._extract_media_from_messages
+    _as_list = staticmethod(Gemma4Processor._as_list)
+
+    def __init__(self, model_type):
+        self.model_type = model_type
+        self.tokenizer = _Processor("gemma4")
+        self.chat_template = self.tokenizer.chat_template
+
+
 class _Tok:
     text, finish_reason, token_count = "ok", "stop", 1
 
@@ -88,6 +104,8 @@ def route(monkeypatch):
                         _OPENAI.extract_text_from_content)
     monkeypatch.setattr(_OPENAI, "_normalize_instruction_messages",
                         _OPENAI._normalize_instruction_messages)
+    monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
+                        _PROMPT_UTILS.get_chat_template)
     rg = _RG()
     monkeypatch.setattr(_RUNTIME, "response_generator", rg, raising=False)
     install_faithful_history()
@@ -97,9 +115,10 @@ def route(monkeypatch):
 
     client = TestClient(_APP.app)
 
-    def render(model_type, messages, responses=False):
+    def render(model_type, messages, responses=False, processor=None):
+        processor = processor or _Processor(model_type)
         monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
-            None, _Processor(model_type), {"model_type": model_type}))
+            None, processor, {"model_type": model_type}))
         if responses:
             r = client.post("/v1/responses", json={
                 "model": "m", "input": messages, "max_output_tokens": 16})
@@ -242,6 +261,21 @@ def test_each_turn_keeps_its_text_and_image_order(route, model_type):
     assert prompt2.startswith(prompt1[:prompt1.rindex(end) + len(end)])
 
 
+@pytest.mark.parametrize("model_type", ("gemma4", "gemma4_unified"))
+def test_the_gemma4_processor_keeps_the_client_order(route, model_type):
+    """Gemma4Processor.apply_chat_template, which renders the prompt, runs
+    the stock rebuild once more before the tokenizer renders."""
+    content = _LAYOUTS["text-image-text-image-text"]
+    prompt, _ = route(model_type, [{"role": "user", "content": content}],
+                      processor=_Gemma4Processor(model_type))
+    _assert_in_order(prompt, "<|image|>", content)
+    _, turn2 = _turns()
+    prompt2, _ = route(model_type, turn2,
+                       processor=_Gemma4Processor(model_type))
+    _assert_in_order(prompt2, "<|image|>", turn2[1]["content"],
+                     turn2[3]["content"])
+
+
 # The model types whose chat template renders an image item where the
 # message holds it and whose processor expands the image markers in prompt
 # order.
@@ -264,6 +298,8 @@ def _rebuilt(monkeypatch, model_type, content, num_images):
     for target in sp_common._render_target_modules():
         monkeypatch.setattr(target, "apply_chat_template",
                             _PROMPT_UTILS.apply_chat_template)
+    monkeypatch.setattr(_PROMPT_UTILS, "get_chat_template",
+                        _PROMPT_UTILS.get_chat_template)
     install_faithful_history()
     msgs = _OPENAI.apply_chat_template(
         None, {"model_type": model_type},

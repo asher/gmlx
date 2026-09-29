@@ -517,7 +517,9 @@ SEAMS: tuple[Seam, ...] = (
          "reasoning.install_template_default_thinking (absent "
          "enable_thinking seeded as Jinja Undefined so the 0.6.15 False "
          "injection stands down) + system_content_fix (a text-only system "
-         "or developer message reaches the template as a string)"),
+         "or developer message reaches the template as a string) + "
+         "render._install_nested_in_place (wrapped: within an in-place "
+         "render, the images of a nested rebuild go back in place)"),
     Seam("mlx_vlm.server.openai", "_split_thinking",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "process_tool_calls",
@@ -599,15 +601,31 @@ SEAMS: tuple[Seam, ...] = (
          "stores in the runtime's model cache)"),
     Seam("mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
-         "self.tokenizer)"),
+         "self.tokenizer) + render._IN_PLACE_IMAGES (expands the image "
+         "markers in prompt order, one image each)"),
+    Seam("mlx_vlm.models.gemma4.processing_gemma4",
+         "Gemma4Processor.apply_chat_template",
+         "render._install_nested_in_place (renders by running the stock "
+         "rebuild once more, which renders through the prompt_utils "
+         "get_chat_template)"),
     Seam("mlx_vlm.models.pixtral.processing_pixtral",
          "PixtralProcessor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
-         "self.tokenizer)"),
+         "self.tokenizer) + render._IN_PLACE_IMAGES (expands the image "
+         "markers in prompt order, one image each)"),
+    Seam("mlx_vlm.models.mistral3.processing_mistral3",
+         "Mistral3Processor.__call__",
+         "render._IN_PLACE_IMAGES (expands the image markers in prompt "
+         "order, one image each)"),
+    Seam("mlx_vlm.models.qwen3_omni_moe.processing_qwen3_omni_moe",
+         "Qwen3OmniMoeProcessor.replace_multimodal_special_tokens",
+         "render._IN_PLACE_IMAGES (expands the image markers in prompt "
+         "order, one image each)"),
     Seam("mlx_vlm.models.qwen3_vl.processing_qwen3_vl",
          "Qwen3VLProcessor.__call__",
          "media_salt._expected_tokens (an image expands to t*h*w of its "
-         "image_grid_thw row over merge_size**2)"),
+         "image_grid_thw row over merge_size**2) + render._IN_PLACE_IMAGES "
+         "(expands the image markers in prompt order, one image each)"),
     Seam("mlx_vlm.models.gemma4_unified.processing_gemma4_unified",
          "Gemma4UnifiedImageProcessor.preprocess",
          "media_salt._expected_tokens (the 12B rule: one token per patch "
@@ -623,7 +641,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.kimi_k25.processing_kimi_k25",
          "KimiK25Processor.__call__",
          "media_salt._expected_tokens (an image expands to h*w of its "
-         "image_grid_hws row over the merge kernel's area)"),
+         "image_grid_hws row over the merge kernel's area) + "
+         "render._IN_PLACE_IMAGES (expands the image markers in prompt "
+         "order, one image each)"),
     Seam("mlx_vlm.models.kimi_k25.processing_kimi_k25",
          "KimiK25ImageProcessor.preprocess",
          "media_salt._image_rows (each image's patches are its image_grid_hws "
