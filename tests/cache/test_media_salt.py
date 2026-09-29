@@ -78,12 +78,15 @@ def test_windows_run_longest_first_inside_the_caller_bounds():
 
 
 def _cfg():
-    return SimpleNamespace(image_token_id=9)
+    """Image id 9, and a Gemma-4 style vision config whose image of H x W
+    pixels expands to H * W tokens."""
+    return SimpleNamespace(image_token_id=9, vision_config=SimpleNamespace(
+        patch_size=1, pooling_kernel_size=1))
 
 
 def test_image_spans_map_runs_to_images_in_order():
-    ids = mx.array([[1, 9, 9, 2, 9, 9, 9, 3]])
-    a, b = mx.full((3, 2, 2), 1.0), mx.full((3, 2, 2), 2.0)
+    ids = mx.array([[1, 9, 9, 2, 9, 9, 3]])
+    a, b = mx.full((3, 1, 2), 1.0), mx.full((3, 1, 2), 2.0)
     stacked = image_spans(ids, {"pixel_values": mx.stack([a, b])}, _cfg())
     listed = image_spans(ids, {"pixel_values": [a, b]}, _cfg())
     assert [s for s, _h in stacked] == [1, 4]
@@ -97,17 +100,18 @@ def test_image_spans_map_runs_to_images_in_order():
 
 
 def test_image_spans_split_flattened_patches_by_grid():
+    # 8 and 4 patches, 4 per token.
     ids = mx.array([[1, 9, 9, 2, 9, 3]])
-    pv = mx.arange(6 * 4, dtype=mx.float32).reshape(6, 4)
-    grid = mx.array([[1, 2, 2], [1, 1, 2]])
+    pv = mx.arange(12 * 4, dtype=mx.float32).reshape(12, 4)
+    grid = mx.array([[1, 2, 4], [1, 2, 2]])
     spans = image_spans(ids, {"pixel_values": pv, "image_grid_thw": grid},
                         _cfg())
     assert [s for s, _h in spans] == [1, 4]
     # The grid row is part of an image's hash: the same patches under a
     # different grid tokenize differently.
     other = image_spans(ids, {"pixel_values": pv,
-                              "image_grid_thw": mx.array([[1, 1, 4],
-                                                          [1, 1, 2]])},
+                              "image_grid_thw": mx.array([[1, 1, 8],
+                                                          [1, 2, 2]])},
                         _cfg())
     assert other[0][1] != spans[0][1] and other[1][1] == spans[1][1]
 
@@ -174,9 +178,29 @@ def test_deepseek_v4_images_key_on_their_vit_grid():
 
 def test_unmatched_runs_key_every_image_at_the_first_run():
     ids = mx.array([[1, 9, 2, 9, 3, 9]])
-    pv = mx.stack([mx.full((3, 2, 2), 1.0), mx.full((3, 2, 2), 2.0)])
+    pv = mx.stack([mx.full((3, 1, 1), 1.0), mx.full((3, 1, 1), 2.0)])
     spans = image_spans(ids, {"pixel_values": pv}, _cfg())
     assert len(spans) == 1 and spans[0][0] == 1
+
+
+def test_a_run_maps_to_an_image_only_when_it_holds_that_image():
+    """Two adjacent images merge into one run, and a placeholder typed as
+    text makes a second one: two runs for two images, but the second
+    holds neither. A grid gives each image one token."""
+    raw = {"pixel_values": mx.arange(8 * 4, dtype=mx.float32).reshape(8, 4),
+           "image_grid_thw": mx.array([[1, 2, 2], [1, 2, 2]])}
+    merged = image_spans(mx.array([[1, 9, 9, 2, 3, 9, 4]]), raw, _cfg())
+    assert len(merged) == 1 and merged[0][0] == 1
+    apart = image_spans(mx.array([[1, 9, 2, 3, 9, 4]]), raw, _cfg())
+    assert [s for s, _h in apart] == [1, 4]
+    # Gemma-4 rows: each image of 2 x 3 pixels expands to 6 tokens.
+    pv = mx.stack([mx.full((3, 2, 3), 1.0), mx.full((3, 2, 3), 2.0)])
+    ids = [1] + [9] * 12 + [2, 9, 3]
+    assert len(image_spans(mx.array([ids]), {"pixel_values": pv},
+                           _cfg())) == 1
+    ids = [1] + [9] * 6 + [2] + [9] * 6 + [3]
+    assert len(image_spans(mx.array([ids]), {"pixel_values": pv},
+                           _cfg())) == 2
 
 
 # -- the block and exact tiers ---------------------------------------------
@@ -374,14 +398,19 @@ def _rig(bidirectional: bool):
     return rig
 
 
+# The pixel shapes of a Gemma-4 image that expands to 20 tokens (16-pixel
+# patches, pooled 3 x 3), wide and tall.
+_WIDE, _TALL = (3, 96, 480), (3, 480, 96)
+
+
 def _pix(v):
-    return mx.full((3, 4, 4), float(v))
+    return mx.full(_WIDE, float(v))
 
 
 def _listed(*values):
     """Images of different sizes, as the server holds them: a list of
     numpy arrays."""
-    return [np.full((3, 4, 4 * (k + 1)), float(v), np.float32)
+    return [np.full((_WIDE, _TALL)[k % 2], float(v), np.float32)
             for k, v in enumerate(values)]
 
 

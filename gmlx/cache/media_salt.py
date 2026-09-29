@@ -187,16 +187,24 @@ def image_token_ids(config: Any) -> set[int]:
     return ids
 
 
-def _run_starts(input_ids: Any, image_ids: set[int]) -> list[int]:
+def _prompt_row(input_ids: Any) -> Any:
     import numpy as np
 
-    row = np.asarray(input_ids).reshape(-1) if input_ids is not None \
-        else np.zeros(0, dtype=np.int32)
+    if input_ids is None:
+        return np.zeros(0, dtype=np.int64)
+    return np.asarray(input_ids).reshape(-1)
+
+
+def _runs(row: Any, image_ids: set[int]) -> list[tuple[int, int]]:
+    """``[start, end)`` of each run of image ids in ``row``."""
+    import numpy as np
+
     if not image_ids or row.size == 0:
         return []
     hit = np.isin(row, np.fromiter(image_ids, dtype=row.dtype))
-    first = hit & ~np.concatenate(([False], hit[:-1]))
-    return [int(i) for i in np.flatnonzero(first)]
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], hit.astype(np.int8),
+                                                   [0]))))
+    return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2])]
 
 
 def _patch_counts(raw: dict) -> Any:
@@ -247,25 +255,111 @@ def _image_rows(raw: dict, n: int) -> list[list[Any]] | None:
     return rows
 
 
-def image_spans(input_ids: Any, raw: dict, config: Any
+def _first(*values: Any) -> Any:
+    return next((v for v in values if v is not None), None)
+
+
+def _expected_tokens(raw: dict, n: int, config: Any,
+                     processor: Any) -> list[int] | None:
+    """The image tokens each of ``n`` images expands to, by the rule of
+    the processor that emitted ``raw``, or None when the rule is unknown.
+    The image processor's settings come first, then the vision config's.
+    """
+    import numpy as np
+
+    ip = getattr(processor, "image_processor", None)
+    vc = _cfg(config, "vision_config")
+    grid = raw.get("image_grid_thw")
+    if grid is not None:
+        # Qwen: t*h*w patches, merge_size**2 per token.
+        merge = int(_first(_cfg(ip, "merge_size"),
+                           _cfg(ip, "spatial_merge_size"),
+                           _cfg(vc, "spatial_merge_size"), 2))
+        rows = np.asarray(grid).astype(np.int64).reshape(-1, 3)
+        return [int(r.prod()) // (merge * merge) for r in rows]
+    grid = raw.get("image_grid_hws")
+    if grid is not None:
+        # Kimi: h*w patches, one merge kernel per token.
+        kernel = np.asarray(_first(_cfg(ip, "merge_kernel_size"),
+                                   _cfg(vc, "merge_kernel_size"), (2, 2)),
+                            dtype=np.int64).reshape(-1)
+        per = int(kernel.prod()) if kernel.size == 2 else int(kernel[0]) ** 2
+        rows = np.asarray(grid).astype(np.int64).reshape(-1, 2)
+        return [int(r.prod()) // per for r in rows]
+    pos = raw.get("image_position_ids")
+    if _is_array(pos) and len(pos.shape) == 3 and int(pos.shape[0]) == n:
+        # Gemma-4 12B: one token per patch; padding rows sit at -1.
+        arr = np.asarray(pos)
+        return [int((arr[i, :, 0] >= 0).sum()) for i in range(n)]
+    patch = _first(_cfg(ip, "patch_size"), _cfg(vc, "patch_size"))
+    pool = _first(_cfg(ip, "pooling_kernel_size"),
+                  _cfg(vc, "pooling_kernel_size"))
+    pv = raw.get("pixel_values")
+    if patch and pool:
+        # Gemma-4: [C, H, W] per image, pool**2 patches per token.
+        if isinstance(pv, (list, tuple)):
+            images = list(pv)
+        elif _is_array(pv) and len(pv.shape) == 4:
+            images = [pv[i] for i in range(int(pv.shape[0]))]
+        else:
+            return None
+        if len(images) != n or any(len(x.shape) != 3 for x in images):
+            return None
+        p, k = int(patch), int(pool)
+        return [(int(x.shape[1]) // p) * (int(x.shape[2]) // p) // (k * k)
+                for x in images]
+    return None
+
+
+def _runs_hold_one_image_each(row: Any, runs: list[tuple[int, int]],
+                              raw: dict, config: Any, processor: Any) -> bool:
+    """Whether run ``i`` holds exactly image ``i``: the processor's own
+    block bounds (``image_spans``, DeepSeek-V4) are the runs, or each run
+    holds as many image tokens as its image expands to. Adjacent images
+    merge into one run and a placeholder typed as text makes a run of its
+    own, so a count alone can pair a run with another image."""
+    import numpy as np
+
+    blocks = raw.get("image_spans")
+    if blocks is not None:
+        return [(int(a), int(b)) for a, b in blocks] == runs
+    expected = _expected_tokens(raw, len(runs), config, processor)
+    if expected is None or len(expected) != len(runs):
+        return False
+    # The ids an image expands to, without the begin and end markers some
+    # configs list beside them.
+    soft = [int(v) for v in (_cfg(config, "image_token_id"),
+                             _cfg(config, "image_token_index"))
+            if v is not None]
+    for (a, b), want in zip(runs, expected):
+        got = int(np.isin(row[a:b], soft).sum()) if soft else b - a
+        if got != want:
+            return False
+    return True
+
+
+def image_spans(input_ids: Any, raw: dict, config: Any, processor: Any = None
                 ) -> tuple[tuple[int, int], ...] | None:
     """``(start, image hash)`` per image run of a prompt, or None when the
     prompt names no image run.
 
-    Runs map to images in order when their counts agree. Otherwise one
-    span at the first run carries a hash of every image, so a prefix
-    before the first image still keys like text.
+    Run ``i`` maps to image ``i`` when the runs and the images pair one to
+    one (``_runs_hold_one_image_each``). Otherwise one span at the first
+    run carries a hash of every image, so a prefix before the first run
+    still keys like text and every longer one keys on all the images.
     """
-    starts = _run_starts(input_ids, image_token_ids(config))
-    if not starts or raw.get("pixel_values") is None:
+    row = _prompt_row(input_ids)
+    runs = _runs(row, image_token_ids(config))
+    if not runs or raw.get("pixel_values") is None:
         return None
-    rows = _image_rows(raw, len(starts))
-    if rows is None:
+    rows = _image_rows(raw, len(runs))
+    if rows is None or not _runs_hold_one_image_each(row, runs, raw, config,
+                                                     processor):
         whole = [raw["pixel_values"]] + [
             raw[k] for k in _PER_IMAGE_KEYS if raw.get(k) is not None]
-        return ((starts[0], _content_hash(whole)),)
-    return tuple((s, _mix(*(_content_hash(a) for a in r)))
-                 for s, r in zip(starts, rows))
+        return ((runs[0][0], _content_hash(whole)),)
+    return tuple((a, _mix(*(_content_hash(x) for x in r)))
+                 for (a, _b), r in zip(runs, rows))
 
 
 class _RequestSalt(int):
@@ -333,7 +427,8 @@ def install_media_salt() -> bool:
         if text is not None:
             try:
                 spans = image_spans(raw_inputs.get("input_ids"), raw_inputs,
-                                    getattr(self.model, "config", None))
+                                    getattr(self.model, "config", None),
+                                    getattr(self, "processor", None))
             except Exception:  # noqa: BLE001 - the stock salt stays
                 _log.debug("APC image salt skipped", exc_info=True)
                 spans = None
