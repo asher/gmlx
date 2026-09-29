@@ -2,6 +2,7 @@
 earlier turn stored, and a prefix whose images differ never restores."""
 
 import importlib
+import logging
 import pickle
 import queue
 import threading
@@ -342,6 +343,28 @@ def test_the_disk_tier_restores_the_images_of_its_own_prefix(tmp_path):
             allow_memory_overlap=True) == (None, 0)
         # Without the overlap flag, a prefix the pool holds stays there.
         assert m.lookup_prefix_disk_cache(t3, extra_hash=salt) == (None, 0)
+    finally:
+        disk.close()
+
+
+def test_a_low_ram_disk_skip_logs_as_stock(tmp_path, monkeypatch, caplog):
+    """Below the free RAM floor, the image restore skips the disk tier
+    with the stock restore's info line."""
+    _t1, t2, a, b = _turns()
+    disk = _apc.DiskBlockStore(tmp_path, namespace="t")
+    try:
+        m = GmlxAPCManager(num_blocks=64, block_size=_BS, disk=disk)
+        m._disk_min_free_ram_bytes = 2 << 30
+        monkeypatch.setattr(_apc, "_free_ram_bytes", lambda: 1 << 30)
+        lines = []
+        for salt in (7, MediaSalt(7, [a, b])):
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger=_apc.logger.name):
+                assert m.lookup_prefix_disk_cache(
+                    t2, extra_hash=salt) == (None, 0)
+            lines.append([r.getMessage() for r in caplog.records
+                          if r.name == _apc.logger.name])
+        assert len(lines[0]) == 1 and lines[1] == lines[0]
     finally:
         disk.close()
 

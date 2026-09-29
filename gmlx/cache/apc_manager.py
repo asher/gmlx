@@ -459,6 +459,12 @@ class GmlxAPCManager(_apc.APCManager):
                 free_now = _apc._free_ram_bytes()
                 if (free_now is not None
                         and free_now < self._disk_min_free_ram_bytes):
+                    _apc.logger.info(
+                        "APC: skipping disk prompt-cache restore "
+                        "(free RAM %.1f GB < %.1f GB)",
+                        free_now / (1 << 30),
+                        self._disk_min_free_ram_bytes / (1 << 30),
+                    )
                     return None, 0
             n_full = len(token_ids) // bs
             if max_prefix_tokens is not None and max_prefix_tokens > 0:
