@@ -29,6 +29,13 @@ APC arms are untouched on non-paced ticks. Chunk cost is observed via the
 ``_prompt_time_counter`` delta, so pacing self-tunes with depth, model,
 and chunk-size policy (prefill_decay etc.) with no per-model constants.
 
+The stock loop runs prompt_step until one prompt column remains and hands
+that column to generate(). That forward costs about one decode step, so it
+is not a chunk: its tick is never paced, and its time never replaces the
+last chunk cost. Otherwise the next admission reads its pacing need and
+its first chunk size from a one-token forward, and runs a full chunk
+unpaced under the live decode rows.
+
 Ratio resolution: `gmlx serve --decode-prefill-ratio` / config
 `server.decode_prefill_ratio` both export GMLX_DECODE_PREFILL_RATIO; the
 wrapper reads the env per tick (install order never matters, and a live
@@ -83,6 +90,14 @@ def _ratio() -> tuple[str, float | None]:
     return val
 
 
+def _last_column_only(gen) -> bool:
+    """True when the prompt batch holds only its last prompt column, which
+    the stock body passes to generate() on this tick."""
+    pb = gen._prompt_batch
+    shape = getattr(getattr(pb, "_input_ids", None), "shape", None)
+    return shape is not None and len(shape) >= 2 and int(shape[1]) <= 1
+
+
 def install_decode_priority_sched() -> None:
     """Pace prefill chunks against live decode GPU time. Idempotent.
 
@@ -101,11 +116,12 @@ def install_decode_priority_sched() -> None:
         # the prompt-time counter delta. Feeds both consumers of the
         # observation: the pacer's owed-decode arithmetic and
         # prefill_decay's tick term (which sizes the NEXT chunk to the
-        # stall budget).
+        # stall budget). The last column's forward is no chunk.
         before = self._prompt_time_counter
+        last_column = _last_column_only(self)
         out = _orig_next(self, **kwargs)
         spent = self._prompt_time_counter - before
-        if spent > 0.0:
+        if spent > 0.0 and not last_column:
             self._kq_last_chunk_time = spent
             self._kq_decode_since_chunk = 0.0
             _pd.note_chunk_cost(spent)
@@ -124,6 +140,11 @@ def install_decode_priority_sched() -> None:
             return _observed_next(self, **kwargs)
         decode_rows = batch_rows(self)
         _pd.note_decode_pressure(decode_rows)
+        if _last_column_only(self):
+            # The stock body runs the decode step and the last column's
+            # generate(), then returns before its admission arm. Pacing
+            # this tick would only hold back the waiter's first token.
+            return _observed_next(self, **kwargs)
         prefill_live = self._prompt_batch is not None or bool(
             self._unprocessed_sequences
         )

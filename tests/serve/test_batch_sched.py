@@ -6,6 +6,7 @@ import pytest
 
 from mlx_vlm.generate import ar
 
+import gmlx.gen.prefill_decay as pd
 import gmlx.serve.batch_sched as batch_sched
 
 
@@ -167,3 +168,105 @@ def test_bad_ratio_warns_and_defaults(paced, monkeypatch, caplog):
     # falls back to the default (auto); burst shape resolves stock
     assert g.chunks == 30 and g.decodes == 30
     assert sum("banana" in r.message for r in caplog.records) == 1
+
+
+# ---- the last prompt column (the stock loop's prompt_step / generate split) ----
+
+STEP = 4
+
+
+class _PromptBatch:
+    """A prompt batch with ``cols`` prompt columns left."""
+
+    def __init__(self, cols):
+        self._input_ids = SimpleNamespace(shape=(1, cols))
+
+
+class LoopGen(FakeGen):
+    def __init__(self, cols):
+        super().__init__()
+        self._generation_batch = [1]
+        self._prompt_batch = _PromptBatch(cols)
+        self.ticks = 0
+        self.chunk_ticks = []
+        self.final_ticks = []
+
+
+def _loop_next(self, **kw):
+    # The stock body: a decode step, then prompt_step while more than one
+    # prompt column remains, else generate() on the last column (about one
+    # decode step), whose row joins the decode batch. Admission builds a
+    # prompt batch and runs its first chunk on the same tick.
+    self.ticks += 1
+    if len(self._generation_batch) > 0:
+        self.decodes += 1
+        _CLOCK.advance(DECODE_S)
+    if self._prompt_batch is None and self._unprocessed_sequences:
+        _, cols = self._unprocessed_sequences.pop(0)
+        self._prompt_batch = _PromptBatch(cols)
+    pb = self._prompt_batch
+    if pb is None:
+        return [], []
+    cols = pb._input_ids.shape[1]
+    if cols > 1:
+        pb._input_ids = SimpleNamespace(shape=(1, cols - min(STEP, cols - 1)))
+        self.chunks += 1
+        self.chunk_ticks.append(self.ticks)
+        _CLOCK.advance(CHUNK_S)
+        self._prompt_time_counter += CHUNK_S
+    else:
+        self.final_ticks.append(self.ticks)
+        _CLOCK.advance(DECODE_S)
+        self._prompt_time_counter += DECODE_S
+        self._prompt_batch = None
+        self._generation_batch.append(len(self._generation_batch) + 1)
+    return [], []
+
+
+@pytest.fixture
+def looped(monkeypatch):
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "1.0")
+    monkeypatch.setattr(ar.BatchGenerator, "_next", _loop_next)
+    _CLOCK.t = 0.0
+    monkeypatch.setattr(batch_sched, "time",
+                        SimpleNamespace(perf_counter=_CLOCK))
+    monkeypatch.setattr(pd, "_LIVE_DECODE_ROWS", 0)
+    monkeypatch.setattr(pd, "_CHUNK_COST", None)
+    monkeypatch.setattr(pd, "_LAST_STEP", STEP)
+    batch_sched.install_decode_priority_sched()
+    yield ar.BatchGenerator._next
+
+
+def _run_until_decoding(paced, g):
+    for _ in range(100):
+        if g._prompt_batch is None and not g._unprocessed_sequences:
+            return
+        paced(g)
+    raise AssertionError("the prompt never reached decode")
+
+
+def test_last_column_is_not_a_chunk(looped):
+    g = LoopGen(2 * STEP + 1)
+    _run_until_decoding(looped, g)
+    assert g.chunks == 2 and len(g.final_ticks) == 1
+    # The chunk cost that auto pacing and the tick term read is the last
+    # chunk's, not the one-column forward's.
+    assert g._kq_last_chunk_time == pytest.approx(CHUNK_S)
+    assert pd._CHUNK_COST == (STEP, pytest.approx(CHUNK_S))
+    # The last column runs on the tick after the last chunk, unpaced.
+    assert g.final_ticks[0] == g.chunk_ticks[-1] + 1
+
+
+def test_next_admission_waits_the_last_chunk(looped):
+    g = LoopGen(STEP + 1)
+    _run_until_decoding(looped, g)
+    decodes = g.decodes
+    g._unprocessed_sequences.append(("uid", STEP + 1))
+    for _ in range(100):
+        if g.chunks == 2:
+            break
+        looped(g)
+    # Ratio 1.0 owes CHUNK_S of decode after the last chunk: four paced
+    # 1 ms decode ticks before the next prompt's first chunk, plus the
+    # decode step of the chunk tick itself.
+    assert g.decodes - decodes == 5

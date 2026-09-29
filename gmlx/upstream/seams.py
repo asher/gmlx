@@ -87,6 +87,12 @@ SEAMS: tuple[Seam, ...] = (
          "tenant rows for the step; the prompt batch is built and first "
          "stepped inside _next)",
          critical=True),
+    Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.needs_processing",
+         "batch_sched._last_column_only (chunks run while more than one "
+         "_input_ids column remains, and generate() takes the last one: "
+         "that tick is neither paced nor read as a chunk cost); "
+         "prefill_decay.install_prefill_decay (reads the step only to "
+         "test it for None, so it stays unwrapped)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind); "
          "lora_rows (per-row prompt_kwargs carry the APC salt, positional "
