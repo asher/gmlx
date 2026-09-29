@@ -58,6 +58,13 @@ def test_the_binding_map_names_exactly_the_shared_names():
                         for stock, names in EXPECTED.items()}
 
 
+def test_this_session_bound_every_stock_module_as_it_loaded():
+    """conftest imports gmlx before anything imports a stock cache module,
+    so the suite runs on the normal path. The children below cover the
+    late path."""
+    assert bind.late_modules == []
+
+
 def test_the_mlx_lm_only_names_stay_stock():
     lm = _mod("mlx_lm.models.cache")
     for name in ("save_prompt_cache", "load_prompt_cache",

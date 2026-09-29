@@ -37,6 +37,10 @@ if str(_TESTS_DIR) not in sys.path:
 
 
 def pytest_configure(config):
+    # gmlx first, as the console entry point does: its cache binding then
+    # meets every stock cache module as it loads. The import loads no MLX.
+    import gmlx  # noqa: F401
+
     # The logic tests touch only small mx array ops (transforms,
     # config-synth instantiation) and never dispatch a kquant kernel, so they
     # can run on the CPU device. Set KQUANT_FORCE_CPU=1 in environments without
