@@ -325,11 +325,14 @@ class ServerSession:
     thread of the API relay, so the session id is kept under a lock."""
 
     def __init__(self, base_url: str, api_key: str | None, client: str,
-                 assistants: list[str]):
+                 assistants: list[str], web_ports: list[int] | None = None):
         self.base_url = base_url
         self.api_key = api_key
         self.client = client
         self.assistants = list(assistants)
+        # The ports of the browser app's pages. The server refuses those
+        # pages on its TCP port while the session is open.
+        self.web_ports = list(web_ports or ())
         self.id: str | None = None
         self.socket: str | None = None
         self.allowed: dict[str, list[str]] = {}
@@ -340,8 +343,10 @@ class ServerSession:
     def _post(self) -> dict:
         from gmlx.commands import launch as L
 
-        reply = L._http_post_json(_sessions_url(self.base_url),
-                                  {"client": self.client, "assistants": self.assistants},
+        body = {"client": self.client, "assistants": self.assistants}
+        if self.web_ports:
+            body["web_ports"] = self.web_ports
+        reply = L._http_post_json(_sessions_url(self.base_url), body,
                                   api_key=self.api_key, timeout=_SESSION_TIMEOUT)
         return _session_reply(reply)
 
@@ -787,6 +792,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     if api_port is None and plan.network == "none":
         raise L.LaunchError(f"network: none cannot reach {base}, which is not a local http "
                             "server. Use the default network for this server.")
+    if int(a.port) != port:
+        # The server check found the server on another port than step 6
+        # assumed, so the ports that depend on it are worked out again.
+        web_port = L.web_port_for(client, int(a.port)) if web else None
+        plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
+                                              web_port=web_port)
     server_session, session_line = None, None
     if api_port is not None and uses_session(base):
         offered = sessions_offered(base, a.api_key)
@@ -798,13 +809,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         # The probe and the session request use the server's key, and the
         # client only the socket.
         a.client_api_key = SESSION_KEY
-        server_session = ServerSession(base, a.api_key, client, cfg.assistants)
-    if int(a.port) != port:
-        # The server check found the server on another port than step 6
-        # assumed, so the ports that depend on it are worked out again.
-        web_port = L.web_port_for(client, int(a.port)) if web else None
-        plan.forward = settings.forward_ports(plan.forward, api_port=api_port,
-                                              web_port=web_port)
+        server_session = ServerSession(base, a.api_key, client, cfg.assistants,
+                                       [web_port] if web_port is not None else [])
     # Step 10
     if a.model and not a.no_keep and not dry:
         L._pick_default(L.probe_models(base, a.api_key), a.model)

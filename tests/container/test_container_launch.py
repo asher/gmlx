@@ -81,7 +81,7 @@ class _SessionServer:
         self.posts.append((url, dict(body), api_key))
         if self.status is not None:
             raise self._error(url, self.status)
-        if set(body) != {"client", "assistants"}:
+        if not {"client", "assistants"} <= set(body) <= {"client", "assistants", "web_ports"}:
             raise self._error(url, 400)
         self.count += 1
         listed = body["assistants"]
@@ -961,6 +961,29 @@ def test_ports_follow_the_server_the_check_found(env, monkeypatch):
     monkeypatch.setattr(launch, "_ensure_server", moved)
     assert _run(["open-webui", "--container"]) == 0
     assert env.runs[0]["spec"].web_port == 3000
+    assert env.runs[0]["server_session"].web_ports == [3000]
+
+
+@pytest.mark.parametrize("client", ["open-webui", "dsh"])
+def test_a_browser_app_session_names_its_pages(env, client):
+    """The server refuses the app's pages on its TCP port while the session
+    is open, so the page cannot go around the session."""
+    assert _run([client, "--container"]) == 0
+    run = env.runs[0]
+    port = run["spec"].web_port
+    assert run["server_session"].web_ports == [port]
+    run["server_session"].open()
+    run["server_session"].renew()
+    assert [body for _, body, _ in env.server.posts[-2:]] == [
+        {"client": client, "assistants": [], "web_ports": [port]}] * 2
+
+
+def test_a_terminal_client_session_names_no_pages(env):
+    assert _run(["pi", "--container"]) == 0
+    server_session = env.runs[0]["server_session"]
+    assert server_session.web_ports == []
+    server_session.open()
+    assert env.server.posts[-1][1] == {"client": "pi", "assistants": []}
 
 
 def test_https_server_allows_forwarding_port_443(env):

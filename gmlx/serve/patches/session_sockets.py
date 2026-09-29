@@ -12,6 +12,11 @@ limits it instead:
 - A request that names an assistant alias outside the session's list gets
   the unknown-model 404, and ``/v1/models`` leaves such aliases out.
 
+A session can also name the loopback ports its browser app serves pages
+on. The app's backend calls the server through the session, so while the
+session is open the origin guard refuses any loopback page on those ports on
+the TCP listener, whatever loopback name the page uses.
+
 Each socket has a uvicorn server of its own in the server's event loop,
 over the same app. That server leaves the process signal handlers to the
 main server. A socket is mode 0600, in a folder of mode 0700 that only the
@@ -72,6 +77,8 @@ _BACKLOG = 2048
 # has no open connection. A launch that dies before its DELETE leaves its
 # session open, and each session server wakes ten times a second.
 SESSIONS_MAX = 32
+# The most web ports one session can name.
+WEB_PORTS_MAX = 8
 
 # Set in the task of each session server. uvicorn logs these lines when a
 # server starts and stops, and from a session server they would read as
@@ -106,11 +113,13 @@ class _SessionServer(uvicorn.Server):
 
 
 class _Session:
-    def __init__(self, sid: str, client: str, path: str, allowed: frozenset):
+    def __init__(self, sid: str, client: str, path: str, allowed: frozenset,
+                 web_ports: frozenset = frozenset()):
         self.id = sid
         self.client = client
         self.path = path
         self.allowed = allowed
+        self.web_ports = web_ports
         self.server: _SessionServer | None = None
         self.task: asyncio.Task | None = None
 
@@ -135,7 +144,8 @@ class _Sessions:
     def hidden(self, model: str, session: _Session) -> bool:
         return model in self.tools and model not in session.allowed
 
-    async def start(self, client: str, allowed: frozenset) -> _Session:
+    async def start(self, client: str, allowed: frozenset,
+                    web_ports: frozenset = frozenset()) -> _Session:
         folder = socket_folder(self.host, self.port)
         while len(self.open) >= SESSIONS_MAX:
             oldest = next((s for s in self.open.values() if s.idle()), None)
@@ -146,7 +156,8 @@ class _Sessions:
                          "new session", oldest.id, oldest.client)
             self.stop(oldest.id)
         sid = secrets.token_hex(_ID_BYTES)
-        session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed)
+        session = _Session(sid, client, str(folder / f"{sid}.sock"), allowed,
+                           web_ports)
         sock = _listen(session.path)
         config = uvicorn.Config(
             _SessionApp(self, session), lifespan="off", ws="none",
@@ -161,6 +172,10 @@ class _Sessions:
         self.open[sid] = session
         _log.info("launch session %s opened for %r, assistants: %s", sid,
                   client, ", ".join(sorted(allowed)) or "none")
+        if web_ports:
+            _log.info("launch session %s refuses the loopback pages on port %s "
+                      "on the TCP listener", sid,
+                      ", ".join(str(p) for p in sorted(web_ports)))
         return session
 
     def stop(self, sid: str) -> _Session | None:
@@ -187,6 +202,13 @@ class _Sessions:
 
 
 _STATE: _Sessions | None = None
+
+
+def session_web_ports() -> frozenset[int]:
+    """The web ports that the open sessions name."""
+    if _STATE is None:
+        return frozenset()
+    return frozenset().union(*(s.web_ports for s in _STATE.open.values()))
 
 
 async def _serve(server: _SessionServer, sock: socket.socket) -> None:
@@ -418,6 +440,20 @@ def _bad_request(path: str, message: str):
         path, 400, "invalid_request_error", message))
 
 
+_OPEN_KEYS = frozenset({"client", "assistants", "web_ports"})
+
+
+def _web_ports_field(value) -> frozenset[int] | str:
+    """The web ports of a session request, or the message that refuses
+    them."""
+    if not isinstance(value, list) or not all(
+            type(p) is int and 0 < p < 65536 for p in value):
+        return '"web_ports" must be a list of port numbers from 1 to 65535'
+    if len(value) > WEB_PORTS_MAX:
+        return f'"web_ports" may name at most {WEB_PORTS_MAX} ports'
+    return frozenset(value)
+
+
 async def _open_session(request: Request):
     from fastapi.responses import JSONResponse
 
@@ -428,21 +464,25 @@ async def _open_session(request: Request):
         body = await request.json()
     except ValueError:
         return _bad_request(path, "the body must be JSON")
-    if not isinstance(body, dict) or set(body) != {"client", "assistants"}:
-        return _bad_request(path, 'the body must hold exactly "client" and '
-                                  '"assistants"')
+    if not isinstance(body, dict) \
+            or not {"client", "assistants"} <= set(body) <= _OPEN_KEYS:
+        return _bad_request(path, 'the body must hold "client" and '
+                                  '"assistants", and may hold "web_ports"')
     client, listed = body["client"], body["assistants"]
     if not isinstance(client, str) or not isinstance(listed, list) \
             or not all(isinstance(a, str) for a in listed):
         return _bad_request(path, '"client" must be a string and '
                                   '"assistants" a list of strings')
+    web_ports = _web_ports_field(body.get("web_ports", []))
+    if isinstance(web_ports, str):
+        return _bad_request(path, web_ports)
     sessions = _STATE
     if sessions is None:
         return _refused(path)
     listed = list(dict.fromkeys(listed))
     allowed = [a for a in listed if a in sessions.tools]
     try:
-        session = await sessions.start(client, frozenset(allowed))
+        session = await sessions.start(client, frozenset(allowed), web_ports)
     except (OSError, RuntimeError) as e:
         return JSONResponse(status_code=503, content=_error_content(
             path, 503, "server_error",

@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, media_urls, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -124,7 +124,8 @@ CACHE_DISK_ENV = {
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
                        "discover", "talk", "assistant", "theme", "themes",
                        "launch"})
-_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls", "model_dirs",
+_SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
+                          "cors_origins", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "systemone", "menubar", "token_queue_timeout_s", "prefill_step_size",
@@ -194,6 +195,91 @@ LAUNCH_RESERVED_ENV = frozenset({"HOME", "TERM", "COLORTERM", "LANG", "TZ",
 # DNS-rebinding host guard (shared here because server.py must stay importable
 # without the fastapi extra).
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_ORIGIN_HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9.])?")
+
+
+def _ipv6_origin_host(host: str) -> str:
+    """An IPv6 address as a browser writes it in an origin: lower-case hex
+    groups, the first longest run of two or more zero groups as ``::``, and
+    never a dotted IPv4 tail."""
+    import ipaddress
+
+    packed = ipaddress.IPv6Address(host).packed
+    groups = [format(int.from_bytes(packed[i:i + 2], "big"), "x") for i in range(0, 16, 2)]
+    best, run = (0, 0), 0
+    for i, g in enumerate(groups + ["end"]):
+        if g == "0":
+            run += 1
+            continue
+        if run > best[1]:
+            best = (i - run, run)
+        run = 0
+    start, length = best
+    if length < 2:
+        return ":".join(groups)
+    return ":".join(groups[:start]) + "::" + ":".join(groups[start + length:])
+
+
+def normalize_origin(text: str) -> str:
+    """The browser origin ``text`` in the form a browser sends it:
+    ``scheme://host[:port]`` with the scheme and host in lower case and no
+    default port. Raises ValueError naming the problem for anything else,
+    including ``*`` and ``null``, which name no single origin."""
+    import urllib.parse
+
+    value = text.strip()
+    if value in ("*", "null"):
+        raise ValueError(f"{value} names no single origin")
+    if not value.isascii():
+        raise ValueError("write the host in its ASCII (punycode) form")
+    try:
+        split = urllib.parse.urlsplit(value)
+        port = split.port
+    except ValueError:
+        raise ValueError("it is not scheme://host[:port]") from None
+    scheme = split.scheme             # urlsplit lowercases it
+    if scheme not in _DEFAULT_PORTS:
+        raise ValueError("the scheme must be http or https")
+    if "@" in split.netloc:
+        raise ValueError("an origin has no user name or password")
+    if split.path not in ("", "/") or split.query or split.fragment \
+            or value.endswith(("?", "#")):
+        raise ValueError("an origin is only scheme://host[:port], with nothing after it")
+    host = split.hostname or ""
+    if not host:
+        raise ValueError("it has no host")
+    if split.netloc.startswith("["):
+        try:
+            host = f"[{_ipv6_origin_host(host)}]"
+        except ValueError:
+            raise ValueError(f"{host!r} is not an IPv6 address") from None
+    elif not _ORIGIN_HOST.fullmatch(host):
+        raise ValueError("the host must be a name or an address, with no wildcard")
+    if port == 0:
+        raise ValueError("port 0 is not a port a page can use")
+    if port is None or port == _DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def origin_is_loopback(origin: str) -> bool:
+    """Whether the normalized ``origin`` is a page on this machine's
+    loopback: ``localhost``, 127.0.0.0/8 or ``::1``. Only a process on the
+    machine can serve such a page."""
+    import ipaddress
+    import urllib.parse
+
+    host = urllib.parse.urlsplit(origin).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return ip.is_loopback or bool(mapped and mapped.is_loopback)
 
 # Bare-start config search order (first existing wins). The XDG-style
 # ``~/.config`` location, where ``gmlx init`` writes, is the default, and the
@@ -558,6 +644,9 @@ class ServerCfg:
     # A request may name media by an http(s) URL, which the server then
     # fetches. File paths are refused either way (patches/media_gate.py).
     media_urls: bool = False
+    # Browser origins, besides loopback ones, whose pages may call the
+    # server (normalized by normalize_origin; patches/hardening.py).
+    cors_origins: list[str] = field(default_factory=list)
     # macOS menu-bar companion: a background `serve` auto-starts it (GUI session
     # only) unless this is set false. No effect off macOS / headless.
     menubar: bool = True
@@ -1916,6 +2005,25 @@ def _parse_assistant(raw) -> AssistantCfg:
         mcp=servers, memory=memory)
 
 
+def _parse_cors_origins(raw) -> list[str]:
+    """``server.cors_origins``: browser origins, normalized, duplicates
+    dropped."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(o, str) for o in raw):
+        raise ConfigError("server.cors_origins: expected a list of origins, such as "
+                          "[https://chat.example.com]")
+    out = []
+    for entry in raw:
+        try:
+            origin = normalize_origin(entry)
+        except ValueError as e:
+            raise ConfigError(f"server.cors_origins entry {entry!r}: {e}") from None
+        if origin not in out:
+            out.append(origin)
+    return out
+
+
 def _parse_assistant_aliases(raw) -> dict:
     """Parse ``server.assistants:`` into ``{alias_id: AssistantAlias}``.
     Cross-checks against models/aliases happen in :func:`_validate`."""
@@ -2250,6 +2358,7 @@ def build_config(doc: dict) -> ServerCfg:
         api_key=str(srv["api_key"]) if srv.get("api_key") else None,
         no_auth=bool(srv.get("no_auth", False)),
         media_urls=bool(srv.get("media_urls", False)),
+        cors_origins=_parse_cors_origins(srv.get("cors_origins")),
         menubar=bool(srv.get("menubar", True)),
         token_queue_timeout_s=_coerce_num(
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),

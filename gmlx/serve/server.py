@@ -1645,7 +1645,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     import yaml
     d = dataclasses.asdict(cfg)
     server = {k: d.pop(k) for k in
-              ("host", "port", "api_key", "no_auth", "media_urls", "model_dirs", "budget_gb",
+              ("host", "port", "api_key", "no_auth", "media_urls", "cors_origins",
+               "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
                "prefill_step_size", "dtype",
                "decode_prefill_ratio", "prefill_tick_ms",
@@ -2066,6 +2067,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from gmlx.serve.media_sinks import ensure_media_root
     ensure_media_root()
     install_server_patches(cfg, reload_fn=reload_fn)
+    from gmlx.config import origin_is_loopback
+    for origin in getattr(cfg, "cors_origins", None) or ():
+        if not origin_is_loopback(origin):
+            print(f"[server] browser pages at {origin} may call this server "
+                  "(server.cors_origins)")
     if getattr(a, "ignore_eos", False) or env_bool("GMLX_IGNORE_EOS", False):
         from .patches import install_ignore_eos
         install_ignore_eos()

@@ -2431,3 +2431,67 @@ def test_media_urls_parses_and_defaults_off():
     assert cfgmod.build_config({}).media_urls is False
     on = cfgmod.build_config({"server": {"media_urls": True}})
     assert on.media_urls is True
+
+
+def test_cors_origins_default_empty_and_normalized():
+    assert cfgmod.build_config({}).cors_origins == []
+    cfg = cfgmod.build_config({"server": {"cors_origins": [
+        "HTTPS://Chat.Example.com:443/", "https://chat.example.com",
+        "http://192.168.1.20:3000", "http://[0:0:0:0:0:0:0:1]:8000"]}})
+    # Normalized the way a browser writes an Origin, duplicates dropped.
+    assert cfg.cors_origins == ["https://chat.example.com",
+                                "http://192.168.1.20:3000", "http://[::1]:8000"]
+
+
+@pytest.mark.parametrize("entry", [
+    "*", "null", " null ", "chat.example.com", "ftp://chat.example.com",
+    "https://chat.example.com/app", "https://chat.example.com?x=1",
+    "https://chat.example.com#top", "https://user@chat.example.com",
+    "https://*.example.com", "https://chat.example.com:0",
+    "https://chat.example.com:99999", "http://", "https://b\u00fccher.example"])
+def test_cors_origins_refuses_an_entry_that_is_not_one_origin(entry):
+    with pytest.raises(ConfigError, match="server.cors_origins entry"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("raw", ["https://chat.example.com", [1], {"a": 1}])
+def test_cors_origins_must_be_a_list_of_strings(raw):
+    with pytest.raises(ConfigError, match="server.cors_origins: expected a list"):
+        cfgmod.build_config({"server": {"cors_origins": raw}})
+
+
+def test_cors_origins_round_trips_through_print_config():
+    import yaml
+
+    pytest.importorskip("gmlx.serve.server")
+    from gmlx.serve import server as srv
+
+    cfg = cfgmod.build_config({"server": {"cors_origins": ["https://ui.example:8443"]}})
+    doc = yaml.safe_load(srv._dump_cfg_yaml(cfg))
+    assert doc["server"]["cors_origins"] == ["https://ui.example:8443"]
+    assert cfgmod.build_config(doc).cors_origins == ["https://ui.example:8443"]
+
+
+@pytest.mark.parametrize("origin, loopback", [
+    ("http://localhost:3000", True), ("http://127.0.0.1", True),
+    ("http://127.9.9.9:1", True), ("http://[::1]:8000", True),
+    ("http://[::ffff:7f00:1]", True), ("http://localhost.example.com", False),
+    ("http://128.0.0.1", False), ("https://chat.example.com", False),
+    ("http://[::ffff:a00:1]", False)])
+def test_origin_is_loopback(origin, loopback):
+    assert cfgmod.origin_is_loopback(cfgmod.normalize_origin(origin)) is loopback
+
+
+@pytest.mark.parametrize("entry", ["*", "null"])
+def test_cors_origins_says_why_a_wildcard_or_null_is_refused(entry):
+    with pytest.raises(ConfigError, match="names no single origin"):
+        cfgmod.build_config({"server": {"cors_origins": [entry]}})
+
+
+@pytest.mark.parametrize("given, browser", [
+    ("http://[1:0:2:3:4:5:6:7]", "http://[1:0:2:3:4:5:6:7]"),       # one zero group stays
+    ("http://[1:0:0:2:0:0:0:3]", "http://[1:0:0:2::3]"),            # the longest run
+    ("http://[1:0:0:2:3:0:0:4]", "http://[1::2:3:0:0:4]"),          # the first of two equal runs
+    ("http://[::FFFF:10.0.0.1]:81", "http://[::ffff:a00:1]:81")])   # no dotted tail
+def test_cors_origins_writes_ipv6_hosts_as_browsers_do(given, browser):
+    assert cfgmod.normalize_origin(given) == browser

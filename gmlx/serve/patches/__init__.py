@@ -215,6 +215,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_json_content_type_tolerance()
     if getattr(cfg, "host", None) in LOOPBACK_HOSTS:
         install_loopback_host_guard(cfg.host)
+    # After the host guard, so it is the outermost middleware and a page
+    # that may not call the server is refused before anything runs.
+    from .hardening import install_origin_guard
+    install_origin_guard(getattr(cfg, "cors_origins", None) or ())
     disable_credentialed_cors()
     install_health_liveness_override()
     install_gen_args_profile_injection()

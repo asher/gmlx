@@ -54,6 +54,9 @@ def _restore_app():
     app = _APP.app
     routes = sp_common._snapshot_routes(app)
     middleware = list(app.user_middleware)
+    mw_kwargs = [(m, dict(getattr(m, "kwargs", {}) or {}))
+                 for m in app.user_middleware]
+    allowed = sp_hardening._allowed_origins
     handlers = dict(app.exception_handlers)
     lifespan = app.router.lifespan_context
     yield
@@ -61,6 +64,11 @@ def _restore_app():
     ss._STATE = None
     sp_common._restore_routes(app, routes)
     app.user_middleware[:] = middleware
+    for m, kw in mw_kwargs:
+        if getattr(m, "kwargs", None) is not None:
+            m.kwargs.clear()
+            m.kwargs.update(kw)
+    sp_hardening._allowed_origins = allowed
     app.exception_handlers.clear()
     app.exception_handlers.update(handlers)
     app.router.lifespan_context = lifespan
@@ -127,8 +135,10 @@ class _Answer:
         return json.loads(self.body)
 
 
-def _request(conn, method, path, body=None, key=None) -> _Answer:
+def _request(conn, method, path, body=None, key=None, origin=None) -> _Answer:
     headers = {}
+    if origin is not None:
+        headers["origin"] = origin
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -143,13 +153,13 @@ def _request(conn, method, path, body=None, key=None) -> _Answer:
         conn.close()
 
 
-def _tcp(live, method, path, body=None, key=None) -> _Answer:
+def _tcp(live, method, path, body=None, key=None, origin=None) -> _Answer:
     conn = http.client.HTTPConnection("127.0.0.1", live.port, timeout=30)
-    return _request(conn, method, path, body, key)
+    return _request(conn, method, path, body, key, origin)
 
 
-def _unix(path, method, url, body=None) -> _Answer:
-    return _request(_UnixConnection(path), method, url, body)
+def _unix(path, method, url, body=None, origin=None) -> _Answer:
+    return _request(_UnixConnection(path), method, url, body, origin=origin)
 
 
 def _chat(model, tools=None) -> dict:
@@ -235,13 +245,14 @@ class _Server:
         self.live, self.cfg = live, cfg
         self.chat, self.tools, self.admin = chat, tools, admin
 
-    def tcp(self, method, path, body=None, key=None) -> _Answer:
-        return _tcp(self.live, method, path, body, key)
+    def tcp(self, method, path, body=None, key=None, origin=None) -> _Answer:
+        return _tcp(self.live, method, path, body, key, origin)
 
-    def open_session(self, assistants, key=None) -> dict:
-        r = self.tcp("POST", ss.ENDPOINT,
-                     {"client": "opencode", "assistants": assistants},
-                     key=key or self.cfg.api_key)
+    def open_session(self, assistants, key=None, web_ports=None) -> dict:
+        body = {"client": "opencode", "assistants": assistants}
+        if web_ports is not None:
+            body["web_ports"] = web_ports
+        r = self.tcp("POST", ss.ENDPOINT, body, key=key or self.cfg.api_key)
         assert r.status == 200, r.body
         return r.json()
 
@@ -276,6 +287,7 @@ def server(monkeypatch, short_dirs):
         aserve.install_assistant_serve(cfg)
         ss.install_session_sockets(cfg)
         sp_hardening.install_api_key_auth(cfg.api_key)
+        sp_hardening.install_origin_guard(cfg.cors_origins)
         if prepare:
             ss.prepare_session_sockets(cfg.host, cfg.port)
         live = _Live(sock, lifespan=lifespan)
@@ -339,12 +351,91 @@ def test_open_session_answers_the_contract_body(server):
     ["opencode"],
     # The body launch probes with: a 400 tells it the server offers sessions.
     {"probe": True},
+    {"client": "opencode", "assistants": [], "web_ports": 3000},
+    {"client": "opencode", "assistants": [], "web_ports": ["3000"]},
+    {"client": "opencode", "assistants": [], "web_ports": [True]},
+    {"client": "opencode", "assistants": [], "web_ports": [0]},
+    {"client": "opencode", "assistants": [], "web_ports": [65536]},
+    {"client": "opencode", "assistants": [], "web_ports": [3000.0]},
+    {"client": "opencode", "assistants": [],
+     "web_ports": list(range(1, ss.WEB_PORTS_MAX + 2))},
+    {"web_ports": [3000]},
 ])
 def test_open_session_refuses_a_bad_body(server, body):
     srv = server()
     r = srv.tcp("POST", ss.ENDPOINT, body)
     assert r.status == 400, r.body
     assert ss._STATE.open == {}
+
+
+def test_a_session_takes_up_to_the_most_web_ports(server):
+    srv = server()
+    srv.open_session([], web_ports=list(range(1, ss.WEB_PORTS_MAX + 1)))
+    assert ss.session_web_ports() == frozenset(range(1, ss.WEB_PORTS_MAX + 1))
+
+
+# The browser app of a session
+
+_PAGE = "http://127.0.0.1:18123"
+
+
+def _refusal(r: _Answer) -> str:
+    assert r.status == 403, r.body
+    assert r.json()["error"]["type"] == "origin_not_allowed"
+    return r.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("api_key", [None, _KEY])
+def test_a_session_page_is_refused_on_tcp_while_the_session_is_open(server, api_key):
+    srv = server(api_key=api_key)
+    assert srv.tcp("GET", "/v1/models", key=api_key, origin=_PAGE).status == 200
+    session = srv.open_session([], web_ports=[18123])
+    # Every loopback name the page can load itself under, and with the key
+    # too, since the page is the app's and not the user's.
+    for origin in (_PAGE, "http://localhost:18123", "HTTP://LOCALHOST:18123",
+                   "http://[::1]:18123", "http://[::ffff:127.0.0.1]:18123",
+                   "http://127.0.0.2:18123", "https://127.0.0.1:18123"):
+        message = _refusal(srv.tcp("GET", "/v1/models", key=api_key, origin=origin))
+        assert "launch container session" in message and "port 18123" in message
+        _refusal(srv.tcp("POST", "/v1/chat/completions", _chat("m-a"), key=api_key,
+                         origin=origin))
+    # A preflight is refused too, so the browser sends nothing after it.
+    conn = http.client.HTTPConnection("127.0.0.1", srv.live.port, timeout=30)
+    conn.request("OPTIONS", "/v1/chat/completions", headers={
+        "origin": _PAGE, "access-control-request-method": "POST"})
+    assert conn.getresponse().status == 403
+    conn.close()
+    # Loopback pages on other ports, and clients that send no origin, pass.
+    assert srv.tcp("GET", "/v1/models", key=api_key,
+                   origin="http://127.0.0.1:18124").status == 200
+    assert srv.tcp("GET", "/v1/models", key=api_key).status == 200
+    # The session's own socket answers the page's origin.
+    assert _unix(session["socket"], "GET", "/v1/models", origin=_PAGE).status == 200
+    assert srv.tcp("DELETE", f"{ss.ENDPOINT}/{session['id']}",
+                   key=api_key).status == 204
+    assert srv.tcp("GET", "/v1/models", key=api_key, origin=_PAGE).status == 200
+
+
+def test_a_default_port_page_is_matched_by_its_port(server):
+    srv = server()
+    srv.open_session([], web_ports=[80])
+    assert "port 80" in _refusal(srv.tcp("GET", "/v1/models", origin="http://localhost"))
+    assert srv.tcp("GET", "/v1/models", origin="https://localhost").status == 200
+
+
+def test_a_session_page_stays_refused_while_any_session_names_it(server):
+    srv = server()
+    first = srv.open_session([], web_ports=[18123])
+    srv.open_session([], web_ports=[18123])
+    srv.tcp("DELETE", f"{ss.ENDPOINT}/{first['id']}")
+    _refusal(srv.tcp("GET", "/v1/models", origin=_PAGE))
+
+
+def test_a_session_without_web_ports_refuses_no_page(server):
+    srv = server()
+    srv.open_session(["home"])
+    assert ss.session_web_ports() == frozenset()
+    assert srv.tcp("GET", "/v1/models", origin=_PAGE).status == 200
 
 
 def test_keyed_server_endpoint_refuses_a_request_without_the_key(server):

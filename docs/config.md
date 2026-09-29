@@ -851,8 +851,10 @@ shell history. The client commands `chat`, `talk`, `ps`, `systemone`,
 is no key.
 
 A loopback server refuses a request whose `Host` header is not a loopback
-name, which blocks DNS rebinding. It answers CORS with `*` and no
-credentials.
+name, which blocks DNS rebinding. Every server refuses, with status 403, a
+request from a browser page whose origin is neither a loopback address nor
+listed in [`cors_origins`](#servercors_origins). Its CORS answers name the
+page's own origin, never `*`, and allow no credentials.
 
 #### `server.no_auth`
 
@@ -1663,6 +1665,7 @@ server:
   api_key: null
   no_auth: false
   media_urls: false
+  cors_origins: []
   model_dirs: [~/models]
   budget_gb: 96
   max_models: null

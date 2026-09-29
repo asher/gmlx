@@ -1,5 +1,6 @@
 """Hardening patches: API-key auth, JSON content-type tolerance,
-loopback Host guard, credential-less CORS, and the liveness-only /health body."""
+loopback Host guard, the browser origin guard, credential-less CORS, and the
+liveness-only /health body."""
 
 from __future__ import annotations
 
@@ -157,8 +158,8 @@ def disable_credentialed_cors() -> None:
     Starlette implements ``allow_origins=["*"]`` + ``allow_credentials=True``
     by reflecting any request Origin with ``Access-Control-Allow-Credentials:
     true`` - credentialed cross-origin access from every website. Auth here is
-    header-based (no cookies), so credentialed CORS is never needed; without
-    it the response carries a literal ``*``."""
+    header-based (no cookies), so credentialed CORS is never needed.
+    :func:`install_origin_guard` replaces the wildcard origin list."""
     from fastapi.middleware.cors import CORSMiddleware
 
     app = importlib.import_module("mlx_vlm.server.app").app
@@ -168,6 +169,135 @@ def disable_credentialed_cors() -> None:
                 and kwargs and kwargs.get("allow_credentials"):
             kwargs["allow_credentials"] = False
             app.middleware_stack = None  # rebuilt on next startup
+
+
+# Browser origin guard
+_ORIGIN_FLAG = "_kq_gguf_origin_guard"
+# The loopback origins, in the form Starlette's CORS middleware matches with
+# ``fullmatch``. Keep in step with gmlx.config.origin_is_loopback, which
+# decides; this only lets the CORS headers name such an origin.
+LOOPBACK_ORIGIN_REGEX = (r"https?://(localhost|127(\.[0-9]{1,3}){3}|\[::1\]"
+                         r"|\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\])(:[0-9]{1,5})?")
+# The normalized server.cors_origins, set by install_origin_guard.
+_allowed_origins: frozenset[str] = frozenset()
+
+
+def origin_allowed(origin: str) -> bool:
+    """Whether a page at ``origin`` may call the server: a loopback origin,
+    which only a process on this Mac can serve, or a listed one."""
+    from gmlx.config import normalize_origin, origin_is_loopback
+
+    try:
+        norm = normalize_origin(origin)
+    except ValueError:
+        return False                  # "null" and anything malformed
+    return origin_is_loopback(norm) or norm in _allowed_origins
+
+
+def _origin_refusal(origin: str) -> str:
+    from gmlx.config import normalize_origin
+
+    shown = origin[:200]
+    if shown.strip() == "null":
+        return ("This server does not answer a page with no origin of its own "
+                "(Origin: null), such as a local file or a sandboxed frame. Serve the "
+                "page from a loopback address instead.")
+    try:
+        shown = normalize_origin(shown)
+    except ValueError:
+        return f"The Origin header {shown!r} is not a browser origin."
+    return (f"Pages from {shown} may not call this server. Add {shown} to "
+            "server.cors_origins in the server's config file to allow them, or serve "
+            "the page from a loopback address.")
+
+
+def _session_page(origin: str, scope) -> tuple[str, int] | None:
+    """The normalized ``origin`` and its port when a request on the TCP
+    listener comes from a loopback page on the web port of an open launch
+    session, else None. The session's browser app reaches the server through
+    the session, so its pages have no reason to call the TCP port. The port
+    decides, since the page can load itself under any loopback name."""
+    import urllib.parse
+
+    from gmlx.config import normalize_origin, origin_is_loopback
+
+    from .session_sockets import session_web_ports
+
+    if scope.get(SESSION_SCOPE_KEY) is not None:
+        return None
+    ports = session_web_ports()
+    if not ports:
+        return None
+    try:
+        norm = normalize_origin(origin)
+    except ValueError:
+        return None
+    if not origin_is_loopback(norm):
+        return None
+    split = urllib.parse.urlsplit(norm)
+    port = split.port or (443 if split.scheme == "https" else 80)
+    return (norm, port) if port in ports else None
+
+
+def _restrict_cors(app) -> None:
+    """Answer CORS for the loopback origins and the listed ones only, never
+    with ``*``."""
+    from fastapi.middleware.cors import CORSMiddleware
+
+    for m in app.user_middleware:
+        kwargs = getattr(m, "kwargs", None)
+        if getattr(m, "cls", None) is CORSMiddleware and kwargs is not None:
+            kwargs["allow_origins"] = sorted(_allowed_origins)
+            kwargs["allow_origin_regex"] = LOOPBACK_ORIGIN_REGEX
+            app.middleware_stack = None
+
+
+def install_origin_guard(allowed_origins=()) -> None:
+    """Refuse a request, with 403, whose ``Origin`` header names a page that
+    may not call the server: anything but a loopback origin or one in
+    ``allowed_origins`` (``server.cors_origins``), ``null`` included.
+
+    A server without a key answers any local process, and a browser sends a
+    page's requests from the user's machine. Without this check any website
+    the user visits could call a loopback server and read the answers, and a
+    ``text/plain`` POST, which needs no preflight, would run as JSON. A
+    client that is not a browser sends no ``Origin`` and passes. A loopback
+    page on the web port of an open launch session is refused too, except on
+    the session's own socket. The check reads no body. Install it after the host guard, so it is the outermost
+    middleware and runs first. Each call replaces the allowed list."""
+    global _allowed_origins
+    from fastapi.responses import JSONResponse
+
+    from gmlx.config import normalize_origin
+
+    _allowed_origins = frozenset(normalize_origin(o) for o in allowed_origins)
+    app = importlib.import_module("mlx_vlm.server.app").app
+    _restrict_cors(app)
+    # Found by the dispatch function rather than an app.state flag, so a
+    # test that restores the middleware list also restores the guard.
+    if any(getattr((getattr(m, "kwargs", None) or {}).get("dispatch"), _ORIGIN_FLAG, False)
+           for m in app.user_middleware):
+        return
+
+    async def _origin_guard(request, call_next):
+        origin = request.headers.get("origin")
+        if origin is not None:
+            if not origin_allowed(origin):
+                message = _origin_refusal(origin)
+            elif (page := _session_page(origin, request.scope)) is not None:
+                message = (f"Pages from {page[0]} are on port {page[1]}, where a launch "
+                           "container session serves its browser app. The app reaches "
+                           "this server through its session, so these pages may not call "
+                           "this port.")
+            else:
+                return await call_next(request)
+            return JSONResponse(status_code=403, content=_error_content(
+                request.url.path, 403, "origin_not_allowed", message))
+        return await call_next(request)
+
+    _origin_guard.__dict__[_ORIGIN_FLAG] = True
+    app.middleware_stack = None
+    app.middleware("http")(_origin_guard)   # added last => outermost, runs first
 
 
 def install_health_liveness_override() -> None:

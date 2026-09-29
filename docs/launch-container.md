@@ -309,12 +309,14 @@ server's [media folder](api.md#media-in-requests). With
 the Mac fetch any public URL, even under `network: none`, and the URL can
 carry data out of the container.
 
-A [browser app](#browser-apps) gives the client a page in your browser at a
-localhost origin, with whatever that origin can reach. That page runs on
-the Mac and can call the server's own port, where the socket's limits do
-not apply, and the server allows requests from any origin. On a server with no
-[`server.api_key`](config.md#serverapi_key), the page can call every route,
-so set a key before you run a browser app in a container.
+A [browser app](#browser-apps) gives the client a page in your browser at
+`http://127.0.0.1:<web port>`, and that page runs on the Mac. The app's own
+server reaches the gmlx server through the socket, so while the session is
+open the server refuses every request from a local page on the web port
+that comes in on its TCP port. The page therefore cannot go around the
+socket's limits. Another gmlx server on the Mac does not know about the
+session, and it answers the page as it answers any local page, so set a
+[`server.api_key`](config.md#serverapi_key) on any other server you run.
 
 These limits apply only to a plain http server on this Mac, named by a
 loopback address, `localhost` or an address that means all interfaces.
