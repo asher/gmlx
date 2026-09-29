@@ -194,7 +194,7 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_l0_salt = _l0_salt(batch)
 
     if batch._inputs_embeds is None:
-        _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
+        _log.debug("mtp_prefill_init: no inputs_embeds, owned lookup skipped")
         return
 
     # The owned lookup (L0, then L1) restores into a single-row prompt
