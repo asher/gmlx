@@ -60,6 +60,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   link that leads outside your home folder.
 - The server no longer serves mlx-vlm's `/v1/realtime` WebSocket route,
   which skipped the API key check.
+- A request whose model fails to load gets that load error. Before, the
+  server sometimes answered 500 with an error about a missing `requests`
+  attribute.
 - A server, menu bar or extra install that gmlx starts no longer imports a
   `gmlx` or `pip` package from the current folder in place of the installed
   one. A server started from a source checkout therefore runs the installed
