@@ -171,3 +171,42 @@ def test_the_hd512_wrapper_takes_an_owned_global_layer(width):
     after = hd512.route_counts()
     moved = [key for key in after if after[key] > before.get(key, 0)]
     assert moved and all(key[1:3] == (512, width) for key in moved), moved
+
+
+def test_training_attention_wraps_the_owned_module_and_restores_it(
+        monkeypatch):
+    """install_training_attention patches the module global the owned
+    layers call: a training call takes the blocked attention, an eval call
+    takes the dispatch with the logits it gave before, and the restore
+    gives back the dispatch."""
+    import gmlx.tune.attention as tune_attention
+
+    calls = []
+    blocked = tune_attention.blocked_attention
+
+    def spy(*a, **kw):
+        calls.append(a[0].shape)
+        return blocked(*a, **kw)
+
+    monkeypatch.setattr(tune_attention, "blocked_attention", spy)
+    lm = probes.tiny(owned)
+    ids = mx.array([probes.PROMPT])
+    want = lm(ids).logits
+    restore = tune_attention.install_training_attention(lm)
+    try:
+        wrapped = owned.scaled_dot_product_attention
+        assert wrapped is not dispatch.scaled_dot_product_attention
+        assert wrapped._gmlx_orig is dispatch.scaled_dot_product_attention
+        lm.train()
+        mx.eval(lm(ids).logits)
+        trained = len(calls)
+        lm.eval()
+        evald = lm(ids).logits
+    finally:
+        lm.eval()
+        restore()
+    assert trained == len(lm.model.layers)
+    assert len(calls) == trained
+    assert mx.array_equal(evald, want).item()
+    assert (owned.scaled_dot_product_attention
+            is dispatch.scaled_dot_product_attention)

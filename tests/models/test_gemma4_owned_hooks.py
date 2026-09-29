@@ -1,0 +1,39 @@
+"""Hooks the owned Gemma 4 language model defines for gmlx's engine.
+
+``speculative_argmax_from_hidden`` lets the greedy verify walk take the
+argmax of every verify position in one op instead of one host sync per
+draft position. Stock gemma4 has only ``speculative_logits_from_hidden``,
+and the loader adds the argmax to each stock instance it builds; the
+owned class defines it, so that addition does nothing on an owned tree.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
+
+from gmlx.load.mtp_target import _ensure_argmax_hook
+from gmlx.models.gemma4 import language as owned
+
+import gemma4_probes as probes
+
+
+def test_the_owned_argmax_is_the_argmax_of_the_verify_logits():
+    lm = probes.tiny(owned)
+    hidden = lm(mx.array([probes.PROMPT]), return_hidden=True).hidden_states[-1]
+    got = lm.speculative_argmax_from_hidden(hidden)
+    want = mx.argmax(lm.speculative_logits_from_hidden(hidden), axis=-1)
+    assert got.shape == (1, len(probes.PROMPT))
+    assert mx.array_equal(got, want).item()
+
+
+def test_the_loader_hook_leaves_an_owned_model_alone():
+    lm = probes.tiny(owned)
+    _ensure_argmax_hook(lm)
+    assert "speculative_argmax_from_hidden" not in vars(lm)
+    assert (type(lm).speculative_argmax_from_hidden
+            is owned.LanguageModel.speculative_argmax_from_hidden)
+
+
+def test_the_stock_class_has_no_argmax():
+    assert not hasattr(stock.LanguageModel, "speculative_argmax_from_hidden")

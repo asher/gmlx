@@ -42,6 +42,7 @@ from .modules import (
 )
 from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
 from gmlx.upstream.qkv_fuse import install_fused_qkv
+from gmlx.models.gemma4 import dispatch as gemma4_dispatch
 from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
 from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
@@ -1190,6 +1191,8 @@ def _install_and_load(
         log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
         log("[install] sparse top-k page decode route active (lossy, opt-in)")
+    # After the installs whose state it reads.
+    gemma4_dispatch.configure()
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -1682,6 +1685,8 @@ def load_model(
         _log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
         _log("[install] sparse top-k page decode route active (lossy, opt-in)")
+    # After the installs whose state it reads.
+    gemma4_dispatch.configure()
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")

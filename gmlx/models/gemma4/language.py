@@ -769,6 +769,11 @@ class LanguageModel(nn.Module):
     def speculative_draft_hidden(self, hidden: mx.array) -> mx.array:
         return self.model.norm(hidden)
 
+    # gmlx: the argmax of every verify position in one op, so the greedy
+    # verify walk takes no host sync per draft position.
+    def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
+        return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
+
     def chunked_prefill_policy(
         self,
         *,
