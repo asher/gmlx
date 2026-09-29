@@ -18,6 +18,7 @@ class _Tok:
     """A tokenizer whose default encode prepends BOS (id 2)."""
 
     bos_token = BOS
+    bos_token_id = 2
 
     def encode(self, text, add_special_tokens=True):
         ids = [2 if w == BOS else 10 + len(w) for w in text.replace(BOS, f" {BOS} ").split()]
@@ -47,7 +48,7 @@ def _fake_rg(model_type):
     config = types.SimpleNamespace(model_type=model_type, image_token_index=None)
     return types.SimpleNamespace(
         model=types.SimpleNamespace(config=config),
-        processor=types.SimpleNamespace(bos_token=BOS, chat_template="t"))
+        processor=types.SimpleNamespace(tokenizer=_Tok(), chat_template="t"))
 
 
 @pytest.mark.parametrize("model_type,prompt,special", [

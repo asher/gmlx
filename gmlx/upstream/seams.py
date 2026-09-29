@@ -466,12 +466,32 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (ignore-EOS)"),
     Seam("mlx_vlm.utils", "process_inputs",
          "single_bos_fix (module attr: the flag reaches only a processor "
-         "that names it; forwarded through **kwargs)"),
+         "that names it; inside a generation call that drops the "
+         "duplicate BOS, forwarded to a known type through **kwargs)"),
     Seam("mlx_vlm.generate.dispatch", "_prepare_generation_inputs",
          "single_bos_fix (calls the prepare_inputs binding with prompts= "
          "and a model-type add_special_tokens)"),
     Seam("mlx_vlm.generate.dispatch", "prepare_inputs",
          "single_bos_fix (module attr, generate path)"),
+    Seam("mlx_vlm.server.anthropic", "anthropic_count_tokens_endpoint",
+         "single_bos_fix (the fallback count calls the prepare_inputs "
+         "binding with prompts= and no add_special_tokens)"),
+    Seam("mlx_vlm.server.anthropic", "prepare_inputs",
+         "single_bos_fix (module attr: the count adds special tokens as "
+         "generation does, and drops a duplicate BOS)"),
+    Seam("mlx_vlm.server.openai", "responses_input_tokens_endpoint",
+         "single_bos_fix (the fallback count calls the prepare_inputs "
+         "binding with prompts= and no add_special_tokens)"),
+    Seam("mlx_vlm.server.openai", "prepare_inputs",
+         "single_bos_fix (module attr: the count adds special tokens as "
+         "generation does, and drops a duplicate BOS)"),
+    Seam("mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor.__call__",
+         "single_bos_fix (a known forwarding type: **kwargs reach "
+         "self.tokenizer)"),
+    Seam("mlx_vlm.models.pixtral.processing_pixtral",
+         "PixtralProcessor.__call__",
+         "single_bos_fix (a known forwarding type: **kwargs reach "
+         "self.tokenizer)"),
     # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
     # used by the hy_v3, hy_v4, deepseek_v41, muse_glimmer and
     # function_gemma tools) ---

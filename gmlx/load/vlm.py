@@ -2609,6 +2609,8 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         attributes = ["image_processor", "tokenizer"]
         image_processor_class = "AutoImageProcessor"
         tokenizer_class = "AutoTokenizer"
+        # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+        _gmlx_kwargs_reach_tokenizer = True
 
         image_token = "<|patch|>"
         image_start_token = "<|image_start|>"
@@ -2828,6 +2830,8 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
         attributes = ["image_processor", "tokenizer"]
         image_processor_class = "AutoImageProcessor"
         tokenizer_class = "AutoTokenizer"
+        # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+        _gmlx_kwargs_reach_tokenizer = True
 
         image_token = "<|image|>"
 
