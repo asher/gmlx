@@ -55,6 +55,7 @@ from gmlx.upstream.quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
 from gmlx.upstream.rotating_cache_fix import install_rotating_cache_fix
 from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
+from gmlx.upstream.wired_limit_cpu_fix import install_wired_limit_cpu_fix
 from .modules import (
     KQuantEmbedding,
     dequantize_unattachable_leaves,
@@ -1248,6 +1249,7 @@ def _install_and_load(
     install_batch_finalize_fix()
     install_batch_rotating_mask_fix()
     install_rotating_trim_fix()
+    install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -1747,6 +1749,7 @@ def load_model(
     install_batch_finalize_fix()
     install_batch_rotating_mask_fix()
     install_rotating_trim_fix()
+    install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")

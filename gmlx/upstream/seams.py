@@ -880,7 +880,14 @@ SEAMS: tuple[Seam, ...] = (
          "systemone.engine.entropy_transfer_mask (owned copy; re-mirror "
          "on upstream change)"),
     Seam("mlx_lm.generate", "wired_limit",
-         "systemone.engine.engine_scope (the gmlx-patched policy)"),
+         "systemone.engine.engine_scope (the gmlx-patched policy) / "
+         "wired_limit_cpu_fix (wrapped: no limit on the CPU device)"),
+    Seam("mlx_vlm.generate.common", "wired_limit",
+         "wired_limit_cpu_fix (wrapped: the stock context reads the working "
+         "set key from the default device's info)"),
+    Seam("mlx_vlm.generate.ar", "wired_limit",
+         "wired_limit_cpu_fix (the binding BatchGenerator enters, wrapped "
+         "the same)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._generate_diffusion",
          "engine_jobs.install_engine_jobs (wrapped: a queued job runs in "
          "place of a generation)"),

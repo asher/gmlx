@@ -87,6 +87,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Ministral-3 or Qwen3-VL-MoE model failed to load.
 - A GGUF load that left model weights without a tensor ran with random values
   in them. It now stops and names the weights it could not fill.
+- In Python, `generate` raised KeyError `max_recommended_working_set_size`
+  when the program had made the CPU the MLX default device.
 
 ## [0.4.19] - 2026-09-27
 

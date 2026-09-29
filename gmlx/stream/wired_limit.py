@@ -102,12 +102,23 @@ def _install_wired_limit_warn_once():
 
     from mlx.utils import tree_reduce
 
+    from gmlx.upstream.wired_limit_cpu_fix import (
+        cpu_default_device,
+        cpu_wired_limit,
+    )
+
     state = {"warned": False}
 
     @contextlib.contextmanager
     def _warn_once_wired_limit(model, streams=None):
         if not mx.metal.is_available():
             yield
+            return
+        # The CPU device's info has no working set key, and a generation
+        # there has nothing to wire (upstream/wired_limit_cpu_fix.py).
+        if cpu_default_device():
+            with cpu_wired_limit(streams):
+                yield
             return
         model_bytes = tree_reduce(
             lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,

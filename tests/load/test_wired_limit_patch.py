@@ -49,11 +49,12 @@ def restore_wired_limit():
 
 @pytest.fixture
 def fake_mx(monkeypatch):
-    """A tiny fake device: 100-byte recommended working set, recorded
+    """A tiny fake GPU device: 100-byte recommended working set, recorded
     set_wired_limit calls, no-op synchronize."""
     calls = []
 
     monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
     monkeypatch.setattr(
         mx, "device_info",
         lambda: {"max_recommended_working_set_size": 100})
@@ -89,6 +90,17 @@ def test_under_budget_never_warns(restore_wired_limit, fake_mx, capsys):
         pass
     assert "close to the maximum" not in capsys.readouterr().out
     assert fake_mx == [100, 7]
+
+
+def test_the_cpu_device_sets_no_limit(restore_wired_limit, fake_mx,
+                                      monkeypatch):
+    # The CPU device's info has no working set key.
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.cpu))
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": "cpu"})
+    _install_wired_limit_warn_once()
+    with _gen.wired_limit(_over_budget_model()):
+        pass
+    assert fake_mx == []
 
 
 def test_install_is_idempotent(restore_wired_limit):
