@@ -1,7 +1,7 @@
 """Shared-prefix cascade decode route: claim gates, fused-kernel numerics
 vs the masked reference on stamped caches, ragged left pads, stamp
-lifecycle (warm-multi detection, extend drop, filter survival), and
-install hygiene.
+formation and install hygiene. The owned batch caches carry the stamp
+through filter and extend (tests/cache/test_owned_cascade_stamp.py).
 
 Numerics require the mlx_kquant fused op (GPU); those tests skip on
 platforms where the op is unavailable. Stamp-detection tests are pure
@@ -59,9 +59,6 @@ class _FakeBatchCache:
         self._right_padding = None
         if P is not None:
             self._gmlx_cascade = {"P": P}
-
-    def extend(self, other):
-        return "extended"
 
 
 def _install():
@@ -454,92 +451,21 @@ def test_kv_q8_claim(monkeypatch):
 
 def test_carry_stamp():
     """Owned prefill merge rebuilds cache objects; carry_stamp moves the
-    formation stamp onto the merged cache and re-arms the extend hook."""
+    formation stamp onto the merged cache."""
     src = _FakeBatchCache([0, 0], P=512)
     dst = _FakeBatchCache([0, 0])
     cs.carry_stamp(src, dst)
     assert dst._gmlx_cascade == src._gmlx_cascade
-    assert getattr(dst.extend, "_gmlx_cascade_merge", False)
     # unstamped src is a no-op
     dst2 = _FakeBatchCache([0, 0])
     cs.carry_stamp(_FakeBatchCache([0, 0]), dst2)
     assert "_gmlx_cascade" not in dst2.__dict__
 
 
-def test_lcp_rows():
-    a = list(range(100))
-    assert cs._lcp_rows([_rb(a), _rb(a)]) == 100
-    assert cs._lcp_rows([_rb(a), _rb(a[:50] + [999] + a[51:])]) == 50
-    assert cs._lcp_rows([_rb(a), _rb(a[:30])]) == 30
-    assert cs._lcp_rows([_rb(a)]) == 100
-    assert cs._lcp_rows([]) == 0
-    assert cs._lcp_rows([_rb(a), b""]) == 0
-
-
-def test_stamp_caches_and_merge():
-    pre = list(range(64))
-    r1 = _rb(pre + [7, 8])
-    r2 = _rb(pre + [9])
-    cache = _FakeBatchCache([0, 0])
-    assert cs._stamp_caches([cache], [r1, r2])
-    assert cache._gmlx_cascade["P"] == 64
-
-    # same-prefix admission keeps cascading at the common P
-    other = _FakeBatchCache([0])
-    cs._stamp_caches([other], [_rb(pre[:40] + [999])])
-    assert cache.extend(other) == "extended"
-    assert cache._gmlx_cascade["P"] == 40
-    assert len(cache._gmlx_cascade["tok"]) == 3
-
-    # unstamped admission clears
-    assert cache.extend(_FakeBatchCache([0])) == "extended"
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
-def test_stamp_divergent_clears():
-    cache = _FakeBatchCache([0])
-    cs._stamp_caches([cache], [_rb([1, 2, 3])])
-    other = _FakeBatchCache([0])
-    cs._stamp_caches([other], [_rb([9, 9, 9])])
-    cache.extend(other)
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
 def test_stamp_no_common_prefix_no_stamp():
     cache = _FakeBatchCache([0, 0])
     assert not cs._stamp_caches([cache], [_rb([1, 2]), _rb([3, 4])])
     assert not hasattr(cache, "_gmlx_cascade")
-
-
-class _FilterCache(_FakeBatchCache):
-    def filter(self, keep):
-        return "filtered"
-
-
-@pytest.mark.parametrize("keep", [[0], [1], [0, 2], [1, 2]])
-def test_stamp_filter_keeps_the_indexed_rows(keep):
-    # The stock batch loop and the spec engine pass the surviving rows as
-    # int32 indices.
-    pre = list(range(32))
-    rows = [_rb(pre + [i]) for i in range(3)]
-    cache = _FilterCache([0, 0, 0])
-    cs._stamp_caches([cache], rows)
-    assert cache.filter(mx.array(keep, mx.int32)) == "filtered"
-    assert cache._gmlx_cascade == {
-        "P": 32, "tok": tuple(rows[k] for k in keep)}
-    assert cache.filter(mx.array([], mx.int32)) == "filtered"
-    assert not hasattr(cache, "_gmlx_cascade")
-
-
-def test_stamp_filter_to_row_zero_keeps_cascading_after_admission():
-    pre = list(range(32))
-    cache = _FilterCache([0, 0])
-    cs._stamp_caches([cache], [_rb(pre + [1]), _rb(pre + [2])])
-    cache.filter(mx.array([0], mx.int32))
-    other = _FakeBatchCache([0])
-    cs._stamp_caches([other], [_rb(pre + [3])])
-    cache.extend(other)
-    assert cache._gmlx_cascade["P"] == 32
 
 
 class _FakePromptBatch:

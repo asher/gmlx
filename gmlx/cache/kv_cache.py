@@ -1748,6 +1748,59 @@ def dynamic_roll(x, shifts, axis):
     return rolled
 
 
+# gmlx: the cascade stamp. The shared-prefix decode route in
+# gmlx.upstream.cascade_sdpa stamps a batch cache with ``_gmlx_cascade``,
+# {"P": shared prefix length, "tok": each row's packed prompt token bytes,
+# in row order}. BatchKVCache and BatchQuantizedKVCache carry it: extend
+# derives it again from both sides' token bytes, and filter keeps the
+# entries of the rows its indices name.
+
+
+def _cascade_lcp(rows) -> int:
+    """The common prefix length, in tokens, of packed int32 token rows."""
+    if not rows or any(not r for r in rows):
+        return 0
+    return len(os.path.commonprefix(list(rows))) // 4
+
+
+def _cascade_merge(a, b):
+    """The stamp of a batch that extend forms from stamps ``a`` (this
+    cache's rows) and ``b`` (the rows it takes in), or None when either
+    side is unstamped or the shared prefix is gone."""
+    if a is None or b is None:
+        return None
+    P = _cascade_lcp([a["tok"][0][: 4 * a["P"]], b["tok"][0][: 4 * b["P"]]])
+    if P <= 0:
+        return None
+    return {"P": P, "tok": a["tok"] + b["tok"]}
+
+
+def _cascade_extend(cache, other) -> None:
+    merged = _cascade_merge(cache.__dict__.get("_gmlx_cascade"),
+                            getattr(other, "_gmlx_cascade", None))
+    if merged is None:
+        cache.__dict__.pop("_gmlx_cascade", None)
+    else:
+        cache._gmlx_cascade = merged
+
+
+def _cascade_filter(cache, keep) -> None:
+    """Keep the stamp entries of the rows ``keep`` names. A stamp whose rows
+    do not cover them is dropped."""
+    info = cache.__dict__.get("_gmlx_cascade")
+    if info is None:
+        return
+    ks = keep.tolist() if hasattr(keep, "tolist") else list(keep)
+    rows = info["tok"]
+    tok = ()
+    if all(0 <= int(k) < len(rows) for k in ks):
+        tok = tuple(rows[int(k)] for k in ks)
+    if tok:
+        cache._gmlx_cascade = {"P": info["P"], "tok": tok}
+    else:
+        cache.__dict__.pop("_gmlx_cascade", None)
+
+
 class BatchKVCache(_BaseCache):
     step = 256
 
@@ -1880,11 +1933,15 @@ class BatchKVCache(_BaseCache):
                 self.values = self.values[..., min_left_pad:, :]
             self._idx -= min_left_pad
             self.left_padding -= min_left_pad
+        # gmlx: the cascade stamp keeps the surviving rows.
+        _cascade_filter(self, batch_indices)
 
     def extend(self, other):
         """
         In-place extend this cache with the other cache.
         """
+        # gmlx: the cascade stamp covers both sides' rows.
+        _cascade_extend(self, other)
         if self.keys is None and other.keys is None:
             self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
             self.offset = mx.concatenate([self.offset, other.offset])
@@ -2730,9 +2787,13 @@ class BatchQuantizedKVCache(_BaseCache):
                 self.values = tuple(v[..., min_lp:, :] for v in self.values)
             self._idx -= min_lp
             self.left_padding -= min_lp
+        # gmlx: the cascade stamp keeps the surviving rows.
+        _cascade_filter(self, batch_indices)
 
     def extend(self, other: "BatchQuantizedKVCache"):
         """Concatenate *other* batch into this cache along the batch dim."""
+        # gmlx: the cascade stamp covers both sides' rows.
+        _cascade_extend(self, other)
         if self.keys is None and other.keys is None:
             self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
             self.offset = mx.concatenate([self.offset, other.offset])

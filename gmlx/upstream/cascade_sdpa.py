@@ -20,12 +20,14 @@ Two pieces, both in this module:
   ``_gmlx_cascade`` with the per-row token bytes. The invariant is
   "keys[b, :, L_b : L_b + P] is interchangeable across rows", with L_b
   read live from cache.left_padding -- filter()'s uniform left-shift
-  preserves it, so retirement keeps the stamp. extend() (admission into a
-  live batch) re-derives the stamp from both sides' tokens: same-prefix
-  admission keeps cascading, a diverging row clears it; the _extend_cache
-  merge lift carries stamps across B=1-to-batch conversion. No APC mode
-  is required, so hybrid models (exact-snapshot APC) and APC-off serving
-  cascade too. B=1 batches are stamped -- inert until rows join.
+  preserves it. The owned BatchKVCache and BatchQuantizedKVCache carry
+  the stamp: filter() keeps the surviving rows' entries, so retirement
+  keeps the stamp, and extend() (admission into a live batch) re-derives
+  it from both sides' tokens: same-prefix admission keeps cascading, a
+  diverging row clears it. The _extend_cache merge lift carries stamps
+  across B=1-to-batch conversion. No APC mode is required, so hybrid
+  models (exact-snapshot APC) and APC-off serving cascade too. B=1
+  batches are stamped -- inert until rows join.
 
 * A decode route. Module-global scaled_dot_product_attention seams (the
   gemma4_batched_sdpa pattern) claim stamped B>1 calls at decode width
@@ -49,8 +51,9 @@ from typing import cast
 
 import mlx.core as mx
 
+from gmlx.cache.kv_cache import _cascade_lcp, _cascade_merge
 from gmlx.envflags import env_bool, env_int
-from gmlx.upstream.patching import link, wrapped_with
+from gmlx.upstream.patching import wrapped_with
 
 _installed_route = False
 _installed_stamp = False
@@ -343,78 +346,6 @@ def _row_bytes(ids):
     return array.array("i", [int(t) for t in ids]).tobytes()
 
 
-def _lcp_rows(rows):
-    """Common-prefix token count across packed rows (memcmp-speed)."""
-    import os
-
-    if not rows or any(not r for r in rows):
-        return 0
-    return len(os.path.commonprefix(list(rows))) // 4
-
-
-def _merge_stamps(a, b):
-    """Stamp for a batch formed by extend(): self rows then other rows
-    (BatchKVCache.extend row order). None when nothing survives."""
-    if a is None or b is None:
-        return None
-    P = _lcp_rows([a["tok"][0][: 4 * a["P"]], b["tok"][0][: 4 * b["P"]]])
-    if P <= 0:
-        return None
-    return {"P": P, "tok": a["tok"] + b["tok"]}
-
-
-def _merge_stamp_on_extend(cache):
-    """Instance-level extend wrapper: admission re-derives the stamp from
-    both sides' token bytes (an unstamped side clears it)."""
-    fn = getattr(cache, "extend", None)
-    if fn is None or wrapped_with(fn, "_gmlx_cascade_merge"):
-        return
-    orig = fn
-
-    def _extend(other, _c=cache, _orig=orig):
-        merged = _merge_stamps(
-            _c.__dict__.get("_gmlx_cascade"),
-            getattr(other, "_gmlx_cascade", None))
-        out = _orig(other)
-        if merged is None:
-            _c.__dict__.pop("_gmlx_cascade", None)
-        else:
-            _c._gmlx_cascade = merged
-        return out
-
-    link(_extend, orig, "_gmlx_cascade_merge")
-    cache.extend = _extend
-
-
-def _mask_stamp_on_filter(cache):
-    """Instance-level filter wrapper: retired rows leave the stamp; the
-    shared prefix stays valid for every surviving row. ``keep`` holds the
-    surviving rows' indices, as the stock batch loop and the spec engine
-    pass it; a stamp whose rows do not cover them is dropped."""
-    fn = getattr(cache, "filter", None)
-    if fn is None or wrapped_with(fn, "_gmlx_cascade_filter"):
-        return
-    orig = fn
-
-    def _filter(keep, *a, _c=cache, _orig=orig, **kw):
-        info = _c.__dict__.get("_gmlx_cascade")
-        out = _orig(keep, *a, **kw)
-        if info is not None:
-            ks = keep.tolist() if hasattr(keep, "tolist") else list(keep)
-            rows = info["tok"]
-            tok = ()
-            if all(0 <= int(k) < len(rows) for k in ks):
-                tok = tuple(rows[int(k)] for k in ks)
-            if tok:
-                _c._gmlx_cascade = {"P": info["P"], "tok": tok}
-            else:
-                _c.__dict__.pop("_gmlx_cascade", None)
-        return out
-
-    link(_filter, orig, "_gmlx_cascade_filter")
-    cache.filter = _filter
-
-
 def carry_stamp(src, dst):
     """Copy a live cascade stamp from one cache object to another.
 
@@ -425,8 +356,6 @@ def carry_stamp(src, dst):
     if st is None or dst is None:
         return
     dst._gmlx_cascade = st
-    _merge_stamp_on_extend(dst)
-    _mask_stamp_on_filter(dst)
 
 
 _KVARN_STAMP_NOTED = [False]
@@ -441,14 +370,12 @@ def _stamp_caches(caches, rows):
             _KVARN_STAMP_NOTED[0] = True
             _log.info("cascade decode inactive under kvarn KV")
         return False
-    P = _lcp_rows(rows)
+    P = _cascade_lcp(rows)
     if P <= 0:
         return False
     tok = tuple(rows)
     for c in caches:
         c._gmlx_cascade = {"P": P, "tok": tok}
-        _merge_stamp_on_extend(c)
-        _mask_stamp_on_filter(c)
     if _STAMPS[0] == 0:
         import sys
 
@@ -531,13 +458,11 @@ def _make_stamped_extend_cache(orig):
         ]
         out = orig(a, b)
         for oc, (sa, sb) in zip(out, stamps):
-            merged = _merge_stamps(sa, sb)
+            merged = _cascade_merge(sa, sb)
             if merged is None:
                 oc.__dict__.pop("_gmlx_cascade", None)
             else:
                 oc._gmlx_cascade = merged
-                _merge_stamp_on_extend(oc)
-                _mask_stamp_on_filter(oc)
         return out
 
     setattr(_extend_cache, "_gmlx_orig", orig)
