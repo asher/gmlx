@@ -174,6 +174,7 @@
   "mlx_vlm.models.gemma4.processing_gemma4:Gemma4Processor.__call__": "69143be8970e5ba39f36f46b6fdcef39c932186e8b742c83c7b950a6ad29b601",
   "mlx_vlm.models.gemma4_unified.gemma4_unified:Model._should_disable_chunked_prefill": "a774ab3362641a163d73207d9caf1523fa9b5dd0dffcf8558eb6b6616fb54954",
   "mlx_vlm.models.kimi_k25.processing_kimi_k25:KimiK25Processor.__call__": "0e997687a37c9923aafc5c61d7eb893cde58d3b26a93aff96c5a7c99ae65b84d",
+  "mlx_vlm.models.llava.processing_llava:LlavaProcessor.__call__": "f2eda4a6f69200c7e1d678cde9001aa824210796cd4fc6c97299202d376b7481",
   "mlx_vlm.models.pixtral.processing_pixtral:PixtralProcessor.__call__": "fe4072794510ff451d61b3a2f7cfc660af3e8d564923e71ec90b5f3cf9834050",
   "mlx_vlm.models.qwen3_5.config:": "b4db2144b162bbc27c0d843833fdd969413b44260ed1f024866eeadf1832dc0f",
   "mlx_vlm.models.qwen3_5.gated_delta:": "c3eca0ae56026626a3302a08b8ce8a69f7fe7fdb08b41d94f27ad012d6c3270c",

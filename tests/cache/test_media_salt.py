@@ -180,6 +180,135 @@ def test_deepseek_v4_images_key_on_their_vit_grid():
     assert a != b
 
 
+def _starts(spans):
+    return [s for s, _h in spans or ()]
+
+
+def test_muse_glimmer_runs_pair_by_the_image_sizes():
+    """An image resized to h x w pixels expands to (h // cell) *
+    (w // cell) patch ids between its start and end markers, with cell =
+    patch * spatial merge."""
+    from mlx_vlm.models.base import to_mlx
+    from PIL import Image
+
+    from gmlx.load.vlm import _MuseGlimmerGgufImageProcessor
+
+    ip = _MuseGlimmerGgufImageProcessor([0.5] * 3, [0.5] * 3, patch_size=14,
+                                        spatial_merge_size=2)
+    raw = dict(to_mlx(ip([Image.new("RGB", (60, 90), (200, 0, 0)),
+                          Image.new("RGB", (120, 50), (0, 200, 0))])))
+    counts = [ip.soft_tokens(h, w) for h, w in raw["image_sizes"].tolist()]
+    assert counts == [6, 10]
+    cfg = SimpleNamespace(image_token_id=9, image_token_index=9,
+                          vision_config=SimpleNamespace(
+                              patch_size=14, spatial_merge_size=2))
+    processor = SimpleNamespace(image_processor=ip)
+
+    def ids(a, b):
+        return mx.array([[1, 5] + [9] * a + [6, 2, 5] + [9] * b + [6, 3]])
+
+    for proc in (processor, None):
+        assert _starts(image_spans(ids(6, 10), raw, cfg, proc)) == [2, 11]
+    # Runs of other lengths hold other images.
+    assert len(image_spans(ids(10, 6), raw, cfg, processor)) == 1
+
+
+def test_deepseek_v41_blocks_pair_by_the_image_meta():
+    """Each image's block, START (IMAGE * n_llm_w + NEWLINE) * n_llm_h END,
+    is one run of media ids."""
+    from mlx_vlm.models.base import to_mlx
+    from PIL import Image
+
+    from gmlx.load.vlm import _DeepseekV41VGgufImageProcessor
+    from gmlx.models.deepseek_v41.image_block import (
+        N_BLOCK_TYPES,
+        build_image_block,
+    )
+
+    vocab = 100
+    cfg = SimpleNamespace(image_token_id=7, image_token_index=7,
+                          media_token_ids=[vocab + t
+                                           for t in range(N_BLOCK_TYPES)])
+    ip = _DeepseekV41VGgufImageProcessor(patch_size=14, downsample_ratio=3,
+                                         max_n_token=1024, min_pixels=0)
+    images = [Image.new("RGB", (84, 126), (200, 0, 0)),
+              Image.new("RGB", (168, 84), (0, 200, 0))]
+
+    def prompt(metas):
+        ids = [1]
+        for i, (_vh, _vw, h, w) in enumerate(metas):
+            ids += [vocab + int(t) for t in build_image_block(h, w)[0]]
+            ids.append(2 + i)
+        return mx.array([ids])
+
+    both = dict(to_mlx(ip(images)))
+    metas = both["image_meta"].tolist()
+    first = len(build_image_block(*metas[0][2:])[0])
+    spans = image_spans(prompt(metas), both, cfg)
+    assert _starts(spans) == [1, 2 + first]
+    # The second image keys as it does alone.
+    alone = dict(to_mlx(ip(images[1:])))
+    assert spans[1][1] == image_spans(prompt(alone["image_meta"].tolist()),
+                                      alone, cfg)[0][1]
+    # Blocks laid out for the other order hold other images.
+    assert len(image_spans(prompt(metas[::-1]), both, cfg)) == 1
+
+
+def _llava(strategy):
+    """mlx-vlm's llava processor over 28 x 28 crops with patch 14, and a
+    tokenizer whose ``<image>`` is id 3."""
+    from mlx_vlm.models.llava.processing_llava import LlavaProcessor
+    from tokenizers import pre_tokenizers
+    from transformers import CLIPImageProcessor
+
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    tokens = (["<s>", "</s>", "<pad>", "<image>"]
+              + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He", "wo"])
+    tokenizer = load_tokenizer_from_gguf({
+        "general.architecture": "qwen2",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.merges": ["H e", "w o"],
+        "tokenizer.ggml.token_type": [3] * 4 + [1] * (len(tokens) - 4),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+    }, "qwen2")
+    image_processor = CLIPImageProcessor(
+        size={"shortest_edge": 28}, crop_size={"height": 28, "width": 28})
+    return LlavaProcessor(image_processor=image_processor, tokenizer=tokenizer,
+                          patch_size=14, vision_feature_select_strategy=strategy,
+                          num_additional_image_tokens=1)
+
+
+@pytest.mark.parametrize("strategy", ["default", "full"])
+def test_llava_runs_pair_by_the_patch_grid(strategy):
+    """An image expands to (H // patch) * (W // patch) tokens, plus the CLS
+    token under the "full" strategy."""
+    from PIL import Image
+
+    processor = _llava(strategy)
+    out = processor(images=[Image.new("RGB", (40, 30), (200, 0, 0)),
+                            Image.new("RGB", (30, 40), (0, 200, 0))],
+                    text=["a<image>b<image>c"])
+    ids, raw = out["input_ids"], {"pixel_values": out["pixel_values"]}
+    per = 5 if strategy == "full" else 4
+    assert ids.tolist()[0].count(3) == 2 * per
+    cfg = SimpleNamespace(image_token_index=3,
+                          vision_feature_select_strategy=strategy,
+                          vision_config=SimpleNamespace(patch_size=14,
+                                                        image_size=28))
+    spans = image_spans(ids, raw, cfg, processor)
+    assert _starts(spans) == [1, 2 + per]
+    # The config alone gives the same count.
+    assert image_spans(ids, raw, cfg) == spans
+    other = "default" if strategy == "full" else "full"
+    cfg.vision_feature_select_strategy = other
+    assert len(image_spans(ids, raw, cfg)) == 1
+
+
 @pytest.mark.parametrize("as_dict", [False, True], ids=["attrs", "dict"])
 def test_omni_images_pair_by_the_thinker_ids(as_dict):
     """qwen3_omni_moe names its image id and vision config on the thinker
@@ -196,7 +325,7 @@ def test_omni_images_pair_by_the_thinker_ids(as_dict):
     raw = {"pixel_values": mx.arange(12 * 4, dtype=mx.float32).reshape(12, 4),
            "image_grid_thw": mx.array([[1, 2, 4], [1, 2, 2]])}
     ids = mx.array([[1, 9, 9, 2, 9, 3]])
-    assert [s for s, _h in image_spans(ids, raw, cfg)] == [1, 4]
+    assert _starts(image_spans(ids, raw, cfg)) == [1, 4]
 
 
 def test_unmatched_runs_key_every_image_at_the_first_run():

@@ -271,11 +271,26 @@ def _first(*values: Any) -> Any:
     return next((v for v in values if v is not None), None)
 
 
-def _expected_tokens(raw: dict, n: int, config: Any,
-                     processor: Any) -> list[int] | None:
-    """The image tokens each of ``n`` images expands to, by the rule of
-    the processor that emitted ``raw``, or None when the rule is unknown.
-    The image processor's settings come first, then the vision config's.
+def _per_image(pv: Any, n: int) -> list[Any] | None:
+    """The ``[C, H, W]`` pixels of each of ``n`` images, or None."""
+    if isinstance(pv, (list, tuple)):
+        images = list(pv)
+    elif _is_array(pv) and len(pv.shape) == 4:
+        images = [pv[i] for i in range(int(pv.shape[0]))]
+    else:
+        return None
+    if len(images) != n or any(len(x.shape) != 3 for x in images):
+        return None
+    return images
+
+
+def _expected_tokens(raw: dict, n: int, config: Any, processor: Any
+                     ) -> tuple[list[int], bool] | None:
+    """The tokens each of ``n`` images expands to, by the rule of the
+    processor that emitted ``raw``, and whether that count is the image's
+    whole run (its markers are image ids too) rather than its soft tokens.
+    None when the rule is unknown. The processor's settings come first,
+    then the vision config's.
     """
     import numpy as np
 
@@ -288,7 +303,7 @@ def _expected_tokens(raw: dict, n: int, config: Any,
                            _cfg(ip, "spatial_merge_size"),
                            _cfg(vc, "spatial_merge_size"), 2))
         rows = np.asarray(grid).astype(np.int64).reshape(-1, 3)
-        return [int(r.prod()) // (merge * merge) for r in rows]
+        return [int(r.prod()) // (merge * merge) for r in rows], False
     grid = raw.get("image_grid_hws")
     if grid is not None:
         # Kimi: h*w patches, one merge kernel per token.
@@ -297,29 +312,57 @@ def _expected_tokens(raw: dict, n: int, config: Any,
                             dtype=np.int64).reshape(-1)
         per = int(kernel.prod()) if kernel.size == 2 else int(kernel[0]) ** 2
         rows = np.asarray(grid).astype(np.int64).reshape(-1, 2)
-        return [int(r.prod()) // per for r in rows]
+        return [int(r.prod()) // per for r in rows], False
     pos = raw.get("image_position_ids")
     if _is_array(pos) and len(pos.shape) == 3 and int(pos.shape[0]) == n:
         # Gemma-4 12B: one token per patch; padding rows sit at -1.
         arr = np.asarray(pos)
-        return [int((arr[i, :, 0] >= 0).sum()) for i in range(n)]
+        return [int((arr[i, :, 0] >= 0).sum()) for i in range(n)], False
+    meta = raw.get("image_meta")
+    if meta is not None and raw.get("image_spans") is None:
+        # DeepSeek-V4.1: START (IMAGE * n_llm_w + NEWLINE) * n_llm_h END,
+        # every one an image id, per (n_vit_h, n_vit_w, n_llm_h, n_llm_w).
+        from gmlx.models.deepseek_v41.image_block import build_image_block
+
+        rows = np.asarray(meta).astype(np.int64).reshape(-1, 4)
+        return [len(build_image_block(int(r[2]), int(r[3]))[0])
+                for r in rows], True
     patch = _first(_cfg(ip, "patch_size"), _cfg(vc, "patch_size"))
     pool = _first(_cfg(ip, "pooling_kernel_size"),
                   _cfg(vc, "pooling_kernel_size"))
     pv = raw.get("pixel_values")
     if patch and pool:
         # Gemma-4: [C, H, W] per image, pool**2 patches per token.
-        if isinstance(pv, (list, tuple)):
-            images = list(pv)
-        elif _is_array(pv) and len(pv.shape) == 4:
-            images = [pv[i] for i in range(int(pv.shape[0]))]
-        else:
-            return None
-        if len(images) != n or any(len(x.shape) != 3 for x in images):
+        images = _per_image(pv, n)
+        if images is None:
             return None
         p, k = int(patch), int(pool)
         return [(int(x.shape[1]) // p) * (int(x.shape[2]) // p) // (k * k)
-                for x in images]
+                for x in images], False
+    sizes = raw.get("image_sizes")
+    merge = _first(_cfg(ip, "spatial_merge_size"),
+                   _cfg(vc, "spatial_merge_size"))
+    if sizes is not None and patch and merge:
+        # Muse Glimmer: an image resized to h x w pixels, one token per
+        # cell of patch * merge pixels on a side.
+        cell = int(patch) * int(merge)
+        rows = np.asarray(sizes).astype(np.int64).reshape(-1, 2)
+        return [int(h // cell) * int(w // cell) for h, w in rows], False
+    strategy = _first(_cfg(processor, "vision_feature_select_strategy"),
+                      _cfg(config, "vision_feature_select_strategy"))
+    patch = _first(_cfg(processor, "patch_size"), patch)
+    if strategy is not None and patch:
+        # llava: the first image's (H // patch) * (W // patch) patches plus
+        # the processor's extra tokens (CLS), less the one the "default"
+        # strategy drops, for every image.
+        images = _per_image(pv, n)
+        if images is None:
+            return None
+        p = int(patch)
+        extra = int(_first(_cfg(processor, "num_additional_image_tokens"), 1))
+        per = ((int(images[0].shape[1]) // p) * (int(images[0].shape[2]) // p)
+               + extra - (1 if strategy == "default" else 0))
+        return [per] * n, False
     return None
 
 
@@ -335,15 +378,18 @@ def _runs_hold_one_image_each(row: Any, runs: list[tuple[int, int]],
     blocks = raw.get("image_spans")
     if blocks is not None:
         return [(int(a), int(b)) for a, b in blocks] == runs
-    expected = _expected_tokens(raw, len(runs), config, processor)
-    if expected is None or len(expected) != len(runs):
+    rule = _expected_tokens(raw, len(runs), config, processor)
+    if rule is None:
+        return False
+    expected, whole = rule
+    if len(expected) != len(runs):
         return False
     # The ids an image expands to, without the begin and end markers some
     # configs list beside them.
     ids = _id_config(config)
-    soft = [int(v) for v in (_cfg(ids, "image_token_id"),
-                             _cfg(ids, "image_token_index"))
-            if v is not None]
+    soft = [] if whole else [int(v) for v in (_cfg(ids, "image_token_id"),
+                                              _cfg(ids, "image_token_index"))
+                             if v is not None]
     for (a, b), want in zip(runs, expected):
         got = int(np.isin(row[a:b], soft).sum()) if soft else b - a
         if got != want:

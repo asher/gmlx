@@ -567,6 +567,11 @@ SEAMS: tuple[Seam, ...] = (
          "KimiK25Processor.__call__",
          "media_salt._expected_tokens (an image expands to h*w of its "
          "image_grid_hws row over the merge kernel's area)"),
+    Seam("mlx_vlm.models.llava.processing_llava", "LlavaProcessor.__call__",
+         "media_salt._expected_tokens (every image expands to the first "
+         "image's (H // patch_size) * (W // patch_size) patches plus "
+         "num_additional_image_tokens, less one under the default "
+         "strategy)"),
     # --- tool-parser registry (upstream.tool_parsers.register_tool_parser,
     # used by the hy_v3, hy_v4, deepseek_v41, muse_glimmer and
     # function_gemma tools) ---
