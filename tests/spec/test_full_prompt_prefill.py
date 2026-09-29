@@ -285,12 +285,24 @@ def teardown_module(module):
     qwen35_verify_fold._installed = _q35_seams[5]
 
 
+def _server_apc_salt(model, processor):
+    """The APC salt the server computes for a text prompt on the request
+    thread and hands the engine as ``_apc_semantic_hash``. A row without
+    it salts on its own full-prompt ``inputs_embeds``, which no other
+    prompt shares, so every lookup misses."""
+    from mlx_vlm import apc as _apc
+    return _apc.semantic_extra_hash(
+        tenant=None, image_hash=0, media={"audio": None, "video": None},
+        model=getattr(model, "language_model", model), processor=processor)
+
+
 def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
     """Run MTP decode through BatchGenerator. Single insert, drain to completion.
 
     ``apc_manager`` goes through the real construction seam: the stash
     wrapper captures it onto the model (or clears a stale stash when None),
-    exactly as the server's generation worker does.
+    exactly as the server's generation worker does, and each row carries
+    the salt the server computes for it.
     """
     from mlx_vlm.generate.ar import BatchGenerator
 
@@ -298,6 +310,10 @@ def _run_mtp(model, drafter, tokenizer, ids_list, n, apc_manager=None):
 
     processor = _make_processor(tokenizer)
     prompt_kwargs_list = _embed_prompts(model, ids_list)
+    if apc_manager is not None:
+        salt = _server_apc_salt(model, processor)
+        for kw in prompt_kwargs_list:
+            kw["_apc_semantic_hash"] = salt
     gen = BatchGenerator(
         model,
         processor,
@@ -850,8 +866,11 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
     checkpoint tier (attn-KV blocks + recurrent-state sidecar, tier=ckpt in
     the hit log) with first-token parity. With the kill switch thrown the
     tier is invisible both ways: a re-run of the cold turn stores stock
-    exact entries again, and the following warm turn hits tier=exact with
-    the same parity."""
+    exact entries again, and the following warm turn restores one with the
+    same parity. The stock admission pick finds that entry under the
+    server's salt and builds a warm suffix batch, which the owned prefill
+    leaves to the stock machinery, so the hit shows in the manager's
+    exact_hits and not in an owned tier=exact line."""
     import gmlx.spec.engine as _eng
     from mlx_vlm.apc import APCManager
 
@@ -901,11 +920,15 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
                 "kill switch did not stop ckpt lookups"
             )
             _clear_l0(model)
+            exact_hits = manager.stats_snapshot()["exact_hits"]
             with _capture_spec_log() as messages:
                 toks_exact = _run_mtp(
                     model, drafter, tokenizer, [turn2_ids], N_DECODE,
                     apc_manager=manager)[0]
-            assert any("tier=exact" in m for m in messages), (
+            assert not any("tier=ckpt" in m for m in messages), (
+                "kill switch did not stop ckpt lookups"
+            )
+            assert manager.stats_snapshot()["exact_hits"] > exact_hits, (
                 "exact-tier fallback did not serve; log: "
                 + "; ".join(messages[-8:])
             )
