@@ -118,11 +118,11 @@ def test_install_is_idempotent():
 
 # The GPU runs production numerics: float32 matmuls at TF32 precision on
 # M5-class GPUs, where the batch and a single-stream row differ by rounding.
-# Over 16 weight seeds that difference reached 0.0148 on row 0 and 0.0087 on
+# Over 40 weight seeds that difference reached 0.0148 on row 0 and 0.0107 on
 # row 1, and each row's tolerance is about three times its worst case. With
 # stock finalize, row 1 attends its four rolled-in drafts and differs by
-# 0.177 to 0.444, at least 6.8 times its tolerance.
-_ROW_TOL = (0.045, 0.026)
+# 0.177 to 0.444 over the same seeds, at least 5.5 times its tolerance.
+_ROW_TOL = (0.045, 0.032)
 
 
 def _stock_finalize(cls):
