@@ -12,12 +12,15 @@ On the media path ``process_inputs`` hands the flag only to a processor
 that names it as a parameter. Gemma-4's processor takes it through
 ``**kwargs``, so a Gemma-4 image prompt gets two BOS as well.
 
-The fix applies the rule of mlx-lm's ``stream_generate`` and gmlx's
-``encode_prompt`` to the one duplicate token. A prompt that opens with the
-tokenizer's BOS string is encoded without special tokens when the only
-special token the tokenizer adds to one sequence is a leading BOS
-(``_adds_only_bos``). A tokenizer that also adds EOS or another token keeps
-the stock flag, so the fix never drops more than the duplicate BOS.
+The fix applies the rule of mlx-lm's ``stream_generate`` to the one
+duplicate token. A prompt that opens with the tokenizer's BOS string is
+encoded without special tokens when the only special token the tokenizer
+adds to one sequence is a leading BOS (``_adds_only_bos``). A tokenizer that
+also adds EOS or another token keeps the stock flag, so the fix never drops
+more than the duplicate BOS. gmlx's own ``encode_prompt`` (``gmlx run`` and
+``gmlx chat``) gives the same ids for a tokenizer that adds only BOS, and
+for any other puts the leading ids from ``leading_ids`` in front once and
+leaves out the trailing ones.
 
 The Laguna chat template writes its own BOS, and its processor names its
 model type. When a processor names a type whose markers
@@ -72,6 +75,7 @@ _PROBE = "a"
 _DROPPING = contextvars.ContextVar("_gmlx_single_bos_dropping", default=False)
 _ONLY_BOS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _LEAD: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_LEAD_IDS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def _tokenizer(processor):
@@ -153,6 +157,24 @@ def _probe_lead(tokenizer) -> str | None:
     except Exception:  # noqa: BLE001  an unreadable tokenizer keeps stock
         return None
     return text if isinstance(text, str) and text else None
+
+
+def _probe_lead_ids(tokenizer) -> list[int] | None:
+    ids = _probe(tokenizer)
+    if ids is None:
+        return None
+    bare, full = ids
+    for i in range(len(full) - len(bare) + 1):
+        if full[i:i + len(bare)] == bare:
+            return full[:i]
+    return None
+
+
+def leading_ids(tokenizer) -> list[int] | None:
+    """The ids ``tokenizer`` adds in front of one sequence, its BOS when it
+    adds one, or None when its encoding with special tokens does not hold
+    the one without them whole. Probed once per tokenizer."""
+    return _memo(_LEAD_IDS, tokenizer, _probe_lead_ids)
 
 
 def _template_owns_markers(processor, prompts) -> bool:

@@ -298,21 +298,27 @@ def _chat(tokenizer, prompt, monkeypatch):
     return [int(t) for t in chat._encode_turn(tokenizer, prompt, True)]
 
 
-@pytest.mark.parametrize("eos", [False, True], ids=["bos-tok", "bos-eos-tok"])
+@pytest.mark.parametrize(
+    "kind", ["bos-tok", "bos-eos-tok", "unnamed-bos-tok", "unnamed-bos-eos-tok"])
 @pytest.mark.parametrize("prompt", [_BOS + "Hello", "Hello"],
                          ids=["bos", "no-bos"])
-def test_serve_run_and_chat_encode_a_prompt_alike(fixed, monkeypatch, eos,
-                                                  prompt):
-    """A tokenizer that adds only BOS drops the duplicate on every path,
-    and one that adds EOS as well keeps the stock encoding on every path."""
-    tokenizer = TokenizerWrapper(_tokenizer(eos))
-    serve = _row(_serve("llama", _make_text_processor(tokenizer), prompt))
-    assert _run(tokenizer, prompt, monkeypatch) == serve
-    assert _chat(tokenizer, prompt, monkeypatch) == serve
-    if eos:
-        assert serve == tokenizer.encode(prompt)
-    else:
-        assert _bos_ids(mx.array([serve])) == 1
+def test_run_and_chat_encode_one_bos_and_no_eos(fixed, monkeypatch, kind,
+                                                prompt):
+    """``gmlx run`` and ``gmlx chat`` give a prompt one BOS and no trailing
+    EOS, whatever the tokenizer adds and whether or not it names its BOS.
+    A tokenizer that adds only a named BOS encodes as the server does. The
+    server keeps the stock encoding of the others."""
+    backend = _tokenizer("-eos" in kind)
+    if kind.startswith("unnamed"):
+        backend.bos_token = None
+    tokenizer = TokenizerWrapper(backend)
+    want = [0] + [int(t) for t in tokenizer.encode(
+        prompt.removeprefix(_BOS), add_special_tokens=False)]
+    assert _run(tokenizer, prompt, monkeypatch) == want
+    assert _chat(tokenizer, prompt, monkeypatch) == want
+    if kind == "bos-tok":
+        serve = _serve("llama", _make_text_processor(tokenizer), prompt)
+        assert _row(serve) == want
 
 
 def test_only_a_tokenizer_that_adds_bos_alone_drops_it():

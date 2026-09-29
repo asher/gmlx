@@ -2167,7 +2167,7 @@ def _opens_thinking(prompt) -> bool:
 
 def _encode_turn(tok, prompt_text, starts_cache: bool) -> list:
     """The ids of one turn's render. A render that starts the cache is a
-    whole prompt and encodes as ``gmlx run`` and the server encode one
+    whole prompt and encodes as ``gmlx run`` encodes one
     (``encode_prompt``). A later turn continues the cached sequence, so its
     render adds no special tokens."""
     if starts_cache:

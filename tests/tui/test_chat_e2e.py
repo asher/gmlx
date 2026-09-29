@@ -231,8 +231,8 @@ def _run_text_chat_kv(monkeypatch, tmp_path, lines, *, extra_argv=(), kv_cls=_KV
 
 def test_a_turn_that_starts_the_cache_encodes_as_run(monkeypatch, tmp_path):
     """The first turn's render is a whole prompt and encodes as `gmlx run`
-    and the server encode one. A later turn continues the cached sequence
-    and adds no special tokens."""
+    encodes one. A later turn continues the cached sequence and adds no
+    special tokens."""
     from mlx_lm.tokenizer_utils import TokenizerWrapper
     from test_single_bos_fix import _tokenizer
 
@@ -248,7 +248,8 @@ def test_a_turn_that_starts_the_cache_encodes_as_run(monkeypatch, tmp_path):
     assert rc == 0
     first, second = (list(t["prompt"]) for t in stream.turns)
     assert first == encode_prompt(tok, "<s>Hello")
-    assert first[-1] == 1  # the tokenizer's EOS, as the server keeps it
+    # One BOS, and none of the EOS the tokenizer adds.
+    assert first == tok.encode("<s>Hello", add_special_tokens=False)
     assert second == tok.encode("<s>wo", add_special_tokens=False)
 
 

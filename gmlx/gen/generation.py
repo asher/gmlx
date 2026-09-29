@@ -912,21 +912,30 @@ _MTP_FINISH_WHY = "on the stock MTP engine (run with --no-mtp to use it)"
 
 
 def encode_prompt(tokenizer, prompt: str) -> list:
-    """Encode a prompt as the server does: with the tokenizer's special
-    tokens, less a BOS the prompt already opens with.
+    """Encode a generation prompt with one BOS and no trailing EOS.
 
-    A chat template that emits its own BOS, on a GGUF whose
-    ``add_bos_token`` is true, would otherwise get a second one from the
-    tokenizer's post-processor. The ds4 DeepSeek-V4.1 conversion sets that
-    flag where the llama.cpp one does not, and both ship the same template.
-    The rule is ``single_bos_fix``'s: a prompt that opens with BOS encodes
-    without special tokens only when that BOS is the one token the
-    tokenizer adds, so a tokenizer that adds EOS too keeps both.
+    The prompt is encoded without special tokens, and the ids the
+    tokenizer adds in front of a sequence (its BOS) go before it unless it
+    already opens with them. A chat template that emits its own BOS, on a
+    GGUF whose ``add_bos_token`` is true, would otherwise get a second one
+    from the tokenizer's post-processor, and one whose ``add_eos_token``
+    is true would end the prompt in EOS. The ds4 DeepSeek-V4.1 conversion
+    sets ``add_bos_token`` where the llama.cpp one does not, and both ship
+    the same template. For a tokenizer that adds only BOS the result is the
+    server's (``single_bos_fix``), which it also keeps for a tokenizer
+    whose encoding the probe cannot split.
     """
-    from gmlx.upstream.single_bos_fix import drops_duplicate_bos
+    from gmlx.upstream.single_bos_fix import drops_duplicate_bos, leading_ids
 
-    return tokenizer.encode(
-        prompt, add_special_tokens=not drops_duplicate_bos(tokenizer, prompt))
+    lead = leading_ids(tokenizer)
+    if lead is None:
+        return tokenizer.encode(
+            prompt,
+            add_special_tokens=not drops_duplicate_bos(tokenizer, prompt))
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    if not lead or list(ids[:len(lead)]) == lead:
+        return ids
+    return lead + list(ids)
 
 
 def _with_mtp_finish_key_notice(fn, *args, **kwargs):
