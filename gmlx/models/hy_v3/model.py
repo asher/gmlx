@@ -45,15 +45,15 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
 from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    scaled_dot_product_attention,
-)
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.cache.attention import (
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
 from gmlx.upstream.graft import graft_module
 
 

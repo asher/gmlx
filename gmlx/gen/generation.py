@@ -185,7 +185,7 @@ def setup_kvarn_cache(
     if make_cache is not None:
         prompt_cache = make_cache()
     else:
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     policy = convert_kvarn_cache(
@@ -224,13 +224,12 @@ def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=No
             file=out,
         )
         return None
-    from mlx_vlm.models import cache as _cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
     from gmlx.spec.helpers import _resolve_block_total
 
     lm = model.language_model if hasattr(model, "language_model") else model
-    built = _cache.make_prompt_cache(lm)
+    built = make_prompt_cache(lm)
     decline = kvarn_mtp_window_decline(built)
     if decline is not None:
         print(f"warning: --kv-quant-scheme kvarn dropped: {decline}", file=out)
@@ -492,8 +491,7 @@ def generate(
     elif kv_bits is not None:
         # Resolve on the constructed stack. A bare make_cache probe
         # misses what max_kv_size builds.
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
-
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
         from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
                                           resolve_and_report)
 
@@ -514,7 +512,7 @@ def generate(
 
     if prompt_cache is None and prefill_tail.tail_model(model):
         # The tail arms on a cache gmlx owns; mlx-lm would build this one.
-        from mlx_lm.models.cache import make_prompt_cache as _mpc
+        from gmlx.cache.kv_cache import make_prompt_cache as _mpc
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     gen_kwargs = {
@@ -732,8 +730,8 @@ def _generate_over(
     phase 2 prints raw (the forced continuation is the thing being probed).
     ``prompt_ids`` is the encoded ``prompt`` phase 1 prefills."""
     from mlx_lm.generate import stream_generate
-    from mlx_lm.models.cache import make_prompt_cache
 
+    from gmlx.cache.kv_cache import make_prompt_cache
     from gmlx.spec.overgen import (
         append_log,
         build_critique_bridge,
@@ -892,12 +890,12 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
     from gmlx.serve.cb_phase import flip
 
     flip("prefill")
-    from mlx_vlm.models import cache as _cache
+    from gmlx.cache.kv_cache import make_prompt_cache
 
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
-    c = cache if cache is not None else _cache.make_prompt_cache(lm)
+    c = cache if cache is not None else make_prompt_cache(lm)
     n_total = input_ids.shape[1]
     i = 0
     while i < n_total - 1:
@@ -1200,9 +1198,9 @@ def generate_speculative_owned(
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
     from mlx_lm.sample_utils import make_sampler
-    from gmlx.spec.helpers import _resolve_block_total
-    from mlx_vlm.models import cache as _cache
 
+    from gmlx.cache.kv_cache import make_prompt_cache
+    from gmlx.spec.helpers import _resolve_block_total
     from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
 
     from .thinking_budget import (
@@ -1253,7 +1251,7 @@ def generate_speculative_owned(
         # a silent fall-through to the pooled packing.
         kv_bits = None
     if prompt_cache is None:
-        prompt_cache = _cache.make_prompt_cache(lm)
+        prompt_cache = make_prompt_cache(lm)
     if kv_bits is not None:
         # Owned rounds take the layers serve takes; the stock walks
         # decline. No later converter runs here, so convert now.
@@ -1547,7 +1545,7 @@ def _stream_generate_speculative(
     times an MTP reply exactly like the plain text path.
 
     ``prompt`` is the already chat-templated new turn; its tokens append to
-    ``prompt_cache`` (created once with mlx-vlm's ``make_prompt_cache`` and reused
+    ``prompt_cache`` (created once with ``make_prompt_cache`` and reused
     across turns - for single-stream ``draft_kind="mtp"`` that cache is a plain
     target KV cache the native drafter reads back, so cross-turn reuse is identical
     to the text path). Greedy output matches the non-speculative path token-for-token.

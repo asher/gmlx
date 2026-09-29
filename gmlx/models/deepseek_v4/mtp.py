@@ -48,9 +48,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as v4
+from gmlx.cache.attention import create_attention_mask
 from gmlx.cache.kv_cache import set_undo_armed
 from gmlx.spec.drafter_protocol import native_block_size
 from .hyper_connection import HyperHead
@@ -357,12 +356,9 @@ class DeepseekV4MTPDrafter(nn.Module):
         return self
 
     def make_cache(self) -> List[Any]:
-        # Runtime-matching origin: the drafter KV sidecar hands these to the
-        # mlx-vlm apc clone path, which isinstance-gates on its own classes.
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import RotatingKVCache
 
-        return [construction_cache_module().RotatingKVCache(
-            max_size=self._sliding_window)]
+        return [RotatingKVCache(max_size=self._sliding_window)]
 
     def reset(self, target_model, left_padding: Optional[List[int]] = None) -> list:
         if left_padding is not None:

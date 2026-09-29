@@ -716,8 +716,6 @@ def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
         lambda r, cfg, ad, base_gguf_path=None:
         applied.append((r, ad, base_gguf_path)))
     monkeypatch.setattr(serving, "_ensure_inner_config", lambda m, c: None)
-    monkeypatch.setattr("gmlx.cache.compat.ensure_runtime_origin_make_cache",
-                        lambda m: None)
     monkeypatch.setattr(serving, "_make_text_processor", lambda tok: "PROC")
     serving._load_serveable_mtp("/m/t.gguf", adapter_gguf="/m/ad.lora.gguf")
     assert applied == [(target.language_model, "/m/ad.lora.gguf", "/m/t.gguf")]

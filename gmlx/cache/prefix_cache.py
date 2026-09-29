@@ -20,6 +20,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from .kv_cache import ArraysCache, CacheList, RotatingKVCache
 from .media_salt import salt_at
 
 _log = logging.getLogger(__name__)
@@ -116,16 +117,15 @@ def _owned_pair(keys: mx.array, values: mx.array):
 
 def _snapshot_entry(c: Any) -> Any:
     """Snapshot one prompt_cache entry, preserving offset for all cache types."""
-    from .compat import cache_types
     from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
-    if isinstance(c, cache_types("CacheList")):
+    if isinstance(c, CacheList):
         return (_CACHELIST_TAG, [_snapshot_entry(sub) for sub in c.caches])
     if isinstance(c, (DS4PoolingCache, DS4BatchPoolingCache)):
         # DeepSeek-V4 pooled-KV cache: no keys/values attrs, so the generic
         # branch would silently corrupt it on restore. state slices are lazy
         # views over the pre-mutation buffer node; _eval_snapshot pins them.
         return (_POOLING_TAG, c.state, c.meta_state)
-    if isinstance(c, cache_types("ArraysCache")):
+    if isinstance(c, ArraysCache):
         return (_ARRAYS_TAG, list(c.cache), c.left_padding, c.lengths)
     from .kvarn_cache import KVarNKVCache
     if isinstance(c, KVarNKVCache):
@@ -153,7 +153,7 @@ def _snapshot_entry(c: Any) -> Any:
     if offset is None:
         offset = state[0].shape[2]
     _idx = getattr(c, "_idx", 0)
-    if isinstance(c, cache_types("RotatingKVCache")):
+    if isinstance(c, RotatingKVCache):
         # When no trim/reorder applies, the returned arrays are the live ring
         # buffers, which decode mutates in place; _owned_pair decouples them.
         keys, values = _owned_pair(*_trim_rotating_state(c, state[0], state[1]))
@@ -165,9 +165,8 @@ def _snapshot_entry(c: Any) -> Any:
 
 def _restore_entry(c: Any, snap: Any) -> None:
     """Restore one prompt_cache entry from a snapshot."""
-    from .compat import cache_types
     if isinstance(snap, tuple) and snap[0] == _CACHELIST_TAG:
-        if isinstance(c, cache_types("CacheList")):
+        if isinstance(c, CacheList):
             # Member counts vary per layer on the mixed stacks (deepseek_v41
             # gives only its source layers a pool), so a zip would restore a
             # prefix and leave the rest stale.

@@ -212,15 +212,6 @@ def _mtp_prefill_init(batch) -> None:
             )
         return
 
-    # Serve wraps make_cache so mlx-lm-origin entries carry the mlx-vlm
-    # runtime's class identities; embedded and test users reach this init
-    # without that wrapper, and the L1 exact tiers dispatch on the vlm
-    # classes (an mlx-lm ArraysCache misses every adapter rule). Rebind
-    # here so both paths see the same identities. No-op when the entries
-    # are already vlm-origin.
-    from gmlx.cache.compat import rebind_to_runtime_origin
-    rebind_to_runtime_origin(batch.prompt_cache)
-
     # Upstream admission already restored a prefix and built this batch
     # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
     # token ids, so every lookup and store here would run in the wrong

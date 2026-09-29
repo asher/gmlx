@@ -114,7 +114,7 @@ class _KVView:
         return mx.concatenate([pk, keys], axis=2), mx.concatenate([pv, values], axis=2)
 
     def make_mask(self, n: int, return_array: bool = False, window_size=None):
-        from mlx_lm.models.cache import create_attention_mask
+        from gmlx.cache.kv_cache import create_attention_mask
 
         return create_attention_mask(n, self.offset, return_array, window_size)
 
@@ -152,14 +152,13 @@ class _StateView:
 def _view_kinds(cache) -> Optional[list[str]]:
     """``"kv"`` or ``"arr"`` per layer when broadcast views can stand in for
     every layer, else None."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import ArraysCache, KVCache
 
-    kv, arr = cache_types("KVCache"), cache_types("ArraysCache")
     kinds = []
     for c in cache:
-        if type(c) in kv:
+        if type(c) is KVCache:
             kinds.append("kv")
-        elif type(c) in arr:
+        elif type(c) is ArraysCache:
             kinds.append("arr")
         else:
             return None
@@ -288,7 +287,7 @@ class LetterReader:
     # -- model calls ---------------------------------------------------------
 
     def make_cache(self):
-        from mlx_lm.models.cache import make_prompt_cache
+        from gmlx.cache.kv_cache import make_prompt_cache
 
         m = self.model
         if not hasattr(m, "make_cache") and not hasattr(m, "layers"):

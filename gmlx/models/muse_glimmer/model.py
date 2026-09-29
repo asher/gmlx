@@ -37,14 +37,14 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from mlx_lm.models.base import BaseModelArgs
+from mlx_lm.models.rope_utils import initialize_rope
+
+from gmlx.cache.attention import (
     create_attention_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.cache import KVCache, RotatingKVCache
-from mlx_lm.models.rope_utils import initialize_rope
-
+from gmlx.cache.kv_cache import KVCache, RotatingKVCache
 from gmlx.upstream.graft import graft_module
 
 

@@ -209,8 +209,7 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
     if kv_bits is None:
         return {}, None
 
-    from mlx_lm.models.cache import make_prompt_cache as _mpc
-
+    from gmlx.cache.kv_cache import make_prompt_cache as _mpc
     from gmlx.cache.kv_policy import (arm_stack, mla_kv_decline,
                                       resolve_and_report)
 

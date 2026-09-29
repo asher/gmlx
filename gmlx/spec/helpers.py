@@ -3,8 +3,8 @@
 The round orchestration the owned engine needs, vendored from mlx-vlm's
 speculative.{common,mtp} so the engine does not depend on mlx-vlm's private
 speculative API (underscore-prefixed, unstable across versions). The drafter
-model classes and the model/cache runtime (mlx_vlm.models.cache) are still
-consumed from mlx-vlm by design -- only the round logic is owned here.
+model classes are still consumed from mlx-vlm by design, and the cache classes
+come from gmlx.cache.kv_cache. Only the round logic is owned here.
 
 Logic is a faithful copy (acceptance must stay token-identical to the validated
 path); keep it in sync when mlx-vlm's round changes in a way we want to track.
@@ -20,9 +20,7 @@ from collections.abc import Callable
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models import cache
-
-from gmlx.cache.compat import cache_types
+from gmlx.cache.kv_cache import BufferedRotatingKVCache, CacheList, RotatingKVCache
 from .drafter_protocol import default_block_size, native_block_size
 
 _log = logging.getLogger(__name__)
@@ -270,16 +268,16 @@ def _buffer_mtp_target_cache(
     buffer_size = max(32, min(128, max(configured, requested) * 8))
 
     def buffer_entry(entry):
-        if isinstance(entry, cache_types("CacheList")):
+        if isinstance(entry, CacheList):
             entry.caches = tuple(buffer_entry(child) for child in entry.caches)
             return entry
-        if isinstance(entry, cache.BufferedRotatingKVCache):
+        if isinstance(entry, BufferedRotatingKVCache):
             entry.buffer_size = max(entry.buffer_size, buffer_size)
         elif (
-            isinstance(entry, cache_types("RotatingKVCache"))
+            isinstance(entry, RotatingKVCache)
             and getattr(entry, "keep", 0) == 0
         ):
-            return cache.BufferedRotatingKVCache.from_cache(
+            return BufferedRotatingKVCache.from_cache(
                 entry, buffer_size=buffer_size
             )
         return entry
@@ -398,8 +396,8 @@ def _mtp_shared_kv_from_prompt_cache(lm: nn.Module, prompt_cache: list[Any]) -> 
         if keys is None or values is None:
             continue
         if (
-            isinstance(layer_cache, cache_types("RotatingKVCache"))
-            and not isinstance(layer_cache, cache.BufferedRotatingKVCache)
+            isinstance(layer_cache, RotatingKVCache)
+            and not isinstance(layer_cache, BufferedRotatingKVCache)
             and hasattr(layer_cache, "_temporal_order")
         ):
             keys = layer_cache._temporal_order(keys)

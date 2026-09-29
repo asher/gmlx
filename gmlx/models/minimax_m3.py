@@ -50,14 +50,14 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    scaled_dot_product_attention,
-)
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import bind, refusals
+from gmlx.cache.attention import (
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
 from gmlx.cache.kv_cache import KVCache
 from gmlx.load.dtypes import activation_dtype
 from gmlx.upstream.graft import graft_module

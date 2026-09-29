@@ -14,10 +14,8 @@ from mlx_vlm.apc import model_apc_mode
 
 import pytest
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import ckpt_layout, ckpt_supported
-
-_cache = runtime_cache_module()
 
 
 def _dense():

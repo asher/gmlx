@@ -161,9 +161,7 @@ def build_score_profile(*, profile,
       unquantized. Any OTHER cache with a bits attr (quantized KV) -> None.
     - profile: the ScoreTransientProfile, or a callable returning one
       (callable form re-resolves live state such as arch base-step envs).
-
-    Pass dual-origin mlx-lm/vlm classes as cache_compat.cache_types(...)
-    tuples; gmlx-native classes are single-origin and safe directly."""
+    """
     def _provider(model, prompt_cache):
         matched = 0
         if kernels_armed is not None and not kernels_armed():

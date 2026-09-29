@@ -18,23 +18,22 @@ and only decays past that as a backstop. Stock base step is kept (the fix is
 decay-prevention, not a chunk-size change).
 
 Disarms (dense decay stays authoritative) on batched sequences or quantized
-KV, where the transient model and kernel path differ: require_cache on the
-mlx-lm/vlm KVCache demands a present single-sequence unquantized full-attn
+KV, where the transient model and kernel path differ: require_cache on
+KVCache demands a present single-sequence unquantized full-attn
 cache, and any batched cache (BatchKVCache / BatchRotatingKVCache, not KVCache
 subclasses) drops the match. The sliding-layer RotatingKVCache carries no
 `bits` attribute, so it neither arms nor disarms.
 """
 from __future__ import annotations
 
-import gmlx.cache.compat as cache_compat
 import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.cache.kv_cache import BatchKVCache, BatchRotatingKVCache, KVCache
 
 _prefill_score_profile = _prefill_decay.build_score_profile(
     profile=_prefill_decay.ScoreTransientProfile(
         heads=1, bytes_per_elem=2, depth_divisor=1),
-    require_cache=cache_compat.cache_types("KVCache"),
-    disarm_cache=(cache_compat.cache_types("BatchKVCache")
-                  + cache_compat.cache_types("BatchRotatingKVCache")),
+    require_cache=KVCache,
+    disarm_cache=(BatchKVCache, BatchRotatingKVCache),
 )
 
 

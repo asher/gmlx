@@ -387,15 +387,13 @@ def test_save_load_prompt_cache_file(tmp_path):
 
 
 @needs_kvarn_ops
-def test_clone_lm_twin():
-    from gmlx.cache.snapshot import _clone_lm_twin
+def test_clone_row_faithful():
+    from gmlx.cache.snapshot import _clone_row_faithful
 
     c = _rot()
     k, v = tokens(2000)
     _feed(c, k, v, 128)
-    targets = []
-    r = _clone_lm_twin(c, targets)
-    mx.eval(*targets)
+    r = _clone_row_faithful(c)
     assert type(r) is KVarNRotatingKVCache
     assert (r.max_size, r.evicted) == (c.max_size, c.evicted)
     _assert_common_window_equal(r, c)

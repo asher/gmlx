@@ -48,9 +48,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as q4
+from gmlx.cache.attention import create_attention_mask
 from gmlx.envflags import env_bool, env_int
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 

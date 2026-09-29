@@ -1,11 +1,9 @@
 """kvarn arms in prefix_cache snapshots and cache_snapshot clones: tag
-round trip, no-alias pins, clone-twin equality, ckpt-tier decline."""
+round trip, no-alias pins, faithful clone equality, ckpt-tier decline."""
 
 from __future__ import annotations
 
 import numpy as np
-
-import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from gmlx.cache.prefix_cache import (
@@ -56,15 +54,12 @@ def test_prefix_restore_does_not_alias_stored_entry():
 
 
 @needs_kvarn_ops
-def test_clone_lm_twin_arm():
-    from gmlx.cache.snapshot import _clone_lm_twin
+def test_clone_row_faithful_arm():
+    from gmlx.cache.snapshot import _clone_row_faithful
 
     live = filled(300, tail=256)
-    targets = []
-    twin = _clone_lm_twin(live, targets)
+    twin = _clone_row_faithful(live)
     assert type(twin) is KVarNKVCache
-    assert targets
-    mx.eval(targets)
     live.update_and_fetch(*tokens(50, seed=9))
     _assert_same_content(twin, filled(300, tail=256))
 

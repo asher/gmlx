@@ -45,17 +45,16 @@ class ApcPrefixes(Prefixes):
     the prefix, never a shorter one."""
 
     def __init__(self, manager, salt: int, make_cache: Callable[[], Any]):
-        from gmlx.cache.compat import cache_types
+        from gmlx.cache.kv_cache import KVCache
         from gmlx.cache.snapshot import ckpt_layout
 
         self.manager = manager
         self.salt = int(salt)
         probe = make_cache()
         self.layout = ckpt_layout(probe, int(manager.block_size))
-        kv = cache_types("KVCache")
         if self.layout is not None:
             self.tier = "ckpt"
-        elif probe and all(type(c) in kv for c in probe):
+        elif probe and all(type(c) is KVCache for c in probe):
             self.tier = "exact"
         else:
             self.tier = "unsupported"

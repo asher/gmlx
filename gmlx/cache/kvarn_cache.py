@@ -169,9 +169,9 @@ def kvarn_mtp_window_decline(caches) -> str | None:
     (no eligible SWA+MTP checkpoint exists to validate it on), so a
     sliding-window layer declines the whole stack. Serve, run and chat
     share the rule."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import BatchRotatingKVCache, RotatingKVCache
 
-    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
+    rotating = (RotatingKVCache, BatchRotatingKVCache)
     if any(isinstance(c, rotating) for c in caches):
         return "sliding-window cache stack cannot quantize"
     return None
@@ -2013,6 +2013,6 @@ def convertible_kv_types():
     ChunkedKVCache is included deliberately: serve's batch build maps it
     to BatchKVCache and converts that, so converting it here keeps the
     CLI and serve paths agreeing on llama4-shaped stacks."""
-    from .compat import cache_types
+    from .kv_cache import ChunkedKVCache, KVCache
 
-    return cache_types("KVCache") + cache_types("ChunkedKVCache")
+    return (KVCache, ChunkedKVCache)

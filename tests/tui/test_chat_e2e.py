@@ -151,7 +151,7 @@ def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello 
     monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
                         lambda model, step: (None, False))
     monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
-    monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)
+    monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache", fake_mpc)
     if tty:
         monkeypatch.setattr(chat.sys, "stdin", _TTYStdin())
         monkeypatch.setattr(chat, "_EscCancel", _InertEsc)
@@ -220,7 +220,7 @@ def _run_text_chat_kv(monkeypatch, tmp_path, lines, *, extra_argv=(), kv_cls=_KV
     monkeypatch.setattr("gmlx.stream.expert_streaming._resolve_prefill_step",
                         lambda model, step: (None, False))
     monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
-    monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)
+    monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache", fake_mpc)
     monkeypatch.setattr(
         importlib.import_module("mlx_lm.generate"), "stream_generate", stream)
     gguf = tmp_path / "model.gguf"
@@ -666,7 +666,7 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
         msg_calls.append(rec)
         return rec
 
-    def fake_mpc(model):                          # mlx_vlm make_prompt_cache(lm)
+    def fake_mpc(model):                          # make_prompt_cache(lm)
         c = ["vlm-text-cache", len(caches)]       # fresh, identity-distinct
         caches.append(c)
         return c
@@ -685,7 +685,7 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
-    monkeypatch.setattr("mlx_vlm.models.cache.make_prompt_cache", fake_mpc)
+    monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache", fake_mpc)
     monkeypatch.setattr(
         importlib.import_module("mlx_vlm.generate"), "stream_generate", vstream)
 

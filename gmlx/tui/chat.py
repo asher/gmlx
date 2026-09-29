@@ -2826,8 +2826,7 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
     # run through the MTP engine over a persistent text KV cache
     # (model.language_model), while image/audio turns use the plain VLM
     # stream.
-    from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.spec.mtp_load import load_vlm_mtp_model
 
@@ -2871,8 +2870,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # a drafter (native-head for qwen3.5/3.6, or a --draft-gguf assistant).
     # Each reply runs through mlx-vlm's MTP engine; the cache is reused
     # across turns exactly like the plain text path.
-    from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache as _mtp_make_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.commands.cli import _apply_placement
     from gmlx.load.loader import preset_native_fp_wire_env
@@ -2964,8 +2962,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 
 
 def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
-    from mlx_lm.models.cache import make_prompt_cache
-
+    from gmlx.cache.kv_cache import make_prompt_cache
     import gmlx.load.loadlog as loadlog
     from gmlx.envflags import env_bool
     from gmlx.load.loader import load_model, preset_native_fp_wire_env

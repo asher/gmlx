@@ -46,8 +46,8 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_lm.models import nemotron_h as nh
-from mlx_lm.models.base import create_attention_mask, create_ssm_mask
 
+from gmlx.cache.attention import create_attention_mask, create_ssm_mask
 from gmlx.envflags import env_bool
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
@@ -372,12 +372,9 @@ class NemotronHMTPDrafter(QwenMTPDrafter):
             raise NotImplementedError(
                 "NemotronHMTPDrafter is B=1 only (v1): the MoE target caps "
                 "speculation width at 1 anyway")
-        from mlx_lm.models.cache import KVCache as _KVCache
+        from gmlx.cache.kv_cache import KVCache
 
-        from gmlx.cache.compat import construction_cache_module
-
-        kv_cls = getattr(construction_cache_module(), "KVCache", _KVCache)
-        return [kv_cls() for _ in self.layers]
+        return [KVCache() for _ in self.layers]
 
     def inject_rows(self, *args, **kwargs) -> None:
         raise NotImplementedError(

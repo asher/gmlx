@@ -45,11 +45,10 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import create_attention_mask
-from mlx_vlm.models.cache import BatchKVCache, KVCache
-
 import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import BatchKVCache, KVCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.models.qwen35.language import Qwen3_5DecoderLayer
 from gmlx.models.qwen35.moe_language import Qwen3_5MoeDecoderLayer

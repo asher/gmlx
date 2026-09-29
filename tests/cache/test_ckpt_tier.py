@@ -17,7 +17,7 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.apc import APCManager, DiskBlockStore
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import (
     _CKPT_SALT,
     _SIDECAR_SALT,
@@ -31,7 +31,6 @@ from gmlx.cache.snapshot import (
 
 # Runtime-origin cache classes: the hybrid stacks these fixtures mimic are
 # built by the mlx-vlm generate stack (vlm-origin classes since 0.6.4).
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache

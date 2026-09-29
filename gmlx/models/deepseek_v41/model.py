@@ -28,16 +28,16 @@ from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    create_causal_mask,
-    scaled_dot_product_attention,
-)
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 
 import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.cache.attention import (
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
+from gmlx.cache.kv_cache import create_causal_mask
 from gmlx.models.deepseek_v4 import model as _v4
 from gmlx.models.deepseek_v4.cache import (
     DS4BatchPoolingCache,
@@ -1694,12 +1694,11 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
         input_embeddings: Optional[mx.array] = None,
         image_mask: Optional[mx.array] = None,
     ) -> mx.array:
-        from gmlx.cache.compat import cache_types
+        from gmlx.cache.kv_cache import CacheList
 
-        cache_list_types = cache_types("CacheList")
         if cache is None:
             cache = [None] * len(self.layers)
-        mask_cache, _, _ = self._split_cache(0, cache[0], cache_list_types)
+        mask_cache, _, _ = self._split_cache(0, cache[0], CacheList)
         offset = mask_cache.offset if mask_cache is not None else 0
 
         # Image tokens take no part in an n-gram and get no engram write.
@@ -1711,7 +1710,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
             inputs = mx.where(image_mask, mx.zeros_like(inputs), inputs)
         row_ids = None
         if self.engram_hash is not None:
-            slot = self._history_slot(cache, cache_list_types)
+            slot = self._history_slot(cache, CacheList)
             history = slot[0] if slot is not None else None
             row_ids, new_history = self.engram_hash(inputs, history, engram_mask)
             if slot is not None:
@@ -1770,7 +1769,7 @@ class DeepseekV41Model(PipelineMixin, nn.Module):
                 )
                 if prof:
                     _prof_mark("engram", idx, h, t0)
-            caches = self._split_cache(idx, cache[idx], cache_list_types)
+            caches = self._split_cache(idx, cache[idx], CacheList)
             if tail is not None and idx >= tail[1]:
                 end, _, hist = tail
                 if h.shape[1]:
@@ -1828,14 +1827,13 @@ class Model(nn.Module):
         return self.model.layers
 
     def make_cache(self):
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import ArraysCache, CacheList, RotatingKVCache
 
-        cmod = construction_cache_module()
         args = self.args
         first_engram = args.engram_layer_ids[:1]
         caches = []
         for idx in range(args.num_hidden_layers):
-            slots = [cmod.RotatingKVCache(max_size=args.sliding_window)]
+            slots = [RotatingKVCache(max_size=args.sliding_window)]
             if idx in args.kv_source_layers:
                 ratio = args.compress_ratios[idx]
                 # The index pool opts out of --kv-bits packing: the score
@@ -1849,8 +1847,8 @@ class Model(nn.Module):
                 idx_pool.quantizable = False
                 slots += [pool, idx_pool]
             if idx in first_engram:
-                slots.append(cmod.ArraysCache(1))
-            caches.append(slots[0] if len(slots) == 1 else cmod.CacheList(*slots))
+                slots.append(ArraysCache(1))
+            caches.append(slots[0] if len(slots) == 1 else CacheList(*slots))
         return caches
 
     def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:

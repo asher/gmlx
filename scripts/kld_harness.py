@@ -60,8 +60,7 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
     and hold the last layer of a deep stack fp16 -- the runtime's own
     coverage. ``carve_out=False`` takes every eligible layer instead, to
     measure what the held layer is worth."""
-    from mlx_lm.models.cache import ChunkedKVCache, KVCache, make_prompt_cache
-
+    from gmlx.cache.kv_cache import ChunkedKVCache, KVCache, make_prompt_cache
     from gmlx.cache.kv_policy import quantize_kv_members
 
     pc = make_prompt_cache(model)
@@ -134,13 +133,14 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
 
 
 def install_turbo_sdpa() -> int:
-    """Route TurboQuant caches to mlx-vlm's own attention dispatch: the
+    """Route TurboQuant caches to the owned base attention dispatch: the
     module-level SDPA symbols of every model module, plus the owned
     qwen3.5 dispatch tail, which refuses these caches in the runtime."""
     import importlib
 
-    from mlx_vlm.models import base as vlm_base
     from mlx_vlm.turboquant import TurboQuantKVCache
+
+    from gmlx.cache.attention import scaled_dot_product_attention as base_sdpa
 
     base_modules = ("mlx_lm.models.base", "mlx_vlm.models.base")
     model_prefixes = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
@@ -153,8 +153,7 @@ def install_turbo_sdpa() -> int:
                 scale = kwargs.get("scale", args[4] if len(args) > 4 else None)
                 mask = kwargs.get("mask", args[5] if len(args) > 5 else None)
                 sinks = kwargs.get("sinks", args[6] if len(args) > 6 else None)
-                return vlm_base.scaled_dot_product_attention(
-                    q, k, v, cache, scale, mask, sinks=sinks)
+                return base_sdpa(q, k, v, cache, scale, mask, sinks=sinks)
             return orig(*args, **kwargs)
 
         sdpa._gmlx_turbo = True
@@ -172,7 +171,7 @@ def install_turbo_sdpa() -> int:
         cur = getattr(mod, "scaled_dot_product_attention", None)
         if cur is None or not callable(cur) or getattr(cur, "_gmlx_turbo", False):
             continue
-        if mod is vlm_base:
+        if name == "mlx_vlm.models.base":
             continue
         mod.scaled_dot_product_attention = wrap(cur, 3)
         n += 1

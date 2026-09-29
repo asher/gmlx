@@ -59,12 +59,9 @@ def _buffered_types() -> tuple:
     RotatingKVCache but carries ``start_position`` and a slack buffer no
     rotating clone or canonical window preserves -- every snapshot path
     declines it loudly until dedicated support lands."""
-    from .compat import cache_types
+    from .kv_cache import BufferedRotatingKVCache
 
-    try:
-        return cache_types("BufferedRotatingKVCache")
-    except AttributeError:
-        return ()
+    return (BufferedRotatingKVCache,)
 
 
 def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | None:
@@ -98,20 +95,16 @@ def _clone_row_faithful(cache: Any) -> Any | None:
 def _clone_row(cache: Any, *, rot_canonical: bool,
                eval_targets: list | None = None) -> Any | None:
     from mlx_vlm import apc as _apc
-    from .compat import cache_types
+
+    from .kv_cache import RotatingKVCache
 
     if isinstance(cache, _buffered_types()):
         return _clone_buffered_window(cache)
-    if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
+    if rot_canonical and isinstance(cache, RotatingKVCache):
         return _clone_rot_canonical(cache)
     targets: list[Any] = [] if eval_targets is None else eval_targets
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=targets)
-    if out is None:
-        # Upstream isinstance-gates on the mlx_vlm cache classes; gmlx text
-        # models carry the mlx_lm twins. Mirror the same per-kind copy for
-        # any class cache_types recognizes.
-        out = _clone_lm_twin(cache, targets)
     if eval_targets is None and targets:
         import mlx.core as mx
         mx.eval(*targets)
@@ -160,7 +153,8 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     the swap; declined."""
     import mlx.core as mx
     from mlx_vlm import apc as _apc
-    from mlx_vlm.models.cache import RotatingKVCache
+
+    from .kv_cache import RotatingKVCache
 
     keep = int(getattr(cache, "keep", 0) or 0)
     if keep:
@@ -195,58 +189,6 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     out._idx = L
     mx.eval(out.keys, out.values)
     return out
-
-
-def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
-    from mlx_vlm import apc as _apc
-    from .compat import cache_types
-
-    copy = _apc._copy_mlx_array
-    if isinstance(cache, cache_types("RotatingKVCache")):
-        # Faithful ring copy for the mlx_lm twin (the faithful path only;
-        # canonical requests never reach here).
-        out = type(cache)(max_size=int(cache.max_size),
-                          keep=int(getattr(cache, "keep", 0) or 0))
-        out.offset = int(getattr(cache, "offset", 0) or 0)
-        out._idx = int(getattr(cache, "_idx", 0) or 0)
-        if cache.keys is not None and cache.values is not None:
-            out.keys = copy(cache.keys)
-            out.values = copy(cache.values)
-            eval_targets.extend([out.keys, out.values])
-        return out
-    if isinstance(cache, cache_types("KVCache")):
-        out = type(cache)()
-        off = int(getattr(cache, "offset", 0) or 0)
-        if cache.keys is not None and cache.values is not None and off > 0:
-            out.keys = copy(cache.keys[..., :off, :])
-            out.values = copy(cache.values[..., :off, :])
-            out.offset = off
-            eval_targets.extend([out.keys, out.values])
-        return out
-    if isinstance(cache, cache_types("ArraysCache")):
-        out = type(cache)(len(cache.cache))
-        out.cache = []
-        for state in cache.cache:
-            if state is None:
-                out.cache.append(None)
-                continue
-            copied = copy(state)
-            out.cache.append(copied)
-            eval_targets.append(copied)
-        for attr in ("left_padding", "lengths"):
-            v = getattr(cache, attr, None)
-            if v is not None:
-                copied = copy(v)
-                setattr(out, attr, copied)
-                eval_targets.append(copied)
-        return out
-    from .kvarn_cache import KVarNKVCache
-    if isinstance(cache, KVarNKVCache):
-        state = tuple(copy(a) for a in cache.state)
-        out = type(cache).from_state(state, cache.meta_state)
-        eval_targets.extend(state)
-        return out
-    return None
 
 
 def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
@@ -596,11 +538,10 @@ def rotating_geometry(prompt_cache, block_size: int):
     across layers; window and keep whole numbers of blocks, so checkpoint
     boundaries are rotation boundaries and the keep region restores as a
     prefix slice of whole blocks."""
-    from .compat import cache_types
+    from .kv_cache import RotatingKVCache
 
-    rot_types = cache_types("RotatingKVCache")
     geoms = {(int(c.max_size), int(c.keep))
-             for c in prompt_cache if isinstance(c, rot_types)}
+             for c in prompt_cache if isinstance(c, RotatingKVCache)}
     if len(geoms) != 1:
         if len(geoms) > 1:
             _log.info("APC rotating: mixed window geometries %s", geoms)
@@ -673,7 +614,7 @@ def rotating_restore(keys, values, meta):
     pointer is checked against what the chain actually returned, never
     trusted). Returns the cache or None.
     """
-    from .compat import construction_cache_module
+    from .kv_cache import RotatingKVCache
 
     if meta is None:
         _log.warning("APC rotating restore rejected: no stored meta")
@@ -690,7 +631,7 @@ def rotating_restore(keys, values, meta):
             "APC rotating restore rejected: stored _idx %d != assembled "
             "length %d", idx, L)
         return None
-    cache = construction_cache_module().RotatingKVCache(
+    cache = RotatingKVCache(
         max_size=max_size, keep=keep)
     cache.keys = keys
     cache.values = values
@@ -835,24 +776,21 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
     the concrete single-stream class only: the rotating subclass loses
     window geometry under the plain tag, and batch classes belong to the
     batch engine -- both decline until dedicated support lands."""
-    from .compat import cache_types
+    from .kv_cache import ArraysCache, KVCache, RotatingKVCache
     from .kvarn_cache import KVarNKVCache
 
     if not prompt_cache:
         return None
-    kv_types = cache_types("KVCache")
-    rot_types = cache_types("RotatingKVCache")
-    arr_types = cache_types("ArraysCache")
     tags = []
     for c in prompt_cache:
         qsa = _qsa_tag(c)
-        if isinstance(c, rot_types):
+        if isinstance(c, RotatingKVCache):
             tags.append(_rot_tag(c))
         elif qsa is not None:
             tags.append(qsa)
-        elif isinstance(c, kv_types):
+        elif isinstance(c, KVCache):
             tags.append("kv")
-        elif isinstance(c, arr_types):
+        elif isinstance(c, ArraysCache):
             tags.append("arr")
         elif type(c) is KVarNKVCache:
             tags.append(_kvarn_tag(c))
@@ -1318,11 +1256,9 @@ def ckpt_store(
     """
     if manager is None or token_ids is None:
         return 0
-    from .compat import cache_types, runtime_cache_module
+    from .kv_cache import KVCache, RotatingKVCache
     from .kvarn_cache import KVarNKVCache
 
-    kv_types = cache_types("KVCache")
-    rot_types = cache_types("RotatingKVCache")
     main_blocks: list[Any] = []
     bounded_blocks: list[Any] = []
     try:
@@ -1363,13 +1299,13 @@ def ckpt_store(
             return 0
         for c in prompt_cache:
             off = getattr(c, "offset", None)
-            if off is not None and not isinstance(c, rot_types) \
-                    and isinstance(c, kv_types) and int(off) != p:
+            if off is not None and not isinstance(c, RotatingKVCache) \
+                    and isinstance(c, KVCache) and int(off) != p:
                 _log.info("APC ckpt store skipped: KV offset %d != %d",
                           int(off), p)
                 _ckpt_decline(manager, "offset")
                 return 0
-            if isinstance(c, rot_types) and int(c.offset) != p:
+            if isinstance(c, RotatingKVCache) and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
@@ -1398,7 +1334,7 @@ def ckpt_store(
                 _ckpt_decline(manager, "layout")
                 return 0
             if p < geom[0]:
-                has_arr = any(not isinstance(c, (kv_types, rot_types))
+                has_arr = any(not isinstance(c, (KVCache, RotatingKVCache))
                               for c in prompt_cache)
                 if not grid_truncate or has_arr or b_full < 2:
                     _log.info(
@@ -1426,13 +1362,16 @@ def ckpt_store(
         # A record keys on the images inside its own p.
         extra_hash = int(salt_at(extra_hash, p))
         salted = ckpt_extra_hash(extra_hash)
-        kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
-                     and not isinstance(c, rot_types)]
-        rot_caches = [c for c in prompt_cache if isinstance(c, rot_types)]
+        # Any: QSA layers subclass KVCache and carry their indexer stream.
+        kv_caches: list[Any] = [c for c in prompt_cache
+                                if isinstance(c, KVCache)
+                                and not isinstance(c, RotatingKVCache)]
+        rot_caches = [c for c in prompt_cache
+                      if isinstance(c, RotatingKVCache)]
         # Inline-state layers (arr and kvarn), in prompt order: the record
         # stores full clones, and assembly pulls them positionally by tag.
         inline_caches = [c for c in prompt_cache
-                         if not isinstance(c, (kv_types, rot_types))]
+                         if not isinstance(c, (KVCache, RotatingKVCache))]
 
         store_blocks = getattr(manager, "store_ckpt_blocks", None)
 
@@ -1575,7 +1514,7 @@ def ckpt_store(
         if tail_len and kv_caches:
             tails = []
             for c in kv_caches:
-                t = runtime_cache_module().KVCache()
+                t = KVCache()
                 t.state = (c.keys[..., b_full:p, :],
                            c.values[..., b_full:p, :])
                 t = _clone_single_row(t, pending)
@@ -1638,9 +1577,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
     disk = getattr(manager, "disk", None)
     if disk is None:
         return
-    from .compat import runtime_cache_module
+    from .kv_cache import ArraysCache, KVCache, RotatingKVCache
     try:
-        rcm = runtime_cache_module()
         entries: list[Any] = []
         kv_i = arr_i = qsa_i = 0
         for tag, c in zip(layout, prompt_cache):
@@ -1669,12 +1607,12 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
                 if tail_len:
                     entries.append(tails[kv_i])
                 else:
-                    ph = rcm.KVCache()
+                    ph = KVCache()
                     ph.offset = p
                     entries.append(ph)
                 kv_i += 1
             elif _is_rot(tag):
-                ph = rcm.RotatingKVCache(
+                ph = RotatingKVCache(
                     max_size=int(c.max_size), keep=int(c.keep))
                 ph.offset = p
                 ph._idx = min(p, int(c.max_size))
@@ -1685,7 +1623,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         # The upstream writer drops zero-array shards; the sentinel keeps
         # an all-placeholder skeleton persistable. Stripped on lookup.
         import mlx.core as mx
-        sent = rcm.ArraysCache(size=1)
+        sent = ArraysCache(size=1)
         sent.cache[0] = mx.array([float(p)], dtype=mx.float32)
         entries.append(sent)
         from mlx_vlm import apc as _apc
@@ -1709,9 +1647,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
 def _assemble_from_record(manager, rec, geometry_check=None):
     """Warm cache list from a pinned record, or None (conjunction fail)."""
     import mlx.core as mx
-    from .compat import runtime_cache_module
+    from .kv_cache import KVCache
 
-    rcm = runtime_cache_module()
     n_kv = sum(1 for t in rec.layout if _is_chain(t))
     n_rot = sum(1 for t in rec.layout if _is_rot(t))
     if any(_is_qsa(t) for t in rec.layout) and not rec.qsa:
@@ -1764,7 +1701,7 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     kv_i = rot_i = arr_i = qsa_i = 0
     for tag in rec.layout:
         if tag == "kv":
-            kc = rcm.KVCache()
+            kc = KVCache()
             kc.state = layer_kv[kv_i]
             warm.append(kc)
             kv_i += 1
@@ -1991,10 +1928,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     machinery, chains from the salted block keyspaces. p comes from the
     lookup's matched length, never from a placeholder."""
     import mlx.core as mx
-    from .compat import cache_types, runtime_cache_module
+    from .kv_cache import KVCache, RotatingKVCache
 
-    kv_types = cache_types("KVCache")
-    rot_types = cache_types("RotatingKVCache")
     salted = ckpt_extra_hash(extra_hash)
     entries, p = manager.lookup_exact_cache(
         ids, extra_hash=salted, min_prefix_tokens=min_prefix_tokens)
@@ -2007,7 +1942,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
             entries = entries[:-1]
     else:
         last = entries[-1] if entries else None
-        if (last is not None and not isinstance(last, kv_types + rot_types)
+        if (last is not None
+                and not isinstance(last, (KVCache, RotatingKVCache))
                 and hasattr(last, "cache") and len(last.cache) == 1
                 and last.cache[0] is not None
                 and getattr(last.cache[0], "size", 0) == 1):
@@ -2016,11 +1952,11 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     tags = []
     for e in entries:
         qsa = _qsa_tag(e)
-        if isinstance(e, rot_types):
+        if isinstance(e, RotatingKVCache):
             tags.append(_rot_tag(e))
         elif qsa is not None:
             tags.append(qsa)
-        elif isinstance(e, kv_types):
+        elif isinstance(e, KVCache):
             tags.append("kv")
         elif type(e) is KVarNKVCache:
             tags.append(_kvarn_tag(e))
@@ -2066,7 +2002,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                     (c.keys[..., :b_full, :], c.values[..., :b_full, :])
                     for c in disk_caches
                 ]
-        rot_entries = [e for e in entries if isinstance(e, rot_types)]
+        rot_entries = [e for e in entries if isinstance(e, RotatingKVCache)]
         layer_rot = None
         if rot_entries:
             keep = int(rot_entries[0].keep)
@@ -2145,7 +2081,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                         st = st + (e.pos[:, :, :p],)
                     kc = _qsa_cache_cls()(int(tag.split(":")[1]))
                 else:
-                    kc = runtime_cache_module().KVCache()
+                    kc = KVCache()
                     st = kv_state
                 kc.state = st
                 if kc.offset != p:
@@ -2211,11 +2147,10 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
 def _truncate_kv_snapshot(snap: list[Any], n: int) -> list[Any] | None:
     """Trim a row snapshot to its first ``n`` tokens, or None if any layer
     cannot be truncated faithfully (rotation, recurrent state, pooling)."""
-    from .compat import cache_types
+    from .kv_cache import KVCache
 
-    kv_types = cache_types("KVCache")
     for c in snap:
-        if not isinstance(c, kv_types) or int(getattr(c, "offset", 0)) < n:
+        if not isinstance(c, KVCache) or int(getattr(c, "offset", 0)) < n:
             return None
     for c in snap:
         c.keys = c.keys[..., :n, :]
@@ -2346,12 +2281,10 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
             return
-        from .compat import cache_types
-        kv_types = cache_types("KVCache")
-        rot_types = cache_types("RotatingKVCache")
+        from .kv_cache import KVCache, RotatingKVCache
         states = []
         for c in prompt_cache:
-            if isinstance(c, kv_types) and not isinstance(c, rot_types):
+            if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
                 continue
             clone = _clone_single_row(c)
             if clone is None:
@@ -2376,17 +2309,15 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     """Rebuild a single-row cache list at snapshot position ``p``: plain
     KV sliced from the live row, rotating windows and recurrent states
     from the snapshot clones."""
-    from .compat import cache_types, construction_cache_module
+    from .kv_cache import KVCache, RotatingKVCache
 
-    kv_types = cache_types("KVCache")
-    rot_types = cache_types("RotatingKVCache")
     out = []
     si = 0
     for c in prompt_cache:
-        if isinstance(c, kv_types) and not isinstance(c, rot_types):
+        if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
                 return None
-            k = construction_cache_module().KVCache()
+            k = KVCache()
             k.keys = c.keys[..., :p, :]
             k.values = c.values[..., :p, :]
             k.offset = p

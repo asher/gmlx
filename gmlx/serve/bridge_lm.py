@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import sys
 
-from mlx_lm.models.cache import make_prompt_cache
-
+from gmlx.cache.kv_cache import make_prompt_cache
 from gmlx.load.loader import load_model
 
 _BRIDGE_FLAG = "_kq_gguf_bridge_installed"

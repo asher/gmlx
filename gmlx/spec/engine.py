@@ -548,8 +548,9 @@ def install_owned_b1_spec_cache() -> None:
     Other draft kinds and B>1 take the stock builder. Idempotent.
     """
     from mlx_vlm.generate import ar as _ar
-    from mlx_vlm.models import cache as _cache
     from mlx_vlm.speculative import utils as _su
+
+    from gmlx.cache import kv_cache
 
     _orig = _su.make_speculative_prompt_cache
     if wrapped_with(_orig, _OWNED_B1_CACHE_FLAG):
@@ -558,7 +559,7 @@ def install_owned_b1_spec_cache() -> None:
     def _owned_spec_cache(lm, *, draft_kind, batch_size, left_padding,
                           make_cache):
         if draft_kind == "mtp" and batch_size == 1:
-            return _cache.make_prompt_cache(lm)
+            return kv_cache.make_prompt_cache(lm)
         return _orig(lm, draft_kind=draft_kind, batch_size=batch_size,
                      left_padding=left_padding, make_cache=make_cache)
 

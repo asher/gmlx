@@ -83,6 +83,7 @@ changes or moves, so such a seam names that function in `impl`, and the
 check pins both. The check and the regeneration both reject a seam that
 resolves to a lambda without one.
 
-KV-cache classes come from both mlx-lm and mlx-vlm. The rules for
-isinstance checks and construction are in the docstring of
-`gmlx/cache/compat.py`.
+gmlx owns the KV-cache classes in `gmlx/cache/kv_cache.py`. The mlx-lm and
+mlx-vlm cache names are bound to them when gmlx loads (`gmlx/cache/bind.py`),
+so gmlx code imports the classes from `gmlx.cache.kv_cache` and one class
+serves both stacks.

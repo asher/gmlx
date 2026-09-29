@@ -45,7 +45,7 @@ def _dsv32_mask_decode_call(self, x, mask=None, cache=None):
     if not getattr(self, "_dsv32_mask_decode", False):
         return _MASK_DECODE_PATCH.stock(self, x, mask, cache)
 
-    from mlx_lm.models.base import scaled_dot_product_attention
+    from gmlx.cache.attention import scaled_dot_product_attention
 
     B, L, D = x.shape
 

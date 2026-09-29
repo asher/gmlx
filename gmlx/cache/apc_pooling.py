@@ -295,8 +295,11 @@ def install_safe_kv_quantization() -> None:
 
     if getattr(lm_gen, "_kq_safe_kv_quant", False):
         return
-    from .compat import cache_types
     from gmlx.models.deepseek_v4.cache import DS4PoolingCache
+
+    from .kv_cache import BatchRotatingKVCache, RotatingKVCache
+
+    rotating = (RotatingKVCache, BatchRotatingKVCache)
 
     def _pack_pools(c, group_size, bits):
         subs = getattr(c, "caches", None)
@@ -309,10 +312,6 @@ def install_safe_kv_quantization() -> None:
     def safe_maybe_quantize(prompt_cache, quantized_kv_start, kv_group_size, kv_bits):
         if kv_bits is None:
             return
-        # Per call, not at install: mlx-vlm (a second rotating-class origin
-        # since 0.6.4) may load after this installer runs.
-        rotating = (cache_types("RotatingKVCache")
-                    + cache_types("BatchRotatingKVCache"))
         bits, group = int(kv_bits), int(kv_group_size)
         for e, c in enumerate(prompt_cache):
             _pack_pools(c, group, bits)

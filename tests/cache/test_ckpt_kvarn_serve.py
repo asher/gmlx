@@ -22,7 +22,7 @@ import pytest
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as engine
 from gmlx.cache.apc_manager import GmlxAPCManager
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache
 from gmlx.cache.kvarn_serve import _ppb_rebuild_declined, ensure_ppb_kvarn
@@ -30,7 +30,6 @@ from gmlx.cache.kvarn_serve import _ppb_rebuild_declined, ensure_ppb_kvarn
 from test_ckpt_kvarn import KVARN_TAG, _arr, _hollow_kvarn
 from kvarn_testlib import Args
 
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache

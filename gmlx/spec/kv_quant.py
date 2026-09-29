@@ -25,7 +25,7 @@ def dequantize_lift_cache(c):
     swap does, at preemption or injection time, as a one-off O(depth)
     copy. Without this every kv-bits MTP preemption declined into a
     drain-wait and queued rows stalled behind the live generation."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache.kv_cache import BatchKVCache
 
     lifted = BatchKVCache([0])
     if c.offset:
@@ -52,7 +52,7 @@ def _dequantized_kv(c, length=None):
 def _dequantized_batch(c):
     """A BatchQuantizedKVCache as a BatchKVCache with the same rows,
     padding and write index."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache.kv_cache import BatchKVCache
 
     out = BatchKVCache([0] * int(c.left_padding.shape[0]))
     out.left_padding = c.left_padding
@@ -77,23 +77,22 @@ def dequantize_exact_row(row):
     packed, and stock admission packs to the generator's kv_bits, so
     both MTP warm paths run this when live batches keep float KV (MTP
     under uniform KV_BITS), whose B=1 round stores packed rows."""
-    from mlx_vlm.models.cache import KVCache
-
-    from gmlx.cache.compat import cache_types
-
-    quant = cache_types("QuantizedKVCache")
-    batch_quant = cache_types("BatchQuantizedKVCache")
-    lists = cache_types("CacheList")
+    from gmlx.cache.kv_cache import (
+        BatchQuantizedKVCache,
+        CacheList,
+        KVCache,
+        QuantizedKVCache,
+    )
 
     def recover(c):
-        if isinstance(c, quant):
+        if isinstance(c, QuantizedKVCache):
             out = KVCache()
             if c.offset:
                 out.update_and_fetch(*_dequantized_kv(c))
             return out
-        if isinstance(c, batch_quant):
+        if isinstance(c, BatchQuantizedKVCache):
             return _dequantized_batch(c)
-        if isinstance(c, lists):
+        if isinstance(c, CacheList):
             members = tuple(recover(m) for m in c.caches)
             if any(m is not o for m, o in zip(members, c.caches)):
                 return type(c)(*members)
@@ -111,7 +110,7 @@ def kvarn_lift_cache(c):
     rotated-domain K/V, which stock SDPA would attend with an un-rotated
     query -- no crash, just wrong logits on every preempted row.
     _raw_single is the original-domain accessor."""
-    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache.kv_cache import BatchKVCache
 
     lifted = BatchKVCache([0])
     if c.offset:
@@ -165,9 +164,9 @@ def lift_single_cache(c):
     otherwise. Everything else lifts through its class's merge. The
     cascade stamp rides along. One lift for the preempted host row and
     the injected rows, so the two cannot drift."""
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    if isinstance(c, cache_types("QuantizedKVCache")):
+    if isinstance(c, QuantizedKVCache):
         return dequantize_lift_cache(c)
     if getattr(c, "kv_quant_scheme", None) == "kvarn" and batch_liftable(c):
         from gmlx.cache.kvarn_sdpa import kvarn_row_ends_ok
@@ -203,10 +202,9 @@ def batch_liftable(c) -> bool:
         # The rotating subclass counts evicted tokens in offset that its
         # buffers no longer hold: kvarn_lift_cache would misplace rows.
         return not isinstance(c, KVarNRotatingKVCache)
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    return (isinstance(c, cache_types("QuantizedKVCache"))
-            or hasattr(type(c), "merge"))
+    return isinstance(c, QuantizedKVCache) or hasattr(type(c), "merge")
 
 _SPEC_KV_QUANT_FLAG = "_kq_gguf_spec_kv_quant"
 _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
@@ -408,8 +406,6 @@ def install_spec_kv_quant() -> None:
     install_owned_b1_spec_cache()
     boot_params = _spec_kv_quant_params()
 
-    from gmlx.cache.compat import cache_types
-
     from gmlx.cache.kv_policy import note_once
 
     _orig = _su.make_speculative_prompt_cache
@@ -449,12 +445,10 @@ def install_spec_kv_quant() -> None:
             # rejected drafts.
             # to_batch_cache also quantizes nested subcaches. Walk
             # into CacheList entries.
-            from mlx_vlm.models.cache import BatchKVCache
-
-            batch_quant = cache_types("BatchQuantizedKVCache")
+            from gmlx.cache.kv_cache import BatchKVCache, BatchQuantizedKVCache
 
             def _swap(c):
-                if isinstance(c, batch_quant):
+                if isinstance(c, BatchQuantizedKVCache):
                     return BatchKVCache(left_padding), 1
                 inner = getattr(c, "caches", None)
                 if inner is None:

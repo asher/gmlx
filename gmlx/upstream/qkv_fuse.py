@@ -52,7 +52,7 @@ def _eligible(m) -> bool:
 
 
 def _make_fused(base_cls):
-    from mlx_lm.models.base import scaled_dot_product_attention
+    from gmlx.cache.attention import scaled_dot_product_attention
 
     class _FusedQKVAttention(base_cls):
         def __call__(self, x, mask, cache=None):

@@ -37,16 +37,16 @@ import mlx.nn as nn
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 from mlx.utils import tree_flatten
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    scaled_dot_product_attention,
-)
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.cache.attention import (
+    create_attention_mask,
+    scaled_dot_product_attention,
+)
 from gmlx.models.deepseek_v4.cache import (
     DS4BatchPoolingCache,
     PackedPool,
@@ -2958,12 +2958,11 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if cache is None:
             cache = [None] * len(self.pipeline_layers)
 
-        from gmlx.cache.compat import cache_types
+        from gmlx.cache.kv_cache import CacheList
 
-        cache_list_types = cache_types("CacheList")
         first_cache = cache[0]
         mask_cache = (
-            first_cache[0] if isinstance(first_cache, cache_list_types)
+            first_cache[0] if isinstance(first_cache, CacheList)
             else first_cache
         )
 
@@ -3037,7 +3036,7 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if pipeline_rank != 0:
             h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
             cache_item = cache[-1]
-            if isinstance(cache_item, cache_list_types):
+            if isinstance(cache_item, CacheList):
                 cache_item = cache_item[0]
             if cache_item is not None:
                 cache_item.keys = mx.depends(cache_item.keys, h)
@@ -3095,19 +3094,14 @@ class Model(nn.Module):
         return predicate
 
     def make_cache(self):
-        # Plain caches take the consuming stack's class identities: under
-        # mlx-vlm serve its apc/batch machinery isinstance-gates on its own
-        # (vendored since 0.6.4) classes; under the pure mlx-lm CLI, on
-        # mlx-lm's.
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import CacheList, RotatingKVCache
 
-        cmod = construction_cache_module()
         caches = []
         for layer in self.layers:
             ratio = layer.attn.compress_ratio
             if ratio == 0:
                 caches.append(
-                    cmod.RotatingKVCache(max_size=self.args.sliding_window))
+                    RotatingKVCache(max_size=self.args.sliding_window))
             elif isinstance(layer.attn, SparseCompressedAttention):
                 # local + compressor pool + indexer pool. The indexer pool
                 # opts out of --kv-bits packing: the score kernel reads it
@@ -3115,8 +3109,8 @@ class Model(nn.Module):
                 idx_pool = DS4PoolingCache(ratio)
                 idx_pool.quantizable = False
                 caches.append(
-                    cmod.CacheList(
-                        cmod.RotatingKVCache(max_size=self.args.sliding_window),
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
                         DS4PoolingCache(ratio),
                         idx_pool,
                     )
@@ -3124,8 +3118,8 @@ class Model(nn.Module):
             else:
                 # local + compressor pool
                 caches.append(
-                    cmod.CacheList(
-                        cmod.RotatingKVCache(max_size=self.args.sliding_window),
+                    CacheList(
+                        RotatingKVCache(max_size=self.args.sliding_window),
                         DS4PoolingCache(ratio),
                     )
                 )

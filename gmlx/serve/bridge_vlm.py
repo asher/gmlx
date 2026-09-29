@@ -441,11 +441,6 @@ def _load_serveable_mtp(
     # returned config.
     model.config = _AttrDict(model.config)
     _ensure_inner_config(model, model.config)
-    # Runtime-origin cache identities for the apc/ar isinstance gates; a
-    # vlm-native LanguageModel target makes this a no-op, an mlx-lm-style
-    # target (deepseek_v4 et al) needs it since mlx-vlm 0.6.4.
-    from gmlx.cache.compat import ensure_runtime_origin_make_cache
-    ensure_runtime_origin_make_cache(model.language_model)
     _MTP_DRAFTER_STASH[os.path.abspath(gguf_path)] = (drafter, "mtp")
     _log_drafter_source(gguf_path, drafter, draft_gguf_path)
     processor = _make_text_processor(tokenizer)
@@ -720,11 +715,6 @@ def load_serveable_model(
         feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
         **_levers)
     processor = _make_text_processor(tokenizer)
-    # mlx-lm-arch caches must carry the vlm runtime's class identities or
-    # apc/ar isinstance-gates (own classes since mlx-vlm 0.6.4) resolve
-    # model_apc_mode to None and APC silently disengages for this model.
-    from gmlx.cache.compat import ensure_runtime_origin_make_cache
-    ensure_runtime_origin_make_cache(raw_model)
     model = TextOnlyModel(raw_model, config=_as_dict(config))
     _ensure_inner_config(model, _AttrDict(_as_dict(config)))
     _ensure_text_embedding_probe(model, raw_model)

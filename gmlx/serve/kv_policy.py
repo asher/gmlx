@@ -87,7 +87,7 @@ def _probe_stack(model):
     make = getattr(lm, "make_cache", None)
     if callable(make):
         return make()
-    from mlx_vlm.models.cache import KVCache
+    from gmlx.cache.kv_cache import KVCache
 
     return [KVCache() for _ in lm.layers]
 

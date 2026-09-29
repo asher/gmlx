@@ -43,11 +43,11 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import create_attention_mask
-from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 
 import gmlx.upstream.gdn_patches as _gp
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.spec.dflash_drafter import DFlashCaptureHooks
 
 from . import language as _L

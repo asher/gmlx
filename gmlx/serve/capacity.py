@@ -160,8 +160,7 @@ def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
     from types import SimpleNamespace
 
     try:
-        from mlx_vlm.models.cache import should_quantize_kv_layer
-
+        from gmlx.cache.kv_cache import should_quantize_kv_layer
         from gmlx.cache.kv_policy import (FP16_BPE, kvarn_bytes_per_element,
                                           kvarn_fixed_tokens,
                                           kvarn_step_tokens)
@@ -226,8 +225,7 @@ def _affine_bpe_vector(geometry, e, raw):
     try:
         fb = float(raw)
         group = int(e.get("KV_GROUP_SIZE") or 64)
-        from mlx_vlm.models.cache import should_quantize_kv_layer
-
+        from gmlx.cache.kv_cache import should_quantize_kv_layer
         from gmlx.cache.kv_policy import (FP16_BPE, VALID_BITS, VALID_GROUPS,
                                           packed_bytes_per_element)
     except Exception:

@@ -11,7 +11,7 @@ Model-free; run with KQUANT_FORCE_CPU=1 to stay off the GPU.
 import mlx.core as mx
 import pytest
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import (
     retirement_store,
     row_snapshot,
@@ -19,7 +19,6 @@ from gmlx.cache.snapshot import (
 
 # Runtime-origin cache classes: these fixtures stand in for caches the
 # mlx-vlm generate stack builds, which are vlm-origin.
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 BatchKVCache = _cache.BatchKVCache
 BatchRotatingKVCache = _cache.BatchRotatingKVCache

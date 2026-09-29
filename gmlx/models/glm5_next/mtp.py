@@ -40,9 +40,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import create_attention_mask
-
 from . import model as glm5
+from gmlx.cache.attention import create_attention_mask
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.spec.mtp_drafter import _POSTNORM_FEED, QwenMTPDrafter
 
@@ -256,18 +255,12 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
             raise NotImplementedError(
                 "Glm5NextMTPDrafter is B=1 only (v1): the pooled indexer "
                 "selection is single-sequence")
-        from mlx_lm.models.cache import CacheList as _CacheList
-        from mlx_lm.models.cache import KVCache as _KVCache
-
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import CacheList, KVCache
         from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        cmod = construction_cache_module()
-        kv_cls = getattr(cmod, "KVCache", _KVCache)
-        list_cls = getattr(cmod, "CacheList", _CacheList)
         pool = DS4PoolingCache(self._kpool, lookback=False)
         pool.quantizable = False
-        return [list_cls(kv_cls(), pool)]
+        return [CacheList(KVCache(), pool)]
 
     def inject_rows(self, *args, **kwargs) -> None:
         raise NotImplementedError(

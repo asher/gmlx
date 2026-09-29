@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from gmlx.cache.apc_manager import GmlxAPCManager
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.snapshot import ckpt_layout, ckpt_lookup, ckpt_store
 from gmlx.cache.kvarn_cache import (
     BatchKVarNKVCache,
@@ -25,7 +25,6 @@ from gmlx.cache.kvarn_cache import (
 from test_ckpt_tier import D, H, make_hybrid_cache
 from kvarn_testlib import needs_kvarn_ops, tokens
 
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache

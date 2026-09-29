@@ -39,9 +39,9 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, LanguageModelOutput
-from mlx_vlm.models.cache import KVCache, RotatingKVCache
 from mlx_vlm.models.interpolate import bilinear_interpolate
 
+from gmlx.cache.kv_cache import KVCache, RotatingKVCache
 from gmlx.upstream.graft import graft_module
 
 from .model import MuseGlimmerModel

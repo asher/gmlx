@@ -44,13 +44,14 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from mlx_lm.models.activations import swiglu
-from mlx_lm.models.base import BaseModelArgs, create_attention_mask
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache import refusals
-from gmlx.cache.kv_cache import KVCache
+from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_cache import CacheList, KVCache
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,
@@ -733,15 +734,7 @@ class Model(nn.Module):
         # latent alone - an unwritten second slot is not inert, because
         # CacheList.state reads keys.shape on every entry it holds.
         # Per-layer cache shapes are the norm here (qwen4_exp mixes three).
-        from gmlx.cache.compat import construction_cache_module
-
-        cmod = construction_cache_module()
-        kv_cls = getattr(cmod, "KVCache", KVCache)
-        list_cls = getattr(cmod, "CacheList", None)
-        if list_cls is None:
-            from mlx_lm.models.cache import CacheList as list_cls
-
-        return [list_cls(HyV4KVCache(), kv_cls())
+        return [CacheList(HyV4KVCache(), KVCache())
                 if layer.self_attn.indexer is not None else HyV4KVCache()
                 for layer in self.model.layers]
 

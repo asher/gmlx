@@ -268,10 +268,10 @@ class DeepseekV4DSparkDrafter(nn.Module):
         return self
 
     def make_cache(self) -> List[Any]:
-        from gmlx.cache.compat import construction_cache_module
+        from gmlx.cache.kv_cache import RotatingKVCache
 
-        rot = construction_cache_module().RotatingKVCache
-        return [rot(max_size=self._sliding_window) for _ in self.stages]
+        return [RotatingKVCache(max_size=self._sliding_window)
+                for _ in self.stages]
 
     def reset(self, target_model, left_padding: Optional[List[int]] = None) -> list:
         if left_padding is not None:

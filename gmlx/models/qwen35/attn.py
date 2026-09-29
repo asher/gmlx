@@ -38,6 +38,7 @@ import mlx.core as mx
 from mlx_vlm.models import base as _B
 
 import gmlx.load.loadlog as loadlog
+from gmlx.cache import attention as _attn
 from gmlx.device import metal_info
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
@@ -527,9 +528,8 @@ def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     Mirrors mlx-vlm's base dispatch minus the TurboQuant branches. gmlx
     never builds those caches, but both TurboQuant cache classes set
     ``bits``, so raise before the affine quantized branch misreads
-    their packing. The quantized branch resolves the base module symbol
-    at call time so the batch-mask fix patch stays engaged (pinned
-    under the quantized-SDPA ledger).
+    their packing. The quantized branch calls the owned quantized SDPA,
+    which carries the batch mask fix.
     """
     if isinstance(cache, (_B.TurboQuantKVCache, _B.BatchTurboQuantKVCache)):
         raise RuntimeError(
@@ -540,7 +540,7 @@ def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     if hasattr(cache, "bits"):
         if sinks is not None:
             raise ValueError("Quantized SDPA does not support attention sinks.")
-        return _B.quantized_scaled_dot_product_attention(
+        return _attn.quantized_scaled_dot_product_attention(
             queries,
             keys,
             values,

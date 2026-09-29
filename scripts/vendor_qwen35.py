@@ -24,14 +24,18 @@ HEADER = """# SPDX-License-Identifier: MIT
 # with an upstream import (tests/test_pyright_scope.py scans for those).
 LANG_IMPORTS = [
     ("from ..activations ", "from mlx_vlm.models.activations "),
-    ("from ..base import (", "from mlx_vlm.models.base import ("),
-    ("from ..cache ", "from mlx_vlm.models.cache "),
+    ("from ..base import (\n    LanguageModelOutput,\n    create_attention_mask,\n"
+     "    scaled_dot_product_attention,\n)\n",
+     "from mlx_vlm.models.base import LanguageModelOutput\n"),
+    ("from ..cache import ArraysCache, KVCache\n", ""),
     ("from ..rope_utils import MRoPERotaryEmbedding\n",
      "from mlx_vlm.models.qwen3_5.config import ModelConfig\n"
      "from mlx_vlm.models.rope_utils import MRoPERotaryEmbedding\n"),
     ("from ..rope_utils import apply_", "from mlx_vlm.models.rope_utils import apply_"),
     ("from .config import ModelConfig, TextConfig\n",
-     "\nfrom gmlx.eval_guard import guard\n\n"
+     "\nfrom gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention\n"
+     "from gmlx.cache.kv_cache import ArraysCache, KVCache\n"
+     "from gmlx.eval_guard import guard\n\n"
      "from .cache import Qwen35ArraysCache\nfrom .config import TextConfig\n"),
 ]
 # Evals under an except route through gmlx.eval_guard (tests/test_eval_guard.py
@@ -116,8 +120,9 @@ def build(models):
         ]""")
     out["language.py"] = ("qwen3_5/language.py", """mlx-vlm 0.6.15 qwen3.5 text model, the base the owned classes subclass.
 
-Edits to the upstream file: imports are absolute, ``TextConfig`` comes from
-the vendored ``config``, ``make_cache`` builds ``Qwen35ArraysCache`` for the
+Edits to the upstream file: imports are absolute, the cache classes and
+attention helpers come from gmlx.cache, ``TextConfig`` comes from the
+vendored ``config``, ``make_cache`` builds ``Qwen35ArraysCache`` for the
 linear-attention layers, the launch probe in ``_qwen3_5_try_launch`` evals
 through ``gmlx.eval_guard``, and comments are ASCII. Bug fixes ported from
 mlx-vlm 0.7.3: ``get_rope_index`` splits each video grid into one row per

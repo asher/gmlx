@@ -128,14 +128,13 @@ def kvarn_convert_batch_stack(caches, policy, left_padding, k_bits, v_bits,
     serve build and the batched speculative build share this walk, so
     admission prices exactly what either builds (the last layer of a
     deep stack stays fp16). Returns the number of layers converted."""
-    from .compat import cache_types
+    from .kv_cache import BatchKVCache
     from .kvarn_cache import BatchKVarNKVCache, ensure_registered
 
     ensure_registered()
-    batch_kv = cache_types("BatchKVCache")
     n = 0
     for i, plan in enumerate(policy.per_layer):
-        if plan.quantize and type(caches[i]) in batch_kv:
+        if plan.quantize and type(caches[i]) is BatchKVCache:
             caches[i] = BatchKVarNKVCache(
                 left_padding,
                 k_bits=k_bits,

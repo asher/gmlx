@@ -48,17 +48,17 @@ from typing import Any, Dict, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    create_ssm_mask,
-    scaled_dot_product_attention,
-)
-from mlx_lm.models.cache import ArraysCache, KVCache
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.cache.attention import (
+    create_attention_mask,
+    create_ssm_mask,
+    scaled_dot_product_attention,
+)
+from gmlx.cache.kv_cache import ArraysCache, CacheList, KVCache
 from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
@@ -1467,30 +1467,20 @@ class Model(nn.Module):
         return self.model.layers
 
     def make_cache(self):
-        # Plain caches take the consuming stack's class identities (mlx-vlm
-        # vs mlx-lm); DS4PoolingCache stays the deepseek_v4 class every APC
-        # seam isinstance-keys on. Heterogeneous list => the hybrid cache is
+        # DS4PoolingCache stays the deepseek_v4 class every APC seam
+        # isinstance-keys on. Heterogeneous list => the hybrid cache is
         # non-trimmable and chat re-prefills on partial prefix reuse.
-        from gmlx.cache.compat import construction_cache_module
-
-        cmod = construction_cache_module()
-        arrays_cls = getattr(cmod, "ArraysCache", ArraysCache)
-        kv_cls = getattr(cmod, "KVCache", KVCache)
-        list_cls = getattr(cmod, "CacheList", None)
-        if list_cls is None:
-            from mlx_lm.models.cache import CacheList as list_cls
-
         caches = []
         for layer in self.layers:
             if layer.is_linear:
                 # slots 0..2 = q/k/v conv tails, 3 = fp32 recurrent state.
-                caches.append(arrays_cls(size=4))
+                caches.append(ArraysCache(size=4))
             else:
                 # Indexer pool: read in full at every scoring step, so it
                 # opts out of --kv-bits packing (deepseek_v4 precedent).
                 pool = DS4PoolingCache(self.args.index_kpool, lookback=False)
                 pool.quantizable = False
-                caches.append(list_cls(kv_cls(), pool))
+                caches.append(CacheList(KVCache(), pool))
         return caches
 
     def sanitize(self, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:

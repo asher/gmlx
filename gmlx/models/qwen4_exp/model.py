@@ -44,15 +44,15 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
+from mlx_lm.models.base import BaseModelArgs
+from mlx_lm.models.gated_delta import gated_delta_update
+
+from gmlx.cache import bind, refusals
+from gmlx.cache.attention import (
     create_attention_mask,
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from mlx_lm.models.gated_delta import gated_delta_update
-
-from gmlx.cache import bind, refusals
 from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention

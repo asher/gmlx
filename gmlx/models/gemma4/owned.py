@@ -43,14 +43,12 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_vlm.models.base import (
-    scaled_dot_product_attention as _base_sdpa,
-)
 from mlx_vlm.models.gemma4 import language as _G
 
 import gmlx.upstream.attn_hd512 as attn_hd512
 from . import batched_sdpa as gemma4_batched_sdpa
 from .image_masks import image_masks
+from gmlx.cache.attention import scaled_dot_product_attention as _base_sdpa
 from gmlx.envflags import env_bool
 
 _OWNED_MASK_CALLS = 0

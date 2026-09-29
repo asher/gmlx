@@ -2137,9 +2137,9 @@ def _packed_single(cache) -> bool:
         return False
     if getattr(cache, "kv_quant_scheme", None) == "kvarn":
         return True
-    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kv_cache import QuantizedKVCache
 
-    return isinstance(cache, cache_types("QuantizedKVCache"))
+    return isinstance(cache, QuantizedKVCache)
 
 
 def _batch_capable(cache) -> bool:

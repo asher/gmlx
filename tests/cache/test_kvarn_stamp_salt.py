@@ -13,7 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache import kv_cache as _cache
 from gmlx.cache.kvarn_apc import (
     _MODE_STAMP,
     apply_kvarn_salt,
@@ -24,7 +24,6 @@ from gmlx.cache.kvarn_apc import (
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from kvarn_testlib import Args, FakeLM
 
-_cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 CacheList = _cache.CacheList
 KVCache = _cache.KVCache

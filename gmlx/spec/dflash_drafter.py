@@ -61,10 +61,10 @@ from typing import TYPE_CHECKING, Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_vlm.models.activations import swiglu
-from mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
 from mlx_vlm.models.rope_utils import initialize_rope
 
 from .drafter_protocol import DraftStash, native_block_size
+from gmlx.cache.kv_cache import BufferedRotatingKVCache, KVCache
 from gmlx.envflags import env_float
 
 _LAYER_TYPES = ("full_attention", "sliding_attention")
