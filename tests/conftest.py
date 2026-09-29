@@ -70,25 +70,64 @@ def pytest_configure(config):
 _read_pools: list = []
 
 
-@pytest.fixture(autouse=True)
-def _hand_back_process_state():
-    # pytest sets up a conftest's autouse fixtures in name order, so this
-    # one sets up before the others and before monkeypatch, and tears down
-    # after them: the environment, MLX's global settings and the warning
-    # format return to what the test started with, whatever the test or
-    # its fixtures left behind.
+# Every test hands the process back as it found it (process_state.py).
+# pytest sets up a test's fixtures in scope order, the wider scopes first.
+# The capture runs as the first function-scoped fixture sets up, whatever
+# the fixture names, and the restore runs as an item finalizer registered
+# then: after the teardown of every function-scoped fixture, and before
+# the teardown of any wider one. Restore covers the test and its
+# function-scoped fixtures. Class-, module- and session-scoped fixtures
+# set up outside the capture, so what they change stays for the tests
+# that share them, and what their own teardown does not undo persists
+# until the end-of-run check.
+_awaiting_capture = None
+
+
+def _hand_back_process_state(item) -> None:
     import process_state
 
     state = process_state.capture()
-    yield
-    process_state.restore(state)
+    item.addfinalizer(lambda: process_state.restore(state))
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    global _awaiting_capture
+    _skip_without_kvarn_ops(item)
+    _awaiting_capture = item
+    try:
+        result = yield
+    except BaseException:
+        # Setup stopped before any function-scoped fixture ran.
+        _awaiting_capture = None
+        raise
+    if _awaiting_capture is item:
+        # A test with no function-scoped fixture.
+        _awaiting_capture = None
+        _hand_back_process_state(item)
+    return result
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_fixture_setup(fixturedef, request):
+    global _awaiting_capture
+    item = _awaiting_capture
+    if item is not None and fixturedef.scope == "function":
+        _awaiting_capture = None
+        _hand_back_process_state(item)
+    return (yield)
 
 
 _END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
 
 
-def pytest_collection_modifyitems(session, config, items):
-    # The production-numerics check reads the state the whole run left.
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_finish(session):
+    # The production-numerics check reads the state the whole run left, so
+    # it runs last. The --ff, --nf and --lf reorders are wrappers around
+    # pytest_collection_modifyitems that run after every plain hook, a
+    # trylast one included, so the move waits until that hook returns.
+    items = session.items
     last = [i for i in items if i.nodeid.endswith(_END_OF_RUN)]
     if last:
         items[:] = [i for i in items if i not in last] + last
@@ -223,7 +262,7 @@ def _no_live_server(monkeypatch):
                         lambda base_url, api_key=None: False)
 
 
-def pytest_runtest_setup(item):
+def _skip_without_kvarn_ops(item) -> None:
     ops = item.get_closest_marker("needs_kvarn_ops") is not None
     row_ends = item.get_closest_marker("needs_kvarn_row_ends") is not None
     if not (ops or row_ends):

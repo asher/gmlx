@@ -6,7 +6,8 @@ that library entry points call. The second, which runs next, must find
 everything as the first found it. The last check runs at the end of the
 session (tests/conftest.py moves it there): the environment still holds
 the session's MLX_ENABLE_TF32, and float32 matmuls in this process round as
-in a fresh process started from the session environment.
+in a fresh process started from the session environment. The tests
+before it run the harness itself in a fresh pytest process.
 """
 
 from __future__ import annotations
@@ -14,10 +15,13 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import json
 import os
+import shutil
 import subprocess
 import sys
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -178,6 +182,117 @@ def test_j_the_next_test_finds_the_governor_unarmed():
     st = governor._state(_GEN)
     assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
     assert prefill_decay._NOTED_CACHE_LIMIT == _MIRRORS["noted_cache_limit"]
+
+
+
+# The harness itself, run in a fresh pytest process on the CPU device over
+# copies of the conftest, process_state and this file.
+_TESTS = Path(__file__).resolve().parent
+_END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
+
+
+def _inner_tree(tmp_path) -> Path:
+    root = tmp_path / "inner"
+    root.mkdir()
+    for name in ("conftest.py", "process_state.py", "test_process_state.py"):
+        shutil.copyfile(_TESTS / name, root / name)
+    return root
+
+
+def _inner_pytest(root: Path, *args, **env):
+    run_env = {k: v for k, v in process_state.SESSION["env"].items()
+               if not k.startswith("PYTEST_")}
+    run_env.update(KQUANT_FORCE_CPU="1", PYTHONPATH=str(_TESTS.parent), **env)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--tb=short",
+         "-o", f"cache_dir={root / '.cache'}", *args],
+        cwd=root, env=run_env, capture_output=True, text=True, timeout=600)
+
+
+_EARLY_FIXTURE = '''
+
+@pytest.fixture(autouse=True)
+def _a_fixture_named_before_the_others(request):
+    first = request.node.name == "test_first"
+    if first:
+        os.environ["GMLX_INNER_SETUP_LEAK"] = "1"
+    yield
+    if first:
+        os.environ["GMLX_INNER_TEARDOWN_LEAK"] = "1"
+'''
+
+_ORDER_TESTS = '''
+import os
+
+
+def test_first():
+    pass
+
+
+def test_second():
+    assert "GMLX_INNER_SETUP_LEAK" not in os.environ
+    assert "GMLX_INNER_TEARDOWN_LEAK" not in os.environ
+'''
+
+_SCOPED_TESTS = '''
+import os
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def module_env():
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("GMLX_INNER_MODULE_ENV", "1")
+        yield
+
+
+@pytest.mark.parametrize("i", [1, 2, 3])
+def test_module_env_stays_for_the_module(module_env, i):
+    assert os.environ.get("GMLX_INNER_MODULE_ENV") == "1"
+'''
+
+_AFTER_SCOPED = '''
+import os
+
+
+def test_module_env_goes_with_its_module():
+    assert "GMLX_INNER_MODULE_ENV" not in os.environ
+'''
+
+
+def test_restore_wraps_every_function_fixture_whatever_its_name(tmp_path):
+    # A conftest fixture named before the others leaks at its setup and its
+    # teardown, and the next test must find neither. A module-scoped
+    # fixture's environment stays for its module and leaves with it.
+    root = _inner_tree(tmp_path)
+    with open(root / "conftest.py", "a") as f:
+        f.write(_EARLY_FIXTURE)
+    (root / "test_order.py").write_text(_ORDER_TESTS)
+    (root / "test_scoped.py").write_text(_SCOPED_TESTS)
+    (root / "test_scoped_after.py").write_text(_AFTER_SCOPED)
+    r = _inner_pytest(root, "test_order.py", "test_scoped.py",
+                      "test_scoped_after.py")
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
+def test_the_end_of_run_check_stays_last_under_ff_and_nf(tmp_path):
+    # The check failed last time and its file is the newest, so --ff and
+    # --nf would each move it to the front.
+    root = _inner_tree(tmp_path)
+    (root / "test_other.py").write_text("def test_other():\n    pass\n")
+    cache = root / ".cache" / "v" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "lastfailed").write_text(json.dumps({_END_OF_RUN: True}))
+    (cache / "nodeids").write_text(
+        json.dumps(["test_other.py::test_other", _END_OF_RUN]))
+    (root / "test_new.py").write_text("def test_new():\n    pass\n")
+    os.utime(root / "test_other.py", (1, 1))
+    for flag in ("--ff", "--nf"):
+        r = _inner_pytest(root, flag, "--collect-only", "test_other.py",
+                          "test_new.py", _END_OF_RUN)
+        ids = [line for line in r.stdout.splitlines() if "::" in line]
+        assert len(ids) == 3 and ids[-1] == _END_OF_RUN, (flag, r.stdout)
 
 
 _GEMM = r"""
