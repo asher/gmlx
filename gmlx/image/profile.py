@@ -297,6 +297,9 @@ def sdpa_peak(seq: int, heads: int, head_dim: int, *, batch: int = 1,
     q, k, v = (mx.random.normal((batch, heads, seq, head_dim)).astype(dtype)
                for _ in range(3))
     mx.eval(q, k, v)
+    # eval can return before the temporaries it made are released, and a
+    # release during the call would read as a peak below the inputs.
+    mx.synchronize()
     mx.clear_cache()
     base = mx.get_active_memory()
     mx.reset_peak_memory()

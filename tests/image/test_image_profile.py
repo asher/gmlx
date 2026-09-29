@@ -123,3 +123,11 @@ def test_sdpa_peak_reports_the_score_size():
     assert r["score_bytes"] == 2 * 64 * 64 * 4
     assert r["output_bytes"] == 2 * 64 * 32 * 4
     assert r["peak_over_inputs_bytes"] >= 0
+
+
+def test_sdpa_peak_counts_the_output_above_its_inputs():
+    # The bf16 inputs are built through fp32 temporaries, the case that read
+    # below the inputs.
+    for _ in range(3):
+        r = prof.sdpa_peak(1024, 8, 128, dtype=mx.bfloat16)
+        assert r["peak_over_inputs_bytes"] >= r["output_bytes"]
