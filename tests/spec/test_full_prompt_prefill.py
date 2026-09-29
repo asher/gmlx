@@ -543,7 +543,10 @@ def test_apc_warm_start(mtp_model):
     suffix_ids = tokenizer.encode(suffix_text)
     turn2_ids = prefix_ids + suffix_ids
 
-    hit = spec_cache.lookup(mx.array([turn2_ids], dtype=mx.int32))
+    # The L0 salt of a text row with no APC manager, adapter or tenant
+    # (gmlx.spec.mtp_prefill._l0_salt).
+    hit = spec_cache.lookup(mx.array([turn2_ids], dtype=mx.int32),
+                            salt=(0, None, None))
     assert hit is not None, "turn-2 prompt did not hit the prefix cache"
     assert hit[0] == len(prefix_ids), (
         f"hit prefix_len {hit[0]} != stored prefix {len(prefix_ids)}"
