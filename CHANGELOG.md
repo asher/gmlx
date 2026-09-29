@@ -79,6 +79,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conversation in the prefix cache for the next turn.
 - A model whose load failed after its weights were read, as when its
   `--kv-bits` setting was refused, stayed in memory.
+- A Gemma-4 model loaded with `--hf-source` ran on random weights and answered
+  with nonsense.
+- A Qwen3.5 or Qwen3.6 model loaded with `--hf-source` answered wrongly, and
+  Qwen3.6-35B-A3B failed at its first token.
+- With `--hf-source`, a Gemma-4 12B, Gemma-3 4B to 27B, Mistral-Small-3.1,
+  Ministral-3 or Qwen3-VL-MoE model failed to load.
+- A GGUF load that left model weights without a tensor ran with random values
+  in them. It now stops and names the weights it could not fill.
 
 ## [0.4.19] - 2026-09-27
 

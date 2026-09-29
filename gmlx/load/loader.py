@@ -1938,18 +1938,70 @@ def _resolve_chat_template(chat_template: str | None) -> str | None:
     return chat_template
 
 
+# A multimodal HF config nests its text model under text_config. Its
+# container class builds a language_model tree that the remapped GGUF names
+# do not reach, and the load reads model_type and the text fields from the
+# top level. Each row maps a container model_type to the model_type the
+# GGUF synth gives, the defaults the mlx_lm container gives its text
+# config, and the keys a text-only load leaves out.
+_TEXT_OF_CONTAINER: dict[str, tuple[str, dict, tuple[str, ...]]] = {
+    # use_bidirectional_attention only changes attention over image tokens,
+    # and the GGUF synth sets no key. A VLM load sets it from the projector
+    # type and the text width.
+    "gemma4": ("gemma4_text", {"vocab_size": 262144, "num_attention_heads": 8,
+                               "num_key_value_heads": 1},
+               ("use_bidirectional_attention",)),
+    "gemma4_unified": ("gemma4_text", {"vocab_size": 262144,
+                                       "num_attention_heads": 8,
+                                       "num_key_value_heads": 1},
+                       ("use_bidirectional_attention",)),
+    "gemma3": ("gemma3_text", {"vocab_size": 262208, "num_attention_heads": 8,
+                               "num_key_value_heads": 4}, ()),
+    # A mistral text config (Mistral-Small-3.1) builds llama, as in mlx_lm.
+    "mistral3": ("ministral3", {"tie_word_embeddings": False}, ()),
+    "qwen3_5": ("qwen3_5", {}, ()),
+    "qwen3_5_moe": ("qwen3_5_moe", {}, ()),
+    "qwen3_vl_moe": ("qwen3_moe", {}, ()),
+}
+
+
+def _text_config_from_container(cfg: dict) -> dict:
+    """The flat text config of an HF container config, or ``cfg`` itself.
+
+    The text config keys come first, then the container's own
+    ``vocab_size`` and ``tie_word_embeddings``, then the container
+    defaults."""
+    row = _TEXT_OF_CONTAINER.get(cfg.get("model_type") or "")
+    text = cfg.get("text_config")
+    if row is None or not isinstance(text, dict):
+        return cfg
+    model_type, defaults, drop = row
+    if cfg["model_type"] == "mistral3" and text.get("model_type") != "ministral3":
+        model_type = "llama"
+    top = {k: cfg[k] for k in ("vocab_size", "tie_word_embeddings") if k in cfg}
+    flat = {**defaults, **top, **text}
+    for key in drop:
+        flat.pop(key, None)
+    flat["model_type"] = model_type
+    loadlog.verbose_print(
+        f"[config] hf_source {cfg['model_type']} container -> {model_type} "
+        "text config")
+    return flat
+
+
 def _load_config_from_source(hf_source: str) -> dict:
-    """Load a ``config.json`` from a local dir or HF id (override path)."""
+    """Load a ``config.json`` from a local dir or HF id (override path).
+
+    A container config comes back as its flat text config, so the model
+    class resolves to the same text model as a load without hf_source."""
     import json
 
     cfg_path = os.path.join(hf_source, "config.json")
-    if os.path.isfile(cfg_path):
-        with open(cfg_path, "r") as f:
-            return json.load(f)
-    from huggingface_hub import hf_hub_download
+    if not os.path.isfile(cfg_path):
+        from huggingface_hub import hf_hub_download
 
-    from gmlx.serve.hf_cache import network_fetch_allowed
-    with network_fetch_allowed():
-        path = hf_hub_download(hf_source, "config.json")
-    with open(path, "r") as f:
-        return json.load(f)
+        from gmlx.serve.hf_cache import network_fetch_allowed
+        with network_fetch_allowed():
+            cfg_path = hf_hub_download(hf_source, "config.json")
+    with open(cfg_path, "r") as f:
+        return _text_config_from_container(json.load(f))
