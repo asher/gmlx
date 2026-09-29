@@ -16,7 +16,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from test_loader_api import _HID, _TOKENS, _mint_tiny_llama
+from test_loader_api import _FFN, _HID, _TOKENS, _mint_tiny_llama
 
 
 @pytest.fixture(scope="module")
@@ -64,14 +64,25 @@ def test_the_message_counts_both_sides_and_names_the_first(gguf, tmp_path):
 
 
 def test_a_tensor_of_another_shape_stops_the_load(gguf, tmp_path):
-    # A config vocab wider than the GGUF's token_embd rows.
-    v = len(_TOKENS)
-    msg = _refused(gguf, _source(tmp_path, gguf, vocab_size=v + 8),
+    # A config FFN wider than the GGUF's.
+    ffn = _FFN + 8
+    msg = _refused(gguf, _source(tmp_path, gguf, intermediate_size=ffn),
                    error="ParameterShapeError")
-    assert ("1 of 20 model parameters get a GGUF tensor of another shape: "
-            f"model.embed_tokens.weight (parameter ({v + 8}, {_HID}), "
-            f"tensor ({v}, {_HID})).") in msg
+    assert ("6 of 20 model parameters get a GGUF tensor of another shape: "
+            f"model.layers.0.mlp.down_proj.weight (parameter ({_HID}, {ffn}), "
+            f"tensor ({_HID}, {_FFN})), ") in msg
     assert "hf_source" in msg and "'llama'" in msg
+
+
+def test_the_vocab_size_comes_from_the_token_embd_rows(gguf, tmp_path):
+    # A config vocab wider than the GGUF's token_embd rows loads with the
+    # rows, as a load without hf_source does.
+    import gmlx
+
+    v = len(_TOKENS)
+    _model, config, _tok = gmlx.load_model(
+        gguf, hf_source=_source(tmp_path, gguf, vocab_size=v + 8))
+    assert config["vocab_size"] == v
 
 
 def test_tensors_without_a_parameter_are_dropped(gguf, tmp_path):

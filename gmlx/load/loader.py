@@ -1552,7 +1552,8 @@ def load_model(
     # 3. build unquantized model from synthesized (or supplied) config.
     loadlog.stage("building model")
     if hf_source is not None:
-        config_dict = _load_config_from_source(hf_source)
+        config_dict = _vocab_from_token_embd(
+            _load_config_from_source(hf_source), tensor_shapes)
     else:
         from .config_synth import synthesize_config
 
@@ -1966,19 +1967,19 @@ def _resolve_chat_template(chat_template: str | None) -> str | None:
 # do not reach, and the load reads model_type and the text fields from the
 # top level. Each row maps a container model_type to the model_type the
 # GGUF synth gives, the defaults the mlx_lm container gives its text
-# config, and the keys a text-only load leaves out.
+# config, and the keys a text-only load leaves out. No row gives a
+# vocab_size: the load takes it from the GGUF (_vocab_from_token_embd).
 _TEXT_OF_CONTAINER: dict[str, tuple[str, dict, tuple[str, ...]]] = {
     # use_bidirectional_attention only changes attention over image tokens,
     # and the GGUF synth sets no key. A VLM load sets it from the projector
     # type and the text width.
-    "gemma4": ("gemma4_text", {"vocab_size": 262144, "num_attention_heads": 8,
+    "gemma4": ("gemma4_text", {"num_attention_heads": 8,
                                "num_key_value_heads": 1},
                ("use_bidirectional_attention",)),
-    "gemma4_unified": ("gemma4_text", {"vocab_size": 262144,
-                                       "num_attention_heads": 8,
+    "gemma4_unified": ("gemma4_text", {"num_attention_heads": 8,
                                        "num_key_value_heads": 1},
                        ("use_bidirectional_attention",)),
-    "gemma3": ("gemma3_text", {"vocab_size": 262208, "num_attention_heads": 8,
+    "gemma3": ("gemma3_text", {"num_attention_heads": 8,
                                "num_key_value_heads": 4}, ()),
     # A mistral text config (Mistral-Small-3.1) builds llama, as in mlx_lm.
     "mistral3": ("ministral3", {"tie_word_embeddings": False}, ()),
@@ -2010,6 +2011,32 @@ def _text_config_from_container(cfg: dict) -> dict:
         f"[config] hf_source {cfg['model_type']} container -> {model_type} "
         "text config")
     return flat
+
+
+def _vocab_from_token_embd(config: dict, tensor_shapes: dict) -> dict:
+    """``config`` with the vocab_size of the GGUF's token_embd rows, the
+    value the GGUF synth gives.
+
+    An HF config can count rows the GGUF does not have: the Gemma-3 4B to
+    27B text config names none, the HF default is 262208, and llama.cpp
+    writes the 262144 token rows only. A config that nests its text model
+    under text_config gets the value there, and at the top level when it
+    names one there."""
+    embd = tensor_shapes.get("token_embd.weight")
+    if embd is None or len(embd) != 2:
+        return config
+    rows = int(embd[1])
+    text = config.get("text_config")
+    targets = [config]
+    if isinstance(text, dict):
+        targets = [text] + ([config] if "vocab_size" in config else [])
+    for target in targets:
+        if target.get("vocab_size") != rows:
+            loadlog.verbose_print(
+                f"[config] hf_source vocab_size {target.get('vocab_size')} "
+                f"-> {rows}, the token_embd rows")
+            target["vocab_size"] = rows
+    return config
 
 
 def _load_config_from_source(hf_source: str) -> dict:

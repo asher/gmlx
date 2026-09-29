@@ -139,7 +139,11 @@ def test_a_container_builds_the_text_model_its_container_builds(name, tmp_path):
     assert cfg["model_type"] == model_type
     assert "text_config" not in cfg
     model, _ = build_model(cfg)
-    assert _text_args(model) == ref
+    got = _text_args(model)
+    if "vocab_size" not in cfg:
+        # A load takes it from the GGUF's token_embd rows.
+        del got["vocab_size"], ref["vocab_size"]
+    assert got == ref
 
 
 @pytest.mark.parametrize("name", ["gemma4", "gemma4_unified"])
@@ -161,12 +165,16 @@ def test_gemma4_leaves_out_the_image_attention_setting(tmp_path):
     assert "use_bidirectional_attention" not in cfg
 
 
-def test_gemma3_takes_the_container_defaults(tmp_path):
-    from gmlx.load.loader import _load_config_from_source
+def test_gemma3_takes_the_container_heads_and_the_gguf_vocab(tmp_path):
+    # The container default vocab_size, 262208, counts 64 rows a llama.cpp
+    # GGUF does not have. The load takes the token_embd rows instead.
+    from gmlx.load.loader import _load_config_from_source, _vocab_from_token_embd
 
     cfg = _load_config_from_source(_write(tmp_path, _CONTAINERS["gemma3"][0]))
-    assert (cfg["vocab_size"], cfg["num_attention_heads"],
-            cfg["num_key_value_heads"]) == (262208, 8, 4)
+    assert "vocab_size" not in cfg
+    assert (cfg["num_attention_heads"], cfg["num_key_value_heads"]) == (8, 4)
+    cfg = _vocab_from_token_embd(cfg, {"token_embd.weight": [64, 262144]})
+    assert cfg["vocab_size"] == 262144
 
 
 def test_mistral3_unties_by_default_and_builds_llama_for_a_mistral_text(tmp_path):
@@ -209,6 +217,92 @@ def tiny_gguf(tmp_path_factory) -> str:
     p = tmp_path_factory.mktemp("container") / "tiny-llama.gguf"
     _mint_tiny_llama(str(p))
     return str(p)
+
+
+_G3_HID, _G3_LAYERS, _G3_HEADS, _G3_KV, _G3_FFN, _G3_HD = 64, 2, 4, 2, 128, 16
+# The image token fields of a Gemma-3 4B to 27B container config.
+_GEMMA3_IMAGE_FIELDS = {"image_token_index": 262144, "boi_token_index": 255999,
+                        "eoi_token_index": 256000, "mm_tokens_per_image": 256}
+
+
+def _mint_tiny_gemma3(path: str) -> None:
+    """A loadable gemma3 GGUF with one token_embd row per token, as
+    llama.cpp writes Gemma-3: 262144 rows where the HF config counts
+    262208."""
+    from gguf import GGUFWriter
+    from test_loader_api import _MERGES, _TOKENS
+
+    w = GGUFWriter(path, "gemma3")
+    for key, value in (("embedding_length", _G3_HID),
+                       ("block_count", _G3_LAYERS),
+                       ("attention.head_count", _G3_HEADS),
+                       ("attention.head_count_kv", _G3_KV),
+                       ("feed_forward_length", _G3_FFN),
+                       ("context_length", 1024),
+                       ("attention.key_length", _G3_HD),
+                       ("attention.value_length", _G3_HD),
+                       ("attention.sliding_window", 16),
+                       ("attention.sliding_window_pattern", _G3_LAYERS)):
+        w.add_uint32(f"gemma3.{key}", value)
+    w.add_float32("gemma3.attention.layer_norm_rms_epsilon", 1e-6)
+    w.add_float32("gemma3.rope.freq_base", 1e6)
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "llama-bpe")
+    w.add_array("tokenizer.ggml.tokens", _TOKENS)
+    w.add_array("tokenizer.ggml.merges", _MERGES)
+    w.add_array("tokenizer.ggml.token_type",
+                [3, 3, 3] + [1] * (len(_TOKENS) - 3))
+    w.add_uint32("tokenizer.ggml.bos_token_id", 0)
+    w.add_uint32("tokenizer.ggml.eos_token_id", 1)
+    rng = np.random.default_rng(0)
+
+    def t(name, *shape):
+        w.add_tensor(name, rng.standard_normal(shape).astype(np.float32) * 0.02)
+
+    t("token_embd.weight", len(_TOKENS), _G3_HID)
+    t("output_norm.weight", _G3_HID)
+    for i in range(_G3_LAYERS):
+        for norm in ("attn_norm", "post_attention_norm", "ffn_norm",
+                     "post_ffw_norm"):
+            t(f"blk.{i}.{norm}.weight", _G3_HID)
+        t(f"blk.{i}.attn_q_norm.weight", _G3_HD)
+        t(f"blk.{i}.attn_k_norm.weight", _G3_HD)
+        t(f"blk.{i}.attn_q.weight", _G3_HEADS * _G3_HD, _G3_HID)
+        t(f"blk.{i}.attn_k.weight", _G3_KV * _G3_HD, _G3_HID)
+        t(f"blk.{i}.attn_v.weight", _G3_KV * _G3_HD, _G3_HID)
+        t(f"blk.{i}.attn_output.weight", _G3_HID, _G3_HEADS * _G3_HD)
+        t(f"blk.{i}.ffn_gate.weight", _G3_FFN, _G3_HID)
+        t(f"blk.{i}.ffn_up.weight", _G3_FFN, _G3_HID)
+        t(f"blk.{i}.ffn_down.weight", _G3_HID, _G3_FFN)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def test_a_gemma3_container_takes_the_vocab_from_the_gguf(tmp_path):
+    # The container's text config names no vocab_size, and the family
+    # default counts 64 rows the GGUF does not have. The load takes the
+    # token_embd rows, as a load without hf_source does, and the two
+    # configs agree on the image token fields.
+    import gmlx
+    from gmlx.cache.media_salt import image_token_ids
+    from gmlx.commands.tool_preflight import _synth_config
+    from test_loader_api import _TOKENS
+
+    gguf = str(tmp_path / "tiny-gemma3.gguf")
+    _mint_tiny_gemma3(gguf)
+    text = {k: v for k, v in _synth_config(gguf).items() if k != "vocab_size"}
+    src = _write(tmp_path, {"model_type": "gemma3", "text_config": text,
+                            **_GEMMA3_IMAGE_FIELDS})
+    ids = mx.array([[0, 5, 6, 7]])
+    ref, ref_cfg, _ = gmlx.load_model(gguf)
+    model, cfg, _ = gmlx.load_model(gguf, hf_source=src)
+    assert cfg["vocab_size"] == ref_cfg["vocab_size"] == len(_TOKENS)
+    for key in (*_GEMMA3_IMAGE_FIELDS, "image_token_id"):
+        assert cfg.get(key) == ref_cfg.get(key), key
+    assert image_token_ids(cfg) == image_token_ids(ref_cfg)
+    assert mx.array_equal(model(ids), ref(ids))
 
 
 def test_a_mistral3_container_loads_a_llama_gguf(tiny_gguf, tmp_path):
