@@ -534,16 +534,24 @@ SEAMS: tuple[Seam, ...] = (
          "single_bos_fix (module attr, generate path)"),
     Seam("mlx_vlm.server.anthropic", "anthropic_count_tokens_endpoint",
          "single_bos_fix (the fallback count calls the prepare_inputs "
-         "binding with prompts= and no add_special_tokens)"),
+         "binding with prompts= and no add_special_tokens, after "
+         "get_cached_model filled the model cache)"),
     Seam("mlx_vlm.server.anthropic", "prepare_inputs",
          "single_bos_fix (module attr: the count adds special tokens as "
          "generation does, and drops a duplicate BOS)"),
     Seam("mlx_vlm.server.openai", "responses_input_tokens_endpoint",
          "single_bos_fix (the fallback count calls the prepare_inputs "
-         "binding with prompts= and no add_special_tokens)"),
+         "binding with prompts= and no add_special_tokens, after "
+         "get_cached_model filled the model cache)"),
     Seam("mlx_vlm.server.openai", "prepare_inputs",
          "single_bos_fix (module attr: the count adds special tokens as "
          "generation does, and drops a duplicate BOS)"),
+    Seam("mlx_vlm.utils", "should_add_special_tokens",
+         "single_bos_fix (the count default: the model type rule "
+         "generation applies)"),
+    Seam("mlx_vlm.server.app", "get_cached_model",
+         "single_bos_fix (the count reads the processor and config this "
+         "stores in the runtime's model cache)"),
     Seam("mlx_vlm.models.gemma4.processing_gemma4", "Gemma4Processor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
          "self.tokenizer)"),

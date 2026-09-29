@@ -240,14 +240,23 @@ _GEMMA4_PROMPT = _BOS + "<|turn>user\nHello<turn|>\n<|turn>model\n"
 
 def _count(route, processor, config, prompt, monkeypatch, rg):
     """The ``input_tokens`` a count route returns for a one-message chat
-    whose render is ``prompt``."""
+    whose render is ``prompt``. The resolver fills the model cache as
+    stock ``get_cached_model`` does."""
     from fastapi.testclient import TestClient
 
     app = importlib.import_module("mlx_vlm.server.app").app
-    runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+    server_runtime = importlib.import_module("mlx_vlm.server.runtime")
+    runtime = server_runtime.runtime
     module = _ANTHROPIC if route == "anthropic" else _OPENAI
-    monkeypatch.setattr(module, "get_cached_model",
-                        lambda *a, **k: (None, processor, config))
+    monkeypatch.setattr(runtime, "model_cache",
+                        server_runtime.ModelCacheRegistry())
+
+    def get_cached_model(*args, **kwargs):
+        runtime.model_cache.set("text_generation", {
+            "model": None, "processor": processor, "config": config})
+        return None, processor, config
+
+    monkeypatch.setattr(module, "get_cached_model", get_cached_model)
     monkeypatch.setattr(module, "apply_chat_template",
                         lambda *a, **k: prompt)
     monkeypatch.setattr(runtime, "response_generator", rg, raising=False)
@@ -265,17 +274,23 @@ def _count(route, processor, config, prompt, monkeypatch, rg):
 
 @pytest.mark.parametrize("route", ["anthropic", "openai"])
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_text", "qwen3_5"])
+@pytest.mark.parametrize("prompt", [_GEMMA4_PROMPT, _GEMMA4_PROMPT[3:]],
+                         ids=["bos", "no-bos"])
+@pytest.mark.parametrize("eos", [False, True], ids=["bos-tok", "bos-eos-tok"])
 @pytest.mark.parametrize("resident", [True, False],
                          ids=["generator", "fallback"])
 def test_token_counts_match_the_prompt(fixed, monkeypatch, route, model_type,
-                                       resident):
+                                       prompt, eos, resident):
     """The count routes tokenize the rendered prompt through the server's
     preprocess when a generator is resident, and through their own
-    ``prepare_inputs`` otherwise. Both count what generation encodes."""
-    processor = _make_text_processor(TokenizerWrapper(_tokenizer()))
+    ``prepare_inputs`` otherwise. Both count what generation encodes: the
+    Gemma-4 template owns its markers, and every other model adds the
+    tokenizer's BOS and, with a tokenizer that adds one, its EOS."""
+    tokenizer = _tokenizer(eos)
+    tokenizer.chat_template = "t"
+    processor = _make_text_processor(TokenizerWrapper(tokenizer))
     config = types.SimpleNamespace(model_type=model_type,
                                    image_token_index=None)
-    prompt = _GEMMA4_PROMPT if model_type != "qwen3_5" else "Hello"
     rg = types.SimpleNamespace(model=_model(model_type), processor=processor)
     rg._cpu_preprocess = types.MethodType(
         _GENERATION.ResponseGenerator._cpu_preprocess, rg)

@@ -196,6 +196,7 @@
   "mlx_vlm.server.app:_protocol_deps": "fdb6e1809845aa2fe36bb308adb977e6fafa5043ce8b425a1c6f47e5d87980ad",
   "mlx_vlm.server.app:_split_thinking_text": "ec241814dee3f11595841860cdcf2e678385762aa228e775751c8081beb10eec",
   "mlx_vlm.server.app:app": "7ed9a819c4f7e7f9ce35fa8dbb43e5d008875790f4dc69a1163a3cea8ef6476b",
+  "mlx_vlm.server.app:get_cached_model": "32f3dcea3e7c0617bc3e3c787afa6cbc329de7fb768e43128e3c76148b053bde",
   "mlx_vlm.server.embeddings:_embed_image": "511daa9dfbcbdab5628a6607c44fb401a76bbd82fa7df6fe9f9aff07d1a0f0ee",
   "mlx_vlm.server.generation:GenerationArguments.to_template_kwargs": "283471183821bf468793d7d112c9f8feb340cfb689715c54688d462c911c4408",
   "mlx_vlm.server.generation:GenerationContext": "880ffc9914012ad7eb723ad4b39b08ef5b5ec9f425b613f00c09ec3003be7287",
@@ -250,7 +251,8 @@
   "mlx_vlm.utils:get_model_path": "dd19819ebf50c4484f09d4bc1f8f1e390d72a84cd7bbe0e47cd95e0d75dbc499",
   "mlx_vlm.utils:prepare_inputs": "51cdb24efbcfb28c690f0566f7859d8f7a4c9351b50dc85fec85976e29de5fe7",
   "mlx_vlm.utils:process_inputs": "fa7e8b37dccccf11113e3cf375cfe1cc40b139d9a904ff31a11644627e0782d6",
-  "mlx_vlm.utils:process_inputs_with_fallback": "93543db5f62f6fb1900e142b159673593da91c0d9de299222f886e03ed74008e"
+  "mlx_vlm.utils:process_inputs_with_fallback": "93543db5f62f6fb1900e142b159673593da91c0d9de299222f886e03ed74008e",
+  "mlx_vlm.utils:should_add_special_tokens": "3ca659d96c7e5e379c1732a4423f6169c79e2949eb7e7f253454d3bf77d63d90"
  },
  "generated_with": {
   "mlx": "0.32.2",

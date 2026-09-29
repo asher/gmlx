@@ -22,12 +22,14 @@ The rule applies where a generation prompt is encoded: the
 ``prepare_inputs`` bindings of the server's ``_cpu_preprocess`` and of the
 generate path, and those of the Messages ``count_tokens`` and Responses
 ``input_tokens`` routes, whose counts then match the prompt the model
-reads. The counts also add the special tokens generation adds. Embeddings
-and reranking call ``prepare_inputs`` through their own bindings and
-tokenize as stock. Inside a call that drops the duplicate, ``process_inputs``
-also passes the flag to a processor of a type known to forward its keyword
-arguments to its tokenizer: a stock class in ``_FORWARDS_TO_TOKENIZER`` or
-a subclass, or a gmlx class that sets ``KWARGS_REACH_TOKENIZER``.
+reads. A count also adds the special tokens generation adds: mlx-vlm's
+model type rule (``should_add_special_tokens``) for the model the route
+resolved, read from the runtime's model cache. Embeddings and reranking
+call ``prepare_inputs`` through their own bindings and tokenize as stock.
+Inside a call that drops the duplicate, ``process_inputs`` also passes
+the flag to a processor of a type known to forward its keyword arguments
+to its tokenizer: a stock class in ``_FORWARDS_TO_TOKENIZER`` or a
+subclass, or a gmlx class that sets ``KWARGS_REACH_TOKENIZER``.
 Idempotent.
 """
 
@@ -159,12 +161,30 @@ def _forwarding(processor):
     return call
 
 
-def _wrap_prepare(original, *, count: bool):
+def _count_adds_special_tokens(module, processor) -> bool:
+    """The ``add_special_tokens`` generation passes for the model a count
+    route in ``module`` resolved. The route's ``get_cached_model`` fills
+    the runtime's model cache with that model's processor and config.
+    True, the rule's default, when the cache holds another processor."""
+    cache = getattr(getattr(module, "runtime", None), "model_cache", None)
+    get = getattr(cache, "get", None)
+    if not callable(get) or get("processor") is not processor:
+        return True
+    config = get("config")
+    model_type = (config.get("model_type") if isinstance(config, dict)
+                  else getattr(config, "model_type", None))
+    utils = importlib.import_module("mlx_vlm.utils")
+    return bool(utils.should_add_special_tokens(model_type, processor))
+
+
+def _wrap_prepare(original, *, count=None):
+    """``count`` is the module of a count route's binding."""
     def prepare_inputs(processor, *args, **kwargs):
-        if count:
-            # Generation adds the tokenizer's special tokens unless the
-            # template owns them; the count's stock default is off.
-            kwargs.setdefault("add_special_tokens", True)
+        if count is not None and "add_special_tokens" not in kwargs:
+            # The count's stock default is off; generation adds the
+            # tokenizer's special tokens unless the template owns them.
+            kwargs["add_special_tokens"] = _count_adds_special_tokens(
+                count, processor)
         dropping = drops_duplicate_bos(processor, kwargs.get("prompts"))
         if dropping:
             kwargs["add_special_tokens"] = False
@@ -208,5 +228,5 @@ def install_single_bos_fix(count_routes: bool = False) -> None:
             modules.append((sys.modules[name], True))
     for module, count in modules:
         if not wrapped_with(module.prepare_inputs, _FLAG):
-            module.prepare_inputs = _wrap_prepare(module.prepare_inputs,
-                                                  count=count)
+            module.prepare_inputs = _wrap_prepare(
+                module.prepare_inputs, count=module if count else None)
