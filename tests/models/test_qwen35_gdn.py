@@ -250,11 +250,12 @@ def test_verify_sink_identity(_saved_call, fused):
 # ---------------------------------------------------------------------------
 
 
-def _gdn_layer(hk):
-    """The first GDN of a toy tree with ``hk`` K heads and 4 V heads, on
-    the owned class."""
+def _gdn_layer(hk, hv):
+    """The first GDN of a toy tree with ``hk`` K heads and ``hv`` V heads,
+    on the owned class."""
     mx.random.seed(11)
-    lm = Q35LanguageModel(_cfg(linear_num_key_heads=hk), _top())
+    lm = Q35LanguageModel(
+        _cfg(linear_num_key_heads=hk, linear_num_value_heads=hv), _top())
     lm.eval()
     mx.eval(lm.parameters())
     qwen35_gdn.rebind_gdn(lm)
@@ -265,7 +266,7 @@ def _paired_copy(gdn, heads):
     """A copy of ``gdn`` with one K head per V head, K head j being
     ``gdn``'s K head ``heads[j]``, and the conv channel index that maps
     ``gdn``'s channels onto the copy's."""
-    ref = _gdn_layer(len(heads))
+    ref = _gdn_layer(len(heads), len(heads))
     dk, kd = gdn.head_k_dim, gdn.key_dim
     qk = mx.concatenate([mx.arange(h * dk, (h + 1) * dk) for h in heads])
     idx = mx.concatenate([qk, kd + qk, 2 * kd + mx.arange(gdn.value_dim)])
@@ -280,14 +281,18 @@ def _paired_copy(gdn, heads):
 
 
 @_NEEDS_GPU
+@pytest.mark.parametrize("hk,hv", ((2, 6), (4, 8)), ids=("2k6v", "4k8v"))
 @pytest.mark.parametrize("tiled", (False, True), ids=("grouped", "tiled"))
 @pytest.mark.parametrize("route", ("fused_decode", "fused_verify",
                                    "unfused_verify"))
-def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route):
-    """With 2 K heads and 4 V heads, V head hv reads the K head the scan in
-    this process pairs it with: hv % Hk once the GGUF tiled-V fixup is in,
-    hv // (Hv / Hk) before it. The reference is a copy with 4 K heads that
-    holds that pairing in its weights, so it has no pairing to choose."""
+def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route,
+                                                   hk, hv):
+    """V head hv reads the K head the scan in this process pairs it with:
+    hv % Hk once the GGUF tiled-V fixup is in, hv // (Hv / Hk) before it.
+    The reference is a copy with Hv K heads that holds that pairing in its
+    weights, so it has no pairing to choose. Neither shape has Hk equal to
+    Hv / Hk, so a pairing that swaps the two (hv // Hk, or hv % (Hv / Hk))
+    fails."""
     from mlx_lm.models import gated_delta as gd
 
     monkeypatch.setattr(gd, "_gmlx_tiled_v_patched", tiled, raising=False)
@@ -296,15 +301,17 @@ def test_fewer_k_heads_pair_as_the_scan_pairs_them(monkeypatch, tiled, route):
         orig = getattr(gdn_patches, name)
         monkeypatch.setattr(gdn_patches, name, lambda *a, _o=orig, _n=name,
                             **k: calls.append(_n) or _o(*a, **k))
-    gdn = _gdn_layer(2)
+    gdn = _gdn_layer(hk, hv)
     gdn._gdn_owned_fused = route != "unfused_verify"
     gdn._gdn_records = False
-    ref, idx = _paired_copy(gdn, [h % 2 if tiled else h // 2 for h in range(4)])
+    r = hv // hk
+    ref, idx = _paired_copy(
+        gdn, [h % hk if tiled else h // r for h in range(hv)])
     S = 1 if route == "fused_decode" else 3
     mx.random.seed(3)
     x = mx.random.normal((1, S, 64)) * 0.5
     conv = mx.random.normal((1, 3, gdn.conv_dim)) * 0.5
-    state = mx.random.normal((1, 4, 32, 32)) * 0.1
+    state = mx.random.normal((1, hv, 32, 32)) * 0.1
     outs = []
     for layer, c in ((gdn, conv), (ref, conv[..., idx])):
         cache = ArraysCache(size=2, left_padding=[0])
