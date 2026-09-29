@@ -22,6 +22,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image whole, not in one pass.
 - In `gmlx serve`, a turn that adds an image reuses the cached earlier turns on
   Gemma-4 and on the qwen35 and qwen35moe architectures.
+- On an M1 or M2, `gmlx distill --cpu` and a Python load on the CPU default
+  device run the model in float16, as the GPU does, not bfloat16.
 
 ### Fixed
 
