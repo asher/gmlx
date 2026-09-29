@@ -2063,7 +2063,7 @@ def _lift_injected_cache(cache, other):
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
             # classes without the batch API at all (DeepSeek V4's
-            # PoolingCache: no _idx, no rotated; its batch class
+            # DS4PoolingCache: no _idx, no rotated; its batch class
             # extend() read len() of a scalar remainder)
             or (_batch_capable(cache) and not _batch_capable(other)
                 and callable(getattr(type(other), "merge", None)))):

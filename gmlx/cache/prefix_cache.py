@@ -117,10 +117,10 @@ def _owned_pair(keys: mx.array, values: mx.array):
 def _snapshot_entry(c: Any) -> Any:
     """Snapshot one prompt_cache entry, preserving offset for all cache types."""
     from .compat import cache_types
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
     if isinstance(c, cache_types("CacheList")):
         return (_CACHELIST_TAG, [_snapshot_entry(sub) for sub in c.caches])
-    if isinstance(c, (PoolingCache, BatchPoolingCache)):
+    if isinstance(c, (DS4PoolingCache, DS4BatchPoolingCache)):
         # DeepSeek-V4 pooled-KV cache: no keys/values attrs, so the generic
         # branch would silently corrupt it on restore. state slices are lazy
         # views over the pre-mutation buffer node; _eval_snapshot pins them.

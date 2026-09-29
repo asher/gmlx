@@ -15,6 +15,13 @@ from __future__ import annotations
 
 import importlib
 
+from gmlx.cache import bind as _cache_bind
+
+# gmlx owns the KV cache classes and SDPA helpers that mlx-vlm and mlx-lm
+# hand out (gmlx/cache/bind.py). The hook goes in before either package
+# loads them, and imports nothing from MLX.
+_cache_bind.install()
+
 DOCS_URL = "https://asher.github.io/gmlx/"
 
 # Exports are resolved lazily (PEP 562) so that importing the package - e.g.

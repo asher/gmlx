@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PoolingCache + BatchPoolingCache for DeepSeek V4 (vendored).
+"""DS4PoolingCache + DS4BatchPoolingCache for DeepSeek V4 (vendored).
 
 Copied 1:1 from mlx-lm PR 1192
 https://github.com/Blaizzy/mlx-lm/blob/5c10538136b9038b9626c134612b08afc18d697a/mlx_lm/models/cache.py
 (lines 903-1447), by way of omlx's ``patches/deepseek_v4/cache_extras.py``
-port. ``deepseek_v4_model.ensure_registered()`` injects both classes into
-the ``mlx_lm.models.cache`` namespace (upstream wins if it already ships
-them) so cache-type resolution by module attribute keeps working.
+port, where the classes are PoolingCache and BatchPoolingCache. They carry
+the DS4 prefix because gmlx.cache.kv_cache holds mlx-vlm's own PoolingCache
+under that name. ``deepseek_v4_model.ensure_registered()`` injects both
+classes into the cache module namespaces so cache-type resolution by name
+keeps working.
 
 Delete this file once installed mlx-lm ships PoolingCache natively.
 
@@ -69,7 +71,7 @@ def pool_arrays(pooled):
     return pooled
 
 
-class PoolingCache(_BaseCache):
+class DS4PoolingCache(_BaseCache):
     """Cache for pooled (compressed) KV tokens with a remainder buffer.
 
     Stores two things:
@@ -658,10 +660,10 @@ class PoolingCache(_BaseCache):
 
     @classmethod
     def merge(cls, caches):
-        return BatchPoolingCache.merge(caches)
+        return DS4BatchPoolingCache.merge(caches)
 
 
-class BatchPoolingCache(_BaseCache):
+class DS4BatchPoolingCache(_BaseCache):
     """Batched pooling cache with per-element variable-length tracking."""
 
     def __init__(self, ratio: int, left_padding: List[int],
@@ -670,7 +672,7 @@ class BatchPoolingCache(_BaseCache):
         self.lookback = bool(lookback) and ratio == 4
 
         if not all(p == 0 for p in left_padding):
-            raise RuntimeError("BatchPoolingCache does not support left padding")
+            raise RuntimeError("DS4BatchPoolingCache does not support left padding")
 
         batch_size = len(left_padding)
 
@@ -688,7 +690,7 @@ class BatchPoolingCache(_BaseCache):
         self._undo = None
 
         # Per-row lookback window for the ratio-4 overlap compressor (see
-        # PoolingCache). Rows that have not completed a window yet hold
+        # DS4PoolingCache). Rows that have not completed a window yet hold
         # zero kv with -inf gate (the first-window masking).
         self._prev_kv = None
         self._prev_gate = None
@@ -708,7 +710,7 @@ class BatchPoolingCache(_BaseCache):
 
     def prepare(self, *, lengths=None, right_padding=None, left_padding=None):
         if left_padding is not None:
-            raise RuntimeError("BatchPoolingCache does not support left padding")
+            raise RuntimeError("DS4BatchPoolingCache does not support left padding")
         if lengths is not None:
             self._lengths = [p + n for p, n in zip(self._processed, lengths)]
 
@@ -730,7 +732,7 @@ class BatchPoolingCache(_BaseCache):
             self.buf_kv = mx.zeros((B, ratio, D1), dtype=kv.dtype)
             self.buf_gate = mx.zeros((B, ratio, D2), dtype=gate.dtype)
 
-        # One-update undo log for MTP draft rejection (see PoolingCache).
+        # One-update undo log for MTP draft rejection (see DS4PoolingCache).
         # The buffer references are only consulted when a window completed,
         # in which case this method rebinds self.buf_* to fresh arrays and
         # the stashed objects keep the pre-update contents. The pooled
@@ -1183,7 +1185,7 @@ class BatchPoolingCache(_BaseCache):
         self._processed = self._processed + other._processed
 
     def extract(self, idx):
-        cache = PoolingCache(self.ratio, lookback=self.lookback)
+        cache = DS4PoolingCache(self.ratio, lookback=self.lookback)
         pl = self._pool_lengths[idx]
         r = self.remainder[idx]
 
@@ -1205,11 +1207,11 @@ class BatchPoolingCache(_BaseCache):
 
     @classmethod
     def merge(cls, caches):
-        """Merge a list of PoolingCache instances into a BatchPoolingCache."""
+        """Merge a list of DS4PoolingCache instances into a DS4BatchPoolingCache."""
         B = len(caches)
         if not all(c.ratio == caches[0].ratio for c in caches):
             raise ValueError(
-                "BatchPoolingCache can only merge caches with the same ratio"
+                "DS4BatchPoolingCache can only merge caches with the same ratio"
             )
         ratio = caches[0].ratio
         batch_cache = cls(ratio, [0] * B,

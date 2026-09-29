@@ -21,6 +21,15 @@ def _walk(fn):
         todo.extend(getattr(fn, name, None) for name in _LINKS)
 
 
+def root(fn):
+    """The function at the bottom of the wrap chain over ``fn``: the one
+    that wraps nothing. ``fn`` itself when it wraps nothing."""
+    for f in _walk(fn):
+        if all(getattr(f, name, None) is None for name in _LINKS):
+            return f
+    return fn
+
+
 def wrapped_with(fn, flag: str) -> bool:
     """Whether ``fn``, or any function it wraps, carries ``flag``.
 

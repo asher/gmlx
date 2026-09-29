@@ -236,7 +236,7 @@ def _install_patches():
     # kvarn records cannot enter the exact store. Unset, both are inert.
     install_spec_kv_quant()
     install_kvarn_apc()
-    # Serve installs the PoolingCache arms of the APC exact store; without
+    # Serve installs the DS4PoolingCache arms of the APC exact store; without
     # them the L1 tests on a pooling-stack model (GLM-5.3-Flash,
     # DeepSeek-V4) fall back cold at every lookup.
     install_pooling_apc_support()

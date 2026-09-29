@@ -1,12 +1,12 @@
-"""APC participation + safe KV quantization for PoolingCache stacks.
+"""APC participation + safe KV quantization for DS4PoolingCache stacks.
 
 Stock mlx-vlm's APC exact store supports the cache kinds it knows
 (KVCache/RotatingKVCache/ChunkedKVCache/ArraysCache/CacheList/tuple) and
 rejects anything else, so a deepseek4 row snapshot -- whose CacheLists carry
 PoolingCaches -- always came back None and was never stored (no serve
-warm-starts, memory or disk). The installers below add PoolingCache arms to
+warm-starts, memory or disk). The installers below add DS4PoolingCache arms to
 the in-memory clone and the disk shard writer/reader; packed (quantized)
-pools are stored packed, and BatchPoolingCache.merge already reads through
+pools are stored packed, and DS4BatchPoolingCache.merge already reads through
 the dequantizing ``pooled`` property, so restored entries splice into
 batches unchanged.
 
@@ -31,7 +31,7 @@ _log = logging.getLogger(__name__)
 
 
 def install_pooling_apc_support() -> None:
-    """Add PoolingCache arms to the APC exact-store clone and disk paths.
+    """Add DS4PoolingCache arms to the APC exact-store clone and disk paths.
 
     Idempotent. A missing upstream symbol raises: silently skipping would
     leave serve APC dead for every pooling-cache model (deepseek-v4), which
@@ -58,31 +58,31 @@ def install_pooling_apc_support() -> None:
             f"changed ({e}) - re-audit against the pinned seams "
             "(gmlx.upstream.seams)") from e
 
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
 
     # The prefix-cache plan (APCCoordinator) marks a stack restorable only
     # when every entry has a capability. Without these rows a pooling stack
     # resolves no strategy and APC never engages, making the clone and disk
     # arms below moot.
-    register_capability(PoolingCache, checkpoint)
-    register_capability(BatchPoolingCache, checkpoint)
+    register_capability(DS4PoolingCache, checkpoint)
+    register_capability(DS4BatchPoolingCache, checkpoint)
 
     def merge_exact_entries(entries, prefix_lens):
         # Warm-batch adoption: a restored exact hit is merged per entry into
         # batch caches; without this arm the merge returns None and the
         # engine silently falls back to a cold prefill after the hit.
-        if entries and all(isinstance(c, PoolingCache) for c in entries):
-            return BatchPoolingCache.merge(entries)
+        if entries and all(isinstance(c, DS4PoolingCache) for c in entries):
+            return DS4BatchPoolingCache.merge(entries)
         return stock_merge(entries, prefix_lens)
 
     def clone_entry(c, *, min_capacity_tokens, eval_targets):
-        if not isinstance(c, PoolingCache):
+        if not isinstance(c, DS4PoolingCache):
             return stock_clone(
                 c,
                 min_capacity_tokens=min_capacity_tokens,
                 eval_targets=eval_targets,
             )
-        out = PoolingCache(c.ratio)
+        out = DS4PoolingCache(c.ratio)
         out.quantizable = c.quantizable
         out._qbits = c._qbits
         out._qgroup = c._qgroup
@@ -113,7 +113,7 @@ def install_pooling_apc_support() -> None:
     def snap_entry(self, c, prefix, arrays, metadata):
         # Runs on the disk writer thread: enqueue paths must hand over
         # cloned, evaluated entries only.
-        if not isinstance(c, PoolingCache):
+        if not isinstance(c, DS4PoolingCache):
             before = set(arrays)
             ok = stock_snap(self, c, prefix, arrays, metadata)
             if ok:
@@ -197,7 +197,7 @@ def install_pooling_apc_support() -> None:
             qgroup = int(metadata.get(f"{prefix}_qgroup", "64"))
         except (KeyError, TypeError, ValueError):
             return None
-        out = PoolingCache(ratio)
+        out = DS4PoolingCache(ratio)
         out.quantizable = metadata.get(f"{prefix}_quantizable", "1") != "0"
         fp4 = metadata.get(f"{prefix}_fp4", "")
         if qbits:
@@ -296,14 +296,14 @@ def install_safe_kv_quantization() -> None:
     if getattr(lm_gen, "_kq_safe_kv_quant", False):
         return
     from .compat import cache_types
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     def _pack_pools(c, group_size, bits):
         subs = getattr(c, "caches", None)
         if subs is not None:
             for sub in subs:
                 _pack_pools(sub, group_size, bits)
-        elif isinstance(c, PoolingCache) and c.quantizable:
+        elif isinstance(c, DS4PoolingCache) and c.quantizable:
             c.quantize_storage(group_size=group_size, bits=bits)
 
     def safe_maybe_quantize(prompt_cache, quantized_kv_start, kv_group_size, kv_bits):
@@ -319,8 +319,12 @@ def install_safe_kv_quantization() -> None:
             if isinstance(c, rotating) or getattr(c, "caches", None) is not None:
                 continue
             # Caches whose K/V rows carry auxiliary state (mlx-vlm's
-            # qwen4_exp) opt out of conversion, as in the stock arms.
-            if getattr(c, "preserve_auxiliary_kv_state", False):
+            # qwen4_exp) opt out of conversion, as in the stock arms. A
+            # class that declares kv_quant_unsupported sets the same flag
+            # but still meets its own to_quantized, so a refusal there
+            # stays loud.
+            if (getattr(c, "preserve_auxiliary_kv_state", False)
+                    and not getattr(c, "kv_quant_unsupported", False)):
                 continue
             if hasattr(c, "to_quantized") and c.offset >= quantized_kv_start:
                 prompt_cache[e] = c.to_quantized(group_size=group, bits=bits)
@@ -369,12 +373,12 @@ def install_safe_kv_quantization() -> None:
 
 
 def model_has_pools(model) -> bool:
-    """True if the model's cache stack contains a PoolingCache.
+    """True if the model's cache stack contains a DS4PoolingCache.
 
     Walks ``make_cache()`` once and memoizes on the model, so the pooled
     seams can gate without paying a cache build per call.
     """
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     cached = getattr(model, "_kq_has_pools", None)
     if cached is not None:
@@ -391,7 +395,7 @@ def model_has_pools(model) -> bool:
             subs = getattr(c, "caches", None)
             if subs is not None:
                 stack.extend(subs)
-            elif isinstance(c, PoolingCache):
+            elif isinstance(c, DS4PoolingCache):
                 found = True
                 break
     try:
@@ -404,12 +408,12 @@ def model_has_pools(model) -> bool:
 def install_pooled_prefill_batch_gate() -> None:
     """Form prompt batches one row at a time on pooling-cache models.
 
-    ``to_batch_cache`` has no PoolingCache arm, so a multi-row prompt batch
+    ``to_batch_cache`` has no DS4PoolingCache arm, so a multi-row prompt batch
     raises before prefill and every request in it fails. Upstream's
     single-row fast path sidesteps the conversion entirely (it builds the
     model's own scalar caches), and the decode side already knows how to
     join those: ``_extend_cache`` promotes a cache that has ``merge`` and no
-    ``left_padding``, which is exactly PoolingCache, and BatchPoolingCache
+    ``left_padding``, which is exactly DS4PoolingCache, and DS4BatchPoolingCache
     carries extend/filter/extract. So capping prompt batches at one row
     yields serial prefill with batched decode, which is where batching pays
     anyway -- B>1 prefill is not a throughput win at depth (gemma-31b 2x27k

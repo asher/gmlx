@@ -11,13 +11,13 @@ test_deepseek_v4_mtp.py. Real-GGUF behavior is gated separately (chat/run
 import mlx.core as mx
 import pytest
 
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
 D = 64  # pooled row width; mx.quantize needs group >= 32 dividing D
 
 
 def _qcache(ratio=4, bits=8, group=32):
-    c = PoolingCache(ratio)
+    c = DS4PoolingCache(ratio)
     c.quantize_storage(group_size=group, bits=bits)
     return c
 
@@ -25,7 +25,7 @@ def _qcache(ratio=4, bits=8, group=32):
 def test_pooled_roundtrip_tolerance():
     mx.random.seed(0)
     rows = mx.random.normal((1, 7, D)).astype(mx.float16)
-    ref = PoolingCache(4)
+    ref = DS4PoolingCache(4)
     q = _qcache()
     ref.update_and_fetch(rows)
     q.update_and_fetch(rows)
@@ -112,9 +112,9 @@ def test_policy_arms_nested_compressor_pools():
 
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 
-    idx_pool = PoolingCache(4)
+    idx_pool = DS4PoolingCache(4)
     idx_pool.quantizable = False
-    comp_pool = PoolingCache(4)
+    comp_pool = DS4PoolingCache(4)
     caches = [
         RotatingKVCache(max_size=8),
         CacheList(RotatingKVCache(max_size=8), comp_pool, idx_pool),
@@ -130,14 +130,14 @@ def test_policy_arms_nested_compressor_pools():
 
 
 def test_policy_arms_pool_beside_kv_member():
-    # The glm5_next shape: CacheList(KVCache, PoolingCache) per layer.
+    # The glm5_next shape: CacheList(KVCache, DS4PoolingCache) per layer.
     # The kv member rules the list, so arming must not key off the
     # layer kind.
     from mlx_lm.models.cache import CacheList, KVCache
 
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 
-    pools = [PoolingCache(4) for _ in range(3)]
+    pools = [DS4PoolingCache(4) for _ in range(3)]
     caches = [CacheList(KVCache(), p) for p in pools]
     policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
     assert policy.verdict == "full"
@@ -153,9 +153,9 @@ def test_policy_arms_pool_beside_kv_member():
 def test_policy_top_level_optout_pool_stays_fp16():
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 
-    opted = PoolingCache(4)
+    opted = DS4PoolingCache(4)
     opted.quantizable = False
-    comp = PoolingCache(4)
+    comp = DS4PoolingCache(4)
     caches = [comp, opted]
     policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
     arm_stack(caches, policy)
@@ -167,7 +167,7 @@ def test_policy_rejects_unknown_bits():
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
 
     policy = resolve_kv_quant_policy(
-        [PoolingCache(4)], kv_bits=16, kv_group_size=32)
+        [DS4PoolingCache(4)], kv_bits=16, kv_group_size=32)
     assert policy.verdict == "error"
 
 
@@ -180,7 +180,7 @@ def test_incompatible_row_width_disarms(capsys):
 
 
 def test_quantize_storage_incompatible_width_stays_fp16():
-    c = PoolingCache(4)
+    c = DS4PoolingCache(4)
     c.update_and_fetch(mx.random.normal((1, 2, 16)).astype(mx.float16))
     c.quantize_storage(group_size=32, bits=8)  # 16-wide rows can't pack
     assert not c.is_quantized

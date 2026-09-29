@@ -229,13 +229,13 @@ def test_anchor_at_guard_single_stop(monkeypatch):
 def _pooling_model(man):
     """A pooling stack resolves exact and is not ckpt-tier (the layout
     probe rejects unknown cache classes) -- the ds4 shape."""
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     return SimpleNamespace(
         _kq_apc_manager=man, _kq_apc_mode="exact",
         config=SimpleNamespace(),
         make_cache=lambda: [KVCache(),
-                            CacheList(KVCache(), PoolingCache(4))])
+                            CacheList(KVCache(), DS4PoolingCache(4))])
 
 
 def _pick_gen(man):

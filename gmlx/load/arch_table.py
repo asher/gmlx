@@ -224,10 +224,10 @@ _VENDORED_MLX_LM_MODULES = {
     # package from 0.7.3, and mlx-lm has none.
     "qwen4_exp": "gmlx.models.qwen4_exp.model",
     # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
-    # PoolingCache/BatchPoolingCache companions injected by ensure_registered.
+    # DS4PoolingCache/DS4BatchPoolingCache companions injected by ensure_registered.
     "deepseek_v4": "gmlx.models.deepseek_v4.model",
     # DeepSeek-V4.1-Flash. Reuses the deepseek_v4 hyper_connection and
-    # PoolingCache companions.
+    # DS4PoolingCache companions.
     "deepseek_v41": "gmlx.models.deepseek_v41.model",
     # mlx-lm PR #1485 (Tencent Hy3, supersedes #1211).
     "hy_v3": "gmlx.models.hy_v3.model",

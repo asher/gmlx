@@ -40,8 +40,8 @@ from mlx_lm.models.pipeline import PipelineMixin
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.models.deepseek_v4 import model as _v4
 from gmlx.models.deepseek_v4.cache import (
-    BatchPoolingCache,
-    PoolingCache,
+    DS4BatchPoolingCache,
+    DS4PoolingCache,
     pool_arrays,
     pool_rows,
 )
@@ -390,7 +390,7 @@ class Compressor(nn.Module):
             self.wgate = nn.Linear(config.hidden_size, config.head_dim, bias=False)
         self.norm = nn.RMSNorm(config.head_dim, eps=config.rms_norm_eps)
 
-    def __call__(self, x: mx.array, pool_cache: Optional[PoolingCache], offset):
+    def __call__(self, x: mx.array, pool_cache: Optional[DS4PoolingCache], offset):
         B = x.shape[0]
         kv = self.wkv(x)
         # Ratio 1 has no gate; kv stands in for it so the cache keeps the
@@ -552,7 +552,7 @@ class Indexer(nn.Module):
 class _PoolMask:
     """Pooled-row visibility for one sequence as a rule, not a tensor: query
     row j at absolute position offset + j sees pooled row i iff
-    i < (offset + j + 1) // ratio, the PoolingCache.make_mask predicate.
+    i < (offset + j + 1) // ratio, the DS4PoolingCache.make_mask predicate.
     The indexer asks for one query block at a time, so no [L, P] mask is
     ever held for a whole chunk."""
 
@@ -600,7 +600,7 @@ def _pool_mask(src, plen: int, L: int, offset, ratio: int):
         if plen == 0 or L == 1 or not isinstance(offset, int):
             return None
         return _PoolMask(plen, L, offset, ratio)
-    if isinstance(offset, int) and isinstance(src, PoolingCache):
+    if isinstance(offset, int) and isinstance(src, DS4PoolingCache):
         if src._plen == 0 or L == 1:
             return None
         return _PoolMask(src._plen, L, offset, src.ratio)
@@ -989,8 +989,8 @@ _score_profile_composed = _prefill_decay.build_score_profile(
         rows=4 * _v4._prefill_block()),
     kernels_armed=lambda: (_v4._dsa_probe("indexer")
                            and _v4._sparse_kernel_ok()),
-    require_cache=PoolingCache,
-    disarm_cache=BatchPoolingCache,
+    require_cache=DS4PoolingCache,
+    disarm_cache=DS4BatchPoolingCache,
     allow_quantized_pools=True,
 )
 
@@ -1842,10 +1842,10 @@ class Model(nn.Module):
                 # path reads it in full every step. The latent pool rests
                 # in the FP4 form the QAT lands its rows on when the sparse
                 # kernels read it directly (exact, ~3.6x smaller).
-                pool = PoolingCache(ratio)
+                pool = DS4PoolingCache(ratio)
                 if _qat_enabled() and _v4._pool_fp4_ok():
                     pool.pack_fp4()
-                idx_pool = PoolingCache(ratio)
+                idx_pool = DS4PoolingCache(ratio)
                 idx_pool.quantizable = False
                 slots += [pool, idx_pool]
             if idx in first_engram:

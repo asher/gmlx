@@ -32,7 +32,7 @@ Design (block_total = 2 -> 1 draft + bonus, zero speculative.py changes):
   at the window (``hidden_capture_limit``) -- context beyond it is
   mathematically invisible to the head.
 - v1 is B=1 only: ``reset(left_padding=...)`` raises; the target has no
-  batch caches for PoolingCache layers yet.
+  batch caches for DS4PoolingCache layers yet.
 
 Correctness is drafter-independent: the verify walk emits the target's own
 greedy/sampled tokens, so the drafter affects speed (acceptance), never
@@ -227,7 +227,7 @@ class DeepseekV4SpecHooks:
         if rejected <= 0:
             return
         leaves = _collect_cache_leaves(prompt_cache)
-        # PoolingCache exposes an n-aware probe (trim(2) can be refusable
+        # DS4PoolingCache exposes an n-aware probe (trim(2) can be refusable
         # while trim(1) is fine); other leaves keep the n-blind contract.
         refused = [
             type(leaf).__name__
@@ -370,7 +370,7 @@ class DeepseekV4MTPDrafter(nn.Module):
         if left_padding is not None:
             raise NotImplementedError(
                 "DeepseekV4MTPDrafter is B=1 only (v1): batched rounds need "
-                "BatchRotatingKVCache/BatchPoolingCache wiring on the target"
+                "BatchRotatingKVCache/DS4BatchPoolingCache wiring on the target"
             )
         self.bind(target_model)
         self.accept_lens = []

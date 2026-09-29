@@ -184,7 +184,9 @@ def runs():
 def test_unarmed_rotating_caches_trim_as_without_the_undo_log(runs, order):
     plain, attached = runs["no-undo"]["caches"], runs[order]["caches"]
     assert set(plain) == set(attached)
-    assert len(plain) >= 4
+    # Both origins name the owned classes, so each name is one class.
+    assert set(plain) == {"gmlx.cache.kv_cache.RotatingKVCache",
+                          "gmlx.cache.kv_cache.BatchRotatingKVCache"}
     for name, want in plain.items():
         got = attached[name]
         assert not want["undo"] and got["undo"], name

@@ -472,12 +472,12 @@ def test_b1_mtp_sees_a_window_nested_in_a_cache_list(restorable):
 
 
 class _Glm5ShapeFakeLM:
-    """glm5_next's real shape: CacheList(KVCache, PoolingCache) per layer."""
+    """glm5_next's real shape: CacheList(KVCache, DS4PoolingCache) per layer."""
 
     def make_cache(self):
-        from gmlx.models.deepseek_v4.cache import PoolingCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        return [_cache_list(KVCache(), PoolingCache(4)) for _ in range(3)]
+        return [_cache_list(KVCache(), DS4PoolingCache(4)) for _ in range(3)]
 
 
 def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
@@ -503,12 +503,12 @@ def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
 
 
 class _PoolOnlyFakeLM:
-    """No growing KV at all: CacheList(state, PoolingCache) per layer."""
+    """No growing KV at all: CacheList(state, DS4PoolingCache) per layer."""
 
     def make_cache(self):
-        from gmlx.models.deepseek_v4.cache import PoolingCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
-        return [_cache_list(_SSMCache(), PoolingCache(4)) for _ in range(2)]
+        return [_cache_list(_SSMCache(), DS4PoolingCache(4)) for _ in range(2)]
 
 
 def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):

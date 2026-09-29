@@ -37,7 +37,7 @@ def _layer_has_content(snap: Any) -> bool:
     subs = getattr(snap, "caches", None)
     if subs is not None:  # CacheList
         return all(_layer_has_content(s) for s in subs)
-    if hasattr(snap, "accumulate_windows"):  # PoolingCache: no `keys`;
+    if hasattr(snap, "accumulate_windows"):  # DS4PoolingCache: no `keys`;
         # content lives in pooled rows and/or the staging remainder
         return snap.size() > 0 or getattr(snap, "remainder", 0) > 0
     if getattr(snap, "kv_quant_scheme", None) == "kvarn":  # no `keys` either

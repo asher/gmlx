@@ -6,7 +6,7 @@ target's own tokens), so the gates that matter are the CACHE paths:
 - all-reject rounds: every round rolls back the verify write (2- or 3-wide;
   S=2/S=3), exercising the rotating-cache one-update undo log (the
   sliding-window caches rotate from the first decode step at prompt >
-  window) and the PoolingCache remainder/undo trim across its full 4-round
+  window) and the DS4PoolingCache remainder/undo trim across its full 4-round
   phase cycle -- including trims whose confirmed-prefix replay re-completes
   a pool window (S=3 only);
 - all-accept rounds (oracle drafter): no rollback -- every verify token stays
@@ -157,7 +157,7 @@ def test_mtp_greedy_identity_reject_path(block):
     target, lm = _build_target(cfg)
     drafter = _build_drafter(cfg, block_size=block)
     # Prompt > sliding_window so the rotating caches rotate from the first
-    # decode round; 41 % 4 != 0 so the PoolingCache remainder cycles through
+    # decode round; 41 % 4 != 0 so the DS4PoolingCache remainder cycles through
     # the window-completion undo phase (at block 3 the 3-wide verify also
     # hits trims whose confirmed replay re-completes a window).
     prompt = mx.random.randint(0, cfg["vocab_size"], (1, 41)).astype(mx.int32)
@@ -253,7 +253,7 @@ def test_rotating_undo_unarmed_update_not_trimmable():
 def test_pooling_cache_trim_through_completed_window():
     # trim(1) when the rejected token completed a pool window must restore
     # the pre-update state and replay the confirmed token exactly.
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     mx.random.seed(5)
     ratio = 4
@@ -262,7 +262,7 @@ def test_pooling_cache_trim_through_completed_window():
     rejected = mx.random.normal((1, 1, 8))
     gates = [mx.random.normal((1, 1, 2)) for _ in range(5)]
 
-    test_cache = PoolingCache(ratio)
+    test_cache = DS4PoolingCache(ratio)
     for t, g in zip(tokens, gates[:3]):
         test_cache.accumulate_windows(t, g, 0)
     # S=2 verify-sized update completes the window (3 + 2 crosses ratio 4).
@@ -276,7 +276,7 @@ def test_pooling_cache_trim_through_completed_window():
     assert test_cache.is_trimmable()
     assert test_cache.trim(1) == 1
 
-    control = PoolingCache(ratio)
+    control = DS4PoolingCache(ratio)
     for t, g in zip(tokens + [confirmed], gates[:4]):
         control.accumulate_windows(t, g, 0)
 
@@ -392,8 +392,8 @@ def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
             cache.update_and_fetch(a, a)
 
     classes = cache_types("BatchRotatingKVCache")
-    assert {"mlx_lm.models.cache", "mlx_vlm.models.cache"} <= {
-        c.__module__ for c in classes}, classes
+    # Both origins name the owned class once gmlx is imported.
+    assert [c.__module__ for c in classes] == ["gmlx.cache.kv_cache"], classes
     for cls in classes:
         test_cache = cls(max_size=8, left_padding=[2, 0])
         feed(test_cache, stream)
@@ -431,7 +431,7 @@ def test_pooling_cache_trim_window_recompletion():
     # the pooled row must come back from the post-append stash (the
     # compressor inputs are gone), bit-identical to a control that only
     # ever saw the confirmed tokens.
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     mx.random.seed(13)
     ratio = 4
@@ -443,7 +443,7 @@ def test_pooling_cache_trim_window_recompletion():
         upd = mx.random.normal((1, 3, D))
         upd_g = mx.random.normal((1, 3, G))
 
-        test_cache = PoolingCache(ratio)
+        test_cache = DS4PoolingCache(ratio)
         for t, g in zip(pre, pre_g):
             r_kv, _, _ = test_cache.accumulate_windows(t, g, 0)
             assert r_kv.shape[1] == 0
@@ -453,7 +453,7 @@ def test_pooling_cache_trim_window_recompletion():
         assert test_cache._can_trim(n_trim)
         assert test_cache.trim(n_trim) == n_trim
 
-        control = PoolingCache(ratio)
+        control = DS4PoolingCache(ratio)
         k = 3 - n_trim
         for i in range(pre_count + k):
             t = pre[i] if i < pre_count else upd[:, i - pre_count : i - pre_count + 1]
@@ -664,10 +664,10 @@ def test_batch_pooling_cache_verify_sized_undo_armed():
     # block-4 verify write (L=4) cleared it and the first rejection past
     # the remainder buffer crashed rollback on every APC-restored (batch
     # lifted) request. Parity with the scalar cache: L <= 6.
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
     mx.random.seed(19)
-    b = BatchPoolingCache(4, [0, 0])
+    b = DS4BatchPoolingCache(4, [0, 0])
     b.accumulate_windows(
         mx.random.normal((2, 1, 8)), mx.random.normal((2, 1, 2)), 0)
     b.accumulate_windows(
@@ -681,7 +681,7 @@ def test_batch_pooling_cache_trim_window_recompletion():
     # Batch twin of test_pooling_cache_trim_window_recompletion, including
     # the per-row watermark move (pooled rows kept above the restored
     # watermark) and a ragged case where only one row re-completes.
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
     mx.random.seed(23)
     ratio, B, D, G = 4, 2, 8, 2
@@ -739,7 +739,7 @@ def test_batch_pooling_cache_trim_window_recompletion():
         upd_g = mx.random.normal((B, upd_len, G))
         k = upd_len - n_trim
 
-        test_cache = BatchPoolingCache(ratio, [0] * B)
+        test_cache = DS4BatchPoolingCache(ratio, [0] * B)
         raws = [[] for _ in range(B)]
         for kv, g in pre:
             feed(test_cache, kv, g, raws)
@@ -749,7 +749,7 @@ def test_batch_pooling_cache_trim_window_recompletion():
         assert test_cache._can_trim(n_trim)
         assert test_cache.trim(n_trim) == n_trim
 
-        control = BatchPoolingCache(ratio, [0] * B)
+        control = DS4BatchPoolingCache(ratio, [0] * B)
         raws_c = [[] for _ in range(B)]
         for kv, g in pre:
             feed(control, kv, g, raws_c)

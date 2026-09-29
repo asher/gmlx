@@ -277,7 +277,7 @@ class DeepseekV4DSparkDrafter(nn.Module):
         if left_padding is not None:
             raise NotImplementedError(
                 "DeepseekV4DSparkDrafter is B=1 only (v1): batched rounds "
-                "need BatchRotatingKVCache/BatchPoolingCache wiring on the "
+                "need BatchRotatingKVCache/DS4BatchPoolingCache wiring on the "
                 "target"
             )
         self.bind(target_model)

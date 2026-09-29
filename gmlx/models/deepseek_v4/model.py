@@ -48,9 +48,9 @@ from mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.models.deepseek_v4.cache import (
-    BatchPoolingCache,
+    DS4BatchPoolingCache,
     PackedPool,
-    PoolingCache,
+    DS4PoolingCache,
 )
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
@@ -161,8 +161,8 @@ _prefill_score_profile = _prefill_decay.build_score_profile(
         base_step=_v4_base_step()),
     kernels_armed=lambda: all(
         _dsa_probe(p) for p in ("window", "sparse", "indexer")),
-    require_cache=PoolingCache,
-    disarm_cache=BatchPoolingCache,
+    require_cache=DS4PoolingCache,
+    disarm_cache=DS4BatchPoolingCache,
     allow_quantized_pools=True,
 )
 
@@ -172,7 +172,7 @@ _prefill_decay.register_score_profile("deepseek_v4", _prefill_score_profile)
 
 def _cacheless_pool_mask(n_pooled: int, L: int, offset, ratio: int):
     """Causal pooled-visibility mask for the cache-less (training/eval)
-    forward, mirroring PoolingCache.make_mask: query at absolute position
+    forward, mirroring DS4PoolingCache.make_mask: query at absolute position
     offset + j sees pooled row i iff i < (offset + j) // ratio."""
     if n_pooled == 0 or L == 1 or not isinstance(offset, int):
         return None
@@ -290,18 +290,17 @@ def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.deepseek_v4`` resolve to this module,
     ahead of any upstream module of that name, and expose the pooling
-    caches on the cache modules that lack them (name-based cache-class
-    resolution and isinstance checks in shared code paths look them up
-    there). mlx-vlm's models/cache.py ships its own PoolingCache, which
-    stays: gmlx.cache.apc_pooling registers this module's classes with
-    APC directly."""
+    caches on the cache modules (name-based cache-class resolution in
+    ``CacheList.from_state`` and prompt-cache load looks them up there).
+    gmlx.cache.apc_pooling registers these classes with APC directly."""
+    import gmlx.cache.kv_cache as _owned_cache
     import mlx_lm.models.cache as _mlx_cache
 
     vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (_mlx_cache, vlm_cache):
-        if mod is not None and not hasattr(mod, "PoolingCache"):  # upstream wins
-            mod.PoolingCache = PoolingCache
-            mod.BatchPoolingCache = BatchPoolingCache
+    for mod in (_owned_cache, _mlx_cache, vlm_cache):
+        if mod is not None:
+            mod.DS4PoolingCache = DS4PoolingCache
+            mod.DS4BatchPoolingCache = DS4BatchPoolingCache
     graft_module("mlx_lm.models.deepseek_v4", sys.modules[__name__])
 
 
@@ -1606,7 +1605,7 @@ def _kernel_window_attention(module, q, kv, pooled, sinks, offset, ratio):
     L x S quadratic work for a sliding_window-wide live band.
 
     With an identity top-k over the pooled rows, the kernel's causal clamp
-    (offset + pos + 1) // ratio reproduces PoolingCache.make_mask exactly,
+    (offset + pos + 1) // ratio reproduces DS4PoolingCache.make_mask exactly,
     so no mask is materialized. pooled=None serves window-only layers: one
     dummy pooled row that a 2**30 ratio keeps invisible at any reachable
     offset. The kernel has no backward, so a training step falls back.
@@ -1943,7 +1942,7 @@ class Compressor(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Union[int, mx.array],
         fetch: bool = True,
     ) -> mx.array:
@@ -2023,7 +2022,7 @@ class Indexer(nn.Module):
         x: mx.array,
         q_residual: mx.array,
         position_rope: DeepseekV4RoPE,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Union[int, mx.array],
     ):
         B, L, _ = x.shape
@@ -3117,13 +3116,13 @@ class Model(nn.Module):
             elif isinstance(layer.attn, SparseCompressedAttention):
                 # local + compressor pool + indexer pool. The indexer pool
                 # opts out of --kv-bits packing: the score kernel reads it
-                # in full every step (see PoolingCache.quantizable).
-                idx_pool = PoolingCache(ratio)
+                # in full every step (see DS4PoolingCache.quantizable).
+                idx_pool = DS4PoolingCache(ratio)
                 idx_pool.quantizable = False
                 caches.append(
                     cmod.CacheList(
                         cmod.RotatingKVCache(max_size=self.args.sliding_window),
-                        PoolingCache(ratio),
+                        DS4PoolingCache(ratio),
                         idx_pool,
                     )
                 )
@@ -3132,7 +3131,7 @@ class Model(nn.Module):
                 caches.append(
                     cmod.CacheList(
                         cmod.RotatingKVCache(max_size=self.args.sliding_window),
-                        PoolingCache(ratio),
+                        DS4PoolingCache(ratio),
                     )
                 )
         return caches

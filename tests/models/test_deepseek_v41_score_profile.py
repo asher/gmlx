@@ -7,7 +7,7 @@ import pytest
 import gmlx.gen.prefill_decay as pd
 import gmlx.models.deepseek_v4.model as dsv4
 import gmlx.models.deepseek_v41.model as dsv41
-from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def _sparse_layer(ratio=1):
     # indexer pool
     local = SimpleNamespace(offset=1000)
     return SimpleNamespace(
-        caches=[local, PoolingCache(ratio), PoolingCache(ratio)])
+        caches=[local, DS4PoolingCache(ratio), DS4PoolingCache(ratio)])
 
 
 def _resident(streamed: bool):
@@ -81,12 +81,12 @@ def test_sparse_kernel_disarmed_returns_none(armed, monkeypatch):
 
 def test_batched_caches_return_none(armed):
     batched = SimpleNamespace(
-        caches=[SimpleNamespace(offset=0), BatchPoolingCache(1, [0, 0])])
+        caches=[SimpleNamespace(offset=0), DS4BatchPoolingCache(1, [0, 0])])
     assert dsv41._prefill_score_profile(_resident(True), [batched]) is None
 
 
 def test_quantized_pool_keeps_profile(armed):
-    pool = PoolingCache(1)
+    pool = DS4PoolingCache(1)
     pool.quantize_storage(64, 8)
     layer = SimpleNamespace(caches=[SimpleNamespace(offset=0), pool])
     assert dsv41._prefill_score_profile(
@@ -95,7 +95,7 @@ def test_quantized_pool_keeps_profile(armed):
 
 def test_quantized_local_window_returns_none(armed):
     layer = SimpleNamespace(
-        caches=[SimpleNamespace(offset=0, bits=8), PoolingCache(1)])
+        caches=[SimpleNamespace(offset=0, bits=8), DS4PoolingCache(1)])
     assert dsv41._prefill_score_profile(_resident(True), [layer]) is None
 
 

@@ -50,6 +50,7 @@ from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.cache import refusals
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,
@@ -133,6 +134,10 @@ class HyV4KVCache(KVCache):
     """
 
     kv_quant_unsupported = True
+    # Kept out of batching and the stock KV quant arms (gmlx.cache.refusals).
+    to_batch = refusals.refuse_batch
+    preserve_auxiliary_kv_state = True
+    extract = refusals.no_extract
 
 
 def split_cache(cache):

@@ -23,7 +23,7 @@ feed (the DeepSeek-V3 pre-norm convention is unverified here - acceptance
 rate is the arbiter).
 
 Verify rollback is two-part (the qwen4_exp recurrent precedent): the MLA
-layers' KV + pool leaves trim (PoolingCache stashes a one-update undo for
+layers' KV + pool leaves trim (DS4PoolingCache stashes a one-update undo for
 L <= 6), and the KDA layers replay the accepted prefix from the recorded
 pre-verify conv tails + recurrent state (``model.rollback_verify_sink``).
 
@@ -217,7 +217,7 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
     def __init__(self, config: Glm5NextMTPConfig):
         nn.Module.__init__(self)
         if int(config.block_size) != 2:
-            # The accept-path trim rewinds the drafter's own PoolingCache
+            # The accept-path trim rewinds the drafter's own DS4PoolingCache
             # through its one-update undo log; a deeper rollout appends one
             # update per draft and cannot rewind past the last one.
             raise ValueError(
@@ -260,12 +260,12 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
         from mlx_lm.models.cache import KVCache as _KVCache
 
         from gmlx.cache.compat import construction_cache_module
-        from gmlx.models.deepseek_v4.cache import PoolingCache
+        from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
         cmod = construction_cache_module()
         kv_cls = getattr(cmod, "KVCache", _KVCache)
         list_cls = getattr(cmod, "CacheList", _CacheList)
-        pool = PoolingCache(self._kpool, lookback=False)
+        pool = DS4PoolingCache(self._kpool, lookback=False)
         pool.quantizable = False
         return [list_cls(kv_cls(), pool)]
 

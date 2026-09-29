@@ -310,3 +310,40 @@ def test_a_forced_one_id_round_after_a_rejected_draft(target, monkeypatch):
     # The verify agrees with the fresh forward to about 2e-6 of the hidden
     # scale; the rejected drafts left in the ring move it by far more.
     assert ratio <= 1e-4, ratio
+
+
+def test_owned_rotating_caches_take_the_rotating_branch_of_the_rollback():
+    """The rollback transaction binds the rotating classes from the cache
+    module at import. Both names are gmlx's own classes, so an owned
+    rotating cache gets the window-replay transaction, not the cursor
+    trim, and a rejected block leaves only the accepted keys."""
+    from mlx_vlm.speculative import cache_state
+
+    import gmlx.cache.kv_cache as owned
+
+    assert cache_state.RotatingKVCache is owned.RotatingKVCache
+    assert cache_state.BatchRotatingKVCache is owned.BatchRotatingKVCache
+    assert vlm_cache.RotatingKVCache is owned.RotatingKVCache
+    single = owned.RotatingKVCache(max_size=8)
+    batch = owned.BatchRotatingKVCache(8, [0, 0])
+
+    def keys(cols, rows):
+        k = mx.array(cols, dtype=mx.float32)[None, None, :, None] + 1
+        return mx.broadcast_to(k, (rows, 1, len(cols), 2))
+
+    for cache, rows in ((single, 1), (batch, 2)):
+        cache.update_and_fetch(keys(list(range(10)), rows),
+                               keys(list(range(10)), rows))
+    tx = cache_state.start_speculative_cache([single, batch], 3)
+    assert set(tx._rotating) == {id(single), id(batch)}
+    assert not tx._positions
+    for cache, rows in ((single, 1), (batch, 2)):
+        cache.update_and_fetch(keys([10, 11, 12], rows),
+                               keys([10, 11, 12], rows))
+    tx.commit(1)
+    for cache in (single, batch):
+        kept = cache._temporal_order(cache.keys) if cache is single \
+            else cache.keys
+        cols = sorted(int(x) - 1 for x in kept[0, 0, :, 0].tolist())
+        assert 10 in cols and 11 not in cols and 12 not in cols, (
+            type(cache).__name__, cols)

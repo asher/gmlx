@@ -17,7 +17,7 @@ import mlx.core as mx
 import pytest
 
 from gmlx.models.deepseek_v4 import model as v4
-from gmlx.models.deepseek_v4.cache import PackedPool, PoolingCache
+from gmlx.models.deepseek_v4.cache import PackedPool, DS4PoolingCache
 from gmlx.models.deepseek_v41.model import Model, _latent_qat
 
 D = 64
@@ -44,7 +44,7 @@ def _grid_rows(n, d=D, seed=0):
 
 
 def _packed():
-    c = PoolingCache(4)
+    c = DS4PoolingCache(4)
     c.pack_fp4()
     return c
 
@@ -62,7 +62,7 @@ def _model_tests():
 
 def test_packed_rows_round_trip_exactly():
     rows = _grid_rows(37)
-    ref = PoolingCache(4)
+    ref = DS4PoolingCache(4)
     ref.update_and_fetch(rows)
     c = _packed()
     got = c.update_and_fetch(rows)
@@ -90,14 +90,14 @@ def test_gather_matches_the_dense_gather():
 
 def test_pack_fp4_repacks_landed_rows_and_ignores_kv_bits():
     rows = _grid_rows(9)
-    c = PoolingCache(4)
+    c = DS4PoolingCache(4)
     c.update_and_fetch(rows)
     c.pack_fp4()
     assert c.is_packed and c.size() == 9
     assert mx.array_equal(c.pooled_rows, rows)
     c.quantize_storage(group_size=32, bits=8)
     assert c.is_packed and not c.is_quantized
-    q = PoolingCache(4)
+    q = DS4PoolingCache(4)
     q.quantize_storage(group_size=32, bits=8)
     q.pack_fp4()
     assert q.is_quantized and not q.is_packed
@@ -107,7 +107,7 @@ def test_state_and_meta_state_rebuild_a_packed_cache():
     c = _packed()
     c.update_and_fetch(_grid_rows(11))
     assert c.meta_state == (4, True, "float16")
-    d = PoolingCache.from_state(c.state, c.meta_state)
+    d = DS4PoolingCache.from_state(c.state, c.meta_state)
     assert d.is_packed and d.size() == 11
     assert isinstance(d.pooled, PackedPool)
     assert mx.array_equal(d.pooled_rows, c.pooled_rows)

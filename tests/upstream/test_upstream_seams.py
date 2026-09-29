@@ -6,6 +6,9 @@ here names the exact seam that drifted - re-audit the using site, then
 from __future__ import annotations
 
 import importlib.metadata as md
+import json
+import os
+import subprocess
 import sys
 import types
 
@@ -202,3 +205,84 @@ def test_version_gate_missing_metadata_warns_not_raises(monkeypatch):
     monkeypatch.setattr(us.sys.modules["importlib.metadata"], "version", fake)
     warnings = us.check_upstream_versions(quiet=True)
     assert any("mlx-lm" in w and "source install" in w for w in warnings)
+
+
+# --- the cache binding (gmlx.cache.bind) ---
+
+_REGEN_CHILD = r"""
+import json
+import sys
+
+import gmlx
+import gmlx.upstream.seams as us
+from gmlx.cache import bind
+
+fps = us.collect_fingerprints()
+loaded = [m for m in bind.MAP if m in sys.modules]
+print(json.dumps({"fps": fps, "loaded": loaded, "late": bind.late_modules}))
+"""
+
+
+def test_regen_runs_clean_in_a_fresh_interpreter_after_the_binding():
+    """``--regen`` runs ``collect_fingerprints`` in a process where
+    ``import gmlx`` bound the cache names. A row that read an owned object
+    would raise there as rebound."""
+    r = subprocess.run([sys.executable, "-c", _REGEN_CHILD],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["late"] == []
+    assert set(out["loaded"]) == {"mlx_vlm.models.cache", "mlx_lm.models.cache",
+                                  "mlx_vlm.models.base", "mlx_lm.models.base"}
+    assert out["fps"] == us.load_pinned()["fingerprints"]
+
+
+def test_each_identity_row_resolves_to_its_owned_object():
+    rows = [s for s in us.SEAMS if s.owned]
+    assert len(rows) == 7
+    for seam in rows:
+        status, obj = us._resolve(seam)
+        assert status == "ok", us._key(seam)
+        assert us._identity_problem(seam, obj) is None
+
+
+def test_no_fingerprint_row_reads_an_owned_object():
+    from gmlx.cache import bind
+    from gmlx.upstream.patching import _walk
+
+    # A row on a bound module may name only what the binding leaves stock.
+    assert not [us._key(s) for s in us.SEAMS if s.module in bind.MAP
+                and s.attr.split(".")[0] in bind.MAP[s.module]]
+    hits = []
+    for seam in us.SEAMS:
+        if seam.owned:
+            continue
+        status, obj = us._resolve(seam)
+        if status != "ok":
+            continue
+        for f in _walk(obj):
+            mod = getattr(f, "__module__", None)
+            if mod in (bind.KV, bind.ATTN):
+                hits.append(us._key(seam))
+    assert not hits, hits
+
+
+def test_an_identity_row_follows_wrappers_and_names_a_stock_object(
+        monkeypatch):
+    def wrapper(x):
+        return _impl_a(x)
+
+    wrapper._gmlx_orig = _impl_a
+    mod = _probe_module(monkeypatch, owned=_impl_a, name=wrapper)
+    seam = us.Seam("_gmlx_seam_probe", "name", "test",
+                   owned="_gmlx_seam_probe:owned")
+    monkeypatch.setattr(us, "SEAMS", (seam,))
+    monkeypatch.setattr(
+        us, "load_pinned", lambda: {"generated_with": {}, "fingerprints": {}})
+    assert us.check_seams() == []
+    assert us.collect_fingerprints() == {}
+    mod.name = _impl_b
+    problems = us.check_seams()
+    assert any("_gmlx_seam_probe:name" in p
+               and "does not resolve to the owned" in p for p in problems)

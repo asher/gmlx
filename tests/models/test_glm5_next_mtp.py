@@ -331,7 +331,7 @@ def test_drafter_validates_and_rejects_batch():
 
 
 def test_drafter_cache_is_latent_pool_pair():
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     drafter = _build_drafter(_tiny_args())
     (cache,) = drafter.make_cache()
@@ -340,7 +340,7 @@ def test_drafter_cache_is_latent_pool_pair():
     assert type(cache).__name__ == "CacheList"
     assert type(cache[0]).__name__ == "KVCache"
     # The pool cache IS identity-checked: every APC seam keys on this class.
-    assert isinstance(cache[1], PoolingCache)
+    assert isinstance(cache[1], DS4PoolingCache)
     assert cache[1].ratio == 4
     assert cache[1].quantizable is False
 

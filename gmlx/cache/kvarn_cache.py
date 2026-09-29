@@ -2002,13 +2002,14 @@ def kvarn_batch_row(batch, cache):
     return BatchKVarNKVCache.merge([row])
 
 def ensure_registered():
-    """Graft the kvarn cache classes onto both cache namespaces so snapshot
+    """Graft the kvarn cache classes onto the cache namespaces so snapshot
     and prompt-cache restores resolve them by name. Upstream wins if the
     names ever appear there."""
+    import gmlx.cache.kv_cache as owned_cache
     import mlx_lm.models.cache as lm_cache
 
     vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (lm_cache, vlm_cache):
+    for mod in (owned_cache, lm_cache, vlm_cache):
         if mod is None:
             continue
         if not hasattr(mod, "KVarNKVCache"):

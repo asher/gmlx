@@ -1,4 +1,4 @@
-"""APC participation for PoolingCache stacks + the rotating-safe KV
+"""APC participation for DS4PoolingCache stacks + the rotating-safe KV
 quantizer (serve KV_BITS).
 
 Gates the merge blockers: a deepseek4 row snapshot must clone (in-memory
@@ -16,7 +16,7 @@ from gmlx.cache.apc_pooling import (
     install_pooling_apc_support,
     install_safe_kv_quantization,
 )
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
 D = 64
 MODES = ["fp16", "q8", "fp4"]
@@ -45,7 +45,7 @@ def _mode_pool(mode, **kw):
 
 
 def _pool(quantized=False, rows=9, remainder=2, packed=False):
-    c = PoolingCache(4)
+    c = DS4PoolingCache(4)
     if quantized:
         c.quantize_storage(group_size=32, bits=8)
     if packed:
@@ -110,7 +110,7 @@ def test_clone_roundtrip(mode):
 
 def test_model_apc_mode_resolves_exact_for_pooling_stack():
     # Gate ahead of every other arm: if the prefix-cache plan finds no
-    # capability for PoolingCache, model_apc_mode is None and serve-side
+    # capability for DS4PoolingCache, model_apc_mode is None and serve-side
     # APC never engages.
     from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
@@ -249,7 +249,7 @@ def test_rebind_to_runtime_origin_recurses_and_skips_ours():
         rebind_to_runtime_origin,
         runtime_cache_module,
     )
-    from gmlx.models.deepseek_v4.cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 
     vlm = runtime_cache_module()
     pool = _pool(rows=0, remainder=0)
@@ -257,7 +257,7 @@ def test_rebind_to_runtime_origin_recurses_and_skips_ours():
     rebind_to_runtime_origin(stack)
     assert type(stack[0]) is vlm.CacheList
     assert type(stack[0].caches[0]) is vlm.RotatingKVCache
-    assert type(stack[0].caches[1]) is PoolingCache  # ours, untouched
+    assert type(stack[0].caches[1]) is DS4PoolingCache  # ours, untouched
     assert type(stack[1]) is vlm.KVCache
 
 
@@ -420,9 +420,9 @@ def test_safe_kv_quantization_packs_pools_and_skips_rotating():
 def test_quantize_storage_converts_existing_rows():
     mx.random.seed(6)
     rows = mx.random.normal((1, 9, D)).astype(mx.float16)
-    ref = PoolingCache(4)
+    ref = DS4PoolingCache(4)
     ref.update_and_fetch(rows)
-    conv = PoolingCache(4)
+    conv = DS4PoolingCache(4)
     conv.update_and_fetch(rows)
     conv.quantize_storage(group_size=32, bits=8)
     assert conv.is_quantized and conv.size() == 9
@@ -614,18 +614,18 @@ def test_model_has_pools_memoizes(monkeypatch):
 
 def test_is_batched_cache_sees_through_cachelist():
     from gmlx.cache.apc_pooling import _is_batched_cache
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
     scalar = SimpleNamespace(caches=[_pool(rows=0, remainder=0)])
-    batched = SimpleNamespace(caches=[BatchPoolingCache(4, [0, 0])])
+    batched = SimpleNamespace(caches=[DS4BatchPoolingCache(4, [0, 0])])
     assert not _is_batched_cache(scalar)
     assert _is_batched_cache(batched)
 
 
 def test_batched_pool_carries_left_padding():
-    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache
 
-    b = BatchPoolingCache(4, [0, 0, 0])
+    b = DS4BatchPoolingCache(4, [0, 0, 0])
     # The admission path lifts only caches missing this attribute.
     assert b.left_padding == [0, 0, 0]
     assert not hasattr(_pool(rows=0, remainder=0), "left_padding")

@@ -12,6 +12,8 @@ shape error at MoE prefill). This module makes the contract explicit:
 - ``seams.json`` pins a fingerprint for each seam, captured at the
   qualified upstream versions: the symbol's source, or its value where it
   has none, and for a forwarding lambda the implementation it calls too.
+  An identity row pins nothing: it names the gmlx object a stock name must
+  resolve to once the cache binding ran (gmlx.cache.bind).
   ``tests/upstream/test_upstream_seams.py`` fails with the symbol's name
   when upstream drifts under the pin.
 - ``check_upstream_versions()`` is the runtime gate: below-floor upstream
@@ -57,6 +59,10 @@ class Seam:
     impl: str = ""  # "module:attr" a forwarding lambda calls; pinned with it
     # The text to pin, for a value whose generic pin says too little.
     pin: Callable[[object], str] | None = None
+    # "module:attr" of the gmlx object the stock name must resolve to. An
+    # identity row pins no text: gmlx owns the object, and check_seams
+    # holds only that the name still leads to it.
+    owned: str = ""
 
 
 def _stock_parser_specs(table) -> str:
@@ -164,7 +170,8 @@ SEAMS: tuple[Seam, ...] = (
          "gemma4_owned._owned_attention_call (mirror)"),
     Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
          "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices); "
-         "gemma4_owned._sdpa_dispatch calls the claim directly"),
+         "gemma4_owned._sdpa_dispatch calls the claim directly",
+         owned="gmlx.cache.attention:scaled_dot_product_attention"),
     # The stock exact verifier bypasses the language module's SDPA, which
     # the gemma4 batched, cascade and sparse rebinds cover. It runs only
     # when the config sets exact_speculative_verify (default False, never
@@ -178,104 +185,10 @@ SEAMS: tuple[Seam, ...] = (
          "gemma4_owned inherits it (owned masks and attention take the "
          "per-layer mask, shared KV and offset it passes, including the "
          "logits_to_keep trim before the KV-shared layers)"),
-    # --- quantized-KV SDPA batch-mask fix (both base modules) ---
-    Seam("mlx_lm.models.base", "quantized_scaled_dot_product_attention",
-         "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
-    Seam("mlx_vlm.models.base", "quantized_scaled_dot_product_attention",
-         "quantized_sdpa_fix (same body as the mlx_lm copy)"),
-    # --- quantized-KV first-allocation pack width (bits 3, 5 and 6) ---
-    Seam("mlx_vlm.models.cache", "QuantizedKVCache.update_and_fetch",
-         "quantized_cache_pack_fix (init_quant sizes dim//(32//bits), "
-         "mx.quantize packs dim*bits//32)"),
-    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.update_and_fetch",
-         "quantized_cache_pack_fix (same formula in _init)"),
-    # --- ragged right-trim rebinds left_padding (both cache origins) ---
-    Seam("mlx_vlm.models.cache", "BatchKVCache.finalize",
-         "batch_finalize_fix (roll adds the tail to left_padding in place; "
-         "identity-keyed pad memos)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.finalize",
-         "batch_finalize_fix (same, tail from prepare lengths)"),
-    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.finalize",
-         "batch_finalize_fix (same, packed key tuples)"),
-    Seam("mlx_lm.models.cache", "BatchKVCache.finalize",
-         "batch_finalize_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.finalize",
-         "batch_finalize_fix (mlx-lm origin)"),
-    # --- rotated batch rotating cache: the mask takes the concat trim ---
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.make_mask",
-         "batch_rotating_mask_fix (wrap: trim read from _idx, which a "
-         "rotated buffer holds as the ring position)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._update_concat",
-         "batch_rotating_mask_fix (the trim the mask must match, taken "
-         "after _temporal_order sets _idx to the buffer length)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._temporal_order",
-         "batch_rotating_mask_fix (sets _idx to the buffer length)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.make_mask",
-         "batch_rotating_mask_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._update_concat",
-         "batch_rotating_mask_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._temporal_order",
-         "batch_rotating_mask_fix (mlx-lm origin)"),
-    # --- rotating trim keeps the trimmed columns (both cache origins) ---
-    Seam("mlx_vlm.models.cache", "RotatingKVCache.trim",
-         "rotating_trim_fix (wrap: trim moves _idx and offset back and "
-         "keeps the trimmed columns)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.trim",
-         "rotating_trim_fix (same, with _offset)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache._update_in_place",
-         "rotating_trim_fix (trims keys.shape[2] - max_size of the oldest "
-         "keys and rotates; grows from offset below the window)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache._update_in_place",
-         "rotating_trim_fix (same, grows from _offset)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache._temporal_order",
-         "rotating_trim_fix (temporal order is _idx at the buffer length)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.extend",
-         "rotating_trim_fix (aligns the buffers at _idx and keeps the "
-         "columns past it, so trimmed columns ride along)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache.update_and_fetch",
-         "rotating_trim_fix (a one-token update goes in place, a wider "
-         "one through the concat)"),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache.update_and_fetch",
-         "rotating_trim_fix (same, with the concat while prepare lengths "
-         "are set)"),
-    Seam("mlx_lm.models.cache", "RotatingKVCache.trim",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.trim",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "RotatingKVCache._update_in_place",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache._update_in_place",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "RotatingKVCache._temporal_order",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.extend",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "RotatingKVCache._update_concat",
-         "rotating_trim_fix (puts the buffer in temporal order and trims it "
-         "to the window, which drops the columns a trim left past _idx)"),
-    Seam("mlx_lm.models.cache", "RotatingKVCache.update_and_fetch",
-         "rotating_trim_fix (mlx-lm origin)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache.update_and_fetch",
-         "rotating_trim_fix (mlx-lm origin, where a one-token update always "
-         "goes in place)"),
-    Seam("mlx_lm.models.cache", "BatchRotatingKVCache",
-         "rotating_trim_fix (is_trimmable reports a buffer past its window "
-         "as not trimmable, so no rollback reaches the depth raise)"),
-    # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
-    Seam("mlx_lm.models.base", "scaled_dot_product_attention",
-         "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
-         "queries/keys/values/cache/scale/mask/sinks)"),
-    Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
-         "kvarn_sdpa.install_kvarn_sdpa (same claim at the vlm seam)"),
-    Seam("mlx_lm.models.cache", "QuantizedKVCache.update_and_fetch",
-         "quantized_cache_pack_fix (distinct class from the vlm copy; "
-         "patched when the two do not resolve to the same object)"),
-    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.make_mask",
-         "quantized_sdpa_fix._patch_make_mask (starts registration for "
-         "the fused decode route; left_padding attr contract)"),
     # --- gemma4 text-only load path (mlx_lm module wrapped in text_only) ---
     Seam("mlx_lm.models.gemma4_text", "scaled_dot_product_attention",
-         "gemma4_batched_sdpa (same row route at the text-only seam)"),
+         "gemma4_batched_sdpa (same row route at the text-only seam)",
+         owned="gmlx.cache.attention:scaled_dot_product_attention"),
     Seam("mlx_lm.models.gemma4_text", "Attention.__call__",
          "gemma4_batched_sdpa (module-global sdpa call, cache kwarg)"),
     Seam("mlx_lm.models.gemma4_text", "Gemma4TextModel._make_masks",
@@ -283,7 +196,8 @@ SEAMS: tuple[Seam, ...] = (
          "producer->consumer pad relay keys on that identity)"),
     # --- shared-prefix cascade decode route + APC warm-batch stamp ---
     Seam("mlx_lm.models.llama", "scaled_dot_product_attention",
-         "cascade_sdpa (stamped shared-prefix batched decode)"),
+         "cascade_sdpa (stamped shared-prefix batched decode)",
+         owned="gmlx.cache.attention:scaled_dot_product_attention"),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
          "cascade_sdpa.install_cascade_stamp (token-prefix stamp at batch "
          "formation; rows + caches coexist in matching order here) + "
@@ -298,7 +212,8 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine._install_apc_manager_stash + kvarn_serve APC gate",
          critical=True),
     Seam("mlx_vlm.generate.ar", "_make_cache",
-         "kvarn_serve._install_make_cache (batch kvarn KV construction)",
+         "kvarn_serve._install_make_cache (batch kvarn KV construction); "
+         "cache.refusals (to_batch is tried before the isinstance chain)",
          critical=True),
     Seam("mlx_vlm.generate.ar",
          "PromptProcessingBatch._store_apc_exact_checkpoints",
@@ -779,7 +694,8 @@ SEAMS: tuple[Seam, ...] = (
          "copy on change; each block hashes under the salt at its end)",
          critical=True),
     Seam("mlx_vlm.apc", "_cache_nbytes",
-         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True,
+         owned="gmlx.cache.kv_cache:cache_nbytes"),
     Seam("mlx_vlm.apc", "APCBlock",
          "apc_manager.GmlxAPCManager._grow_pool", critical=True),
     Seam("mlx_vlm.apc", "APCManager._make_room",
@@ -905,39 +821,40 @@ SEAMS: tuple[Seam, ...] = (
          "model answers from the plan, as the coordinator does)",
          critical=True),
     Seam("mlx_vlm.generate", "maybe_quantize_kv_cache",
-         "apc_pooling (rotating-safe KV-quant replacement)", critical=True),
-    # --- cache classes (dual-origin via gmlx.cache.compat) ---
-    Seam("mlx_vlm.models.cache", "KVCache",
-         "cache_compat (ckpt sidecar tails, snapshots)", critical=True),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache",
-         "cache_compat (ds4 make_cache, rollback attach, spec_helpers)",
+         "apc_pooling (rotating-safe KV-quant replacement); cache.refusals "
+         "(the hybrid and TurboQuant arms skip preserve_auxiliary_kv_state)",
          critical=True),
-    Seam("mlx_vlm.models.cache", "CacheList",
-         "cache_compat (ds4 make_cache, prefix_cache snapshots)",
-         critical=True),
-    Seam("mlx_vlm.models.cache", "ArraysCache",
-         "cache_compat (ckpt_supported, prefix_cache snapshots) / "
-         "arrays_cache_fix (prepare wrap) / qwen35.cache.Qwen35ArraysCache "
-         "(eager advance over the private advance counters)"),
-    Seam("mlx_vlm.models.cache", "BatchKVCache",
-         "mtp_drafter / cache_snapshot row round-trip"),
-    Seam("mlx_vlm.models.cache", "BatchKVCache.filter",
-         "admission per-row release + governor retire (physical row "
-         "drop through the cache's own filter)", critical=True),
-    Seam("mlx_vlm.models.cache", "BatchKVCache.extract",
-         "governor orange retire (contiguous single-row extract before "
-         "filter)", critical=True),
-    Seam("mlx_vlm.models.cache", "ArraysCache.extract",
-         "governor orange retire (GDN hybrid row extract)"),
-    Seam("mlx_vlm.models.cache", "_BaseCache.nbytes",
-         "governor green sampling + registered-cache bytes() protocol",
-         critical=True),
-    Seam("mlx_vlm.models.cache", "BatchRotatingKVCache",
-         "cache_compat (rollback attach, safe KV-quant exclusion)"),
-    Seam("mlx_vlm.models.cache", "BufferedRotatingKVCache",
-         "spec_helpers rollback-slack wrap", critical=True),
-    Seam("mlx_vlm.models.cache", "make_prompt_cache",
-         "chat MTP cache construction", critical=True),
+    # --- owned cache binding (gmlx.cache.bind) ---
+    # Stock modules that import cache names by name before a gmlx wrapper
+    # could reach them. The identity rows hold that each name is the owned
+    # object; the fingerprint rows pin stock code the binding relies on.
+    Seam("mlx_vlm.speculative.cache_state", "RotatingKVCache",
+         "rollback transaction (rotating branch on the owned class)",
+         owned="gmlx.cache.kv_cache:RotatingKVCache"),
+    Seam("mlx_vlm.speculative.cache_state", "BatchRotatingKVCache",
+         "rollback transaction (rotating branch on the owned batch class)",
+         owned="gmlx.cache.kv_cache:BatchRotatingKVCache"),
+    Seam("mlx_vlm.speculative.cache_state", "CacheList",
+         "rollback transaction (recurses into owned cache lists)",
+         owned="gmlx.cache.kv_cache:CacheList"),
+    Seam("mlx_lm.generate", "_make_cache",
+         "cache.bind (type(c) is KVCache batches the owned KVCache and "
+         "rejects its subclasses)", critical=True),
+    Seam("mlx_vlm.apc", "_resolve_checkpoint_class",
+         "cache.checkpoint_claim (wrapped: the prefix check also accepts "
+         "gmlx.cache.kv_cache)", critical=True),
+    Seam("mlx_vlm.apc_adapters", "_has_explicit_snapshot_contract",
+         "cache.bind (compares a class's members against the owned "
+         "_BaseCache.__dict__)"),
+    Seam("mlx_vlm.apc_adapters", "_custom_state_contract",
+         "cache.bind (same _BaseCache.__dict__ comparison)"),
+    Seam("mlx_vlm.apc_adapters", "_apc_type_tables",
+         "cache.bind late path (resets _APC_EXACT_TYPES and "
+         "_APC_BLOCK_TYPES so they refill with owned classes)"),
+    Seam("mlx_lm.models.cache", "load_prompt_cache",
+         "kvarn_cache, qwen4_exp, minimax_m3 and deepseek_v4 "
+         "ensure_registered (resolves each class by name in the module "
+         "globals)"),
     Seam("mlx_vlm.server.runtime", "ModelCacheRegistry",
          "residency pool / test_wire_contract fake loader"),
     # --- vendored switch_layers ---
@@ -987,14 +904,6 @@ SEAMS: tuple[Seam, ...] = (
          "systemone.engine (model._softcap on the read logits)"),
     Seam("mlx_vlm.models.diffusion_gemma.diffusion_gemma", "Model.__init__",
          "systemone.engine (owner of _softcap)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache._update_concat",
-         "systemone.engine.PromptCache.extend (multi-token append); "
-         "rotating_trim_fix (temporal order and window trim drop the "
-         "columns a trim left past _idx)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache._update_in_place",
-         "systemone.engine.PromptCache.extend (one-token append)"),
-    Seam("mlx_vlm.models.cache", "RotatingKVCache._temporal_order",
-         "systemone.engine (sliding trim assumes oldest-first order)"),
     Seam("mlx_vlm.generate.common", "generation_stream",
          "systemone.engine.engine_scope"),
     Seam("mlx_vlm.generate.diffusion", "stream_diffusion_generate",
@@ -1045,13 +954,6 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_lm (GGUF ModelProvider)", critical=True),
     Seam("mlx_lm.generate", "maybe_quantize_kv_cache",
          "apc_pooling", critical=True),
-    Seam("mlx_lm.models.cache", "RotatingKVCache",
-         "rotating_cache_fix / prefix_cache snapshots"),
-    Seam("mlx_lm.models.cache", "ArraysCache",
-         "arrays_cache_fix (prepare wrap: lengths must clear the stale "
-         "left_padding that merge() seeds, or right-padded ragged prefill "
-         "runs unmasked through conv/SSM state)"),
-    Seam("mlx_lm.models.base", "create_causal_mask", "rotating_cache_fix"),
     Seam("mlx_lm.models.hunyuan", "MoeBlock",
          "loader._patch_hunyuan_norm_topk"),
     Seam("mlx_lm.models.deepseek_v32", "MoEGate",
@@ -1103,6 +1005,26 @@ def _resolve(seam: Seam):
 def _resolve_impl(seam: Seam):
     module, _, attr = seam.impl.partition(":")
     return _resolve_path(module, attr)
+
+
+def _identity_problem(seam: Seam, obj) -> str | None:
+    """A problem line when an identity row's stock name no longer leads to
+    its owned object. gmlx wrappers may sit on the stock name and on the
+    owned name alike (a per-arch SDPA claim, the KVarN sweep), so both
+    sides are followed down the ``_gmlx_orig`` and ``__wrapped__`` links
+    those wrappers leave, to the object that wraps nothing."""
+    from gmlx.upstream.patching import root
+
+    module, _, attr = seam.owned.partition(":")
+    status, owned = _resolve_path(module, attr)
+    if status != "ok":
+        return (f"{_key(seam)}: owned object {seam.owned} {status} "
+                f"(used by {seam.used_by})")
+    if root(obj) is root(owned):
+        return None
+    return (f"{_key(seam)}: does not resolve to the owned {seam.owned}; "
+            f"the cache binding (gmlx.cache.bind) did not reach it (used "
+            f"by {seam.used_by})")
 
 
 _UPSTREAM_ROOTS = ("mlx_vlm", "mlx_lm")
@@ -1196,6 +1118,8 @@ def _unforwarded_lambda(seam: Seam, obj) -> str | None:
 def collect_fingerprints() -> dict[str, str]:
     out: dict[str, str] = {}
     for seam in SEAMS:
+        if seam.owned:
+            continue  # an identity row pins no text
         status, obj = _resolve(seam)
         if status == "ok":
             impl = None
@@ -1245,6 +1169,11 @@ def check_seams() -> list[str]:
                 problems.append(
                     f"{_key(seam)}: attribute missing - upstream renamed or "
                     f"removed it (used by {seam.used_by})")
+            continue
+        if seam.owned:
+            problem = _identity_problem(seam, obj)
+            if problem:
+                problems.append(problem)
             continue
         if _rebound(seam, obj):
             continue  # our installer already replaced it in this process

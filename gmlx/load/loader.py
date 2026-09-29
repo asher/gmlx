@@ -48,6 +48,7 @@ from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
 from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
 from gmlx.upstream.batch_finalize_fix import install_batch_finalize_fix
 from gmlx.upstream.batch_rotating_mask_fix import install_batch_rotating_mask_fix
+from gmlx.cache.checkpoint_claim import install_checkpoint_class_claim
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
 from gmlx.upstream.quantized_cache_pack_fix import (
@@ -184,7 +185,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         minimax_m3_model.ensure_registered()
     if mt == "deepseek_v4":
         # mlx-lm ships no deepseek_v4 module yet (PR #1192 unmerged); same
-        # vendored-registration pattern as minimax_m3, plus PoolingCache
+        # vendored-registration pattern as minimax_m3, plus DS4PoolingCache
         # injection into mlx_lm.models.cache.
         import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
@@ -215,7 +216,7 @@ def build_model(config_dict: dict, *, mtp: bool = False):
     if mt == "glm5_next":
         # mlx-lm ships no glm5_next module (llama.cpp PR #27754 arch); same
         # vendored-registration pattern as kimi_k3, plus the deepseek_v4
-        # PoolingCache injection its hybrid cache depends on.
+        # DS4PoolingCache injection its hybrid cache depends on.
         import gmlx.models.glm5_next.model as glm5_next_model
 
         glm5_next_model.ensure_registered()
@@ -1253,6 +1254,7 @@ def _install_and_load(
     install_batch_finalize_fix()
     install_batch_rotating_mask_fix()
     install_rotating_trim_fix()
+    install_checkpoint_class_claim()
     install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.
@@ -1754,6 +1756,7 @@ def load_model(
     install_batch_finalize_fix()
     install_batch_rotating_mask_fix()
     install_rotating_trim_fix()
+    install_checkpoint_class_claim()
     install_wired_limit_cpu_fix()
 
     # 7. partition by what the constructed model actually defines + load.

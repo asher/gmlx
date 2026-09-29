@@ -66,7 +66,10 @@ _log = logging.getLogger(__name__)
 _installed = False
 _FALLBACK_WARNED = False
 
-_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
+# The owned SDPA calls quantized_scaled_dot_product_attention by its bare
+# name in gmlx.cache.attention; the stock modules hold the same function
+# for callers that reach it through their attribute.
+_MODULES = ("gmlx.cache.attention", "mlx_lm.models.base", "mlx_vlm.models.base")
 
 _HD_OK = (64, 128, 256, 512)
 

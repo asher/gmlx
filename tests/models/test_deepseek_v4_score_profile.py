@@ -9,7 +9,7 @@ import pytest
 
 import gmlx.models.deepseek_v4.model as dsv4
 import gmlx.gen.prefill_decay as pd
-from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4BatchPoolingCache, DS4PoolingCache
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def _cache(*layer_caches):
 
 def _sparse_layer(ratio=4):
     local = SimpleNamespace(offset=1000)
-    return SimpleNamespace(caches=[local, PoolingCache(ratio), PoolingCache(ratio)])
+    return SimpleNamespace(caches=[local, DS4PoolingCache(ratio), DS4PoolingCache(ratio)])
 
 
 def test_registered_on_import():
@@ -51,14 +51,14 @@ def test_kernels_disarmed_returns_none(armed, monkeypatch):
 
 def test_batched_caches_return_none(armed):
     batched = SimpleNamespace(
-        caches=[SimpleNamespace(offset=0), BatchPoolingCache(4, [0, 0])])
+        caches=[SimpleNamespace(offset=0), DS4BatchPoolingCache(4, [0, 0])])
     assert dsv4._prefill_score_profile(None, _cache(batched)) is None
 
 
 def test_quantized_pool_keeps_profile(armed):
     # prefill dequantizes pooled rows on read and runs the same kernels; the
     # per-layer fp16 pool copy is step-independent, so the profile stays
-    p = PoolingCache(4)
+    p = DS4PoolingCache(4)
     p.quantize_storage(64, 8)
     layer = SimpleNamespace(caches=[SimpleNamespace(offset=0), p])
     assert dsv4._prefill_score_profile(None, _cache(layer)) == \
@@ -69,9 +69,9 @@ def test_quantized_pool_keeps_profile(armed):
 def test_quantized_comp_pool_fp16_indexer_pool_arms(armed):
     # the real arm_stack outcome: comp pool packed, indexer pool
     # (quantizable=False) and local window fp16
-    comp = PoolingCache(4)
+    comp = DS4PoolingCache(4)
     comp.quantize_storage(64, 8)
-    idx = PoolingCache(4)
+    idx = DS4PoolingCache(4)
     layer = SimpleNamespace(caches=[SimpleNamespace(offset=0), comp, idx])
     prof = dsv4._prefill_score_profile(None, _cache(layer))
     assert prof is not None and prof.depth_divisor == 4
@@ -79,7 +79,7 @@ def test_quantized_comp_pool_fp16_indexer_pool_arms(armed):
 
 def test_quantized_local_returns_none(armed):
     layer = SimpleNamespace(
-        caches=[SimpleNamespace(offset=0, bits=8), PoolingCache(4)])
+        caches=[SimpleNamespace(offset=0, bits=8), DS4PoolingCache(4)])
     assert dsv4._prefill_score_profile(None, _cache(layer)) is None
 
 

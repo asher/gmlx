@@ -53,6 +53,7 @@ from mlx_lm.models.base import (
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_update
 
+from gmlx.cache import refusals
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
@@ -66,11 +67,13 @@ def ensure_registered() -> None:
     ``QSAKVCache`` on the cache modules ahead of any upstream class of that
     name (prompt-cache save/load resolves cache classes by name there, and
     the APC QSA arms check for this class; mlx-vlm >= 0.6.4 vendors its own
-    models/cache.py, so register on both when it is loaded)."""
+    models/cache.py, so register on both when it is loaded, and on
+    gmlx.cache.kv_cache, whose ``CacheList.from_state`` resolves by name)."""
+    import gmlx.cache.kv_cache as _owned_cache
     import mlx_lm.models.cache as _mlx_cache
 
     vlm_cache = sys.modules.get("mlx_vlm.models.cache")
-    for mod in (_mlx_cache, vlm_cache):
+    for mod in (_owned_cache, _mlx_cache, vlm_cache):
         if mod is not None:
             mod.QSAKVCache = QSAKVCache
     graft_module("mlx_lm.models.qwen4_exp", sys.modules[__name__])
@@ -811,6 +814,10 @@ class QSAKVCache(KVCache):
     """
 
     kv_quant_unsupported = True
+    # Kept out of batching and the stock KV quant arms (gmlx.cache.refusals).
+    to_batch = refusals.refuse_batch
+    preserve_auxiliary_kv_state = True
+    extract = refusals.no_extract
 
     def __init__(self, ratio: int = 4):
         super().__init__()

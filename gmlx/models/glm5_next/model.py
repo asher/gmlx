@@ -27,7 +27,7 @@ runs, recombined:
      scoreable by the query at absolute position ``q`` iff it is complete
      and its last member is causally visible, i.e. ``p < (q + 1) // 4`` -
      the query's own just-completed pool included at ``q % 4 == 3``, where
-     the tail is empty. ``PoolingCache.make_mask`` computes exactly this.
+     the tail is empty. ``DS4PoolingCache.make_mask`` computes exactly this.
   4. Sigmoid MoE (288 experts top-8, selection-only correction bias, x2.5
      renorm, one shared expert, 3 leading dense layers) with clamped
      SwiGLU (limit 10) on every FFN, dense and shared included.
@@ -59,7 +59,7 @@ from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     hc_expand,
@@ -232,7 +232,7 @@ def _indexer_decode_available() -> bool:
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.glm5_next`` resolve to this module, ahead
     of any upstream module of that name, and register the deepseek_v4
-    companions (PoolingCache on the cache namespaces) this model's caches
+    companions (DS4PoolingCache on the cache namespaces) this model's caches
     depend on."""
     _ds4_ensure_registered()
     graft_module("mlx_lm.models.glm5_next", sys.modules[__name__])
@@ -447,7 +447,7 @@ class Glm5NextCompressor(nn.Module):
 
     Unlike deepseek_v4's ratio-4 compressor there is no separate wkv (the
     scorer's own keys are pooled), no norm, no rope, and no cross-window
-    overlap - hence PoolingCache(kpool, lookback=False)."""
+    overlap - hence DS4PoolingCache(kpool, lookback=False)."""
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -461,7 +461,7 @@ class Glm5NextCompressor(nn.Module):
         self,
         keys: mx.array,
         gates: mx.array,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Any,
     ) -> mx.array:
         B, L, D = keys.shape
@@ -520,7 +520,7 @@ class Glm5NextIndexer(nn.Module):
         self,
         x: mx.array,
         q_residual: mx.array,
-        pool_cache: Optional[PoolingCache],
+        pool_cache: Optional[DS4PoolingCache],
         offset: Any,
         total_keys: int,
     ) -> Optional[mx.array]:
@@ -706,7 +706,7 @@ class Glm5NextMLAAttention(nn.Module):
 
     Module names follow mlx-lm deepseek_v3/kimi_k3 so the DEEPSEEK2-style
     remap rows and KQuantMultiLinear (embed_q/unembed_out) engage
-    unchanged. The cache is CacheList(KVCache latent-only, PoolingCache).
+    unchanged. The cache is CacheList(KVCache latent-only, DS4PoolingCache).
     """
 
     # _dequantized reads an affine-quantized latent fetch, so
@@ -1468,7 +1468,7 @@ class Model(nn.Module):
 
     def make_cache(self):
         # Plain caches take the consuming stack's class identities (mlx-vlm
-        # vs mlx-lm); PoolingCache stays the deepseek_v4 class every APC
+        # vs mlx-lm); DS4PoolingCache stays the deepseek_v4 class every APC
         # seam isinstance-keys on. Heterogeneous list => the hybrid cache is
         # non-trimmable and chat re-prefills on partial prefix reuse.
         from gmlx.cache.compat import construction_cache_module
@@ -1488,7 +1488,7 @@ class Model(nn.Module):
             else:
                 # Indexer pool: read in full at every scoring step, so it
                 # opts out of --kv-bits packing (deepseek_v4 precedent).
-                pool = PoolingCache(self.args.index_kpool, lookback=False)
+                pool = DS4PoolingCache(self.args.index_kpool, lookback=False)
                 pool.quantizable = False
                 caches.append(list_cls(kv_cls(), pool))
         return caches

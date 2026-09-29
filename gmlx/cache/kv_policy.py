@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from gmlx.cache import refusals
+
 VALID_BITS = (2, 3, 4, 6, 8)
 VALID_GROUPS = (32, 64, 128)
 FP16_BPE = 2.0
@@ -571,16 +573,20 @@ def _held_to_quantized(self):
 
 def hold_fp16(c):
     """Rebind a fresh cache to a subclass that hides to_quantized, so
-    hasattr-gated converters leave the layer fp16. Held layers must not
-    cross the serve APC rebind: rebind_to_runtime_origin passes them
-    through and APC silently skips the stack."""
+    hasattr-gated converters leave the layer fp16. The subclass also
+    carries the refusals in gmlx.cache.refusals, so the isinstance-gated
+    arms of mlx-vlm's KV quantizer and batch constructor leave it alone.
+    Held layers must not cross the serve APC rebind:
+    rebind_to_runtime_origin passes them through and APC silently skips
+    the stack."""
     if not hasattr(c, "to_quantized"):
         return c
     cls = type(c)
     held = _HELD_CLASSES.get(cls)
     if held is None:
         held = type("Fp16Held" + cls.__name__, (cls,),
-                    {"to_quantized": property(_held_to_quantized)})
+                    {"to_quantized": property(_held_to_quantized),
+                     **refusals.MEMBERS})
         _HELD_CLASSES[cls] = held
     out = held.__new__(held)
     out.__dict__.update(c.__dict__)

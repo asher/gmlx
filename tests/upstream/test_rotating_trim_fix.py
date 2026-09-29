@@ -141,7 +141,10 @@ def guarded():
 
 @pytest.mark.parametrize("kind", ["single", "batch-1", "batch-2"])
 def test_a_one_token_step_after_a_trim_matches_a_single_row(guarded, kind):
-    assert len(guarded) == 2
+    # Both origins name the owned classes, so there is one pair.
+    import gmlx.cache.kv_cache as owned
+
+    assert guarded == [(owned.RotatingKVCache, owned.BatchRotatingKVCache)]
     for single, batch in guarded:
         seen, truth = _one_token_after_trim(single, batch, kind)
         assert seen == truth, (single.__module__, kind)
@@ -230,19 +233,19 @@ def test_install_is_idempotent_and_has_a_kill_switch(guarded, monkeypatch):
     assert install_rotating_trim_fix() is False
 
 
-def test_each_rotating_class_is_pinned_whole():
+def test_each_rotating_class_is_the_owned_class():
     """No rollback reaches the depth raise because is_trimmable reports a
-    buffer past its window as not trimmable. A class row fingerprints the
-    class body, is_trimmable included, so each origin's two classes need
-    one."""
-    from gmlx.upstream.seams import SEAMS
+    buffer past its window as not trimmable. Each origin's two classes are
+    the owned ones, so is_trimmable is gmlx text and no seam row pins
+    it."""
+    import importlib
 
-    rows = {(s.module, s.attr) for s in SEAMS}
-    missing = sorted(
-        (m, c) for m in ("mlx_lm.models.cache", "mlx_vlm.models.cache")
-        for c in ("RotatingKVCache", "BatchRotatingKVCache")
-        if (m, c) not in rows)
-    assert not missing, missing
+    import gmlx.cache.kv_cache as owned
+
+    for m in ("mlx_lm.models.cache", "mlx_vlm.models.cache"):
+        mod = importlib.import_module(m)
+        for c in ("RotatingKVCache", "BatchRotatingKVCache"):
+            assert getattr(mod, c) is getattr(owned, c), (m, c)
 
 
 def _child(order: str) -> dict:

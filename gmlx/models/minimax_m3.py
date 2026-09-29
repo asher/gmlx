@@ -59,6 +59,7 @@ from mlx_lm.models import cache as _lm_cache
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.cache import refusals
 from gmlx.load.dtypes import activation_dtype
 from gmlx.upstream.graft import graft_module
 
@@ -67,10 +68,13 @@ def ensure_registered() -> None:
     """Make ``import mlx_lm.models.minimax_m3`` resolve to this module,
     ahead of any upstream module of that name."""
     graft_module("mlx_lm.models.minimax_m3", sys.modules[__name__])
-    # Snapshot restore resolves cache classes by name inside mlx_lm.models.cache;
-    # graft the MSA cache alongside, ahead of any upstream class of that name,
-    # so saved M3 prompt caches round-trip.
+    # Snapshot restore resolves cache classes by name inside mlx_lm.models.cache
+    # and gmlx.cache.kv_cache; graft the MSA cache alongside, ahead of any
+    # upstream class of that name, so saved M3 prompt caches round-trip.
+    import gmlx.cache.kv_cache as _owned_cache
+
     _lm_cache.MSAKVCache = MSAKVCache
+    _owned_cache.MSAKVCache = MSAKVCache
 
 
 @dataclass
@@ -176,6 +180,10 @@ class MSAKVCache(KVCache):
     """
 
     kv_quant_unsupported = True
+    # Kept out of batching and the stock KV quant arms (gmlx.cache.refusals).
+    to_batch = refusals.refuse_batch
+    preserve_auxiliary_kv_state = True
+    extract = refusals.no_extract
 
     def __init__(self):
         super().__init__()

@@ -14,7 +14,17 @@ float-mask fallbacks, the identity memo, and the kill switch.
 
 Upstream mutates `queries` in place (`queries *= scale`), so every call
 here gets a fresh copy -- reusing one q across calls poisons comparisons.
+
+gmlx binds both base modules to its own quantized SDPA
+(gmlx.cache.attention), which carries the mlx-vlm body. The mlx-lm defect
+repros run in a child that never imports gmlx, so they still see the
+stock mlx-lm body.
 """
+
+import json
+import os
+import subprocess
+import sys
 
 import mlx.core as mx
 import pytest
@@ -24,15 +34,18 @@ from mlx_lm.models import base as lm_base
 pytest.importorskip("mlx_vlm.models.base")
 from mlx_vlm.models import base as vlm_base
 
+import gmlx.cache.attention as owned_attention
 import gmlx.upstream.quantized_sdpa_fix as qf
 
 _orig_lm = lm_base.quantized_scaled_dot_product_attention
 _orig_vlm = vlm_base.quantized_scaled_dot_product_attention
+_orig_owned = owned_attention.quantized_scaled_dot_product_attention
 
 
 def teardown_module(module):
     lm_base.quantized_scaled_dot_product_attention = _orig_lm
     vlm_base.quantized_scaled_dot_product_attention = _orig_vlm
+    owned_attention.quantized_scaled_dot_product_attention = _orig_owned
     qf._installed = False
 
 
@@ -57,12 +70,82 @@ def _ref(q, qk, qv, mask, scale=0.125):
         mx.array(q), kd, vd, scale=scale, mask=mask)
 
 
-def test_upstream_repro_and_fix_numerics():
-    # B != n_kv_heads: upstream raises on the 5D/4D broadcast
-    q, qk, qv, mask = _case(B=2, nq=8, nkv=4)
-    with pytest.raises(ValueError):
-        _orig_lm(mx.array(q), qk, qv, 0.125, mask)
+# The stock mlx-lm body, in a child with no gmlx on the import path.
+_STOCK_LM_CHILD = r'''
+import json
+import sys
 
+import mlx.core as mx
+
+mx.set_default_device(mx.cpu)
+from mlx_lm.models.base import quantized_scaled_dot_product_attention as qsdpa
+
+assert not any(m == "gmlx" or m.startswith("gmlx.") for m in sys.modules)
+
+
+def case(B, nq, nkv, pads):
+    mx.random.seed(11)
+    q = mx.random.normal((B, nq, 1, 64))
+    k = mx.random.normal((B, nkv, 64, 64))
+    v = mx.random.normal((B, nkv, 64, 64))
+    qk = mx.quantize(k, group_size=64, bits=8)
+    qv = mx.quantize(v, group_size=64, bits=8)
+    pos = mx.arange(64)[None, None, None, :]
+    mask = pos >= mx.array(list(pads))[:B, None, None, None]
+    ref = mx.fast.scaled_dot_product_attention(
+        mx.array(q), mx.dequantize(*qk, group_size=64, bits=8),
+        mx.dequantize(*qv, group_size=64, bits=8), scale=0.125, mask=mask)
+    return q, qk, qv, mask, ref
+
+
+out = {}
+q, qk, qv, mask, ref = case(2, 8, 4, (5, 0))
+try:
+    mx.eval(qsdpa(mx.array(q), qk, qv, 0.125, mask))
+    out["raises"] = None
+except ValueError as e:
+    out["raises"] = "ValueError"
+q, qk, qv, mask, ref = case(2, 8, 2, (9, 0))
+bad = qsdpa(mx.array(q), qk, qv, 0.125, mask)
+out["misapply_err"] = mx.abs(bad - ref).max().item()
+print(json.dumps(out))
+'''
+
+
+def _without_gmlx_env():
+    env = dict(os.environ)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    keep = [p for p in env.get("PYTHONPATH", "").split(os.pathsep)
+            if p and os.path.abspath(p) != root]
+    env["PYTHONPATH"] = os.pathsep.join(keep)
+    return env
+
+
+def test_stock_mlx_lm_body_has_both_mask_defects():
+    # B != n_kv_heads raises on the 5D/4D broadcast; B == n_kv_heads
+    # broadcasts the mask's batch dim into the kv-head slot, silently.
+    r = subprocess.run([sys.executable, "-c", _STOCK_LM_CHILD],
+                       capture_output=True, text=True, timeout=300,
+                       env=_without_gmlx_env(), cwd="/")
+    assert r.returncode == 0, r.stderr[-3000:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    assert got["raises"] == "ValueError"
+    assert got["misapply_err"] > 0.05
+
+
+def test_owned_body_has_neither_mask_defect():
+    assert _orig_owned is _orig_lm is _orig_vlm
+    for B, nkv, pads in ((2, 4, (5, 0)), (2, 2, (9, 0))):
+        q, qk, qv, mask = _case(B=B, nq=8, nkv=nkv, pads=pads)
+        got = _orig_owned(mx.array(q), qk, qv, 0.125, mask)
+        err = mx.abs(got - _ref(q, qk, qv, mask)).max().item()
+        assert err < 2e-2, f"B={B} nkv={nkv} err={err}"
+
+
+def test_upstream_repro_and_fix_numerics():
+    # B != n_kv_heads: the case the stock mlx-lm body raises on
+    q, qk, qv, mask = _case(B=2, nq=8, nkv=4)
     assert qf.install_quantized_sdpa_mask_fix()
     got = lm_base.quantized_scaled_dot_product_attention(
         mx.array(q), qk, qv, 0.125, mask)
@@ -80,8 +163,6 @@ def test_silent_misapply_case_fixed():
         mx.array(q), qk, qv, 0.125, mask)
     err = mx.abs(got - _ref(q, qk, qv, mask)).max().item()
     assert err < 2e-2, f"fixed numerics err={err}"
-    bad = _orig_lm(mx.array(q), qk, qv, 0.125, mask)
-    assert mx.abs(bad - _ref(q, qk, qv, mask)).max().item() > 0.05
 
 
 def test_vlm_twin_fixed_too():
@@ -323,6 +404,7 @@ def test_mlx_strided_input_quantize_canary():
 def test_install_idempotent_and_killable(monkeypatch):
     lm_base.quantized_scaled_dot_product_attention = _orig_lm
     vlm_base.quantized_scaled_dot_product_attention = _orig_vlm
+    owned_attention.quantized_scaled_dot_product_attention = _orig_owned
     qf._installed = False
     monkeypatch.setenv("GMLX_QSDPA_MASK_FIX", "0")
     assert qf.install_quantized_sdpa_mask_fix() is False
@@ -332,10 +414,15 @@ def test_install_idempotent_and_killable(monkeypatch):
     assert qf.install_quantized_sdpa_mask_fix()
     pl = lm_base.quantized_scaled_dot_product_attention
     pv = vlm_base.quantized_scaled_dot_product_attention
+    po = owned_attention.quantized_scaled_dot_product_attention
     assert pl._gmlx_orig is _orig_lm and pv._gmlx_orig is _orig_vlm
+    # The owned SDPA calls the name bare in its own module, so the fix
+    # must sit there too.
+    assert po._gmlx_orig is _orig_owned
     assert qf.install_quantized_sdpa_mask_fix()
     assert lm_base.quantized_scaled_dot_product_attention is pl
     assert vlm_base.quantized_scaled_dot_product_attention is pv
+    assert owned_attention.quantized_scaled_dot_product_attention is po
 
 
 needs_kq = pytest.mark.skipif(
@@ -405,6 +492,67 @@ def test_make_mask_registers_and_routes():
     assert len(calls) == 1 and calls[0].tolist() == pads
     err = mx.abs(got - _ref(q, qk, qv, mask)).max().item()
     assert err < 2e-2, f"seam route vs dequant ref err={err}"
+    qf._STARTS_MEMO.clear()
+
+
+def _fresh_install(monkeypatch, kq_fn=None, spy=False):
+    """Install the fix anew over the owned body, with the monkeypatch
+    putting every rebound attribute back afterwards."""
+    for mod, orig in ((lm_base, _orig_lm), (vlm_base, _orig_vlm),
+                      (owned_attention, _orig_owned)):
+        monkeypatch.setattr(mod, "quantized_scaled_dot_product_attention",
+                            orig)
+    monkeypatch.setattr(qf, "_installed", False)
+    if spy:
+        monkeypatch.setattr(qf, "_kq_q8_route", lambda: kq_fn)
+    assert qf.install_quantized_sdpa_mask_fix()
+
+
+def test_owned_sdpa_reaches_the_prefill_flash_route(monkeypatch):
+    # The owned scaled_dot_product_attention calls the quantized SDPA by
+    # its bare name in gmlx.cache.attention. The flash route runs the same
+    # ops as the dequantized reference, so it matches exactly; the stock
+    # quantized body does not.
+    from types import SimpleNamespace
+
+    _fresh_install(monkeypatch)
+    q, qk, qv, mask = _case(B=2, nq=8, nkv=4, L=64, kv=256, pads=(5, 0))
+    cache = SimpleNamespace(bits=8, group_size=64)
+    got = owned_attention.scaled_dot_product_attention(
+        mx.array(q), qk, qv, cache, 0.125, mask)
+    assert mx.abs(got - _ref(q, qk, qv, mask)).max().item() == 0.0
+    stock = _orig_owned(mx.array(q), qk, qv, 0.125, mask)
+    assert mx.abs(stock - _ref(q, qk, qv, mask)).max().item() > 0.0
+
+
+@needs_kq
+def test_owned_sdpa_reaches_the_kq_decode_route(monkeypatch):
+    real = qf._kq_q8_route()
+    calls = []
+
+    def spy(*a, **kw):
+        calls.append(kw.get("starts"))
+        return real(*a, **kw)
+
+    _fresh_install(monkeypatch, spy, spy=True)
+    import gmlx.cache.kv_cache as owned
+
+    qf._STARTS_MEMO.clear()
+    mx.random.seed(11)
+    pads = [37, 5, 0]
+    c = owned.BatchQuantizedKVCache(pads, group_size=64, bits=8)
+    k = mx.random.normal((3, 4, 511, 64)).astype(mx.float16)
+    c.update_and_fetch(k, k)
+    mask = c.make_mask(1)
+    qk, qv = c.update_and_fetch(
+        mx.random.normal((3, 4, 1, 64)).astype(mx.float16),
+        mx.random.normal((3, 4, 1, 64)).astype(mx.float16))
+    q = mx.random.normal((3, 8, 1, 64)).astype(mx.float16)
+    got = owned_attention.scaled_dot_product_attention(
+        mx.array(q), qk, qv, c, 0.125, mask)
+    assert len(calls) == 1 and calls[0].tolist() == pads
+    err = mx.abs(got - _ref(q, qk, qv, mask)).max().item()
+    assert err < 2e-2, f"owned entry kq route err={err}"
     qf._STARTS_MEMO.clear()
 
 

@@ -124,7 +124,7 @@ def test_live_batch_classes_untouched():
 
 
 def test_injected_single_without_batch_api_is_lifted_by_merge():
-    """DeepSeek V4's PoolingCache has neither _idx nor rotated; the batch
+    """DeepSeek V4's DS4PoolingCache has neither _idx nor rotated; the batch
     class's extend() then read len() of the single row's scalar state."""
     class Batch:
         n = 1
