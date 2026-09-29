@@ -358,6 +358,10 @@ def test_rotating_undo_replay_3wide():
 def rotating_undo(monkeypatch):
     """The undo log on every origin's rotating cache classes, for this test
     only when an earlier test has not attached it already."""
+    # cache_types lists the mlx-vlm classes only once their module is
+    # imported, and nothing else in this file imports it.
+    import mlx_vlm.models.cache  # noqa: F401
+
     from gmlx.cache.compat import cache_types
     from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
 
@@ -387,7 +391,10 @@ def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
         for a in arrs:
             cache.update_and_fetch(a, a)
 
-    for cls in cache_types("BatchRotatingKVCache"):
+    classes = cache_types("BatchRotatingKVCache")
+    assert [c.__module__ for c in classes] == [
+        "mlx_lm.models.cache", "mlx_vlm.models.cache"], classes
+    for cls in classes:
         test_cache = cls(max_size=8, left_padding=[2, 0])
         feed(test_cache, stream)
         set_undo_armed(True)
