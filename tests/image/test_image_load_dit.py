@@ -188,6 +188,27 @@ def test_an_unsupported_codec_is_refused_by_name(toy, tmp_path):
         _load(p)
 
 
+def test_a_load_on_one_thread_runs_on_another(toy, tmp_path, monkeypatch):
+    """MLX default streams are per thread. With the view check off nothing
+    else evaluates the owned casts, so load_dit must return a materialized
+    tree or the first forward on another thread fails."""
+    import threading
+
+    monkeypatch.setenv("GMLX_VERIFY_VIEWS", "0")
+    p = write_gguf(tmp_path / "toy.gguf", _tensors())
+    box: list = []
+    t = threading.Thread(
+        target=lambda: box.append(_load(p, act_dtype=mx.float16)))
+    t.start()
+    t.join()
+    model, _ = box[0]
+    mlp = model.t_embedder.mlp
+    h = mlp[2](mlp[1](mlp[0](mx.ones((1, 4)))))
+    y = model.final_layer.linear(model.norm.weight[None] * model.x_pad_token)
+    mx.eval(h, y)
+    assert h.dtype == mx.float32 and y.dtype == mx.float16
+
+
 def test_act_dtype_must_be_half(toy, tmp_path):
     with pytest.raises(ValueError, match="bfloat16 or float16"):
         _load(tmp_path / "unused.gguf", act_dtype=mx.float32)

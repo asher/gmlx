@@ -82,7 +82,7 @@ def load_dit(path: str, *, family: str | None = None,
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.loader import (
         _active_now, _install_and_load, collect_after_load,
-        weights_source_key)
+        materialize_module_arrays, weights_source_key)
     from gmlx.load.preflight import (
         NATIVE_TYPES, SUPPORTED_QUANT_TYPES, UnsupportedCodecError,
         find_split_shards)
@@ -147,6 +147,8 @@ def load_dit(path: str, *, family: str | None = None,
         active_before=before, act_dtype=act, text_patches=False)
     n_kq = sum(1 for _, m in model.named_modules()
                if isinstance(m, KQuantLinear))
+    # A model loaded on one thread may run on another.
+    materialize_module_arrays(model)
     collect_after_load()
     info = DitInfo(identified=ident, shards=tuple(shards), act_dtype=act,
                    n_kquant=n_kq, n_owned_casts=len(no_alias),
