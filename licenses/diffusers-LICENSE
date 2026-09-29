@@ -1,15 +1,19 @@
 diffusers - https://github.com/huggingface/diffusers
 
-gmlx follows the reference semantics of diffusers at commit
-e0abab83b5df05de9e7abd788643c1a7c1e42e28, reimplemented in MLX:
+gmlx ports code from diffusers at commit
+e0abab83b5df05de9e7abd788643c1a7c1e42e28, modified for gmlx and MLX. Each
+file carries the Apache-2.0 AND MIT header and the copyright line of its
+source.
 
 - gmlx/image/families/z_image/model.py: the Z-Image forward of
   src/diffusers/models/transformers/transformer_z_image.py (caption and
   image padding, position ids, the unified token order, the timestep
   scale and the final layer).
-- gmlx/image/ops/attention.py and gmlx/image/ops/embeds.py: the RoPE
-  angles, rounded to float32 before cos and sin, and the interleaved pair
-  product of the same file.
+- gmlx/image/ops/embeds.py: TimestepEmbedder.timestep_embedding and
+  RopeEmbedder.precompute_freqs_cis of the same file, with the angles
+  rounded to float32 before cos and sin.
+- gmlx/image/ops/attention.py: apply_rotary_emb of the same file, the
+  interleaved pair product.
 - gmlx/image/ops/norms.py: the RMSNorm rounding of
   src/diffusers/models/normalization.py, which rounds the normalized value
   to the weight dtype before the weight product.

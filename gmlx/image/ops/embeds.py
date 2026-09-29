@@ -1,8 +1,11 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Asher Feldman
-# Portions copyright (c) 2026 Filip Strand (mflux timestep and RoPE embedders, MIT)
-# Table semantics follow diffusers' transformer_z_image.py at e0abab83
-# (Apache-2.0, see licenses/diffusers-LICENSE).
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# Ported from TimestepEmbedder.timestep_embedding and
+# RopeEmbedder.precompute_freqs_cis in diffusers'
+# src/diffusers/models/transformers/transformer_z_image.py at e0abab83 and
+# modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE). mflux's
+# timestep and RoPE embedders at e066d98 follow the same code (MIT; see
+# licenses/mflux-LICENSE).
 """Timestep embeddings and N-axis RoPE tables, computed on the host."""
 
 from __future__ import annotations

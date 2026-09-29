@@ -1,7 +1,10 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Asher Feldman
-# RMSNorm rounding follows diffusers' normalization.py at e0abab83
-# (Apache-2.0, see licenses/diffusers-LICENSE).
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# SPDX-FileCopyrightText: Copyright 2025 HuggingFace Inc.
+# The RMSNorm rounding is ported from RMSNorm in diffusers'
+# src/diffusers/models/normalization.py, which transformer_z_image.py uses,
+# at e0abab83 and modified for gmlx (Apache-2.0; see
+# licenses/diffusers-LICENSE).
 """Norms with fp32 accumulation.
 
 ``mx.fast.rms_norm`` sums in fp32 and rounds the normalized value to the

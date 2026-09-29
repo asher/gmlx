@@ -1,8 +1,10 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Asher Feldman
-# Portions copyright (c) 2026 Filip Strand (mflux Z-Image transformer, MIT)
-# Forward semantics follow diffusers' transformer_z_image.py at e0abab83
-# (Apache-2.0, see licenses/diffusers-LICENSE).
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# SPDX-FileCopyrightText: Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team
+# Ported from diffusers' src/diffusers/models/transformers/transformer_z_image.py
+# (the Z-Image forward, its padding, position ids and final layer) at
+# e0abab83 and modified for gmlx (Apache-2.0; see licenses/diffusers-LICENSE).
+# The module tree follows mflux's Z-Image transformer at e066d98 (MIT; see
+# licenses/mflux-LICENSE).
 """Z-Image DiT module tree and forward.
 
 Attribute paths equal the GGUF tensor names, so numbered elements are plain
