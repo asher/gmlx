@@ -25,6 +25,12 @@ before the trim. It leaves a buffer below ``max_size`` alone when the
 buffer no longer starts at the first token, since ``_update_in_place``
 would then grow it from an offset past the window.
 
+A trim deeper than ``_idx`` raises ValueError and leaves the cache as it
+was. It can only reach a buffer that has wrapped or dropped tokens off its
+window, where the stock trim leaves ``_idx`` negative: the tokens it would
+keep are no longer in the buffer. ``is_trimmable`` reports such a cache as
+not trimmable, and no rollback trims one that deep.
+
 Install is idempotent; GMLX_ROTATING_TRIM_FIX=0 disables it.
 """
 
@@ -43,20 +49,32 @@ def _in_temporal_order(cache) -> bool:
     return cache._idx == keys.shape[2]
 
 
+def _total(cache) -> int:
+    return cache._offset if hasattr(cache, "rotated") else cache.offset
+
+
 def _can_slice(cache) -> bool:
     """Whether ``_update_in_place`` still works on a buffer cut to
     ``_idx``: at least a full window, or a buffer that starts at the first
     token, which it grows from the offset."""
     if cache._idx >= cache.max_size:
         return True
-    total = cache._offset if hasattr(cache, "rotated") else cache.offset
-    return total == cache._idx
+    return _total(cache) == cache._idx
 
 
 def _wrap(orig: Callable) -> Callable:
     def trim(self, n):
         keys = getattr(self, "keys", None)
         idx = getattr(self, "_idx", None)
+        # An armed DeepSeek-V4 undo log restores its snapshot in place of
+        # the stock trim, so the depth check leaves it alone.
+        if (keys is not None and getattr(self, "_mtp_undo", None) is None
+                and min(_total(self), n) > idx):
+            raise ValueError(
+                f"{type(self).__name__}.trim({n}) goes past the write "
+                f"position {idx} of a buffer that has wrapped or dropped "
+                f"tokens off its window, so the trimmed state cannot be "
+                f"held")
         in_order = keys is not None and _in_temporal_order(self)
         got = orig(self, n)
         if (in_order and got and self.keys is keys

@@ -168,17 +168,36 @@ def test_a_trim_below_the_window_keeps_the_growing_buffer(guarded):
             assert seen == want, (batch.__module__, col)
 
 
-def test_a_trim_deeper_than_the_update_keeps_the_stock_buffer(guarded):
-    # A cut to _idx below the window would make _update_in_place grow the
-    # buffer from an offset past it, which raises.
+def _state(cache):
+    offset = getattr(cache, "offset")
+    if isinstance(offset, mx.array):
+        offset = offset.tolist()
+    return (cache.keys, cache._idx, offset, getattr(cache, "_offset", None),
+            getattr(cache, "rotated", None))
+
+
+@pytest.mark.parametrize("n", [2, W + 3])
+def test_a_trim_past_the_write_position_raises(guarded, n):
+    """The stock trim would leave _idx negative: after a one-token step
+    wraps the ring to _idx 1, and after a verify block puts the buffer
+    back in order at _idx W + 2 with the older tokens off the window. The
+    guard raises and leaves the cache as it was."""
     for single, batch in guarded:
         for cache in (single(max_size=W), batch(W, [0])):
-            for cols in (list(range(12)), [12], [13, 14, 15]):
+            steps = [list(range(12)), [12]]
+            if n > W:
+                steps.append([13, 14, 15])
+            for cols in steps:
                 k = _keys(cols, [0] * len(cols))
                 cache.update_and_fetch(k, k)
-            assert cache.trim(3) == 3
-            assert cache.keys.shape[2] == W + 2
-            assert len(_seen(cache, _keys([13], [1]))[0]) == W
+            before = _state(cache)
+            assert before[1] < n, (type(cache), before[1])
+            with pytest.raises(ValueError, match="write position"):
+                cache.trim(n)
+            after = _state(cache)
+            assert after[0] is before[0] and after[1:] == before[1:]
+            # A trim within the write position still runs.
+            assert cache.trim(1) == 1
 
 
 def test_install_is_idempotent_and_has_a_kill_switch(guarded, monkeypatch):
