@@ -50,6 +50,7 @@ _TEMPLATES = {
     "deepseek-v4.1": ("deepseek_v41", None),
     "kimi-k2.5": ("kimi_k25", "kimi_k25_template.jinja"),
     "kimi-k3": ("kimi_k3", "kimi_k3_template.jinja"),
+    "mistral3": ("mistral3", "mistral3_template.jinja"),
 }
 
 
@@ -124,11 +125,13 @@ def route(monkeypatch):
 
     client = TestClient(_APP.app)
 
-    def render(name, messages, stock=False, vision=False):
+    def render(name, messages, stock=False, vision=False, status=200):
         model_type, fixture = (_VISION if vision else _TEMPLATES)[name][:2]
         kind = (_Gemma4Processor if model_type.startswith("gemma4")
                 else _Processor)
         processor = kind(model_type, fixture)
+        if vision:
+            processor.image_token = _VISION[name][2]
         monkeypatch.setattr(_ANTHROPIC, "get_cached_model", lambda *a, **k: (
             None, processor, {"model_type": model_type}))
         if stock:
@@ -138,8 +141,8 @@ def route(monkeypatch):
         r = client.post("/v1/messages", json={
             "model": "m", "max_tokens": 1, "messages": messages,
             "tools": _TOOLS})
-        assert r.status_code == 200, r.text
-        return rg.calls.pop()
+        assert r.status_code == status, r.text
+        return rg.calls.pop() if status == 200 else r.text
 
     yield render
     sp_common._restore_routes(_APP.app, routes)
@@ -256,12 +259,7 @@ def _in_order(prompt, *wants):
         pos = found + len(want)
 
 
-# Mistral3's template raises on a user turn right after a tool turn, so
-# its cases hold no text after the tool results.
-_WITH_TEXT_AFTER = sorted(set(_VISION) - {"mistral3"})
-
-
-@pytest.mark.parametrize("name", _WITH_TEXT_AFTER)
+@pytest.mark.parametrize("name", sorted(_VISION))
 def test_a_tool_result_image_renders_once_before_the_text(route, name):
     image = _VISION[name][2]
     prompt, images = route(name, _round(_shot(_image("s")),
@@ -296,6 +294,27 @@ def test_a_tool_turn_without_images_gets_its_text(route, name):
     assert "'type'" not in tail and '"type"' not in tail
     assert "Unsupported" not in tail
     _in_order(prompt, "RESULT-ONE")
+
+
+def test_mistral3_reads_the_user_text_in_the_tool_results(route):
+    """Mistral3's template rejects a user turn right after a tool turn, so
+    the text and images beside the tool results fold into them."""
+    prompt, _ = route("mistral3", _round(_result(0, "RESULT-ONE"),
+                                         _text("TEXT-AFTER")))
+    assert ("[TOOL_RESULTS]RESULT-ONE\n\nTEXT-AFTER[/TOOL_RESULTS]"
+            in prompt)
+    prompt, images = route("mistral3", _round(
+        _shot(), _image("x"), _text("TEXT-AFTER")), vision=True)
+    assert images == ["http://img/x"]
+    assert ("[TOOL_RESULTS]RESULT-ONE\n\n[IMG]TEXT-AFTER[/TOOL_RESULTS]"
+            in prompt)
+
+
+def test_mistral3_still_rejects_two_user_turns(route):
+    body = route("mistral3", [{"role": "user", "content": [_text("ONE")]},
+                              {"role": "user", "content": [_text("TWO")]}],
+                 status=500)
+    assert "must alternate" in body
 
 
 @pytest.mark.parametrize("name", ("gemma4", "gemma4-12b", "qwen3.5"))

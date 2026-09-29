@@ -37,6 +37,13 @@ one the Gemma-4 processor runs. For other types it moves them to the start
 of the user message that follows the tool results and hands the template
 the tool text as a string (``_tool_images_to_user``); with no such message
 the rebuild places them as before.
+
+The Mistral chat templates reject a user turn right after a tool turn, while
+the Messages API sends text and images beside the tool results in one user
+message. When a template rejects the conversation, the wrapper folds each
+user message that follows a tool message into the text of that tool
+message, each image as the processor's image token, and renders again
+(``_user_after_tool_folded``).
 Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 """
 
@@ -46,6 +53,8 @@ import contextvars
 import importlib
 import json
 import os
+
+from jinja2.exceptions import TemplateError
 
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -116,6 +125,49 @@ def _tool_images_to_user(items: list) -> list:
             out[i] = {**message, "content": content}
         moved = []
     return out
+
+
+def _as_text(content, image_token: str | None) -> str | None:
+    """``content`` as one string with each image as ``image_token``, or
+    None when it holds an image and there is no token, or a part of
+    another kind."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    out = []
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind in _IMAGE_ITEMS and image_token:
+            out.append(image_token)
+        elif kind in _TEXT_PARTS:
+            out.append(str(part.get("text", "") or part.get("content", "")))
+        else:
+            return None
+    return "".join(out)
+
+
+def _user_after_tool_folded(msgs: list,
+                            image_token: str | None) -> list | None:
+    """``msgs`` with each user message that follows a tool message folded
+    into the text of that tool message, or None when there is none or one
+    does not fold."""
+    out: list = []
+    for message in msgs:
+        prev = out[-1] if out else None
+        if (isinstance(message, dict) and message.get("role") == "user"
+                and isinstance(prev, dict) and prev.get("role") == "tool"):
+            head = _as_text(prev.get("content"), image_token)
+            tail = _as_text(message.get("content"), image_token)
+            if head is None or tail is None:
+                return None
+            out[-1] = {**prev,
+                       "content": "\n\n".join(t for t in (head, tail) if t)}
+            continue
+        out.append(message)
+    return out if len(out) < len(msgs) else None
 
 
 def _images_in_place(built: dict, sent: dict) -> dict:
@@ -287,8 +339,18 @@ def install_faithful_history() -> None:
                 items if in_place and len(msgs) == len(items) else None)
             kept = _TOOL_IMAGES_KEPT.set(keep_tool_images)
             try:
+                try:
+                    return prompt_utils.get_chat_template(
+                        processor, msgs, add_generation_prompt, **kwargs)
+                except TemplateError as exc:
+                    # The template's own raise_exception, not a template bug.
+                    folded = (_user_after_tool_folded(
+                        msgs, getattr(processor, "image_token", None))
+                        if type(exc) is TemplateError else None)
+                    if folded is None:
+                        raise
                 return prompt_utils.get_chat_template(
-                    processor, msgs, add_generation_prompt, **kwargs)
+                    processor, folded, add_generation_prompt, **kwargs)
             finally:
                 _TOOL_IMAGES_KEPT.reset(kept)
                 _IN_PLACE_SENT.reset(token)
