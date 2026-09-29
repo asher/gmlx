@@ -31,6 +31,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `GMLX_QSDPA_MASK_FIX=0` no longer turns off the fix for concurrent `kv_bits`
   requests on grouped-query models. The fix is always on.
+- `GMLX_QSDPA_MASK_FIX=0` no longer turns off the fused `kv_bits` prefill and
+  decode paths. `GMLX_KV8_PREFILL_FLASH=0` and `GMLX_QSDPA_KQ=0` still do.
+- `GMLX_QKV_PACK_FIX=0` no longer turns off the fix for `kv_bits` 3, 5 or 6
+  requests failing in `gmlx serve`. The fix is always on.
 
 ### Fixed
 
