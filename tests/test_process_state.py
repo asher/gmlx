@@ -295,6 +295,26 @@ def test_the_end_of_run_check_stays_last_under_ff_and_nf(tmp_path):
         assert len(ids) == 3 and ids[-1] == _END_OF_RUN, (flag, r.stdout)
 
 
+_KQ_TESTS = '''
+def test_sets_a_key_kq_keeps(monkeypatch):
+    monkeypatch.setenv("KQ_VERIFY_EXT", "0")
+
+
+def test_sets_a_key_kq_reads_at_each_call(monkeypatch):
+    monkeypatch.setenv("KQ_GQA_NAX", "0")
+'''
+
+
+def test_the_end_of_run_check_names_a_kq_key_a_test_set(tmp_path):
+    root = _inner_tree(tmp_path)
+    (root / "test_kq.py").write_text(_KQ_TESTS)
+    r = _inner_pytest(root, "test_kq.py", _END_OF_RUN)
+    assert r.returncode == 1, r.stdout[-4000:] + r.stderr[-2000:]
+    assert "1 failed, 2 passed" in r.stdout, r.stdout[-4000:]
+    touched = "[('test_kq.py::test_sets_a_key_kq_keeps', 'KQ_VERIFY_EXT')]"
+    assert touched in r.stdout, r.stdout[-4000:]
+
+
 _GEMM = r"""
 import os
 
@@ -316,6 +336,9 @@ if __name__ == "__main__":
 
 
 def test_the_run_ends_on_production_numerics():
+    assert not process_state.KQ_TOUCHED, (
+        "mlx-kquant keeps these KQ_* keys from its first read, so each test "
+        f"decided one for the rest of the run: {process_state.KQ_TOUCHED}")
     start = process_state.SESSION
     assert os.environ.get("MLX_ENABLE_TF32") == start["env"].get(
         "MLX_ENABLE_TF32")

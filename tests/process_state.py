@@ -30,6 +30,12 @@ reads MLX_ENABLE_TF32 and the command buffer caps once, at the first
 matmul and the first command buffer, so ``start_session`` also runs one
 small GPU matmul: the process keeps the session's settings even when a
 test changes the environment before its own first matmul.
+
+mlx-kquant reads most of its KQ_* keys once too, each at the first call
+of the kernel route that reads it, and there is no one call that reaches
+them all. ``note_kq_env`` records instead each such key a test sets,
+changes or removes, and the end-of-run check fails on any: that test
+decided the key for the rest of the run, or found it already decided.
 """
 
 from __future__ import annotations
@@ -59,6 +65,13 @@ _WIRED_LIMIT_MODULES = ("mlx_lm.generate", "mlx_lm.utils")
 _MISSING = object()
 # Every serve governor state the session creates.
 _governor_states: weakref.WeakSet = weakref.WeakSet()
+# KQ_* keys mlx-kquant reads at each call. A key it reads once and keeps
+# is any other, so a key a new test sets fails the end-of-run check until
+# the kq source shows it is read at each call and it joins this set.
+_KQ_READ_EACH_CALL = frozenset({"KQ_GQA_NAX", "KQ_SWITCH_GEMM_MIN_ROWS"})
+# (test node id, key) for each other KQ_* key a test set, changed or
+# removed.
+KQ_TOUCHED: list = []
 
 
 def _gpu() -> bool:
@@ -174,6 +187,17 @@ def capture() -> dict:
     for d in devices:
         state["streams"][d] = mx.default_stream(d)
     return state
+
+
+def note_kq_env(state: dict, nodeid: str) -> None:
+    """Record each KQ_* key outside _KQ_READ_EACH_CALL whose value now
+    differs from the one ``state`` captured."""
+    saved = state["env"]
+    for k in sorted(set(saved) | set(os.environ)):
+        if (k.startswith("KQ_") and k not in _KQ_READ_EACH_CALL
+                and saved.get(k) != os.environ.get(k)
+                and (nodeid, k) not in KQ_TOUCHED):
+            KQ_TOUCHED.append((nodeid, k))
 
 
 def _restore_env(saved: dict) -> None:

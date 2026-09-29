@@ -83,11 +83,19 @@ _read_pools: list = []
 _awaiting_capture = None
 
 
+_CAPTURED = pytest.StashKey[dict]()
+
+
 def _hand_back_process_state(item) -> None:
     import process_state
 
-    state = process_state.capture()
-    item.addfinalizer(lambda: process_state.restore(state))
+    state = item.stash[_CAPTURED] = process_state.capture()
+
+    def restore():
+        process_state.note_kq_env(state, item.nodeid)
+        process_state.restore(state)
+
+    item.addfinalizer(restore)
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -116,6 +124,22 @@ def pytest_fixture_setup(fixturedef, request):
         _awaiting_capture = None
         _hand_back_process_state(item)
     return (yield)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_call(item):
+    # A KQ_* key set by a fixture shows before the call, and one the test
+    # sets through monkeypatch until its teardown.
+    import process_state
+
+    state = item.stash.get(_CAPTURED, None)
+    if state is not None:
+        process_state.note_kq_env(state, item.nodeid)
+    try:
+        return (yield)
+    finally:
+        if state is not None:
+            process_state.note_kq_env(state, item.nodeid)
 
 
 _END_OF_RUN = "test_process_state.py::test_the_run_ends_on_production_numerics"
