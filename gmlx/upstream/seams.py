@@ -76,6 +76,20 @@ def _stock_parser_specs(table) -> str:
         for spec in specs if spec.name not in ours)
 
 
+def _in_place_image_rows(table) -> str:
+    """The format rows of the model types whose images render in place
+    (``render._IN_PLACE_IMAGES``). The two DeepSeek rows the loader adds
+    on load are left out, so a load earlier in the process does not move
+    the pin. A row that moves to another format changes what the rebuild
+    hands the in-place guard."""
+    from gmlx.serve.patches.render import _IN_PLACE_IMAGES
+
+    added = ("deepseek_v4_vl", "deepseek_v41_vl")
+    return "\n".join(f"{name}: {table.get(name)}"
+                     for name in sorted(_IN_PLACE_IMAGES)
+                     if name not in added)
+
+
 SEAMS: tuple[Seam, ...] = (
     # --- batched serve scheduler + ragged decode (batch_sched / ragged_decode) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator._next",
@@ -453,10 +467,26 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.prompt_utils", "extract_text_from_content",
          "render.install_chat_image_placement (the stock extraction of "
          "text-only content, behind the openai binding's wrap) + "
-         "estimate._estimate_bound (text of each message)"),
+         "estimate._estimate_bound (text of each message) + "
+         "render._images_in_place (a run of text parts joins and strips as "
+         "the extraction joins and strips a message's text)"),
     Seam("mlx_vlm.prompt_utils", "_content_media_count",
          "render.install_chat_image_placement (apply_chat_template counts "
          "the image markers of each message)"),
+    Seam("mlx_vlm.prompt_utils", "MODEL_CONFIG",
+         "render._images_in_place (each in-place model type rebuilds a user "
+         "message as a list of one text part and its image parts)",
+         pin=_in_place_image_rows),
+    Seam("mlx_vlm.prompt_utils", "MessageFormatter._format_list_with_image",
+         "render._images_in_place (a list format rebuild: one text part, "
+         "the images before it or after it, audio parts last)"),
+    Seam("mlx_vlm.prompt_utils",
+         "MessageFormatter._format_list_with_image_type",
+         "render._images_in_place (a typed list rebuild: one text part, "
+         "the images before it, audio parts last)"),
+    Seam("mlx_vlm.prompt_utils", "MessageBuilder",
+         "render._images_in_place (the text part it copies for each run of "
+         "text, and the image part it places)"),
     Seam("mlx_vlm.prompt_utils", "get_message_json",
          "system_content_fix (a list-format model type gets its system and "
          "developer text as a list of text parts)"),
@@ -478,7 +508,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.prompt_utils", "apply_chat_template",
          "server_patches.render.install_faithful_history "
          "(return_messages contract: one rebuilt message per readable "
-         "input item; tool passthrough branch)"),
+         "input item; tool passthrough branch) + render._images_in_place "
+         "(each user message gets as many images as it holds markers, "
+         "and the rest go to the last user message)"),
     Seam("mlx_vlm.prompt_utils", "get_chat_template",
          "server_patches.render.install_faithful_history (owned render "
          "tail mirrors the stock function's) + "

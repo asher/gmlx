@@ -20,6 +20,12 @@ merged list through the same tail the stock function uses. The chat
 template stays the second gate -- with ``preserve_thinking`` unset it
 drops prior-turn reasoning exactly as before, so this restores the
 documented option rather than changing default output.
+
+The rebuild also joins a message's text into one part and puts every
+image of the message before it (after it on Kimi), whatever order the
+client sent. For the model types in ``_IN_PLACE_IMAGES`` the wrapper puts
+the images back between the text parts where the client sent them
+(``_images_in_place``).
 Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 """
 
@@ -34,6 +40,88 @@ from gmlx.upstream.patching import wrapped_with
 # Stock tail: these model types return only the last message when a
 # rendered prompt is requested.
 _LAST_MESSAGE_ONLY = ("paligemma", "molmo", "florence2", "falcon_ocr")
+
+# The model types whose chat template renders an image item where the
+# content list holds it, and whose processor expands the image markers of
+# the prompt in order, one image each. Other types keep the stock order:
+# the llava-hf template renders every image ahead of the text itself.
+_IN_PLACE_IMAGES = frozenset((
+    "gemma4", "gemma4_unified",
+    "qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl", "qwen3_vl_moe",
+    "qwen3_omni_moe",
+    "kimi_k25", "deepseek_v4_vl", "deepseek_v41_vl", "muse_glimmer",
+    "glm5_next", "mistral3", "pixtral",
+))
+# Image items as the client and the stock rebuild write them.
+_IMAGE_ITEMS = ("image", "image_url", "input_image")
+
+
+def _images_in_place(built: dict, sent: dict) -> dict:
+    """``built`` with its text and images in the order ``sent`` holds them.
+
+    Text parts between two images join as the stock text extraction joins
+    them, and the message's leading and trailing space is stripped as
+    before. Audio parts stay where the rebuild put them, after the text.
+    Returns ``built`` unchanged when its order already matches, when its
+    image count differs from the images ``sent`` holds (a legacy side
+    channel image has no place), or when it holds a part of another kind.
+    """
+    content, parts = built.get("content"), sent.get("content")
+    if not isinstance(content, list) or not isinstance(parts, list):
+        return built
+    images, texts, audio = [], [], []
+    for item in content:
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind in _IMAGE_ITEMS:
+            images.append(item)
+        elif kind == "text":
+            texts.append(item)
+        elif kind == "audio":
+            audio.append(item)
+        else:
+            return built
+    if not images or len(texts) != 1:
+        return built
+    # The client's order as (is_image, text) pairs, one per image and one
+    # per run of text parts between images.
+    seq: list[tuple[bool, str]] = []
+    run: list[str] = []
+    for item in parts:
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind in _IMAGE_ITEMS:
+            if run:
+                seq.append((False, " ".join(run)))
+                run = []
+            seq.append((True, ""))
+        elif kind in _TEXT_PARTS:
+            text = item.get("text", "") or item.get("content", "")
+            if text:
+                run.append(text)
+    if run:
+        seq.append((False, " ".join(run)))
+    if sum(is_image for is_image, _ in seq) != len(images):
+        return built
+    runs = [i for i, (is_image, _) in enumerate(seq) if not is_image]
+    if runs:
+        seq[runs[0]] = (False, seq[runs[0]][1].lstrip())
+        seq[runs[-1]] = (False, seq[runs[-1]][1].rstrip())
+    seq = [(is_image, text) for is_image, text in seq if is_image or text]
+    stock = [item.get("type") != "text" for item in content
+             if item.get("type") != "audio"
+             and (item.get("type") != "text" or item.get("text"))]
+    if [is_image for is_image, _ in seq] == stock:
+        return built
+    pics = iter(images)
+    out = []
+    for is_image, text in seq:
+        if is_image:
+            out.append(next(pics))
+            continue
+        part = {**texts[0], "text": text}
+        if "content" in part:
+            part["content"] = text
+        out.append(part)
+    return {**built, "content": out + audio}
 
 
 def _decode_tool_arguments(msgs: list) -> None:
@@ -97,6 +185,8 @@ def install_faithful_history() -> None:
                 # fakes, exotic overrides) already produced final output.
                 return msgs
             items = prompt if isinstance(prompt, list) else [prompt]
+            cfg = config if isinstance(config, dict) else config.__dict__
+            in_place = cfg.get("model_type") in _IN_PLACE_IMAGES
             # The stock rebuild appends one message per input item; items
             # it cannot read (no role/content) are skipped, breaking the
             # 1:1 mapping -- fall back to the unmerged list in that case.
@@ -106,8 +196,9 @@ def install_faithful_history() -> None:
                         extra = {k: v for k, v in sent.items()
                                  if k not in built}
                         if extra:
-                            msgs[i] = {**extra, **built}
-            cfg = config if isinstance(config, dict) else config.__dict__
+                            built = msgs[i] = {**extra, **built}
+                        if in_place:
+                            msgs[i] = _images_in_place(built, sent)
             if cfg.get("model_type") == "gpt_oss":
                 # The harmony template reads prior-turn reasoning from a
                 # ``thinking`` key; alias the OpenAI-style spelling so

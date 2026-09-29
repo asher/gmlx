@@ -41,6 +41,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of a request whose image had the same pixels in another shape.
 - On `/v1/chat/completions`, an image sent in an earlier turn reached the model
   in the latest user message, and a new turn could not reuse the earlier turns.
+- In a chat or Responses request, the images of a message reached the model
+  ahead of its text (after it on Kimi K2.5), whatever order the client used.
 - A Gemma-4 model loaded with its mmproj, a Gemma-4 12B, DiffusionGemma and an
   MLX-format Gemma-4 read the system or developer message as a Python list.
 - A prompt started with two BOS tokens when the chat template wrote one and the

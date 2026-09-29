@@ -1,21 +1,29 @@
 """/v1/chat/completions renders each image in the message that sent it,
 as /v1/responses does, so a turn's prompt starts with the previous turn's
 prompt. Stock chat completions reduces each message to its text and the
-template places every image in the last user message."""
+template places every image in the last user message.
+
+Within a message, the text and images render in the order the client sent
+them. The stock rebuild joins a message's text into one part and puts
+every image before it."""
 
 from __future__ import annotations
 
 import importlib
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 pytest.importorskip("mlx_vlm")
 
 from transformers.utils.chat_template_utils import render_jinja_template  # noqa: E402
 
+from gmlx.cache.media_salt import MediaSalt, image_spans  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import render  # noqa: E402
 from gmlx.serve.patches.chat_behavior import install_role_normalization  # noqa: E402
 from gmlx.serve.patches.render import (  # noqa: E402
     install_chat_image_placement,
@@ -23,6 +31,7 @@ from gmlx.serve.patches.render import (  # noqa: E402
 )
 
 _OPENAI = importlib.import_module("mlx_vlm.server.openai")
+_PROMPT_UTILS = importlib.import_module("mlx_vlm.prompt_utils")
 _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
 _FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -88,11 +97,15 @@ def route(monkeypatch):
 
     client = TestClient(_APP.app)
 
-    def render(model_type, messages):
+    def render(model_type, messages, responses=False):
         monkeypatch.setattr(_OPENAI, "get_cached_model", lambda *a, **k: (
             None, _Processor(model_type), {"model_type": model_type}))
-        r = client.post("/v1/chat/completions", json={
-            "model": "m", "messages": messages, "max_tokens": 1})
+        if responses:
+            r = client.post("/v1/responses", json={
+                "model": "m", "input": messages, "max_output_tokens": 16})
+        else:
+            r = client.post("/v1/chat/completions", json={
+                "model": "m", "messages": messages, "max_tokens": 1})
         assert r.status_code == 200, r.text
         return rg.calls.pop()
 
@@ -166,3 +179,194 @@ def test_a_text_chat_renders_as_before(route, monkeypatch, model_type):
                         getattr(extract, "__wrapped__", extract))
     stock = route(model_type, messages)
     assert patched == stock and patched[1] == []
+
+
+def _assert_in_order(prompt, marker, *contents):
+    """Each text part and image of ``contents`` appears in ``prompt`` after
+    the one before it, one marker per image."""
+    items = [item for content in contents for item in content]
+    assert prompt.count(marker) == sum(
+        item["type"] == "image_url" for item in items)
+    pos = 0
+    for item in items:
+        want = marker if item["type"] == "image_url" else item["text"]
+        found = prompt.find(want, pos)
+        assert found >= 0, f"{want!r} out of order in {prompt!r}"
+        pos = found + len(want)
+
+
+_LAYOUTS = {
+    "text-image": [_text("The picture below is a photo."), _image("a")],
+    "image-text": [_image("a"), _text("What is in this picture?")],
+    "image-text-image": [_image("a"), _text("and then a drawing:"),
+                         _image("b")],
+    "text-image-text-image-text": [
+        _text("The first picture is a photo."), _image("a"),
+        _text("The second picture is a drawing."), _image("b"),
+        _text("Which picture is the drawing?")],
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_LAYOUTS))
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_text_and_images_keep_the_client_order(route, model_type, layout):
+    content = _LAYOUTS[layout]
+    prompt, images = route(model_type, [{"role": "user", "content": content}])
+    assert images == [item["image_url"]["url"] for item in content
+                      if item["type"] == "image_url"]
+    _assert_in_order(prompt, _MODELS[model_type][1], content)
+
+
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_a_responses_message_keeps_the_client_order(route, model_type):
+    content = _LAYOUTS["text-image-text-image-text"]
+    sent = [{"type": "input_image", "image_url": item["image_url"]["url"]}
+            if item["type"] == "image_url"
+            else {"type": "input_text", "text": item["text"]}
+            for item in content]
+    prompt, images = route(model_type, [{"role": "user", "content": sent}],
+                           responses=True)
+    assert images == ["http://img/a", "http://img/b"]
+    _assert_in_order(prompt, _MODELS[model_type][1], content)
+
+
+@pytest.mark.parametrize("model_type", sorted(_MODELS))
+def test_each_turn_keeps_its_text_and_image_order(route, model_type):
+    turn1, turn2 = _turns()
+    prompt1, _ = route(model_type, turn1)
+    prompt2, images2 = route(model_type, turn2)
+    assert images2 == ["http://img/a", "http://img/b"]
+    _assert_in_order(prompt2, _MODELS[model_type][1], turn2[1]["content"],
+                     turn2[3]["content"])
+    end = _MODELS[model_type][2]
+    assert prompt2.startswith(prompt1[:prompt1.rindex(end) + len(end)])
+
+
+# The model types whose chat template renders an image item where the
+# message holds it and whose processor expands the image markers in prompt
+# order.
+_IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
+             "glm5_next", "kimi_k25", "mistral3", "muse_glimmer", "pixtral",
+             "qwen3_5", "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl",
+             "qwen3_vl_moe", "qwen4_exp")
+# The rows mlx-vlm's table lacks, which the loader adds on load.
+_LOADER_ROWS = ("deepseek_v41_vl", "deepseek_v4_vl")
+
+
+def test_the_in_place_types_are_the_checked_ones():
+    assert set(getattr(render, "_IN_PLACE_IMAGES", ())) == set(_IN_PLACE)
+
+
+def _rebuilt(monkeypatch, model_type, content, num_images):
+    if model_type in _LOADER_ROWS:
+        monkeypatch.setitem(_PROMPT_UTILS.MODEL_CONFIG, model_type,
+                            _PROMPT_UTILS.MessageFormat.LIST_WITH_IMAGE_FIRST)
+    for target in sp_common._render_target_modules():
+        monkeypatch.setattr(target, "apply_chat_template",
+                            _PROMPT_UTILS.apply_chat_template)
+    install_faithful_history()
+    msgs = _OPENAI.apply_chat_template(
+        None, {"model_type": model_type},
+        [{"role": "user", "content": content}],
+        num_images=num_images, return_messages=True)
+    stock = _PROMPT_UTILS.apply_chat_template(
+        None, {"model_type": model_type},
+        [{"role": "user", "content": content}],
+        num_images=num_images, return_messages=True)
+    return msgs[0]["content"], stock[0]["content"]
+
+
+def _kinds(content):
+    return [(p["type"], p.get("text")) for p in content]
+
+
+@pytest.mark.parametrize("model_type", _IN_PLACE)
+def test_the_rebuilt_message_holds_the_client_order(monkeypatch, model_type):
+    content = [_text("A"), {"type": "image"}, _text(" B"), _text("C "),
+               {"type": "image"}, _text("D ")]
+    got, _ = _rebuilt(monkeypatch, model_type, content, 2)
+    # Text between two images joins as the stock extraction joins it, and
+    # the message's ends are stripped as before.
+    assert _kinds(got) == [("text", "A"), ("image", None), ("text", " B C "),
+                           ("image", None), ("text", "D")]
+
+
+@pytest.mark.parametrize("model_type", ("gemma4", "kimi_k25", "qwen3_5"))
+def test_a_message_in_the_stock_order_rebuilds_as_before(monkeypatch,
+                                                         model_type):
+    image = {"type": "image"}
+    # Images before the text (after it on Kimi), and images alone.
+    ordered = ([_text(" A "), _text("B"), image, image]
+               if model_type == "kimi_k25"
+               else [image, image, _text(" A "), _text("B")])
+    for content, n in ((ordered, 2), ([image], 1), ([image, image], 2)):
+        got, stock = _rebuilt(monkeypatch, model_type, content, n)
+        assert got == stock
+    # An image the route counted without a marker in the message (a legacy
+    # side channel image) leaves the placement to the stock rebuild.
+    got, stock = _rebuilt(monkeypatch, model_type,
+                          [_text("A"), image, _text("B")], 2)
+    assert got == stock
+
+
+def test_a_template_that_places_images_itself_stays_stock(monkeypatch):
+    """The llava-hf template renders every image of a message ahead of its
+    text whatever the content order."""
+    content = [_text("A"), {"type": "image"}, _text("B")]
+    got, stock = _rebuilt(monkeypatch, "llava", content, 1)
+    assert got == stock
+
+
+def test_the_image_salt_follows_the_images_in_place(route):
+    """The prefix cache keys a prefix on the images that start inside it.
+    With image B after the text that follows image A, a request that adds
+    B keys its prefix through that text as the request that sent A alone,
+    and each image run hashes its own image."""
+    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+        Qwen3VLImageProcessor,
+    )
+    from PIL import Image
+
+    ip = Qwen3VLImageProcessor(patch_size=14, merge_size=1, min_pixels=0,
+                               max_pixels=14 * 14 * 64)
+    pics = [Image.new("RGB", (56, 28), (200, 0, 0)),
+            Image.new("RGB", (28, 42), (0, 200, 0))]
+    cfg = SimpleNamespace(image_token_id=9)
+    proc = SimpleNamespace(image_processor=ip)
+    pad = "<|image_pad|>"
+
+    def ids(prompt, grids):
+        # One text id per character; each pad expands to its image's run.
+        row, parts = [], prompt.split(pad)
+        for i, part in enumerate(parts):
+            row += [1] * len(part)
+            if i < len(grids):
+                row += [9] * int(np.prod(grids[i]))
+        return np.array([row])
+
+    first = [_text("The first picture is a photo."), _image("a"),
+             _text("The second picture is a drawing.")]
+    both = first + [_image("b"), _text("Which one is the drawing?")]
+    salts = []
+    for content, n in ((first, 1), (both, 2)):
+        prompt, _ = route("qwen3_5", [{"role": "user", "content": content}])
+        raw = ip(pics[:n])
+        spans = image_spans(ids(prompt, raw["image_grid_thw"]), raw, cfg,
+                            proc)
+        assert spans is not None and len(spans) == n
+        salts.append((prompt, spans))
+    (p1, spans1), (p2, spans2) = salts
+    # Image A keys at the same start with the same hash in both requests,
+    # and image B starts after the text that follows A.
+    assert spans2[0] == spans1[0]
+    start_b = spans2[1][0]
+    text_b = p2.index("The second picture is a drawing.")
+    assert p2.index(pad) < text_b < p2.index(pad, p2.index(pad) + 1)
+    assert start_b > spans2[0][0] + len("The second picture is a drawing.")
+    # Each span hashes its own image: B keys as it does alone.
+    alone = ids(p1, ip(pics[1:])["image_grid_thw"])
+    assert spans2[1][1] == image_spans(alone, ip(pics[1:]), cfg, proc)[0][1]
+    # Through the text before B, both requests key alike.
+    s1, s2 = MediaSalt(5, spans1), MediaSalt(5, spans2)
+    assert s2.at(start_b) == s1.at(start_b)
+    assert s2.at(start_b + 1) != s1.at(start_b + 1)
