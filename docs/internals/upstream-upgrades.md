@@ -48,7 +48,23 @@ the gmlx site that uses it.
    pinned and target versions, which `pip download --no-deps` fetches. The
    seam's `used_by` field names the gmlx site to verify again.
 
-3. Regenerate the fingerprints in a fresh interpreter of the scratch venv,
+3. List the upstream changes to the code gmlx owns. Each owned file is
+   registered in `scripts/drift_report.py` against the baseline its
+   vendor script recorded. `--old` takes the pinned package directory,
+   from `pip download --no-deps` and an unzip, so the report can tell an
+   upstream change from a gmlx change.
+
+   ```sh
+   python scripts/drift_report.py --old /path/to/pinned/mlx_vlm
+   ```
+
+   The report is a list to triage, not a test. Port an upstream
+   correctness fix when the bug applies to gmlx's copy, with its
+   regression test, and list perf and structural changes for review.
+   `tests/cache/test_owned_cache_surface.py` fails when a stock cache
+   class gains a member or a parameter that the owned class lacks.
+
+4. Regenerate the fingerprints in a fresh interpreter of the scratch venv,
    since the regeneration refuses to run once the installers have patched
    the process. It also records the qualified versions for the runtime
    gate.
@@ -57,14 +73,14 @@ the gmlx site that uses it.
    python -m gmlx.upstream.seams --regen
    ```
 
-4. Run the full test suite and the tests marked `integration` in the
+5. Run the full test suite and the tests marked `integration` in the
    scratch venv, as [Testing](testing.md) describes.
 
-5. Run live smoke tests with models on disk. Cover a served MTP model, a
+6. Run live smoke tests with models on disk. Cover a served MTP model, a
    warm prompt-cache hit, an MXFP4 model, a DeepSeek-V4 model and one
    `gmlx talk` turn.
 
-6. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
+7. Commit the pin bump and the regenerated `gmlx/upstream/seams.json`
    together, as their own commit.
 
 ## Adding a new seam
