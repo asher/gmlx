@@ -302,14 +302,23 @@ def clear_session_sockets(host: str, port) -> None:
 
 # The app of a session socket
 
-async def _read_body(receive) -> bytes | None:
-    """The whole request body, or None when the client went away."""
-    chunks = []
+class _TooLarge(Exception):
+    pass
+
+
+async def _read_body(receive, limit: int) -> bytes | None:
+    """The whole request body, or None when the client went away. Raises
+    :class:`_TooLarge` once the body passes ``limit`` bytes."""
+    chunks, size = [], 0
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
             return None
-        chunks.append(message.get("body", b""))
+        chunk = message.get("body", b"")
+        size += len(chunk)
+        if size > limit:
+            raise _TooLarge
+        chunks.append(chunk)
         if not message.get("more_body", False):
             return b"".join(chunks)
 
@@ -410,7 +419,21 @@ class _SessionApp:
         scope = {**scope, SESSION_SCOPE_KEY: self.session.id}
         method = scope.get("method")
         if method == "POST" and path in _ALIAS_PATHS:
-            body = await _read_body(receive)
+            # The alias check reads the body before the media gate does, so
+            # it applies the gate's ceiling itself.
+            from starlette.datastructures import Headers
+
+            from . import media_gate as mg
+            length = Headers(scope=scope).get("content-length", "")
+            try:
+                if length.isdigit() and int(length) > mg.BODY_MAX_BYTES:
+                    raise _TooLarge
+                body = await _read_body(receive, mg.BODY_MAX_BYTES)
+            except _TooLarge:
+                await JSONResponse(status_code=413, content=_error_content(
+                    path, 413, "invalid_request_error", mg._body_refusal(False)))(
+                        scope, receive, send)
+                return
             if body is None:
                 return
             model = _model_field(body)

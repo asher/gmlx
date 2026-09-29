@@ -513,6 +513,29 @@ def test_a_model_that_is_not_a_string_passes_to_the_route(server, model):
     assert srv.tools == []
 
 
+def test_a_chat_body_over_the_ceiling_is_refused_on_the_socket(server, monkeypatch):
+    from gmlx.serve.patches import media_gate as mg
+    monkeypatch.setattr(mg, "BODY_MAX_BYTES", 1000)
+    srv = server()
+    path = srv.open_session([])["socket"]
+    for route in ("/v1/chat/completions", "/messages"):
+        r = _unix(path, "POST", route, {**_chat("x"), "pad": " " * 2000})
+        assert r.status == 413, (route, r.body)
+        assert "new conversation" in r.json()["error"]["message"]
+    # A declared length over the ceiling is refused before the body is sent.
+    conn = _UnixConnection(path)
+    try:
+        conn.putrequest("POST", "/v1/chat/completions")
+        conn.putheader("content-type", "application/json")
+        conn.putheader("content-length", str(mg.BODY_MAX_BYTES + 1))
+        conn.endheaders()
+        assert conn.getresponse().status == 413
+    finally:
+        conn.close()
+    assert srv.chat == []
+    assert _unix(path, "POST", "/v1/chat/completions", _chat("m-a")).status == 200
+
+
 @pytest.mark.parametrize("api_key", [None, _KEY])
 def test_unlisted_alias_is_an_unknown_model(server, api_key):
     srv = server(api_key=api_key)
