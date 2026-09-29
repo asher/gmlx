@@ -28,6 +28,7 @@ import mlx_kquant as kq
 
 from . import loadlog
 from .dtypes import activation_dtype, activation_dtype_name
+from gmlx.device import metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import install_prefill_decay, note_untracked_weights
@@ -741,7 +742,7 @@ def _warm_touch_threshold_bytes() -> int:
             pass
     cap = 32 << 30
     try:
-        wss = int(mx.device_info()["max_recommended_working_set_size"])
+        wss = int(metal_value("max_recommended_working_set_size"))
         return min(cap, wss // 3)
     except Exception:
         return cap
@@ -796,7 +797,7 @@ def _warm_mmap_residency(
     # below stays whole-model.
     try:
         _tbudget = int(
-            0.9 * cast(int, mx.device_info()["max_recommended_working_set_size"]))
+            0.9 * cast(int, metal_value("max_recommended_working_set_size")))
     except Exception:
         _tbudget = None
     from gmlx.stream.table_stream import warm_touch_exclusions
@@ -843,7 +844,7 @@ def _warm_touch_pass(
         threshold_bytes = _warm_touch_threshold_bytes()
     try:
         budget = int(
-            0.9 * cast(int, mx.device_info()["max_recommended_working_set_size"]))
+            0.9 * cast(int, metal_value("max_recommended_working_set_size")))
     except Exception:
         budget = None
     if mode != "1" and budget is not None and total > budget:
@@ -984,7 +985,7 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     if not supported:
         return False
     total = sum(v.nbytes for v in hf_weights.values())
-    info = mx.device_info()
+    info = metal_info() or {}
     wss = int(info.get("max_recommended_working_set_size", 0))
     if wss and total > 0.9 * wss:
         log(

@@ -68,10 +68,10 @@ def margin() -> float:
 
 
 def working_set_bytes() -> float | None:
-    import mlx.core as mx
+    from gmlx.device import metal_value
 
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         return None
     return ws if ws > 0 else None
@@ -94,11 +94,11 @@ def ceiling_bytes(ws: float, m: float | None = None) -> float:
     reserve. Metal's recommendation assumes the GPU owns the box; a
     serve process sharing it with the kernel and the user does not
     (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked)."""
-    import mlx.core as mx
+    from gmlx.device import metal_value
 
     cap = ws * (1.0 - (margin() if m is None else m))
     try:
-        mem = float(mx.device_info()["memory_size"])
+        mem = float(metal_value("memory_size"))
     except Exception:
         return cap
     return min(cap, mem - reserve_bytes(mem))
@@ -247,7 +247,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     when the header or the device cannot be read (callers keep stock
     behavior then). ``env`` is the model's residency env window; its kv
     params reprice the quantized layers."""
-    import mlx.core as mx
+    from gmlx.device import metal_info
 
     from .mem_preflight import prompt_kv_bytes, span_tokens
     from .memory import admit_reserve_bytes
@@ -262,7 +262,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         if not (priced and ws):
             return None
         cfg, costs, heads = priced
-        info = mx.device_info()
+        info = metal_info() or {}
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
     except Exception:

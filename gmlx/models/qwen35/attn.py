@@ -38,6 +38,7 @@ import mlx.core as mx
 from mlx_vlm.models import base as _B
 
 import gmlx.load.loadlog as loadlog
+from gmlx.device import metal_info
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.cache.kvarn_cache import KVarNView
@@ -298,7 +299,7 @@ _QWEN3_5_RAGGED_SDPA_TWO_PASS_2_SOURCE = r"""
 
 @lru_cache(maxsize=1)
 def _qwen3_5_device_arch_suffix() -> str:
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    info = metal_info() or {}
     return str(info.get("architecture", ""))[-1:]
 
 

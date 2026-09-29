@@ -344,14 +344,13 @@ def available_drained_bytes():
     hold with the batch drained. The arena is MLX-tracked, sized at
     install and never drained. Other MLX-tracked weight allocations are
     not subtracted, which only admits more."""
-    import mlx.core as mx
-
+    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import untracked_weight_bytes
     from gmlx.stream.installs import live_arena_bytes
     from .memory import admit_reserve_bytes
 
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         return None
     if ws <= 0:

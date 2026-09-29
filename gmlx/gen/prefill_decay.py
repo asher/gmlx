@@ -69,6 +69,7 @@ from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
 
+from gmlx.device import metal_value
 from gmlx.envflags import env_bool, env_float, env_int
 from gmlx.upstream.patching import link
 
@@ -215,7 +216,7 @@ def _cap_bytes() -> float:
     global _WS_CAP_BYTES
     if _WS_CAP_BYTES is None:
         try:
-            ws = float(mx.device_info()["max_recommended_working_set_size"])
+            ws = float(metal_value("max_recommended_working_set_size"))
             _WS_CAP_BYTES = cap_bytes_for(ws)
         except Exception:
             _WS_CAP_BYTES = 4e9
@@ -536,7 +537,7 @@ def headroom_bytes() -> float | None:
     fresh per call, never memoized. The one shared accounting: the prefill
     caps, the serve memory trace, and the admission gate all read this."""
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
         active = float(mx.get_active_memory())
     except Exception:
         return None

@@ -25,6 +25,8 @@ import importlib
 
 import mlx.core as mx
 
+from gmlx.device import cpu_default_device
+
 # Each module that binds its own name for the context: mlx-vlm's
 # generators import it by name from common.
 _BINDINGS = (
@@ -38,10 +40,6 @@ _BINDINGS = (
 )
 _STOCK = ("mlx_lm", "mlx_vlm")
 _FLAG = "_gmlx_cpu_guard"
-
-
-def cpu_default_device() -> bool:
-    return mx.default_device() == mx.cpu
 
 
 @contextlib.contextmanager

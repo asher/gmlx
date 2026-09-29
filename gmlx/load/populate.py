@@ -238,9 +238,9 @@ def maybe_populate_for_load(paths: list[str], log=print) -> None:
         return
     try:
         total = sum(os.path.getsize(p) for p in paths)
-        import mlx.core as mx
+        from gmlx.device import metal_value
 
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
     except Exception:
         return
     if not paths or total > budget:

@@ -951,9 +951,9 @@ def _preload_extra_over_budget(model_id: str) -> bool:
 
         path = serving.resolved_models()[model_id].path
         total = sum(os.path.getsize(p) for p in find_split_shards(path))
-        import mlx.core as mx
+        from gmlx.device import metal_value
 
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
         return total > budget
     except Exception:
         return False

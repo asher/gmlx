@@ -34,6 +34,7 @@ import re
 
 import mlx.core as mx
 
+from gmlx.device import metal_info
 from gmlx.envflags import env_choice
 
 ENV_VAR = "GMLX_ACTIVATION_DTYPE"
@@ -71,7 +72,7 @@ def gpu_arch_gen() -> int:
     global _arch_gen
     if _arch_gen is None:
         try:
-            match = _ARCH_RE.search(str(mx.device_info().get("architecture", "")))
+            match = _ARCH_RE.search(str((metal_info() or {}).get("architecture", "")))
         except Exception:
             match = None
         _arch_gen = int(match.group(1)) if match else 0

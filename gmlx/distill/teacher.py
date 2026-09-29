@@ -446,13 +446,14 @@ def teacher_over_budget(model, budget: int | None = None) -> tuple[bool, int, in
     exceed the wired budget, nine tenths of the recommended working set
     as the expert streaming installer reads it. Never over when no
     device reports one."""
-    import mlx.core as mx
     from mlx.utils import tree_flatten
+
+    from gmlx.device import metal_value
     flat: Any = tree_flatten(model.parameters())
     total = sum(int(a.nbytes) for _k, a in flat)
     if budget is None:
         try:
-            budget = int(0.9 * int(mx.device_info()["max_recommended_working_set_size"]))
+            budget = int(0.9 * int(metal_value("max_recommended_working_set_size")))
         except Exception:  # noqa: BLE001
             return False, total, 0
     return total > budget, total, budget
@@ -535,6 +536,8 @@ def run_cache(opts: CacheOptions) -> int:
     memory probe fails twice or the recorded routes do not match the
     chunk, 4 when the validator finds a problem in what was written."""
     import mlx.core as mx
+
+    from gmlx.device import cpu_default_device, metal_value
 
     out = Path(opts.out).expanduser()
     t0 = time.perf_counter()
@@ -731,9 +734,10 @@ def run_cache(opts: CacheOptions) -> int:
         if feeder is None and opts.require_feeder:
             log("[cache] refuse: streaming teacher requested and no prefill feeder is installed")
             return 2
-    if not streaming and not opts.no_wired_limit:
+    # A teacher on the CPU device has nothing to wire.
+    if not streaming and not opts.no_wired_limit and not cpu_default_device():
         try:
-            mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
+            mx.set_wired_limit(int(metal_value("max_recommended_working_set_size")))
         except Exception as e:  # noqa: BLE001
             log(f"[cache] warn: wired limit not set: {e}")
     # shard rows pad to a per-shard length, so freed buffers of many sizes

@@ -10,6 +10,7 @@ import mlx.core as mx
 import numpy as np
 from mlx.utils import tree_flatten
 
+from gmlx.device import metal_info, metal_value
 from gmlx.envflags import env_bool, env_int
 from gmlx.gen.prefill_decay import deduct_untracked_weights
 from gmlx.load import loadlog
@@ -110,14 +111,14 @@ def configure_stream_cpu(
     run on the CPU stream whether or not the model fits the wired budget (a
     fits-in-RAM model is then served from the page cache rather than faulting
     from disk; for the faster all-GPU path on a model that fits, omit
-    ``--stream-cpu``). The GPU
-    working-set budget is still captured before switching the default device to
-    CPU so the over-/under-budget log line stays accurate (the CPU device would
-    otherwise report a budget that hides the condition). Returns
-    ``(n_wrapped, offloaded_bytes)``.
+    ``--stream-cpu``). gmlx reads the Metal device's budget through
+    ``gmlx.device`` whatever the default device is. ``mx.device_info()``
+    then answers with the Metal device's info too, for mlx-vlm's own reads
+    of it (the APC working set), which would otherwise see the CPU's.
+    Returns ``(n_wrapped, offloaded_bytes)``.
     """
     try:
-        gpu_info = dict(mx.device_info())
+        gpu_info = metal_info()
     except Exception:
         gpu_info = None
     configure_cpu_device()
@@ -200,7 +201,7 @@ def _install_gpu_residency(model, moe_modules, *,
 
 
 def _physical_ram() -> int:
-    ram = int(mx.device_info().get("memory_size", 0)) if mx.metal.is_available() else 0
+    ram = int((metal_info() or {}).get("memory_size", 0)) if mx.metal.is_available() else 0
     if not ram:
         ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     return ram
@@ -311,7 +312,7 @@ def install_expert_streaming(
     params = getattr(model, "parameters", None)
     total_bytes = sum(a.nbytes for _, a in tree_flatten(params())) if params else 0
     try:
-        budget = int(0.9 * mx.device_info()["max_recommended_working_set_size"])
+        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
     except Exception:
         budget = None
     over_budget = budget is not None and total_bytes > budget
@@ -1095,7 +1096,7 @@ def install_expert_streaming(
             # Always visible, like the pin line: the one line a memory
             # report needs.
             try:
-                floor = _ram_floor_bytes(int(mx.device_info()["memory_size"]))
+                floor = _ram_floor_bytes(int(metal_value("memory_size")))
             except Exception:
                 floor = _ram_floor_bytes(None)
             # Streamed tables are page-cache citizens like the experts, so

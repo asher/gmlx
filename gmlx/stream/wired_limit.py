@@ -102,10 +102,8 @@ def _install_wired_limit_warn_once():
 
     from mlx.utils import tree_reduce
 
-    from gmlx.upstream.wired_limit_cpu_fix import (
-        cpu_default_device,
-        cpu_wired_limit,
-    )
+    from gmlx.device import cpu_default_device, metal_value
+    from gmlx.upstream.wired_limit_cpu_fix import cpu_wired_limit
 
     state = {"warned": False}
 
@@ -123,7 +121,7 @@ def _install_wired_limit_warn_once():
         model_bytes = tree_reduce(
             lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
             model, 0)
-        max_rec_size = mx.device_info()["max_recommended_working_set_size"]
+        max_rec_size = metal_value("max_recommended_working_set_size")
         if model_bytes > 0.9 * max_rec_size and not state["warned"]:
             state["warned"] = True
             model_mb = model_bytes // 2**20

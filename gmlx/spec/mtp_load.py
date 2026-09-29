@@ -20,6 +20,7 @@ import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
+from gmlx.device import cpu_default_device, metal_value
 from gmlx.envflags import env_int
 from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
@@ -2259,10 +2260,11 @@ def _wire_big_model(model) -> None:
     run outside that context -- unwired, an 87 GB target decodes at ~0.5
     tok/s vs ~20 wired."""
     try:
-        if not mx.metal.is_available():
+        # A model on the CPU device has nothing to wire.
+        if not mx.metal.is_available() or cpu_default_device():
             return
         max_rec_size = int(
-            mx.device_info()["max_recommended_working_set_size"]
+            metal_value("max_recommended_working_set_size")
         )
         # Unconditional, like mlx-lm's wired_limit (its 0.9x threshold only
         # gates a warning): the limit is a cap, not an allocation.

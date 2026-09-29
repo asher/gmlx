@@ -616,10 +616,11 @@ def generate_guard() -> None:
     raises, so the context is replaced by a no-op there."""
     import contextlib
 
-    import mlx.core as mx
     import mlx_lm.generate  # noqa: F401  (the package re-exports the function under the same name)
+
+    from gmlx.device import cpu_default_device
     g = sys.modules["mlx_lm.generate"]
-    if "max_recommended_working_set_size" not in mx.device_info():
+    if cpu_default_device():
         setattr(g, "wired_limit", lambda *_a, **_k: contextlib.nullcontext())
 
 

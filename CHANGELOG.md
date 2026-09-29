@@ -89,6 +89,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in them. It now stops and names the weights it could not fill.
 - In Python, `generate` raised KeyError `max_recommended_working_set_size`
   when the program had made the CPU the MLX default device.
+- `gmlx distill --cpu` failed to load a model with a table past the Metal
+  buffer ceiling, and never streamed a teacher larger than the working set.
 
 ## [0.4.19] - 2026-09-27
 

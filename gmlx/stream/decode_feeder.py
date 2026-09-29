@@ -1596,9 +1596,9 @@ class DecodeFeeder:
             return True
         ram = None
         try:
-            import mlx.core as mx
+            from gmlx.device import metal_value
 
-            ram = int(mx.device_info()["memory_size"])
+            ram = int(metal_value("memory_size"))
         except Exception:  # noqa: S110 - no device info; the floor prices from avail
             pass
         if avail < need + _ram_floor_bytes(ram or avail) + kernel_floor_bytes():

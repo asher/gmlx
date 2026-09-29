@@ -339,8 +339,7 @@ def project_admission(gen, candidates):
     is measured.
     ``candidates`` are pending-queue tuples (uid, prompt, max_tokens, ...).
     """
-    import mlx.core as mx
-
+    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import headroom_bytes, score_transient_bytes
 
     update_kv_rates(gen)
@@ -397,7 +396,7 @@ def project_admission(gen, candidates):
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
         max(cand_tokens))
     try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         ws = 0.0
     reserve = admit_reserve_bytes(ws, gen)

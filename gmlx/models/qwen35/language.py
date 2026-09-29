@@ -29,6 +29,7 @@ from mlx_vlm.models.qwen3_5.config import ModelConfig
 from mlx_vlm.models.rope_utils import MRoPERotaryEmbedding
 from mlx_vlm.models.rope_utils import apply_multimodal_rotary_pos_emb as _apply_mrope
 
+from gmlx.device import metal_info
 from gmlx.eval_guard import guard
 
 from .cache import Qwen35ArraysCache
@@ -1207,7 +1208,7 @@ _QWEN3_5_RAGGED_SDPA_TWO_PASS_2_SOURCE = r"""
 
 @lru_cache(maxsize=1)
 def _qwen3_5_device_arch_suffix() -> str:
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    info = metal_info() or {}
     return str(info.get("architecture", ""))[-1:]
 
 

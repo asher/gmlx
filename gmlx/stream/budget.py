@@ -21,8 +21,7 @@ import os
 import re
 from dataclasses import dataclass
 
-import mlx.core as mx
-
+from gmlx.device import metal_value
 from gmlx.envflags import env_bool, env_int
 
 _DEFAULT_CTX = 32768
@@ -254,7 +253,7 @@ def _decode_arena_bytes(
         if avail is None:
             return want
         try:
-            ram = int(mx.device_info()["memory_size"])
+            ram = int(metal_value("memory_size"))
         except Exception:
             ram = avail
         cap = max(0, avail - _ram_floor_bytes(ram))
@@ -272,7 +271,7 @@ def _decode_arena_bytes(
     ceiling = int(ceiling_bytes() or budget)
     ram = None
     try:
-        ram = int(mx.device_info()["memory_size"])
+        ram = int(metal_value("memory_size"))
     except Exception:  # noqa: S110 - no device info (CPU-only build); the RAM fraction lever is skipped
         pass
     frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
