@@ -357,7 +357,11 @@ SEAMS: tuple[Seam, ...] = (
          "a per-model max_kv_size wins over the process-wide limit)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
          "mem_preflight.install_memory_preflight; "
-         "server_patches.mtp_thinking (thinking_budget deferral)",
+         "server_patches.mtp_thinking (thinking_budget deferral); "
+         "media_salt.install_media_salt (a request scope: the salt is "
+         "hash_image_payload(pixel_values=raw['pixel_values']) after "
+         "_preprocess_request, then semantic_extra_hash, before the "
+         "request queues)",
          critical=True),
     Seam("mlx_vlm.server.generation",
          "ResponseGenerator._make_thinking_budget_criteria",
@@ -378,7 +382,9 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (chat_template_kwargs transform)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
          "server_patches.install_retire_render_capture (ids hop + "
-         "tokenize path for the next-turn retirement key)"),
+         "tokenize path for the next-turn retirement key) + "
+         "media_salt.install_media_salt (hands the request's inputs to "
+         "its image hash)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._cpu_preprocess",
          "single_bos_fix (calls the prepare_inputs binding with prompts= "
          "and a model-type add_special_tokens)"),
@@ -610,14 +616,15 @@ SEAMS: tuple[Seam, ...] = (
          "apc_media.install_media_token_ids (a WholeMediaBlocks column "
          "inside a run moves to its end)", critical=True),
     Seam("mlx_vlm.apc", "hash_image_payload",
-         "media_salt.install_media_salt (a list of images of different "
-         "sizes hashes by content, not as 0)"),
+         "media_salt.install_media_salt (a request's images hash once, "
+         "per image, into spans; a list of images of different sizes "
+         "hashes by content, not as 0)"),
     Seam("mlx_vlm.apc", "semantic_extra_hash",
-         "media_salt.install_media_salt (a request with images carries "
-         "the salt of its text)"),
+         "media_salt.install_media_salt (spans and the text salt make "
+         "the MediaSalt)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._gpu_embed",
-         "media_salt.install_media_salt (the request salt becomes a "
-         "MediaSalt from the ids and pixels)"),
+         "media_salt.install_media_salt (the MediaSalt reaches "
+         "gen_kwargs['_apc_semantic_hash'] unchanged)"),
     Seam("mlx_vlm.apc", "APCManager.lookup_exact_cache",
          "apc_manager.GmlxAPCManager.lookup_exact_cache (one call per "
          "MediaSalt window: min exclusive, a positive max inclusive)"),

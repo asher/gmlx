@@ -35,10 +35,10 @@ from gmlx.spec.engine import install_owned_spec_engine
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
 from gmlx.spec.mtp_load import _arm_spec_target
 
+from test_media_salt import serve_request
 from test_vlm_spec_target_swap import _q35_vlm
 
 ar = importlib.import_module("mlx_vlm.generate.ar")
-server = importlib.import_module("mlx_vlm.server.generation")
 
 # The model is f32. Warm and cold prefill the suffix in different GEMM
 # shapes, and f32 GEMM runs at TF32 on the GPU. A row of a B=2 batch
@@ -80,21 +80,13 @@ def _img(seed):
 
 
 def _request(model, ids, pixels):
-    """``_gpu_embed`` as the server calls it, with the salt its request
-    handler computes."""
+    """A request through the server's generate, as ``serve_request`` runs
+    it."""
     raw = {"input_ids": mx.array([ids])}
-    pv = None
     if pixels:
-        pv = raw["pixel_values"] = mx.concatenate(pixels, axis=0)
+        raw["pixel_values"] = mx.concatenate(pixels, axis=0)
         raw["image_grid_thw"] = mx.array([_GRID] * len(pixels))
-    salt = _apc.semantic_extra_hash(
-        tenant=None,
-        image_hash=_apc.hash_image_payload(pixel_values=pv) if pixels else 0,
-        media={"audio": None, "video": None}, model=model.language_model,
-        processor=None)
-    rg = SimpleNamespace(model=model, vision_cache=None)
-    _ids, kw = server.ResponseGenerator._gpu_embed(
-        rg, raw, None, apc_semantic_hash=salt)
+    _ids, kw = serve_request(model, raw)
     return ids, kw
 
 

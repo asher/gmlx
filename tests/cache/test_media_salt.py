@@ -3,6 +3,8 @@ earlier turn stored, and a prefix whose images differ never restores."""
 
 import importlib
 import pickle
+import queue
+import threading
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -391,10 +393,10 @@ def _rig(bidirectional: bool):
                 1.0 + mx.mean(mx.array(pixel_values[k])))
         return SimpleNamespace(to_dict=lambda: {"inputs_embeds": emb})
 
-    rg = SimpleNamespace(model=SimpleNamespace(config=model.config,
-                                               get_input_embeddings=embed),
-                         vision_cache=None)
-    rig = _RIGS[bidirectional] = SimpleNamespace(lm=lm, img=img, rg=rg)
+    served = SimpleNamespace(config=model.config, language_model=lm,
+                             get_input_embeddings=embed)
+    rig = _RIGS[bidirectional] = SimpleNamespace(lm=lm, img=img,
+                                                 model=served)
     return rig
 
 
@@ -414,21 +416,61 @@ def _listed(*values):
             for k, v in enumerate(values)]
 
 
+def serve_request(model, raw, tenant=None, processor=None):
+    """One request through the stock ``ResponseGenerator.generate`` on a
+    stand-in server whose preprocess returns ``raw``. A thread named
+    ``request`` runs ``generate``, and the calling thread plays the GPU
+    thread: it runs ``_gpu_embed`` on the queued request, so the model
+    runs on the thread that built its inputs. Returns the
+    ``(input_ids, gen_kwargs)`` of ``_gpu_embed``."""
+    mx.eval([v for v in raw.values() if isinstance(v, mx.array)])
+    ready = threading.Event()
+    ready.set()
+    gen = object.__new__(server.ResponseGenerator)
+    gen.__dict__.update(
+        model=model, processor=processor, config=model.config,
+        tokenizer=None, draft_model=None, vision_cache=None, apc_mode="on",
+        requests=queue.Queue(), _ready=ready, _load_error=None,
+        _tokenizer_lock=threading.Lock(), _cancel_lock=threading.Lock(),
+        _cancelled=set(), _cpu_preprocess=lambda *_a, **_k: raw)
+    failed = []
+
+    def handle():
+        args = server.GenerationArguments(max_tokens=4)
+        args.tenant_id = tenant
+        try:
+            _ctx, tokens = gen.generate("prompt", args=args)
+            tokens.close()
+        except Exception as e:  # noqa: BLE001  raised on the caller
+            failed.append(e)
+            gen.requests.put(None)
+
+    handler = threading.Thread(target=handle, name="request")
+    handler.start()
+    request = gen.requests.get()
+    embed = None
+    if request is not None:
+        embed = server.ResponseGenerator._gpu_embed(
+            gen, request.raw_inputs, request.images,
+            apc_semantic_hash=request.apc_semantic_hash)
+        request.rqueue.put(server.GenerationContext(
+            uid=1, prompt_tokens=request.prompt_tokens))
+    handler.join()
+    if failed:
+        raise failed[0]
+    return embed
+
+
 def _request(rig, ids, pixels, tenant=None):
-    """``_gpu_embed`` as the server calls it, with the salt its request
-    handler computes. A list of numpy arrays stays a list."""
+    """A request through the server's generate, as ``serve_request`` runs
+    it. A list of numpy arrays stays a list."""
     raw = {"input_ids": mx.array([ids]),
            "mm_token_type_ids": mx.array([[int(t == rig.img) for t in ids]])}
     listed = bool(pixels) and isinstance(pixels[0], np.ndarray)
     pv = (list(pixels) if listed else mx.stack(pixels)) if pixels else None
     if pv is not None:
         raw["pixel_values"] = pv
-    salt = _apc.semantic_extra_hash(
-        tenant=tenant,
-        image_hash=_apc.hash_image_payload(pixel_values=pv) if pixels else 0,
-        media={"audio": None, "video": None}, model=rig.lm, processor=None)
-    _ids, kw = server.ResponseGenerator._gpu_embed(
-        rig.rg, raw, None, apc_semantic_hash=salt)
+    _ids, kw = serve_request(rig.model, raw, tenant)
     return ids, kw
 
 
@@ -563,3 +605,32 @@ def test_a_text_prompt_keeps_the_stock_salt(serve):
     salt = kw["_apc_semantic_hash"]
     assert isinstance(salt, MediaSalt)
     assert salt.at(42) == stock and salt.at(43) != stock
+
+
+@pytest.mark.parametrize("images", [1, 2])
+def test_each_image_hashes_once_before_the_request_queues(serve, monkeypatch,
+                                                         images):
+    """The request thread hashes each image's pixels once; the GPU worker
+    hashes none."""
+    import gmlx.cache.media_salt as media_salt
+
+    rig = _rig(False)
+    turn1, turn2 = _prompts(rig.img)
+    seen = []
+
+    def spy(fn):
+        def hashed(x):
+            if int(getattr(x, "size", 0)) >= 1000:
+                seen.append((threading.current_thread().name, int(x.size)))
+            return fn(x)
+        return hashed
+
+    monkeypatch.setattr(media_salt, "_content_hash",
+                        spy(media_salt._content_hash))
+    monkeypatch.setattr(_apc, "_tensor_content_hash",
+                        spy(_apc._tensor_content_hash))
+    ids = turn1 if images == 1 else turn2
+    _ids, kw = _request(rig, ids, [_pix(k) for k in range(images)])
+    assert isinstance(kw["_apc_semantic_hash"], MediaSalt)
+    one = int(np.prod(_WIDE))
+    assert seen == [("request", one)] * images

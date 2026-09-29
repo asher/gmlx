@@ -26,6 +26,7 @@ key dependencies, audio, video and the tenant stay in the text salt.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import importlib
 import logging
@@ -362,44 +363,111 @@ def image_spans(input_ids: Any, raw: dict, config: Any, processor: Any = None
                  for (a, _b), r in zip(runs, rows))
 
 
-class _RequestSalt(int):
-    """The stock salt of a request with images, carrying the salt its text
-    alone would get."""
+class _ImageHash(int):
+    """The image hash of a request whose image runs mapped to ``spans`` on
+    the request thread. Its value folds every span, so a site that reads
+    it as an int keys on all of the request's images."""
 
-    text_salt: int
+    spans: tuple[tuple[int, int], ...]
 
-    def __new__(cls, value: int, text_salt: int) -> _RequestSalt:
-        self = super().__new__(cls, int(value))
-        self.text_salt = int(text_salt)
+    def __new__(cls, spans: Iterable[tuple[int, int]]) -> _ImageHash:
+        spans = tuple(spans)
+        self = super().__new__(cls, _fold(0, spans) or 1)
+        self.spans = spans
         return self
 
     def __reduce__(self):
-        return (_RequestSalt, (int(self), self.text_salt))
+        return (_ImageHash, (self.spans,))
+
+
+class _Pending:
+    """The preprocessed inputs of the request ``generate`` is handling,
+    until its image hash reads them."""
+
+    __slots__ = ("raw", "generator")
+
+    def __init__(self) -> None:
+        self.raw: dict | None = None
+        self.generator: Any = None
+
+
+_PENDING: contextvars.ContextVar[_Pending | None] = contextvars.ContextVar(
+    "_gmlx_media_salt_pending", default=None)
+
+
+def _wrapping(wrapper, inner):
+    """``wrapper`` over ``inner``, keeping the flags other installers set
+    on ``inner`` readable on the outermost function."""
+    wrapper.__dict__.update(inner.__dict__)
+    wrapper.__wrapped__ = inner
+    return wrapper
 
 
 def install_media_salt() -> bool:
     """Key the serve engine's APC by the images inside each prefix.
 
-    Wraps ``hash_image_payload`` so a list of images of different sizes
-    hashes by content, ``semantic_extra_hash`` so a request's stock salt
-    carries its text salt, ``ResponseGenerator._gpu_embed`` to replace
-    that salt with a ``MediaSalt`` built from the request's ids and
-    pixels, and ``BatchGenerator._apc_extra_hash`` to hand the
-    ``MediaSalt`` on whole.
-    Idempotent. The APC tiers resolve it per prefix (``GmlxAPCManager``,
-    ``gmlx.cache.snapshot``, ``SpecPrefixCache``).
+    ``ResponseGenerator.generate`` computes a request's salt on the
+    request thread. Wrapped, its ``_preprocess_request`` hands the
+    request's inputs to ``hash_image_payload``, which hashes each image
+    once, maps the image runs to images (``image_spans``) and returns the
+    spans in place of the stock hash of all the pixels.
+    ``semantic_extra_hash`` builds the ``MediaSalt`` from the spans and
+    the salt of the text, and ``BatchGenerator._apc_extra_hash`` hands it
+    on whole. The GPU worker hashes nothing: the stock ``_gpu_embed``
+    passes the salt through. A payload outside a request hashes as stock,
+    except that a list of images of different sizes hashes by content.
+    Idempotent. The APC tiers resolve the salt per prefix
+    (``GmlxAPCManager``, ``gmlx.cache.snapshot``, ``SpecPrefixCache``).
     """
     apc = importlib.import_module("mlx_vlm.apc")
     if getattr(apc, _INSTALLED_FLAG, False):
         return True
     ar = importlib.import_module("mlx_vlm.generate.ar")
     server = importlib.import_module("mlx_vlm.server.generation")
+    cls = server.ResponseGenerator
     stock_image_hash = apc.hash_image_payload
     stock_semantic = apc.semantic_extra_hash
-    stock_embed = server.ResponseGenerator._gpu_embed
+    stock_generate = cls.generate
+    stock_preprocess = cls._preprocess_request
     stock_extra = ar.BatchGenerator._apc_extra_hash
 
+    def generate(self, *args, **kwargs):
+        token = _PENDING.set(_Pending())
+        try:
+            return stock_generate(self, *args, **kwargs)
+        finally:
+            _PENDING.reset(token)
+
+    def _preprocess_request(self, *args, **kwargs):
+        raw = stock_preprocess(self, *args, **kwargs)
+        pending = _PENDING.get()
+        if (pending is not None and pending.raw is None
+                and getattr(self, "apc_mode", None) is not None
+                and isinstance(raw, dict)
+                and raw.get("pixel_values") is not None):
+            pending.raw, pending.generator = raw, self
+        return raw
+
+    def _request_spans(pixel_values):
+        """The spans of the request whose pixels these are, or None."""
+        pending = _PENDING.get()
+        if (pending is None or pending.raw is None or pixel_values is None
+                or pending.raw.get("pixel_values") is not pixel_values):
+            return None
+        raw, gen = pending.raw, pending.generator
+        pending.raw = pending.generator = None
+        try:
+            return image_spans(raw.get("input_ids"), raw,
+                               getattr(gen.model, "config", None),
+                               getattr(gen, "processor", None))
+        except Exception:  # noqa: BLE001  any failure keeps the stock hash
+            _log.debug("APC image salt skipped", exc_info=True)
+            return None
+
     def hash_image_payload(pixel_values=None, image_ref=None):
+        spans = _request_spans(pixel_values)
+        if spans:
+            return _ImageHash(spans)
         # The stock hash returns 0, the image hash of a text prompt, for a
         # list of images of different sizes, as Gemma-4's processor
         # returns them. Such a request could restore a prefix stored for
@@ -412,29 +480,12 @@ def install_media_salt() -> bool:
 
     def semantic_extra_hash(*, tenant=None, image_hash=0, media=None,
                             model=None, processor=None):
-        full = stock_semantic(tenant=tenant, image_hash=image_hash,
+        if isinstance(image_hash, _ImageHash):
+            text = stock_semantic(tenant=tenant, image_hash=0, media=media,
+                                  model=model, processor=processor)
+            return MediaSalt(text, image_hash.spans)
+        return stock_semantic(tenant=tenant, image_hash=image_hash,
                               media=media, model=model, processor=processor)
-        if not image_hash:
-            return full
-        text = stock_semantic(tenant=tenant, image_hash=0, media=media,
-                              model=model, processor=processor)
-        return _RequestSalt(full, text)
-
-    def _gpu_embed(self, raw_inputs, images=None, apc_semantic_hash=None):
-        input_ids, gen_kwargs = stock_embed(
-            self, raw_inputs, images, apc_semantic_hash=apc_semantic_hash)
-        text = getattr(apc_semantic_hash, "text_salt", None)
-        if text is not None:
-            try:
-                spans = image_spans(raw_inputs.get("input_ids"), raw_inputs,
-                                    getattr(self.model, "config", None),
-                                    getattr(self, "processor", None))
-            except Exception:  # noqa: BLE001 - the stock salt stays
-                _log.debug("APC image salt skipped", exc_info=True)
-                spans = None
-            if spans:
-                gen_kwargs["_apc_semantic_hash"] = MediaSalt(text, spans)
-        return input_ids, gen_kwargs
 
     def _apc_extra_hash(self, prompt_kwargs):
         salt = (prompt_kwargs or {}).get("_apc_semantic_hash")
@@ -445,11 +496,11 @@ def install_media_salt() -> bool:
 
     hash_image_payload.__wrapped__ = stock_image_hash  # type: ignore[attr-defined]
     semantic_extra_hash.__wrapped__ = stock_semantic  # type: ignore[attr-defined]
-    _gpu_embed.__wrapped__ = stock_embed  # type: ignore[attr-defined]
     _apc_extra_hash.__wrapped__ = stock_extra  # type: ignore[attr-defined]
     setattr(apc, "hash_image_payload", hash_image_payload)
     setattr(apc, "semantic_extra_hash", semantic_extra_hash)
-    server.ResponseGenerator._gpu_embed = _gpu_embed
+    cls.generate = _wrapping(generate, stock_generate)
+    cls._preprocess_request = _wrapping(_preprocess_request, stock_preprocess)
     ar.BatchGenerator._apc_extra_hash = _apc_extra_hash
     # The owned MTP view grafts the engine's helpers once; a graft taken
     # before this install gets the wrapper too.
