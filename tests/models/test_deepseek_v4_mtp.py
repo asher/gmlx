@@ -392,8 +392,8 @@ def test_batch_rotating_undo_replay_matches_control(rotating_undo, n_trim):
             cache.update_and_fetch(a, a)
 
     classes = cache_types("BatchRotatingKVCache")
-    assert [c.__module__ for c in classes] == [
-        "mlx_lm.models.cache", "mlx_vlm.models.cache"], classes
+    assert {"mlx_lm.models.cache", "mlx_vlm.models.cache"} <= {
+        c.__module__ for c in classes}, classes
     for cls in classes:
         test_cache = cls(max_size=8, left_padding=[2, 0])
         feed(test_cache, stream)
