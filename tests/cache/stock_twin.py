@@ -1,11 +1,14 @@
 """The stock class an owned class replaced, for controls that show a test
 fails on the stock body. The binding keeps each replaced stock object."""
 
+import importlib
+
 from gmlx.cache import bind
 
 
 def stock_twin(owned, origin="mlx_vlm.models.cache"):
     """The ``origin`` class or function whose name now holds ``owned``."""
+    importlib.import_module(origin)
     for old, new in bind.replaced():
         if new is owned and getattr(old, "__module__", None) == origin:
             return old

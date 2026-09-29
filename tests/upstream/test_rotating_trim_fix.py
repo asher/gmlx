@@ -128,13 +128,9 @@ def _armed_undo(single, batch, kind, rejected):
 def guarded():
     import mlx_vlm.models.cache  # noqa: F401
 
-    from gmlx.upstream.batch_rotating_mask_fix import (
-        install_batch_rotating_mask_fix,
-    )
     from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
 
-    # The loader installs both with every model.
-    install_batch_rotating_mask_fix()
+    # The loader installs it with every model.
     install_rotating_trim_fix()
     return _classes()
 
@@ -270,12 +266,8 @@ def _main(order: str) -> None:
     import mlx_vlm.models.cache  # noqa: F401
 
     from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
-    from gmlx.upstream.batch_rotating_mask_fix import (
-        install_batch_rotating_mask_fix,
-    )
     from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
 
-    install_batch_rotating_mask_fix()
     if order == "guard-first":
         install_rotating_trim_fix()
         ensure_rollback_attached()

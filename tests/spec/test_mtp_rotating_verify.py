@@ -27,9 +27,6 @@ from mlx_vlm.models.gemma4.config import TextConfig
 import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.speculative as spec
 from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
-from gmlx.upstream.batch_rotating_mask_fix import (
-    install_batch_rotating_mask_fix,
-)
 from gmlx.upstream.rotating_trim_fix import install_rotating_trim_fix
 
 _W, _VOCAB = 16, 128
@@ -71,8 +68,7 @@ def target(monkeypatch):
     # float32, so near-tie picks agree between the batch and each row.
     monkeypatch.setattr(spec, "generation_stream", mx.cpu)
     gemma4_sync.install_gemma4_nosync()
-    # The loader installs the stock mask and trim fixes with every model.
-    assert install_batch_rotating_mask_fix()
+    # The loader installs the trim fix with every model.
     install_rotating_trim_fix()
     cfg = TextConfig(
         model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,

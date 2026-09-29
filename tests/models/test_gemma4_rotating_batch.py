@@ -15,10 +15,6 @@ import numpy as np
 import pytest
 from mlx_vlm.generate import ar
 
-from gmlx.upstream.batch_rotating_mask_fix import (
-    install_batch_rotating_mask_fix,
-)
-
 from test_gemma4_image_masks import (
     _HIDDEN,
     _TOL,
@@ -35,8 +31,6 @@ def served(monkeypatch):
     monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
-    # The loader installs the stock mask fix with every model.
-    assert install_batch_rotating_mask_fix()
 
 
 def _rows(n1, n2, extra=0):

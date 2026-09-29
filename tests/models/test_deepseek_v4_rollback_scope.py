@@ -96,12 +96,8 @@ def gemma():
 
     import gmlx.models.gemma4.sync as gemma4_sync
     from gmlx.models.gemma4.owned import OwnedGemma4LanguageModel
-    from gmlx.upstream.batch_rotating_mask_fix import (
-        install_batch_rotating_mask_fix,
-    )
 
     gemma4_sync.install_gemma4_nosync()
-    install_batch_rotating_mask_fix()
     cfg = TextConfig(
         model_type="gemma4_text", hidden_size=64, num_hidden_layers=6,
         intermediate_size=128, num_attention_heads=4, head_dim=16,

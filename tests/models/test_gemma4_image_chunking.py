@@ -23,9 +23,6 @@ import gmlx.load.vlm as gvlm
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.gen import media_spans
-from gmlx.upstream.batch_rotating_mask_fix import (
-    install_batch_rotating_mask_fix,
-)
 
 from test_gemma4_image_masks import (
     _N,
@@ -57,8 +54,6 @@ def chunked(monkeypatch):
     # Serve's order: the span wrapper goes outside the MTP body.
     mtp_prefill.install_full_prompt_mtp_prefill()
     assert media_spans.install_span_aware_prompt_step()
-    # The loader installs the stock mask fix with every model.
-    assert install_batch_rotating_mask_fix()
 
 
 def _serve(m, rows, embeds, types, mtp, on_chunk=None):
