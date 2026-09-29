@@ -35,6 +35,7 @@ LANG_IMPORTS = [
     ("from .config import ModelConfig, TextConfig\n",
      "\nfrom gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention\n"
      "from gmlx.cache.kv_cache import ArraysCache, KVCache\n"
+     "from gmlx.device import metal_info\n"
      "from gmlx.eval_guard import guard\n\n"
      "from .cache import Qwen35ArraysCache\nfrom .config import TextConfig\n"),
 ]
@@ -45,6 +46,11 @@ LANG_EDITS = [
     ("            mx.eval(outputs)\n",
      '            guard.eval(outputs, site="qwen3_5_try_launch", owner="scratch")\n'),
     ("(N, n, H, D) \u2014 one kernel", "(N, n, H, D), one kernel"),
+    # The architecture read asks the Metal device through gmlx.device
+    # (tests/test_device.py bans a bare device_info read in gmlx).
+    ('    info = mx.device_info() if hasattr(mx, "device_info") '
+     'else mx.metal.device_info()\n',
+     "    info = metal_info() or {}\n"),
     # Bug fix from mlx-vlm 0.7.3: one grid row per vision block.
     ("        mrope_position_deltas = []\n        if input_ids is not None and (\n",
      "        mrope_position_deltas = []\n"
