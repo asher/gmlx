@@ -391,8 +391,14 @@ def _add_universal_fields(meta, shapes, config: dict, arch: str) -> None:
     # tied embeddings: present when the GGUF has no separate output.weight.
     config["tie_word_embeddings"] = not _has_tensor(shapes, "output.weight")
 
-    # vocab size
+    # vocab size: the token count. A header scan seeks past the token
+    # array, so the header-only synth takes the token_embd rows, which
+    # equal the token count.
     vocab_size = _array_len(meta, "tokenizer.ggml.tokens")
+    if vocab_size is None:
+        embd = shapes.get("token_embd.weight")
+        if embd is not None and len(embd) == 2:
+            vocab_size = int(embd[1])
     if vocab_size is not None:
         config["vocab_size"] = vocab_size
 

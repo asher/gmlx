@@ -3,8 +3,9 @@
 load_model and _install_and_load drop GGUF tensors that match no parameter,
 as before. A parameter with no tensor would keep its random initialization,
 so the load raises with the missing and unmatched counts and the first
-names. The tiny llama GGUF from test_loader_api is loaded with an
-hf_source config.json that builds a different parameter tree.
+names. A tensor whose shape differs from its parameter's also stops the
+load, with both shapes. The tiny llama GGUF from test_loader_api is loaded
+with an hf_source config.json that builds a different parameter tree.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from test_loader_api import _mint_tiny_llama
+from test_loader_api import _HID, _TOKENS, _mint_tiny_llama
 
 
 @pytest.fixture(scope="module")
@@ -36,12 +37,13 @@ def _source(tmp_path, gguf: str, **changes) -> str:
     return str(d)
 
 
-def _refused(gguf: str, src: str) -> str:
+def _refused(gguf: str, src: str,
+             error: str = "UnfilledParametersError") -> str:
     import gmlx
 
     with pytest.raises(RuntimeError) as ei:
         gmlx.load_model(gguf, hf_source=src)
-    assert type(ei.value).__name__ == "UnfilledParametersError"
+    assert type(ei.value).__name__ == error
     return str(ei.value)
 
 
@@ -59,6 +61,17 @@ def test_the_message_counts_both_sides_and_names_the_first(gguf, tmp_path):
     assert "fill 20 of 29 model parameters" in msg
     assert "Parameters without a tensor (9): model.layers.2." in msg
     assert "(+4 more)" in msg
+
+
+def test_a_tensor_of_another_shape_stops_the_load(gguf, tmp_path):
+    # A config vocab wider than the GGUF's token_embd rows.
+    v = len(_TOKENS)
+    msg = _refused(gguf, _source(tmp_path, gguf, vocab_size=v + 8),
+                   error="ParameterShapeError")
+    assert ("1 of 20 model parameters get a GGUF tensor of another shape: "
+            f"model.embed_tokens.weight (parameter ({v + 8}, {_HID}), "
+            f"tensor ({v}, {_HID})).") in msg
+    assert "hf_source" in msg and "'llama'" in msg
 
 
 def test_tensors_without_a_parameter_are_dropped(gguf, tmp_path):
@@ -91,3 +104,15 @@ def test_install_and_load_stops_on_the_same_gap():
     assert "fill 2 of 3 model parameters" in msg
     assert "Parameters without a tensor (1): b.weight." in msg
     assert "Tensors without a parameter (1): extra.weight." in msg
+
+
+def test_install_and_load_stops_on_a_tensor_of_another_shape():
+    from gmlx.load.loader import _install_and_load
+
+    w = {"a.weight": mx.zeros((3, 4)), "a.bias": mx.zeros((4,)),
+         "b.weight": mx.zeros((4, 4))}
+    with pytest.raises(RuntimeError) as ei:
+        _install_and_load(_Pair(), w, {}, log=lambda *_a: None)
+    assert type(ei.value).__name__ == "ParameterShapeError"
+    assert ("1 of 3 model parameters get a GGUF tensor of another shape: "
+            "a.weight (parameter (4, 4), tensor (3, 4)).") in str(ei.value)

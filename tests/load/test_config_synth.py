@@ -106,6 +106,22 @@ def test_untied_when_output_weight_present():
     assert c["tie_word_embeddings"] is False
 
 
+def test_header_scan_vocab_is_the_token_count(tmp_path):
+    # A header scan seeks past a token array over its limit. The header-only
+    # synth (tool preflight, APC block size, serve capacity) then takes the
+    # token_embd rows.
+    from test_loader_api import _TOKENS, _mint_tiny_llama
+
+    from gmlx.commands.tool_preflight import synth_config_from_scans
+    from gmlx.load.headerscan import scan_gguf
+
+    p = str(tmp_path / "tiny-llama.gguf")
+    _mint_tiny_llama(p)
+    scan = scan_gguf(p, include_tensors=True, array_limit=8)
+    assert scan.skipped["tokenizer.ggml.tokens"] == len(_TOKENS)
+    assert synth_config_from_scans([scan])["vocab_size"] == len(_TOKENS)
+
+
 def test_seed_oss_head_dim_from_key_length():
     # Seed-OSS head_dim rides in GGUF as attention.key_length and is *not*
     # hidden//heads on the real model; the synth must surface the key_length value

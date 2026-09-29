@@ -1045,30 +1045,47 @@ class UnfilledParametersError(RuntimeError):
     """The GGUF weights leave model parameters without a tensor."""
 
 
+class ParameterShapeError(UnfilledParametersError):
+    """A GGUF tensor has another shape than the parameter of its name."""
+
+
 def _names(names: list[str], n: int = 5) -> str:
     more = f" (+{len(names) - n} more)" if len(names) > n else ""
     return ", ".join(names[:n]) + more
 
 
-def _require_filled(model_params: set[str], loadable: dict, hf_weights,
+def _require_filled(model_params: dict, loadable: dict, hf_weights,
                     hint: str = "") -> None:
-    """Refuse a load that leaves any model parameter without a tensor.
+    """Refuse a load that leaves any model parameter without a tensor, or
+    gives one a tensor of another shape.
 
-    GGUF tensors with no parameter are dropped (they are logged as
-    redundant). A parameter with no tensor keeps its random initialization,
-    and the model would run on it."""
-    missing = sorted(model_params - loadable.keys())
-    if not missing:
-        return
-    unmatched = sorted(set(hf_weights) - loadable.keys())
-    msg = (
-        f"the GGUF weights fill {len(model_params) - len(missing)} of "
-        f"{len(model_params)} model parameters. Parameters without a tensor "
-        f"({len(missing)}): {_names(missing)}. Tensors without a parameter "
-        f"({len(unmatched)})"
-        + (f": {_names(unmatched)}" if unmatched else "")
-        + ". The model would run on random weights, so the load stops.")
-    raise UnfilledParametersError(msg + (f" {hint}" if hint else ""))
+    ``model_params`` maps each parameter name to its shape. GGUF tensors
+    with no parameter are dropped (they are logged as redundant). A
+    parameter with no tensor keeps its random initialization, and the model
+    would run on it. ``load_weights(strict=False)`` checks no shapes, so a
+    tensor of another shape would replace its parameter while the config
+    still describes the old one. No shape mismatch is allowed."""
+    missing = sorted(model_params.keys() - loadable.keys())
+    if missing:
+        unmatched = sorted(set(hf_weights) - loadable.keys())
+        msg = (
+            f"the GGUF weights fill {len(model_params) - len(missing)} of "
+            f"{len(model_params)} model parameters. Parameters without a "
+            f"tensor ({len(missing)}): {_names(missing)}. Tensors without a "
+            f"parameter ({len(unmatched)})"
+            + (f": {_names(unmatched)}" if unmatched else "")
+            + ". The model would run on random weights, so the load stops.")
+        raise UnfilledParametersError(msg + (f" {hint}" if hint else ""))
+    wrong = sorted(k for k, v in loadable.items()
+                   if tuple(v.shape) != tuple(model_params[k]))
+    if wrong:
+        pairs = [f"{k} (parameter {tuple(model_params[k])}, tensor "
+                 f"{tuple(loadable[k].shape)})" for k in wrong]
+        msg = (
+            f"{len(wrong)} of {len(model_params)} model parameters get a GGUF "
+            f"tensor of another shape: {_names(pairs)}. The config does not "
+            f"describe these weights, so the load stops.")
+        raise ParameterShapeError(msg + (f" {hint}" if hint else ""))
 
 
 def _install_and_load(
@@ -1234,7 +1251,8 @@ def _install_and_load(
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
-    model_params = {p for p, _ in tree_flatten(model.parameters())}
+    model_params = {p: v.shape for p, v in tree_flatten(model.parameters())
+                    if isinstance(v, mx.array)}
     loadable = {k: v for k, v in hf_weights.items() if k in model_params}
     redundant = sorted(set(hf_weights.keys()) - set(loadable.keys()))
     if redundant:
@@ -1733,7 +1751,8 @@ def load_model(
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")
     model.eval()
-    model_params = {p for p, _ in tree_flatten(model.parameters())}
+    model_params = {p: v.shape for p, v in tree_flatten(model.parameters())
+                    if isinstance(v, mx.array)}
     loadable = {k: v for k, v in hf_weights.items() if k in model_params}
     redundant = sorted(set(hf_weights.keys()) - set(loadable.keys()))
     if redundant:
@@ -1744,8 +1763,8 @@ def load_model(
     _require_filled(
         model_params, loadable, hf_weights,
         hint=(f"hf_source {hf_source!r} builds model_type "
-              f"{config.get('model_type')!r}, whose parameter names do not "
-              f"match this GGUF." if hf_source is not None else ""))
+              f"{config.get('model_type')!r}, whose parameters do not match "
+              f"this GGUF." if hf_source is not None else ""))
 
     # Cast non-quantized float params (norms, SSM weights, and the F16 matrix
     # weights some conversions ship - e.g. gemma-3n's AltUp/LAuReL/per-layer
