@@ -324,6 +324,22 @@ def test_a_processor_without_the_flag_or_kwargs_is_called_as_before(fixed):
     assert seen == {"text": _BOS + "Hello", "padding": True}
 
 
+@pytest.mark.parametrize("build", ["_synthesize_muse_glimmer_processor",
+                                   "_synthesize_glm5next_processor"],
+                         ids=["muse_glimmer", "glm5_next"])
+def test_gmlx_processors_that_forward_kwargs_are_known(build):
+    """The Muse Glimmer and GLM-5.3 processors hand **kwargs to their
+    tokenizer, and the fix knows it."""
+    vlm = importlib.import_module("gmlx.load.vlm")
+    processor = getattr(vlm, build)(_tokenizer(), {
+        "clip.vision.patch_size": 14, "clip.vision.spatial_merge_size": 2})
+    assert _forwards_to_tokenizer(processor)
+    rows = [_row(processor(text=[_BOS + "Hello"],
+                           add_special_tokens=flag)["input_ids"])
+            for flag in (True, False)]
+    assert rows[0] == [0] + rows[1] and rows[1][0] == 0
+
+
 @pytest.mark.parametrize("path", _FORWARDING)
 def test_known_processors_take_the_flag_only_through_kwargs(path):
     cls = _class(path)

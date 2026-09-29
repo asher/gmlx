@@ -2595,6 +2595,8 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
 
     from mlx_vlm.models.base import to_mlx
 
+    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
+
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
     image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
@@ -2609,8 +2611,6 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
         attributes = ["image_processor", "tokenizer"]
         image_processor_class = "AutoImageProcessor"
         tokenizer_class = "AutoTokenizer"
-        # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
-        _gmlx_kwargs_reach_tokenizer = True
 
         image_token = "<|patch|>"
         image_start_token = "<|image_start|>"
@@ -2672,6 +2672,8 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
                 list(self.tokenizer.model_input_names)
                 + list(self.image_processor.model_input_names)))
 
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(MuseGlimmerProcessor, KWARGS_REACH_TOKENIZER, True)
     processor = MuseGlimmerProcessor(
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
@@ -2817,6 +2819,8 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
 
     from mlx_vlm.models.base import to_mlx
 
+    from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
+
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
     merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
     image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
@@ -2830,8 +2834,6 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
         attributes = ["image_processor", "tokenizer"]
         image_processor_class = "AutoImageProcessor"
         tokenizer_class = "AutoTokenizer"
-        # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
-        _gmlx_kwargs_reach_tokenizer = True
 
         image_token = "<|image|>"
 
@@ -2889,6 +2891,8 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
                 list(self.tokenizer.model_input_names)
                 + list(self.image_processor.model_input_names)))
 
+    # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
+    setattr(Glm5NextProcessor, KWARGS_REACH_TOKENIZER, True)
     processor = Glm5NextProcessor(
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
