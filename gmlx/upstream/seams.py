@@ -559,6 +559,18 @@ SEAMS: tuple[Seam, ...] = (
          "PixtralProcessor.__call__",
          "single_bos_fix (a known forwarding type: **kwargs reach "
          "self.tokenizer)"),
+    Seam("mlx_vlm.models.qwen3_vl.processing_qwen3_vl",
+         "Qwen3VLProcessor.__call__",
+         "media_salt._expected_tokens (an image expands to t*h*w of its "
+         "image_grid_thw row over merge_size**2)"),
+    Seam("mlx_vlm.models.gemma4_unified.processing_gemma4_unified",
+         "Gemma4UnifiedImageProcessor.preprocess",
+         "media_salt._expected_tokens (the 12B rule: one token per patch "
+         "row of image_position_ids)"),
+    Seam("mlx_vlm.models.gemma4_unified.processing_gemma4_unified",
+         "_pad_patches",
+         "media_salt._expected_tokens (the 12B rule: padding position rows "
+         "are -1)"),
     Seam("mlx_vlm.models.gemma4.processing_gemma4",
          "Gemma4ImageProcessor.preprocess",
          "media_salt._expected_tokens (a [C, H, W] image expands to one "
@@ -567,6 +579,14 @@ SEAMS: tuple[Seam, ...] = (
          "KimiK25Processor.__call__",
          "media_salt._expected_tokens (an image expands to h*w of its "
          "image_grid_hws row over the merge kernel's area)"),
+    Seam("mlx_vlm.models.kimi_k25.processing_kimi_k25",
+         "KimiK25ImageProcessor.preprocess",
+         "media_salt._image_rows (each image's patches are its image_grid_hws "
+         "row's h*w rows of the concatenated pixel_values)"),
+    Seam("mlx_vlm.models.kimi_k25.processing_kimi_k25",
+         "KimiK25ImageProcessor.patchify",
+         "media_salt._image_rows (an image patchifies to one row per cell "
+         "of its (H // patch_size, W // patch_size) grid)"),
     Seam("mlx_vlm.models.llava.processing_llava", "LlavaProcessor.__call__",
          "media_salt._expected_tokens (every image expands to the first "
          "image's (H // patch_size) * (W // patch_size) patches plus "
@@ -612,7 +632,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "_copy_mlx_array",
          "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "SEED_PARENT_HASH",
-         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks + "
+         "apc_manager.block_chain (the seed of every chain it walks) + "
+         "fresh_gate._covered_len (through block_chain)", critical=True),
     Seam("mlx_vlm.apc", "DEFAULT_BLOCK_SIZE",
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
     Seam("mlx_vlm.apc", "DEFAULT_NUM_BLOCKS",
@@ -719,21 +741,24 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "APCManager.lookup_prefix",
          "apc_manager.GmlxAPCManager.lookup_prefix (mirror for a "
          "MediaSalt: the stock walk over block_chain, one hit or miss; "
-         "re-sync on change) + fresh_gate._covered_len (the same walk)"),
+         "re-sync on change) + fresh_gate._covered_len (the same walk)",
+         critical=True),
     Seam("mlx_vlm.apc", "APCManager.lookup_prefix_disk_cache",
          "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (mirror for "
          "a MediaSalt: the stock restore over block_chain, each shard "
-         "block's salt checked at its end; re-sync on change)"),
+         "block's salt checked at its end; re-sync on change)",
+         critical=True),
     Seam("mlx_vlm.apc", "make_warm_kv_cache_from_layers",
          "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
-         "MediaSalt mirror builds the warm cache from the loaded prefix)"),
+         "MediaSalt mirror builds the warm cache from the loaded prefix)",
+         critical=True),
     Seam("mlx_vlm.apc", "DiskBlockStore.load_layer_major_prefix",
          "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
          "MediaSalt mirror: keys, values and per-block metadata with "
-         "token_ids and extra_hash)"),
+         "token_ids and extra_hash)", critical=True),
     Seam("mlx_vlm.apc", "DiskBlockStore.prefix_cache_bytes",
          "apc_manager.GmlxAPCManager.lookup_prefix_disk_cache (the "
-         "MediaSalt mirror sizes its _make_room call)"),
+         "MediaSalt mirror sizes its _make_room call)", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "
