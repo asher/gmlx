@@ -120,26 +120,32 @@ def bind_module(module) -> None:
 
 def register(*classes: type) -> None:
     """Make each gmlx cache class resolvable by name in the modules of
-    ``REGISTRY_MODULES``, including one that loads later. A name that
-    gmlx.cache.kv_cache defines, or that another class holds, raises
-    ValueError, so a gmlx class never shadows an owned class. Registering
-    a class again does nothing."""
+    ``REGISTRY_MODULES``, including one that loads later. The class must
+    derive from the owned ``_BaseCache``, or TypeError. A name that one of
+    those modules, loaded now, binds to another object, or that another
+    class holds, raises ValueError, so a registered class never shadows an
+    owned class or a stock name. Registering a class again does nothing."""
     owned = _owned(KV)
+    pending: dict[str, type] = {}
     for cls in classes:
+        if not (isinstance(cls, type) and issubclass(cls, owned._BaseCache)):
+            raise TypeError(
+                f"cannot register {cls!r}: not a subclass of "
+                f"{KV}._BaseCache")
         name = cls.__name__
-        held = _registry.get(name)
-        if held is cls:
-            continue
-        if held is not None:
+        held = pending.get(name) or _registry.get(name)
+        if held is not None and held is not cls:
             raise ValueError(
-                f"cannot register {cls.__module__}.{cls.__qualname__}: the "
-                f"cache class name {name!r} is registered to "
-                f"{held.__module__}.{held.__qualname__}")
-        if name in vars(owned):
-            raise ValueError(
-                f"cannot register {cls.__module__}.{cls.__qualname__}: "
-                f"{KV} defines {name!r}")
-        _registry[name] = cls
+                f"cannot register {_qualified(cls)}: the cache class name "
+                f"{name!r} is registered to {_qualified(held)}")
+        for where in REGISTRY_MODULES:
+            module = sys.modules.get(where)
+            if module is not None and module.__dict__.get(name, cls) is not cls:
+                raise ValueError(
+                    f"cannot register {_qualified(cls)}: {where} defines "
+                    f"{name!r}")
+        pending[name] = cls
+    _registry.update(pending)
     for where in REGISTRY_MODULES:
         module = sys.modules.get(where)
         if module is not None:
@@ -151,7 +157,20 @@ def registered() -> dict[str, type]:
     return dict(_registry)
 
 
+def _qualified(cls) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 def _apply_registry(module) -> None:
+    """Put each registered class into ``module``. A stock module that
+    loaded after the class registered, and defines the name itself, raises
+    ImportError before anything is set."""
+    for name, cls in _registry.items():
+        if module.__dict__.get(name, cls) is not cls:
+            raise ImportError(
+                f"{module.__name__} defines {name!r}, the name gmlx "
+                f"registered for {_qualified(cls)}; a stock name is never "
+                f"replaced")
     for name, cls in _registry.items():
         setattr(module, name, cls)
 

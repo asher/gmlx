@@ -267,6 +267,38 @@ def test_the_registry_refuses_a_name_already_taken():
         assert _mod(where).QSAKVCache is QSAKVCache, where
 
 
+@pytest.mark.parametrize("name", ["LRUPromptCache", "tree_flatten"])
+def test_the_registry_refuses_a_name_a_stock_cache_module_defines(name):
+    """mlx_lm.server holds the stock LRUPromptCache, and save_prompt_cache
+    calls tree_flatten, so neither name may change."""
+    lm = _mod("mlx_lm.models.cache")
+    before = getattr(lm, name)
+    cls = type(name, (owned._BaseCache,), {})
+    with pytest.raises(ValueError, match=f"mlx_lm.models.cache defines '{name}'"):
+        bind.register(cls)
+    assert getattr(lm, name) is before
+    assert name not in bind.registered() and name not in vars(owned)
+
+
+def test_the_registry_takes_only_cache_classes():
+    with pytest.raises(TypeError, match="_BaseCache"):
+        bind.register(type("NotACache", (object,), {}))
+    assert "NotACache" not in bind.registered()
+
+
+def test_a_cleared_registry_takes_the_same_class_again(monkeypatch):
+    from gmlx.models.minimax_m3 import MSAKVCache
+
+    bind.register(MSAKVCache)
+    monkeypatch.setattr(bind, "_registry", {})
+    bind.register(MSAKVCache)
+    assert bind.registered() == {"MSAKVCache": MSAKVCache}
+    twin = type("MSAKVCache", (owned.KVCache,), {})
+    monkeypatch.setattr(bind, "_registry", {})
+    with pytest.raises(ValueError, match="gmlx.cache.kv_cache defines"):
+        bind.register(twin)
+
+
 _REGISTER_FIRST_CHILD = r"""
 import json
 import sys
@@ -294,6 +326,38 @@ def test_a_class_registered_before_the_vlm_cache_module_loads_is_there():
     assert r.returncode == 0, r.stderr[-4000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out == {"loaded": False, "held": True}
+
+
+_REGISTER_A_STOCK_NAME_CHILD = r"""
+import json
+import sys
+
+import mlx.core as mx
+
+mx.set_default_device(mx.cpu)
+import gmlx  # noqa: F401
+import gmlx.cache.kv_cache as owned
+from gmlx.cache import bind
+
+bind.register(type("LRUPromptCache", (owned._BaseCache,), {}))
+loaded = "mlx_lm.models.cache" in sys.modules
+try:
+    import mlx_lm.models.cache  # noqa: F401
+    error = None
+except ImportError as e:
+    error = str(e)
+print(json.dumps({"loaded": loaded, "error": error}))
+"""
+
+
+def test_a_stock_cache_module_that_defines_a_registered_name_fails_to_load():
+    r = subprocess.run([sys.executable, "-c", _REGISTER_A_STOCK_NAME_CHILD],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ))
+    assert r.returncode == 0, r.stderr[-4000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["loaded"] is False
+    assert "defines 'LRUPromptCache'" in (out["error"] or ""), out
 
 
 def _msa():
