@@ -600,9 +600,11 @@ def install_template_default_thinking() -> None:
     resolve at call time."""
     import importlib
 
+    from gmlx.upstream.patching import wrapped_with
+
     pu = importlib.import_module("mlx_vlm.prompt_utils")
     original = pu.get_chat_template
-    if getattr(original, _TEMPLATE_DEFAULT_FLAG, False):
+    if wrapped_with(original, _TEMPLATE_DEFAULT_FLAG):
         return
     from jinja2 import Undefined
 
@@ -616,6 +618,7 @@ def install_template_default_thinking() -> None:
                         tokenize=tokenize, **kwargs)
 
     get_chat_template.__dict__[_TEMPLATE_DEFAULT_FLAG] = True
+    get_chat_template.__wrapped__ = original  # type: ignore[attr-defined]
     pu.get_chat_template = get_chat_template
 
 

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import importlib
 
+from gmlx.upstream.patching import wrapped_with
+
 _FLAG = "_gmlx_system_content_as_text"
 _ROLES = ("system", "developer")
 _TEXT_PARTS = ("text", "input_text")
@@ -46,7 +48,7 @@ def install_system_content_fix() -> None:
     module global is what both render call sites resolve at call time."""
     pu = importlib.import_module("mlx_vlm.prompt_utils")
     original = pu.get_chat_template
-    if getattr(original, _FLAG, False):
+    if wrapped_with(original, _FLAG):
         return
 
     def get_chat_template(processor, messages, add_generation_prompt,
