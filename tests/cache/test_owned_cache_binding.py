@@ -26,6 +26,7 @@ import gmlx.cache.attention as owned_attn
 import gmlx.cache.kv_cache as owned
 from gmlx.cache import bind
 from gmlx.upstream.patching import _walk, root
+from owned_names import ATTN, EXPECTED, KV, VLM_BASE, VLM_CACHE
 
 pytest.importorskip("mlx_vlm.models.cache")
 
@@ -41,15 +42,20 @@ def _leads_to(value, target) -> bool:
     return root(value) is root(target)
 
 
-@pytest.mark.parametrize("stock", sorted(bind.MAP))
-def test_every_mapped_name_is_the_owned_object(stock):
+@pytest.mark.parametrize("stock", sorted(EXPECTED))
+def test_every_shared_name_is_the_owned_object(stock):
     mod = _mod(stock)
-    for name, (where, attr) in bind.MAP[stock].items():
+    for name, where in EXPECTED[stock].items():
         value = getattr(mod, name)
-        assert _leads_to(value, getattr(_mod(where), attr)), (
+        assert _leads_to(value, getattr(_mod(where), name)), (
             stock, name, [(getattr(f, "__module__", None),
                            getattr(f, "__qualname__", None))
                           for f in _walk(value)])
+
+
+def test_the_binding_map_names_exactly_the_shared_names():
+    assert bind.MAP == {stock: {n: (where, n) for n, where in names.items()}
+                        for stock, names in EXPECTED.items()}
 
 
 def test_the_mlx_lm_only_names_stay_stock():
@@ -131,14 +137,14 @@ def test_the_apc_tables_key_on_owned_classes(monkeypatch):
 
 
 def test_owned_objects_carry_their_true_module():
-    for name, value in vars(owned).items():
-        if (isinstance(value, type) or inspect.isfunction(value)) and \
-                name in bind.VLM_CACHE_NAMES:
-            assert value.__module__ == "gmlx.cache.kv_cache", name
-    for name in bind.VLM_BASE_NAMES:
+    for name in VLM_CACHE:
+        value = root(getattr(owned, name))
+        assert isinstance(value, type) or inspect.isfunction(value), name
+        assert value.__module__ == KV, name
+    for name in VLM_BASE:
         # Under any gmlx wrapper (the KVarN sweep wraps the owned SDPA).
         value = root(getattr(owned_attn, name))
-        assert value.__module__ == "gmlx.cache.attention", name
+        assert value.__module__ == ATTN, name
 
 
 @pytest.fixture
@@ -413,7 +419,7 @@ import sys
 import mlx.core as mx
 
 mx.set_default_device(mx.cpu)
-mode = sys.argv[1]
+mode, expected = sys.argv[1], json.loads(sys.argv[2])
 early = None
 if mode == "gmlx-first":
     import gmlx  # noqa: F401
@@ -444,12 +450,12 @@ from gmlx.upstream.patching import root
 
 owned = importlib.import_module("gmlx.cache.kv_cache")
 unbound = []
-for stock, names in bind.MAP.items():
+for stock, names in expected.items():
     mod = sys.modules.get(stock)
     if mod is None:
         continue
-    for n, (where, attr) in names.items():
-        target = getattr(importlib.import_module(where), attr)
+    for n, where in names.items():
+        target = getattr(importlib.import_module(where), n)
         if root(getattr(mod, n)) is not root(target):
             unbound.append(f"{stock}.{n}")
 stock_ids = {id(o) for o, _ in bind.replaced() if isinstance(o, type)}
@@ -497,7 +503,8 @@ print(json.dumps(out))
 
 
 def _order(mode):
-    r = subprocess.run([sys.executable, "-c", _ORDER_CHILD, mode],
+    r = subprocess.run([sys.executable, "-c", _ORDER_CHILD, mode,
+                        json.dumps(EXPECTED)],
                        capture_output=True, text=True, timeout=600,
                        env=dict(os.environ))
     assert r.returncode == 0, r.stderr[-4000:]

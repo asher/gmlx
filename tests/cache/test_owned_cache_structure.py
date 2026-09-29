@@ -22,10 +22,9 @@ import mlx.core as mx
 import pytest
 
 import gmlx.cache.kv_cache as owned
-from gmlx.cache import bind
+from owned_names import KV, OWNED_CLASSES
 
-_CLASSES = [getattr(owned, n) for n in bind.VLM_CACHE_NAMES
-            if isinstance(getattr(owned, n), type)]
+_CLASSES = [getattr(owned, n) for n in OWNED_CLASSES]
 _CACHES = [c for c in _CLASSES if c not in (owned._BaseCache,
                                             owned.CacheMemory)]
 
@@ -66,6 +65,12 @@ def _filled():
     out[owned.PoolingCache] = owned.PoolingCache(4)
     out[owned.BatchPoolingCache] = owned.BatchPoolingCache(4, [0, 1])
     return out
+
+
+def test_the_owned_module_defines_exactly_the_listed_classes():
+    defined = {n for n, v in vars(owned).items()
+               if isinstance(v, type) and v.__module__ == KV}
+    assert defined == set(OWNED_CLASSES)
 
 
 def test_no_slots_len_or_bool():
