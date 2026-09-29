@@ -27,7 +27,7 @@ from mlx.utils import tree_flatten
 import mlx_kquant as kq
 
 from . import loadlog
-from .dtypes import activation_dtype, activation_dtype_name
+from .dtypes import activation_dtype, activation_dtype_name, dtype_name
 from gmlx.device import cpu_default_device, metal_info, metal_value
 from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
@@ -1047,6 +1047,50 @@ def _require_filled(model_params: dict, loadable: dict, hf_weights,
         raise ParameterShapeError(msg + (f" {hint}" if hint else ""))
 
 
+def _install_text_patches(model, log) -> None:
+    """The text-model installs of a load: process-wide patches of
+    mlx-lm and mlx-vlm, and module swaps that walk the model tree."""
+    if install_hd512_sdpa():
+        log("[install] head_dim-512 fused SDPA active")
+    if install_rope_batch_fix():
+        log("[install] rope int-offset batch fix active")
+    # Inside the decay wrap (installed first): media blocks stay whole.
+    from gmlx.gen.media_spans import (
+        install_block_aware_generate_step,
+        install_span_aware_prompt_step,
+    )
+    install_span_aware_prompt_step()
+    install_block_aware_generate_step()
+    install_prefill_tail()
+    if install_prefill_decay():
+        log("[install] depth-decay prefill chunking active")
+    if install_cascade_sdpa() and install_cascade_stamp():
+        log("[install] shared-prefix cascade decode route active")
+    if install_sparse_sdpa():
+        log("[install] sparse top-k page decode route active (lossy, opt-in)")
+    # After the installs whose state it reads.
+    gemma4_dispatch.configure(model, log)
+    n_fused_moe = install_fused_moe_glu(model)
+    if n_fused_moe:
+        log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_routed = install_switch_glu_block_routing(model)
+    if n_routed:
+        log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")
+    n_inv = install_batch_invariant_linears(model)
+    if n_inv:
+        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
+    n_fused_qkv = install_fused_qkv(model)
+    if n_fused_qkv:
+        log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+            f"{n_occ} modules")
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -1061,6 +1105,8 @@ def _install_and_load(
     active_before: float | None = None,
     deferred_tables: dict | None = None,
     hadamard: dict | None = None,
+    act_dtype: mx.Dtype | None = None,
+    text_patches: bool = True,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -1093,6 +1139,11 @@ def _install_and_load(
     ``hadamard``: module path -> ``FoldTarget`` for a Hadamard-folded GGUF
     (``hadamard.hadamard_targets_for``); the named kquant leaves take their
     rotating subclass right after the kquant swap.
+
+    ``act_dtype``: the dtype the float cast targets, default
+    ``activation_dtype()``. ``text_patches=False`` skips the text-model
+    installs of ``_install_text_patches`` for a model that is not a text
+    model. The kquant swap still runs.
     """
     loadlog.stage("loading weights")
     if active_before is None:
@@ -1155,45 +1206,8 @@ def _install_and_load(
         log(f"[install] {len(attached)} table(s) read from the GGUF, "
              f"{gb:.1f} GB: {', '.join(attached)}")
 
-    if install_hd512_sdpa():
-        log("[install] head_dim-512 fused SDPA active")
-    if install_rope_batch_fix():
-        log("[install] rope int-offset batch fix active")
-    # Inside the decay wrap (installed first): media blocks stay whole.
-    from gmlx.gen.media_spans import (
-        install_block_aware_generate_step,
-        install_span_aware_prompt_step,
-    )
-    install_span_aware_prompt_step()
-    install_block_aware_generate_step()
-    install_prefill_tail()
-    if install_prefill_decay():
-        log("[install] depth-decay prefill chunking active")
-    if install_cascade_sdpa() and install_cascade_stamp():
-        log("[install] shared-prefix cascade decode route active")
-    if install_sparse_sdpa():
-        log("[install] sparse top-k page decode route active (lossy, opt-in)")
-    # After the installs whose state it reads.
-    gemma4_dispatch.configure(model, log)
-    n_fused_moe = install_fused_moe_glu(model)
-    if n_fused_moe:
-        log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
-    n_routed = install_switch_glu_block_routing(model)
-    if n_routed:
-        log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")
-    n_inv = install_batch_invariant_linears(model)
-    if n_inv:
-        log(f"[install] batch-invariant kernel on {n_inv} small float projections")
-    n_shexp = install_hyv3_shexp_fold(model)
-    if n_shexp:
-        log(f"[install] shared-expert fold on {n_shexp} MoE layers")
-    n_fused_qkv = install_fused_qkv(model)
-    if n_fused_qkv:
-        log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
-    n_occ = install_occupancy_fuse(model)
-    if n_occ:
-        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
-            f"{n_occ} modules")
+    if text_patches:
+        _install_text_patches(model, log)
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -1208,8 +1222,9 @@ def _install_and_load(
         )
     _require_filled(model_params, loadable, hf_weights)
 
-    act_dtype = activation_dtype()
-    act_name = activation_dtype_name()
+    if act_dtype is None:
+        act_dtype = activation_dtype()
+    act_name = dtype_name(act_dtype)
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]

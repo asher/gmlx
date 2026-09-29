@@ -114,6 +114,11 @@ def activation_dtype(model_type: str | None = None) -> mx.Dtype:
     return dtype
 
 
+def dtype_name(dtype: mx.Dtype) -> str:
+    """Short label of a float dtype for load logs."""
+    return _SHORT_NAME.get(dtype, str(dtype))
+
+
 def activation_dtype_name(model_type: str | None = None) -> str:
     """Short label for load logs."""
-    return _SHORT_NAME[activation_dtype(model_type)]
+    return dtype_name(activation_dtype(model_type))
