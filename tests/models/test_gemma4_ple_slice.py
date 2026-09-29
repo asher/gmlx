@@ -1,10 +1,10 @@
 """Which callers reach the per-layer-input slice of the Gemma 4 text model.
 
 ``Gemma4TextModel.__call__`` slices whole-prompt ``per_layer_inputs`` at
-``int(c.offset)`` when they are longer than the chunk. On a batch cache
-the offset is an array, and ``int()`` raises at B>1 and syncs at B=1.
-This pins every caller that passes ``per_layer_inputs`` on a tiny model
-with per-layer inputs:
+the cache's column count when they are longer than the chunk. Stock reads
+it as ``int(c.offset)``: on a batch cache the offset is an array, and
+``int()`` raises at B>1 and syncs at B=1. This pins every caller that
+passes ``per_layer_inputs`` on a tiny model with per-layer inputs:
 
 - the container's ``__call__`` computes them from the same ids as the
   embeddings, so they are never longer than the chunk;
@@ -14,11 +14,19 @@ with per-layer inputs:
 - the single-sequence ``generate_step`` passes the whole prompt's with
   every chunk and reaches the slice, on a cache with int offsets.
 
-So no caller reaches the slice with a batch cache. The last test shows
-what the slice does with one.
+So no caller reaches the slice with a batch cache. The owned slice still
+takes one: it reads a batch cache's column count on the host, so a
+left-padded batch gets the chunk's inputs with no sync. The stock half
+runs in a child that applies no loader install (gemma4_probes.py).
 """
 
 from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import mlx.core as mx
 import pytest
@@ -28,7 +36,10 @@ from gmlx._vendor.mlx_vlm.models.gemma4.config import ModelConfig, TextConfig, V
 from gmlx.models.gemma4 import gemma4 as g4
 from gmlx.models.gemma4 import language as lang
 
+import gemma4_probes as probes
 from test_gemma4_image_audio import serve_env  # noqa: F401
+
+DRIVER = Path(__file__).with_name("gemma4_probes.py")
 
 _TEXT = dict(
     model_type="gemma4_text", hidden_size=64, num_hidden_layers=4,
@@ -127,12 +138,22 @@ def test_generate_step_reaches_the_slice_with_int_offsets(model, seen):
     assert reached and set(reached) == {"int"}
 
 
-def test_the_slice_raises_on_a_batch_cache(model):
-    ids, embeds, pli = _padded(model)
-    lm = model.language_model
-    cache = ar._make_cache(lm, [0, 6])
-    mx.eval(lm(None, inputs_embeds=embeds[:, :4], cache=cache,
-               per_layer_inputs=pli[:, :4]).logits)
-    with pytest.raises(ValueError, match="length-1"):
-        lm(None, inputs_embeds=embeds[:, 4:8], cache=cache,
-           per_layer_inputs=pli)
+def test_the_owned_slice_takes_the_chunk_on_a_batch_cache():
+    """Whole-prompt inputs on a left-padded batch cache give the logits
+    the chunk's own inputs give."""
+    lm = probes.tiny(lang, **probes.PLE)
+    embeds, pli, cache = probes.ple_batch_inputs(lm)
+    _e, _p, twin = probes.ple_batch_inputs(lm)
+    whole = lm(None, inputs_embeds=embeds[:, 4:8], cache=cache,
+               per_layer_inputs=pli).logits
+    chunk = lm(None, inputs_embeds=embeds[:, 4:8], cache=twin,
+               per_layer_inputs=pli[:, 4:8]).logits
+    assert mx.array_equal(whole, chunk).item()
+
+
+def test_the_stock_slice_raises_on_a_batch_cache():
+    r = subprocess.run([sys.executable, str(DRIVER), "--cpu"],
+                       capture_output=True, text=True, env=dict(os.environ),
+                       timeout=600)
+    assert r.returncode == 0, r.stderr[-4000:]
+    assert json.loads(r.stdout)["ple_batch_slice"] == "ValueError"

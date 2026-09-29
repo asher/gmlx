@@ -271,7 +271,61 @@ def unified_policy(uni) -> dict:
     return out
 
 
+SOFTCAP = 30.0
+
+
+def softcap(fn) -> dict:
+    """The dtype of ``fn(SOFTCAP, x)`` on bfloat16 logits, and its largest
+    error against the float32 softcap."""
+    mx.random.seed(3)
+    x = (mx.random.normal((2, 4096)) * 12.0).astype(mx.bfloat16)
+    out = fn(SOFTCAP, x)
+    ref = mx.tanh(x.astype(mx.float32) / SOFTCAP) * SOFTCAP
+    err = mx.abs(out.astype(mx.float32) - ref).max().item()
+    return {"dtype": str(out.dtype), "err": err}
+
+
+def model_logits_dtype(lang) -> str:
+    """The logits dtype of a bfloat16 model with a final softcap."""
+    lm = tiny(lang, final_logit_softcapping=SOFTCAP)
+    lm.set_dtype(mx.bfloat16)
+    return str(lm(_ids(PROMPT)).logits.dtype)
+
+
+PLE = dict(num_hidden_layers=4, num_kv_shared_layers=2,
+           hidden_size_per_layer_input=8, sliding_window_pattern=2)
+PLE_ROWS = [list(range(1, 21)), list(range(30, 44))]
+
+
+def ple_batch_inputs(lm):
+    """Left-padded ids for PLE_ROWS, their embeddings, per-layer inputs
+    and a batch cache after a four-column chunk."""
+    n = max(len(r) for r in PLE_ROWS)
+    pads = [n - len(r) for r in PLE_ROWS]
+    ids = mx.array([[0] * p + r for p, r in zip(pads, PLE_ROWS)])
+    embeds = lm.model.embed_tokens(ids) * lm.model.embed_scale
+    pli = lm.model.get_per_layer_inputs(ids)
+    cache = ar._make_cache(lm, pads)
+    mx.eval(lm(None, inputs_embeds=embeds[:, :4], cache=cache,
+               per_layer_inputs=pli[:, :4]).logits)
+    return embeds, pli, cache
+
+
+def ple_batch_slice(lang) -> str:
+    """What the text model does with whole-prompt per-layer inputs and a
+    later chunk on a batch cache: "ok", or the exception's type."""
+    lm = tiny(lang, **PLE)
+    embeds, pli, cache = ple_batch_inputs(lm)
+    try:
+        mx.eval(lm(None, inputs_embeds=embeds[:, 4:8], cache=cache,
+                   per_layer_inputs=pli).logits)
+    except Exception as e:  # noqa: BLE001
+        return type(e).__name__
+    return "ok"
+
+
 def main():
+    from gmlx._vendor.mlx_lm.models import gemma4_text as stock_lm
     from gmlx._vendor.mlx_vlm.models.gemma4 import language as stock
     from gmlx._vendor.mlx_vlm.models.gemma4_unified import gemma4_unified as stock_uni
 
@@ -285,6 +339,10 @@ def main():
         "image_mask_spread": image_mask_spread(stock),
         "lm_policy": lm_policy(stock),
         "unified_policy": unified_policy(stock_uni),
+        "softcap": {"gmlx._vendor.mlx_vlm": softcap(stock.logit_softcap),
+                    "gmlx._vendor.mlx_lm": softcap(stock_lm.logit_softcap)},
+        "model_logits_dtype": model_logits_dtype(stock),
+        "ple_batch_slice": ple_batch_slice(stock),
     }
     print(json.dumps(result, sort_keys=True))
 

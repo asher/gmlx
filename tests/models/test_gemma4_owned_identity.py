@@ -8,7 +8,8 @@ same parameters, and every call gives bit-identical outputs: prefill,
 decode, a verify block with the MTP capture and sinks, rollback,
 ``logits_to_keep``, ``skip_final_norm`` and two rows in one cache. The MoE
 reference carries gmlx's block routing on its SwitchGLUs, and the owned
-experts build mlx-lm's SwitchGLU, at every width from 1 to 8.
+experts build mlx-lm's SwitchGLU, at every width from 1 to 8. The
+reference also takes the owned float32 softcap, which every logit passes.
 """
 
 from __future__ import annotations

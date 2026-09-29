@@ -6,7 +6,9 @@ SDPA, and runs no loader install, so the stock classes run their mlx-vlm
 0.7.3 bodies. Each tiny random config builds a stock tree and an owned
 tree, loads the stock weights into the owned tree and runs the same calls
 on both. The MoE reference gets gmlx's block routing on its mlx-vlm
-SwitchGLUs, which is what gmlx runs today.
+SwitchGLUs, which is what gmlx runs today. Every logit passes the final
+softcap, which the owned copy runs in float32, so the reference takes the
+owned softcap too; test_gemma4_owned_softcap.py covers that change.
 
 Prints one JSON object: case -> {check: true when identical}.
 """
@@ -224,6 +226,7 @@ def container_case(kind) -> dict:
 
 def main():
     mx.set_default_device(mx.cpu if "--cpu" in sys.argv else mx.gpu)
+    stock_lang.logit_softcap = owned_lang.logit_softcap
     result = {name: lm_case(name) for name in TEXT}
     for kind in ("gemma4", "gemma4_unified"):
         result[kind] = container_case(kind)

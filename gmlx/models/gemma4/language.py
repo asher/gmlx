@@ -58,9 +58,11 @@ class RMSNormZeroShift(nn.Module):
         return mx.fast.rms_norm(x, self.weight, self.eps)
 
 
-@partial(mx.compile, shapeless=True)
+# gmlx: the softcap runs in float32 and returns float32 logits. At the
+# activation dtype each bfloat16 logit rounds by about softcap * eps, about
+# 0.12 nats at a cap of 30, enough to flip a near tie.
 def logit_softcap(softcap, x):
-    return mx.tanh(x / softcap) * softcap
+    return mx.tanh(x.astype(mx.float32) / softcap) * softcap
 
 
 class MLP(nn.Module):
@@ -397,6 +399,19 @@ def _cache_has_prefix(c) -> bool:
         return True
 
 
+# gmlx: the columns a cache has taken, counted on the host. int() of a
+# batch cache's array offset syncs at B=1 and raises at B>1, so a batch
+# cache gives its host count: _offset for BatchRotatingKVCache, _idx for
+# BatchKVCache. Both count the left padding, as the prompt's columns do.
+def _cache_columns(c) -> int:
+    if isinstance(c.offset, mx.array):
+        for name in ("_offset", "_idx"):
+            n = getattr(c, name, None)
+            if isinstance(n, int):
+                return n
+    return int(c.offset)
+
+
 # gmlx: the token types of an n-column chunk. A caller that passes the
 # whole prompt's types with every chunk (mlx-vlm's generate_step) gets them
 # sliced at the cache offset; None when they cannot be aligned.
@@ -627,9 +642,10 @@ class Gemma4TextModel(nn.Module):
             elif per_layer_inputs is not None:
                 target_len = h.shape[1]
                 if per_layer_inputs.shape[1] != target_len:
+                    # gmlx: the column count, with no sync on a batch cache.
                     cache_offset = next(
                         (
-                            int(c.offset)
+                            _cache_columns(c)
                             for c in (cache or [])
                             if c is not None and hasattr(c, "offset")
                         ),
