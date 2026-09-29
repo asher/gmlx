@@ -48,7 +48,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On `/v1/messages`, text sent beside a tool result reached the model ahead of
   the result, and a Gemma-4 model did not see the result at all.
 - On `/v1/messages`, a tool result image failed the request on DeepSeek-V4 and
-  on other models could reach the model twice or in an earlier turn.
+  on other models could reach the model twice or in another turn.
 - On `/v1/messages`, a Mistral model failed a request that sent text or an
   image beside a tool result.
 - A Gemma-4 model loaded with its mmproj, a Gemma-4 12B, DiffusionGemma and an

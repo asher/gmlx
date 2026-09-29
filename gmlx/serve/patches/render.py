@@ -33,10 +33,11 @@ tool message. The rebuild counts the markers of user messages only, so it
 also adds each tool image to the last user message. For the model types
 in ``_TOOL_IMAGES``, whose template renders an image in a tool turn, the
 wrapper leaves the tool images out of the count, in its rebuild and in the
-one the Gemma-4 processor runs. For other types it moves them to the start
-of the user message that follows the tool results and hands the template
-the tool text as a string (``_tool_images_to_user``); with no such message
-the rebuild places them as before.
+one the Gemma-4 processor runs. For other types it moves them to a user
+message of their own right after the tool results, as the Responses route
+places a tool output's images, and hands the template the tool text as a
+string (``_tool_images_to_user``). Each tool image then renders in one
+place, and in the same place in every later turn.
 
 The Mistral chat templates reject a user turn right after a tool turn, while
 the Messages API sends text and images beside the tool results in one user
@@ -95,35 +96,28 @@ def _tool_images(message) -> int:
 
 
 def _tool_images_to_user(items: list) -> list:
-    """``items`` with each tool message's images moved to the start of the
-    user message that follows its tool results, and its content as its
-    text, joined as the route joins a tool result's text. Images with no
-    such message stay with the rebuild, which puts them in the last user
-    message."""
-    out = list(items)
+    """``items`` with each tool message's content as its text, joined as
+    the route joins a tool result's text, and the images of each run of tool
+    messages in a user message of their own right after the run, as the
+    Responses route places a tool output's images."""
+    out: list = []
     moved: list = []
-    for i, message in enumerate(out):
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role")
-        if role == "tool":
+    for message in items:
+        if isinstance(message, dict) and message.get("role") == "tool":
             if _tool_images(message):
                 parts = [p for p in message["content"] if isinstance(p, dict)]
                 moved += [p for p in parts if p.get("type") in _IMAGE_ITEMS]
                 text = "\n".join(str(p["text"]) for p in parts
                                  if p.get("type") == "text" and p.get("text"))
-                out[i] = {**message, "content": text.strip()}
+                message = {**message, "content": text.strip()}
+            out.append(message)
             continue
-        if moved and role == "user":
-            content = message.get("content")
-            if isinstance(content, list):
-                content = moved + list(content)
-            elif content:
-                content = moved + [{"type": "text", "text": content}]
-            else:
-                content = list(moved)
-            out[i] = {**message, "content": content}
-        moved = []
+        if moved:
+            out.append({"role": "user", "content": moved})
+            moved = []
+        out.append(message)
+    if moved:
+        out.append({"role": "user", "content": moved})
     return out
 
 

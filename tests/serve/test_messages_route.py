@@ -1,11 +1,14 @@
 """/v1/messages renders a user message's tool results before its text, in
 block order, as the Messages API orders them. The stock conversion emits the
 text first, between the assistant's tool call and the tool response, and the
-Gemma-4 templates then drop the tool response.
+Gemma-4 templates then drop the tool response. The Mistral3 template rejects
+a user turn right after a tool turn, so there the text folds into the tool
+results.
 
 An image in a tool result renders once: in the tool turn on a template that
-shows an image there, else at the start of the text after the tool results.
-The stock render also counts it into the last user message."""
+shows an image there, else in a user message right after the tool results,
+as the Responses route places it. The stock render also counts it into the
+last user message."""
 
 from __future__ import annotations
 
@@ -328,6 +331,51 @@ def test_a_tool_image_and_a_later_image_keep_their_order(route, name):
     assert prompt.count(image) == 2
     _in_order(prompt, "RESULT-ONE", image, "TEXT-AFTER", "ANSWER",
               "NEXT-QUESTION", image)
+
+
+def _slots(prompt, image, anchors):
+    """The anchor text each image slot of ``prompt`` follows."""
+    out, pos = [], prompt.find(image)
+    while pos >= 0:
+        before = prompt[:pos]
+        out.append(max(anchors, key=before.rfind))
+        pos = prompt.find(image, pos + len(image))
+    return out
+
+
+# The templates that show no image in a tool turn: Gemma-4 through the
+# processor's own rebuild, and two that take the tool text as a string.
+_AFTER_TOOL_TURN = ("gemma4", "mistral3", "deepseek-v4")
+
+
+@pytest.mark.parametrize("name", _AFTER_TOOL_TURN)
+def test_each_image_fills_the_slot_of_its_turn(route, name):
+    """A tool image the next message does not follow up, then an image in a
+    later turn: each slot gets its own image."""
+    messages = _round(_shot(_image("s"))) + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_image("x"), _text("Q2")]},
+        {"role": "assistant", "content": [_text("ANS2")]},
+        {"role": "user", "content": [_text("Q3")]}]
+    prompt, images = route(name, messages, vision=True)
+    assert images == ["http://img/s", "http://img/x"]
+    assert _slots(prompt, _VISION[name][2], (
+        "ASK-FIRST", "RESULT-ONE", "ANSWER", "Q2", "ANS2", "Q3")) == [
+        "RESULT-ONE", "ANSWER"]
+
+
+@pytest.mark.parametrize("name", _AFTER_TOOL_TURN)
+def test_a_tool_image_stays_put_in_the_next_turn(route, name):
+    image = _VISION[name][2]
+    first = _round(_shot(_image("s")))
+    prompt1, images1 = route(name, first, vision=True)
+    prompt2, images2 = route(name, first + [
+        {"role": "assistant", "content": [_text("ANSWER")]},
+        {"role": "user", "content": [_text("NEXT-QUESTION")]}], vision=True)
+    assert images1 == images2 == ["http://img/s"]
+    assert prompt1.count(image) == prompt2.count(image) == 1
+    _in_order(prompt1, "RESULT-ONE", image)
+    assert prompt2.startswith(prompt1[:prompt1.index(image) + len(image)])
 
 
 @pytest.mark.parametrize("name", ("gemma4", "gemma4-12b", "qwen3.5"))
