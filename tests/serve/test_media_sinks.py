@@ -338,11 +338,22 @@ def test_the_audio_reader_opens_the_media_folder_and_model_folders_only(
     assert len(rec.calls) == 2
 
 
-def test_model_roots_are_the_configured_model_folders(sinks, monkeypatch, tmp_path):
-    import huggingface_hub.constants as hf_constants
-
+def _roots_for(tts, models) -> tuple[str, ...]:
     import gmlx.serve.bridge_vlm as serving
     from gmlx.config import build_config
+    serving.clear_resolved_models()
+    serving.register_resolved_models(build_config({
+        "server": {"tts": tts},
+        "models": {name: {"path": str(p)} for name, p in models.items()}}))
+    try:
+        return ms._resolve_model_roots()
+    finally:
+        serving.clear_resolved_models()
+
+
+def test_model_roots_are_hf_repo_folders_and_the_speech_folder(sinks, monkeypatch,
+                                                              tmp_path):
+    import huggingface_hub.constants as hf_constants
     hub = tmp_path / "hub"
     snap = hub / "models--org--llm" / "snapshots" / "abc"
     snap.mkdir(parents=True)
@@ -350,27 +361,37 @@ def test_model_roots_are_the_configured_model_folders(sinks, monkeypatch, tmp_pa
     blob.parent.mkdir()
     blob.write_bytes(b"GGUF")
     (snap / "m.gguf").symlink_to(blob)
-    local = tmp_path / "local" / "m.gguf"
-    local.parent.mkdir()
-    local.write_bytes(b"GGUF")
-    home_model = tmp_path / "home.gguf"
-    home_model.write_bytes(b"GGUF")
+    # Local model files, even one under a folder named like a repo folder,
+    # add no root: a GGUF in Downloads must not open Downloads.
+    downloads = tmp_path / "Downloads" / "m.gguf"
+    lookalike = tmp_path / "models--x" / "m.gguf"
+    for p in (downloads, lookalike):
+        p.parent.mkdir()
+        p.write_bytes(b"GGUF")
+    # A path through a link to the cache is still a cache model.
+    (tmp_path / "hublink").symlink_to(hub)
+    linked = tmp_path / "hublink" / "models--org--vlm" / "snapshots" / "x" / "m.gguf"
+    linked.parent.mkdir(parents=True)
+    linked.write_bytes(b"GGUF")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(hub))
-    serving.clear_resolved_models()
-    serving.register_resolved_models(build_config({
-        "server": {"tts": "mlx-community/csm-1b"},
-        "models": {"a": {"path": str(snap / "m.gguf")}, "b": {"path": str(local)},
-                   "c": {"path": str(home_model)}}}))
-    try:
-        roots = ms._resolve_model_roots()
-    finally:
-        serving.clear_resolved_models()
-    # A cache model's root is its repo folder, and a model kept in the home
-    # folder itself opens nothing.
-    assert roots == tuple(sorted({
-        ms.canonical(hub / "models--org--llm"), ms.canonical(local.parent),
+    models = {"a": snap / "m.gguf", "b": downloads, "c": lookalike, "d": linked}
+    assert _roots_for("mlx-community/csm-1b", models) == tuple(sorted({
+        ms.canonical(hub / "models--org--llm"), ms.canonical(hub / "models--org--vlm"),
         ms.canonical(hub / "models--mlx-community--csm-1b")}))
+    # Only a model repo folder counts, never the cache itself.
+    other = hub / "datasets--org--d" / "snapshots" / "x" / "m.gguf"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"GGUF")
+    for path in (hub, hub / "m.gguf", other):
+        assert ms._hf_repo_folder(str(path)) is None
+    # A speech model in a local folder opens that folder, unless it is the
+    # home folder or holds it.
+    voice = tmp_path / "voices" / "csm"
+    voice.mkdir(parents=True)
+    assert _roots_for(str(voice), {"b": downloads}) == (ms.canonical(voice),)
+    for folder in (tmp_path, tmp_path.parent):
+        assert _roots_for(str(folder), {"b": downloads}) == ()
 
 
 def test_modules_that_copied_the_audio_reader_get_the_check(sinks):

@@ -17,8 +17,8 @@ not know.
   :data:`~.media_gate.MEDIA_MAX_PIXELS` pixels.
 - ``mlx_audio.audio_io.read`` takes bytes or a file object of at most
   :data:`~.media_gate.MEDIA_MAX_BYTES`, a file in the media folder, or a
-  path in the folder of a configured model, such as a voice prompt the
-  model's own code reads.
+  path in the Hugging Face repo folder of a configured model or in the
+  speech model's folder, such as a voice prompt the model's own code reads.
 - ``mlx_vlm.utils.load`` loads only a configured model path.
 - ``load_drafter`` loads only the drafter the server's own build chose.
 - ``DiskBlockStore`` stores only under the APC disk path the server's own
@@ -39,7 +39,14 @@ import stat
 import tempfile
 from pathlib import Path
 
-from gmlx.safe_path import LeavesRoot, NotFollowed, canonical, open_file_below, path_inside
+from gmlx.safe_path import (
+    LeavesRoot,
+    NotFollowed,
+    canonical,
+    open_file_below,
+    parts_below,
+    path_inside,
+)
 from gmlx.serve.patches import media_gate as mg
 from gmlx.serve.patches.media_gate import MediaRefused
 
@@ -55,8 +62,9 @@ _MEDIA_DIR = ("gmlx", "media")
 
 # (module, attribute) -> the function or method replaced there.
 _originals: dict[tuple[object, str], object] = {}
-# The folders of the configured models, where mlx_audio's reader may open a
-# file a model's own code names. Set by install.
+# The Hugging Face repo folders of the configured models and the speech
+# model's folder, where mlx_audio's reader may open a file a model's own
+# code names. Set by install.
 _model_roots: tuple[str, ...] = ()
 
 
@@ -315,17 +323,17 @@ def _configured_model_paths() -> tuple[set[str], set[str]]:
     return models, adapters
 
 
-def _model_folder(path: str) -> str:
-    """The folder of a configured model file. For a file in the Hugging
-    Face cache this is its repo folder, which holds the repo's snapshots and
-    the blobs their files link to."""
-    folder = os.path.dirname(canonical(path))
-    probe = folder
-    while probe != os.path.dirname(probe):
-        if os.path.basename(probe).startswith("models--"):
-            return probe
-        probe = os.path.dirname(probe)
-    return folder
+def _hf_repo_folder(path: str) -> str | None:
+    """The Hugging Face repo folder a configured model file lies in, which
+    holds the repo's snapshots and the blobs their files link to, or None
+    for a file outside the Hugging Face cache."""
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    hub = canonical(HF_HUB_CACHE)
+    parts = parts_below(canonical(path), hub)
+    if parts and parts[0].startswith("models--"):
+        return os.path.join(hub, parts[0])
+    return None
 
 
 def _tts_folder() -> str | None:
@@ -349,13 +357,14 @@ def _tts_folder() -> str | None:
 
 
 def _resolve_model_roots() -> tuple[str, ...]:
+    # A model file outside the Hugging Face cache adds no root. Its code
+    # reads no audio from the folder it lies in, which may be ~/Downloads.
     models, adapters = _configured_model_paths()
-    roots = {_model_folder(p) for p in models | adapters}
+    roots = {r for r in map(_hf_repo_folder, models | adapters) if r}
     tts = _tts_folder()
     if tts:
         roots.add(tts)
-    # A model file kept in the home folder itself must not open the whole
-    # home folder.
+    # A speech model folder must not open the whole home folder.
     home = canonical(os.path.expanduser("~"))
     return tuple(sorted(r for r in roots if not path_inside(home, r)))
 
