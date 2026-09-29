@@ -15,6 +15,8 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import capacity as _capacity
 import gmlx.serve.bridge_vlm as serving
+from gmlx.upstream.patching import link, wrapped_with
+
 from ._common import (
     _PATCH_FLAG,
     _get_pool,
@@ -239,7 +241,7 @@ def install_hf_download_gate(hf_cache: bool) -> None:
     if hf_cache:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-    if getattr(utils.get_model_path, _PATCH_FLAG, False):
+    if wrapped_with(utils.get_model_path, _PATCH_FLAG):
         return
     original = utils.get_model_path
 
@@ -247,7 +249,7 @@ def install_hf_download_gate(hf_cache: bool) -> None:
         return _gate_model_path(path_or_hf_repo, hf_cache, original, *args, **kwargs)
 
     get_model_path.__dict__[_PATCH_FLAG] = True
-    utils.get_model_path = get_model_path
+    utils.get_model_path = link(get_model_path, original)
 
 
 # Runtime-snapshot enrichment (lifts /health + /v1/metrics)
@@ -282,7 +284,7 @@ def install_runtime_snapshot_enrichment() -> None:
     and ``/v1/metrics`` report the full pool (the handlers call it by name).
     Idempotent."""
     app = importlib.import_module("mlx_vlm.server.app")
-    if getattr(app._server_runtime_snapshot, _PATCH_FLAG, False):
+    if wrapped_with(app._server_runtime_snapshot, _PATCH_FLAG):
         return
     original = app._server_runtime_snapshot
 
@@ -386,7 +388,7 @@ def install_runtime_snapshot_enrichment() -> None:
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True
-    app._server_runtime_snapshot = snapshot
+    app._server_runtime_snapshot = link(snapshot, original)
 
 
 # Pool-aware /unload + /v1/reload

@@ -6,6 +6,8 @@ import os
 
 import mlx.core as mx
 
+from gmlx.upstream.patching import wrapped_with
+
 
 def _neutralize_wired_limit_sweep():
     """Pin the MLX wired limit at its default for the rest of the process.
@@ -32,7 +34,7 @@ def _neutralize_wired_limit_sweep():
     ``import mlx_lm.generate`` binds the function mlx_lm re-exports in
     ``__init__``, not the submodule.
     """
-    if getattr(mx.set_wired_limit, "_kq_no_sweep", False):
+    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
         return
     # A generator that started before this call left the limit raised, and
     # its exit restore is a no-op from here on. Lower it now: with it up,
@@ -140,8 +142,8 @@ def _install_wired_limit_warn_once():
         except ImportError:
             continue
         fn = getattr(mod, "wired_limit", None)
-        if fn is None or getattr(fn, "_kq_no_sweep", False) or \
-                getattr(fn, "_kq_warn_once", False):
+        if fn is None or wrapped_with(fn, "_kq_no_sweep") or \
+                wrapped_with(fn, "_kq_warn_once"):
             continue
         mod.wired_limit = _warn_once_wired_limit
 

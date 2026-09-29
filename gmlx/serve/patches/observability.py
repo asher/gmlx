@@ -6,6 +6,8 @@ import importlib
 import logging
 import time
 
+from gmlx.upstream.patching import link, wrapped_with
+
 
 # Per-request timing log
 #
@@ -125,7 +127,7 @@ def install_request_timing_log() -> None:
     try:
         gen = importlib.import_module("mlx_vlm.server.generation")
         store = gen.ServerMetricsStore
-        if getattr(store.record_success, _REQUEST_LOG_FLAG, False):
+        if wrapped_with(store.record_success, _REQUEST_LOG_FLAG):
             return
         orig_success = store.record_success
         orig_failure = store.record_failure
@@ -148,5 +150,5 @@ def install_request_timing_log() -> None:
             pass
 
     record_success.__dict__[_REQUEST_LOG_FLAG] = True
-    store.record_success = record_success
-    store.record_failure = record_failure
+    store.record_success = link(record_success, orig_success)
+    store.record_failure = link(record_failure, orig_failure)

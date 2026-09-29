@@ -8,6 +8,8 @@ import importlib
 import logging
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.upstream.patching import link, wrapped_with
+
 from ._common import (
     _PATCH_FLAG,
     _install_gen_args_transform,
@@ -147,7 +149,7 @@ def install_until_eos_default() -> None:
     if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
         return
     orig = cls._make_thinking_budget_criteria
-    if getattr(orig, _UNTIL_EOS_FLAG, False):
+    if wrapped_with(orig, _UNTIL_EOS_FLAG):
         return
 
     def _make_thinking_budget_criteria(self, args, input_ids):
@@ -161,7 +163,7 @@ def install_until_eos_default() -> None:
 
     _make_thinking_budget_criteria.__dict__.update(getattr(orig, "__dict__", {}))
     _make_thinking_budget_criteria.__dict__[_UNTIL_EOS_FLAG] = True
-    cls._make_thinking_budget_criteria = _make_thinking_budget_criteria
+    cls._make_thinking_budget_criteria = link(_make_thinking_budget_criteria, orig)
 
 
 # XTC sampling (request extras / profile -> per-request logits processor)
@@ -436,7 +438,7 @@ def install_fast_sampler() -> None:
     and applies the llama.cpp filter order. Idempotent; greedy (temperature 0)
     still returns ``None`` so the batch engine keeps its argmax fast path."""
     from mlx_vlm.server import generation as gen
-    if getattr(gen.ResponseGenerator._make_sampler, _FAST_SAMPLER_FLAG, False):
+    if wrapped_with(gen.ResponseGenerator._make_sampler, _FAST_SAMPLER_FLAG):
         return
     stock_make_sampler = gen.ResponseGenerator._make_sampler
 
@@ -456,4 +458,4 @@ def install_fast_sampler() -> None:
             seed=getattr(args, "seed", None))
 
     _make_sampler.__dict__[_FAST_SAMPLER_FLAG] = True
-    gen.ResponseGenerator._make_sampler = _make_sampler
+    gen.ResponseGenerator._make_sampler = link(_make_sampler, stock_make_sampler)

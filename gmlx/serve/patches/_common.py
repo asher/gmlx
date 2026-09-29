@@ -6,6 +6,8 @@ import importlib
 import inspect
 import sys
 
+from gmlx.upstream.patching import link, wrapped_with
+
 
 _PATCH_FLAG = "_kq_gguf_server_patches"
 
@@ -19,7 +21,7 @@ def _install_gen_args_transform(flag: str, transform) -> None:
     install wraps the current function and carries earlier patch flags forward,
     so every transform stays idempotent under its own ``flag``."""
     app = importlib.import_module("mlx_vlm.server.app")
-    if getattr(app._build_gen_args, flag, False):
+    if wrapped_with(app._build_gen_args, flag):
         return
     original = app._build_gen_args
 
@@ -29,7 +31,7 @@ def _install_gen_args_transform(flag: str, transform) -> None:
 
     build_gen_args.__dict__.update(original.__dict__)   # earlier patch flags
     build_gen_args.__dict__[flag] = True
-    app._build_gen_args = build_gen_args
+    app._build_gen_args = link(build_gen_args, original)
     deps = getattr(app, "_protocol_deps", None)
     if deps is not None:
         deps.build_gen_args = build_gen_args

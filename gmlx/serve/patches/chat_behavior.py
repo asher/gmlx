@@ -10,6 +10,8 @@ import os
 
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.upstream.patching import link, wrapped_with
+
 from ._common import (
     _CHAT_PATHS,
     _PATCH_FLAG,
@@ -134,7 +136,7 @@ def install_chat_template_kwargs() -> None:
     gen = importlib.import_module("mlx_vlm.server.generation")
     cls = gen.GenerationArguments
     original = cls.to_template_kwargs
-    if getattr(original, _CTKW_FLAG, False):
+    if wrapped_with(original, _CTKW_FLAG):
         return
 
     def to_template_kwargs(self):
@@ -147,7 +149,7 @@ def install_chat_template_kwargs() -> None:
         return kw
 
     to_template_kwargs.__dict__[_CTKW_FLAG] = True
-    cls.to_template_kwargs = to_template_kwargs
+    cls.to_template_kwargs = link(to_template_kwargs, original)
 
 
 # OpenAI `developer` role for templates that do not handle it
@@ -232,12 +234,12 @@ def install_role_normalization() -> None:
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, _ROLE_NORM_FLAG, False):
+        if fn is not None and not wrapped_with(fn, _ROLE_NORM_FLAG):
             setattr(target, "apply_chat_template", _wrap(fn))
 
     openai = importlib.import_module("mlx_vlm.server.openai")
     merge = getattr(openai, "_normalize_instruction_messages", None)
-    if merge is not None and not getattr(merge, _ROLE_NORM_FLAG, False):
+    if merge is not None and not wrapped_with(merge, _ROLE_NORM_FLAG):
         wrapped = _developer_in_place(merge)
         wrapped.__dict__[_ROLE_NORM_FLAG] = True
         setattr(openai, "_normalize_instruction_messages", wrapped)
@@ -308,7 +310,7 @@ def install_thinking_budget_fix() -> None:
     cls = getattr(gen, "ResponseGenerator", None)
     if cls is None or not hasattr(cls, "_make_thinking_budget_criteria"):
         return
-    if getattr(cls._make_thinking_budget_criteria, _TBUDGET_FLAG, False):
+    if wrapped_with(cls._make_thinking_budget_criteria, _TBUDGET_FLAG):
         return
     armed_cls = _armed_thinking_budget_criteria_cls()
 
@@ -428,7 +430,7 @@ def install_stream_thinking_seed() -> None:
     cls = getattr(rs, "ThinkingStreamState", None)
     if cls is None:
         return
-    if not getattr(cls.__init__, _STREAM_SEED_FLAG, False):
+    if not wrapped_with(cls.__init__, _STREAM_SEED_FLAG):
         original_init = cls.__init__
 
         def __init__(self, *args, **kw):
@@ -450,7 +452,7 @@ def install_stream_thinking_seed() -> None:
         __init__.__dict__[_STREAM_SEED_FLAG] = True
         cls.__init__ = __init__
 
-    if not getattr(cls.feed, _STREAM_SEED_FLAG, False):
+    if not wrapped_with(cls.feed, _STREAM_SEED_FLAG):
         original_feed = cls.feed
         delta_cls = rs.ThinkingStreamDelta
 
@@ -484,7 +486,7 @@ def install_stream_thinking_seed() -> None:
     app = importlib.import_module("mlx_vlm.server.app")
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, _STREAM_SEED_FLAG, False):
+        if fn is not None and not wrapped_with(fn, _STREAM_SEED_FLAG):
             setattr(target, "apply_chat_template", _wrap(fn))
 
     # Non-stream twin: a reply that hits max_tokens inside a prompt-opened
@@ -494,7 +496,7 @@ def install_stream_thinking_seed() -> None:
     # the request contextvar.
     import gmlx.cache.retire_key as retire_key
     split = getattr(app, "_split_thinking_text", None)
-    if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
+    if split is not None and not wrapped_with(split, _STREAM_SEED_FLAG):
         def _split_thinking_text(text, thinking_start_token=None,
                                  thinking_end_token=None,
                                  starts_in_thinking=False, processor=None):
@@ -555,7 +557,7 @@ def install_ignore_eos() -> None:
     if cls is None:
         return
     original = cls.__call__
-    if getattr(original, _IGNORE_EOS_FLAG, False):
+    if wrapped_with(original, _IGNORE_EOS_FLAG):
         return
 
     def __call__(self, input_ids):
@@ -755,8 +757,7 @@ def install_openai_stop_sequences() -> None:
     # module helper so a cut also rstrips; no-hit text passes through.
     an = importlib.import_module("mlx_vlm.server.anthropic")
     stock_apply = getattr(an, "_apply_stop_sequences", None)
-    if stock_apply is not None and not getattr(
-            stock_apply, _STOP_FLAG, False):
+    if stock_apply is not None and not wrapped_with(stock_apply, _STOP_FLAG):
         def _apply_stop_sequences(text, stop_sequences):
             out, seq = stock_apply(text, stop_sequences)
             if seq is not None:
@@ -788,7 +789,7 @@ def install_vanilla_stream_chunks() -> None:
     schemas = importlib.import_module("mlx_vlm.server.schemas")
     chunk_cls = schemas.ChatStreamChunk
     original = chunk_cls.model_dump_json
-    if getattr(original, _PATCH_FLAG, False):
+    if wrapped_with(original, _PATCH_FLAG):
         return
 
     def model_dump_json(self, **kwargs):
@@ -796,15 +797,14 @@ def install_vanilla_stream_chunks() -> None:
         return original(self, **kwargs)
 
     model_dump_json.__dict__[_PATCH_FLAG] = True
-    chunk_cls.model_dump_json = model_dump_json
+    chunk_cls.model_dump_json = link(model_dump_json, original)
 
     # Non-stream twin (mlx-vlm >= 0.6.15): GenerationTimings grew optional
     # draft_* fields, so the ChatResponse body carries timings nulls unless
     # they are stripped. Scoped to timings: choices[].logprobs stays null
     # per the OpenAI wire.
     resp_cls = getattr(schemas, "ChatResponse", None)
-    if resp_cls is not None and not getattr(
-            resp_cls.model_dump, _PATCH_FLAG, False):
+    if resp_cls is not None and not wrapped_with(resp_cls.model_dump, _PATCH_FLAG):
         original_dump = resp_cls.model_dump
 
         def model_dump(self, **kwargs):
@@ -907,7 +907,7 @@ def install_stream_timings() -> None:
 
     generation = importlib.import_module("mlx_vlm.server.generation")
     metrics_cls = generation.GenerationMetrics
-    if not getattr(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG, False):
+    if not wrapped_with(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG):
         metrics_cls.record_chunk = _count_record_chunk(metrics_cls.record_chunk)
 
     app = importlib.import_module("mlx_vlm.server.app").app

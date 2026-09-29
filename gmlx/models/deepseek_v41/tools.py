@@ -29,6 +29,8 @@ import re
 import sys
 from typing import Any
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _DSML = "｜DSML｜"
 
 tool_call_start = f"<{_DSML} calls>"
@@ -110,14 +112,14 @@ def install_message_normalizer(tokenizer) -> None:
     """Run ``normalize_messages`` ahead of every chat-template render on
     this tokenizer. Idempotent."""
     original = getattr(tokenizer, "apply_chat_template", None)
-    if original is None or getattr(original, "_ds41_normalized", False):
+    if original is None or wrapped_with(original, "_ds41_normalized"):
         return
 
     def apply_chat_template(conversation, *args, **kwargs):
         return original(normalize_messages(conversation), *args, **kwargs)
 
     apply_chat_template._ds41_normalized = True
-    tokenizer.apply_chat_template = apply_chat_template
+    tokenizer.apply_chat_template = link(apply_chat_template, original)
 
 
 def ensure_registered() -> None:

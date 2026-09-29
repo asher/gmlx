@@ -29,6 +29,8 @@ import importlib
 import json
 import os
 
+from gmlx.upstream.patching import wrapped_with
+
 # Stock tail: these model types return only the last message when a
 # rendered prompt is requested.
 _LAST_MESSAGE_ONLY = ("paligemma", "molmo", "florence2", "falcon_ocr")
@@ -128,7 +130,7 @@ def install_faithful_history() -> None:
 
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, "_kq_faithful_history", False):
+        if fn is not None and not wrapped_with(fn, "_kq_faithful_history"):
             target.apply_chat_template = _wrap(fn)
 
 
@@ -177,7 +179,7 @@ def install_chat_image_placement() -> None:
     """
     openai = importlib.import_module("mlx_vlm.server.openai")
     stock = openai.extract_text_from_content
-    if not getattr(stock, _PLACEMENT_FLAG, False):
+    if not wrapped_with(stock, _PLACEMENT_FLAG):
         def extract_text_from_content(content):
             if isinstance(content, _PlacedImages):
                 return _placed_content(content)

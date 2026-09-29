@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _TEXT_TYPES = ("text", "input_text")
 
 
@@ -55,11 +57,11 @@ def install_string_content(tokenizer) -> None:
     """Run ``string_content`` ahead of every chat-template render on this
     tokenizer. Idempotent."""
     original = getattr(tokenizer, "apply_chat_template", None)
-    if original is None or getattr(original, "_ds4_string_content", False):
+    if original is None or wrapped_with(original, "_ds4_string_content"):
         return
 
     def apply_chat_template(conversation, *args, **kwargs):
         return original(string_content(conversation), *args, **kwargs)
 
     setattr(apply_chat_template, "_ds4_string_content", True)
-    tokenizer.apply_chat_template = apply_chat_template
+    tokenizer.apply_chat_template = link(apply_chat_template, original)

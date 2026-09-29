@@ -9,6 +9,8 @@ import importlib
 import logging
 import weakref
 
+from gmlx.upstream.patching import link, wrapped_with
+
 _log = logging.getLogger(__name__)
 _CAPTURE_WARNED: set[str] = set()
 
@@ -150,14 +152,14 @@ def install_retire_render_capture() -> None:
     # retirement keys cover all protocol routes, not just OpenAI.
     for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
-        if fn is not None and not getattr(fn, "_kq_retire_capture", False):
+        if fn is not None and not wrapped_with(fn, "_kq_retire_capture"):
             target.apply_chat_template = _make_capture(fn)
 
     # The handlers resolve their parser through the package attribute
     # (``_protocol_deps`` looks it up at call time), before they render.
     pkg = importlib.import_module("mlx_vlm.server")
     infer = getattr(pkg, "_infer_tool_parser_from_processor", None)
-    if infer is not None and not getattr(infer, "_kq_retire_capture", False):
+    if infer is not None and not wrapped_with(infer, "_kq_retire_capture"):
         def _infer_tool_parser_from_processor(processor, override=None):
             _REQUEST_TOOL_PARSER.set(override)
             return infer(processor, override=override)
@@ -167,7 +169,7 @@ def install_retire_render_capture() -> None:
 
     cls = gen_mod.ResponseGenerator
     orig_pre = cls._preprocess_request
-    if getattr(orig_pre, "_kq_retire_capture", False):
+    if wrapped_with(orig_pre, "_kq_retire_capture"):
         return
 
     def _preprocess_request(self, prompt, images=None, audio=None,
@@ -198,4 +200,4 @@ def install_retire_render_capture() -> None:
         return raw
 
     _preprocess_request._kq_retire_capture = True
-    cls._preprocess_request = _preprocess_request
+    cls._preprocess_request = link(_preprocess_request, orig_pre)

@@ -20,6 +20,7 @@ import ast
 import collections
 import importlib
 import pathlib
+import types
 
 import pytest
 
@@ -30,69 +31,32 @@ _ROOT = pathlib.Path(gmlx.__file__).parent
 _LINKS = {"_gmlx_orig", "__wrapped__"}
 _SKIP = {"upstream/patching.py"}
 
-# Whole-body replacements on a name another installer also wraps, as
-# "path::installer::def". Neither calls what it replaces.
+# Functions that take a flag, or a name another installer also sets, and
+# call nothing under them, as "path::installer::def": whole-body
+# replacements, and fields of an object the installer built.
 _REPLACEMENTS = {
     # Installs before the cascade stamp wraps it (serve patches order).
     "cache/apc_pooling.py::install_batched_cachelist_admission::_extend_cache",
     # SpeculativeGenerationBatch.extend raises in stock. The cascade wraps
     # the extend of a cache, which is another name.
     "spec/admission.py::install_continuous_batch_admission::_buffered_extend",
-}
-
-# Offenders not yet moved to the chain helpers, as "path::function".
-_KNOWN = {
-    "guard": {
-        "eval_guard.py::install_stream_registry",
-        "models/deepseek_v4/chat.py::install_string_content",
-        "models/deepseek_v41/tools.py::install_message_normalizer",
-        "serve/patches/_common.py::_install_gen_args_transform",
-        "serve/patches/apc.py::install_retire_render_capture",
-        "serve/patches/chat_behavior.py::install_chat_template_kwargs",
-        "serve/patches/chat_behavior.py::install_ignore_eos",
-        "serve/patches/chat_behavior.py::install_openai_stop_sequences",
-        "serve/patches/chat_behavior.py::install_role_normalization",
-        "serve/patches/chat_behavior.py::install_stream_thinking_seed",
-        "serve/patches/chat_behavior.py::install_stream_timings",
-        "serve/patches/chat_behavior.py::install_thinking_budget_fix",
-        "serve/patches/chat_behavior.py::install_vanilla_stream_chunks",
-        "serve/patches/mtp_thinking.py::_install_criteria",
-        "serve/patches/mtp_thinking.py::_install_defer",
-        "serve/patches/mtp_thinking.py::_install_transport",
-        "serve/patches/observability.py::install_request_timing_log",
-        "serve/patches/render.py::install_chat_image_placement",
-        "serve/patches/render.py::install_faithful_history",
-        "serve/patches/routes.py::install_hf_download_gate",
-        "serve/patches/routes.py::install_runtime_snapshot_enrichment",
-        "serve/patches/sampling.py::install_fast_sampler",
-        "serve/patches/sampling.py::install_until_eos_default",
-        "stream/wired_limit.py::_install_wired_limit_warn_once",
-        "stream/wired_limit.py::_neutralize_wired_limit_sweep",
-    },
-    "link": {
-        "eval_guard.py::install_stream_registry",
-        "models/deepseek_v4/chat.py::install_string_content",
-        "models/deepseek_v41/tools.py::install_message_normalizer",
-        "serve/patches/_common.py::_install_gen_args_transform",
-        "serve/patches/apc.py::install_retire_render_capture",
-        "serve/patches/chat_behavior.py::install_chat_template_kwargs",
-        "serve/patches/chat_behavior.py::install_ignore_eos",
-        "serve/patches/chat_behavior.py::install_thinking_budget_fix",
-        "serve/patches/chat_behavior.py::install_vanilla_stream_chunks",
-        "serve/patches/mtp_thinking.py::_install_criteria",
-        "serve/patches/mtp_thinking.py::_install_defer",
-        "serve/patches/mtp_thinking.py::_install_transport",
-        "serve/patches/observability.py::install_request_timing_log",
-        "serve/patches/routes.py::install_hf_download_gate",
-        "serve/patches/routes.py::install_runtime_snapshot_enrichment",
-        "serve/patches/sampling.py::install_fast_sampler",
-        "serve/patches/sampling.py::install_until_eos_default",
-        "stream/wired_limit.py::_install_wired_limit_warn_once",
-        "stream/wired_limit.py::_neutralize_wired_limit_sweep",
-        "stream/wired_limit.py::configure_cpu_device",
-        "tui/chat.py::_backend_mtp_text",
-        "tui/chat.py::_backend_plain_text",
-    },
+    # Decode never stops on EOS.
+    "serve/patches/chat_behavior.py::install_ignore_eos::__call__",
+    # The criteria seam is rebound without delegating; mtp_thinking wraps
+    # it after.
+    "serve/patches/chat_behavior.py::install_thinking_budget_fix"
+    "::_make_thinking_budget_criteria",
+    # The wired limit sweep: a no-op setter, and wired_limit bodies that
+    # skip the sweep or warn once.
+    "stream/wired_limit.py::_neutralize_wired_limit_sweep::_no_sweep",
+    "stream/wired_limit.py::_neutralize_wired_limit_sweep::_quiet_wired_limit",
+    "stream/wired_limit.py::_install_wired_limit_warn_once"
+    "::_warn_once_wired_limit",
+    "stream/wired_limit.py::configure_cpu_device::_wired_noop",
+    # Fields of the chat backend each builder makes.
+    "tui/chat.py::_backend_mtp_text::_new_text_cache",
+    "tui/chat.py::_backend_plain_text::_new_text_cache",
+    "tui/chat.py::_backend_plain_text::_join",
 }
 
 
@@ -245,18 +209,21 @@ def test_no_single_level_unwrap():
 
 
 def test_guards_walk_the_chain():
-    assert sorted(_scan()["guard"] - _KNOWN["guard"]) == []
+    assert sorted(_scan()["guard"]) == []
 
 
 def test_wrappers_link_what_they_wrap():
-    assert sorted(_scan()["link"] - _KNOWN["link"]) == []
+    assert sorted(_scan()["link"]) == []
 
 
-def test_known_offenders_still_offend():
-    """Keep the lists honest: a fixed site leaves them."""
-    found = _scan()
-    for rule, known in _KNOWN.items():
-        assert sorted(known - found[rule]) == [], rule
+def test_replacements_are_still_there():
+    """Keep the list honest: each entry names a def its installer still
+    rebinds."""
+    defs = set()
+    for rel, fn in _functions():
+        for _slot, d in _wrappers(fn):
+            defs.add(f"{rel}::{fn.name}::{d.name}")
+    assert sorted(_REPLACEMENTS - defs) == []
 
 
 _ROUTES = {
@@ -337,3 +304,23 @@ def test_tick_installers_rerun_in_another_order_add_no_layer(monkeypatch):
         assert ar.BatchGenerator._next is top, install.__name__
     for *_, flag in _TICK:
         assert sum(bool(f.__dict__.get(flag)) for f in _walk(top)) == 1, flag
+
+
+def test_chat_template_installers_rerun_in_another_order_add_no_layer():
+    """The DeepSeek-V4 and V4.1 message fixes both wrap a tokenizer's
+    apply_chat_template and read their flag on the outermost function, so
+    a rerun of the first under the second wrapped the template again."""
+    from gmlx.models.deepseek_v4.chat import install_string_content
+    from gmlx.models.deepseek_v41.tools import install_message_normalizer
+
+    seen = []
+    tokenizer = types.SimpleNamespace(
+        apply_chat_template=lambda conversation, *a, **k: seen.append(1))
+    install_string_content(tokenizer)
+    install_message_normalizer(tokenizer)
+    top = tokenizer.apply_chat_template
+    install_string_content(tokenizer)
+    install_message_normalizer(tokenizer)
+    assert tokenizer.apply_chat_template is top
+    tokenizer.apply_chat_template([{"role": "user", "content": "hi"}])
+    assert seen == [1]
