@@ -3,7 +3,6 @@ adapter, or an MLX checkpoint, behind one interface the trainer and the
 evaluator share."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from .format import read_json
@@ -85,20 +84,14 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
 
 
 def load_mlx_student(path: str, adapter_path: str | None = None):
-    """(model, config, tokenizer) from an MLX checkpoint directory, as
-    ``mlx_lm.load`` gives them, with gmlx's class resolver: a Gemma 4
-    checkpoint builds the owned model."""
-    from gmlx._vendor.mlx_lm.utils import load_adapters, load_model, load_tokenizer
+    """(model, config, tokenizer) from an MLX checkpoint directory or a
+    Hugging Face repo id, as ``mlx_lm.load`` gives them, with gmlx's class
+    resolver: a Gemma 4 checkpoint builds the owned model."""
+    from gmlx.load import mlx_checkpoint
 
-    from gmlx.models.gemma4.text import get_model_classes
-
-    model_path = Path(path)
-    model, config = load_model(model_path, get_model_classes=get_model_classes)
-    if adapter_path is not None:
-        model = load_adapters(model, adapter_path)
-        model.eval()
-    tokenizer = load_tokenizer(
-        model_path, eos_token_ids=config.get("eos_token_id", None))
+    model_path = mlx_checkpoint.resolve(path)
+    model, tokenizer = mlx_checkpoint.load(str(model_path),
+                                           adapter_path=adapter_path)
     cfg = read_json(model_path / "config.json")
     return model, cfg, tokenizer
 

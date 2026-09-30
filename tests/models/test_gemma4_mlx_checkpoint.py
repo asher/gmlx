@@ -280,6 +280,45 @@ def test_the_student_route_builds_the_owned_model(name, dirs, reference):
     assert np.abs(got - want).max() <= 1e-5
 
 
+def test_the_student_route_resolves_a_repo_id(dirs, reference, monkeypatch):
+    """A name that is no local path is a Hugging Face repo id, fetched with
+    the files mlx-lm fetches while the offline window is shut."""
+    import huggingface_hub
+
+    from gmlx.distill.student import load_mlx_student
+    from gmlx.serve import hf_cache
+
+    calls = []
+
+    def snapshot_download(repo_id, **kw):
+        calls.append((repo_id, kw, hf_cache._OFFLINE_LOCK._is_owned()))
+        return str(dirs["container_q4"])
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    model, cfg, tok = load_mlx_student("example-org/tiny-gemma-4")
+    [(repo_id, kw, locked)] = calls
+    assert (repo_id, locked) == ("example-org/tiny-gemma-4", True)
+    assert kw["revision"] is None
+    assert {"*.json", "model*.safetensors", "tokenizer.model"} <= set(
+        kw["allow_patterns"])
+    assert _owned_classes(model)
+    assert cfg["model_type"] == "gemma4"
+    assert tok.eos_token_id == 1
+    assert np.abs(_logits(model) - reference["container_q4"]).max() <= 1e-5
+
+
+def test_a_local_directory_is_not_fetched(dirs, monkeypatch):
+    import huggingface_hub
+
+    from gmlx.load import mlx_checkpoint
+
+    def snapshot_download(*a, **k):
+        raise AssertionError("fetched a local directory")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    assert mlx_checkpoint.resolve(str(dirs["flat"])) == dirs["flat"]
+
+
 @pytest.mark.parametrize("name", ["flat", "flat_q4", "container", "container_q4"])
 def test_the_text_only_route_builds_the_owned_model(name, dirs, reference):
     from gmlx._vendor.mlx_lm.utils import load_config
