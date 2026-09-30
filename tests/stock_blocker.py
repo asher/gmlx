@@ -8,6 +8,11 @@ it does in an environment without them, even in a venv that has them. The
 module is also the pytest plugin that lists the names and the importing
 lines at the end of the run and fails the run when it recorded any, since
 an importer that catches the ImportError lets every test pass.
+
+The finder works in the test process only. A child process that a test
+starts does not inherit it. tests/test_no_stock_imports.py poisons the
+stock packages for its own child, and the CI job that runs the suite
+without the stock packages installed covers every other child.
 """
 
 from __future__ import annotations
