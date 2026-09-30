@@ -16,7 +16,7 @@ Start modes (resolution order):
   (keep, drop gone, add new); preserves comments. With ``--from-hf-cache`` (or a
   config already carrying ``hf_cache: true``) it also reconciles cache-resident GGUFs.
   Default config unless ``--config``.
-* ``launch <harness>`` - point a coding harness (opencode, ...) at a **running** server
+* ``launch <client>`` - point a client (opencode, ...) at a **running** server
   and exec it (see :mod:`gmlx.commands.launch`). No auto-install; the server must
   already be up.
 * ``--config FILE`` - serve a YAML config (named models + profiles).

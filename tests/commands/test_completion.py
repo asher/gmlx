@@ -44,6 +44,16 @@ def test_verb_candidates_carry_descriptions():
 
 # Flag completion (scraped from each verb's own --help).
 
+def test_a_flag_description_is_its_first_sentence():
+    """A description ends at a full stop, never where argparse wrapped the
+    help, even when the sentence runs over two lines."""
+    opts = {o: h for o, _, h in completion._verb_options("launch")}
+    assert opts["--mount"] == "Share another folder with the container."
+    assert opts["--config-only"] == ("Write the client's config and print the command "
+                                     "instead of running it.")
+    assert completion._first_sentence("Use e.g. this. Then that.") == "Use e.g. this."
+
+
 def test_run_flag_completion():
     vals = _vals(completion._complete(["run", "--"]))
     for f in ("--max-tokens", "--temp", "--mmproj", "--speculative"):
@@ -168,7 +178,7 @@ def test_launch_completes_harnesses_and_menubar():
 def test_launch_labels_harnesses_by_kind():
     labels = dict(v.split("\t", 1)
                   for v in completion._complete(["launch", ""]))
-    assert labels["pi"] == "coding harness"
+    assert labels["pi"] == "coding agent"
     assert labels["goose"] == "agent runtime"
     assert labels["elia"] == "chat TUI"
     assert labels["dsh"] == "web app" and labels["open-webui"] == "web app"

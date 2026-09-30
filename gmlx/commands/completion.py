@@ -28,7 +28,7 @@ _VERB_DESC = {
     "serve": "run the batched multi-model OpenAI/Anthropic server",
     "init": "scaffold a starter server config",
     "sync-models": "reconcile a config's models with disk / the hf cache",
-    "launch": "point a coding harness at a running server",
+    "launch": "run a client against a running server",
     "stop": "stop a backgrounded server",
     "restart": "restart a backgrounded server",
     "status": "show whether a backgrounded server is running",
@@ -107,7 +107,7 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
     if verb.startswith("distill ") and not text.strip():
         return ()
     out: list[list[str]] = []
-    pending: list[int] = []                  # out indices awaiting wrapped help
+    current: list[int] = []                  # out indices whose help is still wrapping
     for line in text.splitlines():
         # Option-defining lines are indented exactly two spaces and start with a dash;
         # usage continuations align far deeper and positionals don't start with a dash.
@@ -115,22 +115,27 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
             head = re.match(r"^ {2}(-\S.*)$", line).group(1)
             parts = re.split(r"\s{2,}", head, maxsplit=1)
             inline = parts[1].strip() if len(parts) > 1 else ""
-            pending = []
+            current = []
             for tok in parts[0].split(", "):
                 tok = tok.strip()
                 if not tok.startswith("-"):
                     continue
                 bits = tok.split(None, 1)
                 out.append([bits[0], bits[1] if len(bits) > 1 else "", inline])
-                if not inline:               # help wrapped onto the next line
-                    pending.append(len(out) - 1)
-        elif pending and re.match(r"^ {3,}\S", line):
-            for idx in pending:
-                out[idx][2] = line.strip()
-            pending = []
+                current.append(len(out) - 1)
+        elif current and re.match(r"^ {3,}\S", line):
+            for idx in current:
+                out[idx][2] = f"{out[idx][2]} {line.strip()}".strip()
         else:
-            pending = []
-    return tuple((o[0], o[1], o[2]) for o in out)
+            current = []
+    return tuple((o[0], o[1], _first_sentence(o[2])) for o in out)
+
+
+def _first_sentence(text: str) -> str:
+    """The help up to its first full stop, so a description never ends
+    where argparse wrapped the line."""
+    m = re.search(r"(?<!\be\.g)(?<!\bi\.e)\.(?=\s)", text)
+    return text[:m.end()] if m else text
 
 
 def _capture_help(verb: str) -> str:
@@ -233,7 +238,7 @@ def _model_candidates(words: list[str]) -> list[str]:
     return out
 
 
-# Launch targets that are not coding harnesses, grouped as launch.py groups them.
+# Launch targets that are not coding agents, grouped as launch.py groups them.
 _HARNESS_KINDS = {
     "hermes": "agent runtime", "goose": "agent runtime",
     "aichat": "chat TUI", "elia": "chat TUI",
@@ -244,7 +249,7 @@ _HARNESS_KINDS = {
 def _harness_candidates() -> list[str]:
     from .launch import _HARNESSES
 
-    out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding harness')}"
+    out = [f"{h}\t{_HARNESS_KINDS.get(h, 'coding agent')}"
            for h in sorted(_HARNESSES)]
     out.append("menubar\tmacOS status-bar monitor")
     return out

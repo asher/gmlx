@@ -654,7 +654,7 @@ def launch_detached(child: list, *, host: str, port: int,
                 print("  set up:  gmlx init  ->  gmlx pull <hf:ref>  ->  "
                       "gmlx restart")
             else:
-                print(f"  try:  gmlx launch <harness>   or   "
+                print(f"  try:  gmlx launch <client>   or   "
                       f"curl http://{host}:{port}/v1/models")
             print(f"  logs: {lp}")
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
