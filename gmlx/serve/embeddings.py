@@ -2,27 +2,27 @@
 
 Three backends, chosen by what ``embeddings:`` points at:
 
-* **GGUF decoder-LM** (a ``*.gguf`` file or ``hf:<org>/<repo>/<file>.gguf`` ref) -
-  e.g. ``Qwen3-Embedding-{0.6,4,8}B``. These *are* the Qwen3 dense decoder trunk
-  plus last-token (EOS) pooling and an L2-norm, so the runtime's own
-  :func:`gmlx.load.loader.load_model` loads them and one prefill forward over
-  ``model.model`` (the trunk) gives the hidden states we pool - no separate
-  download, no encoder framework. This path is **not** capped at the BERT window,
-  so long documents (30k-token transcripts) embed without silent truncation.
+* GGUF decoder LM (a ``*.gguf`` file or ``hf:<org>/<repo>/<file>.gguf`` ref),
+  such as ``Qwen3-Embedding-{0.6,4,8}B``. These are the Qwen3 dense decoder
+  trunk plus last-token (EOS) pooling and an L2 norm, so the runtime's own
+  :func:`gmlx.load.loader.load_model` loads them, and one prefill forward over
+  ``model.model`` (the trunk) gives the hidden states to pool. No separate
+  download or encoder framework is needed. This path is not capped at the BERT
+  window, so long documents (30k-token transcripts) embed without silent
+  truncation.
 
-* **GGUF encoder** (a ``*.gguf`` / ``hf:`` ref to an encoder arch), e.g.
-  EmbeddingGemma. Same :func:`gmlx.load.loader.load_model`, but the GGUF builds a
-  gmlx encoder (:mod:`gmlx.models.embedders`: a bidirectional backbone +
-  mean-pool + dense head + L2-norm) that returns pooled ``text_embeds`` itself,
-  so we just forward each text.
+* GGUF encoder (a ``*.gguf`` or ``hf:`` ref to an encoder arch), such as
+  EmbeddingGemma. The same :func:`gmlx.load.loader.load_model` builds a gmlx
+  encoder (:mod:`gmlx.models.embedders`: a bidirectional backbone, mean
+  pooling, a dense head and an L2 norm) that returns pooled ``text_embeds``
+  itself, so each text is just forwarded.
 
-* **safetensors encoder** (an alias / mlx-community repo id / local dir) -
+* safetensors encoder (an alias, an mlx-community repo id or a local dir):
   EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding
   checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
-  pooled, L2-normalized vectors in ``outputs.text_embeds`` (the pooling is
-  the checkpoint's own: the first token for BGE-M3 and Arctic-Embed, the
-  last token for Qwen3-Embedding, the mean for EmbeddingGemma and Nomic
-  ModernBERT).
+  pooled, L2-normalized vectors in ``outputs.text_embeds``, pooled as the
+  checkpoint's sentence-transformers config sets (see
+  :mod:`gmlx.models.embedders.checkpoint`).
 
 Either way the loaded model is cached process-wide, so repeat requests don't
 reload. This module is import-safe without MLX loaded: the encoders import
@@ -54,13 +54,13 @@ from .subservice import (
 # Embedding model presets surfaced by the ``gmlx init`` wizard, in display order.
 # Two tiers:
 #
-#  * tier ``gguf`` - Qwen3-Embedding decoder-LMs that run on this runtime's own
-#    loader (last-token pooling + L2-norm), so they need no extra. Values are
-#    ``hf:`` refs into the official Qwen GGUF repos; ``quants`` lists only the
-#    rungs those repos actually ship (0.6B has just Q8_0 / f16).
-#  * tier ``mlx`` - safetensors encoders (Gemma3 / XLM-RoBERTa / ModernBERT)
-#    on gmlx's own encoders. Values are mlx-community repo ids; ``quants`` are
-#    the bit-width variants.
+#  * tier ``gguf``: GGUFs that run on this runtime's own loader, so they need
+#    no extra. The Qwen3-Embedding decoder LMs (last-token pooling and an L2
+#    norm) point into the official Qwen GGUF repos, and ``quants`` lists only
+#    the rungs those repos ship (0.6B has just Q8_0 and f16).
+#  * tier ``mlx``: safetensors encoders (EmbeddingGemma, XLM-RoBERTa,
+#    ModernBERT) on gmlx's own encoders. Values are mlx-community repo ids,
+#    and ``quants`` are the bit-width variants.
 #
 # ``dim`` is the vector width (bigger = larger index + more storage/RAM per
 # vector), ``ctx`` the max input tokens, ``default_quant`` the rung the wizard

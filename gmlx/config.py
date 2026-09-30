@@ -429,12 +429,12 @@ class ServerCfg:
     # model dir, or `true` for the default alias - resolved by
     # tts.resolve_tts_model at serve time.
     tts: str | None = None
-    # Optional text-embeddings model (POST /v1/embeddings). A GGUF decoder-LM
-    # embedder (alias `qwen3-embed-0.6b`, a *.gguf path, or
-    # hf:<org>/<repo>/<file>.gguf, loaded by the runtime), or a safetensors
-    # encoder (alias `embeddinggemma`/`bge-m3`, an HF MLX repo, a local dir, or
-    # `true` for the default alias), no extra either way - resolved by
-    # embeddings.resolve_embeddings_model at serve time.
+    # Optional text-embeddings model (POST /v1/embeddings). A GGUF embedder
+    # (alias `qwen3-embed-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf,
+    # loaded by the runtime), or a safetensors encoder (alias `embeddinggemma`
+    # or `bge-m3`, an HF MLX repo, or a local dir). `true` means the default
+    # alias, the GGUF `qwen3-embed-0.6b`. Neither needs an extra.
+    # embeddings.resolve_embeddings_model resolves it at serve time.
     embeddings: str | None = None
     # Optional reranker model (POST /v1/rerank; Cohere/Jina shape). A Qwen3-Reranker
     # GGUF (alias `qwen3-rerank-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf)

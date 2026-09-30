@@ -2,10 +2,11 @@
 
 gmlx builds these encoders itself: EmbeddingGemma (safetensors
 ``gemma3_text`` and the ``gemma_embedding`` GGUF), BERT, XLM-RoBERTa,
-ModernBERT and Qwen3-Embedding. A model takes ``(input_ids, attention_mask)`` and returns an
-``EncoderOutput`` whose ``text_embeds`` are the pooled, L2-normalized
-sentence vectors. :func:`load` reads an MLX safetensors checkpoint, plain
-or quantized, with its tokenizer (see :mod:`.checkpoint`).
+ModernBERT and Qwen3-Embedding. A model takes ``(input_ids,
+attention_mask)`` and returns an ``EncoderOutput`` whose ``text_embeds`` are
+the pooled, L2-normalized sentence vectors. :func:`load` reads an MLX
+safetensors checkpoint, plain or quantized, with its tokenizer (see
+:mod:`.checkpoint`).
 
 Importing this package loads nothing: the modules import MLX on use.
 """
