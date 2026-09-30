@@ -16,6 +16,12 @@ imports the same modules after gmlx and nothing else, since the cache
 bind that ``import gmlx`` installs rebinds the stock cache names in both.
 The two must be equal, and the loaded child must not have imported
 mlx-lm's gemma4 modules.
+
+Two more pairs of children import mlx-vlm's gemma4 modules, or mlx-lm as
+mlx-kld does, before gmlx. One of each pair builds the owned text model
+and both containers, whose attention must go through the owned dispatch
+to the owned base, and the stock modules must fingerprint as in the
+other, which builds nothing.
 """
 
 from __future__ import annotations
@@ -37,9 +43,20 @@ _CHILD = textwrap.dedent('''
     import mlx.core as mx
 
     mx.set_default_device(mx.cpu)
+    mode, paths, first = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3]
+    # What a host imports before gmlx.
+    FIRST = {
+        "gmlx": (),
+        "mlx_vlm": ("mlx_vlm.models.gemma4", "mlx_vlm.models.gemma4_unified",
+                    "mlx_vlm.speculative.drafters.gemma4_assistant",
+                    "mlx_vlm.models.diffusion_gemma"),
+        "mlx_lm": ("mlx_lm", "mlx_lm.utils", "mlx_lm.generate",
+                   "mlx_lm.models.cache"),
+    }
+    for name in FIRST[first]:
+        importlib.import_module(name)
     import gmlx
 
-    mode, paths = sys.argv[1], json.loads(sys.argv[2])
     STOCK = {
         "mlx_vlm.models.gemma4": (
             "config", "language", "gemma4", "vision", "audio",
@@ -164,6 +181,21 @@ _CHILD = textwrap.dedent('''
             model = load_vlm_checkpoint(__import__("pathlib").Path(paths[key]))
             mx.eval(model.language_model(ids).logits)
 
+    def build_owned():
+        from gmlx.cache import attention
+        from gmlx.load import vlm
+        from gmlx.load.loader import build_model
+        from gmlx.models.gemma4 import dispatch, language
+
+        ids = mx.array([[2, 17, 42, 99, 7, 63]])
+        mx.eval(build_model(text_config())[0](ids))
+        for model_type in ("gemma4", "gemma4_unified"):
+            model = vlm.build_vlm_model(container(model_type))[0]
+            mx.eval(model.language_model(ids).logits)
+        return {"dispatch": language.scaled_dot_product_attention
+                is dispatch.scaled_dot_product_attention,
+                "base": dispatch._base is attention.scaled_dot_product_attention}
+
     def run_installers():
         import inspect, pkgutil
 
@@ -233,10 +265,12 @@ _CHILD = textwrap.dedent('''
                 getattr(v, "__module__", None),
                 getattr(v, "__qualname__", getattr(v, "__name__", None))]
 
-    installers = None
+    installers = owned = None
     if mode == "loaded":
         run_routes()
         installers = run_installers()
+    elif mode == "built":
+        owned = build_owned()
     stock_lm = sorted(m for m in ("mlx_lm.models.gemma4_text",
                                   "mlx_lm.models.gemma4") if m in sys.modules)
     prints = {}
@@ -253,13 +287,14 @@ _CHILD = textwrap.dedent('''
                             continue
                         prints[name + ":" + attr + "." + cattr] = fp(cv)
     print(json.dumps({"stock_lm": stock_lm, "prints": prints,
-                      "installers": installers}))
+                      "installers": installers, "owned": owned}))
 ''')
 
 
-def _child(mode: str, paths: dict) -> dict:
+def _child(mode: str, paths: dict, first: str = "gmlx") -> dict:
     env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
-    r = subprocess.run([sys.executable, "-c", _CHILD, mode, json.dumps(paths)],
+    r = subprocess.run([sys.executable, "-c", _CHILD, mode, json.dumps(paths),
+                        first],
                        capture_output=True, text=True, env=env, timeout=900)
     assert r.returncode == 0, r.stderr[-4000:]
     return json.loads(r.stdout.strip().splitlines()[-1])
@@ -279,13 +314,30 @@ def runs(tmp_path_factory) -> dict:
     return {mode: _child(mode, paths) for mode in ("clean", "loaded")}
 
 
-def test_every_route_leaves_stock_gemma4_as_a_plain_import(runs):
-    clean, loaded = runs["clean"]["prints"], runs["loaded"]["prints"]
+def _changed(clean: dict, loaded: dict) -> dict:
     assert len(clean) > 500
-    changed = {k: (clean.get(k), loaded.get(k))
-               for k in sorted(set(clean) | set(loaded))
-               if clean.get(k) != loaded.get(k)}
-    assert changed == {}
+    return {k: (clean.get(k), loaded.get(k))
+            for k in sorted(set(clean) | set(loaded))
+            if clean.get(k) != loaded.get(k)}
+
+
+def test_every_route_leaves_stock_gemma4_as_a_plain_import(runs):
+    assert _changed(runs["clean"]["prints"], runs["loaded"]["prints"]) == {}
+
+
+def _import_order(first: str) -> None:
+    clean, built = _child("clean", {}, first), _child("built", {}, first)
+    assert built["owned"] == {"dispatch": True, "base": True}
+    assert built["stock_lm"] == []
+    assert _changed(clean["prints"], built["prints"]) == {}
+
+
+def test_an_owned_tree_after_mlx_vlm_gemma4_patches_nothing():
+    _import_order("gmlx._vendor.mlx_vlm")
+
+
+def test_an_owned_tree_after_mlx_lm_patches_nothing():
+    _import_order("gmlx._vendor.mlx_lm")
 
 
 def test_no_route_imports_the_stock_mlx_lm_gemma4_modules(runs):
