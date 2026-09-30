@@ -279,7 +279,8 @@ def _vlm_spec_language_model(model_type: str):
     image turns stays correct - unlike ``_mtp_target_classes``'s text build,
     which passes an empty one). None means the built ``.language_model``
     already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
-    their mixins in their own vlm_model), or the arch has no spec support
+    their mixins in their own vlm_model, and the owned gemma4 containers
+    hold the owned language model), or the arch has no spec support
     (the per-arch hook check downstream fails loud). The env gate
     GMLX_QWEN_OWNED is consulted at call time via ``_mtp_target_classes``,
     so =0 resolves to the stock class and the swap no-ops against the
@@ -289,13 +290,6 @@ def _vlm_spec_language_model(model_type: str):
 
         def build(model_config):
             return cls(model_config.text_config, model_config)
-
-        return cls, build
-    if model_type in ("gemma4", "gemma4_unified"):
-        cls, _ = _mtp_target_classes("gemma4_text")
-
-        def build(model_config):
-            return cls(model_config.text_config)
 
         return cls, build
     return None

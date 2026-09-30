@@ -18,7 +18,7 @@ import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.gen import media_spans
-from gmlx.load.mtp_target import _vlm_spec_language_model
+from gmlx.models.gemma4 import language as owned_lang
 
 from test_apc_media import _HIDDEN, _gemma4_config
 
@@ -30,15 +30,15 @@ _BIDIRECTIONAL = [
 
 
 def _models(model_type, text):
-    """The container, its stock language model and the MTP target, on the
-    same weights."""
+    """The container, its language model and the MTP target, on the same
+    weights. The container gmlx builds holds the owned language model, and
+    the MTP target is a second owned one."""
     assert gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     model, _ = gvlm.build_vlm_model(_gemma4_config(model_type, **text))
     lm = model.language_model
     mx.eval(lm.parameters())
-    _cls, build = _vlm_spec_language_model(model_type)
-    target = build(model.config)
+    target = owned_lang.LanguageModel(model.config.text_config)
     target.load_weights(list(tree_flatten(lm.parameters())))
     mx.eval(target.parameters())
     return model, lm, target
@@ -176,13 +176,15 @@ def test_an_image_row_beside_an_audio_row_chunks_at_the_image_edges(
 ])
 def test_the_unified_container_never_declines_chunking(image, audio):
     """From the token types, and from the ids alone when the request
-    carries none."""
+    carries none. The owned container has no decline to consult;
+    test_gemma4_owned_chunking.py runs the stock container's."""
     model, _lm, _target = _models("gemma4_unified", {})
     ids, types = _prompt(model, image=image, audio=audio)
-    decline = model._should_disable_chunked_prefill
-    assert decline(mx.array([ids]),
-                   mm_token_type_ids=mx.array([types])) is False
-    assert decline(mx.array([ids])) is False
+    assert not hasattr(model, "_should_disable_chunked_prefill")
+    assert model.chunked_prefill_policy(
+        input_ids=mx.array([ids]),
+        prefill_kwargs={"mm_token_type_ids": mx.array([types])}) is True
+    assert model.chunked_prefill_policy(input_ids=mx.array([ids])) is True
 
 
 def test_causal_gemma4_keeps_chunking_an_image_and_audio_prompt():

@@ -21,8 +21,8 @@ import gmlx.load.vlm as gvlm
 import gmlx.models.gemma4.owned as gemma4_owned
 import gmlx.models.gemma4.sync as gemma4_sync
 import gmlx.spec.mtp_prefill as mtp_prefill
+from gmlx.models.gemma4 import language as owned_lang
 from gmlx.models.gemma4.image_masks import image_masks
-from gmlx.load.mtp_target import _vlm_spec_language_model
 
 from test_gemma4_image_audio import _served, serve_env  # noqa: F401
 
@@ -56,7 +56,8 @@ def _text(window):
 @functools.lru_cache(maxsize=None)
 def _models(model_type, window):
     """transformers' causal LM and gmlx's plain language model and MTP
-    target, on the same weights."""
+    target, on the same weights. The container gmlx builds holds the owned
+    language model, and the MTP target is a second owned one."""
     assert gemma4_sync.install_gemma4_nosync()
     mtp_prefill.install_full_prompt_mtp_prefill()
     if model_type == "gemma4":
@@ -82,8 +83,7 @@ def _models(model_type, window):
                      for k, v in hf.state_dict().items()
                      if not k.startswith("lm_head")], strict=True)
     mx.eval(lm.parameters())
-    _cls, build = _vlm_spec_language_model(model_type)
-    target = build(model.config)
+    target = owned_lang.LanguageModel(model.config.text_config)
     target.load_weights(list(tree_flatten(lm.parameters())))
     mx.eval(target.parameters())
     return hf_mod, tc, hf, lm, target

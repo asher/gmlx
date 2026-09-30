@@ -17,12 +17,12 @@ import numpy as np
 import pytest
 from mlx.utils import tree_flatten
 from gmlx._vendor.mlx_vlm.generate import ar, dispatch
-from gmlx._vendor.mlx_vlm.models.gemma4 import language as g4
 
 import gmlx.load.vlm as gvlm
 import gmlx.spec.engine as engine
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.gen import media_spans
+from gmlx.models.gemma4 import language as owned_lang
 
 from test_gemma4_image_masks import (
     _N,
@@ -231,13 +231,14 @@ def test_run_prefill_chunks_at_block_edges(model_type, monkeypatch):
     types = _types(_BLOCKS)
     ids = mx.array([list(range(1, _N + 1))])
     widths = []
-    build = g4.Gemma4TextModel._make_masks
+    # The container gmlx builds holds the owned text model.
+    build = owned_lang.Gemma4TextModel._make_masks
 
     def spy(self, h, cache, mm_token_type_ids=None):
         widths.append(int(h.shape[1]))
         return build(self, h, cache, mm_token_type_ids)
 
-    monkeypatch.setattr(g4.Gemma4TextModel, "_make_masks", spy)
+    monkeypatch.setattr(owned_lang.Gemma4TextModel, "_make_masks", spy)
 
     def first(step):
         """The first token's log-probabilities and the prefill forwards'

@@ -144,24 +144,24 @@ def test_language_model_guard_sees_the_container_ids_with_bidirectional_attentio
     """These archs name their image id on the container config only, and
     the server builds the batch engine on the language model. The loader
     mirrors the ids onto the text config when that config turns on
-    bidirectional image attention, and the spec target the MTP path swaps
-    in reads them too. Causal models keep a guard that sees no image id."""
+    bidirectional image attention. A gemma4 container holds the owned
+    language model, which is also the MTP path's spec target, so the spec
+    swap leaves it in place. Causal models keep a guard that sees no image
+    id."""
     install_media_token_ids()
     model = _model(model_type, text)
     container = _apc.multimodal_token_ids_from_config(model.config)
     image = int(model.config.image_token_id)
     assert image in container
-    lms = [model.language_model]
+    lm = model.language_model
     if model_type.startswith("gemma4"):
         gvlm._swap_spec_language_model(model, model_type, log=lambda _m: None)
-        assert model.language_model is not lms[0]
-        lms.append(model.language_model)
-    for lm in lms:
-        seen = _guard(lm)._apc_media_token_ids()
-        if mirrored:
-            assert seen >= container
-        else:
-            assert image not in seen
+        assert model.language_model is lm
+    seen = _guard(lm)._apc_media_token_ids()
+    if mirrored:
+        assert seen >= container
+    else:
+        assert image not in seen
 
 
 class _Store:

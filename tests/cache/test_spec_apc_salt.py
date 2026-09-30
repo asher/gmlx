@@ -150,13 +150,14 @@ def test_l0_restores_only_where_the_media_guard_allows(ar):
 
 
 def _gemma4_spec_config(model_type):
-    """The config of the spec target the VLMxMTP loader builds for a gemma4
-    VLM, from the real container config. It names no media ids."""
+    """The config of the language model an owned gemma4 container holds,
+    the spec target of the VLMxMTP loader, from the real container config.
+    It names no media ids."""
     import importlib
 
     from gmlx._vendor.mlx_vlm.utils import update_module_configs
 
-    from gmlx.load.mtp_target import _vlm_spec_language_model
+    from gmlx.models.gemma4.language import LanguageModel
 
     module = importlib.import_module(f"gmlx._vendor.mlx_vlm.models.{model_type}")
     text = ("gemma4_unified_text" if model_type == "gemma4_unified"
@@ -173,8 +174,8 @@ def _gemma4_spec_config(model_type):
     config = update_module_configs(
         module.ModelConfig.from_dict(raw), module, raw,
         ["text", "vision", "projector", "audio"])
-    _cls, build = _vlm_spec_language_model(model_type)
-    return build(config).config, int(config.image_token_id)
+    return (LanguageModel(config.text_config).config,
+            int(config.image_token_id))
 
 
 def _muse_glimmer_config():

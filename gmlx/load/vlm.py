@@ -1916,6 +1916,16 @@ _OWNED_VLM_REGISTRARS = {
 }
 
 
+# VLM model types whose container and language model gmlx owns, with the
+# module build_vlm_model builds them from. The copied packages of the same
+# names stay, for the processors, the towers and the borrowed models that
+# use them.
+_OWNED_VLM_MODULES = {
+    "gemma4": "gmlx.models.gemma4.vlm",
+    "gemma4_unified": "gmlx.models.gemma4.unified",
+}
+
+
 def register_owned_vlm_model(model_type: str) -> None:
     """Register the cache classes and the tool parser of a VLM model type
     gmlx owns, before its build. ``get_model_and_args`` resolves the type
@@ -1964,8 +1974,12 @@ def build_vlm_model(config_dict: dict):
     """
     from gmlx._vendor.mlx_vlm.utils import get_model_and_args, update_module_configs
 
-    register_owned_vlm_model(config_dict["model_type"])
-    module, _model_type = get_model_and_args(config_dict)
+    owned = _OWNED_VLM_MODULES.get(config_dict["model_type"])
+    if owned is not None:
+        module = importlib.import_module(owned)
+    else:
+        register_owned_vlm_model(config_dict["model_type"])
+        module, _model_type = get_model_and_args(config_dict)
     cfg = module.ModelConfig.from_dict(config_dict)
     cfg = update_module_configs(
         cfg, module, config_dict, ["text", "vision", "projector", "audio"])
@@ -3338,20 +3352,17 @@ def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     VLM's REAL ModelConfig (real vision_config -> get_rope_index mrope stays
     correct on image turns). Must run before weight install: owned trees are
     parameter-identical to stock, so the fresh tree loads the same remapped
-    names. Vendored archs (muse_glimmer / glm5_next / qwen4_exp) carry their
-    hook mixins natively and have no row; GMLX_*_OWNED=0 resolves the row to
-    the stock class the tree already is, so the isinstance short-circuits."""
+    names. Vendored and owned archs (muse_glimmer / glm5_next / qwen4_exp /
+    gemma4) carry their hooks natively and have no row; GMLX_QWEN_OWNED=0
+    resolves the row to the stock class the tree already is, so the
+    isinstance short-circuits."""
     row = _vlm_spec_language_model(model_type)
     if row is None:
         return
     cls, build_lm = row
     if isinstance(model.language_model, cls):
         return
-    lm = build_lm(model.config)
-    if hasattr(model.language_model, "no_chunked_prefill"):
-        # gemma4_unified stamps this at construction.
-        lm.no_chunked_prefill = model.language_model.no_chunked_prefill
-    model.language_model = lm
+    model.language_model = build_lm(model.config)
     log(f"[vlm] spec target: language_model -> {cls.__name__}")
 
 

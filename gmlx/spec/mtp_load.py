@@ -2122,8 +2122,8 @@ def load_vlm_mtp_model(
     Same MTP engine as ``load_mtp_model``, but the target is a full mlx-vlm VLM
     (K-quant LLM GGUF + float mmproj) loaded with ``spec_target=True``, so its
     ``.language_model`` is the same hook-bearing class the text MTP path
-    builds (owned qwen3.5/gemma4 classes via ``_vlm_spec_language_model``;
-    vendored archs carry their hook mixins natively). Text-only requests run
+    builds (owned qwen3.5 classes via ``_vlm_spec_language_model``; the
+    owned gemma4 containers and the vendored archs build theirs natively). Text-only requests run
     through the MTP rounds (which only touch ``.language_model`` + caches);
     image requests stay on the plain VLM path. Returns
     ``(model, drafter, config, tokenizer, processor)``.
