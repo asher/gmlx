@@ -61,13 +61,14 @@ Say = Callable[[str], None]
 
 
 def _shown(path: str | os.PathLike) -> str:
-    """A path for a message: ``~`` for the home folder, and any control
-    character written as an escape, since a file name can hold one."""
+    """A path for a message: ``~`` for the home folder, and any character
+    :func:`printable` escapes written as an escape, since a file name can
+    hold one."""
     text = str(path)
     home = os.path.expanduser("~")
     if text == home or text.startswith(home.rstrip("/") + "/"):
         text = "~" + text[len(home.rstrip("/")):]
-    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+    return printable(text)
 
 
 def _read_regular(path: Path, limit: int) -> bytes:

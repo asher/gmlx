@@ -839,6 +839,18 @@ def test_say_escapes_terminal_controls(capsys):
                    "\\x0d\\x0a\n")
 
 
+def test_printed_names_escape_format_and_separator_characters():
+    """A right-to-left override would print a shared folder's name in
+    another order than the one shared."""
+    from gmlx.container import images
+    from gmlx.container.text import printable
+    name = "/x/evil\u202etxt.exe\u2028line\u00a0nbsp \u200bzw\U000e0041tag"
+    out = printable(name)
+    assert out == "/x/evil\\u202etxt.exe\\u2028line\\xa0nbsp \\u200bzw\\U000e0041tag"
+    assert images._shown(name) == out
+    assert printable("caf\u00e9 \u65e5\u672c \u2713") == "caf\u00e9 \u65e5\u672c \u2713"
+
+
 def test_the_session_log_stops_at_its_limit(tmp_path):
     log = session._SessionLog(tmp_path / "last-pi.log", limit=200)
     for i in range(100):
