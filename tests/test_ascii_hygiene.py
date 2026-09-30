@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tripwire for the repo ASCII policy: non-ASCII may appear only in the
 allowlisted glyph modules (rendered TUI furniture, tokenizer logic, or test
-fixtures), and the docs tree must be pure ASCII. Typography in messages,
-comments, and docstrings is ASCII everywhere else. CPU-only."""
+fixtures), and the docs tree and the workflows must be pure ASCII.
+Typography in messages, comments, and docstrings is ASCII everywhere else.
+CPU-only."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -63,3 +64,11 @@ def test_docs_are_pure_ascii():
     bad = [f.relative_to(_ROOT).as_posix() for f in files
            if f.is_file() and any(b > 0x7F for b in f.read_bytes())]
     assert not bad, f"non-ascii in docs: {bad}"
+
+
+def test_workflows_are_pure_ascii():
+    files = sorted((_ROOT / ".github").rglob("*.yml"))
+    assert files
+    bad = [f.relative_to(_ROOT).as_posix() for f in files
+           if any(b > 0x7F for b in f.read_bytes())]
+    assert not bad, f"non-ascii in workflows: {bad}"

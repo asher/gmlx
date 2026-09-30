@@ -42,7 +42,7 @@ jobs:
           # run instead of skipping themselves away.
           pip install -e ".[all]" pytest httpx build
       - name: Import canary
-        # A broken package import must fail the build loudly — the test files
+        # A broken package import must fail the build loudly. The test files
         # importorskip only true optionals, never gmlx itself.
         run: python -c "import gmlx, gmlx.commands.cli, gmlx.serve.server, gmlx.serve.patches, gmlx.spec.engine, gmlx.spec.speculative"
       - name: Wheel completeness
