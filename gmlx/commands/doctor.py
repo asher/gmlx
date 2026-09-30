@@ -335,11 +335,11 @@ def _folder_bytes(root, budget: list[int]) -> int:
 
 
 def check_container():
-    """None off macOS, and when container mode is neither configured nor
-    installed. Otherwise the Apple container version and service, the
-    packaged guest entry, file handles, and what launch keeps on disk:
-    volumes, private homes and images. Leftover launch containers warn,
-    because their memory stays taken until they stop."""
+    """None off macOS, and a SKIP row when container mode is neither
+    configured nor installed. Otherwise the Apple container version and
+    service, the packaged guest entry, file handles, and what launch keeps
+    on disk: volumes, private homes and images. Leftover launch containers
+    warn, because their memory stays taken until they stop."""
     if sys.platform != "darwin":
         return None
     from gmlx.config import LAUNCH_CLIENTS, ConfigError, load_launch_settings
@@ -351,7 +351,8 @@ def check_container():
         enabled = False               # the config row reports a broken file
     if cli.find() is None:
         if not enabled:
-            return None
+            return _check("container", "SKIP",
+                          "Apple container is not installed (brew install container)")
         return _check("container", "FAIL",
                       f"container mode is on in the launch config, but Apple container "
                       f"is not installed. {cli.INSTALL_HINT}")

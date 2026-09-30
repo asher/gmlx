@@ -1021,7 +1021,13 @@ def test_seeding_a_token_file_warns(home):
     (home / ".claude.json").write_text("{}")
     private = settings.private_home("claude-code")
     warns = settings.seed_home(private, ["~/.claude.json"])
-    assert any("sign-in token" in w and "~/.claude.json" in w for w in warns)
+    assert "[launch] warning: seed ~/.claude.json holds a sign-in token. The client can " \
+           "read it." in warns
+    (home / ".claude").mkdir()
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    warns = settings.seed_home(private, ["~/.claude"])
+    assert "[launch] warning: seed ~/.claude copies ~/.claude/.credentials.json, which " \
+           "holds a sign-in token. The client can read it." in warns
 
 
 def test_a_deep_seed_leftover_is_removed(home):

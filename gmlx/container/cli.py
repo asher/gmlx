@@ -25,8 +25,9 @@ KERNEL_DOWNLOAD_MB = 700
 NODE_BASE_DOWNLOAD_MB = 80
 QUERY_TIMEOUT = 60.0
 DELETE_TIMEOUT = 600.0
-INSTALL_HINT = ("Install Apple container with `brew install container`, or the "
-                "signed installer from https://github.com/apple/container/releases.")
+INSTALL_HINT = ("Apple container installs with Homebrew, or from the signed installer "
+                "at https://github.com/apple/container/releases. Install it with: brew "
+                "install container")
 LAUNCH_LABEL = "gmlx.launch"
 
 
@@ -77,8 +78,8 @@ def _run(args: list[str], *, capture: bool = True, timeout=_QUERY,
     except subprocess.TimeoutExpired:
         raise ContainerError(
             f"`container {' '.join(args[:3])}` gave no answer in {timeout:.0f} s. "
-            "The container service may be stuck: try `container system stop` "
-            "and `container system start`.") from None
+            "The container service may be stuck. Restart it with: container system stop "
+            "&& container system start") from None
     except OSError as e:
         # Such as too many open files, or a binary that went away.
         raise ContainerError(f"cannot run `container {' '.join(args[:3])}`: {e}") from None

@@ -837,11 +837,9 @@ def _launch_claude_code(a, *, exec_fn) -> int:
 
     print(_summary("claude-code", f"{pairs['ANTHROPIC_BASE_URL']}/v1/messages",
                    models, default_model))
-    print("[launch] note: Claude Code sends a very long system prompt and "
-          "frequently rewrites its request prefix (compaction, tool results), "
-          "so KV-prefix reuse is limited - expect prefill-dominated turn "
-          "latency on local models; serve with the prompt cache (cache:) "
-          "enabled to soften repeated prefixes")
+    print("[launch] note: Claude Code resends a long system prompt on every turn, so "
+          "local turns start slowly unless the server's prompt cache is on "
+          "(server.cache.enabled).")
     # An inherited real key would take precedence over our ANTHROPIC_AUTH_TOKEN.
     return _finish(a, binary, ["claude"], pairs, drop=("ANTHROPIC_API_KEY",),
                    exec_fn=exec_fn)
@@ -1545,11 +1543,9 @@ def _preload_descr(cfg):
     return pid, (f"{pid} ({size})" if size else pid)
 
 
-def _guide_to_init(harness: str | None,
-                   rerun: str | None = None) -> None:
+def _guide_to_init(rerun: str | None = None) -> None:
     """Setup guidance printed when nothing is running and no config exists.
-    ``rerun`` overrides the re-run command for non-launch verbs (e.g. talk)."""
-    cmd = rerun or f"launch {harness or '<harness>'}"
+    ``rerun`` names the verb in the prefix for non-launch verbs (e.g. talk)."""
     tag = f"[{rerun or 'launch'}]"
     print(
         f"{tag} no gmlx server is running, and no config was found in a default\n"
@@ -1557,8 +1553,8 @@ def _guide_to_init(harness: str | None,
         "  Set one up first:\n"
         "    gmlx init --models-dir <DIR>     # scaffold ~/.config/gmlx/gmlx.yaml from your GGUFs\n"
         "    gmlx init --from-hf-cache        # ...or from models already in your HF cache\n"
-        f"  then re-run:  gmlx {cmd}\n"
-        f"  Already have a server? point at it:    gmlx {cmd} --base-url URL",
+        "  then run the same command again.\n"
+        "  Already have a server? Add --base-url URL to the command.",
         file=sys.stderr)
 
 
@@ -1667,7 +1663,7 @@ def _ensure_server(a) -> int | None:
 
     cfg, cfg_path = _discover_config()
     if cfg_path is None:
-        _guide_to_init(a.harness, getattr(a, "rerun_label", None))
+        _guide_to_init(getattr(a, "rerun_label", None))
         return 2
     if cfg is None:
         print(f"[launch] config {cfg_path} won't load (malformed) - fix it or pass "
@@ -1726,21 +1722,21 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
 
     ap = argparse.ArgumentParser(
         prog=prog,
-        description="Point a coding harness at a gmlx server and run it, starting "
-                    "the server from a default-location config if none is reachable "
-                    "(no harness auto-install).",
+        description="Configure a client for a gmlx server and run it, on the Mac or in "
+                    "an Apple container. Launch starts the server from the default "
+                    "config when none answers, and never installs a client on the Mac.",
         epilog="Arguments after `--` go to the client, as in `gmlx launch "
                "claude-code -- --continue`. Also: `gmlx launch menubar` raises "
                "the macOS menu-bar monitor for a running server.",
     )
     ap.add_argument("harness", nargs="?", choices=sorted(_HARNESSES),
-                    help="The coding harness, chat TUI (aichat/elia), or web app "
-                         "(open-webui, dsh) to configure + launch. Omit it (bare "
-                         "`gmlx launch`) to print this help; `menubar` raises the "
-                         "macOS status-bar monitor.")
+                    help="The client to configure and run: a coding agent, a chat "
+                         "TUI (aichat, elia) or a web app (open-webui, dsh). Without "
+                         "it, launch prints this help, and `menubar` raises the macOS "
+                         "status-bar monitor.")
     ap.add_argument("--model", default=None,
-                    help="Model id to make the harness default (must be served; "
-                         "default: the server's default-marked model).")
+                    help="Model id to make the client's default. It must be served "
+                         "(default: the server's default-marked model).")
     ap.add_argument("--base-url", default=None,
                     help="Server OpenAI base URL (default http://HOST:PORT/v1).")
     ap.add_argument("--host", default=None,
@@ -1750,19 +1746,21 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                     help="Server port (default: the single managed server if "
                          f"there's one, else the config's, else {_DEFAULT_PORT}).")
     ap.add_argument("--api-key", default=None, metavar="KEY",
-                    help="API key the harness sends, which must match the "
+                    help="API key the client sends, which must match the "
                          "server's server.api_key. Default: the config's "
                          "server.api_key. With --base-url, or when the config "
                          "sets no key, tools get a placeholder.")
     ap.add_argument("--provider-id", default=_PROVIDER_ID,
-                    help=f"Provider id written into the harness config "
+                    help=f"Provider id written into the client's config "
                          f"(default {_PROVIDER_ID}).")
     ap.add_argument("--config-path", default=None,
-                    help=f"Where to write the harness config (default under "
-                         f"{_CONFIG_HOME}).")
+                    help=f"Where to write the client's config (default under "
+                         f"{_CONFIG_HOME}). Container mode refuses it, since the "
+                         f"config goes in the client's private home.")
     ap.add_argument("--config-only", action="store_true",
-                    help="Write the harness config and print the run command; do "
-                         "not exec the harness.")
+                    help="Write the client's config and print the command instead "
+                         "of running it. In container mode it is a dry run that prints "
+                         "the container run command.")
     ap.add_argument("--no-start", action="store_true",
                     help="Don't auto-start a server when none is reachable; just error.")
     ap.add_argument("--start-timeout", type=float, default=0.0, metavar="S",
@@ -1795,8 +1793,8 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
                      help="Copy every seed file into the private home again, replacing "
                           "the copies there.")
     box.add_argument("--network", choices=("default", "none"), default=None,
-                     help="none leaves the client only the gmlx server and the "
-                          "forwarded ports.")
+                     help="With none, the client reaches only the gmlx server and "
+                          "the forwarded ports.")
     box.add_argument("--shell", action="store_true",
                      help="Open a shell in the container instead of the client, or in "
                           "the running session's container.")
@@ -1811,12 +1809,15 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return 0
     if a.dsh_profile is not None and a.harness != "dsh":
         ap.error("--dsh-profile applies only to dsh")
+    if "--container" in argv and "--no-container" in argv:
+        ap.error("--container and --no-container cannot go together")
     from gmlx.config import ConfigError
     from gmlx.container.text import printable_lines
     from .launch_container import container_mode, run_container
     try:
         in_container, launch_cfg = container_mode(a, ap)
     except ConfigError as e:
+        sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1
     if in_container:
@@ -1836,5 +1837,6 @@ def cmd_launch(argv: list, *, exec_fn=_default_exec,
         return _HARNESSES[a.harness](a, exec_fn=exec_fn)
     except LaunchError as e:
         # A message can name a file or value read from a client's config.
+        sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
         return 1

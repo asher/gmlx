@@ -265,13 +265,15 @@ def ensure_volumes(volumes: list[Mount], say: Say = _say) -> None:
             continue
         want = parse_size_bytes(v.size or "32G")
         if have.size_bytes is None:
-            say(f"[launch] the volume {v.source} was created without a size, so it has "
-                "Apple's 512 GB default. To give it the configured size, delete it with "
-                f"`container volume delete {v.source}`, which loses its data.")
+            say(f"[launch] warning: the volume {v.source} was created without a size, so it "
+                "has Apple's 512 GB default. Deleting it loses its data, and the next launch "
+                f"creates it with the configured size. Delete it with: container volume "
+                f"delete {v.source}")
         elif want is not None and have.size_bytes != want:
-            say(f"[launch] the volume {v.source} has {gb(have.size_bytes)}, not the "
-                f"configured {v.size}. The size applies only when a volume is created: "
-                f"`container volume delete {v.source}` recreates it, and loses its data.")
+            say(f"[launch] warning: the volume {v.source} has {gb(have.size_bytes)}, not the "
+                f"configured {v.size or '32G'}, because a size applies only when a volume is "
+                "created. Deleting it loses its data, and the next launch creates it with the "
+                f"configured size. Delete it with: container volume delete {v.source}")
 
 
 def gb(n: int) -> str:
@@ -676,8 +678,9 @@ def supervise(spec: RunSpec, *, api_targets: list | None, record: dict,
         refused = getattr(server_session, "refused", None)
         if refused:
             # The client owned the terminal until now.
-            say(f"[launch] the client's last requests failed: the server stopped "
-                f"answering on the session socket and gave no new one ({refused})")
+            say("[launch] the client's last requests failed, because the server stopped "
+                "answering on the session socket and gave no new one.")
+            say(f"[launch] {refused}")
         return rc if rc >= 0 else 128 - rc
     finally:
         # Each step runs even when one before it fails, and the signal

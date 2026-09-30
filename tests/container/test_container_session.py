@@ -396,8 +396,14 @@ def test_ensure_volumes_creates_and_reports_sizes(fake_container):
     said = []
     session.ensure_volumes([_vol("pg"), _vol("old"), _vol("small")], said.append)
     assert ["volume", "create", "--label", "gmlx.launch=1", "-s", "8G", "pg"] in fake_container.log
-    assert any("512 GB default" in line for line in said)
-    assert any("has 4G, not the configured 8G" in line for line in said)
+    assert said == [
+        "[launch] warning: the volume old was created without a size, so it has Apple's "
+        "512 GB default. Deleting it loses its data, and the next launch creates it with the "
+        "configured size. Delete it with: container volume delete old",
+        "[launch] warning: the volume small has 4G, not the configured 8G, because a size "
+        "applies only when a volume is created. Deleting it loses its data, and the next "
+        "launch creates it with the configured size. Delete it with: container volume "
+        "delete small"]
 
 
 def test_volume_lines_use_allocated_blocks(fake_container, tmp_path, monkeypatch):
@@ -1189,9 +1195,10 @@ def test_supervise_prints_a_refused_renewal_after_the_client_exits(fake_containe
     server.refused = "cannot reach the server at http://127.0.0.1:8080/v1 (refused)."
     session.supervise(spec, api_targets=[("127.0.0.1", 8080)], record={}, say=said.append,
                       server_session=server)
-    assert said[-1].startswith("[launch] the client's last requests failed")
-    assert said[-1].endswith("(cannot reach the server at http://127.0.0.1:8080/v1 "
-                             "(refused).)")
+    assert said[-2:] == ["[launch] the client's last requests failed, because the server "
+                         "stopped answering on the session socket and gave no new one.",
+                         "[launch] cannot reach the server at http://127.0.0.1:8080/v1 "
+                         "(refused)."]
     assert callable(server.log)                    # the session log's guest lines
 
 

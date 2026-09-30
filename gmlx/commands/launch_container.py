@@ -11,6 +11,7 @@ and runs the supervisor in ``gmlx.container.session``.
 from __future__ import annotations
 
 import contextlib
+import io
 import ipaddress
 import json
 import os
@@ -36,11 +37,14 @@ from gmlx.container.text import printable, printable_lines
 CONTAINER_FLAGS = {"mount": "--mount", "mount_cwd": "--mount-cwd", "image": "--image",
                    "rebuild": "--rebuild", "reseed": "--reseed", "network": "--network",
                    "shell": "--shell"}
-# What an attaching --shell accepts. Every other flag shapes a new session.
-_ATTACH_DEFAULTS = {
+# Flags an attaching --shell ignores, since the running session already has
+# its server and model, and the flags it refuses, which shape a new session.
+_ATTACH_IGNORED = {
     "model": None, "base_url": None, "host": None, "port": None, "api_key": None,
-    "provider_id": "gmlx", "config_path": None, "config_only": False,
-    "no_start": False, "start_timeout": 0.0, "no_keep": False, "dsh_profile": None,
+    "no_start": False, "start_timeout": 0.0, "no_keep": False,
+}
+_ATTACH_REFUSED = {
+    "provider_id": "gmlx", "config_path": None, "config_only": False, "dsh_profile": None,
     "mount": [], "mount_cwd": None, "image": None, "rebuild": False, "reseed": False,
     "network": None,
 }
@@ -58,6 +62,11 @@ def _flag_name(dest: str, value) -> str:
     if dest == "mount_cwd" and value is False:
         return "--no-mount-cwd"
     return CONTAINER_FLAGS.get(dest) or "--" + dest.replace("_", "-")
+
+
+def _listed(words: list[str]) -> str:
+    """``a``, ``a and b`` or ``a, b and c``."""
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
 
 
 def _flag_set(a, dest: str) -> bool:
@@ -91,8 +100,10 @@ def container_mode(a, ap) -> tuple[bool, LaunchCfg]:
             on, path = launch_block_enables(a.harness)
             if on is not False:
                 verb = "turns" if on else "may turn"
+                first = str(e) if str(e)[-1:] in ".?!" else f"{e}."
+                subject = "That file" if str(path) in first else str(path)
                 raise ConfigError(
-                    f"{e}. {path} {verb} container mode on for "
+                    f"{first} {subject} {verb} container mode on for "
                     f"{a.harness}, so launch stops until the launch block is fixed. Pass "
                     "--no-container to run it on the Mac instead.") from None
         print(printable_lines(f"[launch] ignoring the launch settings, so {a.harness} runs "
@@ -296,7 +307,8 @@ def guest_url(base_url: str) -> tuple[str, int | None, list]:
         try:
             targets = resolve_targets(host, port)
         except OSError as e:
-            raise SettingsError(f"cannot resolve the server host {host} ({e}).") from None
+            raise SettingsError(f"cannot resolve the server host {host} "
+                                f"({e.strerror or e}). Check the server URL.") from None
         if not targets:
             raise SettingsError(f"the server host {host} has no IPv4 or IPv6 address.")
     url = urllib.parse.urlunsplit(("http", f"127.0.0.1:{port}", split.path, split.query,
@@ -674,19 +686,31 @@ class _Prereqs:
 def _attach(a, exec_fn, say) -> int:
     from gmlx.commands.launch import LaunchError
 
-    for dest, default in _ATTACH_DEFAULTS.items():
+    for dest, default in _ATTACH_REFUSED.items():
         value = getattr(a, dest, default)
         if value != default:
             flag = _flag_name(dest, value)
             raise LaunchError(f"a {a.harness} session is already running, so --shell attaches "
                               f"to it, and {flag} applies only to a new session.")
-    record = session.read_record(a.harness)
+    ignored = [_flag_name(dest, getattr(a, dest, default))
+               for dest, default in _ATTACH_IGNORED.items()
+               if getattr(a, dest, default) != default]
+    containers = [c for c in cli.list_launch_containers() if c.state == "running"
+                  and c.labels.get("gmlx.launch.client") == a.harness]
+    try:
+        record = session.read_record(a.harness)
+    except SettingsError as e:
+        names = [c.name for c in containers]
+        stop = (f"Stop it with: container stop {names[0]}" if len(names) == 1
+                else "Quit the client in that session")
+        raise LaunchError(f"{e} End that session and launch again. {stop}") from None
     name = (record or {}).get("name")
-    running = [c for c in cli.list_launch_containers()
-               if c.name == name and c.state == "running"
-               and c.labels.get("gmlx.launch.client") == a.harness]
-    if not record or not running:
+    if not record or not any(c.name == name for c in containers):
         raise LaunchError(f"the {a.harness} session is still starting. Try again in a moment.")
+    if ignored:
+        say(f"[launch] {_listed(ignored)} {'applies' if len(ignored) == 1 else 'apply'} only "
+            "to a new session, so the shell ignores "
+            f"{'it' if len(ignored) == 1 else 'them'}.")
     shares = [Mount(s["host"], s["guest"], bool(s.get("readonly"))) for s in record["shares"]]
     cwd = settings.guest_path(os.path.realpath(_cwd()), shares)
     say(f"[launch] attaching to {name} (working folder {record['workdir']})")
@@ -812,10 +836,11 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 record = session.read_record(client) or {}
             except SettingsError:
                 record = {}
+            where = f" in {record['name']}" if record.get("name") else ""
             raise L.LaunchError(
-                f"a container session of {client} is already running"
-                + (f" ({record['name']})" if record.get("name") else "")
-                + f". Open a shell in it with: gmlx launch {client} --shell")
+                f"a {client} session is already running{where}, and one session of a "
+                "client runs at a time. End that session to launch another, or open a "
+                f"shell in it with: gmlx launch {client} --shell")
         held = [lock]
         try:
             if dry:
@@ -831,7 +856,14 @@ def run_container(a, launch_cfg: LaunchCfg, *, exec_fn) -> int:
                 item.release()
     except (L.LaunchError, SettingsError, ContainerError, ConfigError,
             confine.ConfinedError) as e:
+        sys.stdout.flush()
         print(printable_lines(f"[launch] {e}"), file=sys.stderr)
+        return 1
+    except OSError as e:
+        # Such as a launch data folder that is a file, or a full disk.
+        why = f"cannot use {e.filename} ({e.strerror})." if e.filename and e.strerror else e
+        sys.stdout.flush()
+        print(printable_lines(f"[launch] {why}"), file=sys.stderr)
         return 1
     except _Signalled as e:
         print(f"[launch] stopped by signal {e.signum} while the image was prepared",
@@ -885,6 +917,9 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
     for line in settings.seed_home(plan.home, plan.seed, reseed=getattr(a, "reseed", False),
                                    writable=settings.seed_writable(plan, _cwd())):
         say(line)
+    if getattr(a, "reseed", False) and not plan.seed:
+        say(f"[launch] --reseed has nothing to copy, because no seed is configured for "
+            f"{client}.")
     if not dry:
         settings.record_shares(plan)
     check = _server_precheck(a, dry)
@@ -902,7 +937,8 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         # so the plan is all it can show.
         _, image_line, _ = _image_state(image_plan, a.rebuild, running)
         _print_dry_plan(runtime_dir, plan, image_line,
-                        _summary_lines(plan, None, a.shell, client), running, say)
+                        _summary_lines(plan, None, a.shell, client, plan.workdir), running,
+                        say)
         say(check.missing)
         return 0
     if not dry:
@@ -985,8 +1021,12 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         captured.update(argv=argv, pairs=pairs, extra=extra)
         return 0
     a.container_sink = sink
-    with guest_home(plan.home):
+    # Under --shell the client does not start, so its summary and notes
+    # would describe a program that is not running.
+    quiet = contextlib.redirect_stdout(io.StringIO()) if a.shell else contextlib.nullcontext()
+    with guest_home(plan.home), quiet:
         rc = L._HARNESSES[client](a, exec_fn=exec_fn)
+    sys.stdout.flush()
     if rc != 0 or not captured:
         return rc
     if client == "open-webui":
@@ -1034,7 +1074,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
         tty=session.stdin_is_tty() and not token_url, interactive=not token_url,
         shell=a.shell, url_pattern=_DSH_URL_LINE if token_url else None,
         labels={"gmlx.launch.runtime": runtime_dir.name})
-    summary = _summary_lines(plan, None if dry else ready, a.shell, client)
+    summary = _summary_lines(plan, None if dry else ready, a.shell, client, spec.workdir)
     if full_api:
         summary.append(full_api)
     if dry:
@@ -1052,7 +1092,7 @@ def _run_locked(a, launch_cfg, cfg, prereqs, held, exec_fn, say) -> int:
                              opener=opener, summary=summary, server_session=server_session)
 
 
-def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:
+def _summary_lines(plan, ready, shell: bool, client: str, workdir: str) -> list[str]:
     lines = [images.describe(ready)] if ready is not None else []
     if ready is not None:
         note = images.image_age_note(ready)
@@ -1074,6 +1114,10 @@ def _summary_lines(plan, ready, shell: bool, client: str) -> list[str]:
         lines += session.volume_lines(plan.volumes)
     for port in plan.forward:
         lines.append(f"[launch] forwarding the guest's 127.0.0.1:{port} to Mac port {port}")
+    if not plan.cwd_shared and client not in settings.NO_CWD_CLIENTS:
+        where = "its private home" if workdir == str(plan.home) else workdir
+        who = "the shell opens" if shell else f"{client} starts"
+        lines.append(f"[launch] the current folder is not shared, so {who} in {where}")
     if shell:
         lines.append(f"[launch] opening a shell instead of {client}")
     return lines

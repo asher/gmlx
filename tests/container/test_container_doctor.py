@@ -33,9 +33,10 @@ def _enable(home):
     cfg.write_text("launch:\n  container:\n    enabled: true\n")
 
 
-def test_absent_when_neither_installed_nor_configured(box, monkeypatch):
+def test_skips_when_neither_installed_nor_configured(box, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    assert doctor.check_container() is None
+    row = doctor.check_container()
+    assert row["status"] == "SKIP" and "(brew install container)" in row["detail"]
 
 
 def test_fails_when_enabled_but_not_installed(box, monkeypatch):

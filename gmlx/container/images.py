@@ -275,6 +275,25 @@ def _node_base() -> str:
     return m[1] if m else ""
 
 
+def _shown_base(ref: str) -> str:
+    """A base image as people write it, such as node:22-bookworm-slim,
+    without the registry of Docker Hub and the digest."""
+    name = ref.split("@", 1)[0]
+    for prefix in ("docker.io/library/", "docker.io/"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _registry_of(ref: str) -> str:
+    """The registry server of an image reference, docker.io when it names
+    none."""
+    first, sep, _ = ref.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return "docker.io"
+
+
 def shipped_tag(client: str, packages: list[str]) -> str:
     return f"{recipe_repo(client)}:{shipped_hash(client, packages)}"
 
@@ -632,7 +651,7 @@ def _build(context: str, *, say: Say, announce: "_Announce", **kw) -> None:
                 raise ImageError(
                     "the image builder that runs now forwards your SSH agent, so a "
                     "Containerfile could use every key in it. Launch does not build on "
-                    "it until you stop it with container builder stop")
+                    "it until you stop it with: container builder stop")
             kw["builder_args"] = cli.builder_build_args(current)
             kw["env"] = cli.builder_build_env(current)
         else:
@@ -787,7 +806,8 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
             node = _node_base()
             download = rebuild or (node and cli.image_info(node) is None)
             announce(f"building the {client} image" + (
-                f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for {node}"
+                f", which first downloads about {cli.NODE_BASE_DOWNLOAD_MB} MB for the "
+                f"{_shown_base(node)} base image"
                 if download else ""))
             _build(str(SHIPPED_CONTAINERFILE.parent), say=say, announce=announce,
                    file=str(SHIPPED_CONTAINERFILE),
@@ -795,7 +815,8 @@ def _ensure_shipped(client: str, packages: list[str], *, rebuild: bool,
                    labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild)
             info = cli.image_info(tag)
             if info is None:
-                raise ImageError(f"the build finished but {tag} is not in the image store.")
+                raise ImageError(f"the build finished but {tag} is not in the image store. "
+                                 "Launch again with --rebuild.")
             action = "built"
         else:
             current = cli.image_info(base)
@@ -860,7 +881,8 @@ def _build_user_image(plan: ImagePlan, digests: dict[str, str], *, rebuild: bool
                    labels=LAUNCH_LABELS, no_cache=rebuild, pull=rebuild and not plan.bases)
             info = cli.image_info(tag)
             if info is None:
-                raise ImageError(f"the build finished but {tag} is not in the image store.")
+                raise ImageError(f"the build finished but {tag} is not in the image store. "
+                                 "Launch again with --rebuild.")
             action = "built"
             try:
                 _write_private(_manifest_path(repo), json.dumps(manifest, sort_keys=True))
@@ -880,10 +902,16 @@ def _ensure_pulled(plan: ImagePlan, *, rebuild: bool, say: Say,
     action = "found"
     if info is None:
         announce(f"pulling {ref}")
-        cli.pull(ref)
+        try:
+            cli.pull(ref)
+        except ContainerError as e:
+            raise ImageError(f"{e} Check the image reference. When the image is private, "
+                             f"sign in to its registry with: container registry login "
+                             f"{_registry_of(ref)}") from None
         info = cli.image_info(ref)
         if info is None:
-            raise ImageError(f"the pull finished but {ref} is not in the image store.")
+            raise ImageError(f"the pull finished but {ref} is not in the image store. "
+                             "Launch again with --rebuild.")
         action = "pulled"
     check_arch(info, ref)
     repo = repository_of(info.name or ref)

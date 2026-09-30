@@ -949,16 +949,19 @@ def seed_home(home: Path, seeds: list[str], *, reseed: bool = False,
 
 def _seed_token_warnings(shown: str, real: str, host_real: str) -> list[str]:
     out = []
-    tokens = [t for t in TOKEN_FILES if _inside(os.path.join(host_real, t), real)]
-    if tokens:
-        out.append(f"[launch] warning: seed {shown} copies "
-                   f"{', '.join('~/' + t for t in tokens)}, which holds a sign-in "
-                   "token. The client can read it.")
-    maybe = [t for t in TOKEN_MAYBE_FILES if _inside(os.path.join(host_real, t), real)]
-    if maybe:
-        out.append(f"[launch] warning: seed {shown} copies "
-                   f"{', '.join('~/' + t for t in maybe)}, which can hold a token, such as "
-                   "one in a url.<base>.insteadOf address. The client can read it.")
+    for files, one, many, what in (
+            (TOKEN_FILES, "holds", "hold", "a sign-in token"),
+            (TOKEN_MAYBE_FILES, "can hold", "can hold",
+             "a token, such as one in a url.<base>.insteadOf address")):
+        hits = [t for t in files if _inside(os.path.join(host_real, t), real)]
+        if not hits:
+            continue
+        if any(_same(os.path.join(host_real, t), real) for t in hits):
+            subject, verb = f"seed {shown}", one
+        else:
+            subject = f"seed {shown} copies {', '.join('~/' + t for t in hits)}, which"
+            verb = one if len(hits) == 1 else many
+        out.append(f"[launch] warning: {subject} {verb} {what}. The client can read it.")
     return out
 
 

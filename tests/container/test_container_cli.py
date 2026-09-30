@@ -154,7 +154,7 @@ def test_a_builder_that_forwards_ssh_is_refused(fake_container, monkeypatch, no_
         (ctx / "Containerfile").write_text("FROM debian\nRUN --mount=type=ssh true\n")
         plan = images.ImagePlan("build", "pi", containerfile=ctx / "Containerfile",
                                 context=ctx)
-    with pytest.raises(images.ImageError, match="stop it with container builder stop$"):
+    with pytest.raises(images.ImageError, match="stop it with: container builder stop$"):
         images.ensure_image(plan, say=_quiet)
     assert not fake_container.load().get("builds")
     assert not fake_container.calls("builder", "stop")
@@ -762,6 +762,16 @@ def test_missing_image_is_pulled_and_pinned(fake_container):
     assert ready.tag == "debian:12"
 
 
+@pytest.mark.parametrize("ref,server", [("ghcr.io/example/agent:1", "ghcr.io"),
+                                        ("me/agent:1", "docker.io")])
+def test_a_failed_pull_names_the_registry_login(fake_container, ref, server):
+    with pytest.raises(images.ImageError) as e:
+        images.ensure_image(images.ImagePlan("image", "pi", ref=ref), say=_quiet)
+    assert str(e.value).endswith("Check the image reference. When the image is private, "
+                                 "sign in to its registry with: container registry login "
+                                 f"{server}")
+
+
 def test_rebuild_pulls_again_and_drops_the_old_digest(fake_container):
     fake_container.update(registry={"debian:12": {"digest": D1}})
     first = images.ensure_image(images.ImagePlan("image", "pi", ref="debian:12"), say=_quiet)
@@ -1069,8 +1079,8 @@ def test_the_step_goes_on_the_first_build_line_only(fake_container, tmp_path):
     images.ensure_image(plan, say=said.append, step="step 2 of 3")
     builds = [line for line in said if "building" in line]
     assert len(builds) == 2
-    assert builds[0].startswith("[launch] step 2 of 3: building the pi image, which first "
-                                "downloads about 80 MB for docker.io/library/node:22")
+    assert builds[0] == ("[launch] step 2 of 3: building the pi image, which first downloads "
+                         "about 80 MB for the node:22-bookworm-slim base image")
     assert builds[1].startswith("[launch] building ")
     assert sum("step 2 of 3" in line for line in said) == 1
 

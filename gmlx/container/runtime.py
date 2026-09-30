@@ -91,7 +91,7 @@ def _install(folder: Path, source: Path) -> None:
 def acquire_runtime(source: Path | None = None) -> tuple[Path, FileLock]:
     """The runtime folder of the packaged entry, with a shared lock on it that
     the caller holds until its session ends."""
-    from .settings import check_mount_chars
+    from .settings import SettingsError, check_mount_chars
 
     source = source or entry_path()
     folder = runtime_root() / entry_digest(source)
@@ -105,7 +105,9 @@ def acquire_runtime(source: Path | None = None) -> tuple[Path, FileLock]:
         if lock.still_current() and _complete(folder):
             return folder, lock
         lock.release()                # a cleanup removed it between the two steps
-    raise RuntimeError(f"cannot prepare the runtime folder {folder}")
+    raise SettingsError(f"cannot prepare the runtime folder {folder}, because it changed "
+                        "each time launch prepared it. Launch again, and remove the folder "
+                        "if this repeats.")
 
 
 def cleanup_runtime(keep: str | None = None) -> list[Path]:

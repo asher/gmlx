@@ -45,7 +45,8 @@ def _private_root(d: Path) -> Path:
         except FileExistsError:
             pass
     if not d.is_dir() or d.is_symlink():
-        raise NotADirectoryError(f"{d} is not a folder.")
+        raise NotADirectoryError(f"{d} is not a folder, and gmlx keeps the files of "
+                                 "container mode there. Move or remove it.")
     if os.stat(d).st_mode & 0o777 != ROOT_MODE:
         os.chmod(d, ROOT_MODE)
     # The gmlx folder above it can come from other gmlx commands, made with

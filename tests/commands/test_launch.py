@@ -574,7 +574,7 @@ def test_cmd_launch_bare_prints_help(capsys):
     rc = launch.cmd_launch([])                               # no harness -> help, not error
     assert rc == 0
     out = capsys.readouterr().out
-    assert "usage:" in out and "harness" in out             # long-form help, exit 0
+    assert "usage:" in out and "client" in out              # long-form help, exit 0
 
 
 def test_cmd_launch_menubar_routes(monkeypatch):

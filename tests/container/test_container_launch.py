@@ -186,6 +186,47 @@ def test_no_mount_cwd_conflicts_with_no_container(env, capsys):
     assert "--no-mount-cwd applies only in container mode" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flags", [["--container", "--no-container"],
+                                   ["--no-container", "--container"]])
+def test_container_and_no_container_together_are_refused(env, capsys, flags):
+    with pytest.raises(SystemExit):
+        _run(["pi", *flags])
+    assert "--container and --no-container cannot go together" in capsys.readouterr().err
+    assert not env.runs
+
+
+def test_no_mount_cwd_says_where_the_client_starts(env):
+    assert _run(["pi", "--no-mount-cwd"]) == 0
+    assert ("[launch] the current folder is not shared, so pi starts in its private home"
+            in env.runs[0]["summary"])
+
+
+def test_reseed_without_a_seed_says_so(env, capsys):
+    assert _run(["pi", "--reseed"]) == 0
+    assert ("[launch] --reseed has nothing to copy, because no seed is configured for pi."
+            in capsys.readouterr().out.splitlines())
+
+
+def test_a_shell_prints_no_client_summary(env, capsys):
+    """Under --shell the client does not start, so the lines that describe
+    it stay out."""
+    assert _run(["pi", "--shell"]) == 0
+    assert "[launch] opening a shell instead of pi" in env.runs[0]["summary"]
+    out = capsys.readouterr().out
+    assert "[launch] pi ->" not in out and "merged" not in out
+
+
+def test_a_data_folder_that_is_a_file_is_a_clean_error(env, capsys, monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    (data / "gmlx").mkdir(parents=True)
+    (data / "gmlx" / "launch").write_text("not a folder")
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    assert _run(["pi", "--container"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("[launch] ") and "Move or remove it." in err
+    assert "Traceback" not in err
+
+
 def test_a_broken_launch_block_leaves_host_mode_running(env, capsys, monkeypatch):
     which = launch.shutil.which
     monkeypatch.setattr(launch.shutil, "which",
@@ -263,8 +304,10 @@ def test_a_misspelled_launch_key_with_a_container_block_refuses(env, capsys, mon
     assert _run(["pi"], exec_fn=lambda *a: calls.append(a) or 0) == 1
     err = capsys.readouterr().err
     assert not calls and not env.runs
-    assert "unknown top-level key 'lauch'" in err and "Did you mean launch?" in err
-    assert "may turn container mode on for pi" in err
+    assert "unknown top-level key 'lauch'" in err
+    # The file is named once, and the question ends its own sentence.
+    assert "Did you mean launch? That file may turn container mode on for pi" in err
+    assert err.count("gmlx.yaml") == 1
     assert _run(["pi", "--no-container"], exec_fn=lambda *a: calls.append(a) or 0) == 0
     assert calls
 
@@ -978,8 +1021,10 @@ def running_session(env):
 
 def test_second_session_is_refused_with_the_shell_hint(running_session, capsys):
     assert _run(["pi", "--container"]) == 1
-    err = capsys.readouterr().err
-    assert "gmlx-pi-abc123" in err and "gmlx launch pi --shell" in err
+    assert capsys.readouterr().err == (
+        "[launch] a pi session is already running in gmlx-pi-abc123, and one session of a "
+        "client runs at a time. End that session to launch another, or open a shell in it "
+        "with: gmlx launch pi --shell\n")
 
 
 @pytest.mark.parametrize("record", [{"name": "gmlx-pi-abc123"},
@@ -988,7 +1033,10 @@ def test_second_session_is_refused_with_the_shell_hint(running_session, capsys):
 def test_shell_with_a_damaged_record_is_a_clean_error(running_session, capsys, record):
     session.record_path("pi").write_text(json.dumps(record))
     assert _run(["pi", "--shell"], exec_fn=lambda *a: pytest.fail("exec")) == 1
-    assert "is damaged, so --shell cannot attach" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "is damaged, so --shell cannot attach" in err
+    assert err.endswith("End that session and launch again. Stop it with: container stop "
+                        "gmlx-pi-abc123\n")
     assert _run(["pi", "--container"]) == 1              # the refusal still names the way
     assert "gmlx launch pi --shell" in capsys.readouterr().err
 
@@ -1024,8 +1072,20 @@ def test_shell_attach_from_an_unshared_folder(running_session, capsys):
 
 
 def test_shell_attach_refuses_new_session_flags(running_session, capsys):
-    assert _run(["pi", "--shell", "--model", "x"]) == 1
-    assert "--model applies only to a new session" in capsys.readouterr().err
+    assert _run(["pi", "--shell", "--mount", "/tmp"]) == 1
+    assert "--mount applies only to a new session" in capsys.readouterr().err
+
+
+def test_shell_attach_ignores_the_server_flags(running_session, capsys):
+    """The flags that chose the session's server and model are what the
+    user typed to start it, so the shell takes them and says it ignores
+    them."""
+    calls = []
+    assert _run(["pi", "--shell", "--port", "48611", "--no-start"],
+                exec_fn=lambda *a: calls.append(a) or 0) == 0
+    assert calls
+    assert ("[launch] --port and --no-start apply only to a new session, so the shell "
+            "ignores them.") in capsys.readouterr().out
 
 
 def test_shell_attach_while_the_session_starts(running_session, capsys):
@@ -1267,10 +1327,10 @@ def test_attach_defaults_match_the_parser():
     when it attaches, so they must follow the parser."""
     from tests.commands.test_launch import _parse_launch_args
     a = _parse_launch_args(["pi"])
-    for dest, default in lc._ATTACH_DEFAULTS.items():
+    defaults = {**lc._ATTACH_IGNORED, **lc._ATTACH_REFUSED}
+    for dest, default in defaults.items():
         assert getattr(a, dest) == default, dest
-    rest = set(vars(a)) - set(lc._ATTACH_DEFAULTS) - {
-        "harness", "container", "shell", "passthrough"}
+    rest = set(vars(a)) - set(defaults) - {"harness", "container", "shell", "passthrough"}
     assert rest == set(), rest
 
 
