@@ -105,6 +105,12 @@ a Linux kernel, as
 [Container mode](launch-container.md#turning-on-container-mode) describes.
 `gmlx doctor` reports the version and whether the service runs.
 
+The Homebrew, uv and pip installs include the program that container mode
+runs inside the container. A git checkout of gmlx needs it built first,
+with the Rust toolchain that
+[CONTRIBUTING.md](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md)
+names.
+
 ## Tab completion
 
 gmlx completes its commands, flags, your model ids and the ports of running
@@ -143,7 +149,8 @@ To remove gmlx completely:
 3. Delete the files that gmlx wrote, which
    [Where files are on disk](troubleshooting.md#where-files-are-on-disk)
    lists, and the models you downloaded.
-4. If you used container mode, remove its images and volumes as
+4. If you used container mode, remove its images, volumes and private
+   homes as
    [Removing container data](launch-container.md#removing-container-data)
    describes.
 

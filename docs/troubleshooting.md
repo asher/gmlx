@@ -310,13 +310,14 @@ does.
 
 A launch that stops with `names X in its #! line, which is not in the
 image` found a script whose interpreter, such as `python3`, is missing.
-Install the interpreter in the image, or change the script's `#!` line.
+Install the interpreter in the image, or change the script's `#!` line. The
+message `ends in a carriage return` means the script has Windows line
+endings. Convert it to Unix line endings, for example with `dos2unix`.
+
 Without `-S`, env receives everything after its name as one command name,
 so `#!/usr/bin/env tool --flag` looks for a command called `tool --flag`.
-The message `env receives it as one command name` reports this case.
-Write `#!/usr/bin/env -S tool --flag` instead. The message `ends in a
-carriage return` means the script has Windows line endings. Convert it to
-Unix line endings, for example with `dos2unix`.
+The message `env receives it as one command name` reports this case. Write
+`#!/usr/bin/env -S tool --flag` instead.
 
 When the session itself cannot start the command, it exits 127 or 126 with
 the same messages. Exit 126 with `its #! interpreter or its program loader
@@ -353,21 +354,25 @@ A launch that stops with a message that names a path in the
 [private home](launch-container.md#the-private-home) found a file there
 that launch will not read or replace, such as a symbolic link or a file
 larger than 16 MiB. The client in the container owns that folder and can put
-links there, so launch never follows one. Delete the path the message
-names, or reset the client by deleting
+links there, so launch never follows one.
+
+Delete the path the message names, or reset the client by deleting
 `~/.local/share/gmlx/launch/<client>/home`, and launch again. A file that
 only the git identity needs, such as `.gitconfig`, gives a warning instead
 and the launch goes on.
 
-### Launch refuses a mount or a seed through a symbolic link
+### Launch refuses a mount through a symbolic link
 
-A `--mount`, a [`mounts`](config.md#launchcontainermounts) entry or a
-[`seed`](config.md#launchcontainerclientsseed) whose path is a symbolic
-link, or passes through one, stops the launch. A client in an earlier
-session could have left that link in a folder it shared. When you made the
-link yourself, write the real path that the message gives, such as
-`/private/tmp/x` for `/tmp/x`. A seed must also lie inside your home folder
-and outside credential folders.
+A `--mount` or a [`mounts`](config.md#launchcontainermounts) entry whose
+path is a symbolic link, or passes through one, stops the launch. A client
+in an earlier session could have left that link in a folder it shared.
+When you made the link yourself, write the real path that the message
+gives, such as `/private/tmp/x` for `/tmp/x`.
+
+Launch copies a [`seed`](config.md#launchcontainerclientsseed) through a
+link and prints the path the link leads to.
+[The private home](launch-container.md#the-private-home) lists where that
+path may not lead, such as outside your home folder.
 
 ### Launch refuses to build while the builder forwards your SSH agent
 
@@ -396,7 +401,7 @@ each file, as [Limits](launch-container.md#limits) explains. Stop the
 session to release the handles, and share a narrower folder next time.
 `gmlx doctor` reports the count.
 
-### Installed in --shell, gone next launch
+### Packages installed in --shell are gone at the next launch
 
 The container's own files are discarded when a session ends. Add the
 packages to the image, as
@@ -459,7 +464,7 @@ follow `XDG_CACHE_HOME` and `XDG_DATA_HOME` when they are set.
 |------|----------|
 | `~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml` | These hold the config, as [Where gmlx looks](config.md#where-gmlx-looks) describes. |
 | `~/.config/gmlx/` | `gmlx launch` writes injected clients' configs here. |
-| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. To remove gmlx, delete those settings and keep the files. |
+| `~/.pi/agent/`, `~/.omp/agent/`, `~/.config/goose/config.yaml`, `~/.hermes/config.yaml` | `gmlx launch` merges its settings into these files, as [The clients](launch.md#the-clients) describes. Delete those settings to remove gmlx. |
 | `~/.cache/gmlx/` | It holds server runfiles and logs, chat input history and the GGUF header cache. |
 | `~/.cache/gmlx/apc/` | The prompt cache is stored here when the disk tier is on and has no `path` of its own. |
 | `~/.cache/gmlx/media/` | The server opens the media files a request names from here, as [Media in requests](api.md#media-in-requests) describes. |

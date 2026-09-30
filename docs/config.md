@@ -63,11 +63,10 @@ gmlx never reads a `gmlx.yaml` in the current directory by itself. A config
 file can name commands that the server runs on your Mac, and a cloned
 repository, or a [container](launch-container.md) client that writes the
 folder, can put a file there. When `./gmlx.yaml` exists, a command that
-searches for the config prints this line:
-
-```text
-gmlx no longer reads ./gmlx.yaml; pass --config ./gmlx.yaml
-```
+searches for the config prints a line that starts with
+`gmlx no longer reads ./gmlx.yaml` and ends with the fix for that command,
+as [the troubleshooting entry](troubleshooting.md#gmlx-no-longer-reads-gmlxyaml)
+describes.
 
 Pass `--config FILE` to read a project file or any other file. Without any
 file, `gmlx serve` scans the current directory for GGUFs and prints a hint
@@ -140,10 +139,12 @@ This is the model's GGUF file. The path can be absolute, relative
 to a folder in [`server.model_dirs`](#servermodel_dirs), or an
 `hf:<org>/<repo>/<file.gguf>[@rev]` reference. Such a reference resolves
 from the local Hugging Face cache or from the `gmlx pull` folders under
-`model_dirs`. A relative path that no such folder holds is taken from the
-folder the server runs in, which is the config file's folder for a server
-that gmlx starts in the background. For a model split into shards, name
-the first shard. This key is required.
+`model_dirs`. This key is required.
+
+A relative path that no `model_dirs` folder holds is taken from the folder
+the server runs in, which is the config file's folder for a server that
+gmlx starts in the background. For a model split into shards, name the
+first shard.
 
 ### `models.*.profile`
 
@@ -873,14 +874,14 @@ With `true`, a request may name an image, audio or video by an `http(s)://`
 URL, and the server fetches it from the Mac. The server refuses a host with
 any address that is not public, such as one on the Mac or the local
 network, checks each redirect the same way, and uses no proxy. It stops a
-fetch that takes more than 60 seconds or brings more than 32 MiB.
+fetch that takes more than 60 seconds or passes the size limit of
+[Media in requests](api.md#media-in-requests).
 
 Any client that reaches the server's port can then make the Mac send
 requests to any public host, and the URL can carry data out. A client in a
 launch container reaches the server through a session socket instead, which
-takes no URLs. This key does not change which files a request can name,
-which [Media in requests](api.md#media-in-requests) describes. The default
-is `false`, which takes no URLs.
+takes no URLs. This key does not change which files a request can name.
+The default is `false`, which takes no URLs.
 
 #### `server.cors_origins`
 
@@ -888,11 +889,12 @@ Pages from these origins may call the server. Pages on a loopback address,
 such as `http://localhost:3000` or `http://127.0.0.1:5173`, may always call
 it. So may desktop apps built on Electron, Tauri or VS Code webviews, which
 send an origin with the scheme `app`, `file`, `tauri`, `vscode-file` or
-`vscode-webview`, since a web page cannot send one. An entry is a scheme, a
-host and an optional port, such as `https://chat.example.com` or
-`http://192.168.1.20:3000`, with nothing after them. For an app with
-another scheme, the entry is the scheme and a name, such as
-`capacitor://localhost`.
+`vscode-webview`, since a web page cannot send one.
+
+An entry is a scheme, a host and an optional port, such as
+`https://chat.example.com` or `http://192.168.1.20:3000`, with nothing
+after them. For an app with another scheme, the entry is the scheme and a
+name, such as `capacitor://localhost`.
 
 A browser sends the page's origin with each request, and the server answers
 any other origin with status 403. The page cannot read that answer, so its
@@ -1426,22 +1428,16 @@ server reads, as [Where gmlx looks](#where-gmlx-looks) describes.
 A `launch` block in a file that `--config` names is never read by launch,
 and the server takes no setting from the block.
 
-A malformed block never stops the server, which prints one warning and
-loads the rest of the file. `gmlx launch` then runs a client on the Mac,
-with one notice, only when the block clearly leaves it off. Each level on
-the way, from `launch` through `container` and `clients` to the client's
-entry, must be absent or a mapping, with no unknown key in `launch`,
-`container` or the client's entry. Every name under `clients` must be a
-known client, and each `enabled` on the way must be absent or exactly
-`false`.
+A malformed block stops a container launch with a message that names the
+file, and `--no-container` then runs the client on the Mac. A misspelled
+top-level key that holds a `container` block, such as `lauch:`, counts as a
+malformed block. The server ignores a malformed block with one warning and
+loads the rest of the file.
 
-Any other value or shape refuses the launch, and so does a file that cannot
-be read as YAML. An unknown top-level key that holds a `container` block,
-such as a misspelled `lauch:`, refuses the launch too. A
-`container.enabled: true` refuses even beside the client's
-`enabled: false`, since the block is broken. The message names the file,
-and `--no-container` runs the client on the Mac instead. A launch with
-`--container` or another container flag always refuses a malformed block.
+A launch with no container flag still runs a client on the Mac, with one
+notice, when a malformed block clearly leaves that client off. That means
+every `enabled` on the way to the client is absent or `false`, and no key
+on the way is unknown.
 
 ```yaml
 # doctest: build
@@ -1515,8 +1511,9 @@ model server. The default is `4G`.
 
 ### `launch.container.ssh_agent`
 
-With `true`, the client can sign with the keys loaded in the Mac's SSH
-agent. The default is `false`.
+With `true`, the client can sign with every key loaded in the Mac's SSH
+agent, so it can push to any repository those keys reach. Load only the
+keys the task needs before the launch. The default is `false`.
 
 ### `launch.container.env`
 
@@ -1583,13 +1580,11 @@ the copy's limits. The default is no files.
 ### `launch.container.clients.*.assistants`
 
 Each name in this list is a [served assistant](#served-assistants) that
-the client can use. The server answers the client as if the other served
-assistants did not exist. Their MCP tools run on the Mac, outside the
-container, so list assistants only for a chat client such as `open-webui`,
-`aichat` or `elia`. A coding agent reads files and web pages that could
-steer those tools, so give it none. The
-[security model](launch-container.md#security-model) describes what a
-client can reach. The default is no assistants.
+the client can use, and the server answers the client as if the others did
+not exist. Their tools run on the Mac, so list assistants only for a chat
+client such as `open-webui`, as
+[What the client reaches on the server](launch-container.md#what-the-client-reaches-on-the-server)
+explains. The default is no assistants.
 
 ## Chat themes
 

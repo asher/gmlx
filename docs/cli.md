@@ -592,11 +592,13 @@ send turns verbatim with `--no-chat-template`.
 `gmlx launch` writes an external tool's configuration to point at a gmlx
 server, starts the server if none is reachable, and runs the tool. It never
 installs the tool on the Mac, and [container mode](launch-container.md)
-installs it in the container's image. `opencode`, `aichat`, `elia` and
-`dsh` get a configuration of their own under `~/.config/gmlx`. `pi`, `omp`,
-`hermes` and `goose` get a provider merged into their own files, and
-`claude-code` and `open-webui` get environment variables only.
-[Agents and chat apps](launch.md) describes each client.
+installs it in the container's image.
+
+`opencode`, `aichat`, `elia` and `dsh` get a configuration of their own
+under `~/.config/gmlx`. `pi`, `omp`, `hermes` and `goose` get a provider
+merged into their own files, and `claude-code` and `open-webui` get
+environment variables only. [Agents and chat apps](launch.md) describes
+each client.
 
 ```sh
 gmlx launch opencode
@@ -631,7 +633,7 @@ These flags control `gmlx launch`:
 | `--rebuild` | Off | Rebuild the client's image, or pull an `image:` reference again. |
 | `--reseed` | Off | Copy every [seed](config.md#launchcontainerclientsseed) into the private home again, replacing the copies there. |
 | `--network {default,none}` | The config's [`network`](config.md#launchcontainernetwork) | Set the container's network for this launch. |
-| `--shell` | Off | Open a shell in the container instead of the client, or in the running session's container, as [The shell](launch-container.md#the-shell) describes. |
+| `--shell` | Off | Open a shell in the container instead of the client, or in the container of a running session, as [The shell](launch-container.md#the-shell) describes. |
 | `-- ARGS` | None | Pass the arguments after `--` to the client, after the arguments launch adds. |
 
 Once the tool starts, it replaces gmlx, so the exit status is the tool's
@@ -643,10 +645,14 @@ interrupted during the start wait.
 In container mode, launch supervises the client instead of replacing
 itself and passes the client's exit status through. It exits 1 when it
 refuses the session or finds a malformed `launch` block, as
-[Launch](config.md#launch) describes, and 125, 126 or 127 when the
-container cannot start the client, as
+[Launch](config.md#launch) describes, and 2 when a container flag comes
+with `--no-container`.
+
+The container exits 125, 126 or 127 when it cannot start the client. Launch
+exits 128 plus the signal number when a SIGTERM or SIGHUP arrives while it
+prepares the image.
 [Sessions, signals and exit codes](launch-container.md#sessions-signals-and-exit-codes)
-describes.
+describes each code.
 
 ### launch menubar
 
@@ -1316,13 +1322,15 @@ These flags control `gmlx distill census`:
 
 `gmlx doctor` checks what a working setup needs and prints a PASS, WARN,
 FAIL or SKIP line for each check, with the fix named. No check accesses the
-network. The checks cover the macOS version, the runtime and kernels, the
-config, and the files of each configured model and service. They also cover background
-servers, the login items and the launcher that background starts use,
-the Apple container service with the disk space container mode takes,
+network.
+
+The checks cover the macOS version, the runtime and kernels, the config,
+and the files of each configured model and service. They also cover
+background servers, the login items and the launcher that background starts
+use, the Apple container service and the disk space container mode takes,
 optional extras, ffmpeg, MCP tools, and assistants served on a non-loopback
-address. The last checks
-are the Hugging Face token, RAM against each model's size, and disk space.
+address. The last checks are the Hugging Face token, RAM against each
+model's size, and disk space.
 
 ```sh
 gmlx doctor

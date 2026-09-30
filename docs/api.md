@@ -305,19 +305,21 @@ curl localhost:8080/v1/chat/completions -d '{
 
 The server takes an image, audio or video in a request in two forms. Inline
 data works in each dialect, as a `data:` URI, an Anthropic `base64` image
-source or base64 `input_audio` data. A file works when the request names it
-by absolute path or `file://` URL inside the server's media folder,
-`~/.cache/gmlx/media`, or `$XDG_CACHE_HOME/gmlx/media` when that variable is
-set. The server creates the folder at start with access for your user only,
-and it follows no symbolic link inside it.
+source or base64 `input_audio` data. A request through a
+[launch container](launch-container.md#what-the-client-reaches-on-the-server)
+session takes media only in this form.
+
+A file works when the request names it by absolute path or `file://` URL
+inside the server's media folder, `~/.cache/gmlx/media`, or
+`$XDG_CACHE_HOME/gmlx/media` when that variable is set. The server creates
+the folder at start with access for your user only, and it follows no
+symbolic link inside it.
 
 Any other file path, and any `file_id`, gets a 400 before anything reads
 it, so a client that holds the API key cannot make the server read other
 files on the Mac. The message names the media folder and a copy command,
 such as `cp -c photo.png ~/.cache/gmlx/media/`. On APFS, `cp -c` makes a
-clone that takes no extra disk space. A request through a
-[launch container](launch-container.md#what-the-client-reaches-on-the-server)
-session takes media only inline.
+clone that takes no extra disk space.
 
 An `http(s)://` URL gets a 400 too, because the server would fetch it from
 the Mac. [`server.media_urls`](config.md#servermedia_urls) lets the server
@@ -328,11 +330,12 @@ limit below, since the size sets the memory a generation takes.
 
 Each image, audio clip or video holds at most 32 MiB, whether it is inline,
 fetched or read from the media folder. A video in the media folder is the
-exception, since the server streams it from the file. An image must be a
-PNG, JPEG, WebP, GIF, BMP or TIFF image of at most 67,108,864 pixels, and an
-image edit takes PNG, JPEG, WebP and GIF images only. A video must be an MP4,
-QuickTime, Matroska, WebM or AVI file. Scale a larger image down, or split
-long audio, before you send it.
+exception, since the server streams it from the file. Scale a larger image
+down, or split long audio, before you send it.
+
+An image must be a PNG, JPEG, WebP, GIF, BMP or TIFF image of at most
+67,108,864 pixels, and an image edit takes PNG, JPEG, WebP and GIF images
+only. A video must be an MP4, QuickTime, Matroska, WebM or AVI file.
 
 The server checks every request body as JSON, whatever its Content-Type
 says. Only `/v1/audio/transcriptions` and `/v1/audio/translations` take a
@@ -352,7 +355,7 @@ only lower it.
 | More requests are waiting than the queue cap. | The server answers 503 of type `server_overloaded`, with `Retry-After` set to the estimated drain time of 2 to 60 seconds. | `GMLX_QUEUE_DEPTH_CAP` |
 | A model cannot load beside the resident models that are pinned or busy. | The server answers 503 of type `model_load_deferred`, with the load gate's numbers in the message and `Retry-After`. | `GMLX_OVERCOMMIT=1` |
 | Memory runs out while a request streams. | The [governor](glossary.md#governor) ends the largest request with an error of type `server_overloaded_shed` and `finish_reason` `shed`. | `GMLX_GOVERNOR=0` |
-| A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation or fewer images. | None |
+| A request body other than an audio upload is larger than 64 MiB. | The server answers 413 before it reads the body, and the message suggests a new conversation on a chat route, or smaller inputs. | None |
 | A form sent to `/v1/audio/transcriptions` or `/v1/audio/translations` is larger than 1024 MiB. | The server answers 413 before it reads the body, and the message suggests a compressed file or a split recording. | None |
 | A request through a [launch session socket](launch-container.md#what-the-client-reaches-on-the-server) is larger than 32 MiB, or 64 MiB for an audio form. | The server answers 413 before it reads the body, and the message names the limit of a launch session. | None |
 | A streaming request is silent, as during a long prefill. | The server sends periodic SSE comment lines, so that read timeouts do not drop the connection. | `GMLX_SSE_KEEPALIVE_S` |

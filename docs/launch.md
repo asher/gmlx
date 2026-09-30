@@ -81,9 +81,12 @@ lists, as [Container mode](launch-container.md) describes.
 which takes the place of the location that the table lists for the client.
 It names a file for opencode and dsh, and a directory for pi, omp and
 aichat. For goose it names the `config.yaml`, for elia the
-`XDG_CONFIG_HOME` directory, and for Open WebUI the data directory. hermes
-refuses it, because hermes reads only `$HERMES_HOME/config.yaml`, so set
-`HERMES_HOME` to use another folder.
+`XDG_CONFIG_HOME` directory, and for Open WebUI the data directory.
+
+hermes refuses `--config-path`, because hermes reads only
+`$HERMES_HOME/config.yaml`, so set `HERMES_HOME` to use another folder.
+Container mode refuses it for every client, because the configuration goes
+into the private home.
 
 ## Starting the server
 
@@ -103,8 +106,7 @@ background. `--start-timeout SECONDS` limits the wait for scripts, and
 server runs.
 
 `--base-url URL` names a server explicitly. `launch` then never starts one
-and reads no configuration file, so a configuration file in the current
-folder cannot redirect the session or supply a key.
+and reads no configuration file.
 
 The first request to a model that is not loaded waits for the load. Which
 models the server loads at start is under
@@ -155,8 +157,8 @@ Without a key on the server, a tool that needs a key still gets a
 placeholder key, because it refuses to run without one. The opencode, omp
 and aichat configurations get no key. In
 [container mode](launch-container.md#what-the-client-reaches-on-the-server)
-with a server on the Mac, each tool gets the placeholder key
-`gmlx-container-session` in the same setting and never the server's key.
+with a server on the Mac, each tool that has a key setting gets the
+placeholder key `gmlx-container-session` there and never the server's key.
 
 ## The clients
 

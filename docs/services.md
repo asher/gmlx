@@ -154,10 +154,11 @@ A Sesame model, such as `mlx-community/csm-1b`, speaks a preset voice from
 the prompt file of that name in its own repository, which the server
 fetches when it loads the model. A voice the repository lacks gets a 400
 that lists the voices it holds. A Sesame model in a local folder has no
-preset voices here, so set `server.tts` to its repository instead. The
-model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
+preset voices here, so set `server.tts` to its repository instead.
+
+The model also needs `tokenizer-e351c8d8-checkpoint125.safetensors` from
 `kyutai/moshiko-pytorch-bf16` and the tokenizer files of
-`unsloth/Llama-3.2-1B`, and the server fetches only the model's own
+`unsloth/Llama-3.2-1B`. The server fetches only the model's own
 repository, so download both into the Hugging Face cache first.
 
 Open WebUI always sends a voice, and its default voice is an OpenAI name
