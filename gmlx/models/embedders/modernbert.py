@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2024 Answer.AI, LightOn, and contributors, and the HuggingFace Inc. team
+# SPDX-FileCopyrightText: Copyright 2024 Answer.AI, LightOn, and contributors, and the HuggingFace Inc. team. All rights reserved.
 # Ported from transformers 5.15.1
 # src/transformers/models/modernbert/modeling_modernbert.py (the embeddings,
 # the rotary attention with global and local layers, the GeGLU MLP and the

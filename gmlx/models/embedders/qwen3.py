@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team
+# SPDX-FileCopyrightText: Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
 # Ported from transformers 5.15.1 src/transformers/models/qwen3/modeling_qwen3.py
 # (the Qwen3Model causal and padding masks) and the last-token pooling of the
 # Qwen3-Embedding sentence-transformers configuration, and modified for gmlx

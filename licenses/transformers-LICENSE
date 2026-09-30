@@ -11,13 +11,17 @@ transformers release 5.15.1 (Apache-2.0), with modifications:
 - gmlx/models/embedders/modernbert.py: the ModernBERT embeddings, rotary
   attention with global and local layers, GeGLU MLP and pre-norm encoder
   layer of src/transformers/models/modernbert/modeling_modernbert.py,
-  restated in MLX with a boolean window mask in place of the sliding window
-  bias.
+  restated in MLX with fused scaled dot product attention and additive
+  global and window masks.
 - gmlx/models/embedders/gemma_embedding.py: the bidirectional global and
   sliding window masks and the scaled token embedding of the Gemma3 text
   model under use_bidirectional_attention, from
   src/transformers/models/gemma3/modeling_gemma3.py and
   configuration_gemma3.py. The transformer blocks are mlx-lm's gemma3_text
+  blocks.
+- gmlx/models/embedders/qwen3.py: the causal and padding masks of the
+  Qwen3 model in src/transformers/models/qwen3/modeling_qwen3.py, restated
+  in MLX as one additive mask. The transformer blocks are mlx-lm's qwen3
   blocks.
 
 transformers is Copyright The Hugging Face team and licensed under the

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2025 Google Inc. HuggingFace Inc. team
+# SPDX-FileCopyrightText: Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
 # Ported from transformers 5.15.1
 # src/transformers/models/gemma3/modeling_gemma3.py and
 # configuration_gemma3.py (the Gemma3TextModel masks under

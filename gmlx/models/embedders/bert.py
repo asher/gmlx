@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2018 The Google AI Language Team Authors, Facebook AI Research and The HuggingFace Inc. team
+# SPDX-FileCopyrightText: Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
+# SPDX-FileCopyrightText: Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2019 Facebook AI Research and the HuggingFace Inc. team.
 # Ported from transformers 5.15.1 src/transformers/models/bert/modeling_bert.py
 # and src/transformers/models/xlm_roberta/modeling_xlm_roberta.py (the
 # embeddings, the self-attention and the post-norm encoder layer) and modified
