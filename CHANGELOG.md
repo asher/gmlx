@@ -83,6 +83,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A request whose model fails to load gets that load error. Before, the
   server sometimes answered 500 with an error about a missing `requests`
   attribute.
+- The Anthropic Messages routes answer a model the server does not serve
+  with a 404 `not_found_error`, as the OpenAI routes do. Before,
+  `/v1/messages` answered 500.
 - A Sesame speech model, such as `mlx-community/csm-1b`, reads its preset
   voices from its own repository, so they no longer need access to the
   gated `sesame/csm-1b` repository.
